@@ -279,6 +279,8 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `ops.platform_acknowledge_webhook_receipt`. Workers are not involved. Web servers of this release
    need it, as the Integrations tab reads the table; web servers from before it show no
    acknowledgements.
+   ADR-180 adds no migration. Until the web rollout ends, a web server from before it refuses
+   `phone` in `PATCH /contacts/{id}` with 422, as it always did; rolling back does the same.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

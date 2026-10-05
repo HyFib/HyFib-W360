@@ -890,12 +890,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   returned. `GET /contact-fields` (`api/contacts.ts`, `contacts.read`) lists the fields by label.
   `POST /contacts` takes `fields` (an existing contact gets only those it has no value for, merged
   under its own values), and `PATCH /contacts/{id}` (`apiUpdateContact`, `contacts.write`) changes
-  the name, email, field values and tags in one transaction: `apiFieldChanges` reads the named
-  fields `FOR SHARE` (the order a field's deletion takes its locks) and checks each value with
-  `apiFieldValue` (`contacts/fields.ts`: JSON types, no coercion), then the contact row is locked
-  `FOR UPDATE`; only what differs is written and audited as `contact.updated` (keys and counts, no
-  values). A refused value names `fields.<key>` in `issues` and nothing is saved. Both writes keep
-  the app's 50-tag limit.
+  the name, email, a typed number (ADR-180: `assertNumberFree` refuses a contact with a WhatsApp
+  identity, a number another contact has and a suppressed one), field values and tags in one
+  transaction: `apiFieldChanges` reads the named fields `FOR SHARE` (the order a field's deletion
+  takes its locks) and checks each value with `apiFieldValue` (`contacts/fields.ts`: JSON types, no
+  coercion), then the contact row is locked `FOR UPDATE`; only what differs is written and audited
+  as `contact.updated` (keys and counts, no values). A refused value names `fields.<key>` in
+  `issues` and nothing is saved. Both writes keep the app's 50-tag limit.
 - **Finding contacts (ADR-113):** `GET /contacts` also takes `email` (compared through the
   `lower(email)` index), `tag` and up to 5 `fields[<key>]` (`contactListQuery` turns the
   `deepObject` parameters into one object for the schema). `apiFieldFilters` checks each key against

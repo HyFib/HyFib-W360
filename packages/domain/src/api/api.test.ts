@@ -2740,7 +2740,7 @@ describe('contact custom fields and changes (ADR-112)', () => {
     expect(apiTags([], 'removeTags')).toEqual([]);
   });
 
-  it('change at least one of name, email, fields and tags, and nothing else', () => {
+  it('change at least one of name, email, number, fields and tags, and nothing else', () => {
     expect(apiContactUpdateSchema.parse({ name: '  Priya  ', email: null })).toEqual({
       name: 'Priya',
       email: null,
@@ -2749,9 +2749,23 @@ describe('contact custom fields and changes (ADR-112)', () => {
       addTags: ['vip'],
       removeTags: ['new'],
     });
+    // A number alone is a change (ADR-180); only PATCH takes one.
+    expect(apiContactUpdateSchema.parse({ phone: '+919876543210' })).toEqual({
+      phone: '+919876543210',
+    });
+    expect(apiContactUpdateSchema.safeParse({}).error?.issues[0]?.message).toBe(
+      'Give name, email, phone, fields, addTags or removeTags.',
+    );
+    expect(
+      apiUpdateManyContactsSchema.safeParse({
+        contacts: [{ id: '0190a000-0000-7000-8000-000000000001', phone: '+919876543210' }],
+      }).success,
+    ).toBe(false);
     for (const bad of [
       {},
-      { phone: '+919876543210' },
+      { phone: null },
+      { phone: 919876543210 },
+      { phone: '+9'.padEnd(41, '1') },
       { name: 'x'.repeat(201) },
       { email: 7 },
       { addTags: Array.from({ length: 21 }, (_, i) => `t${i}`) },
@@ -2779,6 +2793,10 @@ describe('contact custom fields and changes (ADR-112)', () => {
     expect(await update(ctx(['contacts.write']), id, { addTags: ['a,b'] })).toBe(
       'validation_failed',
     );
+    // A number that is not one is refused by its place before any read (ADR-180).
+    await expect(
+      apiUpdateContact({} as never, ctx(['contacts.write']), id, { phone: '98111' }),
+    ).rejects.toMatchObject({ code: 'validation_failed', issues: [{ path: 'phone' }] });
     // A tag both added and removed, however it is written.
     const both = await apiUpdateContact({} as never, ctx(['contacts.write']), id, {
       addTags: ['VIP'],
@@ -2877,9 +2895,18 @@ describe('contact custom fields and changes (ADR-112)', () => {
     expect(paths['/contacts/{id}']?.patch?.operationId).toBe('updateContact');
     expect(paths['/contacts/{id}']?.patch?.description).toContain('`contacts.write`');
     expect(paths['/contacts/{id}']?.patch?.description).toContain('`fields.<key>`');
-    expect(paths['/contacts/{id}']?.patch?.description).toContain(
-      'The phone number is not changed through the API.',
-    );
+    for (const words of [
+      'A number changes only when it was typed for the contact, as members change it',
+      'is refused with 412, as is a number on the company',
+      'a number another contact has is refused with 409, without naming that contact',
+      'Only this call changes numbers.',
+    ]) {
+      expect(paths['/contacts/{id}']?.patch?.description).toContain(words);
+    }
+    const patchResponses = (
+      paths['/contacts/{id}']?.patch as unknown as { responses: Record<string, unknown> }
+    ).responses;
+    expect(Object.keys(patchResponses)).toEqual(expect.arrayContaining(['409', '412', '422']));
     expect(paths['/contact-fields']?.get?.operationId).toBe('listContactFields');
     expect(paths['/contact-fields']?.get?.description).toContain('`contacts.read`');
     const schemas = doc.components.schemas as Record<
@@ -2893,6 +2920,7 @@ describe('contact custom fields and changes (ADR-112)', () => {
       'email',
       'fields',
       'name',
+      'phone',
       'removeTags',
     ]);
     expect(schemas.ContactCreate?.properties).toHaveProperty('fields');

@@ -4182,8 +4182,9 @@ Found while building: `POST /contacts` added up to 20 tags to an existing contac
 naming `tags`.
 
 Not built: defining fields through the API, filtering the contact list by a field value (since
-ADR-113), changing numbers through the API, changing many contacts in one call, and an event that
-says which fields changed (the payload is the contact as it is when delivered, as before).
+ADR-113), changing numbers through the API (typed numbers: built by ADR-180), changing many contacts
+in one call, and an event that says which fields changed (the payload is the contact as it is when
+delivered, as before).
 
 ## ADR-113 Finding contacts through the public API (2026-10-02)
 
@@ -7210,3 +7211,34 @@ Decision:
 
 Not built: acknowledging quarantine entries (they are resolved with a resolution instead), assigning
 a receipt to someone, and deleting a note (a new acknowledgement replaces it).
+
+## ADR-180 Changing a contact's typed number through the public API (P5-08) (2026-10-05)
+
+Context: `PATCH /contacts/{id}` changes a contact's name, email, custom field values and tags
+(ADR-112), never its number: a number WhatsApp gave is the contact's identity, and members change
+typed numbers in the app. A CRM or shop that fixes a mistyped number (an import, a checkout form)
+had a member retype it. Members' rule already tells the two apart: a contact linked to a WhatsApp
+identity keeps its number, and any other contact's number can be changed to one no other contact
+has.
+
+Decision:
+
+- **`phone` on `PATCH /contacts/{id}`,** with the country code and a leading +, as `POST /contacts`
+  takes it, under the same `contacts.write` scope. It changes as members change it: a contact with a
+  WhatsApp identity (it wrote to one of the company's numbers) keeps its number (412, "This number
+  comes from WhatsApp and cannot be changed."); a number another contact of the company has is
+  refused with 409, without naming that contact (a key may not read contacts); a number on the
+  company's suppression list is refused with 412, as `POST /contacts` refuses to create a contact
+  for it. A number that is not one is refused with 422 naming `phone`, before anything is read; the
+  same number in another form changes nothing.
+- **One call:** only `PATCH /contacts/{id}` changes numbers. Changing many contacts at once
+  (ADR-122) or the contacts a search finds (ADR-165) does not take `phone`: two contacts in one call
+  could swap numbers, which each check alone would not see.
+- **As any change:** in the transaction that locks the contact; audited as `contact.updated` with
+  `phone` among what changed, never the number; `contact.updated` webhooks name `phone` (ADR-121)
+  and the contact feed lists the contact (ADR-114), from the triggers as for members. Two keys
+  moving two contacts to one number at once: the unique number index refuses the second (409).
+  Consent stays with the contact, as when members change a number.
+
+Not built: numbers in calls that change many contacts, clearing a number, and moving a WhatsApp
+identity to another contact.

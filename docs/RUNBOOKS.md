@@ -2511,6 +2511,15 @@ with the receipt, retried or not, and is deleted with it after 90 days. Acknowle
 retries the receipt nor stops the alert email. "Receipt not found." means it was deleted since the
 page loaded.
 
+**`PATCH /api/v1/contacts/{id}` with `phone` answers 409, 412 or 422 (ADR-180).** 412 "This number
+comes from WhatsApp and cannot be changed." means the contact has written to one of the company's
+numbers: its number is its identity and stays (members cannot change it either); 412 about the
+suppression list means the new number is suppressed (remove it from the list in the app first, if
+that is right). 409 means another contact of the company has the number: find it with
+`GET /contacts?phone=` (with `contacts.read`) and merge or fix them in the app. 422 naming `phone`
+means it is not a number with its country code and a leading +. Calls that change many contacts do
+not take `phone`.
+
 **A dead letter of those three queues stays unsettled.** The sweep leaves one alone while its
 company is being deleted, while a job for the same work waits or runs (the company started it again,
 or a retry), and when its envelope did not verify. Otherwise look for `ending stranded work failed;

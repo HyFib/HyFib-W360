@@ -1,5 +1,45 @@
 # Progress
 
+## 2026-10-05 — Phase 5: changing a contact's typed number through the public API (P5-08, ADR-180)
+
+Status: **Implemented; its database test runs in CI only.** A key could not fix a mistyped number.
+No migration. The local PostgreSQL is unavailable (its Docker daemon stopped), so the integration
+test below was written but not run here.
+
+### Completed
+
+- **Design (ADR-180):** `phone` on `PATCH /contacts/{id}` only, under members' rule: a WhatsApp
+  identity's number stays, another contact's number (409, unnamed) and a suppressed one are refused.
+- **Domain:** the PATCH schema, `prepareContactChange` normalizing the number, `assertNumberFree`
+  and `changeLockedContact` writing and auditing it (`api/contacts.ts`); the OpenAPI entry with 409
+  and 412.
+- **Tests:**
+  - Unit (3 changed in `api.test.ts`): the schema, the refusal of a bad number before any read, the
+    OpenAPI entry.
+  - Integration (1 new in `api-contact-fields.test.ts`): the change and each refusal. Written for
+    CI; not run here.
+- **Docs:** ADR-180 (and ADR-112's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T174; DEPLOYMENT and RUNBOOKS; BACKLOG P5-08; feature matrix H-033.
+- **Mutation checks:** 8 deliberate regressions tried, all caught on the unit-tested parts (a long
+  number taken, a number alone not a change, the message, any number taken, the refusal misplaced,
+  the OpenAPI words and codes). The identity, suppression and conflict checks need the database, so
+  their regressions are left to the integration test, which runs in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 808 passed (82 files)                                               |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it       |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 8 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Numbers in calls that change many contacts; clearing a number; moving a WhatsApp identity.
+
 ## 2026-10-05 — Phase 5: acknowledging webhook receipts on the operations console (P5-10, ADR-179)
 
 Status: **Implemented; its database tests run in CI only (test data only).** Nothing on the

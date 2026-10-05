@@ -607,10 +607,14 @@ verification, app review, Embedded Signup configuration).
   `campaigns.send`: a campaign a key paused runs again after members' checks, under the
   authority of the member who launched it, who must still be allowed to send campaigns; what
   members or HyFib paused stays with members; migration 0124).
+  **[Changing typed numbers built; its database tests run only in CI]** (ADR-180:
+  `PATCH /contacts/{id}` takes `phone` and changes a number as members do: one WhatsApp gave
+  stays, one another contact has or one on the suppression list is refused; only that call
+  changes numbers; no migration).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   media downloads, a contact card's contacts (Meta's
   contact object is not confirmed), changing a field's type, changing
-  numbers,
+  numbers in calls that change many contacts,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
   resuming what members or HyFib paused, approving, scheduling, creating and editing campaigns
   through the API, campaign

@@ -361,6 +361,77 @@ describe('contact custom fields through the public API (ADR-112)', () => {
     });
   });
 
+  it('changes a typed number as members do, and refuses one WhatsApp gave, one another contact has, one on the suppression list and a bad one, saving nothing (ADR-180)', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['contacts.read', 'contacts.write']);
+    const create = async (phone: string) =>
+      (await apiCreateContact(deps(), ctx, { phone, name: 'Typed' }, null)).body.data as {
+        id: string;
+        phone: string;
+      };
+    const typed = await create(nextPhone());
+    const other = await create(nextPhone());
+    const fresh = nextPhone();
+    const changed = await apiUpdateContact(deps(), ctx, typed.id, { phone: fresh });
+    expect(changed).toMatchObject({ id: typed.id, phone: fresh, name: 'Typed' });
+    expect(await apiGetContact(deps(), ctx, typed.id)).toEqual(changed);
+    expect(await updateAudits(typed.id)).toEqual([
+      {
+        actor_type: 'api_key',
+        metadata: { changed: ['phone'], fields: [], tagsAdded: 0, tagsRemoved: 0, source: 'api' },
+      },
+    ]);
+    // The number it has, given in another form, changes nothing.
+    await apiUpdateContact(deps(), ctx, typed.id, { phone: fresh.replace(/^\+91/, '+91 ') });
+    expect(await updateAudits(typed.id)).toHaveLength(1);
+
+    // Another contact's number: 409, without naming that contact.
+    const taken = await refusal(apiUpdateContact(deps(), ctx, typed.id, { phone: other.phone }));
+    expect([taken.code, taken.error.publicMessage]).toEqual([
+      'conflict',
+      'Another contact already has this phone number.',
+    ]);
+    expect(JSON.stringify(taken.error.details ?? {})).not.toContain(other.id);
+    // A number on the company's suppression list, as POST /contacts refuses it.
+    const suppressed = nextPhone();
+    await fx.query(
+      `INSERT INTO app.suppressions (id, tenant_id, phone_e164, reason) VALUES ($1, $2, $3, 'manual')`,
+      [uuidv7(), c.tenant.id, suppressed],
+    );
+    expect(
+      (await refusal(apiUpdateContact(deps(), ctx, typed.id, { phone: suppressed }))).code,
+    ).toBe('precondition_failed');
+    // A bad number, named by its place.
+    expect(
+      await refusal(apiUpdateContact(deps(), ctx, typed.id, { phone: '98111' })),
+    ).toMatchObject({ code: 'validation_failed', paths: ['phone'] });
+    // A number WhatsApp gave is the contact's identity.
+    const digits = other.phone.slice(1);
+    await fx.query(
+      `INSERT INTO app.contact_identities (id, tenant_id, contact_id, whatsapp_account_id, wa_id)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [uuidv7(), c.tenant.id, other.id, c.whatsappAccountId, digits],
+    );
+    const identity = await refusal(apiUpdateContact(deps(), ctx, other.id, { phone: nextPhone() }));
+    expect([identity.code, identity.error.publicMessage]).toEqual([
+      'precondition_failed',
+      'This number comes from WhatsApp and cannot be changed.',
+    ]);
+    // Its other details still change, and the number it has is no change at all.
+    expect(
+      await apiUpdateContact(deps(), ctx, other.id, { phone: other.phone, name: 'From WhatsApp' }),
+    ).toMatchObject({ phone: other.phone, name: 'From WhatsApp' });
+    expect((await apiGetContact(deps(), ctx, typed.id)).phone).toBe(fresh);
+    // Only PATCH changes numbers: changing many contacts at once refuses the key.
+    expect(
+      (
+        await refusal(
+          apiUpdateManyContacts(deps(), ctx, { contacts: [{ id: typed.id, phone: nextPhone() }] }),
+        )
+      ).code,
+    ).toBe('validation_failed');
+  });
+
   it('refuses unknown fields, other types, bad values and too many tags, saving nothing', async () => {
     const c = await fx.company();
     await defineFields(c);

@@ -652,12 +652,13 @@ Phase 5 rules (Public API, P5-08):
   values of the company's own fields only, so a value left by a field deleted at the same moment is
   never read. `contacts.read` also lists the fields (keys, labels and types). Changing a contact
   (`PATCH /contacts/{id}`) needs `contacts.write`, which only members who can change contacts grant,
-  and an active company; it changes the name, email, field values and tags, never the phone number,
-  under the contact's row lock and with the field rows locked against a deletion at the same time
-  (taken first, in a deletion's order); erased and other companies' contacts are not found. Values
-  must have their field's type and a refusal saves nothing; tags keep the 50 a contact may have,
-  which `POST /contacts` now checks too. The audit entry names what changed and which fields, never
-  a value.
+  and an active company; it changes the name, email, field values and tags, and a typed number
+  (ADR-180) but never one WhatsApp gave (the contact's identity), nor to a number another contact
+  has (refused without naming it) or one on the suppression list, under the contact's row lock and
+  with the field rows locked against a deletion at the same time (taken first, in a deletion's
+  order); erased and other companies' contacts are not found. Values must have their field's type
+  and a refusal saves nothing; tags keep the 50 a contact may have, which `POST /contacts` now
+  checks too. The audit entry names what changed and which fields, never a value.
 - Finding contacts (ADR-113): `GET /contacts` filters by email, tag and custom field values in the
   key's company only (erased contacts never match). Field keys are checked against the company's
   fields before use, and keys, tags and values are bound parameters, never part of the SQL text. A

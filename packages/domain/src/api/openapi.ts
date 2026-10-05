@@ -908,8 +908,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         },
         patch: {
           operationId: 'updateContact',
-          summary: 'Change a contact’s name, email, custom fields or tags',
-          description: `${scopeNote('contacts.write')} A field's value must have its type (GET /contact-fields); a refusal names \`fields.<key>\` and saves nothing. Tags are lower-cased, 50 at most per contact. The phone number is not changed through the API. What the contact already has changes nothing, so a retry is safe without an \`Idempotency-Key\`. Erased contacts are not found.`,
+          summary: 'Change a contact’s name, email, number, custom fields or tags',
+          description: `${scopeNote('contacts.write')} A field's value must have its type (GET /contact-fields); a refusal names \`fields.<key>\` and saves nothing. Tags are lower-cased, 50 at most per contact. A number changes only when it was typed for the contact, as members change it: one WhatsApp gave (the contact wrote to one of the company's numbers) is the contact's identity and is refused with 412, as is a number on the company's suppression list; a number another contact has is refused with 409, without naming that contact. Only this call changes numbers. What the contact already has changes nothing, so a retry is safe without an \`Idempotency-Key\`. Erased contacts are not found.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           requestBody: { required: true, content: json(ref('ContactUpdate')) },
           responses: {
@@ -917,7 +917,7 @@ export function buildOpenApiDocument(serverUrl: string) {
               description: 'The contact as it is now.',
               content: json(dataOf(ref('Contact'))),
             },
-            ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
+            ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
           },
         },
       },
