@@ -114,8 +114,9 @@ const contactsService = () => createContactsService({ db: fx.dbs.app, clock: sys
 
 /**
  * An endpoint of the company taking `eventTypes` (and only the contact parts given, ADR-123, the
- * runs of the automations given, ADR-145, the campaign statuses given, ADR-146, and the order
- * statuses given, ADR-147), on a path of the receiver of its own.
+ * runs of the automations given, ADR-145, the campaign statuses given, ADR-146, the order statuses
+ * given, ADR-147, the conversation statuses given, ADR-149, and the ends of runs given, ADR-151), on
+ * a path of the receiver of its own.
  */
 async function addEndpoint(
   c: Company,
@@ -125,6 +126,7 @@ async function addEndpoint(
   campaignStatuses: string[] | null = null,
   orderStatuses: string[] | null = null,
   conversationStatuses: string[] | null = null,
+  runEndStatuses: string[] | null = null,
 ) {
   const path = `/ok/${randomBytes(6).toString('hex')}`;
   const owner = await fx.ctx(c, c.owner);
@@ -136,6 +138,7 @@ async function addEndpoint(
     campaignStatuses,
     orderStatuses,
     conversationStatuses,
+    runEndStatuses,
   });
   return { ...created, path };
 }
@@ -1547,6 +1550,105 @@ describe('automation run events (ADR-078)', () => {
     await deliverDue(c);
     expect(bodiesAt(greeterOnly.path).filter((b) => b.type === 'message.received')).toHaveLength(3);
     expect(runsAt(greeterOnly.path)).toHaveLength(2);
+  });
+
+  it('sends an endpoint that names how runs ended only those ends, others every end, and captures no end nobody takes (ADR-151)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const brochure = await publishAutomation(
+      owner,
+      'Brochure',
+      keyword('brochure'),
+      sayGraph('Here it is.'),
+    );
+    await publishAutomation(owner, 'Greeter', keyword('hello'), sayGraph('Hello there.'));
+    // Every start and the failures; every end; Brochure's completions only.
+    const failures = await addEndpoint(
+      c,
+      ['automation.run_started', 'automation.run_ended'],
+      null,
+      null,
+      null,
+      null,
+      null,
+      ['failed'],
+    );
+    const everyEnd = await addEndpoint(c, ['automation.run_ended']);
+    const brochureCompleted = await addEndpoint(
+      c,
+      ['automation.run_ended'],
+      null,
+      [brochure],
+      null,
+      null,
+      null,
+      ['completed'],
+    );
+    const runOf = async (text: string, clock: Clock = systemClock) => {
+      const { conversation_id: conversationId } = await inbound(c, waId(), text);
+      const [run] = await runsIn(conversationId);
+      if (!run) throw new Error(`no run started by “${text}”`);
+      expect(await driveRun(c, run.id, clock)).toBe('ended');
+      return run.id;
+    };
+    const completed = await runOf('brochure');
+    // A day later the customer's window has closed: the text cannot be sent and the run fails.
+    const failed = await runOf('brochure', { now: () => new Date(Date.now() + 25 * 3600_000) });
+    const greeted = await runOf('hello');
+    expect(
+      (await eventsOf(c, 'automation.')).map((e) => [e.type, e.detail.runId, e.deliveries]),
+    ).toEqual([
+      ['automation.run_started', completed, 1],
+      ['automation.run_ended', completed, 2],
+      ['automation.run_started', failed, 1],
+      ['automation.run_ended', failed, 2],
+      ['automation.run_started', greeted, 1],
+      ['automation.run_ended', greeted, 1],
+    ]);
+
+    await deliverDue(c);
+    const runsAt = (path: string) =>
+      bodiesAt(path)
+        .filter((b) => b.type.startsWith('automation.'))
+        .map((b) => {
+          const { run } = (
+            b.type === 'automation.run_started'
+              ? automationRunStartedPayloadSchema
+              : automationRunEndedPayloadSchema
+          ).parse(b).data;
+          return [b.type, run.id, run.status];
+        })
+        .sort();
+    expect(runsAt(failures.path)).toEqual(
+      [
+        ['automation.run_started', completed, 'running'],
+        ['automation.run_started', failed, 'running'],
+        ['automation.run_started', greeted, 'running'],
+        ['automation.run_ended', failed, 'failed'],
+      ].sort(),
+    );
+    expect(runsAt(everyEnd.path)).toEqual(
+      [
+        ['automation.run_ended', completed, 'completed'],
+        ['automation.run_ended', failed, 'failed'],
+        ['automation.run_ended', greeted, 'completed'],
+      ].sort(),
+    );
+    // Both of its filters apply: Greeter's completion is not Brochure's.
+    expect(runsAt(brochureCompleted.path)).toEqual([
+      ['automation.run_ended', completed, 'completed'],
+    ]);
+
+    // With the other two endpoints turned off, no endpoint takes a completion: the next run's start
+    // is captured, its end is not.
+    await webhooks().setEnabled(owner, { endpointId: everyEnd.id, enabled: false });
+    await webhooks().setEnabled(owner, { endpointId: brochureCompleted.id, enabled: false });
+    const later = await runOf('brochure');
+    expect(
+      (await eventsOf(c, 'automation.'))
+        .filter((e) => e.detail.runId === later)
+        .map((e) => [e.type, e.deliveries]),
+    ).toEqual([['automation.run_started', 1]]);
   });
 
   it('names the key that started a run through the API', async () => {

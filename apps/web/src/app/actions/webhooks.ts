@@ -31,6 +31,8 @@ export async function createWebhookEndpointAction(
     templateStatuses: string[] | null;
     /** The conversation statuses it takes (ADR-149); null takes every status. */
     conversationStatuses: string[] | null;
+    /** How the runs it takes as `automation.run_ended` ended (ADR-151); null takes every end. */
+    runEndStatuses: string[] | null;
   },
 ): Promise<ActionResult<{ endpointId: string; secret: string }>> {
   return runAction(async () => {
@@ -65,6 +67,8 @@ export async function updateWebhookEndpointAction(
     templateStatuses: string[] | null;
     /** The conversation statuses it takes (ADR-149); null takes every status. */
     conversationStatuses: string[] | null;
+    /** How the runs it takes as `automation.run_ended` ended (ADR-151); null takes every end. */
+    runEndStatuses: string[] | null;
   },
 ): Promise<ActionResult> {
   return runAction(async () => {

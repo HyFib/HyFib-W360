@@ -5804,9 +5804,9 @@ Decision:
   signature (0095's, with the automation condition), so its owner and grants stay. Existing
   endpoints keep null; nothing is backfilled.
 
-Not built: filters on other facts of a run (its trigger, how it ended, the key that started it),
-choosing automations by tag or folder, and filters for campaigns, templates, orders or conversations
-by team or channel.
+Not built: filters on other facts of a run (its trigger, how it ended (built by ADR-151), the key
+that started it), choosing automations by tag or folder, and filters for campaigns, templates,
+orders or conversations by team or channel.
 
 ## ADR-146 Choosing the campaign statuses a webhook endpoint receives (P5-09) (2026-10-04)
 
@@ -6043,3 +6043,51 @@ Decision:
 
 Not built: results as they were at the change (a snapshot stored with the event), results for a time
 range or by day, the campaign in `message.status`, events for each recipient, and costs.
+
+## ADR-151 Choosing how the automation runs a webhook endpoint receives ended (P5-09) (2026-10-05)
+
+Context: since ADR-078 an endpoint that takes `automation.run_ended` receives the end of every run:
+each completed run and each one handed to people, taken over, stopped or failed. ADR-145 lets it
+name the automations whose runs it takes, and left filters on how a run ended unbuilt. A receiver
+that acts on some ends only (an alert on failures, a desk opening a case when a run hands the
+conversation to people) had to read and drop the rest; ADR-146 to ADR-149 built the same filter for
+the statuses of campaigns, orders, templates and conversations.
+
+Decision:
+
+- **A list of ends per endpoint,** for `automation.run_ended` only: null receives every end, as
+  before; a list holds 1 to 5 of `completed`, `handed_off`, `taken_over`, `stopped` and `failed`,
+  the status the run ended with (the event's `run.status`), in the order an automation's runs list
+  them with repeats merged. A run's active statuses (`running`, `waiting`) end nothing and cannot be
+  named. It is chosen in Settings → Webhooks under "Automation ended" (every end ticked to begin
+  with; saving them all ticked keeps none) and shown on the endpoint as "Automation ends sent: …",
+  with the names an automation's runs use, and through the API as `runEndStatuses` on
+  `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every endpoint the API
+  answers.
+- **Only with the event:** a list given for an endpoint that does not receive `automation.run_ended`
+  is refused (`runEndStatuses`; 422 through the API), run starts included. A change that removes the
+  event clears it, and a `PATCH` that leaves it out keeps it; Settings always sends it. A check in
+  the database holds the same rule (null, or 1 to 5 known ends while the event is among the
+  endpoint's).
+- **Applied when the event is captured,** with the automations an endpoint names (ADR-145):
+  `app.capture_webhook_event` creates an `automation.run_ended` delivery only for the active
+  endpoints that take it, whose automations are null or include the run's, and whose list is null or
+  holds the status the run ended with, and writes no event when none takes it. Run starts are
+  unchanged. The capture is in the transaction that ends the run, from 0055's trigger, whatever ends
+  it (the run itself, a member, an API key, erasure). A change of the list applies to ends captured
+  after it; deliveries already created are still sent. Replays, test events and the payload are
+  unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `runEndStatuses` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The list names statuses only, never a run or a conversation.
+- **The same control** as the statuses of campaigns, orders, templates and conversations in
+  Settings.
+- **Migration 0114:** `run_end_statuses text[]` on `app.webhook_endpoints` with the check, validated
+  at once (a company has at most 10 endpoints), an update grant on the column for the runtime role
+  (it inserts it with its table grant), and `app.capture_webhook_event` replaced with the same
+  signature (0113's, with the run end condition), so its owner and grants stay. Existing endpoints
+  keep null; nothing is backfilled.
+
+Not built: filters on a run's end reason, its trigger or the key that started it, on how long it
+ran, or by tag or folder.

@@ -72,6 +72,12 @@ export type WebhookTemplateStatus =
  */
 export type WebhookConversationStatus = 'open' | 'resolved';
 
+/**
+ * The statuses an `automation.run_ended` event reports, the status a run ended with, which an
+ * endpoint can choose (ADR-151); a run's active statuses (`running`, `waiting`) end nothing.
+ */
+export type WebhookRunEndStatus = 'completed' | 'handed_off' | 'taken_over' | 'stopped' | 'failed';
+
 export const WEBHOOK_DELIVERY_STATES = ['pending', 'delivering', 'succeeded', 'failed'] as const;
 export type WebhookDeliveryState = (typeof WEBHOOK_DELIVERY_STATES)[number];
 
@@ -125,6 +131,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * null takes every status. Set only while `conversation.status_changed` is among its events.
    */
   conversationStatuses: text('conversation_statuses').array().$type<WebhookConversationStatus[]>(),
+  /**
+   * The statuses a run ended with that it takes as `automation.run_ended` (ADR-151); null takes
+   * every end. Set only while `automation.run_ended` is among its events.
+   */
+  runEndStatuses: text('run_end_statuses').array().$type<WebhookRunEndStatus[]>(),
   state: text('state', { enum: ['active', 'disabled'] })
     .notNull()
     .default('active'),

@@ -195,6 +195,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `campaign.results` (a retry or a replay a newer worker delivers has them), and rolling workers
    back to an image from before it does the same; until the web rollout ends, an old server's
    OpenAPI document does not describe them.
+   Migration 0114 (ADR-151) does for `run_end_statuses` and `automation.run_ended` what 0113 does
+   for conversation statuses: a nullable column with a check validated by reading the table, and
+   `app.capture_webhook_event` replaced with the same signature (keeping 0109's to 0113's filters);
+   every endpoint starts with none. Web servers from before it neither show nor change the column:
+   until the web rollout ends, an old server's change that drops `automation.run_ended` from an
+   endpoint with a list fails on the check, and its other changes keep it.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

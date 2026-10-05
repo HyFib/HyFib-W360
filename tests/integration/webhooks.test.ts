@@ -1326,6 +1326,101 @@ describe('conversation status filters (ADR-149)', () => {
   });
 });
 
+describe('run end filters (ADR-151)', () => {
+  it('are refused without automation.run_ended, unknown, active or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], runEndStatuses: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, runEndStatuses }),
+        'validation_failed',
+        message,
+      );
+    // A run's start is not its end, and a run still going has not ended.
+    await refused(
+      ['automation.run_started'],
+      ['failed'],
+      /only for an endpoint that receives Automation ended/,
+    );
+    await refused(['automation.run_ended'], [], /at least one way a run ends/);
+    await refused(['automation.run_ended'], ['running'], /from the list/);
+    await refused(['automation.run_ended'], ['waiting'], /from the list/);
+    await refused(['automation.run_ended'], ['crashed'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['automation.run_ended', 'consent.changed'],
+      runEndStatuses: ['failed', 'handed_off', 'failed'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ runEndStatuses: ['handed_off', 'failed'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['automation.run_ended', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.runEndStatuses;
+    expect(await current()).toEqual(['handed_off', 'failed']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['handed_off', 'failed']);
+    await change({ runEndStatuses: ['failed'] });
+    expect(await current()).toEqual(['failed']);
+    const updates = await fx.query<{ metadata: { runEndStatuses?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.runEndStatuses)).toEqual([
+      ['handed_off', 'failed'],
+      ['failed'],
+    ]);
+    await change({ runEndStatuses: null });
+    expect(await current()).toBeNull();
+    await change({ runEndStatuses: ['completed'] });
+    // The database refuses an empty list, more than five entries, a status a run has while it goes
+    // on, an unknown status or a missing one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET run_end_statuses = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{completed,handed_off,taken_over,stopped,failed,failed}'`,
+      `'{completed,running}'`,
+      `'{completed,waiting}'`,
+      `'{completed,crashed}'`,
+      `ARRAY['completed', NULL]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_run_end_statuses/);
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], runEndStatuses: ['failed'] }),
+      'validation_failed',
+      /only for an endpoint that receives Automation ended/,
+    );
+    // …and any list for an endpoint that does not take it, run starts included.
+    await change({ eventTypes: ['automation.run_started'] });
+    await expect(setInDatabase(`'{failed}'`)).rejects.toThrow(/webhook_endpoints_run_end_statuses/);
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'run_end_statuses',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('automation filters (ADR-145)', () => {
   const automationService = () =>
     createAutomationService({

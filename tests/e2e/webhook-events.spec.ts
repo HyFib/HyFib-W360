@@ -303,11 +303,11 @@ interface RunEventBody {
   };
 }
 
-test('automation run events reach an endpoint: a live run starts and ends, a member’s test run sends nothing, and an endpoint can take chosen automations only', async ({
+test('automation run events reach an endpoint: a live run starts and ends, a member’s test run sends nothing, an endpoint can take chosen automations only, and another only the ends it chooses', async ({
   page,
   request,
 }) => {
-  test.setTimeout(240_000);
+  test.setTimeout(300_000);
   const email = uniqueEmail('hookrun');
   const slug = `hookrun-${Date.now().toString(36)}`;
   const path = `/runs/${slug}`;
@@ -471,6 +471,56 @@ test('automation run events reach an endpoint: a live run starts and ends, a mem
     ['automation.run_ended', 'Farewell', `+${fourth}`],
     ['automation.run_started', 'Farewell', `+${fourth}`],
   ]);
+
+  // A second endpoint takes the ends of every automation's runs but their completions (ADR-151).
+  const endsPath = `${path}/ends`;
+  const forEnds = () => received.filter((r) => r.path === endsPath);
+  const endBox = (name: string) => page.getByRole('checkbox', { name, exact: true });
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${endsPath}`);
+  await page.getByRole('checkbox', { name: /Automation ended/ }).check();
+  await endBox('Completed (completed)').uncheck();
+  await expect(endBox('Failed (failed)')).toBeChecked();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await expect(page.getByLabel('Signing secret')).toBeVisible();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  // The form starts afresh: the event ticked again takes every end.
+  await page.getByRole('checkbox', { name: /Automation ended/ }).check();
+  await expect(endBox('Completed (completed)')).toBeChecked();
+  await page.reload();
+  // Only the second endpoint names how runs ended, as an automation's runs name them.
+  await expect(page.getByText(/^Automation ends sent:/)).toHaveText([
+    'Automation ends sent: Handed off, Taken over, Stopped, Failed',
+  ]);
+  await page
+    .getByRole('list', { name: 'Endpoints' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Automation ends sent:' })
+    .getByRole('link', { name: /Deliveries and settings/ })
+    .click();
+  await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
+  const endsUrl = page.url();
+  await expect(endBox('Completed (completed)')).not.toBeChecked();
+  await expect(endBox('Handed off (handed_off)')).toBeChecked();
+  await expect(endBox('Failed (failed)')).toBeChecked();
+
+  // A fifth customer writes "bye": Farewell's run starts and completes, and the first endpoint
+  // hears both. The completion is captured for no other endpoint: the second has no delivery.
+  const fifth = randomWaId();
+  await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, fifth, 'bye'));
+  await expect(async () => expect(forUs()).toHaveLength(8)).toPass({ timeout: 30_000 });
+  expect(
+    forUs()
+      .slice(6)
+      .map((e) => [e.json.type, e.json.data.run.status, e.json.data.contact.phone])
+      .sort(),
+  ).toEqual([
+    ['automation.run_ended', 'completed', `+${fifth}`],
+    ['automation.run_started', 'running', `+${fifth}`],
+  ]);
+  await page.goto(endsUrl);
+  await expect(page.getByText('No deliveries yet.')).toBeVisible();
+  expect(forEnds()).toEqual([]);
 
   // Both automations are archived: Greeter, not chosen, is no longer offered; Farewell, chosen,
   // stays listed and ticked, marked archived.

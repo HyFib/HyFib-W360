@@ -5,6 +5,7 @@ import type {
   WebhookEventType,
   WebhookMessageStatus,
   WebhookOrderStatus,
+  WebhookRunEndStatus,
   WebhookTemplateStatus,
 } from '@w360/db';
 
@@ -15,6 +16,7 @@ export type {
   WebhookEventType,
   WebhookMessageStatus,
   WebhookOrderStatus,
+  WebhookRunEndStatus,
   WebhookTemplateStatus,
 } from '@w360/db';
 
@@ -255,6 +257,27 @@ export const WEBHOOK_CONVERSATION_STATUSES = [
 export const WEBHOOK_CONVERSATION_STATUS_LABELS: Record<WebhookConversationStatus, string> = {
   open: 'Open',
   resolved: 'Resolved',
+};
+
+/**
+ * The statuses a run ends with, which an endpoint taking `automation.run_ended` can choose
+ * (ADR-151), in the order an automation's runs list them; a run's active statuses end nothing.
+ */
+export const WEBHOOK_RUN_END_STATUSES = [
+  'completed',
+  'handed_off',
+  'taken_over',
+  'stopped',
+  'failed',
+] as const satisfies readonly WebhookRunEndStatus[];
+
+/** How Settings names each way a run ends (ADR-151), as an automation's runs name them. */
+export const WEBHOOK_RUN_END_STATUS_LABELS: Record<WebhookRunEndStatus, string> = {
+  completed: 'Completed',
+  handed_off: 'Handed off',
+  taken_over: 'Taken over',
+  stopped: 'Stopped',
+  failed: 'Failed',
 };
 
 export const WEBHOOK_LIMITS = {

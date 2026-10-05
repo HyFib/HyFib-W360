@@ -107,6 +107,7 @@ import {
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
 } from '../webhooks/service';
 
@@ -1330,6 +1331,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'headers',
       'messageStatuses',
       'orderStatuses',
+      'runEndStatuses',
       'templateStatuses',
     ]);
     expect(update.additionalProperties).toBe(false);
@@ -1412,6 +1414,45 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(webhooks['conversation.status_changed']?.post?.description).toContain(
       'An endpoint receives every status unless it names the statuses it takes (its `conversationStatuses`',
     );
+    // How the runs an endpoint receives ended (ADR-151): a list, or null.
+    const runEndStatuses = (answered.properties as Record<string, { anyOf?: unknown[] }>)
+      .runEndStatuses;
+    expect(runEndStatuses?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('runEndStatuses');
+    expect(Object.keys(createBody.properties)).toContain('runEndStatuses');
+    expect(webhooks['automation.run_ended']?.post?.description).toContain(
+      'an endpoint receives every end unless it names the statuses it takes (its `runEndStatuses`',
+    );
+  });
+
+  it('take run end statuses only with automation.run_ended, and a list of them alone is a change (ADR-151)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['automation.run_ended'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, runEndStatuses: ['failed', 'stopped'] })
+        .runEndStatuses,
+    ).toEqual(['stopped', 'failed']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['automation.run_started'],
+      runEndStatuses: ['failed'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['runEndStatuses', WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, runEndStatuses: [] },
+      { ...base, runEndStatuses: ['running'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ runEndStatuses: null })).toEqual({
+      runEndStatuses: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ runEndStatuses: ['failed'] })).toEqual({
+      runEndStatuses: ['failed'],
+    });
   });
 
   it('take conversation statuses only with conversation.status_changed, and a list of them alone is a change (ADR-149)', () => {

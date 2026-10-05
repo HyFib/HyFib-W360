@@ -1,5 +1,93 @@
 # Progress
 
+## 2026-10-05 — Phase 5: choosing how the automation runs a webhook endpoint receives ended (P5-09, ADR-151)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-078 an endpoint that took
+`automation.run_ended` received the end of every run: each completed run and each one handed to
+people, taken over, stopped or failed. ADR-145 let it name the automations whose runs it takes and
+left filters on how a run ended unbuilt. A receiver that acts on some ends only (an alert on
+failures, a desk opening a case when a run hands the conversation to people) had to read and drop
+the rest; ADR-146 to ADR-149 had built the same filter for the statuses of campaigns, orders,
+templates and conversations.
+
+### Completed
+
+- **Design (ADR-151):** an endpoint takes every end (null, as before) or 1 to 5 of the statuses a
+  run ends with (`completed`, `handed_off`, `taken_over`, `stopped`, `failed`; a run still going,
+  `running` or `waiting`, ends nothing, so the list cannot name it), kept only while it takes
+  `automation.run_ended`; applied where events are captured, together with the automations the
+  endpoint names, in the transaction that ends the run, whatever ends it; run starts unchanged;
+  audited and exported; permissions unchanged.
+- **Migration 0114:** `app.webhook_endpoints.run_end_statuses` (`text[]`, a check: null, or 1 to 5
+  known ends while `automation.run_ended` is among the events; containment also refuses a null
+  entry, `running` and `waiting`), the runtime role's update of the column, and
+  `app.capture_webhook_event` replaced with the same signature (0113's, with the run end condition
+  in both its existence check and its deliveries).
+- **Domain:** `webhooks/model.ts` (`WEBHOOK_RUN_END_STATUSES` in the order an automation's runs list
+  them, their labels as the runs page names them); `webhooks/service.ts`
+  (`webhookRunEndStatusesSchema`, `webhookRunEndStatusesFor`, the schemas' rule, `runEndStatuses`
+  on each listed endpoint, create and update storing and auditing the list);
+  `api/webhook-endpoints.ts` (`runEndStatuses` on `POST` and `PATCH /webhook-endpoints` and in
+  every answer, kept or cleared, audited); OpenAPI (`runEndStatuses`, and `automation.run_ended`
+  says how the filter applies); the company data export carries the column.
+- **Web:** Settings → Webhooks, under "Automation ended" while it is ticked: "Statuses sent", every
+  end ticked to begin with (saving them all keeps none); the endpoints list says "Automation ends
+  sent: …". The control is the one the statuses of campaigns, orders, templates and conversations
+  use.
+- **Tests:**
+  - Unit (3 new, 1 extended): the list's rules (1 to 5 known ends, `running`, `waiting`, an unknown
+    status, a null entry and six entries refused, repeats merged into the order an automation's
+    runs list them, null, the empty list's message, the labels, the list matching a run's statuses
+    but the active ones), keeping and clearing; the API's schemas (only with the event, run starts
+    included; a list alone is a change) and the OpenAPI entries.
+  - Integration (3 new, 1 changed): an endpoint naming failures gets only the failed end and every
+    start, one taking every end gets each, one naming an automation's completions gets only those,
+    and an end no endpoint takes is not recorded; refusals of ends without the event (run starts
+    included), an empty list, `running`, `waiting` and an unknown status, keeping, replacing and
+    clearing, the audits, each clause of the database check (an empty list, six entries, `running`,
+    `waiting`, an unknown status, a null entry, any list without the event, run starts included)
+    and the column grant (`webhooks.test.ts`, `webhook-events.test.ts`); the same rules through the
+    API, a run still going and an unknown status named by their place
+    (`api-webhook-endpoints.test.ts`, whose endpoint shape now includes `runEndStatuses`).
+  - E2E (1 extended in `webhook-events.spec.ts`): automation run events through Settings, the runner
+    and the worker: a second endpoint added with "Completed" unticked; the form starts afresh, the
+    endpoints list names its ends and no other endpoint's, and its page ticks every end but
+    completions; a fifth customer's run starts and completes, the first endpoint hears both, and the
+    second has no delivery.
+- **Docs:** ADR-151 (and ADR-145's "Not built" annotated); SECURITY (Phase 5 rules); THREAT-MODEL
+  T160; ARCHITECTURE; RUNBOOKS; DEPLOYMENT (0114's rollout); DATA-RETENTION; BACKLOG P5-09; feature
+  matrix H-014, W-138 and W-139.
+- **Mutation checks:** 63 deliberate regressions tried, all caught on the first run: 16 by unit
+  tests and 36 by integration tests in the domain, the API and the migration (the ends, their order,
+  a run still going and the labels, the list's rules, keeping and clearing, the list following run
+  ends rather than starts, the schemas' rule, each store, read and audit in Settings and the API,
+  the OpenAPI entries, the export, the capture's existence check and deliveries, the null branch,
+  the condition kept to run ends in both places and away from run starts, the status filtered rather
+  than the end reason, each clause of the database check and the column grant), and 11 in the web
+  through the e2e test (the ends shown, what is sent, every end ticked sent as none, the ends sent
+  only with their event, ticking and unticking, the page's starting state, the form starting afresh,
+  the names shown in the control, the endpoints list and its labels, the endpoint's page knowing its
+  list). The domain checks were run twice, the second time keeping each run's output, which showed
+  each failing on its own assertion rather than on a migration or a module that would not load.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                                                                  | Result                                                                          |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                       | clean                                                                           |
+| `pnpm test` (unit)                                                                       | 696 passed (74 files; 3 new)                                                    |
+| `pnpm test:integration` on PostgreSQL 18.6                                               | 864 passed (56 files; 3 new)                                                    |
+| `pnpm test:integration` on PostgreSQL 17.11                                              | 864 passed (56 files)                                                           |
+| `pnpm build`                                                                             | passed                                                                          |
+| e2e: webhooks, webhook-events, api-contact-fields, api-quota (chromium, mobile-chromium) | 36 passed (6.3 min); Firefox and WebKit are not installed here, so CI runs them |
+| Mutation checks                                                                          | 63 tried, all caught (16 by unit, 36 by integration, 11 through the e2e test)   |
+| gitleaks 8.30.1 on the staged changes                                                    | no leaks found                                                                  |
+
+### Known gaps
+
+- Filters on a run's end reason, its trigger or the key that started it, on how long it ran, or by
+  tag or folder.
+
 ## 2026-10-05 — Phase 5: campaign results in campaign events (P5-09, ADR-150)
 
 Status: **Implemented and locally verified (test data only).** Since ADR-087 `campaign.status_changed`

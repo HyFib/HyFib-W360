@@ -2,7 +2,9 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { Keyring } from '@w360/core';
 import {
+  ACTIVE_RUN_STATUSES,
   AUTOMATION_END_REASONS,
+  AUTOMATION_RUN_STATUSES,
   CAMPAIGN_COMPLETION_REASONS,
   CAMPAIGN_PAUSE_REASONS,
   CAMPAIGN_STATUSES,
@@ -27,6 +29,8 @@ import {
   WEBHOOK_CONTACT_PARTS,
   WEBHOOK_CONVERSATION_STATUS_LABELS,
   WEBHOOK_CONVERSATION_STATUSES,
+  WEBHOOK_RUN_END_STATUS_LABELS,
+  WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
@@ -79,6 +83,8 @@ import {
   webhookContactPartsSchema,
   webhookConversationStatusesFor,
   webhookConversationStatusesSchema,
+  webhookRunEndStatusesFor,
+  webhookRunEndStatusesSchema,
   webhookHeadersAad,
   webhookHeadersSchema,
   webhookMessageStatusesFor,
@@ -1463,5 +1469,58 @@ describe('conversation status filters (ADR-149)', () => {
     expect(
       webhookConversationStatusesFor(['order.status_changed'], undefined, ['open']),
     ).toBeNull();
+  });
+});
+
+describe('run end filters (ADR-151)', () => {
+  it('take 1 to 5 of the statuses a run ends with, once each, in the order an automation’s runs list them; null takes every end', () => {
+    expect(webhookRunEndStatusesSchema.parse(['failed', 'completed'])).toEqual([
+      'completed',
+      'failed',
+    ]);
+    expect(webhookRunEndStatusesSchema.parse(['failed', 'failed'])).toEqual(['failed']);
+    expect(webhookRunEndStatusesSchema.parse(null)).toBeNull();
+    // Every status a run can end with; the statuses of a run still going end nothing.
+    expect(WEBHOOK_RUN_END_STATUSES).toEqual(
+      AUTOMATION_RUN_STATUSES.filter(
+        (s) => !(ACTIVE_RUN_STATUSES as readonly string[]).includes(s),
+      ),
+    );
+    for (const refused of [
+      [],
+      ['running'],
+      ['waiting'],
+      ['crashed'],
+      ['Failed'],
+      'failed',
+      [null],
+      Array(6).fill('failed'),
+    ]) {
+      expect(webhookRunEndStatusesSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookRunEndStatusesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one way a run ends, or take every end.',
+    );
+    expect(WEBHOOK_RUN_END_STATUS_LABELS).toEqual({
+      completed: 'Completed',
+      handed_off: 'Handed off',
+      taken_over: 'Taken over',
+      stopped: 'Stopped',
+      failed: 'Failed',
+    });
+  });
+
+  it('are kept only while the endpoint takes automation.run_ended: given, kept, or cleared', () => {
+    const both = ['automation.run_started', 'automation.run_ended'] as const;
+    expect(webhookRunEndStatusesFor([...both], ['failed'], null)).toEqual(['failed']);
+    expect(webhookRunEndStatusesFor([...both], undefined, ['completed'])).toEqual(['completed']);
+    expect(webhookRunEndStatusesFor([...both], null, ['completed'])).toBeNull();
+    expect(webhookRunEndStatusesFor([...both], undefined, null)).toBeNull();
+    expect(
+      webhookRunEndStatusesFor(['automation.run_started'], ['failed'], ['completed']),
+    ).toBeNull();
+    expect(webhookRunEndStatusesFor(['order.status_changed'], undefined, ['completed'])).toBeNull();
   });
 });
