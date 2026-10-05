@@ -532,6 +532,13 @@ Phase 5 rules (Public API, P5-08):
   refuses the whole call, naming its place in the list, and changes nothing (tested), so a call never
   reveals or touches another company's contacts beyond saying an id is not one of the company's. A
   call counts as one request against the key's limits.
+- Numbers in calls that change many contacts (ADR-188): each contact's new number is refused as
+  `PATCH /contacts/{id}` refuses it (a WhatsApp identity's, another contact's without naming it, a
+  suppressed one), and every number is checked against the numbers contacts have before the call,
+  after their rows are locked and before anything is written, so a key never swaps or moves numbers
+  between the call's contacts (a person's messages then reaching another) in one call; a number
+  given twice is refused before anything is read. A refusal names the place in the list, never
+  another contact.
 - Starting automations through the API (ADR-077) needs `automations.start`, which only members who
   publish automations (`automations.publish`: owners and administrators) can grant, as a started run
   messages contacts as a published version does; an automation whose version sends a marketing

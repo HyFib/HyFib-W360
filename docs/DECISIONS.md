@@ -4644,8 +4644,9 @@ Decision:
   them, which the API answers with 409 `conflict` (retryable), as for any deadlock.
 
 Not built: choosing contacts to change by a filter (all with a tag, a segment), changes that partly
-succeed, adding contacts in the same call, changing numbers, and the same change for many contacts
-in the inbox (members change contacts one at a time, or by import).
+succeed, adding contacts in the same call, changing numbers (typed numbers: built by ADR-188), and
+the same change for many contacts in the inbox (members change contacts one at a time, or by
+import).
 
 ## ADR-123 Choosing the contact changes a webhook endpoint receives (2026-10-03)
 
@@ -7243,8 +7244,8 @@ Decision:
   moving two contacts to one number at once: the unique number index refuses the second (409).
   Consent stays with the contact, as when members change a number.
 
-Not built: numbers in calls that change many contacts, clearing a number, and moving a WhatsApp
-identity to another contact.
+Not built: numbers in calls that change many contacts (built by ADR-188), clearing a number, and
+moving a WhatsApp identity to another contact.
 
 ## ADR-181 Choosing the members whose assigned conversations' events a webhook endpoint receives (P5-09) (2026-10-05)
 
@@ -7566,3 +7567,39 @@ Decision:
 
 Not built: deleting drafts (a cancelled draft is kept, as members' are) and cancelling many
 campaigns in one call.
+
+## ADR-188 Changing typed numbers in calls that change many contacts (P5-08) (2026-10-05)
+
+Context: ADR-180 lets `PATCH /contacts/{id}` change a number typed for a contact and kept numbers
+out of `POST /contacts/update-many` (ADR-122): two contacts in one call could swap numbers, which
+each contact's check alone would not see. A CRM or shop fixing the numbers an import or a checkout
+form mistyped still made one request per contact, each counted against its limits, and a failure
+halfway left some fixed.
+
+Decision:
+
+- **`phone` on each contact of `POST /contacts/update-many`,** as `PATCH /contacts/{id}` takes it,
+  under the same `contacts.write` scope, all of them or none, as the call's other changes. A number
+  changes as members change it (ADR-180): a contact whose number WhatsApp gave keeps it (412), a
+  number on the company's suppression list is refused (412), and a number another contact has is
+  refused with 409, without naming that contact.
+- **Never swapped or moved within a call:** every new number is checked after the contacts are
+  locked and before the first change is written, against the numbers contacts have before the call.
+  A number one of the call's own contacts has is therefore another contact's, whatever the order,
+  even when that contact is given another number in the same call, so a call never swaps two
+  contacts' numbers or moves one from a contact to another; that takes separate calls, each checked
+  on its own. A number given to two contacts of the call, in any form, is refused with 422 before
+  anything is read ("Give each number once.").
+- **The refusal names its place:** the 409 and 412 carry `issues` with `contacts.<index>.phone` (a
+  bad number is refused with 422 naming the same place), so the integration knows which contact to
+  fix; nothing in the call is changed. `PATCH /contacts/{id}`'s answers are unchanged.
+- **The same change for many contacts** (`POST /contacts/update-matching`, ADR-165) still takes no
+  number: one number cannot go to many contacts.
+- **As any change:** each contact through `changeLockedContact`, in the order given; audited as
+  `contact.updated` with `phone` among what changed, never the number; `contact.updated` webhooks
+  name `phone` (ADR-121) and the contact feed lists the contact (ADR-114). Two calls giving one
+  number to two contacts at once: the unique number index refuses the second (409), as for `PATCH`.
+- **No migration.**
+
+Not built: swapping numbers in one call (a contact needs a free number first), numbers in the same
+change for many contacts, clearing a number, and moving a WhatsApp identity to another contact.

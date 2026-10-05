@@ -1482,19 +1482,24 @@ repeating a call is harmless. A call takes at most 100 conversations, each once 
 `conversationIds`), and counts as one request against the key's limits. Each conversation's change
 is audited as a single change is, all with the call's correlation id.
 
-**A call to change many contacts is refused with 422 naming `contacts.<n>.…`.** The contact at that
-place in the list (counting from 0) could not be changed as asked (ADR-122): `contacts.<n>.id` names
-none of the company's live contacts (another company's, an erased one, or none at all);
-`contacts.<n>.fields.<key>` is a field the company does not have or a value of another type
-(`GET /api/v1/contact-fields` lists the fields and types); `contacts.<n>.email` is not an email;
-`contacts.<n>.addTags` would give the contact more than 50 tags; `contacts.<n>.removeTags` names a
-tag also being added. Nothing in the call was changed, the other contacts included:
-`POST /contacts/update-many` changes all of them or none. Correct that contact's change and send
-the call again; what a contact already has changes nothing, so repeating a call is harmless. A call
-takes at most 100 contacts, each once (422 naming `contacts`), and counts as one request. A 409
-`conflict` (retryable) means it met another transaction changing the same contacts in another order,
-such as a CSV import, and PostgreSQL ended it: send it again. Each contact's change is audited as a
-single change is, all with the call's correlation id.
+**A call to change many contacts is refused with 409, 412 or 422 naming `contacts.<n>.…`.** The
+contact at that place in the list (counting from 0) could not be changed as asked (ADR-122):
+`contacts.<n>.id` names none of the company's live contacts (another company's, an erased one, or
+none at all); `contacts.<n>.fields.<key>` is a field the company does not have or a value of another
+type (`GET /api/v1/contact-fields` lists the fields and types); `contacts.<n>.email` is not an
+email; `contacts.<n>.addTags` would give the contact more than 50 tags; `contacts.<n>.removeTags`
+names a tag also being added. `contacts.<n>.phone` with 422 is not a number with its country code
+and a leading +, or a number another contact of the call is given too ("Give each number once.");
+with 409 or 412 it is refused as `PATCH /api/v1/contacts/{id}` refuses it (ADR-180, below), and 409
+also when one of the call's own contacts has the number: a call never swaps or moves numbers between
+its contacts (ADR-188), so give the contact that has it another number in a call of its own first.
+Nothing in the call was changed, the other contacts included: `POST /contacts/update-many` changes
+all of them or none. Correct that contact's change and send the call again; what a contact already
+has changes nothing, so repeating a call is harmless. A call takes at most 100 contacts, each once
+(422 naming `contacts`), and counts as one request. A 409 `conflict` that names no place (retryable)
+means it met another transaction changing the same contacts in another order, such as a CSV import,
+and PostgreSQL ended it: send it again. Each contact's change is audited as a single change is, all
+with the call's correlation id.
 
 **An API key expired without a reminder, or the reminder came twice.** Owners and administrators
 are emailed once, 7 days before a key expires (ADR-067): `app.api_keys.expiry_reminded_at` says when
@@ -2585,8 +2590,8 @@ numbers: its number is its identity and stays (members cannot change it either);
 suppression list means the new number is suppressed (remove it from the list in the app first, if
 that is right). 409 means another contact of the company has the number: find it with
 `GET /contacts?phone=` (with `contacts.read`) and merge or fix them in the app. 422 naming `phone`
-means it is not a number with its country code and a leading +. Calls that change many contacts do
-not take `phone`.
+means it is not a number with its country code and a leading +. `POST /api/v1/contacts/update-many`
+gives the same answers naming `contacts.<n>.phone` (ADR-188).
 
 **A dead letter of those three queues stays unsettled.** The sweep leaves one alone while its
 company is being deleted, while a job for the same work waits or runs (the company started it again,

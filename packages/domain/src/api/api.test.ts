@@ -2859,6 +2859,7 @@ describe('OpenAPI document', () => {
       'fields',
       'addTags',
       'removeTags',
+      'phone',
     ]);
   });
 
@@ -3015,7 +3016,7 @@ describe('contact custom fields and changes (ADR-112)', () => {
       addTags: ['vip'],
       removeTags: ['new'],
     });
-    // A number alone is a change (ADR-180); only PATCH takes one.
+    // A number alone is a change (ADR-180), in a call changing many contacts too (ADR-188).
     expect(apiContactUpdateSchema.parse({ phone: '+919876543210' })).toEqual({
       phone: '+919876543210',
     });
@@ -3026,7 +3027,7 @@ describe('contact custom fields and changes (ADR-112)', () => {
       apiUpdateManyContactsSchema.safeParse({
         contacts: [{ id: '0190a000-0000-7000-8000-000000000001', phone: '+919876543210' }],
       }).success,
-    ).toBe(false);
+    ).toBe(true);
     for (const bad of [
       {},
       { phone: null },
@@ -3090,6 +3091,9 @@ describe('contact custom fields and changes (ADR-112)', () => {
         ],
       },
       { contacts: ids(API_LIMITS.contactsPerChange).map((c) => ({ id: c, removeTags: ['new'] })) },
+      // A number alone, or with other changes (ADR-188).
+      { contacts: [{ id, phone: '+919876543210' }] },
+      { contacts: [{ id, name: 'A', phone: '+919876543210' }] },
     ]) {
       expect(apiUpdateManyContactsSchema.parse(body)).toEqual(body);
     }
@@ -3105,8 +3109,8 @@ describe('contact custom fields and changes (ADR-112)', () => {
       { contacts: [{ id: 'not-a-uuid', name: 'A' }] },
       { contacts: [{ name: 'A' }] },
       { contacts: [{ id }] },
-      { contacts: [{ id, phone: '+919876543210' }] },
-      { contacts: [{ id, name: 'A', phone: '+919876543210' }] },
+      { contacts: [{ id, phone: null }] },
+      { contacts: [{ id, phone: 919876543210 }] },
       { contacts: { id, name: 'A' } },
       { contacts: [{ id, name: 'A' }], dryRun: true },
       {},
@@ -3148,8 +3152,72 @@ describe('contact custom fields and changes (ADR-112)', () => {
       { path: 'contacts.1.removeTags', message: 'The tag vip cannot be both added and removed.' },
     ]);
     expect(await issues({})).toEqual([
-      { path: 'contacts.1', message: 'Give name, email, fields, addTags or removeTags.' },
+      { path: 'contacts.1', message: 'Give name, email, phone, fields, addTags or removeTags.' },
     ]);
+  });
+
+  it('take numbers in a call that changes many contacts, each given once, refused by its place before anything is read (ADR-188)', async () => {
+    const other = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';
+    const third = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f03';
+    const many = (body: unknown) =>
+      apiUpdateManyContacts({} as never, ctx(['contacts.write']), body).catch(
+        (error: unknown) => error,
+      );
+    const refusal = async (body: unknown) => {
+      const error = await many(body);
+      return isAppError(error) ? { code: error.code, issues: error.issues } : error;
+    };
+    // A number that is not one, by its place.
+    expect(
+      await refusal({
+        contacts: [
+          { id, name: 'Priya' },
+          { id: other, phone: '98111' },
+        ],
+      }),
+    ).toMatchObject({ code: 'validation_failed', issues: [{ path: 'contacts.1.phone' }] });
+    // The same number twice, written two ways: the second is named.
+    expect(
+      await refusal({
+        contacts: [
+          { id, phone: '+919876543210' },
+          { id: other, name: 'Bina' },
+          { id: third, phone: '+91 98765 43210' },
+        ],
+      }),
+    ).toEqual({
+      code: 'validation_failed',
+      issues: [{ path: 'contacts.2.phone', message: 'Give each number once.' }],
+    });
+    // Different numbers pass every check that needs no database, and reach it (none is given).
+    expect(
+      await many({
+        contacts: [
+          { id, phone: '+919876543210' },
+          { id: other, phone: '+919876543211' },
+        ],
+      }),
+    ).toBeInstanceOf(TypeError);
+    // Described: what a number needs, that the call never swaps or moves them, and the refusals.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const paths = doc.paths as unknown as Record<
+      string,
+      Record<string, { summary: string; description: string; responses: Record<string, unknown> }>
+    >;
+    const updateMany = paths['/contacts/update-many']?.post;
+    expect(updateMany?.summary).toContain('numbers');
+    for (const words of [
+      'A number changes as PATCH /contacts/{id} changes one',
+      'Each number must be free before the call',
+      'a call never swaps or moves numbers between contacts',
+      'A number given twice, in any form, is refused with 422',
+      '`contacts.2.phone`',
+    ]) {
+      expect(updateMany?.description).toContain(words);
+    }
+    expect(Object.keys(updateMany?.responses ?? {})).toEqual(
+      expect.arrayContaining(['409', '412', '422']),
+    );
   });
 
   it('are described: the fields in every contact, their definitions, and the change', () => {
@@ -3165,7 +3233,7 @@ describe('contact custom fields and changes (ADR-112)', () => {
       'A number changes only when it was typed for the contact, as members change it',
       'is refused with 412, as is a number on the company',
       'a number another contact has is refused with 409, without naming that contact',
-      'Only this call changes numbers.',
+      'POST /contacts/update-many changes numbers too; the same change for many contacts does not.',
     ]) {
       expect(paths['/contacts/{id}']?.patch?.description).toContain(words);
     }

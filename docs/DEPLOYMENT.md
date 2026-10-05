@@ -330,6 +330,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-187 has no migration: until the web rollout ends, an old web server refuses a key's cancel of
    a draft with 409, as before.
 
+   ADR-188 has no migration: until the web rollout ends, an old web server refuses `phone` in
+   `POST /contacts/update-many` with 422, as before.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

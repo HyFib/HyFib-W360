@@ -936,7 +936,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         patch: {
           operationId: 'updateContact',
           summary: 'Change a contact’s name, email, number, custom fields or tags',
-          description: `${scopeNote('contacts.write')} A field's value must have its type (GET /contact-fields); a refusal names \`fields.<key>\` and saves nothing. Tags are lower-cased, 50 at most per contact. A number changes only when it was typed for the contact, as members change it: one WhatsApp gave (the contact wrote to one of the company's numbers) is the contact's identity and is refused with 412, as is a number on the company's suppression list; a number another contact has is refused with 409, without naming that contact. Only this call changes numbers. What the contact already has changes nothing, so a retry is safe without an \`Idempotency-Key\`. Erased contacts are not found.`,
+          description: `${scopeNote('contacts.write')} A field's value must have its type (GET /contact-fields); a refusal names \`fields.<key>\` and saves nothing. Tags are lower-cased, 50 at most per contact. A number changes only when it was typed for the contact, as members change it: one WhatsApp gave (the contact wrote to one of the company's numbers) is the contact's identity and is refused with 412, as is a number on the company's suppression list; a number another contact has is refused with 409, without naming that contact. POST /contacts/update-many changes numbers too; the same change for many contacts does not. What the contact already has changes nothing, so a retry is safe without an \`Idempotency-Key\`. Erased contacts are not found.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           requestBody: { required: true, content: json(ref('ContactUpdate')) },
           responses: {
@@ -951,9 +951,10 @@ export function buildOpenApiDocument(serverUrl: string) {
       '/contacts/update-many': {
         post: {
           operationId: 'updateManyContacts',
-          summary: 'Change many contacts’ names, emails, custom fields or tags at once',
+          summary: 'Change many contacts’ names, emails, numbers, custom fields or tags at once',
           description: [
             `${scopeNote('contacts.write')} Up to ${API_LIMITS.contactsPerChange} contacts, each with its \`id\` and what PATCH /contacts/{id} takes, each changed as that changes one. All of them or none: a contact of another company or an erased one, a value of another type, an unknown field or a 51st tag refuses the call (422, naming the place, as \`contacts.3.fields.plan\`), and nothing is changed.`,
+            'A number changes as PATCH /contacts/{id} changes one: one WhatsApp gave, or one on the company’s suppression list, is refused with 412, and one another contact has with 409. Each number must be free before the call, so a number one of the call’s own contacts has is refused too, whatever the order and even when that contact is given another: a call never swaps or moves numbers between contacts. A number given twice, in any form, is refused with 422. These refusals name the place, as `contacts.2.phone`, and nothing is changed.',
             'The contacts are changed in the order given and answered in it. A call counts as one request against the rate and monthly limits, within the 64 KB a body may hold. What a contact already has changes nothing, so a retry is safe without an `Idempotency-Key`.',
           ].join('\n\n'),
           requestBody: { required: true, content: json(ref('UpdateManyContacts')) },
@@ -966,7 +967,7 @@ export function buildOpenApiDocument(serverUrl: string) {
                 required: ['data'],
               }),
             },
-            ...errors(400, 401, 403, 415, 422, 423, 429, 500),
+            ...errors(400, 401, 403, 409, 412, 415, 422, 423, 429, 500),
           },
         },
       },

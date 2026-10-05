@@ -1,5 +1,53 @@
 # Progress
 
+## 2026-10-05 — Phase 5: typed numbers in calls that change many contacts (P5-08, ADR-188)
+
+Status: **Implemented; its database and browser tests run in CI only.** A CRM fixing many mistyped
+numbers made one request per contact. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so the integration test and the changed e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-188):** `phone` on each contact of `POST /contacts/update-many`, as `PATCH` takes
+  it; every number free before the call and given once, so a call never swaps or moves numbers;
+  refusals naming `contacts.<index>.phone`; no migration.
+- **Domain:** the update-many item schema takes `phone`; a repeated number is refused before the
+  transaction; `assertNumberFree` names the place and runs for every new number before the first
+  change; the OpenAPI entry (summary, the rules, 409 and 412) and `PATCH`'s description.
+- **Tests:**
+  - Unit (1 new in `api.test.ts`, 3 changed there and 1 changed in `contact-search.test.ts`): the
+    schema, a bad number and a repeated one refused by their place before any read, the same change
+    for many contacts refusing a number, the OpenAPI entry.
+  - Integration (1 new in `api-contact-fields.test.ts`; the ADR-180 test no longer expects
+    update-many to refuse numbers): two numbers fixed and audited, a swap and a move refused by
+    their place, a repeated, a suppressed and a WhatsApp identity's number refused, nothing changed
+    by a refused call. Written for CI; not run here.
+  - E2E (1 changed in `api-contact-fields.spec.ts`): a swap refused by its place, and a number fixed
+    in such a call and shown on the contact page. Written for CI; not run here.
+- **Docs:** ADR-188 (and the "Not built" of ADR-122 and ADR-180 annotated); SECURITY; ARCHITECTURE;
+  THREAT-MODEL T182 (and T174 updated); DEPLOYMENT and RUNBOOKS; BACKLOG P5-08; feature matrix
+  H-033.
+- **Mutation checks:** 10 deliberate regressions tried, all caught on the unit-tested parts (a
+  repeated number let through, numbers compared as written, the number left out of the call or not
+  counted as a change, a number taken by the same change for many contacts, the description, the
+  refusals and the summary). The checks against the database are left to the integration test, which
+  runs in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 837 passed (82 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 10 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Swapping numbers in one call; clearing a number; moving a WhatsApp identity.
+
 ## 2026-10-05 — Phase 5: cancelling campaign drafts through the public API (P5-08, ADR-187)
 
 Status: **Implemented; its database and browser tests run in CI only.** A draft a key made by

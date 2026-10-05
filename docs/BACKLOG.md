@@ -618,10 +618,13 @@ verification, app review, Embedded Signup configuration).
   **[Cancelling campaign drafts built; its database tests run only in CI]** (ADR-187:
   `POST /campaigns/{id}/cancel` cancels a draft for a key holding `campaigns.write`, as members
   cancel drafts; anything else still needs `campaigns.stop`; no migration).
+  **[Changing typed numbers in calls that change many contacts built; its database tests run only in
+  CI]** (ADR-188: `POST /contacts/update-many` takes `phone` for each contact, as `PATCH` does;
+  every number must be free before the call and is given once, so a call never swaps or moves
+  numbers, and a refusal names its place; no migration).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   media downloads, a contact card's contacts (Meta's
-  contact object is not confirmed), changing a field's type, changing
-  numbers in calls that change many contacts,
+  contact object is not confirmed), changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
   resuming what members or HyFib paused, approving, scheduling and starting campaigns
   through the API, campaign

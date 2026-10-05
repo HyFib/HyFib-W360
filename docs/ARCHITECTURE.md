@@ -1233,6 +1233,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   id that is not one of the company's live contacts (naming `contacts.<index>.id`), and applies
   `changeLockedContact`, the function `PATCH` uses, to each in the order given; it answers the
   contacts in that order.
+- **Numbers in many contacts' changes (ADR-188):** `apiUpdateManyContacts` refuses a number two
+  contacts of the call give (compared as E.164, naming `contacts.<index>.phone`) before the
+  transaction, and after locking the contacts checks every new number with `assertNumberFree`, given
+  the place, before `changeLockedContact` writes anything: the numbers the call's own contacts have
+  are still theirs then, so a call never swaps or moves numbers. `changeLockedContact` checks each
+  number again as it writes it, as for `PATCH`.
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built
