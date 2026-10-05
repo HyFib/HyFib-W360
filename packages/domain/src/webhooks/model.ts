@@ -1,8 +1,10 @@
 import type {
+  ChannelStatus,
   WebhookCampaignStatus,
   WebhookContactPart,
   WebhookConversationStatus,
   WebhookEventType,
+  WebhookMessageSender,
   WebhookMessageStatus,
   WebhookOrderStatus,
   WebhookRunEndStatus,
@@ -14,6 +16,7 @@ export type {
   WebhookContactPart,
   WebhookConversationStatus,
   WebhookEventType,
+  WebhookMessageSender,
   WebhookMessageStatus,
   WebhookOrderStatus,
   WebhookRunEndStatus,
@@ -142,6 +145,27 @@ export const WEBHOOK_MESSAGE_STATUS_LABELS: Record<WebhookMessageStatus, string>
   failed: 'Failed',
   canceled: 'Canceled',
   unknown_outcome: 'Outcome unknown',
+};
+
+/**
+ * Who sent a message, as a `message.status` event's `message.sentBy` says (ADR-172): a member, an
+ * automation, a campaign, the API, or HyFib itself (store order updates and satisfaction surveys).
+ */
+export const WEBHOOK_MESSAGE_SENDERS = [
+  'agent',
+  'bot',
+  'campaign',
+  'api',
+  'system',
+] as const satisfies readonly WebhookMessageSender[];
+
+/** How Settings names each sender an endpoint can choose (ADR-172). */
+export const WEBHOOK_MESSAGE_SENDER_LABELS: Record<WebhookMessageSender, string> = {
+  agent: 'Members',
+  bot: 'Automations',
+  campaign: 'Campaigns',
+  api: 'The API',
+  system: 'HyFib (store order updates and satisfaction surveys)',
 };
 
 /**
@@ -298,6 +322,16 @@ export const WEBHOOK_LIMITS = {
   headerValueLength: 1000,
   /** The automations an endpoint can choose to take the runs of (ADR-145). */
   automations: 20,
+  /** The WhatsApp numbers an endpoint can choose to take the events of (ADR-170). */
+  channels: 100,
+  /**
+   * An endpoint's OAuth client (ADR-173): its identifier, secret and scope, short enough that the
+   * Basic header stays within what the egress client sends, and the longest token kept.
+   */
+  oauthClientIdLength: 200,
+  oauthClientSecretLength: 500,
+  oauthScopeLength: 500,
+  oauthTokenLength: 4000,
 } as const;
 
 /** The events of automation runs, which an endpoint can take for chosen automations (ADR-145). */
@@ -326,6 +360,84 @@ export function webhookTakesAutomationRuns(eventTypes: readonly WebhookEventType
 }
 
 /**
+ * The events that happen on a WhatsApp number, which an endpoint can take for chosen numbers
+ * (ADR-170): a campaign's are on the number it sends from. Consent, contact and template events
+ * belong to no number.
+ */
+export const WEBHOOK_CHANNEL_EVENTS = [
+  'message.received',
+  'message.status',
+  'conversation.status_changed',
+  'conversation.assignment_changed',
+  'conversation.team_changed',
+  'automation.run_started',
+  'automation.run_ended',
+  'order.received',
+  'order.status_changed',
+  'campaign.status_changed',
+] as const satisfies readonly WebhookEventType[];
+
+/**
+ * A WhatsApp number of the company, which an endpoint can choose to take the events of (ADR-170).
+ * Any of its numbers can be chosen: they are never deleted, only disconnected.
+ */
+export interface WebhookChannelChoice {
+  id: string;
+  /** Its verified name and number as WhatsApp shows them; Meta's id for it until they are known. */
+  label: string;
+  status: ChannelStatus;
+}
+
+/** A WhatsApp number an endpoint takes the events of (ADR-170). */
+export interface WebhookEndpointChannel {
+  id: string;
+  label: string;
+  /** Null only for a number the company no longer had, which cannot happen: numbers are kept. */
+  status: ChannelStatus | null;
+}
+
+/**
+ * Where an endpoint gets OAuth access tokens and as which client (ADR-173); its secret is never
+ * shown.
+ */
+export interface WebhookEndpointOAuth {
+  tokenUrl: string;
+  clientId: string;
+  /** The scope it asks for (space-separated values), or none. */
+  scope: string | null;
+}
+
+/** How Settings → Webhooks describes an endpoint's OAuth client (ADR-173). */
+export function webhookOAuthText(oauth: WebhookEndpointOAuth): string {
+  const host = webhookHost(oauth.tokenUrl) ?? oauth.tokenUrl;
+  const scope = oauth.scope ? `, scope ${oauth.scope}` : '';
+  return `OAuth access tokens from ${host}, as client ${oauth.clientId}${scope}`;
+}
+
+/** How Settings → Webhooks notes a number that is not active, as Settings → Channels names it. */
+export const WEBHOOK_CHANNEL_STATUS_NOTES: Record<ChannelStatus, string | null> = {
+  onboarding: 'setting up',
+  active: null,
+  needs_reconnect: 'reconnect needed',
+  disconnected: 'disconnected',
+  failed: 'setup failed',
+};
+
+/** A number as Settings → Webhooks lists it: its label, and its status unless it is active. */
+export function webhookChannelText(channel: {
+  label: string;
+  status: ChannelStatus | null;
+}): string {
+  const note = channel.status ? WEBHOOK_CHANNEL_STATUS_NOTES[channel.status] : null;
+  return note ? `${channel.label} (${note})` : channel.label;
+}
+
+/** Whether an endpoint with these events takes events of numbers, and can choose numbers. */
+export function webhookTakesChannelEvents(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_CHANNEL_EVENTS.some((type) => eventTypes.includes(type));
+}
+
+/**
  * The periods Settings → Webhooks replays failed deliveries from (ADR-095), up to the deliveries
  * HyFib keeps. The API takes any time instead.
  */
@@ -342,7 +454,8 @@ export type WebhookReplayPeriod = (typeof WEBHOOK_REPLAY_PERIODS)[number]['key']
  * How a failed delivery's last attempt went, to replay only some failures (ADR-159): answered with
  * a server error (HTTP 5xx), refused (HTTP 4xx), answered otherwise (HTTP 1xx or 3xx: redirects are
  * not followed), not validly answered (a timeout, a host or address that failed, a broken
- * connection, an answer too large or without a valid status, an interrupted attempt), or ended
+ * connection, an answer too large or without a valid status, an interrupted attempt, or no access
+ * token from the endpoint's authorization server, ADR-173, so it was not called), or ended
  * without an attempt (the endpoint was off, or HyFib could not prepare the request). A code says
  * more than a status, as in `webhookErrorLabel`.
  */
@@ -360,7 +473,7 @@ export const WEBHOOK_FAILURE_LABELS: Record<WebhookFailureKind, string> = {
   server_error: 'Server errors (HTTP 5xx)',
   client_error: 'Refused (HTTP 4xx)',
   other_answer: 'Other answers (HTTP 1xx or 3xx)',
-  no_answer: 'No valid answer (timeouts, connection errors)',
+  no_answer: 'No valid answer (timeouts, connection errors, no access token)',
   not_attempted: 'Not attempted (endpoint off, request not prepared)',
 };
 
@@ -443,6 +556,26 @@ export function webhookErrorLabel(code: string | null, status: number | null): s
     case 'payload_failed':
       return 'HyFib could not prepare the request';
     default:
-      return code;
+      return webhookOAuthErrorLabel(code) ?? code;
   }
+}
+
+/**
+ * What a member sees when an endpoint's OAuth client got no access token (ADR-173), so the
+ * endpoint was not called; null for another code.
+ */
+function webhookOAuthErrorLabel(code: string): string | null {
+  if (!code.startsWith('oauth_token_')) return null;
+  const rest = code.slice('oauth_token_'.length);
+  if (rest === 'invalid') return 'The authorization server gave no usable access token';
+  const refused = /^refused(?:_(\d{3}))?$/.exec(rest);
+  if (refused) {
+    const status = refused[1] ? ` (HTTP ${refused[1]})` : '';
+    return `The authorization server refused an access token${status}`;
+  }
+  // The token request failed as a delivery can: its label, where it has one.
+  const label = webhookErrorLabel(rest, null);
+  return label && label !== rest
+    ? `No access token: ${label.charAt(0).toLowerCase()}${label.slice(1)}`
+    : `No access token (${rest})`;
 }

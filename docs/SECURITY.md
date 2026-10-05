@@ -450,9 +450,11 @@ Phase 5 rules (Public API, P5-08):
   ADR-070), `campaigns.send` for `messages.send_marketing`, `inbox.read_all` for
   `conversations.read` (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075),
   `automations.publish` for `automations.start` (ADR-077), `tenant.settings.manage` for
-  `contact_fields.manage` (ADR-115), `campaigns.read` for the scope of the same name (ADR-125), and
-  `campaigns.send` for `campaigns.stop` (ADR-128). Nobody grants a key more than they hold, and
-  rotating needs the same. A key keeps the scopes it was created with.
+  `contact_fields.manage` (ADR-115), `campaigns.read` for the scope of the same name (ADR-125),
+  `campaigns.send` for `campaigns.stop` (ADR-128), `commerce.read` for `orders.read` (ADR-167),
+  `inbox.reply` for `orders.write` (ADR-168), and `channels.read` for the scope of the same name
+  (ADR-171). Nobody grants a key more than they hold, and rotating needs the same. A key keeps the
+  scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -511,6 +513,14 @@ Phase 5 rules (Public API, P5-08):
   included) refuses the whole call, naming its place in the list, and changes nothing (tested), so
   a call never reveals or touches another company's conversations beyond saying an id is not one of
   the company's. A call counts as one request against the key's limits.
+- Changing the conversations a filter finds (ADR-166, `POST /conversations/update-matching`) needs
+  `conversations.read` and `conversations.write` both, so a key that may only change conversations
+  cannot list them through it. It takes at least one of the list's filters, so no call changes every
+  conversation by mistake, and changes each conversation of a page, at most 100, through the
+  function `PATCH` uses, under the locks of ADR-120, audited as the key. The filter is applied again
+  to the locked rows, so a conversation someone else took out of it meanwhile is left out rather
+  than changed (tested), and only the company's conversations are found (the company condition and
+  row security; another company's key changed nothing, tested).
 - Changing many contacts in one call (ADR-122, `POST /contacts/update-many`) needs
   `contacts.write` and changes each contact through the function `PATCH /contacts/{id}` uses, with
   the same checks of every value against its field's type, the 50-tag limit and the audit as the
@@ -554,6 +564,13 @@ Phase 5 rules (Public API, P5-08):
   naming its place in the list, and stops nothing (an integration test, run in CI), so a call never
   stops or reveals another company's runs beyond saying an id is not one of the company's. A call
   counts as one request against the key's limits.
+- Template sends to many numbers (ADR-163, `POST /messages/send-many`) need the scopes one send
+  needs and check each number as one send does (erasure, the suppression list, consent for the
+  template's category, the marketing frequency cap under the campaign runner's company lock), so a
+  call never sends where one send would be refused; a refused number changes nothing, not even the
+  contact it would have created (integration tests, run in CI). At most 50 numbers per call, once
+  per `Idempotency-Key`; a call counts as one request against the key's limits, within the 64 KB a
+  body holds, and the send worker paces each WhatsApp number's messages as it paces every send.
 - Buttons and lists through the API (ADR-080) follow every rule of text replies (`messages.reply`,
   an active company, only contacts who wrote in the last 24 hours with one answer for every
   refusal, the window checked again at send). Their ids cannot start with `w360`: HyFib's own
@@ -599,6 +616,28 @@ Phase 5 rules (Public API, P5-08):
   another WhatsApp account's, another company's or a disconnected catalog are refused like unknown
   ids, and the catalog sent to Meta is always the one found, never taken from the request
   unchecked.
+- Reading orders (ADR-167): `GET /orders` and `GET /orders/{id}` need `orders.read`, granted only
+  with `commerce.read`, and Commerce in the company's plan, both checked before an order is read.
+  They read in the key's company only (row security and an explicit company condition): another
+  company's order answers 404 as an unknown one does, an id that is not a UUID is refused before any
+  query, and every filter is typed (a status from the list, UUIDs, the reference's eight-capital
+  pattern, an ISO time). Orders name the contact, conversation and number by id only, never the
+  customer's number or name, the Payment Link or Razorpay's payment ids; an erased contact's orders
+  are read without the note erasure clears (unit tests; integration and e2e tests, run in CI only).
+- Changing orders (ADR-168): `PATCH /orders/{id}` needs `orders.write`, granted only with
+  `inbox.reply`, checked before anything is read and refused while the company is suspended or
+  restricted, and Commerce in the company's plan. It changes an order of the key's company only (row
+  security and an explicit company condition; another company's order answers 404), with its row
+  locked, and only as members may move it: payment statuses come only from Razorpay, an order
+  waiting for payment is left to members, and a paid order is never cancelled. The change is audited
+  as the key and moves the order's version on, so a member's page opened before it is refused as
+  stale (unit tests; integration and e2e tests, run in CI only).
+- Reading numbers (ADR-171): `GET /channels` needs `channels.read`, granted only with the permission
+  of the same name, checked before anything is read. It reads in the key's company only (row
+  security and an explicit company condition), takes a page and a status from the list and nothing
+  else, and gives each number's id, the number and verified name WhatsApp shows, its status and when
+  it was added: never Meta's ids for the number or its account, the credential, the registration PIN
+  or Meta's review fields (unit tests; integration and e2e tests, run in CI only).
 - The message feed (ADR-088) needs `conversations.read`, checked before its query is read, and
   reads only in the key's company scope: other companies' messages are never in it, erased
   contacts' conversations are left out, internal notes are not messages and media is never
@@ -710,6 +749,15 @@ Phase 5 rules (Public API, P5-08):
   the SQL text; `contains` escapes `%` and `_`, so a value is never a pattern. Each page reads at
   most 2,000 contacts, so no condition can make one request read every contact a company has. It
   writes nothing.
+- Groups of conditions in contact searches (ADR-164) are checked, bound and scoped as conditions
+  outside them (a `last_message` or `campaign` condition in a group needs its scope, checked before
+  anything is read), hold no groups and count toward the search's 20 conditions, so a search reads
+  no more than before.
+- Changing the contacts a search finds (ADR-165, `POST /contacts/update-matching`) needs
+  `contacts.read` and `contacts.write` both, so a key that may only write contacts cannot read them
+  through it, and the conditions' own scopes; it changes custom field values and tags only, each
+  contact as `PATCH /contacts/{id}` changes one (audited as the key), at most 100 a call, in one
+  snapshot, all or none.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.
@@ -788,6 +836,19 @@ Phase 5 rules (outgoing webhooks, P5-09):
   inject another. Only the worker opens them, for the endpoint they are bound to; headers that do
   not open fail that delivery alone as `payload_failed` (stage `headers`), logged without them.
   Tested.
+- An endpoint's OAuth client (ADR-173) is set the same way: a token URL held to the egress client's
+  rules when saved and when called (https, public addresses, the name pinned, no redirects), a
+  client ID, a secret and a scope. The secret reaches the server once, is sealed with the AAD
+  `webhook-oauth-secret:<company>:<endpoint>` and is never shown again, logged, put in audit entries
+  (which name the token URL's host), exported or kept in an API key's idempotency record; a change
+  keeps it only while the token URL stays the same, so it cannot be sent to another server by
+  someone who does not know it. The worker sends it only to the token URL, in an HTTP Basic header.
+  Access tokens live only in the worker's memory, keyed by the company, the endpoint and a hash of
+  the client: never stored, logged or shown, a day at most, replaced after a 401 or a change of the
+  client. A token's characters are checked (RFC 6750) before it goes in the `Authorization` header,
+  and an endpoint with a client cannot send an `Authorization` header of its own. A token request
+  that fails is recorded by its code only; a secret that does not open fails that delivery alone as
+  `payload_failed` (stage `oauth`). Tested (unit; integration and e2e tests run in CI only).
 - An endpoint can take only some `message.status` statuses (ADR-119), chosen by whoever may change
   it (members with `developer.manage`, or the key that manages it). The list is checked against
   the statuses the message trigger captures, kept only while the endpoint takes `message.status`
@@ -847,6 +908,24 @@ Phase 5 rules (outgoing webhooks, P5-09):
   and applied in `app.capture_webhook_event` together with the automations the endpoint names
   (ADR-145), in the transaction that ends the run: it narrows what one endpoint receives and never
   adds an event or a delivery for another endpoint or company. Audited with the list. Tested.
+- An endpoint can take the events of chosen WhatsApp numbers only (ADR-170), chosen the same way.
+  Each id must be a number of the endpoint's company, looked up in the company's scope (another
+  company's number is refused like an unknown id, by its place); the list is kept only while the
+  endpoint takes an event that happens on a number (a database check too, which also refuses a null
+  entry and more than 100 ids); and it is applied in `app.capture_webhook_event` with the number of
+  the row the change itself made, passed by that table's trigger in the transaction that makes the
+  change: it narrows what one endpoint receives and never adds an event or a delivery for another
+  endpoint or company. Consent, contact and template events are not narrowed, and the number passed
+  is not stored with the event. Audited with the list (unit tests; integration and e2e tests, run in
+  CI only).
+- An endpoint can take `message.status` only for the messages some kinds of senders sent (ADR-172),
+  chosen the same way: members, automations, campaigns, the API or HyFib. The list is checked
+  against those five (a contact sends no status), kept only while the endpoint takes
+  `message.status` (a database check too, which also refuses a null entry), and applied in
+  `app.capture_webhook_event` with the sender of the message the change itself updated, passed by
+  its trigger in the same transaction: it narrows what one endpoint receives and never adds an event
+  or a delivery for another endpoint or company. The sender passed is not stored with the event.
+  Audited with the list (unit tests; integration and e2e tests, run in CI only).
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or
@@ -1284,6 +1363,14 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   list returns the administrator's name and the note to platform administrators only, and the
   company never sees them. An acknowledgement is forgotten an hour after its failure stops being
   listed.
+- Acknowledging dead letters (ADR-169): through `ops.platform_acknowledge_dead_letter` (SECURITY
+  DEFINER, executable only by the platform role), which checks the platform administrator, the note
+  (10 to 500 characters, trimmed) and the dead letter, and writes the platform audit entry
+  (`platform.dead_letter_acknowledged`, the note as its reason; the company only when the job's
+  signature verified) in the same transaction. Only the definer role writes the acknowledgement
+  columns of `ops.dead_letters`, which a check keeps together; the platform role reads them on the
+  console, the company never sees them, and the CSV export gives the time only, never who or the
+  note (unit tests; integration and e2e tests, run in CI only).
 
 Company export and deletion (Settings → Company data, ADR-055):
 

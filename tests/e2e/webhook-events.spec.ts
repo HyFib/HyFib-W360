@@ -1157,3 +1157,98 @@ test('conversation status events reach an endpoint: a member resolves and the cu
     [conversationId, 'resolved'],
   ]);
 });
+
+/** A message event body, as far as the number test reads it. */
+interface NumberEventBody {
+  type: string;
+  data: { message: { text: string | null }; channel: { id: string; phone: string | null } };
+}
+
+test('an endpoint can take the events of chosen WhatsApp numbers only, and changed to every number hears them all (ADR-170)', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(150_000);
+  const email = uniqueEmail('hooknum');
+  const slug = `hooknum-${Date.now().toString(36)}`;
+  const path = `/numbers/${slug}`;
+  const forUs = () =>
+    received.filter((r) => r.path === path).map((r) => JSON.parse(r.body) as NumberEventBody);
+  await signUpAndVerify(page, { name: 'Nina Numbers', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Number Hooks');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const main = await connectTestChannel({ ownerEmail: email, slug });
+  const outlet = await connectTestChannel({
+    ownerEmail: email,
+    slug,
+    displayPhoneNumber: '+91 90000 54321',
+    verifiedName: 'E2E Outlet',
+  });
+
+  // An endpoint for the outlet's messages only.
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${path}`);
+  await page.getByRole('checkbox', { name: /Message received/ }).check();
+  await expect(page.getByRole('radio', { name: /Every number’s events/ })).toBeChecked();
+  await page.getByRole('radio', { name: /Only the events of the numbers ticked/ }).check();
+  const mainBox = page.getByRole('checkbox', { name: '+91 90000 12345 · E2E Traders' });
+  const outletBox = page.getByRole('checkbox', { name: '+91 90000 54321 · E2E Outlet' });
+  await outletBox.check();
+  await expect(mainBox).not.toBeChecked();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await expect(page.getByLabel('Signing secret')).toBeVisible();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  await page.reload();
+  await expect(
+    page.getByText('Numbers whose events are sent: +91 90000 54321 · E2E Outlet'),
+  ).toBeVisible();
+
+  // A customer writes to each number: only the message to the outlet is sent.
+  const waId = randomWaId();
+  await sendSignedWebhook(
+    request,
+    inboundMessage(main.wabaId, main.phoneNumberId, waId, 'Hello main shop'),
+  );
+  await sendSignedWebhook(
+    request,
+    inboundMessage(outlet.wabaId, outlet.phoneNumberId, waId, 'Hello outlet'),
+  );
+  await expect(async () => expect(forUs()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(forUs().map((e) => [e.type, e.data.message.text, e.data.channel.phone])).toEqual([
+    ['message.received', 'Hello outlet', '+91 90000 54321'],
+  ]);
+  // Both messages are in the inbox, so both were captured or passed over: the endpoint's
+  // deliveries hold the outlet's alone.
+  await page.goto(`/c/${slug}/inbox`);
+  await expect(async () => {
+    await page.reload();
+    await expect(page.getByText('Hello main shop')).toBeVisible({ timeout: 1_000 });
+    await expect(page.getByText('Hello outlet')).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 30_000 });
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByRole('link', { name: /Deliveries and settings/ }).click();
+  await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
+  const deliveries = page.getByRole('list', { name: 'Deliveries' }).getByRole('listitem');
+  await expect(deliveries).toHaveCount(1);
+  await expect(deliveries.filter({ hasText: 'message.received' })).toHaveCount(1);
+
+  // The endpoint's settings show the number it takes; changed to every number, it hears both.
+  await expect(
+    page.getByRole('radio', { name: /Only the events of the numbers ticked/ }),
+  ).toBeChecked();
+  await expect(outletBox).toBeChecked();
+  await expect(mainBox).not.toBeChecked();
+  await page.getByRole('radio', { name: /Every number’s events/ }).check();
+  await page.getByRole('button', { name: 'Save endpoint' }).click();
+  await expect(page.getByText('Endpoint saved.')).toBeVisible();
+  await sendSignedWebhook(
+    request,
+    inboundMessage(main.wabaId, main.phoneNumberId, waId, 'Main shop again'),
+  );
+  await expect(async () => expect(forUs()).toHaveLength(2)).toPass({ timeout: 30_000 });
+  expect(forUs()[1]!.data.channel.phone).toBe('+91 90000 12345');
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await expect(page.getByText(/^Numbers whose events are sent:/)).toHaveCount(0);
+});

@@ -22,6 +22,7 @@ import {
   type WebhookContactPart,
   type WebhookConversationStatus,
   type WebhookEventType,
+  type WebhookMessageSender,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookRunEndStatus,
@@ -36,13 +37,19 @@ import {
   WEBHOOK_LIMITS,
   webhookHost,
   webhookTakesAutomationRuns,
+  webhookTakesChannelEvents,
+  type WebhookEndpointOAuth,
 } from '../webhooks/model';
 import {
+  assertWebhookAuthorization,
   assertWebhookAutomations,
+  assertWebhookChannels,
+  checkedWebhookOAuth,
   checkedWebhookUrl,
   deliveryEventJoin,
   insertWebhookEndpoint,
   lockWebhookEndpoint,
+  NO_WEBHOOK_OAUTH,
   queueWebhookTest,
   replayFailedAcrossEndpoints,
   replayFailedWebhookDeliveries,
@@ -52,14 +59,18 @@ import {
   setWebhookEndpointEnabled,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_CHANNELS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_SENDERS_NEED_THE_EVENT,
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
   webhookAutomationIdsFor,
   webhookAutomationIdsSchema,
   webhookCampaignStatusesFor,
   webhookCampaignStatusesSchema,
+  webhookChannelIdsFor,
+  webhookChannelIdsSchema,
   webhookContactPartsFor,
   webhookConversationStatusesFor,
   webhookConversationStatusesSchema,
@@ -72,8 +83,13 @@ import {
   webhookEventTypesSchema,
   webhookFailureKindsSchema,
   webhookHeadersSchema,
+  webhookMessageSendersFor,
+  webhookMessageSendersSchema,
   webhookMessageStatusesFor,
   webhookMessageStatusesSchema,
+  webhookOAuthAudit,
+  webhookOAuthColumns,
+  webhookOAuthSchema,
   webhookOrderStatusesFor,
   webhookOrderStatusesSchema,
   webhookTemplateStatusesFor,
@@ -111,6 +127,16 @@ const messageStatusesField = webhookMessageStatusesSchema.describe(
 const invalidStatuses = () =>
   new AppError('validation_failed', WEBHOOK_STATUSES_NEED_THE_EVENT, {
     issues: [{ path: 'messageStatuses', message: WEBHOOK_STATUSES_NEED_THE_EVENT }],
+  });
+
+const messageSendersField = webhookMessageSendersSchema.describe(
+  'Who sent the messages whose message.status the endpoint receives, as the event names them in message.sentBy (agent: a member, bot: an automation, campaign, api, system: HyFib itself, such as store order updates and satisfaction surveys), only with the message.status event; null receives the statuses of every message.',
+);
+
+/** Senders are chosen only for an endpoint that receives `message.status` (ADR-172). */
+const invalidSenders = () =>
+  new AppError('validation_failed', WEBHOOK_SENDERS_NEED_THE_EVENT, {
+    issues: [{ path: 'messageSenders', message: WEBHOOK_SENDERS_NEED_THE_EVENT }],
   });
 
 const contactPartsField = webhookContactPartsSchema.describe(
@@ -185,6 +211,20 @@ const invalidRunEndStatuses = () =>
     issues: [{ path: 'runEndStatuses', message: WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT }],
   });
 
+const channelIdsField = webhookChannelIdsSchema.describe(
+  `The WhatsApp numbers whose events the endpoint receives: 1 to ${WEBHOOK_LIMITS.channels} ids of the company's numbers (messages, conversations and orders give a number's id as \`channelId\`, templates in \`channels\` and webhook events as \`channel.id\`), only with an event that happens on a number: message.received, message.status, conversation.status_changed, conversation.assignment_changed, conversation.team_changed, automation.run_started, automation.run_ended, order.received, order.status_changed or campaign.status_changed. A campaign's events are those of the number it sends from; a campaign without a number yet is on none. Consent, contact and template events belong to no number: an endpoint that names numbers still receives every one of them it takes. null receives the events of every number, including numbers connected later.`,
+);
+
+/** Numbers are chosen only for an endpoint that receives events of numbers (ADR-170). */
+const invalidChannels = () =>
+  new AppError('validation_failed', WEBHOOK_CHANNELS_NEED_THE_EVENTS, {
+    issues: [{ path: 'channelIds', message: WEBHOOK_CHANNELS_NEED_THE_EVENTS }],
+  });
+
+const oauthField = webhookOAuthSchema.describe(
+  `An OAuth 2.0 client of the receiver's authorization server (the client credentials grant): before delivering, HyFib asks the token URL (an https address on the public internet, held to the endpoint URL's rules) for an access token, authenticating with the client ID and secret (HTTP Basic) and asking for the scope if one is given, and sends the token as \`Authorization: Bearer <token>\`. A token is used until a minute before it expires, for at most a day; one without a lifetime of more than two minutes serves only the deliveries sent with it, and one the endpoint answers 401 to is replaced at the next attempt. A delivery that gets no token fails its attempt (\`lastError\` \`oauth_token_…\`) and is retried. The client ID and secret use printable ASCII characters (up to ${WEBHOOK_LIMITS.oauthClientIdLength} and ${WEBHOOK_LIMITS.oauthClientSecretLength}); the secret is stored encrypted and never shown again. An endpoint with an OAuth client cannot send an Authorization header of its own.`,
+);
+
 export const apiCreateWebhookEndpointSchema = z
   .object({
     url: z
@@ -199,6 +239,7 @@ export const apiCreateWebhookEndpointSchema = z
     description: descriptionField.optional().describe('A note for members, up to 200 characters.'),
     headers: headersField.optional(),
     messageStatuses: messageStatusesField.optional(),
+    messageSenders: messageSendersField.optional(),
     contactParts: contactPartsField.optional(),
     automationIds: automationIdsField.optional(),
     campaignStatuses: campaignStatusesField.optional(),
@@ -206,11 +247,17 @@ export const apiCreateWebhookEndpointSchema = z
     templateStatuses: templateStatusesField.optional(),
     conversationStatuses: conversationStatusesField.optional(),
     runEndStatuses: runEndStatusesField.optional(),
+    channelIds: channelIdsField.optional(),
+    oauth: oauthField.nullable().optional(),
   })
   .strict()
   .refine((data) => !data.messageStatuses || data.events.includes('message.status'), {
     path: ['messageStatuses'],
     message: WEBHOOK_STATUSES_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.messageSenders || data.events.includes('message.status'), {
+    path: ['messageSenders'],
+    message: WEBHOOK_SENDERS_NEED_THE_EVENT,
   })
   .refine((data) => !data.contactParts || data.events.includes('contact.updated'), {
     path: ['contactParts'],
@@ -239,6 +286,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.runEndStatuses || data.events.includes('automation.run_ended'), {
     path: ['runEndStatuses'],
     message: WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.channelIds || webhookTakesChannelEvents(data.events), {
+    path: ['channelIds'],
+    message: WEBHOOK_CHANNELS_NEED_THE_EVENTS,
   });
 
 export const apiUpdateWebhookEndpointSchema = z
@@ -262,6 +313,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .optional()
       .describe(
         'The message.status statuses the endpoint receives; null receives every status. Left out, they stay, unless the events no longer include message.status, which clears them.',
+      ),
+    messageSenders: messageSendersField
+      .optional()
+      .describe(
+        'Who sent the messages whose message.status the endpoint receives; null receives the statuses of every message. Left out, they stay, unless the events no longer include message.status, which clears them.',
       ),
     contactParts: contactPartsField
       .optional()
@@ -298,6 +354,17 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'The statuses a run ended with that the endpoint receives as automation.run_ended; null receives every end. Left out, they stay, unless the events no longer include automation.run_ended, which clears them.',
       ),
+    channelIds: channelIdsField
+      .optional()
+      .describe(
+        "The WhatsApp numbers whose events the endpoint receives (the company's numbers); null receives the events of every number. Left out, they stay, unless the events no longer include an event that happens on a number, which clears them.",
+      ),
+    oauth: oauthField
+      .nullable()
+      .optional()
+      .describe(
+        'Replaces the endpoint’s OAuth client: its token URL, client ID and scope (left out: none). The secret may be left out to keep the stored one, unless the token URL changes: the secret is sent there. null removes the client. Left out, it stays.',
+      ),
   })
   .strict()
   .refine(
@@ -307,14 +374,17 @@ export const apiUpdateWebhookEndpointSchema = z
       data.enabled !== undefined ||
       data.headers !== undefined ||
       data.messageStatuses !== undefined ||
+      data.messageSenders !== undefined ||
       data.contactParts !== undefined ||
       data.automationIds !== undefined ||
       data.campaignStatuses !== undefined ||
       data.orderStatuses !== undefined ||
       data.templateStatuses !== undefined ||
       data.conversationStatuses !== undefined ||
-      data.runEndStatuses !== undefined,
-    'Give the events, the description, the headers, the message statuses, the contact parts, the automations, the campaign statuses, the order statuses, the template statuses, the conversation statuses, the run end statuses or whether the endpoint is enabled',
+      data.runEndStatuses !== undefined ||
+      data.channelIds !== undefined ||
+      data.oauth !== undefined,
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the automations, the campaign statuses, the order statuses, the template statuses, the conversation statuses, the run end statuses, the numbers, the OAuth client or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -335,6 +405,8 @@ export interface ApiWebhookEndpoint {
   headers: { name: string }[];
   /** The `message.status` statuses it receives (ADR-119); null receives every status. */
   messageStatuses: WebhookMessageStatus[] | null;
+  /** Who sent the messages whose statuses it receives (ADR-172); null receives every sender's. */
+  messageSenders: WebhookMessageSender[] | null;
   /** The contact parts it receives as `contact.updated` (ADR-123); null receives every change. */
   contactParts: WebhookContactPart[] | null;
   /** The automations whose runs it receives (ADR-145); null receives every automation's runs. */
@@ -349,6 +421,10 @@ export interface ApiWebhookEndpoint {
   conversationStatuses: WebhookConversationStatus[] | null;
   /** How the runs it receives as `automation.run_ended` ended (ADR-151); null receives every end. */
   runEndStatuses: WebhookRunEndStatus[] | null;
+  /** The numbers whose events it receives (ADR-170); null receives every number's. */
+  channelIds: string[] | null;
+  /** Where it gets OAuth tokens and as which client (ADR-173); the secret is never shown. */
+  oauth: WebhookEndpointOAuth | null;
   /** The key that added the endpoint. */
   apiKeyId: string;
   createdAt: string;
@@ -395,7 +471,7 @@ export const apiReplayFailedDeliveriesSchema = z
     failures: webhookFailureKindsSchema
       .optional()
       .describe(
-        'Replay only the events whose latest failed delivery failed in one of these ways: `server_error` (answered with HTTP 5xx), `client_error` (HTTP 4xx), `other_answer` (HTTP 1xx or 3xx; redirects are not followed), `no_answer` (no valid answer: a timeout, a host or address that failed, a broken connection, an answer too large or without a valid status, an interrupted attempt) or `not_attempted` (ended without an attempt: the endpoint was off, or HyFib could not prepare the request). Left out, every failure is replayed.',
+        'Replay only the events whose latest failed delivery failed in one of these ways: `server_error` (answered with HTTP 5xx), `client_error` (HTTP 4xx), `other_answer` (HTTP 1xx or 3xx; redirects are not followed), `no_answer` (no valid answer: a timeout, a host or address that failed, a broken connection, an answer too large or without a valid status, an interrupted attempt, or no access token from the endpoint’s OAuth authorization server) or `not_attempted` (ended without an attempt: the endpoint was off, or HyFib could not prepare the request). Left out, every failure is replayed.',
       ),
   })
   .strict();
@@ -441,6 +517,7 @@ const columns = {
   previousSecretExpiresAt: webhookEndpoints.previousSecretExpiresAt,
   headerNames: webhookEndpoints.headerNames,
   messageStatuses: webhookEndpoints.messageStatuses,
+  messageSenders: webhookEndpoints.messageSenders,
   contactParts: webhookEndpoints.contactParts,
   automationIds: webhookEndpoints.automationIds,
   campaignStatuses: webhookEndpoints.campaignStatuses,
@@ -448,6 +525,10 @@ const columns = {
   templateStatuses: webhookEndpoints.templateStatuses,
   conversationStatuses: webhookEndpoints.conversationStatuses,
   runEndStatuses: webhookEndpoints.runEndStatuses,
+  channelAccountIds: webhookEndpoints.channelAccountIds,
+  oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
+  oauthClientId: webhookEndpoints.oauthClientId,
+  oauthScope: webhookEndpoints.oauthScope,
   apiKeyId: webhookEndpoints.createdByApiKeyId,
   createdAt: webhookEndpoints.createdAt,
   updatedAt: webhookEndpoints.updatedAt,
@@ -468,6 +549,7 @@ type EndpointRow = Pick<
   | 'previousSecretExpiresAt'
   | 'headerNames'
   | 'messageStatuses'
+  | 'messageSenders'
   | 'contactParts'
   | 'automationIds'
   | 'campaignStatuses'
@@ -475,6 +557,10 @@ type EndpointRow = Pick<
   | 'templateStatuses'
   | 'conversationStatuses'
   | 'runEndStatuses'
+  | 'channelAccountIds'
+  | 'oauthTokenUrl'
+  | 'oauthClientId'
+  | 'oauthScope'
   | 'createdAt'
   | 'updatedAt'
 > & { apiKeyId: string | null };
@@ -500,6 +586,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
         : null,
     headers: row.headerNames.map((name) => ({ name })),
     messageStatuses: row.messageStatuses,
+    messageSenders: row.messageSenders,
     contactParts: row.contactParts,
     automationIds: row.automationIds,
     campaignStatuses: row.campaignStatuses,
@@ -507,6 +594,11 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     templateStatuses: row.templateStatuses,
     conversationStatuses: row.conversationStatuses,
     runEndStatuses: row.runEndStatuses,
+    channelIds: row.channelAccountIds,
+    oauth:
+      row.oauthTokenUrl && row.oauthClientId
+        ? { tokenUrl: row.oauthTokenUrl, clientId: row.oauthClientId, scope: row.oauthScope }
+        : null,
     apiKeyId: row.apiKeyId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -690,6 +782,14 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
       assertScope(ctx, 'webhooks.manage');
       const data = parseInput(apiCreateWebhookEndpointSchema, input);
       const { url, host } = checkedWebhookUrl(data.url, deps.egressPolicy);
+      const oauth = data.oauth
+        ? checkedWebhookOAuth(data.oauth, NO_WEBHOOK_OAUTH, deps.egressPolicy)
+        : null;
+      assertWebhookAuthorization(
+        (data.headers ?? []).map((h) => h.name),
+        oauth !== null,
+        data.headers,
+      );
       const now = clock.now();
       return db.run(ctx.scope, (tx) =>
         idempotent(
@@ -704,6 +804,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               data.messageStatuses,
               null,
             );
+            const messageSenders = webhookMessageSendersFor(data.events, data.messageSenders, null);
             const contactParts = webhookContactPartsFor(data.events, data.contactParts, null);
             const automationIds = webhookAutomationIdsFor(data.events, data.automationIds, null);
             await assertWebhookAutomations(tx, ctx.tenant.id, automationIds);
@@ -724,12 +825,15 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               null,
             );
             const runEndStatuses = webhookRunEndStatusesFor(data.events, data.runEndStatuses, null);
+            const channelIds = webhookChannelIdsFor(data.events, data.channelIds, null);
+            await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
             const { id, secret } = await insertWebhookEndpoint(tx, deps.keyring, ctx.tenant.id, {
               url,
               description: data.description || null,
               eventTypes: data.events,
               headers,
               messageStatuses,
+              messageSenders,
               contactParts,
               automationIds,
               campaignStatuses,
@@ -737,6 +841,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               templateStatuses,
               conversationStatuses,
               runEndStatuses,
+              channelAccountIds: channelIds,
+              oauth,
               creator: { apiKeyId: ctx.key.id },
             });
             await audit(tx, ctx, 'webhook.endpoint_created', id, {
@@ -744,6 +850,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               eventTypes: data.events,
               ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
               ...(messageStatuses ? { messageStatuses } : {}),
+              ...(messageSenders ? { messageSenders } : {}),
               ...(contactParts ? { contactParts } : {}),
               ...(automationIds ? { automationIds } : {}),
               ...(campaignStatuses ? { campaignStatuses } : {}),
@@ -751,6 +858,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(templateStatuses ? { templateStatuses } : {}),
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
+              ...(channelIds ? { channelIds } : {}),
+              ...(oauth ? { oauthTokenHost: oauth.host } : {}),
             });
             await announce(tx, ctx, { host, events: data.events, at: now });
             const endpoint = await readEndpoint(tx, ctx, id, now);
@@ -777,6 +886,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         const host = webhookHost(endpoint.url);
         const events = data.events ?? endpoint.eventTypes;
         if (data.messageStatuses && !events.includes('message.status')) throw invalidStatuses();
+        if (data.messageSenders && !events.includes('message.status')) throw invalidSenders();
         if (data.contactParts && !events.includes('contact.updated')) throw invalidParts();
         if (data.automationIds && !webhookTakesAutomationRuns(events)) throw invalidAutomations();
         if (data.campaignStatuses && !events.includes('campaign.status_changed')) {
@@ -794,22 +904,39 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         if (data.runEndStatuses && !events.includes('automation.run_ended')) {
           throw invalidRunEndStatuses();
         }
+        if (data.channelIds && !webhookTakesChannelEvents(events)) throw invalidChannels();
         // Only a list given now is checked: the automations kept were checked when chosen.
         if (data.automationIds !== undefined) {
           await assertWebhookAutomations(tx, ctx.tenant.id, data.automationIds);
         }
+        // And the numbers likewise (ADR-170).
+        if (data.channelIds !== undefined) {
+          await assertWebhookChannels(tx, ctx.tenant.id, data.channelIds);
+        }
+        // Left out, the OAuth client stays as it is (ADR-173).
+        const oauth = data.oauth
+          ? checkedWebhookOAuth(data.oauth, endpoint, deps.egressPolicy)
+          : data.oauth;
+        assertWebhookAuthorization(
+          data.headers ? data.headers.map((h) => h.name) : endpoint.headerNames,
+          oauth === undefined ? endpoint.oauthTokenUrl !== null : oauth !== null,
+          data.headers,
+        );
         if (
           data.events !== undefined ||
           data.description !== undefined ||
           data.headers !== undefined ||
           data.messageStatuses !== undefined ||
+          data.messageSenders !== undefined ||
           data.contactParts !== undefined ||
           data.automationIds !== undefined ||
           data.campaignStatuses !== undefined ||
           data.orderStatuses !== undefined ||
           data.templateStatuses !== undefined ||
           data.conversationStatuses !== undefined ||
-          data.runEndStatuses !== undefined
+          data.runEndStatuses !== undefined ||
+          data.channelIds !== undefined ||
+          oauth !== undefined
         ) {
           const [changed] = await tx
             .update(webhookEndpoints)
@@ -819,10 +946,18 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(data.headers !== undefined
                 ? sealWebhookHeaders(deps.keyring, ctx.tenant.id, id, data.headers)
                 : {}),
+              ...(oauth !== undefined
+                ? webhookOAuthColumns(deps.keyring, ctx.tenant.id, id, oauth, endpoint)
+                : {}),
               messageStatuses: webhookMessageStatusesFor(
                 events,
                 data.messageStatuses,
                 endpoint.messageStatuses,
+              ),
+              messageSenders: webhookMessageSendersFor(
+                events,
+                data.messageSenders,
+                endpoint.messageSenders,
               ),
               contactParts: webhookContactPartsFor(
                 events,
@@ -859,12 +994,18 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.runEndStatuses,
                 endpoint.runEndStatuses,
               ),
+              channelAccountIds: webhookChannelIdsFor(
+                events,
+                data.channelIds,
+                endpoint.channelAccountIds,
+              ),
               updatedAt: now,
             })
             .where(and(eq(webhookEndpoints.tenantId, ctx.tenant.id), eq(webhookEndpoints.id, id)))
             .returning({
               eventTypes: webhookEndpoints.eventTypes,
               messageStatuses: webhookEndpoints.messageStatuses,
+              messageSenders: webhookEndpoints.messageSenders,
               contactParts: webhookEndpoints.contactParts,
               automationIds: webhookEndpoints.automationIds,
               campaignStatuses: webhookEndpoints.campaignStatuses,
@@ -872,6 +1013,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               templateStatuses: webhookEndpoints.templateStatuses,
               conversationStatuses: webhookEndpoints.conversationStatuses,
               runEndStatuses: webhookEndpoints.runEndStatuses,
+              channelAccountIds: webhookEndpoints.channelAccountIds,
             });
           if (!changed) throw new Error('A locked endpoint was not updated');
           await audit(tx, ctx, 'webhook.endpoint_updated', id, {
@@ -879,6 +1021,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             eventTypes: changed.eventTypes,
             ...(data.headers !== undefined ? { headers: data.headers.map((h) => h.name) } : {}),
             ...(changed.messageStatuses ? { messageStatuses: changed.messageStatuses } : {}),
+            ...(changed.messageSenders ? { messageSenders: changed.messageSenders } : {}),
             ...(changed.contactParts ? { contactParts: changed.contactParts } : {}),
             ...(changed.automationIds ? { automationIds: changed.automationIds } : {}),
             ...(changed.campaignStatuses ? { campaignStatuses: changed.campaignStatuses } : {}),
@@ -888,6 +1031,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ? { conversationStatuses: changed.conversationStatuses }
               : {}),
             ...(changed.runEndStatuses ? { runEndStatuses: changed.runEndStatuses } : {}),
+            ...(changed.channelAccountIds ? { channelIds: changed.channelAccountIds } : {}),
+            ...webhookOAuthAudit(oauth, endpoint),
           });
         }
         if (data.enabled !== undefined) {

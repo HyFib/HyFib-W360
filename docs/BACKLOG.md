@@ -571,11 +571,41 @@ verification, app review, Embedded Signup configuration).
   `POST /automation-runs/stop-many` stops up to 100 runs keys started, each as one stop does, all of
   them or none: an id that names no run a key of the company started refuses the call, naming its
   place; the conversations are locked in id order).
+  **[Sending a template to many numbers built; its database tests run only in CI]** (ADR-163:
+  `POST /messages/send-many` sends one approved template to up to 50 numbers, each with its own
+  values and each checked as one send is, in a savepoint, so a refused number is answered in its
+  place and changes nothing while the others are sent; numbers that are not valid or given twice and
+  values that do not fill the variables refuse the call).
+  **[Groups of conditions in contact searches built; their database tests run only in CI]**
+  (ADR-164: `POST /contacts/search` takes groups of conditions a contact matches together, all of a
+  group's conditions or any, one level deep, 20 conditions in all; a refusal inside a group names
+  its place).
+  **[Changing the contacts a search finds built; its database tests run only in CI]** (ADR-165:
+  `POST /contacts/update-matching` changes the contacts of one search page per call, each as
+  `PATCH /contacts/{id}` changes one, custom field values and tags only, in one snapshot; it needs
+  `contacts.read` and `contacts.write`).
+  **[Changing the conversations a filter finds built; its database tests run only in CI]** (ADR-166:
+  `POST /conversations/update-matching` changes the conversations of one page of
+  `GET /conversations` per call, at least one filter, each as `PATCH` changes one, with the filter
+  checked again under the rows' locks; it needs `conversations.read` and `conversations.write`).
+  **[Reading WhatsApp orders built; its database tests run only in CI]** (ADR-167: `GET /orders` and
+  `GET /orders/{id}` with the new `orders.read` scope, granted with `commerce.read`, and Commerce in
+  the plan: the orders customers send from the catalog, newest first on exact pages, filtered by
+  status, contact, conversation, reference or time of change, with their items, amounts in minor
+  units and ids only, never Payment Links; migration 0115).
+  **[Changing WhatsApp orders built; its database tests run only in CI]** (ADR-168:
+  `PATCH /orders/{id}` with the new `orders.write` scope, granted with `inbox.reply`, and Commerce
+  in the plan: an order confirmed, fulfilled or cancelled as members move it, from an expected
+  status when one is given, payment statuses left to Razorpay; a retry changes nothing; migration
+  0116).
+  **[Reading WhatsApp numbers built; its database tests run only in CI]** (ADR-171: `GET /channels`
+  with the new `channels.read` scope, granted with the permission of the same name: every number of
+  the company oldest first on exact pages, filtered by status, with its number, verified name and
+  status and the id the rest of the API names it by, never Meta's ids; migration 0119).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
-  choosing conversations to change by a filter, media downloads, a contact card's contacts (Meta's
-  contact object is not confirmed), bulk sends in one call, changing a field's type, changing
-  numbers, choosing
-  contacts to change by a filter, groups of conditions,
+  media downloads, a contact card's contacts (Meta's
+  contact object is not confirmed), changing a field's type, changing
+  numbers,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
   resuming, approving, scheduling, creating and editing campaigns through the API, campaign
   recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose
@@ -663,11 +693,23 @@ verification, app review, Embedded Signup configuration).
   **[Replays of every endpoint built; their database tests run only in CI]** (ADR-160: one replay
   for every endpoint that is on, 500 across them in the order they were added, in Settings or
   `POST /webhook-endpoints/replay-failed` for the endpoints keys added, audited once per endpoint).
-  Remaining: filters for other event types and on a message's or contact's values (such as by
-  campaign, template, tag or field key, or a run's trigger or end reason), which tags were added or
-  removed, other authentication (OAuth client credentials, headers computed per delivery), mutual
-  TLS, fixed egress addresses, events for store orders, Payment Links and each step of a run,
-  `createdAt` finer than the millisecond, load tests.
+  **[Number filters built; their database tests run only in CI]** (ADR-170: an endpoint takes the
+  message, conversation, automation run, order and campaign events of the WhatsApp numbers it
+  chooses, 1 to 100 of the company's numbers, in Settings or through the API, or every number's as
+  before; applied where events are captured, with the number the changed row has; consent, contact
+  and template events are not narrowed). **[Message sender filters built; their database tests run
+  only in CI]** (ADR-172: an endpoint takes `message.status` only for the messages members,
+  automations, campaigns, the API or HyFib sent, as it chooses, in Settings or through the API, or
+  every message's as before; applied where events are captured, with the statuses and numbers it
+  names). **[OAuth client credentials built; their database tests run only in CI]** (ADR-173: an
+  endpoint gets an access token from its receiver's authorization server as the client a member or
+  key sets, and sends it as a bearer token with every delivery; the secret sealed and needed again
+  for a new token URL, tokens kept in the worker's memory only). Remaining: filters for other event
+  types and on a message's
+  or contact's values (such as by campaign, template, team, assigned member, tag or field key, or a
+  run's trigger or end reason), which tags were added or removed, other authentication (headers
+  computed per delivery, other OAuth grants), mutual TLS, fixed egress addresses, events for store
+  orders, Payment Links and each step of a run, `createdAt` finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,
@@ -711,9 +753,13 @@ verification, app review, Embedded Signup configuration).
   built; their database tests run only in CI]** (ADR-158: "Download CSV" on each list of the
   Onboarding, Integrations and Queues tabs, as the tab reads it, each export audited and refused to
   anyone but a platform administrator before any read; who acknowledged or retried and the notes
-  left out). Remaining: other alert channels, longer trends and charts, Meta's quality webhook
-  (unconfirmed), exports beyond the rows a tab lists, assigning failures and acknowledging the
-  console's other lists, paging and rollups for many companies.
+  left out). **[Acknowledging dead letters built; its database tests run only in CI]** (ADR-169: a
+  platform administrator acknowledges a dead letter on the Queues tab with a note, shown with who
+  and when to the other administrators, replaced by a later note and kept in the platform audit log;
+  it lasts as long as the dead letter, and the CSV gives when, never who or the note). Remaining:
+  other alert channels, longer trends and charts, Meta's quality webhook (unconfirmed), exports
+  beyond the rows a tab lists, assigning failures and acknowledging receipts, quarantine entries and
+  late queues, paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

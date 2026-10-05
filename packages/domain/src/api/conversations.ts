@@ -14,9 +14,11 @@ import {
   isNull,
   messages,
   sql,
+  teams,
   type ConversationStatus,
   type MessageStatus,
   type MessageType,
+  type SQL,
   type Tx,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
@@ -39,9 +41,8 @@ import { idempotent } from './resources';
  * conversations and reads their messages (ADR-072), or every message across them (ADR-088), and their
  * internal notes (ADR-089); one with `conversations.write` resolves and reopens them (ADR-075), adds
  * internal notes (ADR-084), and assigns them or moves them between teams (ADR-093), many at once
- * (ADR-120). The
- * conversations of erased contacts are left out, as their contacts are. Messages read as the
- * webhooks describe them (ADR-053).
+ * (ADR-120) or those a filter finds (ADR-166). The conversations of erased contacts are left out, as
+ * their contacts are. Messages read as the webhooks describe them (ADR-053).
  */
 
 const page = {
@@ -49,28 +50,36 @@ const page = {
   cursor: z.string().max(200).optional().describe('`nextCursor` from the previous page.'),
 };
 
+/** What GET /conversations filters by, as changing conversations by a filter takes it (ADR-166). */
+const conversationFilters = {
+  status: z.enum(CONVERSATION_STATUSES).optional().describe('Only conversations in this status.'),
+  contactId: z.uuid().optional().describe('Only the conversations of this contact.'),
+  channelId: z.uuid().optional().describe('Only the conversations on this WhatsApp number.'),
+  assigneeId: z
+    .union([z.uuid(), z.literal('none')])
+    .optional()
+    .describe('Only the conversations assigned to this member, or `none` for those without one.'),
+  teamId: z
+    .union([z.uuid(), z.literal('none')])
+    .optional()
+    .describe('Only the conversations of this team, or `none` for those without one.'),
+  updatedSince: z.iso
+    .datetime({ offset: true })
+    .optional()
+    .describe(
+      'Only conversations changed at or after this time (a new message, a status or assignee change, a read).',
+    ),
+};
+
 export const apiConversationListQuerySchema = z
-  .object({
-    ...page,
-    status: z.enum(CONVERSATION_STATUSES).optional().describe('Only conversations in this status.'),
-    contactId: z.uuid().optional().describe('Only the conversations of this contact.'),
-    channelId: z.uuid().optional().describe('Only the conversations on this WhatsApp number.'),
-    assigneeId: z
-      .union([z.uuid(), z.literal('none')])
-      .optional()
-      .describe('Only the conversations assigned to this member, or `none` for those without one.'),
-    teamId: z
-      .union([z.uuid(), z.literal('none')])
-      .optional()
-      .describe('Only the conversations of this team, or `none` for those without one.'),
-    updatedSince: z.iso
-      .datetime({ offset: true })
-      .optional()
-      .describe(
-        'Only conversations changed at or after this time (a new message, a status or assignee change, a read).',
-      ),
-  })
+  .object({ ...page, ...conversationFilters })
   .strict();
+
+/** A filter of GET /conversations: the conversations it finds. */
+export type ConversationFilter = Omit<
+  z.infer<typeof apiConversationListQuerySchema>,
+  'limit' | 'cursor'
+>;
 
 export const apiMessageListQuerySchema = z.object(page).strict();
 
@@ -135,6 +144,19 @@ export const apiUpdateConversationSchema = z
   .strict()
   .refine(someChange, 'Give status, assigneeId or teamId.');
 
+/** The change many conversations get alike (ADR-120, ADR-166). */
+const manyConversationsChange = {
+  status: conversationChange.status.describe(
+    '`resolved` to resolve the conversations, `open` to reopen them.',
+  ),
+  assigneeId: conversationChange.assigneeId.describe(
+    'A member from GET /members to assign the conversations to, or null to unassign them.',
+  ),
+  teamId: conversationChange.teamId.describe(
+    'A team from GET /teams to move the conversations to, or null for no team.',
+  ),
+};
+
 /** The same change for up to 100 conversations at once (ADR-120), each named once. */
 export const apiUpdateManyConversationsSchema = z
   .object({
@@ -149,18 +171,46 @@ export const apiUpdateManyConversationsSchema = z
       .describe(
         `The conversations to change, 1 to ${API_LIMITS.conversationsPerChange}, each once; they are changed in this order.`,
       ),
-    status: conversationChange.status.describe(
-      '`resolved` to resolve the conversations, `open` to reopen them.',
-    ),
-    assigneeId: conversationChange.assigneeId.describe(
-      'A member from GET /members to assign the conversations to, or null to unassign them.',
-    ),
-    teamId: conversationChange.teamId.describe(
-      'A team from GET /teams to move the conversations to, or null for no team.',
-    ),
+    ...manyConversationsChange,
   })
   .strict()
   .refine(someChange, 'Give status, assigneeId or teamId.');
+
+/**
+ * Changing the conversations a filter finds, a page at a time (ADR-166): GET /conversations'
+ * filters, at least one, the change each conversation of the page gets, and the page.
+ */
+export const apiUpdateMatchingConversationsSchema = z
+  .object({
+    filter: z
+      .object(conversationFilters)
+      .strict()
+      .refine(
+        (filter) => Object.values(filter).some((value) => value !== undefined),
+        'Give at least one filter: status, contactId, channelId, assigneeId, teamId or updatedSince.',
+      )
+      .describe(
+        'The conversations to change, as GET /conversations filters them: at least one filter.',
+      ),
+    change: z
+      .object(manyConversationsChange)
+      .strict()
+      .refine(someChange, 'Give status, assigneeId or teamId.')
+      .describe(
+        'What each conversation of the page gets, as PATCH /conversations/{id} takes it: any of status, assigneeId and teamId.',
+      ),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(API_LIMITS.conversationsPerChange)
+      .default(50)
+      .describe(
+        `The conversations one call changes, at most ${API_LIMITS.conversationsPerChange}; a page can hold fewer.`,
+      ),
+    cursor: page.cursor,
+  })
+  .strict();
 
 export interface ApiConversation {
   id: string;
@@ -311,6 +361,65 @@ async function visibleConversation(
   return row ?? null;
 }
 
+/**
+ * The conditions of a filter of GET /conversations on the company's conversations: the page read
+ * and, when the conversations a filter finds are changed (ADR-166), the lock of the page's rows.
+ */
+export function conversationFilterSql(tenantId: string, filter: ConversationFilter): SQL[] {
+  const conditions = [eq(conversations.tenantId, tenantId)];
+  if (filter.status) conditions.push(eq(conversations.status, filter.status));
+  if (filter.contactId) conditions.push(eq(conversations.contactId, filter.contactId));
+  if (filter.channelId) conditions.push(eq(conversations.channelAccountId, filter.channelId));
+  if (filter.assigneeId) {
+    conditions.push(
+      filter.assigneeId === 'none'
+        ? isNull(conversations.assignedMembershipId)
+        : eq(conversations.assignedMembershipId, filter.assigneeId),
+    );
+  }
+  if (filter.teamId) {
+    conditions.push(
+      filter.teamId === 'none'
+        ? isNull(conversations.teamId)
+        : eq(conversations.teamId, filter.teamId),
+    );
+  }
+  if (filter.updatedSince) {
+    conditions.push(sql`${conversations.updatedAt} >= ${filter.updatedSince}::timestamptz`);
+  }
+  return conditions;
+}
+
+/** A page of the conversations a filter finds, newest first, without erased contacts' ones. */
+async function conversationPage(
+  tx: Tx,
+  tenantId: string,
+  filter: ConversationFilter,
+  limit: number,
+  cursor: { at: string; id: string } | null,
+) {
+  const rows = await tx
+    .select(conversationColumns)
+    .from(conversations)
+    .innerJoin(contacts, contactNotErased)
+    .where(
+      and(
+        ...conversationFilterSql(tenantId, filter),
+        cursor
+          ? sql`(${conversations.createdAt}, ${conversations.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
+          : undefined,
+      ),
+    )
+    .orderBy(desc(conversations.createdAt), desc(conversations.id))
+    .limit(limit + 1);
+  const shown = rows.slice(0, limit);
+  const last = shown.at(-1);
+  return {
+    rows: shown,
+    nextCursor: rows.length > limit && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
+  };
+}
+
 export async function apiListConversations(
   deps: Pick<OutboundDeps, 'db'>,
   ctx: ApiContext,
@@ -322,43 +431,8 @@ export async function apiListConversations(
   return deps.db.run(
     ctx.scope,
     async (tx) => {
-      const rows = await tx
-        .select(conversationColumns)
-        .from(conversations)
-        .innerJoin(contacts, contactNotErased)
-        .where(
-          and(
-            eq(conversations.tenantId, ctx.tenant.id),
-            q.status ? eq(conversations.status, q.status) : undefined,
-            q.contactId ? eq(conversations.contactId, q.contactId) : undefined,
-            q.channelId ? eq(conversations.channelAccountId, q.channelId) : undefined,
-            q.assigneeId === 'none'
-              ? isNull(conversations.assignedMembershipId)
-              : q.assigneeId
-                ? eq(conversations.assignedMembershipId, q.assigneeId)
-                : undefined,
-            q.teamId === 'none'
-              ? isNull(conversations.teamId)
-              : q.teamId
-                ? eq(conversations.teamId, q.teamId)
-                : undefined,
-            q.updatedSince
-              ? sql`${conversations.updatedAt} >= ${q.updatedSince}::timestamptz`
-              : undefined,
-            cursor
-              ? sql`(${conversations.createdAt}, ${conversations.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
-              : undefined,
-          ),
-        )
-        .orderBy(desc(conversations.createdAt), desc(conversations.id))
-        .limit(q.limit + 1);
-      const shown = rows.slice(0, q.limit);
-      const last = shown.at(-1);
-      return {
-        data: shown.map(toApiConversation),
-        nextCursor:
-          rows.length > q.limit && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
-      };
+      const page = await conversationPage(tx, ctx.tenant.id, q, q.limit, cursor);
+      return { data: page.rows.map(toApiConversation), nextCursor: page.nextCursor };
     },
     { accessMode: 'read only' },
   );
@@ -650,8 +724,8 @@ export async function apiListMessages(
   );
 }
 
-/** A refused assignee or team, named by the field that gave it. */
-const invalidField = (path: 'assigneeId' | 'teamId', message: string) =>
+/** A refused assignee or team, named by the field that gave it (`change.teamId` in ADR-166). */
+const invalidField = (path: string, message: string) =>
   new AppError('validation_failed', message, { issues: [{ path, message }] });
 const INVALID_TEAM = 'Give the id of one of the company’s teams (GET /teams).';
 const INVALID_ASSIGNEE = 'Give the id of a member who can answer conversations (GET /members).';
@@ -676,7 +750,8 @@ interface LockedConversation {
  *   turn and the case, open a new case on reopening and capture the webhook events.
  * The key is the audit actor, so per-member report counts leave the change out, and no satisfaction
  * survey is sent (surveys follow a member's resolve, ADR-032). What the conversation already has
- * changes nothing, so a retried request does no harm.
+ * changes nothing, so a retried request does no harm. A refused field is named after `place`, the
+ * object holding the change in the body (`change.` for ADR-166).
  */
 async function changeLockedConversation(
   tx: Tx,
@@ -685,6 +760,7 @@ async function changeLockedConversation(
   current: LockedConversation,
   data: z.infer<typeof apiUpdateConversationSchema>,
   now: Date,
+  place = '',
 ): Promise<void> {
   const thisConversation = and(
     eq(conversations.tenantId, ctx.tenant.id),
@@ -707,7 +783,7 @@ async function changeLockedConversation(
   const moved = data.teamId !== undefined && data.teamId !== current.teamId;
   if (moved) {
     if (data.teamId && !(await lockTeam(tx, ctx.tenant.id, data.teamId))) {
-      throw invalidField('teamId', INVALID_TEAM);
+      throw invalidField(`${place}teamId`, INVALID_TEAM);
     }
     await tx
       .update(conversations)
@@ -726,7 +802,7 @@ async function changeLockedConversation(
   if (data.assigneeId !== undefined && data.assigneeId !== current.assignedMembershipId) {
     if (data.assigneeId) {
       if (!(await lockAssignableMember(tx, ctx.tenant.id, data.assigneeId))) {
-        throw invalidField('assigneeId', INVALID_ASSIGNEE);
+        throw invalidField(`${place}assigneeId`, INVALID_ASSIGNEE);
       }
       await endRunForHuman(tx, {
         tenantId: ctx.tenant.id,
@@ -822,6 +898,21 @@ export async function apiUpdateConversation(
   return toApiConversation(row);
 }
 
+/** The conversations among `ids` whose contacts are not erased, by id. */
+async function visibleConversations(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[],
+): Promise<Map<string, ConversationRow>> {
+  if (ids.length === 0) return new Map();
+  const rows = await tx
+    .select(conversationColumns)
+    .from(conversations)
+    .innerJoin(contacts, contactNotErased)
+    .where(and(eq(conversations.tenantId, tenantId), inArray(conversations.id, [...ids])));
+  return new Map(rows.map((row) => [row.id, row]));
+}
+
 /** A conversation id that names none of the company's conversations, by its place in the list. */
 const unknownConversation = (index: number) => {
   const message = 'Give the id of one of the company’s conversations (GET /conversations).';
@@ -863,16 +954,7 @@ export async function apiUpdateManyConversations(
           .for('update')
       ).map((row) => [row.id, row]),
     );
-    const visible = async () =>
-      new Map(
-        (
-          await tx
-            .select(conversationColumns)
-            .from(conversations)
-            .innerJoin(contacts, contactNotErased)
-            .where(and(eq(conversations.tenantId, ctx.tenant.id), inArray(conversations.id, ids)))
-        ).map((row) => [row.id, row]),
-      );
+    const visible = () => visibleConversations(tx, ctx.tenant.id, ids);
     const before = await visible();
     const changes = ids.map((id, index) => {
       const current = locked.get(id);
@@ -891,6 +973,91 @@ export async function apiUpdateManyConversations(
     });
   });
   return rows.map(toApiConversation);
+}
+
+/** Whether the team is the company's, read without locking it: teams are locked after conversations. */
+async function isCompanyTeam(tx: Tx, tenantId: string, teamId: string): Promise<boolean> {
+  const [team] = await tx
+    .select({ id: teams.id })
+    .from(teams)
+    .where(and(eq(teams.tenantId, tenantId), eq(teams.id, teamId)));
+  return team !== undefined;
+}
+
+/**
+ * Changes the conversations a filter of GET /conversations finds, a page at a time (ADR-166): the
+ * page is read as GET /conversations reads it and each of its conversations changed as PATCH changes
+ * one, in the order read, with the locks changing many conversations takes (ADR-120): the member
+ * first, then the page's rows in id order, the team as a conversation moves into it.
+ * - The rows are locked with the filter again, so a conversation someone else took out of the filter
+ *   after the page was read is left out instead of being changed, and one that still matches is
+ *   changed as it now is. Read committed, as every change of a conversation, since routing counts
+ *   members' conversations once it holds its lock: a snapshot taken before would miss some.
+ * - A member who cannot answer conversations or a team that is not the company's refuses the call
+ *   before the page is read, even when nothing on it would change.
+ * Needs `conversations.read` and `conversations.write`. What a conversation already has changes
+ * nothing, and one the change took out of the filter is not found again, so a call sent again after
+ * a lost answer is safe: the pages still reach every conversation the filter finds, each changed once.
+ */
+export async function apiUpdateMatchingConversations(
+  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+  ctx: ApiContext,
+  input: unknown,
+): Promise<{ data: ApiConversation[]; nextCursor: string | null }> {
+  assertScope(ctx, 'conversations.read');
+  assertScope(ctx, 'conversations.write');
+  const {
+    filter,
+    change,
+    limit,
+    cursor: after,
+  } = parseInput(apiUpdateMatchingConversationsSchema, input);
+  const cursor = decodeKeysetCursor(after);
+  return deps.db.run(ctx.scope, async (tx) => {
+    if (change.assigneeId && !(await lockAssignableMember(tx, ctx.tenant.id, change.assigneeId))) {
+      throw invalidField('change.assigneeId', INVALID_ASSIGNEE);
+    }
+    if (change.teamId && !(await isCompanyTeam(tx, ctx.tenant.id, change.teamId))) {
+      throw invalidField('change.teamId', INVALID_TEAM);
+    }
+    const page = await conversationPage(tx, ctx.tenant.id, filter, limit, cursor);
+    const ids = page.rows.map((row) => row.id);
+    if (ids.length === 0) return { data: [], nextCursor: page.nextCursor };
+    const locked = new Map(
+      (
+        await tx
+          .select(lockedColumns)
+          .from(conversations)
+          .where(
+            and(...conversationFilterSql(ctx.tenant.id, filter), inArray(conversations.id, ids)),
+          )
+          .orderBy(asc(conversations.id))
+          .for('update')
+      ).map((row) => [row.id, row]),
+    );
+    const shown = await visibleConversations(tx, ctx.tenant.id, [...locked.keys()]);
+    const changes = ids.flatMap((id) => {
+      const current = locked.get(id);
+      return current && shown.has(id) ? [{ id, current }] : [];
+    });
+    const now = deps.clock.now();
+    for (const { id, current } of changes) {
+      await changeLockedConversation(tx, ctx, id, current, change, now, 'change.');
+    }
+    const changed = await visibleConversations(
+      tx,
+      ctx.tenant.id,
+      changes.map(({ id }) => id),
+    );
+    return {
+      data: changes.map(({ id }) => {
+        const row = changed.get(id);
+        if (!row) throw new Error('A conversation locked for a change is no longer shown');
+        return toApiConversation(row);
+      }),
+      nextCursor: page.nextCursor,
+    };
+  });
 }
 
 /**

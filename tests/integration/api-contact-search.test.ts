@@ -4,6 +4,7 @@ import {
   API_CONTACT_SEARCH_WINDOW,
   apiRecordConsent,
   apiSearchContacts,
+  apiUpdateMatchingContacts,
   authenticateApiToken,
   createApiKeysService,
   createContactsService,
@@ -660,6 +661,184 @@ describe('finding contacts by name (ADR-143)', () => {
       }),
     );
     expect(unknown.code).toBe('validation_failed');
+  });
+});
+
+describe('groups of conditions (ADR-164)', () => {
+  it('finds contacts matching all of some conditions and any of others, and names a refusal inside a group by its place', async () => {
+    const c = await fx.company();
+    await defineFields(c);
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const add = async (displayName: string, attributes: Record<string, string>, tags: string[]) => {
+      const created = await service.createContact(owner, {
+        displayName,
+        phone: nextPhone(),
+        attributes,
+      });
+      if (tags.length > 0) await service.addTags(owner, created.id, tags);
+    };
+    await add('Asha', { city: 'Pune', orders: '5' }, ['vip']);
+    await add('Bina', { city: 'Delhi', orders: '1' }, ['vip']);
+    await add('Chitra', { city: 'Mumbai', orders: '9' }, ['vip']);
+    await add('Dev', { city: 'Pune', orders: '7' }, []);
+    const ctx = await apiKey(c, ['contacts.read']);
+    const inPune = { type: 'field', key: 'city', op: 'equals', value: 'pune' };
+    const busy = { type: 'field', key: 'orders', op: 'greater_than', value: 6 };
+
+    // VIPs who are in Pune or have more than 6 orders.
+    const vips = await apiSearchContacts(deps(), ctx, {
+      conditions: [
+        { type: 'tag', op: 'has', tag: 'vip' },
+        { type: 'group', match: 'any', conditions: [inPune, busy] },
+      ],
+    });
+    expect(names(vips)).toEqual(['Chitra', 'Asha']);
+    // Any of: in Pune with more than 6 orders, or in Delhi.
+    const either = await apiSearchContacts(deps(), ctx, {
+      match: 'any',
+      conditions: [
+        { type: 'group', match: 'all', conditions: [inPune, busy] },
+        { type: 'field', key: 'city', op: 'equals', value: 'delhi' },
+      ],
+    });
+    expect(names(either)).toEqual(['Dev', 'Bina']);
+    // A group of one condition finds what the condition alone finds.
+    const alone = await apiSearchContacts(deps(), ctx, { conditions: [busy] });
+    const grouped = await apiSearchContacts(deps(), ctx, {
+      conditions: [{ type: 'group', match: 'any', conditions: [busy] }],
+    });
+    expect(names(grouped)).toEqual(names(alone));
+    expect(names(alone)).toEqual(['Dev', 'Chitra']);
+
+    // A condition the company's fields do not allow, inside a group, is named by its place.
+    expect(
+      await refusal(
+        apiSearchContacts(deps(), ctx, {
+          conditions: [
+            { type: 'tag', op: 'has', tag: 'vip' },
+            {
+              type: 'group',
+              match: 'any',
+              conditions: [inPune, { type: 'field', key: 'plan', op: 'is_set' }],
+            },
+          ],
+        }),
+      ),
+    ).toEqual({
+      code: 'validation_failed',
+      paths: ['conditions.1.conditions.1.key'],
+      message: 'The company has no custom field with the key plan (GET /contact-fields).',
+    });
+    // So is a campaign the company does not have.
+    const withCampaigns = await apiKey(c, ['contacts.read', 'campaigns.read']);
+    const missing = await refusal(
+      apiSearchContacts(deps(), withCampaigns, {
+        conditions: [
+          {
+            type: 'group',
+            match: 'any',
+            conditions: [inPune, { type: 'campaign', campaignId: uuidv7(), outcome: 'delivered' }],
+          },
+        ],
+      }),
+    );
+    expect(missing.paths).toEqual(['conditions.0.conditions.1.campaignId']);
+  });
+});
+
+describe('changing the contacts a search finds (ADR-165)', () => {
+  it('changes each page of the contacts a search finds as PATCH changes one, until the cursor is null', async () => {
+    const c = await fx.company();
+    await defineFields(c);
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    for (const [displayName, city] of [
+      ['Asha', 'Pune'],
+      ['Bina', 'Delhi'],
+      ['Chitra', 'Pune'],
+      ['Dev', 'Pune'],
+      ['Esha', null],
+    ] as const) {
+      await service.createContact(owner, {
+        displayName,
+        phone: nextPhone(),
+        attributes: city ? { city } : {},
+      });
+    }
+    // Another company's contact matches the same conditions and is never changed.
+    const other = await fx.company();
+    await defineFields(other);
+    const theirs = await contactsService().createContact(await fx.ctx(other, other.owner), {
+      displayName: 'Theirs',
+      phone: nextPhone(),
+      attributes: { city: 'Pune' },
+    });
+
+    const ctx = await apiKey(c, ['contacts.read', 'contacts.write']);
+    const call = (cursor?: string | null) =>
+      apiUpdateMatchingContacts(deps(), ctx, {
+        conditions: [
+          { type: 'field', key: 'city', op: 'equals', value: 'pune' },
+          { type: 'tag', op: 'not_has', tag: 'local' },
+        ],
+        change: { addTags: ['local'], fields: { orders: 1 } },
+        limit: 2,
+        ...(cursor ? { cursor } : {}),
+      });
+    const first = await call();
+    expect(names(first)).toEqual(['Dev', 'Chitra']);
+    expect(first.data.map((contact) => [contact.tags, contact.fields])).toEqual([
+      [['local'], { city: 'Pune', orders: 1 }],
+      [['local'], { city: 'Pune', orders: 1 }],
+    ]);
+    expect(first.nextCursor).not.toBeNull();
+    const second = await call(first.nextCursor);
+    expect([names(second), second.nextCursor]).toEqual([['Asha'], null]);
+    // From the start again, nothing matches: the change took every contact out of the search.
+    expect(await call()).toEqual({ data: [], nextCursor: null });
+
+    const tagged = await apiSearchContacts(deps(), ctx, {
+      conditions: [{ type: 'tag', op: 'has', tag: 'local' }],
+    });
+    expect(names(tagged)).toEqual(['Dev', 'Chitra', 'Asha']);
+    expect(
+      await fx.query('SELECT 1 FROM app.contact_tags WHERE contact_id = $1', [theirs.id]),
+    ).toHaveLength(0);
+    // Each contact changed is audited as the key, as PATCH /contacts/{id} audits one.
+    const audits = await fx.query<{ actor_type: string; changed: string[] }>(
+      `SELECT actor_type, metadata->'changed' AS changed FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'contact.updated' ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(audits).toEqual(
+      Array.from({ length: 3 }, () => ({ actor_type: 'api_key', changed: ['fields', 'tags'] })),
+    );
+
+    // A field the company does not have refuses the call by its part, changing nothing.
+    const refused = await refusal(
+      apiUpdateMatchingContacts(deps(), ctx, {
+        conditions: [{ type: 'field', key: 'city', op: 'is_set' }],
+        change: { addTags: ['checked'], fields: { plan: 'gold' } },
+      }),
+    );
+    expect([refused.code, refused.paths]).toEqual(['validation_failed', ['change.fields.plan']]);
+    const checked = await apiSearchContacts(deps(), ctx, {
+      conditions: [{ type: 'tag', op: 'has', tag: 'checked' }],
+    });
+    expect(checked.data).toEqual([]);
+    // A key that can only write contacts cannot search them to change them.
+    const writer = await apiKey(c, ['contacts.write']);
+    expect(
+      (
+        await refusal(
+          apiUpdateMatchingContacts(deps(), writer, {
+            conditions: [{ type: 'field', key: 'city', op: 'is_set' }],
+            change: { addTags: ['x'] },
+          }),
+        )
+      ).code,
+    ).toBe('forbidden');
   });
 });
 

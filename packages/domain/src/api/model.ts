@@ -9,6 +9,7 @@ export type { ApiScope } from '@w360/db';
  */
 
 export const API_SCOPE_KEYS = [
+  'channels.read',
   'templates.read',
   'contacts.read',
   'contacts.write',
@@ -21,6 +22,8 @@ export const API_SCOPE_KEYS = [
   'campaigns.read',
   'campaigns.stop',
   'automations.start',
+  'orders.read',
+  'orders.write',
   'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
 
@@ -32,6 +35,13 @@ export const API_SCOPE_INFO: Record<
   ApiScope,
   { label: string; description: string; permission: Permission; writes: boolean }
 > = {
+  'channels.read': {
+    label: 'Read WhatsApp numbers',
+    description:
+      "List the company's WhatsApp numbers with each one's number, verified name and status, and the id messages, conversations, orders and webhook events name it by and a send takes to choose it. Never Meta's ids or credentials.",
+    permission: 'channels.read',
+    writes: false,
+  },
   'templates.read': {
     label: 'Read templates',
     description: 'List approved templates and their variables.',
@@ -114,6 +124,20 @@ export const API_SCOPE_INFO: Record<
     permission: 'automations.publish',
     writes: true,
   },
+  'orders.read': {
+    label: 'Read WhatsApp orders',
+    description:
+      "List the orders customers send from the company's WhatsApp catalog and read each one's items, total, note and status, with its conversation and contact ids. Never Payment Links or payment ids. Needs Commerce in the company's plan.",
+    permission: 'commerce.read',
+    writes: false,
+  },
+  'orders.write': {
+    label: 'Confirm, fulfil and cancel WhatsApp orders',
+    description:
+      "Move the company's WhatsApp orders on as members do: confirm or cancel a received order, fulfil or cancel a confirmed one, fulfil a paid one. Never payments: members ask for and cancel Payment Links in the app. Needs Commerce in the company's plan.",
+    permission: 'inbox.reply',
+    writes: true,
+  },
   'webhooks.manage': {
     label: 'Manage webhook endpoints',
     description:
@@ -166,6 +190,11 @@ export const API_LIMITS = {
   runsPerStart: 50,
   /** Runs one call to POST /automation-runs/stop-many stops (ADR-162). */
   runsPerStop: 100,
+  /**
+   * Numbers one call to POST /messages/send-many sends to (ADR-163): each send keeps its
+   * savepoint's transaction id until the call commits, as each start of runsPerStart does.
+   */
+  messagesPerSend: 50,
   keyRate: { capacity: 50, refillPerSecond: 10 },
   companyRate: { capacity: 200, refillPerSecond: 30 },
   authFailureRate: { capacity: 20, refillPerSecond: 0.2 },

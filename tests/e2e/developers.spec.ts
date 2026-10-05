@@ -67,11 +67,13 @@ test('the API reference shows anyone every operation, event and schema of the Op
   const error = page.getByRole('table', { name: 'Fields of Error' });
   await expect(error.getByRole('row', { name: /^issues/ })).toBeVisible();
   await expect(error.getByRole('row', { name: /^path/ })).toBeVisible();
-  await expect(
-    page
-      .getByRole('table', { name: 'Fields of ContactSearch' })
-      .getByRole('row', { name: /^One shape: type = tag/ }),
-  ).toBeVisible();
+  // A search's conditions list each shape, and so do a group's conditions, a level deeper.
+  const search = page.getByRole('table', { name: 'Fields of ContactSearch' });
+  await expect(search.getByRole('row', { name: /^One shape: type = group/ })).toBeVisible();
+  const tag = search.getByRole('row', { name: /^One shape: type = tag/ });
+  await expect(tag).toHaveCount(2);
+  await expect(tag.first()).toBeVisible();
+  await expect(tag.last()).toBeVisible();
 
   // An event shows the headers it is signed with and what to answer.
   await contents.getByRole('link', { name: 'message.received', exact: true }).click();

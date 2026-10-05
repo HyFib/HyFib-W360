@@ -1,3 +1,4 @@
+import { alias } from 'drizzle-orm/pg-core';
 import { z } from 'zod';
 import { forbidden, notFound, uuidv7, type Clock } from '@w360/core';
 import { ALL_QUEUES, queueMaxWaitMinutes } from '@w360/contracts';
@@ -320,6 +321,19 @@ const deadLetterRetrySchema = z.object({
   deadLetterId: z.uuid(),
   reason: z.string().trim().min(10, 'Give a reason of at least 10 characters').max(2000),
 });
+
+/** A dead letter the console lists and what the administrator noted about it (ADR-169). */
+const deadLetterAcknowledgeSchema = z.object({
+  deadLetterId: z.uuid(),
+  note: z
+    .string()
+    .trim()
+    .min(10, 'Write a note of at least 10 characters')
+    .max(500, 'Write a note of at most 500 characters'),
+});
+
+/** The administrator who acknowledged a dead letter, beside the one who retried it. */
+const acknowledgers = alias(users, 'acknowledgers');
 
 /** A failure the console lists, by its integration and state, and what the administrator noted. */
 const acknowledgeSchema = z.object({
@@ -654,10 +668,14 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         retriedByName: users.name,
         settledAt: deadLetters.settledAt,
         settledEnded: deadLetters.settledEnded,
+        acknowledgedAt: deadLetters.acknowledgedAt,
+        acknowledgedByName: acknowledgers.name,
+        acknowledgement: deadLetters.acknowledgement,
       })
       .from(deadLetters)
       .leftJoin(tenants, eq(tenants.id, deadLetters.tenantId))
       .leftJoin(users, eq(users.id, deadLetters.retriedByUserId))
+      .leftJoin(acknowledgers, eq(acknowledgers.id, deadLetters.acknowledgedByUserId))
       .orderBy(desc(deadLetters.failedAt))
       .limit(100);
     return recent.map((d) => {
@@ -1022,6 +1040,20 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           sql`select ops.platform_retry_dead_letter(${data.deadLetterId}::uuid, ${data.reason}, ${actor.correlationId}) as queue`,
         );
         return { queue: String(result.rows[0]?.queue) };
+      });
+    },
+
+    /**
+     * Records that a platform administrator looked at a dead letter, with a note, replacing an
+     * earlier acknowledgement of it (ADR-169). The definer function checks the administrator, the
+     * note and the dead letter, and audits it in the same transaction.
+     */
+    async acknowledgeDeadLetter(actor: PlatformActor, input: unknown): Promise<void> {
+      const data = parseInput(deadLetterAcknowledgeSchema, input);
+      await platformDb.run(actor.userId, async (tx) => {
+        await tx.execute(
+          sql`select ops.platform_acknowledge_dead_letter(${data.deadLetterId}::uuid, ${data.note}, ${actor.correlationId})`,
+        );
       });
     },
 

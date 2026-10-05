@@ -88,6 +88,8 @@ import {
   apiSendButtonsSchema,
   apiSendCatalogSchema,
   apiSendListSchema,
+  apiSendManyTemplates,
+  apiSendManyTemplatesSchema,
   apiSendMessage,
   apiSendProductListSchema,
   apiSendProductSchema,
@@ -105,12 +107,19 @@ import {
 import {
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_CHANNELS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_SENDERS_NEED_THE_EVENT,
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
 } from '../webhooks/service';
-import { WEBHOOK_FAILURE_KINDS, WEBHOOK_LIMITS } from '../webhooks/model';
+import {
+  WEBHOOK_CHANNEL_EVENTS,
+  WEBHOOK_EVENT_KEYS,
+  WEBHOOK_FAILURE_KINDS,
+  WEBHOOK_LIMITS,
+} from '../webhooks/model';
 import {
   apiStartManyAutomationRuns,
   apiStartManyAutomationRunsSchema,
@@ -180,12 +189,15 @@ describe('API scopes', () => {
       'conversations.write',
       'campaigns.stop',
       'automations.start',
+      'orders.write',
       'webhooks.manage',
     ]);
     expect([...API_SEND_SCOPES]).toEqual(API_SCOPE_KEYS.filter((s) => s.startsWith('messages.')));
   });
 
   it('need the permission a member needs for the same work', () => {
+    // Members see the company's numbers in Settings → Channels with channels.read (ADR-171).
+    expect(API_SCOPE_INFO['channels.read'].permission).toBe('channels.read');
     expect(API_SCOPE_INFO['messages.send'].permission).toBe('inbox.reply');
     expect(API_SCOPE_INFO['messages.send_marketing'].permission).toBe('campaigns.send');
     expect(API_SCOPE_INFO['messages.reply'].permission).toBe('inbox.reply');
@@ -197,6 +209,9 @@ describe('API scopes', () => {
     expect(API_SCOPE_INFO['conversations.read'].permission).toBe('inbox.read_all');
     expect(API_SCOPE_INFO['conversations.write'].permission).toBe('inbox.supervise');
     expect(API_SCOPE_INFO['automations.start'].permission).toBe('automations.publish');
+    // Members read orders with commerce.read (ADR-167) and change them with inbox.reply (ADR-168).
+    expect(API_SCOPE_INFO['orders.read'].permission).toBe('commerce.read');
+    expect(API_SCOPE_INFO['orders.write'].permission).toBe('inbox.reply');
     expect(API_SCOPE_INFO['webhooks.manage'].permission).toBe('developer.manage');
   });
 
@@ -1330,13 +1345,16 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(Object.keys(update.properties).sort()).toEqual([
       'automationIds',
       'campaignStatuses',
+      'channelIds',
       'contactParts',
       'conversationStatuses',
       'description',
       'enabled',
       'events',
       'headers',
+      'messageSenders',
       'messageStatuses',
+      'oauth',
       'orderStatuses',
       'runEndStatuses',
       'templateStatuses',
@@ -1364,6 +1382,13 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
     expect(webhooks['message.status']?.post?.description).toContain(
       'An endpoint receives every status unless it names the ones it takes',
+    );
+    // Who sent the messages whose statuses an endpoint receives (ADR-172): a list, or null.
+    const senders = (answered.properties as Record<string, { anyOf?: unknown[] }>).messageSenders;
+    expect(senders?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('messageSenders');
+    expect(webhooks['message.status']?.post?.description).toContain(
+      'and the statuses of every message unless it names who sent them (its `messageSenders`',
     );
     // The contact parts an endpoint receives as contact.updated (ADR-123): a list, or null.
     const parts = (answered.properties as Record<string, { anyOf?: unknown[] }>).contactParts;
@@ -1430,6 +1455,148 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(webhooks['automation.run_ended']?.post?.description).toContain(
       'an endpoint receives every end unless it names the statuses it takes (its `runEndStatuses`',
     );
+    // The numbers whose events an endpoint receives (ADR-170): a list, or null.
+    const channelIds = (answered.properties as Record<string, { anyOf?: unknown[] }>).channelIds;
+    expect(channelIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('channelIds');
+    expect(Object.keys(createBody.properties)).toContain('channelIds');
+    expect(doc.info.description).toContain(
+      'An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its `channelIds`',
+    );
+  });
+
+  it('take senders only with message.status, in their order once each, and a list of them alone is a change (ADR-172)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['message.status'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, messageSenders: ['api', 'campaign', 'api'] })
+        .messageSenders,
+    ).toEqual(['campaign', 'api']);
+    const createBody = (
+      buildOpenApiDocument('https://app.example.com/api/v1').components as unknown as {
+        schemas: Record<string, { properties: Record<string, unknown> }>;
+      }
+    ).schemas.CreateWebhookEndpoint;
+    expect(Object.keys(createBody?.properties ?? {})).toContain('messageSenders');
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.received'],
+      messageSenders: ['api'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['messageSenders', WEBHOOK_SENDERS_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, messageSenders: [] },
+      { ...base, messageSenders: ['contact'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ messageSenders: null })).toEqual({
+      messageSenders: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ messageSenders: ['bot'] })).toEqual({
+      messageSenders: ['bot'],
+    });
+  });
+
+  it('take an OAuth client with its secret and answer it without, and a client alone is a change (ADR-173)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['message.status'] };
+    const oauth = {
+      tokenUrl: 'https://auth.example.com/oauth2/token',
+      clientId: 'hyfib',
+      clientSecret: 's3cret',
+      scope: '',
+    };
+    expect(apiCreateWebhookEndpointSchema.parse({ ...base, oauth }).oauth).toEqual({
+      ...oauth,
+      scope: null,
+    });
+    expect(apiCreateWebhookEndpointSchema.parse({ ...base, oauth: null }).oauth).toBeNull();
+    expect(
+      apiCreateWebhookEndpointSchema.safeParse({ ...base, oauth: { ...oauth, grant: 'password' } })
+        .success,
+    ).toBe(false);
+    // A change may remove the client, or leave its secret out to keep the stored one.
+    expect(apiUpdateWebhookEndpointSchema.parse({ oauth: null })).toEqual({ oauth: null });
+    const kept = { tokenUrl: oauth.tokenUrl, clientId: oauth.clientId, scope: '' };
+    expect(apiUpdateWebhookEndpointSchema.parse({ oauth: kept })).toEqual({
+      oauth: { ...kept, scope: null },
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    type Client = { anyOf?: { properties?: Record<string, unknown> }[] };
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const given = (schemas.CreateWebhookEndpoint as { properties: { oauth?: Client } }).properties
+      .oauth;
+    const answered = schemas.WebhookEndpoint as {
+      properties: { oauth?: Client };
+      required?: string[];
+    };
+    const keys = (client: Client | undefined) =>
+      Object.keys(client?.anyOf?.find((s) => s.properties)?.properties ?? {}).sort();
+    expect(keys(given)).toEqual(['clientId', 'clientSecret', 'scope', 'tokenUrl']);
+    // The secret is never answered.
+    expect(keys(answered.properties.oauth)).toEqual(['clientId', 'scope', 'tokenUrl']);
+    expect(answered.required).toContain('oauth');
+    expect(doc.info.description).toContain('send it as `Authorization: Bearer <token>`');
+  });
+
+  it('take numbers only with an event that happens on one, each once, and a list of them alone is a change (ADR-170)', () => {
+    const a = '0190e9a1-0000-7000-8000-00000000000a';
+    const b = '0190e9a1-0000-7000-8000-00000000000b';
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    // Each event that happens on a number allows a list, alongside events that do not.
+    for (const event of WEBHOOK_CHANNEL_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          channelIds: [b, a.toUpperCase(), b],
+        }).channelIds,
+        event,
+      ).toEqual([b, a]);
+    }
+    // Consent, contact and template events happen on no number.
+    expect(WEBHOOK_EVENT_KEYS.filter((e) => !WEBHOOK_CHANNEL_EVENTS.some((c) => c === e))).toEqual([
+      'consent.changed',
+      'template.status_changed',
+      'contact.created',
+      'contact.updated',
+      'contact.erased',
+    ]);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['consent.changed', 'template.status_changed', 'contact.updated'],
+      channelIds: [a],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['channelIds', WEBHOOK_CHANNELS_NEED_THE_EVENTS],
+    ]);
+    const message = { ...base, events: ['message.received'] };
+    for (const body of [
+      { ...message, channelIds: [] },
+      { ...message, channelIds: ['not-a-number'] },
+      {
+        ...message,
+        channelIds: Array.from(
+          { length: WEBHOOK_LIMITS.channels + 1 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiCreateWebhookEndpointSchema.parse({ ...message, channelIds: null }).channelIds).toBe(
+      null,
+    );
+    expect(apiUpdateWebhookEndpointSchema.parse({ channelIds: null })).toEqual({
+      channelIds: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ channelIds: [a] })).toEqual({ channelIds: [a] });
   });
 
   it('take run end statuses only with automation.run_ended, and a list of them alone is a change (ADR-151)', () => {
@@ -3424,5 +3591,160 @@ describe('stopping many runs in one call (ADR-162)', () => {
     expect(body.additionalProperties).toBe(false);
     expect(body.properties.runIds.minItems).toBe(1);
     expect(body.properties.runIds.maxItems).toBe(API_LIMITS.runsPerStop);
+  });
+});
+
+describe('sending a template to many numbers in one call (ADR-163)', () => {
+  const ctx = (scopes: string[]) =>
+    ({
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: null,
+      requestId: 'r',
+    }) as unknown as ApiContext;
+  const templateId = '0192a1b2-0000-7000-8000-000000000001';
+  const message = (to: string) => ({ to, variables: { body: ['Asha', 'A-1001'] } });
+  // Every refusal here comes before anything is read: the dependencies are never used.
+  const send = (scopes: string[], body: unknown) =>
+    apiSendManyTemplates({} as never, ctx(scopes), body, { key: 'k-1', requestHash: 'h' })
+      .then(() => null)
+      .catch((caught: unknown) => caught);
+
+  it('takes one template and 1 to 50 numbers, each with the values of its variables', () => {
+    const parse = (body: unknown) => apiSendManyTemplatesSchema.safeParse(body);
+    expect(API_LIMITS.messagesPerSend).toBe(50);
+    const many = (n: number) =>
+      Array.from({ length: n }, (_, i) => message(`+9198111${String(i).padStart(5, '0')}`));
+    expect(parse({ templateId, messages: many(1) }).success).toBe(true);
+    expect(parse({ templateId, messages: many(API_LIMITS.messagesPerSend) }).success).toBe(true);
+    expect(parse({ templateId, from: templateId, messages: many(2) }).success).toBe(true);
+    // Values left out are none, as for one send.
+    expect(parse({ templateId, messages: [{ to: '+919811100001' }] }).data?.messages).toEqual([
+      { to: '+919811100001', variables: { header: [], body: [] } },
+    ]);
+    for (const body of [
+      { templateId, messages: [] },
+      { templateId, messages: many(API_LIMITS.messagesPerSend + 1) },
+      { messages: many(1) },
+      { templateId: 'x', messages: many(1) },
+      { templateId, messages: many(1), type: 'template' },
+      { templateId, messages: [{ ...message('+919811100001'), templateId }] },
+      { templateId, messages: [{ to: '+919811100001', variables: { header: ['a', 'b'] } }] },
+      { templateId, messages: [{ to: '+919811100001', variables: { body: [' '] } }] },
+      { templateId, messages: message('+919811100001') },
+      {},
+    ]) {
+      expect(parse(body).success, JSON.stringify(body).slice(0, 80)).toBe(false);
+    }
+  });
+
+  it('refuses before anything is read: the scope, an empty list, a number that is not one or given twice', async () => {
+    const forbidden = await send(['messages.reply'], {
+      templateId,
+      messages: [message('+919811100001')],
+    });
+    expect(isAppError(forbidden) && forbidden.code).toBe('forbidden');
+    const empty = await send(['messages.send'], { templateId, messages: [] });
+    expect(isAppError(empty) && empty.code).toBe('validation_failed');
+    const notANumber = await send(['messages.send_marketing'], {
+      templateId,
+      messages: [message('+919811100001'), message('+919811100002'), message('12345')],
+    });
+    expect(isAppError(notANumber) && notANumber.code).toBe('validation_failed');
+    expect(isAppError(notANumber) && notANumber.issues?.map((i) => i.path)).toEqual([
+      'messages.2.to',
+    ]);
+    // The same number twice, however it is written.
+    const twice = await send(['messages.send'], {
+      templateId,
+      messages: [message('+91 98111 00001'), message('+919811100002'), message('+919811100001')],
+    });
+    expect(isAppError(twice) && twice.code).toBe('validation_failed');
+    expect(isAppError(twice) && twice.issues).toEqual([
+      {
+        path: 'messages.2.to',
+        message: 'Give each number once: messages.2.to is the number of messages.0.to.',
+      },
+    ]);
+  });
+
+  it('is described: each number answered in its place, the call refused as a whole only for what cannot send at all', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const op = (
+      doc.paths as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            description: string;
+            parameters: unknown[];
+            requestBody: unknown;
+            responses: Record<string, { content?: unknown }>;
+          }
+        >
+      >
+    )['/messages/send-many']?.post;
+    expect(op?.operationId).toBe('sendManyTemplates');
+    expect(op?.parameters).toEqual([{ $ref: '#/components/parameters/IdempotencyKey' }]);
+    expect(op?.requestBody).toEqual({
+      required: true,
+      content: {
+        'application/json': { schema: { $ref: '#/components/schemas/SendManyTemplates' } },
+      },
+    });
+    expect(op?.responses['200']?.content).toEqual({
+      'application/json': {
+        schema: {
+          type: 'object',
+          properties: {
+            data: { type: 'array', items: { $ref: '#/components/schemas/TemplateSend' } },
+          },
+          required: ['data'],
+        },
+      },
+    });
+    expect(Object.keys(op?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '403', '404', '409', '412', '422', '423']),
+    );
+    for (const words of [
+      'Utility templates need `messages.send`, marketing templates `messages.send_marketing`.',
+      'Sends the template to up to 50 numbers',
+      'consent, the suppression list and the marketing frequency cap are checked for each',
+      'The call counts as one request against the rate and monthly limits',
+      'a refused number changes nothing, a contact created for it included, and the others are still sent',
+      'a number that is not valid or given twice',
+      'naming the place, as `messages.3.variables`',
+      'One call per `Idempotency-Key`',
+      'it can be refused as a whole (409, sending nothing): send it again with the same `Idempotency-Key`',
+    ]) {
+      expect(op?.description).toContain(words);
+    }
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const body = schemas.SendManyTemplates as {
+      properties: { messages: { minItems?: number; maxItems?: number } };
+      required: string[];
+      additionalProperties: boolean;
+    };
+    expect(body.required).toEqual(['templateId', 'messages']);
+    expect(body.additionalProperties).toBe(false);
+    expect(body.properties.messages.minItems).toBe(1);
+    expect(body.properties.messages.maxItems).toBe(API_LIMITS.messagesPerSend);
+    const answer = schemas.TemplateSend as {
+      properties: Record<
+        string,
+        { anyOf?: { properties?: Record<string, { const?: string; enum?: string[] }> }[] }
+      >;
+      required: string[];
+    };
+    expect(Object.keys(answer.properties)).toEqual(['to', 'message', 'error']);
+    expect(answer.required).toEqual(['to', 'message', 'error']);
+    const error = answer.properties.error?.anyOf?.find((o) => o.properties);
+    expect(error?.properties?.code?.const).toBe('precondition_failed');
+    const queued = answer.properties.message?.anyOf?.find((o) => o.properties);
+    expect(Object.keys(queued?.properties ?? {})).toEqual(
+      expect.arrayContaining(['id', 'status', 'contactId', 'channelId', 'templateId']),
+    );
   });
 });

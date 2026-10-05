@@ -935,6 +935,17 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   compiles them with `segmentConditionsSql`, which `segmentWhere` wraps for segments and campaigns.
   Its pages and `GET /contacts`'s come from one function, `apiContactPage` (`api/contacts.ts`): the
   window's edge, then the matching rows down to it, in one repeatable read snapshot.
+- **Groups of conditions (ADR-164):** an item of the search's `conditions` can be a group with its
+  own `match`. `placedConditions` lists every condition with its place, for the scope checks and the
+  campaigns named; `segmentCondition` checks each one as before, naming its place; and
+  `contactSearchSql` joins the search's items by its `match`, compiling a group with
+  `segmentConditionsSql` as a segment of its own and a single condition as a segment of one.
+- **Changing the contacts a search finds (ADR-165):** `POST /contacts/update-matching`
+  (`apiUpdateMatchingContacts`) reads one page through the search's own steps (`searchPage`, shared
+  with `apiSearchContacts`), then `changeContactsAlike` (`api/contacts.ts`) checks the change's
+  fields once (`lockFields`, `checkFieldChanges`), locks the page's contacts `FOR UPDATE` in id
+  order and runs `changeLockedContact`, `PATCH /contacts/{id}`'s step, for each, in one repeatable
+  read transaction; it answers the contacts as they now are with the page's cursor.
 - **Following contact changes (0091, ADR-114):** triggers on `contacts` (insert, and an update of
   the columns the API describes), `contact_tags` (insert, delete) and `contact_consents` (set, status
   changed) call `app.capture_contact_change`, which inserts one `app.contact_changes` row per contact
@@ -1047,6 +1058,16 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   through the single stop's step (`stopRunIfActive`: the active run locked with `lockActiveRun`, its
   step, `endRun` as `stopped_by_api`, the audit entry as the key), leaving a run that has ended as
   it is. The answer reads the runs again, in the order given.
+- **Template sends to many numbers through the API (ADR-163):** `POST /messages/send-many`
+  (`apiSendManyTemplates`, up to `API_LIMITS.messagesPerSend` (50) numbers) shares the single send's
+  steps in `api/resources.ts`: `loadSendableTemplate` (the company's approved template the key's
+  scope may send), `assertTemplateVariables` (each send's values, named by place),
+  `templateSendingNumber` (the number of the template's account, active), `lockMarketingSends` (the
+  campaign runner's company lock for a marketing template, taken before any contact or conversation,
+  by both calls) and `queueTemplateFor` (the contact, eligibility, the frequency cap, the
+  conversation `FOR UPDATE`, the message, its send intent, the event and the job). Each number's
+  `queueTemplateFor` runs in a savepoint, and a `precondition_failed` refusal is answered in its
+  place. The answer is stored with the `Idempotency-Key`, as one send's is.
 - **Buttons and lists through the API (ADR-080):** `POST /messages` with `type` `buttons` or `list`
   (`apiSendButtons`, `apiSendList`) takes the same path as a text reply (`sendReply`: the contact
   who wrote in the last 24 hours, the conversation locked `FOR UPDATE`, the automation ended as
@@ -1125,6 +1146,22 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   share an id). `productInteractive` (`commerce/model.ts`) builds the Graph `interactive` object for
   the inbox and the API alike, and the message stores `content.products` as the inbox's product
   sends do.
+- **Orders through the API (ADR-167):** `GET /orders` and `GET /orders/{id}` (`api/orders.ts`,
+  `orders.read`) check Commerce in the plan first (`loadEntitlements`, reason `not_in_plan`), then
+  read `commerce_orders` in the company, newest first by `received_at` on exact keyset cursors
+  (`commerce_orders_list_idx`), the filters as plain equalities and `updated_at >= updatedSince`,
+  and the page's items in one query (`itemsOf`, by order and position). `toApiOrder` gives the order
+  the `order.*` webhooks describe (ADR-085), with ids in place of the contact and number objects.
+- **Changing orders through the API (ADR-168):** `PATCH /orders/{id}` (`apiUpdateOrder`,
+  `orders.write`) checks Commerce in the plan, locks the order's row and checks the move against
+  `MEMBER_ORDER_TRANSITIONS` (and `expectedStatus`) under the lock; `writeLockedOrderStatus`
+  (`commerce/service.ts`), shared with members' `setOrderStatus`, writes the status, its time and
+  the next version, and the trigger of 0063 captures `order.status_changed`. The answer is read as
+  `GET /orders/{id}` reads it (`readApiOrder`).
+- **Numbers through the API (ADR-171):** `GET /channels` (`api/channels.ts`, `channels.read`) reads
+  `channel_accounts` in the company oldest first on exact keyset cursors (`created_at`, `id`), with
+  `status` as an equality, and gives the id, `display_phone_number`, `verified_name`, the status and
+  `created_at`; Meta's ids, the credential, the PIN and Meta's review fields are never selected.
 - **Message feed (ADR-088):** `GET /messages` (`apiListMessages`, `conversations.read`) pages the
   company's messages across conversations newest first on exact keyset cursors, joined to their
   conversation and contact (erased contacts' conversations left out), with `direction`,
@@ -1155,6 +1192,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the function `PATCH` uses, to each in the order given, which locks the team as a conversation
   moves into it (after the conversations, as a team's deletion does); it answers the conversations
   in that order.
+- **Conversations a filter finds (ADR-166):** `POST /conversations/update-matching`
+  (`apiUpdateMatchingConversations`) reads one page through `conversationPage`, the list's own read
+  (`apiListConversations` uses it, with `conversationFilterSql` for the filters), in a read
+  committed transaction: it checks the member (`lockAssignableMember`, first) and the team
+  (`isCompanyTeam`, a plain read) before the page, locks the page's rows `FOR UPDATE` in id order
+  with the filter's conditions again, so rows someone else took out of the filter are skipped, drops
+  erased contacts' conversations (`visibleConversations`, shared with `update-many`) and applies
+  `changeLockedConversation` to each in the page's order; it answers them as they now are with the
+  page's cursor.
 - **Many contacts at once (ADR-122):** `POST /contacts/update-many` (`apiUpdateManyContacts`,
   `api/contacts.ts`) takes 1 to 100 contacts, each with its id and `PATCH`'s fields. It checks each
   change before the transaction (`prepareContactChange`: email, tags), then locks every field any
@@ -1420,6 +1466,36 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   with, and writes no event when none does; run starts, other types, replays and test events are
   unchanged. Settings (the same status control) and the API (`runEndStatuses`) set it; a change that
   drops the event clears it.
+- **Number filters** (migration 0118, ADR-170): `channel_account_ids` on an endpoint lists the
+  WhatsApp numbers whose events it takes: the message, conversation, automation run, order and
+  campaign events (`WEBHOOK_CHANNEL_EVENTS`; consent, contact and template events happen on no
+  number and are not narrowed), null for every number; a check keeps it to 1 to 100 ids without
+  nulls and to endpoints that take such an event. The trigger functions of those events pass the
+  changed row's number as `channelId` in the detail; `app.capture_webhook_event` (replaced with the
+  same signature) takes it out before storing the event, creates such an event's delivery only for
+  endpoints whose list is null or holds the number, and writes no event when none does; replays and
+  test events are unchanged. Settings (a choice between every number and the numbers ticked, from
+  `channelChoices`) and the API (`channelIds`) set it, the services checking that each id is a
+  number of the company (`assertWebhookChannels`); a change that drops every such event clears it.
+- **Message sender filters** (migration 0120, ADR-172): `message_senders` on an endpoint lists who
+  sent the messages whose `message.status` it takes (`agent`, `bot`, `campaign`, `api`, `system`, as
+  the payload's `message.sentBy`), null for every sender; a check keeps it to 1 to 5 known senders
+  and to endpoints that take the event. The message trigger passes the sender as `sentBy` in the
+  detail, mapped as the payload maps it; `app.capture_webhook_event` (replaced with the same
+  signature) takes it out with the number before storing the event, creates a status's delivery only
+  for endpoints whose list is null or holds the sender, and writes no event when none does. Settings
+  (checkboxes under "Message status") and the API (`messageSenders`) set it; a change that drops the
+  event clears it.
+- **OAuth clients** (migration 0121, ADR-173): an endpoint may name its receiver's token URL, a
+  client ID, a secret (sealed, `webhook-oauth-secret:<company>:<endpoint>`) and a scope; a check
+  keeps them set together or not at all. Settings ("OAuth 2.0") and the API (`oauth`) set it; the
+  token URL is checked like the endpoint's URL, and a new token URL needs the secret again. After a
+  batch's claim commits, `sendDelivery` gets a token from the worker's `WebhookOAuthTokenCache` (in
+  memory, keyed by the company, the endpoint and a hash of the client; deliveries needing one at
+  once share the request) or asks the token URL through the egress client (`fetchWebhookOAuthToken`:
+  the client credentials grant with HTTP Basic, RFC 6749 section 4.4), sends it as a bearer token,
+  and drops it when the endpoint answers 401. A delivery that gets no token fails its attempt with
+  an `oauth_token_…` code and no status. The lease of such a delivery covers both requests.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and
@@ -1430,13 +1506,14 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   on; deleting. Each endpoint's page lists its latest 100 deliveries (or only failed ones) with
   attempts, result and timings, replays finished ones (a new delivery of the same event, audited)
   and edits the URL, description, events, the message statuses, contact parts, automations,
-  campaign, order, template and conversation statuses and the run ends it takes and headers (names
-  shown, values never; replacing gives each again).
+  campaign, order, template and conversation statuses, the run ends and the numbers it takes,
+  headers (names shown, values never; replacing gives each again) and its OAuth client (the secret
+  never shown).
   The OpenAPI document describes every event under `webhooks`. Audit entries name the endpoint's
   host, never its full URL or secret.
 - **Not built yet:** filters on a message's
   or contact's values, ordering,
-  other authentication (OAuth client credentials, headers computed per delivery), mutual TLS, fixed
+  other authentication (headers computed per delivery, other OAuth grants), mutual TLS, fixed
   egress addresses for receivers' allowlists, endpoints per number, and events for conversations
   started, notes or merges.
 
@@ -1542,6 +1619,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   subject and state) and writes the platform audit entry in one transaction; the console's list
   returns each failure's acknowledgement. `ops.integration_alerts_due` keeps acknowledgements of
   listed failures and forgets the others after an hour, as it does the alert marks.
+- **Acknowledging dead letters** (ADR-169, migration 0117): `acknowledged_at`,
+  `acknowledged_by_user_id` and `acknowledgement` on `ops.dead_letters`, set together (the check
+  `dead_letters_acknowledged`) and written only by `ops.platform_acknowledge_dead_letter` (definer,
+  platform role only) with the platform audit entry in one transaction. The Queues tab's read
+  (`recentDeadLetters`) joins the administrator's name through `acknowledgers`, an alias of
+  `auth.users` beside the one for who retried; the CSV writes the time only.
 - **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
   90 days) and a health card on each company's platform page. Every page re-checks the platform
   actor. The functions read every company on each view, which suits the test envelope; paging and

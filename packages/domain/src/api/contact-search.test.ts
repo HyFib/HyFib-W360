@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { isAppError } from '@w360/core';
 import type { Database } from '@w360/db';
-import { apiContactSearchSchema, apiSearchContacts } from './contact-search';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import {
+  apiContactSearchSchema,
+  apiSearchContacts,
+  apiUpdateMatchingContacts,
+  apiUpdateMatchingContactsSchema,
+  contactSearchSql,
+} from './contact-search';
 import type { ApiContext } from './context';
 import { API_ROUTES, buildOpenApiDocument } from './openapi';
 
@@ -237,6 +244,299 @@ describe('contact searches through the API (ADR-117)', () => {
       'calling_code',
       'last_message',
       'campaign',
+      'group',
     ]);
+  });
+});
+
+describe('groups of conditions in contact searches (ADR-164)', () => {
+  const source = (value: string) => ({ type: 'source', source: value });
+  const group = (match: string, conditions: unknown[]) => ({ type: 'group', match, conditions });
+
+  it('takes groups of 1 to 20 conditions, each with its match, holding no groups, 20 conditions in all', () => {
+    const parse = (conditions: unknown[]) => apiContactSearchSchema.safeParse({ conditions });
+    expect(parse([isSet, group('any', [source('api'), source('import')])]).success).toBe(true);
+    expect(parse([group('all', [isSet])]).success).toBe(true);
+    // 20 conditions in all, counted inside groups too.
+    expect(
+      parse([...Array.from({ length: 10 }, () => isSet), group('any', Array(10).fill(isSet))])
+        .success,
+    ).toBe(true);
+    const tooMany = parse([
+      ...Array.from({ length: 11 }, () => isSet),
+      group('any', Array(10).fill(isSet)),
+    ]);
+    expect(tooMany.success).toBe(false);
+    expect(tooMany.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['conditions', 'At most 20 conditions in all, those in groups included.'],
+    ]);
+    // More than 20 items is refused once, by the list's own limit.
+    expect(
+      parse(Array.from({ length: 21 }, () => isSet)).error?.issues.map((i) => i.path.join('.')),
+    ).toEqual(['conditions']);
+    for (const conditions of [
+      [group('any', [])],
+      [group('any', Array(21).fill(isSet))],
+      [group('some', [isSet])],
+      [{ type: 'group', conditions: [isSet] }],
+      [group('any', [group('all', [isSet])])],
+      [{ ...group('any', [isSet]), extra: true }],
+      [group('any', [{ ...isSet, extra: true }])],
+    ]) {
+      expect(parse(conditions).success, JSON.stringify(conditions)).toBe(false);
+    }
+  });
+
+  it('looks inside groups for the scopes conditions need, before it reads anything', async () => {
+    const lastMessage = { type: 'last_message', op: 'within_days', days: 7 };
+    const campaign = { type: 'campaign', campaignId: TENANT, outcome: 'delivered' };
+    const refused = async (scopes: string[], conditions: unknown[]) => {
+      try {
+        await apiSearchContacts({ db: untouched }, ctx(scopes), { conditions });
+      } catch (error) {
+        if (isAppError(error)) return error.publicMessage;
+        throw error;
+      }
+      throw new Error('expected a refusal');
+    };
+    expect(await refused(['contacts.read'], [isSet, group('any', [isSet, lastMessage])])).toBe(
+      'This API key does not have the conversations.read scope.',
+    );
+    expect(await refused(['contacts.read', 'conversations.read'], [group('all', [campaign])])).toBe(
+      'This API key does not have the campaigns.read scope.',
+    );
+    const { db, reads } = reached();
+    await expect(
+      apiSearchContacts({ db }, ctx(['contacts.read', 'conversations.read', 'campaigns.read']), {
+        conditions: [group('any', [lastMessage, campaign])],
+      }),
+    ).rejects.toThrow('reached the database');
+    expect(reads).toHaveLength(1);
+  });
+
+  it('joins each group’s conditions by its match, inside the search’s match', () => {
+    const render = (match: 'all' | 'any', items: Parameters<typeof contactSearchSql>[1]) =>
+      new PgDialect().sqlToQuery(contactSearchSql(match, items, 'Asia/Kolkata', new Map()));
+    const col = (name: string) => `"app"."contacts"."${name}"`;
+    expect(
+      render('any', [
+        { type: 'source', source: 'api' },
+        {
+          match: 'all',
+          conditions: [
+            { type: 'source', source: 'import' },
+            { type: 'calling_code', prefix: '91' },
+          ],
+        },
+      ]),
+    ).toMatchObject({
+      sql: `(((${col('source')} = $1)) or ((${col('source')} = $2) and (${col('phone_e164')} like $3)))`,
+      params: ['api', 'import', '+91%'],
+    });
+    expect(
+      render('all', [
+        {
+          match: 'any',
+          conditions: [
+            { type: 'source', source: 'api' },
+            { type: 'source', source: 'import' },
+          ],
+        },
+        { type: 'calling_code', prefix: '971' },
+      ]),
+    ).toMatchObject({
+      sql: `(((${col('source')} = $1) or (${col('source')} = $2)) and ((${col('phone_e164')} like $3)))`,
+      params: ['api', 'import', '+971%'],
+    });
+  });
+
+  it('is described: groups, their limit and the place of a refusal inside one', () => {
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      paths: Record<string, Record<string, { description: string }>>;
+      components: { schemas: Record<string, unknown> };
+    };
+    const description = doc.paths['/contacts/search']?.post?.description ?? '';
+    for (const words of [
+      'Conditions can also be put in groups a contact matches together',
+      'a group holds conditions, not groups, and a search holds at most 20 conditions in all',
+      '`conditions.2.conditions.0.key` in a group',
+    ]) {
+      expect(description).toContain(words);
+    }
+    const body = doc.components.schemas.ContactSearch as {
+      properties: {
+        conditions: {
+          items: {
+            oneOf: {
+              properties: {
+                type: { const: string };
+                match?: { enum: string[] };
+                conditions?: { minItems: number; maxItems: number; items: { oneOf: unknown[] } };
+              };
+              required: string[];
+            }[];
+          };
+        };
+      };
+    };
+    const groupShape = body.properties.conditions.items.oneOf.find(
+      (o) => o.properties.type.const === 'group',
+    );
+    expect(groupShape?.required).toEqual(['type', 'match', 'conditions']);
+    expect(groupShape?.properties.match?.enum).toEqual(['all', 'any']);
+    expect(groupShape?.properties.conditions).toMatchObject({ minItems: 1, maxItems: 20 });
+    expect(groupShape?.properties.conditions?.items.oneOf).toHaveLength(9);
+  });
+});
+
+describe('changing the contacts a search finds (ADR-165)', () => {
+  const vip = { addTags: ['vip'] };
+  const body = (extra: Record<string, unknown> = {}) => ({
+    conditions: [isSet],
+    change: vip,
+    ...extra,
+  });
+
+  it('takes a search’s conditions, a change of fields or tags, and a page of at most 100', () => {
+    const parse = (input: unknown) => apiUpdateMatchingContactsSchema.safeParse(input);
+    const parsed = parse(body());
+    expect(parsed.success && [parsed.data.match, parsed.data.limit]).toEqual(['all', 50]);
+    for (const input of [
+      body({ limit: 100 }),
+      body({ change: { removeTags: ['old'] } }),
+      body({ change: { fields: { city: 'Pune' } } }),
+      body({ change: { fields: { city: null }, addTags: ['a'], removeTags: ['b'] } }),
+      body({ match: 'any', cursor: 'abc' }),
+      body({ conditions: [{ type: 'group', match: 'any', conditions: [isSet, isSet] }] }),
+    ]) {
+      expect(parse(input).success, JSON.stringify(input)).toBe(true);
+    }
+    for (const input of [
+      body({ limit: 101 }),
+      body({ limit: 0 }),
+      body({ change: {} }),
+      body({ change: { name: 'Asha' } }),
+      body({ change: { email: 'a@example.com' } }),
+      body({ change: { ...vip, extra: true } }),
+      body({ conditions: [] }),
+      body({ order: 'name' }),
+      { conditions: [isSet] },
+    ]) {
+      expect(parse(input).success, JSON.stringify(input)).toBe(false);
+    }
+  });
+
+  it('needs contacts.read and contacts.write, and refuses a bad change, before it reads anything', async () => {
+    const refused = async (scopes: string[], input: unknown, status = 'active') => {
+      try {
+        await apiUpdateMatchingContacts({ db: untouched }, ctx(scopes, status), input);
+      } catch (error) {
+        if (isAppError(error)) {
+          return [error.code, error.publicMessage, (error.issues ?? []).map((i) => i.path)];
+        }
+        throw error;
+      }
+      throw new Error('expected a refusal');
+    };
+    expect(await refused(['contacts.write'], body())).toEqual([
+      'forbidden',
+      'This API key does not have the contacts.read scope.',
+      [],
+    ]);
+    expect(await refused(['contacts.read'], body())).toEqual([
+      'forbidden',
+      'This API key does not have the contacts.write scope.',
+      [],
+    ]);
+    expect((await refused(['contacts.read', 'contacts.write'], body(), 'suspended'))[0]).toBe(
+      'tenant_suspended',
+    );
+    expect(
+      (
+        await refused(['contacts.read', 'contacts.write'], {
+          conditions: [{ type: 'last_message', op: 'within_days', days: 7 }],
+          change: vip,
+        })
+      )[1],
+    ).toBe('This API key does not have the conversations.read scope.');
+    expect(
+      (
+        await refused(['contacts.read', 'contacts.write'], body({ change: { addTags: ['a,b'] } }))
+      )[2],
+    ).toEqual(['change.addTags']);
+    expect(
+      (
+        await refused(
+          ['contacts.read', 'contacts.write'],
+          body({ change: { addTags: ['vip'], removeTags: ['VIP'] } }),
+        )
+      )[2],
+    ).toEqual(['change.removeTags']);
+  });
+
+  it('reads and changes the page in one transaction that sees one snapshot', async () => {
+    const { db, reads } = reached();
+    await expect(
+      apiUpdateMatchingContacts({ db }, ctx(['contacts.read', 'contacts.write']), body()),
+    ).rejects.toThrow('reached the database');
+    expect(reads).toEqual([{ isolationLevel: 'repeatable read' }]);
+  });
+
+  it('is described: both scopes, pages of the search, the change, refusals and retries', () => {
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      paths: Record<string, Record<string, Record<string, unknown>>>;
+      components: { schemas: Record<string, unknown> };
+    };
+    expect(API_ROUTES).toContainEqual(['post', '/contacts/update-matching']);
+    const op = doc.paths['/contacts/update-matching']?.post as {
+      operationId: string;
+      description: string;
+      requestBody: unknown;
+      responses: Record<string, { content?: unknown }>;
+    };
+    expect(op.operationId).toBe('updateMatchingContacts');
+    expect(op.requestBody).toEqual({
+      required: true,
+      content: {
+        'application/json': { schema: { $ref: '#/components/schemas/UpdateMatchingContacts' } },
+      },
+    });
+    expect(op.responses['200']?.content).toEqual(
+      (doc.paths['/contacts/search']?.post as { responses: Record<string, { content?: unknown }> })
+        .responses['200']?.content,
+    );
+    expect(Object.keys(op.responses)).toEqual(
+      expect.arrayContaining(['200', '403', '409', '422', '423', '429']),
+    );
+    for (const words of [
+      'Scopes: `contacts.read` and `contacts.write`',
+      'the same for every contact',
+      'changes each of them as PATCH /contacts/{id} changes one',
+      'send the same conditions and change with it until it is `null`',
+      'a contact the change takes out of the search is not read again',
+      '(422, naming the part, as `change.fields.plan`)',
+      'the call can be refused as a whole (409, changing nothing): send it again with the same cursor',
+      'a call sent again after a lost answer is safe without an `Idempotency-Key`',
+      'A call counts as one request',
+    ]) {
+      expect(op.description).toContain(words);
+    }
+    const schema = doc.components.schemas.UpdateMatchingContacts as {
+      properties: {
+        change: { properties: Record<string, unknown>; additionalProperties: boolean };
+        limit: { maximum: number; default: number };
+      };
+      required: string[];
+      additionalProperties: boolean;
+    };
+    expect(schema.required).toEqual(expect.arrayContaining(['conditions', 'change']));
+    expect(schema.additionalProperties).toBe(false);
+    expect(Object.keys(schema.properties.change.properties)).toEqual([
+      'fields',
+      'addTags',
+      'removeTags',
+    ]);
+    expect(schema.properties.change.additionalProperties).toBe(false);
+    expect([schema.properties.limit.maximum, schema.properties.limit.default]).toEqual([100, 50]);
   });
 });

@@ -17,22 +17,28 @@ import {
   apiGetAutomationRun,
   apiGetContact,
   apiGetConversation,
+  apiGetOrder,
   apiGetMessage,
   apiKeyReminderNotice,
   apiListAutomations,
+  apiListChannels,
   apiListContacts,
   apiListConversationMessages,
   apiListConversationNotes,
   apiListConversations,
   apiListMembers,
   apiListMessages,
+  apiListOrders,
   apiListTeams,
   apiListTemplates,
   apiRecordConsent,
+  apiSendManyTemplates,
   apiSendMessage,
   apiSendTemplate,
   apiUpdateConversation,
   apiUpdateManyConversations,
+  apiUpdateMatchingConversations,
+  apiUpdateOrder,
   apiStartAutomationRun,
   apiStartManyAutomationRuns,
   apiStopAutomationRun,
@@ -1178,6 +1184,213 @@ describe('template sends', () => {
     expect(failed.status).toBe('failed');
     expect(failed.error).toMatchObject({ code: '131026' });
   });
+
+  it('send one template to many numbers in one call, each refusal answered in its place (ADR-163)', async () => {
+    const { ctx, id: keyId } = await apiKey(c, ['messages.send', 'contacts.write']);
+    const owner = await fx.ctx(c, c.owner);
+    await createConsentService({ db: fx.dbs.app, clock: systemClock }).addSuppression(owner, {
+      phone: '+919811100402',
+      reason: 'legal',
+    });
+    const optedOut = await apiCreateContact(deps(), ctx, { phone: '+919811100403' }, null);
+    await apiRecordConsent(deps(), ctx, (optedOut.body.data as { id: string }).id, {
+      purpose: 'utility',
+      action: 'opt_out',
+      evidence: 'Asked us by email to stop order updates',
+    });
+    const to = (n: number, name: string) => ({
+      to: `+91981110040${n}`,
+      variables: { body: [name, `A-40${n}`] },
+    });
+    const input = {
+      templateId: utility.id,
+      messages: [
+        { ...to(1, 'Asha'), to: '+91 98111 00401' },
+        to(2, 'Ravi'),
+        to(3, 'Mina'),
+        to(4, 'Dev'),
+      ],
+    };
+    type Answer = {
+      to: string;
+      message: { id: string; status: string } | null;
+      error: { code: string; message: string } | null;
+    };
+    const first = await apiSendManyTemplates(deps(), ctx, input, idem('many-1', 'many-1'));
+    expect(first).toMatchObject({ status: 200, replayed: false });
+    const answers = first.body.data as Answer[];
+    expect(answers.map((a) => a.to)).toEqual([
+      '+919811100401',
+      '+919811100402',
+      '+919811100403',
+      '+919811100404',
+    ]);
+    expect(answers[0]).toMatchObject({
+      message: {
+        type: 'template',
+        status: 'queued',
+        channelId: c.channelAccountId,
+        templateId: utility.id,
+      },
+      error: null,
+    });
+    expect(answers.slice(1, 3)).toEqual([
+      {
+        to: '+919811100402',
+        message: null,
+        error: {
+          code: 'precondition_failed',
+          message: 'This number is on the company’s suppression list.',
+        },
+      },
+      {
+        to: '+919811100403',
+        message: null,
+        error: {
+          code: 'precondition_failed',
+          message: 'This contact has opted out of these messages.',
+        },
+      },
+    ]);
+    expect(answers[3]).toMatchObject({ message: { status: 'queued' }, error: null });
+    // A refused number gets no contact; each queued message is the key's, to its own contact.
+    expect(
+      await fx.query('SELECT 1 FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2', [
+        c.tenant.id,
+        '+919811100402',
+      ]),
+    ).toHaveLength(0);
+    const rows = await fx.query<{ sender_type: string; api_key_id: string; phone_e164: string }>(
+      `SELECT m.sender_type, m.api_key_id, ct.phone_e164
+         FROM app.messages m
+         JOIN app.conversations cv ON cv.tenant_id = m.tenant_id AND cv.id = m.conversation_id
+         JOIN app.contacts ct ON ct.tenant_id = cv.tenant_id AND ct.id = cv.contact_id
+        WHERE m.id = ANY($1::uuid[])
+        ORDER BY ct.phone_e164`,
+      [[answers[0]?.message?.id, answers[3]?.message?.id]],
+    );
+    expect(rows).toEqual([
+      { sender_type: 'api', api_key_id: keyId, phone_e164: '+919811100401' },
+      { sender_type: 'api', api_key_id: keyId, phone_e164: '+919811100404' },
+    ]);
+    // One call per key: a retry answers as the first call did and queues nothing.
+    expect(await apiSendManyTemplates(deps(), ctx, input, idem('many-1', 'many-1'))).toEqual({
+      ...first,
+      replayed: true,
+    });
+
+    // Refused as a whole before any number is sent to: values that do not fill the variables.
+    const short = await expectAppError(
+      apiSendManyTemplates(
+        deps(),
+        ctx,
+        {
+          templateId: utility.id,
+          messages: [to(5, 'Asha'), { to: '+919811100406', variables: { body: ['Ravi'] } }],
+        },
+        idem('many-2', 'many-2'),
+      ),
+      'validation_failed',
+      /2 body variables/,
+    );
+    expect(isAppError(short) && short.issues?.map((i) => i.path)).toEqual(['messages.1.variables']);
+    expect(
+      await fx.query(
+        'SELECT 1 FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = ANY($2::text[])',
+        [c.tenant.id, ['+919811100405', '+919811100406']],
+      ),
+    ).toHaveLength(0);
+    // A marketing template needs the marketing scope, as for one send.
+    await expectAppError(
+      apiSendManyTemplates(
+        deps(),
+        ctx,
+        {
+          templateId: marketing.id,
+          messages: [{ to: '+919811100407', variables: { body: ['Asha'] } }],
+        },
+        idem('many-3', 'many-3'),
+      ),
+      'forbidden',
+      /messages\.send_marketing/,
+    );
+
+    expect(await sendAll(c)).toEqual(['accepted', 'accepted']);
+    expect(templatesTo('919811100401')).toHaveLength(1);
+    expect(templatesTo('919811100402')).toHaveLength(0);
+    expect(templatesTo('919811100403')).toHaveLength(0);
+    const sent = templatesTo('919811100404');
+    expect(sent).toHaveLength(1);
+    expect(JSON.stringify(sent[0]?.body)).toContain('A-404');
+  });
+
+  it('check each marketing send to many numbers for the opt-in and against the frequency cap (ADR-163)', async () => {
+    const { ctx } = await apiKey(c, ['messages.send_marketing', 'contacts.write']);
+    const optIn = async (phone: string) => {
+      const created = await apiCreateContact(deps(), ctx, { phone }, null);
+      await apiRecordConsent(deps(), ctx, (created.body.data as { id: string }).id, {
+        purpose: 'marketing',
+        action: 'opt_in',
+        evidence: 'Signed up at the store counter',
+      });
+    };
+    await optIn('+919811100411');
+    await optIn('+919811100412');
+    const owner = await fx.ctx(c, c.owner);
+    const campaigns = createCampaignsService(deps());
+    await campaigns.updateSettings(
+      owner,
+      { approvalRequired: false, cap: { count: 1, days: 7 }, costCurrency: null },
+      {},
+    );
+    try {
+      const sale = (to: string) => ({ to, variables: { body: ['Asha'] } });
+      const earlier = await apiSendTemplate(
+        deps(),
+        ctx,
+        { ...sale('+919811100412'), templateId: marketing.id },
+        idem('mk-1', 'mk-1'),
+      );
+      expect(earlier.status).toBe(201);
+      const many = await apiSendManyTemplates(
+        deps(),
+        ctx,
+        {
+          templateId: marketing.id,
+          messages: [sale('+919811100411'), sale('+919811100412'), sale('+919811100413')],
+        },
+        idem('mk-2', 'mk-2'),
+      );
+      const answers = many.body.data as {
+        to: string;
+        message: { id: string } | null;
+        error: { code: string; message: string } | null;
+      }[];
+      expect(answers.map((a) => [a.to, a.message === null, a.error?.code ?? null])).toEqual([
+        ['+919811100411', false, null],
+        ['+919811100412', true, 'precondition_failed'],
+        ['+919811100413', true, 'precondition_failed'],
+      ]);
+      expect(answers[1]?.error?.message).toMatch(
+        /as many marketing messages as the company allows/,
+      );
+      expect(answers[2]?.error?.message).toMatch(/not opted in to marketing messages/);
+      // The number refused for its opt-in got no contact.
+      expect(
+        await fx.query('SELECT 1 FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2', [
+          c.tenant.id,
+          '+919811100413',
+        ]),
+      ).toHaveLength(0);
+    } finally {
+      await campaigns.updateSettings(
+        owner,
+        { approvalRequired: false, cap: null, costCurrency: null },
+        {},
+      );
+    }
+    expect(await sendAll(c)).toEqual(['accepted', 'accepted']);
+  });
 });
 
 describe('text replies (ADR-070)', () => {
@@ -2049,6 +2262,45 @@ describe('quotes and reactions (ADR-082)', () => {
   });
 });
 
+let planCodes = 0;
+/** Puts the company on a published plan with the given modules (P5-01), as platform staff would. */
+async function onPlan(c: Company, modules: string[]) {
+  const staff = await createUser(fx.dbs, { twoFactor: true });
+  await fx.dbs.ownerPool.query(
+    `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_owner')`,
+    [staff.id],
+  );
+  const actor: PlatformActor = {
+    userId: staff.id,
+    role: 'platform_owner',
+    correlationId: uuidv7(),
+  };
+  const plans = createPlanAdminService({ platformDb: fx.dbs.platform, clock: systemClock });
+  planCodes += 1;
+  const { id } = await plans.createPlan(actor, {
+    code: `shop-api-${Date.now().toString(36)}-${planCodes}`,
+    name: 'Shop plan',
+    price: '999',
+    intervalMonths: '1',
+    trialDays: '0',
+    graceDays: '7',
+    seatsIncluded: '10',
+    numbersIncluded: '5',
+    modules,
+  });
+  await plans.publishPlan(actor, id);
+  const view = await plans.tenantPlan(actor, c.tenant.id);
+  await plans.setTenantPlan(actor, {
+    tenantId: c.tenant.id,
+    version: view.state.version,
+    status: 'active',
+    planId: id,
+    periodStart: dayOf(new Date(), 'Asia/Kolkata'),
+    periodEnd: dayOf(new Date(Date.now() + 30 * 86_400_000), 'Asia/Kolkata'),
+    reason: 'Plan for the API Commerce tests',
+  });
+}
+
 describe('product messages (ADR-086)', () => {
   const commerce = () =>
     createCommerceService({
@@ -2145,45 +2397,6 @@ describe('product messages (ADR-086)', () => {
   const issuesOf = (error: unknown) =>
     (apiErrorResponse(error, 'r').body.error as { issues?: { path: string; message: string }[] })
       .issues ?? [];
-
-  let planCodes = 0;
-  /** Puts the company on a published plan with the given modules (P5-01), as platform staff would. */
-  async function onPlan(c: Company, modules: string[]) {
-    const staff = await createUser(fx.dbs, { twoFactor: true });
-    await fx.dbs.ownerPool.query(
-      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_owner')`,
-      [staff.id],
-    );
-    const actor: PlatformActor = {
-      userId: staff.id,
-      role: 'platform_owner',
-      correlationId: uuidv7(),
-    };
-    const plans = createPlanAdminService({ platformDb: fx.dbs.platform, clock: systemClock });
-    planCodes += 1;
-    const { id } = await plans.createPlan(actor, {
-      code: `shop-api-${Date.now().toString(36)}-${planCodes}`,
-      name: 'Shop plan',
-      price: '999',
-      intervalMonths: '1',
-      trialDays: '0',
-      graceDays: '7',
-      seatsIncluded: '10',
-      numbersIncluded: '5',
-      modules,
-    });
-    await plans.publishPlan(actor, id);
-    const view = await plans.tenantPlan(actor, c.tenant.id);
-    await plans.setTenantPlan(actor, {
-      tenantId: c.tenant.id,
-      version: view.state.version,
-      status: 'active',
-      planId: id,
-      periodStart: dayOf(new Date(), 'Asia/Kolkata'),
-      periodEnd: dayOf(new Date(Date.now() + 30 * 86_400_000), 'Asia/Kolkata'),
-      reason: 'Plan for the API product message tests',
-    });
-  }
 
   it('send a product, several products and the catalog once per Idempotency-Key, as the inbox sends them', async () => {
     const c = await fx.company();
@@ -2528,6 +2741,424 @@ describe('product messages (ADR-086)', () => {
       'send-whole',
       'with-commerce',
     ]);
+  });
+});
+
+describe('WhatsApp orders (ADR-167)', () => {
+  const commerce = () =>
+    createCommerceService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      keyring: fx.keyring,
+      appBaseUrl: 'https://app.example.test',
+      allowLiveKeys: false,
+    });
+
+  /** A cart the customer sends from the catalog through the Meta webhook pipeline; its order. */
+  async function sendCart(
+    c: Company,
+    waId: string,
+    items: { retailerId: string; quantity: number; price: number }[],
+    text = '',
+  ) {
+    await inbound(c, waId, [
+      {
+        type: 'order',
+        extra: {
+          order: {
+            catalog_id: '5558701',
+            text,
+            product_items: items.map((i) => ({
+              product_retailer_id: i.retailerId,
+              quantity: i.quantity,
+              item_price: i.price,
+              currency: 'INR',
+            })),
+          },
+        },
+      },
+    ]);
+    const [order] = await fx.query<{
+      id: string;
+      reference: string;
+      conversation_id: string;
+      contact_id: string;
+      message_id: string;
+    }>(
+      `SELECT o.id, o.reference, o.conversation_id, o.contact_id, o.message_id
+         FROM app.commerce_orders o
+         JOIN app.contacts ct ON ct.tenant_id = o.tenant_id AND ct.id = o.contact_id
+        WHERE o.tenant_id = $1 AND ct.phone_e164 = $2
+        ORDER BY o.received_at DESC, o.id DESC LIMIT 1`,
+      [c.tenant.id, `+${waId}`],
+    );
+    if (!order) throw new Error('order not recorded');
+    return order;
+  }
+
+  const versionOf = async (orderId: string) =>
+    (
+      await fx.query<{ version: number }>('SELECT version FROM app.commerce_orders WHERE id = $1', [
+        orderId,
+      ])
+    )[0]!.version;
+
+  it('list the company’s orders newest first on exact pages, with their items, filtered, and one by id', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['orders.read'], 'Order sync');
+    const list = (query: Record<string, string | null | undefined>) =>
+      apiListOrders(deps(), reader.ctx, query);
+    const first = await sendCart(
+      c,
+      '919811100701',
+      [
+        { retailerId: 'sku-1', quantity: 2, price: 19.99 },
+        { retailerId: 'sku-2', quantity: 1, price: 250 },
+      ],
+      'Please gift wrap',
+    );
+    const second = await sendCart(c, '919811100702', [
+      { retailerId: 'sku-3', quantity: 1, price: 99 },
+    ]);
+    const third = await sendCart(c, '919811100701', [
+      { retailerId: 'sku-1', quantity: 1, price: 19.99 },
+    ]);
+    await sendCart(other, '919811100703', [{ retailerId: 'sku-1', quantity: 1, price: 10 }]);
+
+    // Newest first, two to a page and the last on the next; another company's order never.
+    const page = await list({ limit: '2' });
+    expect(page.data.map((o) => o.id)).toEqual([third.id, second.id]);
+    expect(page.nextCursor).toEqual(expect.any(String));
+    const last = await list({ limit: '2', cursor: page.nextCursor });
+    expect(last.data.map((o) => o.id)).toEqual([first.id]);
+    expect(last.nextCursor).toBeNull();
+
+    // The order as the webhook describes it: money in minor units, items in cart order, ids only.
+    const [stored] = await fx.query<{ received_at: Date }>(
+      'SELECT received_at FROM app.commerce_orders WHERE id = $1',
+      [first.id],
+    );
+    expect(last.data[0]).toEqual({
+      id: first.id,
+      reference: first.reference,
+      status: 'received',
+      statusChangedAt: expect.any(String),
+      conversationId: first.conversation_id,
+      contactId: first.contact_id,
+      channelId: c.channelAccountId,
+      messageId: first.message_id,
+      catalogId: '5558701',
+      currency: 'INR',
+      subtotalMinor: 28_998,
+      itemCount: 2,
+      droppedItems: 0,
+      customerNote: 'Please gift wrap',
+      items: [
+        { retailerId: 'sku-1', name: null, quantity: 2, unitPriceMinor: 1_999, currency: 'INR' },
+        { retailerId: 'sku-2', name: null, quantity: 1, unitPriceMinor: 25_000, currency: 'INR' },
+      ],
+      receivedAt: stored!.received_at.toISOString(),
+      paidAt: null,
+      updatedAt: expect.any(String),
+    });
+    expect(await apiGetOrder(deps(), reader.ctx, first.id)).toEqual(last.data[0]);
+
+    // Filters by contact, conversation and reference.
+    expect((await list({ contactId: first.contact_id })).data.map((o) => o.id)).toEqual([
+      third.id,
+      first.id,
+    ]);
+    expect((await list({ conversationId: second.conversation_id })).data.map((o) => o.id)).toEqual([
+      second.id,
+    ]);
+    expect((await list({ reference: second.reference })).data.map((o) => o.id)).toEqual([
+      second.id,
+    ]);
+
+    // A member confirms the first order: it is found by its status and as changed since.
+    const before = new Date(Date.now() - 1_000).toISOString();
+    await commerce().setOrderStatus(owner, {
+      id: first.id,
+      expectedVersion: await versionOf(first.id),
+      status: 'confirmed',
+    });
+    expect((await list({ status: 'confirmed' })).data.map((o) => [o.id, o.status])).toEqual([
+      [first.id, 'confirmed'],
+    ]);
+    expect((await list({ status: 'received' })).data.map((o) => o.id)).toEqual([
+      third.id,
+      second.id,
+    ]);
+    expect((await list({ updatedSince: before })).data.map((o) => o.id)).toContain(first.id);
+    expect(
+      (await list({ updatedSince: new Date(Date.now() + 60_000).toISOString() })).data,
+    ).toEqual([]);
+
+    // Another company's order is not found by its id; nor is one that does not exist.
+    const [theirs] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.commerce_orders WHERE tenant_id = $1',
+      [other.tenant.id],
+    );
+    await expectAppError(apiGetOrder(deps(), reader.ctx, theirs!.id), 'not_found');
+    await expectAppError(apiGetOrder(deps(), reader.ctx, uuidv7()), 'not_found');
+  });
+
+  it('keep an erased contact’s orders without the note, and need the scope and Commerce in the plan', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['orders.read']);
+    const order = await sendCart(
+      c,
+      '919811100711',
+      [{ retailerId: 'sku-1', quantity: 1, price: 19.99 }],
+      'Leave at the door',
+    );
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(owner, {
+      contactId: order.contact_id,
+      suppress: false,
+    });
+    const kept = await apiGetOrder(deps(), reader.ctx, order.id);
+    expect([kept.customerNote, kept.contactId, kept.items.length]).toEqual([
+      null,
+      order.contact_id,
+      1,
+    ]);
+    expect((await apiListOrders(deps(), reader.ctx, {})).data.map((o) => o.id)).toEqual([order.id]);
+
+    // A key without the scope is refused before anything is read; reading is allowed while the
+    // company is suspended, as every read is.
+    const others = await apiKey(c, ['conversations.read', 'contacts.read']);
+    await expectAppError(apiListOrders(deps(), others.ctx, {}), 'forbidden', /orders\.read/);
+    await expectAppError(apiGetOrder(deps(), others.ctx, order.id), 'forbidden', /orders\.read/);
+    const suspended = {
+      ...reader.ctx,
+      tenant: { ...reader.ctx.tenant, status: 'suspended' as const },
+    };
+    expect((await apiListOrders(deps(), suspended, {})).data).toHaveLength(1);
+
+    // A plan without Commerce reads no orders; with it again, it does. Each read starts when it is
+    // awaited, so neither is refused while nothing waits for it.
+    await onPlan(c, []);
+    for (const read of [
+      () => apiListOrders(deps(), reader.ctx, {}),
+      () => apiGetOrder(deps(), reader.ctx, order.id),
+    ]) {
+      const error = await expectAppError(read(), 'forbidden', /does not include Commerce/);
+      expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    }
+    await onPlan(c, ['commerce']);
+    expect((await apiGetOrder(deps(), reader.ctx, order.id)).id).toBe(order.id);
+  });
+
+  it('are moved on as members move them, as the key, and a retry changes nothing (ADR-168)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await createWebhooksService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      keyring: fx.keyring,
+      egressPolicy: { allowLoopbackForTests: true },
+    }).create(owner, {
+      url: 'https://hooks.receiver.test/orders',
+      eventTypes: ['order.status_changed'],
+    });
+    const writer = await apiKey(c, ['orders.write'], 'Order system');
+    const change = (id: string, input: unknown) => apiUpdateOrder(deps(), writer.ctx, id, input);
+    const order = await sendCart(
+      c,
+      '919811100721',
+      [{ retailerId: 'sku-1', quantity: 3, price: 10 }],
+      'Ring twice',
+    );
+    const versionBefore = await versionOf(order.id);
+
+    // Confirmed from received, as the key, and answered as GET /orders/{id} gives the order.
+    const confirmed = await change(order.id, { status: 'confirmed', expectedStatus: 'received' });
+    expect(confirmed).toMatchObject({
+      id: order.id,
+      reference: order.reference,
+      status: 'confirmed',
+      subtotalMinor: 3_000,
+      customerNote: 'Ring twice',
+    });
+    expect(confirmed.items.map((i) => [i.retailerId, i.quantity])).toEqual([['sku-1', 3]]);
+    const reader = await apiKey(c, ['orders.read']);
+    expect(await apiGetOrder(deps(), reader.ctx, order.id)).toEqual(confirmed);
+    expect(await versionOf(order.id)).toBe(versionBefore + 1);
+    const audit = () =>
+      fx.query<{ actor_type: string; actor_id: string; metadata: Record<string, unknown> }>(
+        `SELECT actor_type, actor_id, metadata FROM app.audit_events
+          WHERE tenant_id = $1 AND subject_id = $2 AND action = 'commerce.order_status_changed'
+          ORDER BY occurred_at, id`,
+        [c.tenant.id, order.id],
+      );
+    expect(await audit()).toEqual([
+      {
+        actor_type: 'api_key',
+        actor_id: writer.id,
+        metadata: { reference: order.reference, from: 'received', to: 'confirmed', source: 'api' },
+      },
+    ]);
+    const events = async () =>
+      (
+        await fx.query<{ status: string; detail: { orderId: string; previousStatus: string } }>(
+          `SELECT status, detail FROM app.webhook_events
+            WHERE tenant_id = $1 AND type = 'order.status_changed' ORDER BY created_at, id`,
+          [c.tenant.id],
+        )
+      ).map((e) => [e.detail.orderId, e.detail.previousStatus, e.status]);
+    expect(await events()).toEqual([[order.id, 'received', 'confirmed']]);
+
+    // A retry, even with the status it expected the first time, changes nothing.
+    expect(await change(order.id, { status: 'confirmed', expectedStatus: 'received' })).toEqual(
+      confirmed,
+    );
+    expect(await versionOf(order.id)).toBe(versionBefore + 1);
+    expect(await audit()).toHaveLength(1);
+    expect(await events()).toHaveLength(1);
+
+    // A member's page opened before the key's change is stale.
+    await expectAppError(
+      commerce().setOrderStatus(owner, {
+        id: order.id,
+        expectedVersion: versionBefore,
+        status: 'cancelled',
+      }),
+      'conflict',
+      /Someone else changed this/,
+    );
+
+    // Not in the status expected, or a move members cannot make: refused naming the status.
+    await expectAppError(
+      change(order.id, { status: 'cancelled', expectedStatus: 'received' }),
+      'conflict',
+      /^The order is not received, so it was not changed\. This order's status is confirmed\.$/,
+    );
+    const other = await sendCart(c, '919811100722', [
+      { retailerId: 'sku-2', quantity: 1, price: 5 },
+    ]);
+    await expectAppError(
+      change(other.id, { status: 'fulfilled' }),
+      'conflict',
+      /^The order cannot move to fulfilled from its status\. This order's status is received\.$/,
+    );
+    expect(await versionOf(order.id)).toBe(versionBefore + 1);
+    expect(await versionOf(other.id)).toBe(1);
+
+    // Fulfilled from confirmed, after which nothing moves it; cancelled from received, for good.
+    expect((await change(order.id, { status: 'fulfilled' })).status).toBe('fulfilled');
+    await expectAppError(
+      change(order.id, { status: 'cancelled' }),
+      'conflict',
+      /status is fulfilled\.$/,
+    );
+    expect(
+      (await change(other.id, { status: 'cancelled', expectedStatus: 'received' })).status,
+    ).toBe('cancelled');
+    await expectAppError(
+      change(other.id, { status: 'confirmed' }),
+      'conflict',
+      /status is cancelled\.$/,
+    );
+
+    // Payment statuses are Razorpay's: an order waiting for payment is left to members, who cancel
+    // its Payment Link; a paid one is fulfilled, never cancelled.
+    const waiting = await sendCart(c, '919811100723', [
+      { retailerId: 'sku-3', quantity: 1, price: 7 },
+    ]);
+    const paid = await sendCart(c, '919811100724', [
+      { retailerId: 'sku-4', quantity: 2, price: 9 },
+    ]);
+    await fx.query(`UPDATE app.commerce_orders SET status = 'awaiting_payment' WHERE id = $1`, [
+      waiting.id,
+    ]);
+    await fx.query(
+      `UPDATE app.commerce_orders SET status = 'paid', paid_at = now() WHERE id = $1`,
+      [paid.id],
+    );
+    for (const status of ['confirmed', 'fulfilled', 'cancelled']) {
+      await expectAppError(
+        change(waiting.id, { status }),
+        'conflict',
+        /members cancel its Payment Link in the app first\. This order's status is awaiting_payment\.$/,
+      );
+    }
+    await expectAppError(change(paid.id, { status: 'cancelled' }), 'conflict', /status is paid\.$/);
+    const fulfilled = await change(paid.id, { status: 'fulfilled', expectedStatus: 'paid' });
+    expect([fulfilled.status, fulfilled.paidAt]).toEqual(['fulfilled', expect.any(String)]);
+    expect(await events()).toEqual([
+      [order.id, 'received', 'confirmed'],
+      [order.id, 'confirmed', 'fulfilled'],
+      [other.id, 'received', 'cancelled'],
+      [waiting.id, 'received', 'awaiting_payment'],
+      [paid.id, 'received', 'paid'],
+      [paid.id, 'paid', 'fulfilled'],
+    ]);
+  });
+
+  it('need orders.write, an active company, Commerce in the plan and the company’s own order (ADR-168)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const writer = await apiKey(c, ['orders.write']);
+    const order = await sendCart(c, '919811100731', [
+      { retailerId: 'sku-1', quantity: 1, price: 19.99 },
+    ]);
+    const theirs = await sendCart(other, '919811100732', [
+      { retailerId: 'sku-1', quantity: 1, price: 19.99 },
+    ]);
+    const confirm = { status: 'confirmed' };
+    const statusOf = async (orderId: string) =>
+      (
+        await fx.query<{ status: string }>('SELECT status FROM app.commerce_orders WHERE id = $1', [
+          orderId,
+        ])
+      )[0]!.status;
+
+    // Another company's order and one that does not exist are not found, and nothing changes.
+    await expectAppError(apiUpdateOrder(deps(), writer.ctx, theirs.id, confirm), 'not_found');
+    await expectAppError(apiUpdateOrder(deps(), writer.ctx, uuidv7(), confirm), 'not_found');
+    expect(await statusOf(theirs.id)).toBe('received');
+
+    // A key that only reads orders, or one of a suspended company, changes none.
+    const reader = await apiKey(c, ['orders.read']);
+    await expectAppError(
+      apiUpdateOrder(deps(), reader.ctx, order.id, confirm),
+      'forbidden',
+      /orders\.write/,
+    );
+    const suspended = {
+      ...writer.ctx,
+      tenant: { ...writer.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(apiUpdateOrder(deps(), suspended, order.id, confirm), 'tenant_suspended');
+
+    // A plan without Commerce changes no orders; with it again, it does.
+    await onPlan(c, []);
+    const error = await expectAppError(
+      apiUpdateOrder(deps(), writer.ctx, order.id, confirm),
+      'forbidden',
+      /does not include Commerce/,
+    );
+    expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    expect(await statusOf(order.id)).toBe('received');
+    await onPlan(c, ['commerce']);
+    expect((await apiUpdateOrder(deps(), writer.ctx, order.id, confirm)).status).toBe('confirmed');
+
+    // Granting the scope needs inbox.reply, which members change orders with.
+    const owner = await fx.ctx(c, c.owner);
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'inbox.reply')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Orders', scopes: ['orders.write'], expiresInDays: 30 }),
+      'forbidden',
+      /Confirm, fulfil and cancel WhatsApp orders/,
+    );
   });
 });
 
@@ -3459,6 +4090,70 @@ describe('assigning conversations (ADR-093)', () => {
     expect(await apiListTeams(deps(), theirs.ctx, {})).toEqual({ data: [], nextCursor: null });
   });
 
+  it('read the company’s WhatsApp numbers with channels.read, oldest first, a page at a time (ADR-171)', async () => {
+    const c = await fx.company();
+    const outlet = await fx.addNumber(c, { phone: '+91 90000 54321', name: 'Outlet' });
+    const closed = await fx.addNumber(c, { phone: '+91 90000 11111', status: 'disconnected' });
+    const pending = await fx.addNumber(c, { phone: null, status: 'onboarding' });
+    const reader = await apiKey(c, ['channels.read']);
+    const [main] = await fx.query<{ created_at: Date }>(
+      'SELECT created_at FROM app.channel_accounts WHERE id = $1',
+      [c.channelAccountId],
+    );
+
+    // Every number, whatever its status, in the order it was added: its number, verified name and
+    // status only, never Meta's ids.
+    const all = await apiListChannels(deps(), reader.ctx, {});
+    expect(all.data.map((n) => [n.id, n.phone, n.name, n.status])).toEqual([
+      [c.channelAccountId, '+91 90000 00000', null, 'active'],
+      [outlet.channelAccountId, '+91 90000 54321', 'Outlet', 'active'],
+      [closed.channelAccountId, '+91 90000 11111', null, 'disconnected'],
+      [pending.channelAccountId, null, null, 'onboarding'],
+    ]);
+    expect(all.data[0]?.createdAt).toBe(main!.created_at.toISOString());
+    expect(all.nextCursor).toBeNull();
+    for (const n of all.data) {
+      expect(Object.keys(n)).toEqual(['id', 'phone', 'name', 'status', 'createdAt']);
+    }
+    for (const metaId of [c.phoneNumberId, outlet.phoneNumberId, c.wabaId]) {
+      expect(JSON.stringify(all)).not.toContain(metaId);
+    }
+
+    // Pages never skip or repeat a number, and a status narrows them.
+    const first = await apiListChannels(deps(), reader.ctx, { limit: 3 });
+    expect(first.data).toEqual(all.data.slice(0, 3));
+    expect(first.nextCursor).not.toBeNull();
+    expect(
+      await apiListChannels(deps(), reader.ctx, { limit: 3, cursor: first.nextCursor ?? '' }),
+    ).toEqual({ data: all.data.slice(3), nextCursor: null });
+    expect(
+      (await apiListChannels(deps(), reader.ctx, { status: 'active' })).data.map((n) => n.id),
+    ).toEqual([c.channelAccountId, outlet.channelAccountId]);
+    expect(await apiListChannels(deps(), reader.ctx, { status: 'failed' })).toEqual({
+      data: [],
+      nextCursor: null,
+    });
+
+    // Reads need channels.read, go on while the company is suspended, and stay in the company.
+    const sender = await apiKey(c, ['messages.send', 'templates.read', 'webhooks.manage']);
+    await expectAppError(
+      apiListChannels(deps(), sender.ctx, {}),
+      'forbidden',
+      /channels\.read scope/,
+    );
+    const suspended = {
+      ...reader.ctx,
+      tenant: { ...reader.ctx.tenant, status: 'suspended' as const },
+    };
+    expect(await apiListChannels(deps(), suspended, {})).toEqual(all);
+    const other = await fx.company();
+    const theirs = await apiKey(other, ['channels.read']);
+    expect(await apiListChannels(deps(), theirs.ctx, {})).toEqual({
+      data: [expect.objectContaining({ id: other.channelAccountId, status: 'active' })],
+      nextCursor: null,
+    });
+  });
+
   it('assign, reassign, unassign and move conversations as the inbox does, audited as the key', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
@@ -4085,6 +4780,257 @@ describe('assigning conversations (ADR-093)', () => {
     ).toBe('teamId');
     expect((await conversationRow(inSales.id)).team_id).toBeNull();
     expect((await conversationRow(elsewhere.id)).team_id).toBeNull();
+  });
+
+  it('change the conversations a filter finds, a page at a time, each as PATCH changes it, audited as the key (ADR-166)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const supervisor = await joined(c, 'supervisor', 'Sam Supervisor');
+    const { teamId: support } = await teams().createTeam(owner, {
+      name: 'Support',
+      assignment: 'round_robin',
+      memberIds: [agent.membership.id, supervisor.membership.id],
+    });
+    await teams().setAvailability(agent, { available: true });
+    await teams().setAvailability(supervisor, { available: true });
+    const writer = await apiKey(c, ['conversations.read', 'conversations.write'], 'Bulk tidy');
+    const matching = (body: unknown) => apiUpdateMatchingConversations(deps(), writer.ctx, body);
+    const other = await fx.company();
+    const theirs = await conversationWith(other, '919811100500');
+    const [first, second, third, fourth, fifth] = [
+      await conversationWith(c, '919811100501'),
+      await conversationWith(c, '919811100502'),
+      await conversationWith(c, '919811100503'),
+      await conversationWith(c, '919811100504'),
+      await conversationWith(c, '919811100505'),
+    ];
+    await apiUpdateManyConversations(deps(), writer.ctx, {
+      conversationIds: [first.id, second.id, third.id],
+      assigneeId: agent.membership.id,
+    });
+
+    // The agent's open conversations go to the supervisor, newest first, two at a time.
+    const byAgent = {
+      filter: { status: 'open', assigneeId: agent.membership.id },
+      change: { assigneeId: supervisor.membership.id },
+      limit: 2,
+    };
+    const page = await matching(byAgent);
+    expect(page.data.map((v) => [v.id, v.assigneeId])).toEqual([
+      [third.id, supervisor.membership.id],
+      [second.id, supervisor.membership.id],
+    ]);
+    expect(page.nextCursor).toEqual(expect.any(String));
+    const last = await matching({ ...byAgent, cursor: page.nextCursor });
+    expect(last.data.map((v) => [v.id, v.assigneeId])).toEqual([
+      [first.id, supervisor.membership.id],
+    ]);
+    expect(last.nextCursor).toBeNull();
+    for (const conv of [first, second, third]) {
+      const audited = await changes(c, conv.id);
+      expect(audited.map((a) => [a.action, a.actor_type, a.actor_id])).toEqual([
+        ['conversation.assigned', 'api_key', writer.id],
+        ['conversation.assigned', 'api_key', writer.id],
+      ]);
+      expect(audited[1]?.metadata).toMatchObject({
+        from: agent.membership.id,
+        to: supervisor.membership.id,
+        source: 'api',
+      });
+    }
+    for (const conv of [fourth, fifth])
+      expect((await conversationRow(conv.id)).assigned).toBeNull();
+    // The filter finds none of them any more.
+    expect(await matching(byAgent)).toEqual({ data: [], nextCursor: null });
+
+    // Every open conversation without a team resolved in one page; another company's untouched.
+    const resolved = await matching({
+      filter: { status: 'open', teamId: 'none' },
+      change: { status: 'resolved' },
+      limit: 100,
+    });
+    expect(resolved.data.map((v) => [v.id, v.status])).toEqual(
+      [fifth, fourth, third, second, first].map((v) => [v.id, 'resolved']),
+    );
+    expect(resolved.nextCursor).toBeNull();
+    expect((await conversationRow(theirs.id)).status).toBe('open');
+
+    // The unassigned ones reopened, then moved into the round-robin team, given out in turn.
+    const reopened = await matching({
+      filter: { status: 'resolved', assigneeId: 'none' },
+      change: { status: 'open' },
+    });
+    expect(reopened.data.map((v) => [v.id, v.status])).toEqual([
+      [fifth.id, 'open'],
+      [fourth.id, 'open'],
+    ]);
+    const moved = await matching({
+      filter: { status: 'open', assigneeId: 'none' },
+      change: { teamId: support },
+    });
+    expect(moved.data.map((v) => [v.id, v.teamId, v.assigneeId])).toEqual([
+      [fifth.id, support, agent.membership.id],
+      [fourth.id, support, supervisor.membership.id],
+    ]);
+    for (const conv of [fourth, fifth]) {
+      expect((await changes(c, conv.id)).map((a) => a.action)).toEqual([
+        'conversation.status_changed',
+        'conversation.status_changed',
+        'conversation.team_changed',
+        'conversation.routed',
+      ]);
+    }
+  });
+
+  it('refuse a member or a team it may not take before reading the page, even when nothing matches, changing nothing (ADR-166)', async () => {
+    const c = await fx.company();
+    const marketer = await fx.ctx(c, c.marketer);
+    const other = await fx.company();
+    const { teamId: foreign } = await teams().createTeam(await fx.ctx(other, other.owner), {
+      name: 'Foreign',
+    });
+    const writer = await apiKey(c, ['conversations.read', 'conversations.write']);
+    const conv = await conversationWith(c, '919811100511');
+    const before = await conversationRow(conv.id);
+    const refused = async (
+      ctx: typeof writer.ctx,
+      body: unknown,
+      code: string,
+      paths: string[],
+    ) => {
+      const error = await expectAppError(apiUpdateMatchingConversations(deps(), ctx, body), code);
+      expect(isAppError(error) && (error.issues ?? []).map((i) => i.path)).toEqual(paths);
+    };
+    const open = { status: 'open' };
+    for (const filter of [open, { contactId: uuidv7() }]) {
+      await refused(
+        writer.ctx,
+        { filter, change: { assigneeId: marketer.membership.id } },
+        'validation_failed',
+        ['change.assigneeId'],
+      );
+      await refused(
+        writer.ctx,
+        { filter, change: { status: 'resolved', teamId: foreign } },
+        'validation_failed',
+        ['change.teamId'],
+      );
+      await refused(writer.ctx, { filter, change: { teamId: uuidv7() } }, 'validation_failed', [
+        'change.teamId',
+      ]);
+    }
+    await refused(writer.ctx, { filter: {}, change: { status: 'resolved' } }, 'validation_failed', [
+      'filter',
+    ]);
+    for (const scopes of [['conversations.write'], ['conversations.read']] as const) {
+      await refused(
+        (await apiKey(c, [...scopes])).ctx,
+        { filter: open, change: { status: 'resolved' } },
+        'forbidden',
+        [],
+      );
+    }
+    for (const status of ['suspended', 'restricted'] as const) {
+      const ctx = { ...writer.ctx, tenant: { ...writer.ctx.tenant, status } };
+      await refused(ctx, { filter: open, change: { status: 'resolved' } }, 'tenant_suspended', []);
+    }
+    expect(await conversationRow(conv.id)).toEqual(before);
+    expect(await changes(c, conv.id)).toEqual([]);
+
+    // Another company's key finds none of the company's conversations.
+    const theirs = await apiKey(other, ['conversations.read', 'conversations.write']);
+    expect(
+      await apiUpdateMatchingConversations(deps(), theirs.ctx, {
+        filter: open,
+        change: { status: 'resolved' },
+      }),
+    ).toEqual({ data: [], nextCursor: null });
+    expect(await conversationRow(conv.id)).toEqual(before);
+  });
+
+  it('leave out a conversation someone else takes out of the filter meanwhile, and change one still matching as it now is (ADR-166)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { teamId: sales } = await teams().createTeam(owner, { name: 'Sales' });
+    const writer = await apiKey(c, ['conversations.read', 'conversations.write']);
+    const [taken, kept, moved] = [
+      await conversationWith(c, '919811100521'),
+      await conversationWith(c, '919811100522'),
+      await conversationWith(c, '919811100523'),
+    ];
+    const holder = await fx.dbs.adminPool.connect();
+    let call: ReturnType<typeof apiUpdateMatchingConversations> | undefined;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('UPDATE app.conversations SET assigned_membership_id = $2 WHERE id = $1', [
+        taken.id,
+        owner.membership.id,
+      ]);
+      await holder.query('UPDATE app.conversations SET team_id = $2 WHERE id = $1', [
+        moved.id,
+        sales,
+      ]);
+      const [held] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+      // The page is read before the other transaction commits, so all three are on it; their rows
+      // are then locked with the filter again, after it commits.
+      call = apiUpdateMatchingConversations(deps(), writer.ctx, {
+        filter: { assigneeId: 'none' },
+        change: { status: 'resolved' },
+      });
+      call.catch(() => undefined);
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await fx.query<{ n: number }>(
+            'SELECT count(*)::int AS n FROM pg_stat_activity a WHERE $1 = ANY (pg_blocking_pids(a.pid))',
+            [held!.pid],
+          );
+          if (waiting!.n < 1) throw new Error('the call is not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+    } finally {
+      await holder.query('COMMIT');
+      holder.release();
+    }
+    const result = await call;
+    expect(result?.data.map((v) => [v.id, v.status, v.teamId])).toEqual([
+      [moved.id, 'resolved', sales],
+      [kept.id, 'resolved', null],
+    ]);
+    expect(result?.nextCursor).toBeNull();
+    expect(await conversationRow(taken.id)).toMatchObject({
+      status: 'open',
+      assigned: owner.membership.id,
+    });
+    expect(await changes(c, taken.id)).toEqual([]);
+  });
+
+  it('reach every conversation a filter finds, each changed once, when a call is sent again after a lost answer (ADR-166)', async () => {
+    const c = await fx.company();
+    const writer = await apiKey(c, ['conversations.read', 'conversations.write']);
+    const ids: string[] = [];
+    for (let i = 1; i <= 5; i++) ids.push((await conversationWith(c, `91981110053${i}`)).id);
+    const call = (cursor?: string | null) =>
+      apiUpdateMatchingConversations(deps(), writer.ctx, {
+        filter: { status: 'open' },
+        change: { status: 'resolved' },
+        limit: 2,
+        ...(cursor ? { cursor } : {}),
+      });
+    const first = await call();
+    expect(first.data.map((v) => v.id)).toEqual([ids[4], ids[3]]);
+    // The answer to the next call is lost. Sent again with the same cursor, it finds the
+    // conversations still open past it: those it resolved are not found again.
+    const lost = await call(first.nextCursor);
+    expect(lost.data.map((v) => v.id)).toEqual([ids[2], ids[1]]);
+    const again = await call(first.nextCursor);
+    expect(again.data.map((v) => [v.id, v.status])).toEqual([[ids[0], 'resolved']]);
+    expect(again.nextCursor).toBeNull();
+    for (const id of ids) {
+      expect((await changes(c, id)).map((a) => a.action)).toEqual(['conversation.status_changed']);
+    }
+    expect(await call()).toEqual({ data: [], nextCursor: null });
   });
 });
 

@@ -3,10 +3,12 @@ import {
   AUTOMATION_END_REASONS,
   AUTOMATION_RUN_STATUSES,
   CAMPAIGN_STATUSES,
+  CHANNEL_STATUSES,
   CONVERSATION_STATUSES,
   MESSAGE_STATUSES,
   TEAM_ASSIGNMENT_MODES,
   MESSAGE_TYPES,
+  ORDER_STATUSES,
   WEBHOOK_DELIVERY_STATES,
   type MessageStatus,
 } from '@w360/db';
@@ -17,6 +19,7 @@ import {
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
+  WEBHOOK_MESSAGE_SENDERS,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
@@ -45,6 +48,8 @@ import {
   templateStatusPayloadSchema,
 } from '../webhooks/payloads';
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
+import { SEGMENT_LIMITS } from '../campaigns/segments';
+import { ORDER_REFERENCE_RE } from '../commerce/model';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
 import {
@@ -58,7 +63,7 @@ import {
   apiCampaignWithResultsSchema,
 } from './campaigns';
 import { apiContactFieldCreateSchema, apiContactFieldUpdateSchema } from './contact-fields';
-import { apiContactSearchSchema } from './contact-search';
+import { apiContactSearchSchema, apiUpdateMatchingContactsSchema } from './contact-search';
 import { apiContactSchema } from './contact-view';
 import {
   API_CONTACT_SEARCH_WINDOW,
@@ -72,8 +77,10 @@ import {
   apiAddNoteSchema,
   apiUpdateConversationSchema,
   apiUpdateManyConversationsSchema,
+  apiUpdateMatchingConversationsSchema,
 } from './conversations';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
+import { apiUpdateOrderSchema } from './orders';
 import {
   apiConsentSchema,
   apiContactCreateSchema,
@@ -83,6 +90,7 @@ import {
   apiSendProductListSchema,
   apiSendProductSchema,
   apiSendReactionSchema,
+  apiSendManyTemplatesSchema,
   apiSendMessageSchema,
   apiSendTextSchema,
 } from './resources';
@@ -125,6 +133,20 @@ export const apiQueuedMessageSchema = z.object({
   contactId: z.uuid(),
   channelId: z.uuid(),
   templateId: z.uuid().optional().describe('The template sent, for templates.'),
+});
+
+/** What a send of a template to many numbers answers for one number (ADR-163). */
+export const apiTemplateSendSchema = z.object({
+  to: z.string().describe('The number, in E.164 form.'),
+  message: apiQueuedMessageSchema
+    .nullable()
+    .describe('The message, as it is queued; null when it was not.'),
+  error: z
+    .object({ code: z.literal('precondition_failed'), message: z.string() })
+    .nullable()
+    .describe(
+      'Why the message was not queued, as a send to the number alone would refuse it (the contact erased, opted out, on the suppression list or without the marketing opt-in the company asks for, or at the marketing frequency cap), in the message’s words; null when it was.',
+    ),
 });
 
 /** The states of an outbound message (the `received` state is for inbound messages only). */
@@ -190,6 +212,74 @@ export const apiConversationSchema = z.object({
   resolvedAt: z.iso.datetime().nullable(),
 });
 
+const ORDER_REFERENCE_PATTERN = ORDER_REFERENCE_RE.source;
+
+/** A WhatsApp order a customer sent from the company's catalog (ADR-167). */
+export const apiOrderSchema = z.object({
+  id: z.uuid(),
+  reference: z
+    .string()
+    .describe('The short reference members and the customer quote, like K7M2QX9P.'),
+  status: z
+    .enum(ORDER_STATUSES)
+    .describe(
+      'As the Orders page shows it: received as the customer sent it, then confirmed, awaiting_payment (a Payment Link was sent), paid, fulfilled or cancelled.',
+    ),
+  statusChangedAt: z.iso.datetime(),
+  conversationId: z.uuid().describe('The conversation the order was sent in.'),
+  contactId: z
+    .uuid()
+    .describe('The customer, as GET /contacts/{id} reads them with `contacts.read`.'),
+  channelId: z.uuid().describe('The WhatsApp number the order was sent to.'),
+  messageId: z
+    .uuid()
+    .describe('The order message, as the conversation’s messages and `message.received` name it.'),
+  catalogId: z.string().describe('The Meta catalog the cart came from.'),
+  currency: z
+    .string()
+    .nullable()
+    .describe('ISO 4217, like INR; null when the items are in different currencies.'),
+  subtotalMinor: z
+    .number()
+    .int()
+    .nullable()
+    .describe(
+      'The items’ total in the currency’s minor units (paise for INR); null when a price could not be read, the currencies differ or items were left out.',
+    ),
+  itemCount: z.number().int().describe('The items read from the cart.'),
+  droppedItems: z
+    .number()
+    .int()
+    .describe(
+      'Cart items that could not be read or were beyond the limit of items an order keeps.',
+    ),
+  customerNote: z
+    .string()
+    .nullable()
+    .describe(
+      'The note the customer sent with the cart; null if none or once the contact is erased.',
+    ),
+  items: z.array(
+    z.object({
+      retailerId: z.string().describe('The item’s content id (SKU) in the catalog.'),
+      name: z
+        .string()
+        .nullable()
+        .describe('The product’s name when the order was received; null if it was not known.'),
+      quantity: z.number().int(),
+      unitPriceMinor: z
+        .number()
+        .int()
+        .nullable()
+        .describe('In the currency’s minor units; null when the price could not be read.'),
+      currency: z.string().nullable(),
+    }),
+  ),
+  receivedAt: z.iso.datetime(),
+  paidAt: z.iso.datetime().nullable().describe('When Razorpay reported its Payment Link paid.'),
+  updatedAt: z.iso.datetime().describe('When anything about the order last changed.'),
+});
+
 /** A member conversations can be assigned to (ADR-093). */
 export const apiMemberSchema = z.object({
   id: z.uuid().describe('The member, as `assigneeId` names them.'),
@@ -198,6 +288,29 @@ export const apiMemberSchema = z.object({
     .boolean()
     .describe('Whether the member takes new conversations now (round-robin teams give them some).'),
   teamIds: z.array(z.uuid()).describe('The teams the member belongs to.'),
+});
+
+/** A WhatsApp number of the company (ADR-171). */
+export const apiChannelSchema = z.object({
+  id: z
+    .uuid()
+    .describe(
+      'The number, as messages, conversations, orders and webhook events name it (`channelId`, `channel.id`) and a send takes it (`from`).',
+    ),
+  phone: z
+    .string()
+    .nullable()
+    .describe('The number as WhatsApp shows it, like +91 98765 43210; null until Meta reports it.'),
+  name: z
+    .string()
+    .nullable()
+    .describe('The business name WhatsApp verified for the number; null until Meta reports it.'),
+  status: z
+    .enum(CHANNEL_STATUSES)
+    .describe(
+      '`active`: it sends and receives; `onboarding`: being connected; `needs_reconnect`: the WhatsApp account must be connected again; `disconnected`; `failed`: connecting it failed.',
+    ),
+  createdAt: z.iso.datetime().describe('When the number was added to the company.'),
 });
 
 /** A team conversations can be moved to (ADR-093). */
@@ -363,6 +476,12 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       'The message.status statuses the endpoint receives; null receives every status, including statuses added later.',
     ),
+  messageSenders: z
+    .array(z.enum(WEBHOOK_MESSAGE_SENDERS))
+    .nullable()
+    .describe(
+      'Who sent the messages whose message.status the endpoint receives, as message.sentBy names them; null receives the statuses of every message.',
+    ),
   contactParts: z
     .array(z.enum(WEBHOOK_CONTACT_PARTS))
     .nullable()
@@ -405,6 +524,22 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       'The statuses a run ended with that the endpoint receives as automation.run_ended; null receives every end.',
     ),
+  channelIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The WhatsApp numbers whose message, conversation, automation run, order and campaign events the endpoint receives; null receives every number's, including numbers connected later. Consent, contact and template events are not narrowed.",
+    ),
+  oauth: z
+    .object({
+      tokenUrl: z.string().describe('Where HyFib asks for access tokens.'),
+      clientId: z.string(),
+      scope: z.string().nullable().describe('The scope it asks for; null: none.'),
+    })
+    .nullable()
+    .describe(
+      'The OAuth 2.0 client whose access tokens are sent as `Authorization: Bearer <token>` with every delivery (the client credentials grant); null: none. The secret is never shown.',
+    ),
   apiKeyId: z.uuid().describe('The API key that added the endpoint.'),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
@@ -420,7 +555,7 @@ export const apiWebhookDeliverySchema = z.object({
   status: z
     .enum(WEBHOOK_DELIVERY_STATES)
     .describe(
-      'pending: waiting for its next attempt; delivering: an attempt is under way; succeeded: the endpoint answered 2xx; failed: every attempt failed, the endpoint was turned off, the event is gone, or HyFib could not prepare the request (build or sign it, or open the endpoint’s headers).',
+      'pending: waiting for its next attempt; delivering: an attempt is under way; succeeded: the endpoint answered 2xx; failed: every attempt failed, the endpoint was turned off, the event is gone, or HyFib could not prepare the request (build or sign it, or open the endpoint’s headers or OAuth client).',
     ),
   attempts: z.number().int(),
   nextAttemptAt: z.iso
@@ -433,7 +568,7 @@ export const apiWebhookDeliverySchema = z.object({
     .string()
     .nullable()
     .describe(
-      'Why the last attempt failed, or why the delivery ended without one, as a code (for example `invalid_status`, `timeout`, `endpoint_disabled`, `event_gone`, or `payload_failed`: HyFib could not prepare the request (build or sign it, or open the endpoint’s headers), which a replay sends once the cause is fixed).',
+      'Why the last attempt failed, or why the delivery ended without one, as a code (for example `invalid_status`, `timeout`, `endpoint_disabled`, `event_gone`, or `payload_failed`: HyFib could not prepare the request (build or sign it, or open the endpoint’s headers or OAuth client), which a replay sends once the cause is fixed). An endpoint with an OAuth client that got no access token fails the attempt without sending it: `oauth_token_refused_<status>` (the authorization server answered with that status), `oauth_token_invalid` (it answered 200 without a usable bearer token), or `oauth_token_` and the code of the request that failed (such as `oauth_token_timeout`).',
     ),
   lastDurationMs: z.number().int().nullable(),
   deliveredAt: z.iso.datetime().nullable(),
@@ -514,7 +649,7 @@ const errors = (...statuses: number[]) =>
           {
             400: 'The request is malformed (for example invalid JSON or a missing header).',
             401: 'No valid API key: missing, unknown, revoked or expired.',
-            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one or Commerce when sending products (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
+            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one or Commerce when sending products or reading or changing orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
             404: 'Not found in the company.',
             409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit). Pausing or cancelling a campaign: its status does not allow it, and the message names the status.',
             412: "A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it. Starting an automation: it is not published, archived or not started through the API (automation_unavailable), paused (automation_paused), its number is not active (channel_unavailable), or the plan's automation runs for the month are used up (automation_quota).",
@@ -589,7 +724,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, pause and cancel campaigns, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, pause and cancel campaigns, list your WhatsApp numbers, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -598,7 +733,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         '',
         `POST /messages needs an \`Idempotency-Key\` header: a retry with the same key and body returns the first response (header \`Idempotent-Replayed: true\`) and never sends twice; responses are kept ${API_LIMITS.idempotencyHours} hours. Delivery itself follows WhatsApp: read the status with GET /messages/{id}.`,
         '',
-        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's.`,
+        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact and template event it takes.`,
       ].join('\n'),
     },
     servers: [{ url: serverUrl }],
@@ -615,6 +750,27 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf({ type: 'array', items: ref('Template') })),
             },
             ...errors(401, 403, 429, 500),
+          },
+        },
+      },
+      '/channels': {
+        get: {
+          operationId: 'listChannels',
+          summary: 'WhatsApp numbers, oldest first',
+          description: `${scopeNote('channels.read')} The company's WhatsApp numbers, whatever their status: the ids messages, conversations, orders and webhook events name them by, and that \`from\` takes on POST /messages when the company has several. Meta's ids for them and their credentials are never given.`,
+          parameters: [
+            ...pageParams,
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: [...CHANNEL_STATUSES] },
+              description:
+                'Only the numbers with this status (`active` for those that send and receive).',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of numbers.', content: pageOf('Channel') },
+            ...errors(401, 403, 422, 429, 500),
           },
         },
       },
@@ -719,7 +875,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'searchContacts',
           summary: 'Contacts matching conditions, as segments find them, newest first',
-          description: `${scopeNote('contacts.read')} Finds contacts with segments' conditions and comparisons: the contact's name, custom field values, tags, consent, the day a contact was added (in the company's time zone), where it came from and its country calling code, whether it wrote in the last days (\`last_message\`, which also needs \`conversations.read\`) and what happened to a campaign's message to it (\`campaign\`, which also needs \`campaigns.read\`), matching all of them or any. Answers as GET /contacts does: newest first, erased contacts left out, pages that never skip or repeat a contact. Each page reads at most ${API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US')} of the company's contacts: when the conditions leave out most of them, a page can hold fewer contacts than \`limit\`, or none, and still give a \`nextCursor\`; send the same conditions with it until it is \`null\`. A condition the company's fields do not allow, or a campaign it does not have, is refused, naming it (like \`conditions.1.key\`). It only reads, so no \`Idempotency-Key\` is needed.`,
+          description: `${scopeNote('contacts.read')} Finds contacts with segments' conditions and comparisons: the contact's name, custom field values, tags, consent, the day a contact was added (in the company's time zone), where it came from and its country calling code, whether it wrote in the last days (\`last_message\`, which also needs \`conversations.read\`) and what happened to a campaign's message to it (\`campaign\`, which also needs \`campaigns.read\`), matching all of them or any. Conditions can also be put in groups a contact matches together, all of a group's conditions or any (\`type\` \`group\`, with its own \`match\`), so a search can ask for all of some conditions and any of others: a group holds conditions, not groups, and a search holds at most ${SEGMENT_LIMITS.conditions} conditions in all, those in groups included. Answers as GET /contacts does: newest first, erased contacts left out, pages that never skip or repeat a contact. Each page reads at most ${API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US')} of the company's contacts: when the conditions leave out most of them, a page can hold fewer contacts than \`limit\`, or none, and still give a \`nextCursor\`; send the same conditions with it until it is \`null\`. A condition the company's fields do not allow, or a campaign it does not have, is refused, naming it (like \`conditions.1.key\`, or \`conditions.2.conditions.0.key\` in a group). It only reads, so no \`Idempotency-Key\` is needed.`,
           requestBody: { required: true, content: json(ref('ContactSearch')) },
           responses: {
             '200': { description: 'A page of contacts.', content: pageOf('Contact') },
@@ -772,6 +928,25 @@ export function buildOpenApiDocument(serverUrl: string) {
               }),
             },
             ...errors(400, 401, 403, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/contacts/update-matching': {
+        post: {
+          operationId: 'updateMatchingContacts',
+          summary: 'Change the contacts a search finds, a page at a time',
+          description: [
+            `Scopes: \`contacts.read\` and \`contacts.write\`; a \`last_message\` condition also needs \`conversations.read\`, and a \`campaign\` condition \`campaigns.read\`, as for POST /contacts/search. Takes a search's conditions, groups included, and a change: custom field values (\`fields\`) and tags (\`addTags\`, \`removeTags\`), the same for every contact.`,
+            `Each call reads one page of the contacts POST /contacts/search finds with the same conditions (newest first, at most ${API_LIMITS.contactsPerChange} contacts, read in windows of ${API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US')}), changes each of them as PATCH /contacts/{id} changes one and answers them as they now are with \`nextCursor\`: send the same conditions and change with it until it is \`null\`. A page is found by the conditions as they are when it is read, so a contact the change takes out of the search is not read again.`,
+            'A field the company does not have, a value of another type, or a contact the change would give more than 50 tags refuses the call (422, naming the part, as `change.fields.plan`), and nothing is changed. The page is read and changed in one transaction: when a contact on it is changed by someone else at the same moment, the call can be refused as a whole (409, changing nothing): send it again with the same cursor. What a contact already has changes nothing, and a contact the change took out of the search is not found again, so a call sent again after a lost answer is safe without an `Idempotency-Key`: the pages still reach every contact the search finds, each changed once. A call counts as one request against the rate and monthly limits.',
+          ].join('\n\n'),
+          requestBody: { required: true, content: json(ref('UpdateMatchingContacts')) },
+          responses: {
+            '200': {
+              description: 'The page’s contacts, as they now are, and where the next page starts.',
+              content: pageOf('Contact'),
+            },
+            ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -964,6 +1139,27 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/messages/send-many': {
+        post: {
+          operationId: 'sendManyTemplates',
+          summary: 'Send an approved template to many numbers',
+          description: [
+            `${scopeNote('messages.send', 'messages.send_marketing')} Utility templates need \`messages.send\`, marketing templates \`messages.send_marketing\`. Sends the template to up to ${API_LIMITS.messagesPerSend} numbers, each with the values of its variables and each as POST /messages sends a template: the contact is created when new, and consent, the suppression list and the marketing frequency cap are checked for each. The call counts as one request against the rate and monthly limits, within the 64 KB a body may hold.`,
+            'Each number is answered in its place, in the order given, with its message, queued, or with why it was not (the contact erased, opted out, on the suppression list or without the marketing opt-in the company asks for, or at the marketing frequency cap): a refused number changes nothing, a contact created for it included, and the others are still sent. Messages queued together may leave in any order.',
+            'Refused as a whole, sending nothing: a template or a WhatsApp number that cannot send (as for one message), a number that is not valid or given twice, or values that do not fill the template’s variables (422, naming the place, as `messages.3.variables`). One call per `Idempotency-Key`: a retry answers as the first request did.',
+            'The call is one transaction holding the conversations it sends in until it ends. When it collides with another call taking several of them at the same moment in another order (another send to many numbers, say), it can be refused as a whole (409, sending nothing): send it again with the same `Idempotency-Key`.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],
+          requestBody: { required: true, content: json(ref('SendManyTemplates')) },
+          responses: {
+            '200': {
+              description: 'Each number, in the order given: its message, or why it was not sent.',
+              content: json(dataOf({ type: 'array', items: ref('TemplateSend') })),
+            },
+            ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
+          },
+        },
+      },
       '/conversations': {
         get: {
           operationId: 'listConversations',
@@ -1035,7 +1231,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           description: [
             `${scopeNote('conversations.write')} As members do in the inbox, with any of \`status\`, \`assigneeId\` and \`teamId\`, applied together: the team, then the member, then the status.`,
             "Resolving stops an automation answering the conversation and ends the wait for a reply; the contact's next message opens the conversation again. No satisfaction survey is sent: surveys follow a member's resolve.",
-            'Assigning a member (one from GET /members) stops an automation answering the conversation; `null` unassigns it, and a round-robin team gives it out again within a minute. Moving it to a team (one from GET /teams) gives it to the team’s next available member when the team assigns in turn and the conversation is open with no member. A member who cannot answer conversations, or a team of another company, is refused (422, naming the field).',
+            'Assigning a member (one from GET /members) stops an automation answering the conversation; `null` unassigns it, and a round-robin team gives it out again within a minute. Moving it to a team (one from GET /teams) gives it to the team’s next available member when the team assigns in turn and the conversation is open with no member. A member who cannot answer conversations, or a team of another company, is refused (422, naming the field). When routing hands the conversation out at the same moment as a move into a team, the request can be refused (409, changing nothing): send it again.',
             'What the conversation already has changes nothing, so a retry is safe without an `Idempotency-Key`. Conversations of erased contacts are not found.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/Id' }],
@@ -1045,7 +1241,7 @@ export function buildOpenApiDocument(serverUrl: string) {
               description: 'The conversation, as it now is.',
               content: json(dataOf(ref('Conversation'))),
             },
-            ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -1055,7 +1251,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           summary: 'Resolve, reopen, assign or move many conversations at once',
           description: [
             `${scopeNote('conversations.write')} Up to ${API_LIMITS.conversationsPerChange} conversations, each changed as PATCH /conversations/{id} changes one, with any of \`status\`, \`assigneeId\` and \`teamId\`. All of them or none: an id that names none of the company's conversations (an erased contact's included), a member who cannot answer conversations or a team of another company refuses the call (422, naming the field, as \`conversationIds.3\`), and nothing is changed.`,
-            'The conversations are changed in the order given (a team that assigns in turn gives them out in that order) and answered in it. A call counts as one request against the rate and monthly limits. What a conversation already has changes nothing, so a retry is safe without an `Idempotency-Key`.',
+            'The conversations are changed in the order given (a team that assigns in turn gives them out in that order) and answered in it. When routing hands one of them out at the same moment as a move into a team, the call can be refused as a whole (409, changing nothing): send it again. A call counts as one request against the rate and monthly limits. What a conversation already has changes nothing, so a retry is safe without an `Idempotency-Key`.',
           ].join('\n\n'),
           requestBody: { required: true, content: json(ref('UpdateManyConversations')) },
           responses: {
@@ -1067,7 +1263,28 @@ export function buildOpenApiDocument(serverUrl: string) {
                 required: ['data'],
               }),
             },
-            ...errors(400, 401, 403, 415, 422, 423, 429, 500),
+            ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/conversations/update-matching': {
+        post: {
+          operationId: 'updateMatchingConversations',
+          summary: 'Change the conversations a filter finds, a page at a time',
+          description: [
+            'Scopes: `conversations.read` and `conversations.write`. Takes the filters of GET /conversations (`filter`, at least one) and a change (`change`): any of `status`, `assigneeId` and `teamId`, the same for every conversation, applied as PATCH /conversations/{id} applies them: the team, then the member, then the status.',
+            `Each call reads one page of the conversations GET /conversations lists with the same filters (newest first, at most ${API_LIMITS.conversationsPerChange}), changes each of them as PATCH /conversations/{id} changes one, in that order, and answers them as they now are with \`nextCursor\`: send the same filter and change with it until it is \`null\`. Pages go from newer conversations to older ones, each found by the filters as they are when it is read, so a conversation the change takes out of the filter is not read again. One someone else takes out of the filter between the read and the change is left out, so a page can hold fewer conversations than the limit while more follow. Conversations of erased contacts are left out.`,
+            'A member who cannot answer conversations or a team of another company refuses the call (422, naming the field, as `change.teamId`), even when no conversation matches, and nothing is changed. When the call moves conversations into a team while routing hands out one of them, it can be refused as a whole (409, changing nothing): send it again with the same cursor.',
+            'What a conversation already has changes nothing, and one the change took out of the filter is not found again, so a call sent again after a lost answer is safe without an `Idempotency-Key`: the pages still reach every conversation the filter finds, each changed once. A call counts as one request against the rate and monthly limits.',
+          ].join('\n\n'),
+          requestBody: { required: true, content: json(ref('UpdateMatchingConversations')) },
+          responses: {
+            '200': {
+              description:
+                'The page’s conversations, as they now are, and where the next page starts.',
+              content: pageOf('Conversation'),
+            },
+            ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -1332,6 +1549,85 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf({ type: 'array', items: ref('AutomationRun') })),
             },
             ...errors(400, 401, 403, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/orders': {
+        get: {
+          operationId: 'listOrders',
+          summary: 'WhatsApp orders, newest first',
+          description: [
+            `${scopeNote('orders.read')} The carts customers send from the company’s WhatsApp catalog, as the Orders page lists them, newest first by when they were received; pages never skip or repeat an order. Each order has its items, total and note, with its conversation, contact and number by id. Needs Commerce in the company’s plan (403, reason not_in_plan).`,
+            'Amounts are integers in the currency’s minor units (paise for INR). Payment Links and Razorpay’s payment ids are never read here: the company’s Razorpay account reports those. An erased contact’s orders are listed without the note, which erasure clears. To catch up on changes, ask for `updatedSince` a little before your previous pass began (a minute, say) and expect to see some orders again: a change carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
+          ].join('\n\n'),
+          parameters: [
+            ...pageParams,
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: [...ORDER_STATUSES] },
+              description: 'Only orders in this status.',
+            },
+            {
+              name: 'contactId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the orders of this contact.',
+            },
+            {
+              name: 'conversationId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the orders sent in this conversation.',
+            },
+            {
+              name: 'reference',
+              in: 'query',
+              schema: { type: 'string', pattern: ORDER_REFERENCE_PATTERN },
+              description:
+                'Only the order with this reference, in capitals as members and customers see it.',
+            },
+            {
+              name: 'updatedSince',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description:
+                'Only orders changed at or after this time (received, a new status, or the note cleared when the contact was erased).',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of orders.', content: pageOf('Order') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/orders/{id}': {
+        get: {
+          operationId: 'getOrder',
+          summary: 'A WhatsApp order',
+          description: `${scopeNote('orders.read')} With its items, total and note. Needs Commerce in the company’s plan (403, reason not_in_plan).`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': { description: 'The order.', content: json(dataOf(ref('Order'))) },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+        patch: {
+          operationId: 'updateOrder',
+          summary: 'Confirm, fulfil or cancel a WhatsApp order',
+          description: [
+            `${scopeNote('orders.write')} As members do on the order page: a received order is confirmed or cancelled, a confirmed one fulfilled or cancelled, a paid one fulfilled. Needs Commerce in the company’s plan (403, reason not_in_plan). The order’s \`order.status_changed\` webhook event follows, as for a member’s change.`,
+            'Any other move is refused (409, naming the order’s status, changing nothing), and so is an order not in `expectedStatus` when you give it. Payment statuses come only from Razorpay, and an order waiting for payment is not changed through the API: members cancel its Payment Link in the app first. Nothing is sent to the customer.',
+            'An order that already has the status asked for is answered as it is, whatever `expectedStatus` says, so a retry is safe without an `Idempotency-Key`.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateOrder')) },
+          responses: {
+            '200': {
+              description: 'The order, as it now is.',
+              content: json(dataOf(ref('Order'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -1606,7 +1902,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'message.status': webhook(
         'webhookMessageStatus',
         WEBHOOK_EVENT_INFO['message.status'].label,
-        `${WEBHOOK_EVENT_INFO['message.status'].description} An endpoint receives every status unless it names the ones it takes (its \`messageStatuses\`, or the statuses ticked in Settings → Webhooks); a status no endpoint takes is not recorded.`,
+        `${WEBHOOK_EVENT_INFO['message.status'].description} An endpoint receives every status unless it names the ones it takes (its \`messageStatuses\`, or the statuses ticked in Settings → Webhooks), and the statuses of every message unless it names who sent them (its \`messageSenders\`, as message.sentBy names them, or the senders ticked in Settings → Webhooks); a status no endpoint takes is not recorded.`,
         'WebhookMessageStatus',
       ),
       'consent.changed': webhook(
@@ -1762,6 +2058,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         ContactUpdate: jsonSchema(apiContactUpdateSchema, 'input'),
         UpdateManyContacts: jsonSchema(apiUpdateManyContactsSchema, 'input'),
         ContactSearch: jsonSchema(apiContactSearchSchema, 'input'),
+        UpdateMatchingContacts: jsonSchema(apiUpdateMatchingContactsSchema, 'input'),
         ContactField: jsonSchema(apiContactFieldSchema),
         ContactFieldCreate: jsonSchema(apiContactFieldCreateSchema, 'input'),
         ContactFieldUpdate: jsonSchema(apiContactFieldUpdateSchema, 'input'),
@@ -1780,6 +2077,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         Consent: jsonSchema(apiConsentSchema, 'input'),
         Template: jsonSchema(apiTemplateSchema),
         SendTemplate: jsonSchema(apiSendMessageSchema, 'input'),
+        SendManyTemplates: jsonSchema(apiSendManyTemplatesSchema, 'input'),
+        TemplateSend: jsonSchema(apiTemplateSendSchema),
         SendText: jsonSchema(apiSendTextSchema, 'input'),
         SendButtons: jsonSchema(apiSendButtonsSchema, 'input'),
         SendList: jsonSchema(apiSendListSchema, 'input'),
@@ -1809,11 +2108,15 @@ export function buildOpenApiDocument(serverUrl: string) {
         },
         UpdateConversation: jsonSchema(apiUpdateConversationSchema, 'input'),
         UpdateManyConversations: jsonSchema(apiUpdateManyConversationsSchema, 'input'),
+        UpdateMatchingConversations: jsonSchema(apiUpdateMatchingConversationsSchema, 'input'),
+        Channel: jsonSchema(apiChannelSchema),
         Member: jsonSchema(apiMemberSchema),
         Team: jsonSchema(apiTeamSchema),
         AddConversationNote: jsonSchema(apiAddNoteSchema, 'input'),
         ConversationNote: jsonSchema(apiConversationNoteSchema),
         Campaign: jsonSchema(apiCampaignSchema),
+        Order: jsonSchema(apiOrderSchema),
+        UpdateOrder: jsonSchema(apiUpdateOrderSchema, 'input'),
         CampaignWithResults: jsonSchema(apiCampaignWithResultsSchema),
         CampaignRecipient: jsonSchema(apiCampaignRecipientSchema),
         Automation: jsonSchema(apiAutomationSchema),
@@ -1855,10 +2158,12 @@ export function buildOpenApiDocument(serverUrl: string) {
 /** The routes the document describes: method and path template (checked by a unit test). */
 export const API_ROUTES = [
   ['get', '/templates'],
+  ['get', '/channels'],
   ['get', '/contacts'],
   ['post', '/contacts'],
   ['post', '/contacts/search'],
   ['post', '/contacts/update-many'],
+  ['post', '/contacts/update-matching'],
   ['get', '/contacts/{id}'],
   ['patch', '/contacts/{id}'],
   ['post', '/contacts/{id}/consent'],
@@ -1868,6 +2173,7 @@ export const API_ROUTES = [
   ['delete', '/contact-fields/{key}'],
   ['get', '/contact-changes'],
   ['post', '/messages'],
+  ['post', '/messages/send-many'],
   ['get', '/messages'],
   ['get', '/messages/{id}'],
   ['get', '/message-changes'],
@@ -1875,6 +2181,7 @@ export const API_ROUTES = [
   ['get', '/conversations/{id}'],
   ['patch', '/conversations/{id}'],
   ['post', '/conversations/update-many'],
+  ['post', '/conversations/update-matching'],
   ['post', '/conversations/{id}/notes'],
   ['get', '/conversations/{id}/notes'],
   ['get', '/conversations/{id}/messages'],
@@ -1891,6 +2198,9 @@ export const API_ROUTES = [
   ['get', '/automation-runs/{id}'],
   ['post', '/automation-runs/{id}/stop'],
   ['post', '/automation-runs/stop-many'],
+  ['get', '/orders'],
+  ['get', '/orders/{id}'],
+  ['patch', '/orders/{id}'],
   ['get', '/webhook-endpoints'],
   ['post', '/webhook-endpoints'],
   ['post', '/webhook-endpoints/replay-failed'],

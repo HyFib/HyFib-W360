@@ -42,9 +42,10 @@ export default async function WebhookEndpointPage({
   const endpoint = (await webhooks.list(ctx)).find((e) => e.id === endpointId);
   if (!endpoint) notFound();
   const failedOnly = failed === '1';
-  const [deliveries, automationChoices] = await Promise.all([
+  const [deliveries, automationChoices, channelChoices] = await Promise.all([
     webhooks.deliveries(ctx, { endpointId, failedOnly }),
     webhooks.automationChoices(ctx),
+    webhooks.channelChoices(ctx),
   ]);
   const tz = ctx.tenant.timezone;
   const host = webhookHost(endpoint.url) ?? endpoint.url;
@@ -182,6 +183,7 @@ export default async function WebhookEndpointPage({
               eventTypes: endpoint.eventTypes,
               headerNames: endpoint.headerNames,
               messageStatuses: endpoint.messageStatuses,
+              messageSenders: endpoint.messageSenders,
               contactParts: endpoint.contactParts,
               automationIds: endpoint.automations?.map((a) => a.id) ?? null,
               campaignStatuses: endpoint.campaignStatuses,
@@ -189,8 +191,11 @@ export default async function WebhookEndpointPage({
               templateStatuses: endpoint.templateStatuses,
               conversationStatuses: endpoint.conversationStatuses,
               runEndStatuses: endpoint.runEndStatuses,
+              channelIds: endpoint.channels?.map((c) => c.id) ?? null,
+              oauth: endpoint.oauth,
             }}
             automationChoices={automationChoices}
+            channelChoices={channelChoices}
           />
         </CardContent>
       </Card>

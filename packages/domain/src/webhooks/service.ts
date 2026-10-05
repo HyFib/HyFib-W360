@@ -8,6 +8,7 @@ import {
   asc,
   automationVersions,
   automations,
+  channelAccounts,
   desc,
   eq,
   gt,
@@ -36,23 +37,35 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
+  WEBHOOK_MESSAGE_SENDERS,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_TEMPLATE_STATUSES,
   WEBHOOK_UNATTEMPTED_ERRORS,
   webhookHost,
   webhookTakesAutomationRuns,
+  webhookTakesChannelEvents,
   type WebhookAutomationChoice,
   type WebhookCampaignStatus,
+  type WebhookChannelChoice,
   type WebhookContactPart,
   type WebhookConversationStatus,
   type WebhookEndpointAutomation,
+  type WebhookEndpointChannel,
+  type WebhookEndpointOAuth,
   type WebhookFailureKind,
+  type WebhookMessageSender,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookRunEndStatus,
   type WebhookTemplateStatus,
 } from './model';
+import {
+  webhookOAuthSecretAad,
+  WEBHOOK_OAUTH_CLIENT_RE,
+  WEBHOOK_OAUTH_SCOPE_RE,
+  type WebhookOAuthClient,
+} from './oauth';
 
 /** Binds an endpoint's secret to its company, the endpoint and the secret's version. */
 export const webhookSecretAad = (tenantId: string, endpointId: string, version: number) =>
@@ -131,6 +144,62 @@ export const webhookHeadersSchema = z
   );
 
 /**
+ * An endpoint's OAuth client (ADR-173): the token endpoint of its receiver's authorization server,
+ * the client identifier and secret that server issued, and the scope to ask for, if any (empty or
+ * left out: none). A change may leave the secret out to keep the stored one while the token URL
+ * stays the same.
+ */
+export const webhookOAuthSchema = z
+  .object({
+    tokenUrl: z
+      .string({ error: 'Enter the token URL' })
+      .trim()
+      .min(1, 'Enter the token URL')
+      .max(WEBHOOK_LIMITS.urlLength, 'The token URL is too long'),
+    clientId: z
+      .string({ error: 'Enter the client ID' })
+      .trim()
+      .min(1, 'Enter the client ID')
+      .max(
+        WEBHOOK_LIMITS.oauthClientIdLength,
+        `Client IDs are limited to ${WEBHOOK_LIMITS.oauthClientIdLength} characters.`,
+      )
+      .regex(WEBHOOK_OAUTH_CLIENT_RE, 'Client IDs use printable ASCII characters.'),
+    clientSecret: z
+      .string({ error: 'Enter the client secret.' })
+      .trim()
+      .min(1, 'Enter the client secret.')
+      .max(
+        WEBHOOK_LIMITS.oauthClientSecretLength,
+        `Client secrets are limited to ${WEBHOOK_LIMITS.oauthClientSecretLength} characters.`,
+      )
+      .regex(WEBHOOK_OAUTH_CLIENT_RE, 'Client secrets use printable ASCII characters.')
+      .optional(),
+    scope: z
+      .string()
+      .trim()
+      .max(
+        WEBHOOK_LIMITS.oauthScopeLength,
+        `Scopes are limited to ${WEBHOOK_LIMITS.oauthScopeLength} characters.`,
+      )
+      .refine(
+        (scope) => scope === '' || WEBHOOK_OAUTH_SCOPE_RE.test(scope),
+        'Separate the scope’s values with single spaces; they cannot hold quotes or backslashes.',
+      )
+      .transform((scope) => scope || null)
+      .nullable()
+      .optional(),
+  })
+  .strict();
+export type WebhookOAuthInput = z.output<typeof webhookOAuthSchema>;
+
+export const WEBHOOK_OAUTH_SECRET_NEEDED = 'Enter the client secret.';
+export const WEBHOOK_OAUTH_SECRET_FOR_NEW_URL =
+  'Enter the client secret again: it is sent to the token URL, which changed.';
+export const WEBHOOK_OAUTH_AUTHORIZATION =
+  'An endpoint that gets OAuth tokens sends them as its Authorization header: remove that header, or the OAuth client.';
+
+/**
  * The columns that keep an endpoint's headers: the names as written, and names and values sealed
  * with the keyring, bound to the company and the endpoint. No headers keep nothing sealed.
  */
@@ -204,6 +273,34 @@ export function webhookMessageStatusesFor(
   given: readonly WebhookMessageStatus[] | null | undefined,
   current: readonly WebhookMessageStatus[] | null,
 ): WebhookMessageStatus[] | null {
+  if (!eventTypes.includes('message.status')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Who sent the messages whose `message.status` an endpoint takes (ADR-172), in the order Settings
+ * lists them; null takes every sender.
+ */
+export const webhookMessageSendersSchema = z
+  .array(z.enum(WEBHOOK_MESSAGE_SENDERS, { error: 'Choose who sent the messages from the list.' }))
+  .min(1, 'Choose at least one sender, or take the statuses of every message.')
+  .max(WEBHOOK_MESSAGE_SENDERS.length, 'Give each sender once.')
+  .transform((chosen) => WEBHOOK_MESSAGE_SENDERS.filter((sender) => chosen.includes(sender)))
+  .nullable();
+
+export const WEBHOOK_SENDERS_NEED_THE_EVENT =
+  'Choose who sent the messages only for an endpoint that receives Message status.';
+
+/**
+ * The senders an endpoint keeps after it is added or changed: every sender (null) unless it takes
+ * `message.status`; then those given, or else the ones it had.
+ */
+export function webhookMessageSendersFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookMessageSender[] | null | undefined,
+  current: readonly WebhookMessageSender[] | null,
+): WebhookMessageSender[] | null {
   if (!eventTypes.includes('message.status')) return null;
   const kept = given === undefined ? current : given;
   return kept ? [...kept] : null;
@@ -440,6 +537,82 @@ export async function assertWebhookAutomations(
   });
 }
 
+/**
+ * The WhatsApp numbers whose events an endpoint takes (ADR-170), each once; null takes every
+ * number, including numbers connected later.
+ */
+export const webhookChannelIdsSchema = z
+  .array(z.uuid({ error: 'Choose numbers from the list.' }))
+  .min(1, 'Choose at least one number, or take every number.')
+  .max(WEBHOOK_LIMITS.channels, `Choose at most ${WEBHOOK_LIMITS.channels} numbers.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_CHANNELS_NEED_THE_EVENTS =
+  'Choose numbers only for an endpoint that receives message, conversation, automation, order or campaign events.';
+
+export const WEBHOOK_CHANNELS_NOT_FOUND = 'Choose WhatsApp numbers of this company.';
+
+/**
+ * The numbers an endpoint keeps after it is added or changed: every number (null) unless it takes
+ * an event of a number; then those given, or else the ones it had.
+ */
+export function webhookChannelIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesChannelEvents(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses numbers given for an endpoint unless each is the company's (ADR-170). A company's
+ * numbers are never deleted, only disconnected, so a list never names one that is gone. `tx` is in
+ * the company's scope.
+ */
+export async function assertWebhookChannels(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+): Promise<void> {
+  if (!ids || ids.length === 0) return;
+  const rows = await tx
+    .select({ id: channelAccounts.id })
+    .from(channelAccounts)
+    .where(and(eq(channelAccounts.tenantId, tenantId), inArray(channelAccounts.id, [...ids])));
+  const found = new Set(rows.map((r) => r.id));
+  const index = ids.findIndex((id) => !found.has(id));
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_CHANNELS_NOT_FOUND, {
+    issues: [{ path: `channelIds.${index}`, message: WEBHOOK_CHANNELS_NOT_FOUND }],
+  });
+}
+
+/**
+ * How Settings → Webhooks names a number (ADR-170): the number and the name WhatsApp verified for
+ * it, or Meta's id for it until Meta reports them.
+ */
+export function webhookChannelLabel(channel: {
+  displayPhoneNumber: string | null;
+  verifiedName: string | null;
+  phoneNumberId: string;
+}): string {
+  const { displayPhoneNumber: phone, verifiedName: name } = channel;
+  if (phone && name) return `${phone} · ${name}`;
+  return phone ?? name ?? `Phone number ID ${channel.phoneNumberId}`;
+}
+
+/** The columns `webhookChannelLabel` reads, with the number's id and status. */
+const channelChoiceColumns = {
+  id: channelAccounts.id,
+  displayPhoneNumber: channelAccounts.displayPhoneNumber,
+  verifiedName: channelAccounts.verifiedName,
+  phoneNumberId: channelAccounts.phoneNumberId,
+  status: channelAccounts.status,
+};
+
 /** A new signing secret: `whsec_` and 32 random bytes. */
 export function generateWebhookSecret(): string {
   return `whsec_${randomBytes(32).toString('base64url')}`;
@@ -474,6 +647,11 @@ const endpointFields = z.object({
   /** Given, the `message.status` statuses it takes (null: every status); left out, they stay. */
   messageStatuses: webhookMessageStatusesSchema.optional(),
   /**
+   * Given, who sent the messages whose statuses it takes (null: every sender, ADR-172); left out,
+   * they stay.
+   */
+  messageSenders: webhookMessageSendersSchema.optional(),
+  /**
    * Given, the contact parts it takes as `contact.updated` (null: every change); left out, they
    * stay.
    */
@@ -497,12 +675,24 @@ const endpointFields = z.object({
   conversationStatuses: webhookConversationStatusesSchema.optional(),
   /** Given, how the runs it takes ended (null: every end, ADR-151); left out, they stay. */
   runEndStatuses: webhookRunEndStatusesSchema.optional(),
+  /**
+   * Given, the numbers whose events it takes (null: every number, ADR-170); left out, they stay.
+   */
+  channelIds: webhookChannelIdsSchema.optional(),
+  /** Given, its OAuth client (null: none, ADR-173); left out, it stays. */
+  oauth: webhookOAuthSchema.nullable().optional(),
 });
 /** Statuses are chosen only for an endpoint that takes `message.status`. */
 const statusesNeedTheEvent = {
   check: (data: { eventTypes: WebhookEventType[]; messageStatuses?: unknown }) =>
     !data.messageStatuses || data.eventTypes.includes('message.status'),
   options: { path: ['messageStatuses'], message: WEBHOOK_STATUSES_NEED_THE_EVENT },
+};
+/** Senders are chosen only for an endpoint that takes `message.status` (ADR-172). */
+const sendersNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; messageSenders?: unknown }) =>
+    !data.messageSenders || data.eventTypes.includes('message.status'),
+  options: { path: ['messageSenders'], message: WEBHOOK_SENDERS_NEED_THE_EVENT },
 };
 /** Contact parts are chosen only for an endpoint that takes `contact.updated` (ADR-123). */
 const partsNeedTheEvent = {
@@ -549,26 +739,36 @@ const runEndStatusesNeedTheEvent = {
     !data.runEndStatuses || data.eventTypes.includes('automation.run_ended'),
   options: { path: ['runEndStatuses'], message: WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT },
 };
+/** Numbers are chosen only for an endpoint that takes events of numbers (ADR-170). */
+const channelsNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; channelIds?: unknown }) =>
+    !data.channelIds || webhookTakesChannelEvents(data.eventTypes),
+  options: { path: ['channelIds'], message: WEBHOOK_CHANNELS_NEED_THE_EVENTS },
+};
 const endpointSchema = endpointFields
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
+  .refine(sendersNeedTheEvent.check, sendersNeedTheEvent.options)
   .refine(partsNeedTheEvent.check, partsNeedTheEvent.options)
   .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options)
   .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
   .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
   .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
-  .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options);
+  .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
+  .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options);
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointFields
   .extend({ endpointId: z.uuid() })
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
+  .refine(sendersNeedTheEvent.check, sendersNeedTheEvent.options)
   .refine(partsNeedTheEvent.check, partsNeedTheEvent.options)
   .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options)
   .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
   .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
   .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
-  .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options);
+  .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
+  .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
 const replayAllFailedSchema = z.object({
@@ -599,6 +799,8 @@ export interface WebhookEndpointView {
   headerNames: string[];
   /** The `message.status` statuses it takes (ADR-119); null takes every status. */
   messageStatuses: WebhookMessageStatus[] | null;
+  /** Who sent the messages whose statuses it takes (ADR-172); null takes every sender. */
+  messageSenders: WebhookMessageSender[] | null;
   /** The contact parts it takes as `contact.updated` (ADR-123); null takes every change. */
   contactParts: WebhookContactPart[] | null;
   /**
@@ -616,6 +818,10 @@ export interface WebhookEndpointView {
   conversationStatuses: WebhookConversationStatus[] | null;
   /** How the runs it takes as `automation.run_ended` ended (ADR-151); null takes every end. */
   runEndStatuses: WebhookRunEndStatus[] | null;
+  /** The numbers whose events it takes (ADR-170), as stored, named; null takes every number. */
+  channels: WebhookEndpointChannel[] | null;
+  /** Where it gets OAuth tokens and as which client (ADR-173); the secret is never shown. */
+  oauth: WebhookEndpointOAuth | null;
   createdAt: Date;
   /** The member who added the endpoint in settings (null once their account is gone). */
   createdBy: string | null;
@@ -642,26 +848,165 @@ export interface WebhookDeliveryView {
   createdAt: Date;
 }
 
-const invalidUrl = (message: string) =>
-  new AppError('validation_failed', message, { issues: [{ path: 'url', message }] });
-
-/** The URL as it will be called, after the egress guard's rules (https, no credentials, ports). */
+/**
+ * The URL as it will be called, after the egress guard's rules (https, no credentials, ports): an
+ * endpoint's (`url`), or its OAuth token URL (`oauth.tokenUrl`, ADR-173), which is held to the
+ * same rules.
+ */
 export function checkedWebhookUrl(
   raw: string,
   policy: Pick<EgressPolicy, 'allowLoopbackForTests'>,
+  path: 'url' | 'oauth.tokenUrl' = 'url',
 ) {
+  const invalid = (message: string) =>
+    new AppError('validation_failed', message, { issues: [{ path, message }] });
   let target: ReturnType<typeof parseEgressUrl>;
   try {
     target = parseEgressUrl(raw, policy);
   } catch (error) {
-    if (error instanceof EgressError) throw invalidUrl(error.message);
+    if (error instanceof EgressError) throw invalid(error.message);
     throw error;
   }
   target.url.hash = '';
   const url = target.url.toString();
   // Normalising (percent-encoding) can lengthen what was entered.
-  if (url.length > WEBHOOK_LIMITS.urlLength) throw invalidUrl('The URL is too long');
+  if (url.length > WEBHOOK_LIMITS.urlLength) {
+    throw invalid(path === 'url' ? 'The URL is too long' : 'The token URL is too long');
+  }
   return { url, host: target.hostname };
+}
+
+/** An endpoint's OAuth columns (ADR-173): all null without an OAuth client. */
+export interface WebhookOAuthColumns {
+  oauthTokenUrl: string | null;
+  oauthClientId: string | null;
+  oauthClientSecretCiphertext: string | null;
+  oauthScope: string | null;
+}
+
+export const NO_WEBHOOK_OAUTH: WebhookOAuthColumns = {
+  oauthTokenUrl: null,
+  oauthClientId: null,
+  oauthClientSecretCiphertext: null,
+  oauthScope: null,
+};
+
+/**
+ * An OAuth client given for an endpoint, its token URL checked; a null secret keeps the stored one.
+ */
+export interface CheckedWebhookOAuth extends Omit<WebhookOAuthClient, 'clientSecret'> {
+  clientSecret: string | null;
+  /** The token URL's host, the only part of it audit entries name. */
+  host: string;
+}
+
+/**
+ * Checks an OAuth client given for an endpoint (ADR-173): its token URL like an endpoint's URL, and
+ * that a secret is given unless the endpoint keeps the one it has, which it can only while the token
+ * URL stays the same, since the secret is sent there.
+ */
+export function checkedWebhookOAuth(
+  given: WebhookOAuthInput,
+  current: WebhookOAuthColumns,
+  policy: Pick<EgressPolicy, 'allowLoopbackForTests'>,
+): CheckedWebhookOAuth {
+  const { url, host } = checkedWebhookUrl(given.tokenUrl, policy, 'oauth.tokenUrl');
+  const keeps = current.oauthClientSecretCiphertext !== null && current.oauthTokenUrl === url;
+  if (given.clientSecret === undefined && !keeps) {
+    const message = current.oauthTokenUrl
+      ? WEBHOOK_OAUTH_SECRET_FOR_NEW_URL
+      : WEBHOOK_OAUTH_SECRET_NEEDED;
+    throw new AppError('validation_failed', message, {
+      issues: [{ path: 'oauth.clientSecret', message }],
+    });
+  }
+  return {
+    tokenUrl: url,
+    host,
+    clientId: given.clientId,
+    clientSecret: given.clientSecret ?? null,
+    scope: given.scope ?? null,
+  };
+}
+
+/**
+ * The OAuth columns an endpoint keeps (ADR-173): none without a client; else the client, its secret
+ * sealed with the keyring, bound to the company and the endpoint, or the one it has kept.
+ */
+export function webhookOAuthColumns(
+  keyring: Keyring,
+  tenantId: string,
+  endpointId: string,
+  oauth: CheckedWebhookOAuth | null,
+  current: WebhookOAuthColumns,
+): WebhookOAuthColumns {
+  if (!oauth) return NO_WEBHOOK_OAUTH;
+  let sealed = current.oauthClientSecretCiphertext;
+  if (oauth.clientSecret !== null) {
+    sealed = keyring.encrypt(oauth.clientSecret, webhookOAuthSecretAad(tenantId, endpointId));
+  }
+  if (!sealed) throw new Error('An OAuth client kept its secret without one stored');
+  return {
+    oauthTokenUrl: oauth.tokenUrl,
+    oauthClientId: oauth.clientId,
+    oauthClientSecretCiphertext: sealed,
+    oauthScope: oauth.scope,
+  };
+}
+
+/**
+ * An endpoint's OAuth client, opened for its token requests, or null without one. Throws when the
+ * keyring cannot open the secret (a key the platform no longer holds).
+ */
+export function openWebhookOAuthClient(
+  keyring: Keyring,
+  tenantId: string,
+  endpointId: string,
+  columns: WebhookOAuthColumns,
+): WebhookOAuthClient | null {
+  const { oauthTokenUrl, oauthClientId, oauthClientSecretCiphertext } = columns;
+  if (!oauthTokenUrl || !oauthClientId || !oauthClientSecretCiphertext) return null;
+  return {
+    tokenUrl: oauthTokenUrl,
+    clientId: oauthClientId,
+    clientSecret: keyring.decryptString(
+      oauthClientSecretCiphertext,
+      webhookOAuthSecretAad(tenantId, endpointId),
+    ),
+    scope: columns.oauthScope,
+  };
+}
+
+/**
+ * An endpoint either gets OAuth tokens or sends an Authorization header of its own, since the token
+ * goes in that header (ADR-173). `headersGiven`: the headers the request gave, to name the one at
+ * fault; else the OAuth client is.
+ */
+export function assertWebhookAuthorization(
+  headerNames: readonly string[],
+  oauth: boolean,
+  headersGiven: readonly WebhookHeader[] | undefined,
+): void {
+  if (!oauth) return;
+  const index = headerNames.findIndex((name) => name.toLowerCase() === 'authorization');
+  if (index === -1) return;
+  const path = headersGiven ? `headers.${index}.name` : 'oauth';
+  throw new AppError('validation_failed', WEBHOOK_OAUTH_AUTHORIZATION, {
+    issues: [{ path, message: WEBHOOK_OAUTH_AUTHORIZATION }],
+  });
+}
+
+/**
+ * What a change's audit entry says of the endpoint's OAuth client (ADR-173): the token URL's host
+ * and whether a new secret was given, or that the client was removed; nothing when it was left out.
+ */
+export function webhookOAuthAudit(
+  oauth: CheckedWebhookOAuth | null | undefined,
+  current: WebhookOAuthColumns,
+): Record<string, unknown> {
+  if (oauth === undefined) return {};
+  if (oauth === null) return current.oauthTokenUrl ? { oauthRemoved: true } : {};
+  return { oauthTokenHost: oauth.host, oauthSecretReplaced: oauth.clientSecret !== null };
 }
 
 /** Takes the company's endpoint lock, so two creations cannot pass the endpoint limit together. */
@@ -692,6 +1037,7 @@ export async function lockWebhookEndpoint(
       secretCiphertext: webhookEndpoints.secretCiphertext,
       eventTypes: webhookEndpoints.eventTypes,
       messageStatuses: webhookEndpoints.messageStatuses,
+      messageSenders: webhookEndpoints.messageSenders,
       contactParts: webhookEndpoints.contactParts,
       automationIds: webhookEndpoints.automationIds,
       campaignStatuses: webhookEndpoints.campaignStatuses,
@@ -699,6 +1045,12 @@ export async function lockWebhookEndpoint(
       templateStatuses: webhookEndpoints.templateStatuses,
       conversationStatuses: webhookEndpoints.conversationStatuses,
       runEndStatuses: webhookEndpoints.runEndStatuses,
+      channelAccountIds: webhookEndpoints.channelAccountIds,
+      headerNames: webhookEndpoints.headerNames,
+      oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
+      oauthClientId: webhookEndpoints.oauthClientId,
+      oauthClientSecretCiphertext: webhookEndpoints.oauthClientSecretCiphertext,
+      oauthScope: webhookEndpoints.oauthScope,
     })
     .from(webhookEndpoints)
     .where(
@@ -732,6 +1084,7 @@ export async function insertWebhookEndpoint(
     eventTypes: WebhookEventType[];
     headers: readonly WebhookHeader[];
     messageStatuses: WebhookMessageStatus[] | null;
+    messageSenders: WebhookMessageSender[] | null;
     contactParts: WebhookContactPart[] | null;
     automationIds: string[] | null;
     campaignStatuses: WebhookCampaignStatus[] | null;
@@ -739,6 +1092,9 @@ export async function insertWebhookEndpoint(
     templateStatuses: WebhookTemplateStatus[] | null;
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
+    channelAccountIds: string[] | null;
+    /** Its OAuth client (ADR-173), checked by `checkedWebhookOAuth` with nothing stored. */
+    oauth: CheckedWebhookOAuth | null;
     creator: WebhookEndpointCreator;
   },
 ): Promise<{ id: string; secret: string }> {
@@ -764,6 +1120,7 @@ export async function insertWebhookEndpoint(
     secretCiphertext: keyring.encrypt(secret, webhookSecretAad(tenantId, id, 1)),
     ...sealWebhookHeaders(keyring, tenantId, id, input.headers),
     messageStatuses: input.messageStatuses,
+    messageSenders: input.messageSenders,
     contactParts: input.contactParts,
     automationIds: input.automationIds,
     campaignStatuses: input.campaignStatuses,
@@ -771,6 +1128,8 @@ export async function insertWebhookEndpoint(
     templateStatuses: input.templateStatuses,
     conversationStatuses: input.conversationStatuses,
     runEndStatuses: input.runEndStatuses,
+    channelAccountIds: input.channelAccountIds,
+    ...webhookOAuthColumns(keyring, tenantId, id, input.oauth, NO_WEBHOOK_OAUTH),
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
   });
@@ -1146,6 +1505,7 @@ export function createWebhooksService(deps: {
               previousSecretExpiresAt: webhookEndpoints.previousSecretExpiresAt,
               headerNames: webhookEndpoints.headerNames,
               messageStatuses: webhookEndpoints.messageStatuses,
+              messageSenders: webhookEndpoints.messageSenders,
               contactParts: webhookEndpoints.contactParts,
               automationIds: webhookEndpoints.automationIds,
               campaignStatuses: webhookEndpoints.campaignStatuses,
@@ -1153,6 +1513,10 @@ export function createWebhooksService(deps: {
               templateStatuses: webhookEndpoints.templateStatuses,
               conversationStatuses: webhookEndpoints.conversationStatuses,
               runEndStatuses: webhookEndpoints.runEndStatuses,
+              channelAccountIds: webhookEndpoints.channelAccountIds,
+              oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
+              oauthClientId: webhookEndpoints.oauthClientId,
+              oauthScope: webhookEndpoints.oauthScope,
               createdAt: webhookEndpoints.createdAt,
               createdBy: users.name,
               keyName: apiKeys.name,
@@ -1199,6 +1563,21 @@ export function createWebhooksService(deps: {
                     and(eq(automations.tenantId, ctx.tenant.id), inArray(automations.id, chosen)),
                   );
           const byId = new Map(named.map((a) => [a.id, a]));
+          // The numbers endpoints chose (ADR-170).
+          const numbers = [...new Set(rows.flatMap((r) => r.channelAccountIds ?? []))];
+          const numbered =
+            numbers.length === 0
+              ? []
+              : await tx
+                  .select(channelChoiceColumns)
+                  .from(channelAccounts)
+                  .where(
+                    and(
+                      eq(channelAccounts.tenantId, ctx.tenant.id),
+                      inArray(channelAccounts.id, numbers),
+                    ),
+                  );
+          const numberById = new Map(numbered.map((n) => [n.id, n]));
           return rows.map((r) => {
             const recent: Record<WebhookDeliveryState, number> = {
               pending: 0,
@@ -1208,9 +1587,30 @@ export function createWebhooksService(deps: {
             };
             for (const c of counts) if (c.endpointId === r.id) recent[c.state] = c.n;
             const previousSigns = r.previousSecretExpiresAt && r.previousSecretExpiresAt > now;
-            const { keyName, keyPrefix, automationIds, ...endpoint } = r;
+            const {
+              keyName,
+              keyPrefix,
+              automationIds,
+              channelAccountIds,
+              oauthTokenUrl,
+              oauthClientId,
+              oauthScope,
+              ...endpoint
+            } = r;
             return {
               ...endpoint,
+              oauth:
+                oauthTokenUrl && oauthClientId
+                  ? { tokenUrl: oauthTokenUrl, clientId: oauthClientId, scope: oauthScope }
+                  : null,
+              channels: channelAccountIds
+                ? channelAccountIds.map((id): WebhookEndpointChannel => {
+                    const number = numberById.get(id);
+                    return number
+                      ? { id, label: webhookChannelLabel(number), status: number.status }
+                      : { id, label: 'Unknown number', status: null };
+                  })
+                : null,
               automations: automationIds
                 ? automationIds.map((id) => {
                     const automation = byId.get(id);
@@ -1266,6 +1666,26 @@ export function createWebhooksService(deps: {
       );
     },
 
+    /**
+     * The numbers an endpoint can choose to take the events of (ADR-170): every WhatsApp number of
+     * the company, in the order they were connected, whatever their status. Numbers are never
+     * deleted, so a list always shows the numbers it holds.
+     */
+    async channelChoices(ctx: TenantContext): Promise<WebhookChannelChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      const rows = await db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select(channelChoiceColumns)
+            .from(channelAccounts)
+            .where(eq(channelAccounts.tenantId, ctx.tenant.id))
+            .orderBy(asc(channelAccounts.createdAt), asc(channelAccounts.id)),
+        { accessMode: 'read only' },
+      );
+      return rows.map((r) => ({ id: r.id, label: webhookChannelLabel(r), status: r.status }));
+    },
+
     /** A new endpoint; its secret is returned once. */
     async create(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
@@ -1279,6 +1699,7 @@ export function createWebhooksService(deps: {
           data.messageStatuses,
           null,
         );
+        const messageSenders = webhookMessageSendersFor(data.eventTypes, data.messageSenders, null);
         const contactParts = webhookContactPartsFor(data.eventTypes, data.contactParts, null);
         const automationIds = webhookAutomationIdsFor(data.eventTypes, data.automationIds, null);
         await assertWebhookAutomations(tx, ctx.tenant.id, automationIds);
@@ -1299,12 +1720,23 @@ export function createWebhooksService(deps: {
           null,
         );
         const runEndStatuses = webhookRunEndStatusesFor(data.eventTypes, data.runEndStatuses, null);
+        const channelIds = webhookChannelIdsFor(data.eventTypes, data.channelIds, null);
+        await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
+        const oauth = data.oauth
+          ? checkedWebhookOAuth(data.oauth, NO_WEBHOOK_OAUTH, deps.egressPolicy)
+          : null;
+        assertWebhookAuthorization(
+          headers.map((h) => h.name),
+          oauth !== null,
+          data.headers,
+        );
         const { id, secret } = await insertWebhookEndpoint(tx, keyring, ctx.tenant.id, {
           url,
           description: data.description || null,
           eventTypes: data.eventTypes,
           headers,
           messageStatuses,
+          messageSenders,
           contactParts,
           automationIds,
           campaignStatuses,
@@ -1312,6 +1744,8 @@ export function createWebhooksService(deps: {
           templateStatuses,
           conversationStatuses,
           runEndStatuses,
+          channelAccountIds: channelIds,
+          oauth,
           creator: { userId: ctx.user.id },
         });
         await recordAudit(
@@ -1326,6 +1760,7 @@ export function createWebhooksService(deps: {
               eventTypes: data.eventTypes,
               ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
               ...(messageStatuses ? { messageStatuses } : {}),
+              ...(messageSenders ? { messageSenders } : {}),
               ...(contactParts ? { contactParts } : {}),
               ...(automationIds ? { automationIds } : {}),
               ...(campaignStatuses ? { campaignStatuses } : {}),
@@ -1333,6 +1768,8 @@ export function createWebhooksService(deps: {
               ...(templateStatuses ? { templateStatuses } : {}),
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
+              ...(channelIds ? { channelIds } : {}),
+              ...(oauth ? { oauthTokenHost: oauth.host } : {}),
             },
           },
           meta,
@@ -1352,6 +1789,11 @@ export function createWebhooksService(deps: {
           data.eventTypes,
           data.messageStatuses,
           endpoint.messageStatuses,
+        );
+        const messageSenders = webhookMessageSendersFor(
+          data.eventTypes,
+          data.messageSenders,
+          endpoint.messageSenders,
         );
         const contactParts = webhookContactPartsFor(
           data.eventTypes,
@@ -1392,6 +1834,24 @@ export function createWebhooksService(deps: {
           data.runEndStatuses,
           endpoint.runEndStatuses,
         );
+        const channelIds = webhookChannelIdsFor(
+          data.eventTypes,
+          data.channelIds,
+          endpoint.channelAccountIds,
+        );
+        // Only a list given now is checked: the numbers kept were checked when chosen.
+        if (data.channelIds !== undefined) {
+          await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
+        }
+        // Left out, the OAuth client stays as it is (ADR-173).
+        const oauth = data.oauth
+          ? checkedWebhookOAuth(data.oauth, endpoint, deps.egressPolicy)
+          : data.oauth;
+        assertWebhookAuthorization(
+          data.headers ? data.headers.map((h) => h.name) : endpoint.headerNames,
+          oauth === undefined ? endpoint.oauthTokenUrl !== null : oauth !== null,
+          data.headers,
+        );
         await tx
           .update(webhookEndpoints)
           .set({
@@ -1399,6 +1859,7 @@ export function createWebhooksService(deps: {
             description: data.description || null,
             eventTypes: data.eventTypes,
             messageStatuses,
+            messageSenders,
             contactParts,
             automationIds,
             campaignStatuses,
@@ -1406,8 +1867,12 @@ export function createWebhooksService(deps: {
             templateStatuses,
             conversationStatuses,
             runEndStatuses,
+            channelAccountIds: channelIds,
             ...(data.headers
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
+              : {}),
+            ...(oauth !== undefined
+              ? webhookOAuthColumns(keyring, ctx.tenant.id, data.endpointId, oauth, endpoint)
               : {}),
             updatedAt: clock.now(),
           })
@@ -1429,6 +1894,7 @@ export function createWebhooksService(deps: {
               eventTypes: data.eventTypes,
               ...(data.headers ? { headers: data.headers.map((h) => h.name) } : {}),
               ...(messageStatuses ? { messageStatuses } : {}),
+              ...(messageSenders ? { messageSenders } : {}),
               ...(contactParts ? { contactParts } : {}),
               ...(automationIds ? { automationIds } : {}),
               ...(campaignStatuses ? { campaignStatuses } : {}),
@@ -1436,6 +1902,8 @@ export function createWebhooksService(deps: {
               ...(templateStatuses ? { templateStatuses } : {}),
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
+              ...(channelIds ? { channelIds } : {}),
+              ...webhookOAuthAudit(oauth, endpoint),
             },
           },
           meta,

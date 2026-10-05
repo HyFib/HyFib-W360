@@ -1,5 +1,653 @@
 # Progress
 
+## 2026-10-05 — Phase 5: OAuth 2.0 client credentials for webhook endpoints (P5-09, ADR-173)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers and
+authorization servers only).** A receiver protected by OAuth 2.0 needed a proxy that fetched tokens.
+The local PostgreSQL is unavailable (its Docker daemon stopped), so migration 0121, the integration
+tests and the e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-173):** an optional OAuth client per endpoint (token URL, client ID, sealed secret,
+  scope); the worker asks for a token with the client credentials grant through the egress client,
+  sends it as a bearer token and keeps it in memory only; the secret needed again for a new token
+  URL; no `Authorization` header of the endpoint's own beside a client.
+- **Database:** migration 0121 (the four columns and their check, the column grants,
+  `ops.sealed_value_keys()` with the OAuth secrets); the schema's columns (`packages/db`).
+- **Domain:** `webhooks/oauth.ts` (the token request and answer, `fetchWebhookOAuthToken`,
+  `WebhookOAuthTokenCache`); in the service the client's schema, checks, sealing and opening
+  (`webhookOAuthSchema`, `checkedWebhookOAuth`, `webhookOAuthColumns`, `openWebhookOAuthClient`,
+  `assertWebhookAuthorization`, `webhookOAuthAudit`), create, update and the view; the delivery job
+  (`sendDelivery`, the stage `oauth`, the longer lease); the error labels and the failure kind's
+  words; `oauth` in the API and the OpenAPI document; the sealed kind `webhook_oauth_secret`; the
+  export columns.
+- **Worker:** one `WebhookOAuthTokenCache` per process, passed to every delivery job.
+- **Web:** "OAuth 2.0" in the endpoint form (a new client, or keep, change or remove the stored one,
+  the secret left empty to keep it) and "OAuth access tokens from …" on the endpoints list.
+- **Tests:**
+  - Unit (9 new in `oauth.test.ts`, 7 new in `webhooks.test.ts`, 1 new and 1 changed in
+    `api.test.ts`, 1 changed in `reseal.test.ts`): the request, the answer, the lifetime, the egress
+    errors, the tokens kept, the client's rules, sealing, the header conflict, the audit, the
+    labels, the API schemas, the OpenAPI entries and the sealed kinds of the latest migration.
+  - Integration (7 new in `webhooks.test.ts`, 1 new in `api-webhook-endpoints.test.ts`;
+    `keyring-reseal.test.ts` and `company-data.test.ts` extended; the delivery jobs of the other
+    files given a token cache): see H-014. Written for CI; not run here.
+  - E2E (1 new in `webhooks.spec.ts`, the failures' words updated there): a client set in Settings
+    and delivered with its token, changed with the secret given again, removed, and given by an API
+    key. Written for CI; not run here.
+- **Docs:** ADR-173 (and ADR-118's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T168; DEPLOYMENT and RUNBOOKS (migration 0121, token failures); DATA-RETENTION; BACKLOG P5-09;
+  feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 39 deliberate regressions tried, all caught on the unit-tested parts (the
+  request's scope and encoding, other statuses, any token text or length, the type's case, the
+  lifetime's limit, margin and text form, when it is timed, egress errors thrown, the tokens kept,
+  shared, dropped and evicted, the client's rules, the secret kept for another token URL, the field
+  named, the binding, the scope opened, the header conflict and its field, the audit, the labels,
+  the API's schemas, the OpenAPI answer and overview, the sealed kind). The delivery job and the
+  form need the database or a browser, so their regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 789 passed (80 files)                                                |
+| `pnpm test:integration`, e2e, migration 0121       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 39 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Other grants and client authentication methods, the client in the request body, token revocation,
+  tokens shared by endpoints, refreshing ahead of need.
+
+## 2026-10-05 — Fixes found by CI: six integration tests of ADR-163 to ADR-172
+
+Status: **Fixed; the integration suite runs in CI only.** The first CI run of the ten slices (PR
+#32) failed six integration tests on PostgreSQL 18 and 17; none had run anywhere before (the local
+PostgreSQL is unavailable). One found a duplicated refusal in the API; the others were tests that
+did not match the database or what an earlier slice changed.
+
+### Completed
+
+- **ADR-164 (the API):** a contact search with more than 20 conditions was refused twice under
+  `conditions`, once by the list's limit and once by the count across groups. The count now leaves a
+  list over the limit to the limit, so it is refused once (`api/contact-search.ts`); a unit test
+  covers it.
+- **ADR-168 (the test):** audit entries were ordered by a column they do not have; they are ordered
+  by `occurred_at`.
+- **ADR-169 (the tests):** an unverified dead letter was written with a kind, a company and a
+  reference, which 0026's check refuses (the worker keeps none for an envelope that did not verify);
+  the helper now writes them only for a verified one. ADR-158's test of the dead letters' CSV now
+  expects the "Acknowledged (UTC)" column ADR-169 added, empty there.
+- **ADR-170 and ADR-172 (the test):** the API test of a new endpoint now expects `channelIds` and
+  `messageSenders`, null.
+- **Template sync requests (the test):** the test looked for the company's account in
+  `ops.template_sync_due`'s list, which holds at most 500 accounts, those never synced first; the
+  suite's shared database now holds more connected accounts that never synced, so the account was
+  left out. The test now reads the account's sync request itself, as the sweep does.
+- **ADR-167 (the test), found by the second run:** on PostgreSQL 17 the run of the fixes above
+  reported an unhandled error: the test started both reads refused for a plan without Commerce
+  before awaiting the first, and the second was refused while nothing waited for it (whether that
+  happens depends on timing; the PostgreSQL 18 run did not report it). Each read now starts when it
+  is awaited; a scan of the integration tests found no other list of calls started before they are
+  awaited that touch the database.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                         |
+| -------------------------------------------------- | -------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                          |
+| `pnpm test` (unit)                                 | 772 passed (79 files); the new assertion fails without the fix |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it  |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                 |
+
+## 2026-10-05 — Phase 5: choosing who sent the messages whose statuses a webhook endpoint receives (P5-09, ADR-172)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every
+endpoint taking message statuses received every message's. The local PostgreSQL is unavailable (its
+Docker daemon stopped), so migration 0120, the integration tests and the e2e step below were written
+but not run here.
+
+### Completed
+
+- **Design (ADR-172):** `messageSenders`, null for every message or 1 to 5 of `agent`, `bot`,
+  `campaign`, `api` and `system`, only with `message.status`; applied where events are captured.
+- **Database:** migration 0120 (the column and its check, the column grant,
+  `app.capture_webhook_event` and the message trigger passing the sender, which is not stored); the
+  schema's column (`packages/db`).
+- **Domain:** the list's schema and keeping (`webhookMessageSendersSchema`,
+  `webhookMessageSendersFor`), create and update with the audit, the endpoint view;
+  `WEBHOOK_MESSAGE_SENDERS` and their labels in the model; `messageSenders` in the API and the
+  OpenAPI document; the export column.
+- **Web:** "Messages sent by" under "Message status" in the endpoint form and "Statuses of messages
+  sent by: …" on the endpoints list.
+- **Tests:**
+  - Unit (2 new in `webhooks.test.ts`, 1 new and 1 changed in `api.test.ts`): the list's rules,
+    keeping and clearing, the labels, the API schemas and the OpenAPI entries.
+  - Integration (2 new in `webhooks.test.ts`, 1 new in `api-webhook-endpoints.test.ts`): refusals,
+    keeping and clearing, audits, the check and the grant, and capture of a member's and the API's
+    replies. Written for CI; not run here.
+  - E2E (`webhooks.spec.ts`, the message status test extended): an endpoint narrowed to the API's
+    messages. Written for CI; not run here.
+- **Docs:** ADR-172 (and ADR-119's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T167; DEPLOYMENT and RUNBOOKS (migration 0120, a receiver missing some statuses); BACKLOG P5-09;
+  feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 13 deliberate regressions tried, all caught on the unit-tested parts (an
+  empty or long list, order and repeats kept, any sender taken, a list kept without its event or by
+  a null, a sender not offered, a label, the API's refinement, change rule and field, the OpenAPI
+  field and the event's description). The capture and the form need the database or a browser, so
+  their regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 772 passed (79 files)                                                |
+| `pnpm test:integration`, e2e, migration 0120       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 13 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Statuses of the messages one key, campaign, automation or template sent.
+
+## 2026-10-05 — Phase 5: reading the company's WhatsApp numbers through the public API (P5-08, ADR-171)
+
+Status: **Implemented; its database and browser tests run in CI only.** Keys named numbers by id
+everywhere but could not list them. The local PostgreSQL is unavailable (its Docker daemon stopped),
+so migration 0119, the integration test and the e2e step below were written but not run here.
+
+### Completed
+
+- **Design (ADR-171):** a reading scope `channels.read`, granted with the permission of the same
+  name; `GET /channels` with every number oldest first, filtered by status, each with its number,
+  verified name, status and time added, never Meta's ids.
+- **Database:** migration 0119 (the key and plan scope checks); the scope in the schema's list
+  (`packages/db`).
+- **Domain:** `apiListChannels` (`api/channels.ts`), the scope's description, the operation and its
+  `Channel` schema in the OpenAPI document.
+- **Web:** the route `GET /api/v1/channels`; Settings → API keys and the platform plan pages offer
+  the scope from the list.
+- **Tests:**
+  - Unit (5 new in `channels.test.ts`, 1 changed in `api.test.ts`): the scope, its permission, place
+    and words, the parameters, refusals before anything is read, the read-only transaction, the
+    operation and its schema.
+  - Integration (1 new in `api.test.ts`): every number in order with its fields, pages, the status
+    filter, Meta's ids absent, the scope refused, reads while suspended, another company apart.
+    Written for CI; not run here.
+  - E2E (`api.spec.ts` extended): the key gets "Read WhatsApp numbers" and lists the number its send
+    used. Written for CI; not run here.
+- **Docs:** ADR-171 (and ADR-170's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T166; DEPLOYMENT and RUNBOOKS (migration 0119, the 403); BACKLOG P5-08 and P5-09; feature matrix
+  H-033 and W-134.
+- **Mutation checks:** 17 deliberate regressions tried, all caught on the unit-tested parts (another
+  scope or none, a writing transaction, any status, larger pages, unknown parameters, another
+  permission, a writing scope, the words, the list's order, the database list, the route, the
+  operation, the schema and its fields, the overview). The query itself needs the database, so its
+  regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 769 passed (79 files)                                                |
+| `pnpm test:integration`, e2e, migration 0119       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 17 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- A number by id; the number's account and quality rating; connecting numbers through the API.
+
+## 2026-10-05 — Phase 5: webhook endpoints for chosen WhatsApp numbers (P5-09, ADR-170)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every
+endpoint received every number's events. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so migration 0118, the integration tests and the e2e test below were written but not run
+here.
+
+### Completed
+
+- **Design (ADR-170):** `channelIds`, null for every number or 1 to 100 of the company's numbers,
+  only with an event that happens on a number (messages, conversations, automation runs, orders,
+  campaigns); applied where events are captured; consent, contact and template events not narrowed.
+- **Database:** migration 0118 (the column and its check, the column grant,
+  `app.capture_webhook_event` and the five trigger functions of number events passing the number,
+  which is not stored); the schema's column (`packages/db`).
+- **Domain:** the list's schema, keeping and checking (`webhookChannelIdsSchema`,
+  `webhookChannelIdsFor`, `assertWebhookChannels`), the endpoint view naming the numbers,
+  `channelChoices`, create and update with the audit; `WEBHOOK_CHANNEL_EVENTS` and the labels in the
+  model; `channelIds` in the API (create, update, answers) and the OpenAPI document; the export
+  column.
+- **Web:** "WhatsApp numbers" in the endpoint form (every number, or the numbers ticked) and
+  "Numbers whose events are sent: …" on the endpoints list.
+- **Tests:**
+  - Unit (4 new in `webhooks.test.ts`, 1 new and 1 changed in `api.test.ts`): the list's rules,
+    keeping and clearing, which events happen on a number and that each of their payloads names it,
+    the labels, the API schemas and the OpenAPI entries.
+  - Integration (3 new in `webhooks.test.ts`, 4 new in `webhook-events.test.ts`, 1 new in
+    `api-webhook-endpoints.test.ts`; `addNumber` in the WhatsApp fixture): refusals, keeping and
+    clearing, audits, the check and the grant, the choices, and capture per number for every event
+    of a number. Written for CI; not run here.
+  - E2E (`webhook-events.spec.ts`, 1 new; `connectTestChannel` takes the number's display): an
+    endpoint for one of two numbers, then for every number. Written for CI; not run here.
+- **Docs:** ADR-170 (and ADR-145's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T165; DEPLOYMENT and RUNBOOKS (migration 0118, a receiver missing a number's events); BACKLOG
+  P5-09; feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 23 deliberate regressions tried, all caught on the unit-tested parts (an
+  empty or long list, repeats or case kept, any text taken, a list kept without its events or by a
+  null, labels and status notes, the events of a number, the limit, the API's refinement, change
+  rule and field, the OpenAPI field and overview). The services' checks, the capture and the form
+  need the database or a browser, so their regressions are left to the integration and e2e tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 764 passed (78 files)                                                |
+| `pnpm test:integration`, e2e, migration 0118       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 23 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Filters by team or assigned member; numbers per event type; `GET /channels`.
+
+## 2026-10-05 — Phase 5: acknowledging dead letters on the operations console (P5-10, ADR-169)
+
+Status: **Implemented; its database tests run in CI only (test data only).** Administrators could
+retry a dead letter but not say that they had looked at one. The local PostgreSQL is unavailable
+(its Docker daemon stopped), so migration 0117, the integration tests and the e2e step below were
+written but not run here.
+
+### Completed
+
+- **Design (ADR-169):** a note of 10 to 500 characters on a dead letter, retried or not, shown with
+  who and when, replaced by a later note, audited; kept with the dead letter for its 30 days; the
+  CSV gives the time only.
+- **Database:** migration 0117 (three columns and a check on `ops.dead_letters`,
+  `ops.platform_acknowledge_dead_letter`); the schema's columns (`packages/db`).
+- **Domain:** `acknowledgeDeadLetter` in the ops service; the Queues tab's read with the
+  acknowledgement; "Acknowledged (UTC)" in the dead letters' CSV (`platform/ops-model.ts`).
+- **Web:** the Acknowledged column of Recent dead letters, with the form and the action.
+- **Tests:**
+  - Unit (3 new in `dead-letter-acknowledgements.test.ts`, 2 changed in `ops-model.test.ts`):
+    refusals before any query, the definer call with the trimmed note and the correlation id, the
+    CSV column, never who or the note.
+  - Integration (3 new in `platform-ops.test.ts`, 1 changed in `tenant-isolation.test.ts`): who and
+    the note listed, replaced and audited, the company only through a verified signature; refusals;
+    the grants, the function and the check. Written for CI; not run here.
+  - E2E (`dead-letter-retry.spec.ts` extended): an administrator acknowledges the retried dead
+    letter and the audit log shows it. Written for CI; not run here.
+- **Docs:** ADR-169; SECURITY; ARCHITECTURE; THREAT-MODEL T164; DEPLOYMENT and RUNBOOKS (migration
+  0117, acknowledging); DATA-RETENTION; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 12 tried, all caught on the unit-tested parts (any id, short or long notes,
+  the note untrimmed, the input unchecked, no correlation id, another function, another user, the
+  CSV column missing, another time, who or the note written). The function, the grants, the check
+  and the list need the database, so their regressions are left to the integration and e2e tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 759 passed (78 files; 3 new)                                    |
+| `pnpm test:integration`, e2e, migration 0117       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 12 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Acknowledging receipts, quarantine entries and late queues; assigning; filtering by
+  acknowledgement.
+
+## 2026-10-05 — Phase 5: confirming, fulfilling and cancelling WhatsApp orders through the API (P5-08, ADR-168)
+
+Status: **Implemented; its database tests run in CI only (test data only).** Order systems read
+orders since ADR-167 but needed a member to move them on. The local PostgreSQL is unavailable (its
+Docker daemon stopped), so migration 0116, the integration tests and the e2e step below were written
+but not run here.
+
+### Completed
+
+- **Design (ADR-168):** a new writing scope, `orders.write`, granted with `inbox.reply`; Commerce in
+  the plan; `PATCH /orders/{id}` with `status` and an optional `expectedStatus`, the moves members
+  make, payment statuses left to Razorpay, retries changing nothing.
+- **Database:** migration 0116 widens the key and plan scope checks; `API_SCOPES` (`packages/db`).
+- **Domain:** `apiUpdateOrder` and `apiUpdateOrderSchema` (`api/orders.ts`, with `readApiOrder`
+  shared with `apiGetOrder`); `writeLockedOrderStatus` (`commerce/service.ts`), now used by members'
+  changes too; the scope's label, description and permission (`api/model.ts`); `api/openapi.ts` (the
+  operation, `UpdateOrder`, the route list, the 403's words).
+- **Web:** `PATCH` on the route `api/v1/orders/[id]`; Settings → API keys and the platform plan
+  pages list the scope from the shared list.
+- **Tests:**
+  - Unit (5 new in `orders.test.ts`, 2 changed in `api.test.ts`): the scope, its permission and
+    words, every role with `inbox.reply` holding `commerce.read`; the change's body; refusals before
+    anything is read; one read committed transaction; the operation, its body and words.
+  - Integration (2 new in `api.test.ts`): every move and refusal naming the status, the expected
+    status, the version, the audit entry as the key, the order events, a member's stale page,
+    retries and payment statuses; another company's and an unknown order, a reading key, a suspended
+    company, a plan without Commerce and granting the scope. Written for CI; not run here.
+  - E2E (`commerce.spec.ts` extended): the key created in Settings fulfils the paid order over HTTP,
+    is refused when cancelling it, and a retry answers the same; the order page shows it fulfilled.
+    Written for CI; not run here.
+- **Docs:** ADR-168; SECURITY (scopes, changing orders); ARCHITECTURE; THREAT-MODEL T163; DEPLOYMENT
+  (migration 0116); RUNBOOKS; BACKLOG P5-08; feature matrix H-033 and W-134.
+- **Mutation checks:** 24 tried, all caught on the unit-tested parts (a reading key changing orders,
+  a malformed id reaching the database, the body unchecked, `paid` taken or cancelling not offered,
+  `expectedStatus` required or null, other fields taken, a read-only transaction, another
+  permission, changes while suspended, the scope's words, the database list without the scope, the
+  operation's route, id, body, schema, responses and words, the route's method). The moves, the
+  version, the audit entry, the company scoping and the plan check need the database, so their
+  regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 756 passed (77 files; 5 new)                                    |
+| `pnpm test:integration`, e2e, migration 0116       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 24 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Payment Links and refunds through the API, changing many orders in one call, a reason with the
+  change, events naming who changed an order, store orders.
+
+## 2026-10-05 — Phase 5: reading WhatsApp orders through the API (P5-08, ADR-167)
+
+Status: **Implemented; its database tests run in CI only (test data only).** Order systems heard
+orders only through webhooks. The local PostgreSQL is unavailable (its Docker daemon stopped), so
+migration 0115, the integration tests and the e2e step below were written but not run here.
+
+### Completed
+
+- **Design (ADR-167):** a new reading scope, `orders.read`, granted with `commerce.read`; Commerce
+  in the plan; `GET /orders` (newest first, exact pages, filters) and `GET /orders/{id}`; the order
+  as the webhook describes it, with ids only and never Payment Links.
+- **Database:** migration 0115 widens the key and plan scope checks; `API_SCOPES` (`packages/db`).
+- **Domain:** `api/orders.ts` (`apiOrderListQuerySchema`, `apiListOrders`, `apiGetOrder`); the
+  scope's label, description and permission (`api/model.ts`); `api/openapi.ts` (the two operations,
+  `Order`, the route list, the 403's words).
+- **Web:** the routes `api/v1/orders` and `api/v1/orders/[id]`; Settings → API keys and the platform
+  plan pages list the scope from the shared list.
+- **Tests:**
+  - Unit (5 new in `orders.test.ts`): the scope, its permission and its words; the query; refusals
+    before anything is read; read-only transactions, while the company is suspended too; the
+    operations, their parameters, the order schema and words.
+  - Integration (2 new in `api.test.ts`; the plan helper moved to the file's top): three orders over
+    two pages, as the webhook describes them, filtered and read by id, another company's and an
+    unknown id not found; an erased contact's order, the scope, a suspended company and a plan
+    without Commerce. Written for CI; not run here.
+  - E2E (`commerce.spec.ts` extended): a key created in Settings reads the paid order and that order
+    by id over HTTP, without its Payment Link. Written for CI; not run here.
+- **Docs:** ADR-167; SECURITY (scopes, orders); ARCHITECTURE; THREAT-MODEL T162; DEPLOYMENT
+  (migration 0115); RUNBOOKS; BACKLOG P5-08; feature matrix H-033 and W-134.
+- **Mutation checks:** 25 tried, all caught on the unit-tested parts (another scope or none needed,
+  a malformed id or cursor reaching the database, a writable transaction, the page's maximum or
+  default, any reference, time or conversation taken, other parameters taken, another permission,
+  refused while suspended, the scope's words, the database list without the scope, the operations'
+  responses, parameters, words, schema and routes). The plan check, the company scoping, erasure and
+  paging need the database, so their regressions are left to the integration and e2e tests, which
+  run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 751 passed (77 files; 5 new)                                    |
+| `pnpm test:integration`, e2e, migration 0115       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 25 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Changing orders through the API, store orders, Payment Links, refunds and order reports.
+
+## 2026-10-05 — Phase 5: changing the conversations a filter finds (P5-08, ADR-166)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A key changed
+conversations it named, up to 100 per call. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-166):** `POST /conversations/update-matching` changes the conversations of one page
+  of `GET /conversations` per call (at least one filter; the change as `PATCH` takes it, the same
+  for each), each as `PATCH` changes one, read committed with the filter checked again under the
+  rows' locks; `conversations.read` and `conversations.write` both; a member or team it may not take
+  refused before the page is read.
+- **Domain:** `api/conversations.ts` (the list's filters shared with the new body,
+  `conversationFilterSql`, `conversationPage` shared with the list, `visibleConversations` shared
+  with `update-many`, `isCompanyTeam`, `apiUpdateMatchingConversations` and its schema;
+  `changeLockedConversation` names a refused field after its place); `api/openapi.ts` (the
+  operation, `UpdateMatchingConversations`, the route list, and the 409 that routing can cause on
+  `PATCH` and `update-many`).
+- **Web:** the route `api/v1/conversations/update-matching`.
+- **Tests:**
+  - Unit (5 new in `conversations.test.ts`): the body (the list's filters, at least one, a change as
+    `PATCH` takes it, pages of 1 to 100); both conversation scopes and the body's refusals before
+    anything is read; one read committed transaction; the filters' SQL, in the company; the
+    operation, its body and its words, and the 409 of `PATCH` and `update-many`.
+  - Integration (4 new in `api.test.ts`, assigning conversations): a member's conversations handed
+    to another, two pages until the cursor is null, audited as the key; every open conversation
+    without a team resolved in one page, another company's untouched; reopened and moved into a
+    round-robin team, given out in turn; refusals before the page even when nothing matches; a
+    conversation taken out of the filter behind a held row lock left out and one still matching
+    changed as it now is; a call sent again after a lost answer reaching every conversation once.
+    Written for CI; not run here.
+  - E2E (`api.spec.ts`, the test of ADR-120 extended): reopened and unassigned by a filter over
+    HTTP, two pages, shown in the inbox; an empty filter refused. Written for CI; not run here.
+- **ADR-165 corrected before its push:** a call sent again after a lost answer is safe because a
+  contact the change took out of the search is not found again, not because "a page sent again
+  changes nothing more", which is untrue when the change takes contacts out of the search; and a
+  change cannot bring other contacts into a search, so that sentence was dropped (ADR, OpenAPI, unit
+  test).
+- **Docs:** ADR-166; SECURITY (conversation changes); ARCHITECTURE; BACKLOG P5-08; feature matrix
+  H-033 and W-134.
+- **Mutation checks:** 24 tried, all caught on the unit-tested parts (either conversation scope not
+  needed, a call without a filter or with other parts of a filter or change, an empty change, the
+  page's maximum or default, the cursor not read, the company or a filter's condition left out or on
+  the wrong column, `none` matching every conversation, `updatedSince` leaving out its own time, the
+  call in one snapshot, the 409 left out of the words or the responses, here or on `PATCH` and
+  `update-many`, the route or its body unlisted, the route answering another method). The member and
+  team checks, the filter under the locks, the changes and the audit entries need the database, so
+  their regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 746 passed (76 files; 5 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 24 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Filters the list does not have (the last message's time, say), counting the conversations a change
+  would reach, every page in one call, notes for many conversations.
+
+## 2026-10-05 — Phase 5: changing the contacts a search finds (P5-08, ADR-165)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A key changed contacts
+it named, up to 100 per call. The local PostgreSQL is unavailable (its Docker daemon stopped), so
+the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-165):** `POST /contacts/update-matching` changes the contacts of one search page per
+  call (custom field values and tags, the same for each), each as `PATCH /contacts/{id}` changes
+  one, in one repeatable read transaction; `contacts.read` and `contacts.write` both; pages follow
+  the conditions as they are; all or none in a call.
+- **Domain:** `api/contacts.ts` (`apiContactsAlikeChangeSchema`, `prepareContactsAlikeChange`,
+  `changeContactsAlike`); `api/contact-search.ts` (`searchPage` and `assertConditionScopes` shared
+  with the search, `apiUpdateMatchingContacts` and its schema); `api/openapi.ts` (the operation,
+  `UpdateMatchingContacts`, the route list).
+- **Web:** the route `api/v1/contacts/update-matching`.
+- **Tests:**
+  - Unit (4 new in `contact-search.test.ts`): the body (a search, a change of fields or tags only,
+    at least one, pages of 1 to 100); both contact scopes, the conditions' scopes and the change's
+    refusals before anything is read; one repeatable read transaction; the operation, its body and
+    its words.
+  - Integration (1 new in `api-contact-search.test.ts`): two pages changed until the cursor is null,
+    each contact as one change, audited as the key; the first page again finding nothing; another
+    company's contact untouched; a field the company does not have refusing the call by its part and
+    changing nothing; a key that only writes contacts refused. Written for CI; not run here.
+  - E2E (`api-contact-search.spec.ts` extended): a page changed over HTTP and found by its new tag.
+    Written for CI; not run here.
+- **Docs:** ADR-165; SECURITY (contact searches); ARCHITECTURE; BACKLOG P5-08; feature matrix H-033
+  and W-134.
+- **Mutation checks:** 13 tried, all caught on the unit-tested parts (either contact scope or the
+  conditions' scopes not needed, the change's refusals unnamed, the page's maximum or default, an
+  empty change, a name or another part taken, no shared snapshot, the 409 left out of the words, the
+  route unlisted or answering another method). The page's changes, the locks and the audit entries
+  need the database, so their regressions are left to the integration and e2e tests, which run in
+  CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 741 passed (75 files; 4 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 13 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Names, emails and consent for many contacts, erasing the contacts a search finds, counting the
+  contacts a change would reach, every page in one call.
+
+## 2026-10-05 — Phase 5: groups of conditions in contact searches (P5-08, ADR-164)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A search matched all of
+its conditions or any. The local PostgreSQL is unavailable (its Docker daemon stopped), so the
+integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-164):** `POST /contacts/search` takes groups of conditions a contact matches
+  together, all of a group's conditions or any, one level deep and 20 conditions in all; conditions
+  in groups are checked, compiled and scoped as those outside, and a refusal inside a group names
+  its place. Segments are unchanged.
+- **Domain:** `api/contact-search.ts` (the group in the body, `placedConditions`, `segmentCondition`
+  naming a place, `contactSearchSql`); `api/openapi.ts` (the operation's words).
+- **Tests:**
+  - Unit (4 new in `contact-search.test.ts`, 2 extended there and in `reference.test.ts`): groups of
+    1 to 20 conditions with their match, holding no groups, 20 conditions in all; the scopes of
+    conditions inside groups checked before anything is read; the SQL joining each group by its
+    match inside the search's, rendered; the operation's words, the group's shape and the reference
+    page listing a group's conditions inside it.
+  - Integration (1 new in `api-contact-search.test.ts`): all of some conditions and any of others,
+    any of a group or a condition, a group of one finding what its condition finds, refusals inside
+    a group named by their place. Written for CI; not run here.
+  - E2E (`api-contact-search.spec.ts` extended): a search of two groups over HTTP and a refusal
+    inside a group. Written for CI; not run here.
+- **Docs:** ADR-164; SECURITY (contact searches); ARCHITECTURE; BACKLOG P5-08; feature matrix H-033
+  and W-134.
+- **Mutation checks:** 11 tried, all caught on the unit-tested parts (no limit on conditions in all,
+  a group counted as one, an empty group, a group's closed shape or required match, conditions in
+  groups left out of the scope checks, each joiner inverted or widened, the operation's words). The
+  places of refusals inside groups and what a search finds need the database, so their regressions
+  are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 737 passed (75 files; 4 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 11 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Groups in segments, groups inside groups, the opposite of a group, counting the matches, orders
+  other than newest first.
+
+## 2026-10-05 — Phase 5: sending a template to many numbers in one call (P5-08, ADR-163)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A key sent a template
+to one number per call. The local PostgreSQL is unavailable (its Docker daemon stopped), so the
+integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-163):** `POST /messages/send-many` sends one approved template to up to 50 numbers,
+  each with its own values and each as one send, in a savepoint: a refused number is answered in its
+  place and changes nothing while the others are sent; numbers that are not valid or given twice and
+  values that do not fill the variables refuse the call; one request against the key's limits, once
+  per `Idempotency-Key`. A send to one number now takes the campaign runner's company lock before
+  creating the contact, as the new call does.
+- **Domain:** `api/resources.ts` (the single send split into `loadSendableTemplate`,
+  `assertTemplateVariables`, `templateSendingNumber`, `lockMarketingSends` and `queueTemplateFor`;
+  `apiSendManyTemplates` and its schema; `phoneAt` and `assertEachNumberOnce`, now shared with the
+  start of many runs in `api/automations.ts`); `api/model.ts` (`API_LIMITS.messagesPerSend`);
+  `api/openapi.ts` (the operation, `SendManyTemplates`, `TemplateSend`, the route list).
+- **Web:** the route `api/v1/messages/send-many`.
+- **Tests:**
+  - Unit (3 new in `api.test.ts`): the body takes one template and 1 to 50 numbers, each with its
+    values, and nothing else; the scope, an empty list, a number that is not valid or given twice
+    refused before anything is read and named by its place; the operation, its body, its answer, its
+    words and the 409 of a collision.
+  - Integration (2 new in `api.test.ts`): a suppressed number and an opted-out contact answered in
+    their places, writing no contact, while two numbers are queued as the key and sent through the
+    Graph stand-in; a retry answering the same; values that do not fill the variables refusing the
+    call by place before any contact; the marketing scope; a marketing call answering the frequency
+    cap and a missing opt-in in place. Written for CI; not run here.
+  - E2E (`api.spec.ts` extended, its timeout raised to two minutes): an opted-out contact answered
+    in its place over HTTP while two numbers are sent, and a retry replayed. Written for CI; not run
+    here.
+- **Docs:** ADR-163; SECURITY (the API send rules); THREAT-MODEL T8 and T69; ARCHITECTURE; BACKLOG
+  P5-08; feature matrix H-033 and W-134.
+- **Mutation checks:** 20 tried, all caught on the unit-tested parts (the scope not checked, the
+  list without a minimum or a maximum, closed shapes opened, a number refused without its place,
+  repeats taken or named the wrong way round, values left out refused, the limit raised, the route
+  unlisted or answering another method, the operation's body, answer, words, 409 and refusal code).
+  The savepoints, the lock and the sends need the database, so their regressions are left to the
+  integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 733 passed (75 files; 3 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 20 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Different templates in one call, reasons beside a refusal's message, more than 50 numbers per
+  call.
+
 ## 2026-10-05 — Phase 5: stopping many runs in one call (P5-08, ADR-162)
 
 Status: **Implemented; its database tests run in CI only (test data only).** A key stopped one run

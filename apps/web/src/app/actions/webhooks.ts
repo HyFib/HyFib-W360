@@ -10,6 +10,15 @@ import { tenantForAction } from '@/server/tenant-action';
  * Company webhook endpoints (Settings → Webhooks). A new signing secret goes to the browser once,
  * here, when an endpoint is created or its secret rotated.
  */
+
+/** An endpoint's OAuth client as the form gives it (ADR-173). */
+interface WebhookOAuthActionInput {
+  tokenUrl: string;
+  clientId: string;
+  /** Left out, a change keeps the stored secret. */
+  clientSecret?: string;
+  scope: string;
+}
 export async function createWebhookEndpointAction(
   slug: string,
   input: {
@@ -19,6 +28,8 @@ export async function createWebhookEndpointAction(
     headers: { name: string; value: string }[];
     /** The message.status statuses the endpoint takes; null takes every status. */
     messageStatuses: string[] | null;
+    /** Who sent the messages whose statuses it takes (ADR-172); null takes every sender. */
+    messageSenders: string[] | null;
     /** The contact parts it takes as contact.updated; null takes every change. */
     contactParts: string[] | null;
     /** The automations whose runs it takes (ADR-145); null takes every automation. */
@@ -33,6 +44,10 @@ export async function createWebhookEndpointAction(
     conversationStatuses: string[] | null;
     /** How the runs it takes as `automation.run_ended` ended (ADR-151); null takes every end. */
     runEndStatuses: string[] | null;
+    /** The WhatsApp numbers whose events it takes (ADR-170); null takes every number. */
+    channelIds: string[] | null;
+    /** Its OAuth client (ADR-173); null: none. */
+    oauth: WebhookOAuthActionInput | null;
   },
 ): Promise<ActionResult<{ endpointId: string; secret: string }>> {
   return runAction(async () => {
@@ -55,6 +70,8 @@ export async function updateWebhookEndpointAction(
     headers?: { name: string; value: string }[];
     /** The message.status statuses the endpoint takes; null takes every status. */
     messageStatuses: string[] | null;
+    /** Who sent the messages whose statuses it takes (ADR-172); null takes every sender. */
+    messageSenders: string[] | null;
     /** The contact parts it takes as contact.updated; null takes every change. */
     contactParts: string[] | null;
     /** The automations whose runs it takes (ADR-145); null takes every automation. */
@@ -69,6 +86,13 @@ export async function updateWebhookEndpointAction(
     conversationStatuses: string[] | null;
     /** How the runs it takes as `automation.run_ended` ended (ADR-151); null takes every end. */
     runEndStatuses: string[] | null;
+    /** The WhatsApp numbers whose events it takes (ADR-170); null takes every number. */
+    channelIds: string[] | null;
+    /**
+     * Given, its OAuth client (null removes it, ADR-173): a secret left out keeps the stored one
+     * while the token URL stays the same. Left out, it stays.
+     */
+    oauth?: WebhookOAuthActionInput | null;
   },
 ): Promise<ActionResult> {
   return runAction(async () => {

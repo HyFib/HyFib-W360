@@ -22,6 +22,8 @@ test('an API key created in settings sends an approved template once, and stops 
   page,
   request,
 }) => {
+  // Two sends wait for WhatsApp after the template's review: more than the default minute.
+  test.setTimeout(120_000);
   const email = uniqueEmail('api');
   const slug = `api-${Date.now().toString(36)}`;
   await signUpAndVerify(page, { name: 'Arun Api', email, password: PASSWORD });
@@ -65,7 +67,7 @@ test('an API key created in settings sends an approved template once, and stops 
     });
   }).toPass({ timeout: 30_000 });
 
-  // A key with three scopes; its token is shown once.
+  // A key with four scopes; its token is shown once.
   await page.goto(`/c/${slug}/settings/api-keys`);
   await expect(page.getByText('No API keys yet.')).toBeVisible();
   await page.getByLabel('Name', { exact: true }).fill('Order system');
@@ -74,6 +76,7 @@ test('an API key created in settings sends an approved template once, and stops 
     .getByRole('checkbox', { name: /Create and change contacts and record consent/ })
     .check();
   await page.getByRole('checkbox', { name: /Send utility templates/ }).check();
+  await page.getByRole('checkbox', { name: /Read WhatsApp numbers/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const tokenField = page.getByLabel('API key', { exact: true });
   await expect(tokenField).toBeVisible();
@@ -137,8 +140,20 @@ test('an API key created in settings sends an approved template once, and stops 
     });
   const first = await send();
   expect(first.status()).toBe(201);
-  const queued = (await first.json()).data as { id: string; status: string };
+  const queued = (await first.json()).data as { id: string; status: string; channelId: string };
   expect(queued.status).toBe('queued');
+  // It is sent from the company's only number, as GET /channels lists it (ADR-171).
+  const numbers = await request.get('/api/v1/channels', { headers: auth });
+  expect(numbers.status()).toBe(200);
+  expect(((await numbers.json()) as { data: unknown[] }).data).toEqual([
+    {
+      id: queued.channelId,
+      phone: '+91 90000 12345',
+      name: 'E2E Traders',
+      status: 'active',
+      createdAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+    },
+  ]);
   const retry = await send();
   expect(retry.status()).toBe(201);
   expect(retry.headers()['idempotent-replayed']).toBe('true');
@@ -168,6 +183,67 @@ test('an API key created in settings sends an approved template once, and stops 
       ],
     },
   });
+
+  // The template to several numbers in one call (ADR-163): a number whose contact opted out is
+  // answered in its place and the others are sent, once per key.
+  const optedOutWaId = randomWaId();
+  const optedOut = await request.post('/api/v1/contacts', {
+    headers: auth,
+    data: { phone: `+${optedOutWaId}` },
+  });
+  expect(optedOut.status()).toBe(201);
+  const optedOutId = ((await optedOut.json()) as { data: { id: string } }).data.id;
+  const optOut = await request.post(`/api/v1/contacts/${optedOutId}/consent`, {
+    headers: auth,
+    data: {
+      purpose: 'utility',
+      action: 'opt_out',
+      evidence: 'Asked us by email to stop order updates',
+    },
+  });
+  expect(optOut.status()).toBe(200);
+  const manyWaIds = [randomWaId(), randomWaId()];
+  const manyKey = randomUUID();
+  const sendMany = () =>
+    request.post('/api/v1/messages/send-many', {
+      headers: { ...auth, 'Idempotency-Key': manyKey },
+      data: {
+        templateId: template!.id,
+        messages: [
+          { to: `+${manyWaIds[0]}`, variables: { body: ['Ravi', 'A-1002'] } },
+          { to: `+${optedOutWaId}`, variables: { body: ['Mina', 'A-1003'] } },
+          { to: `+${manyWaIds[1]}`, variables: { body: ['Dev', 'A-1004'] } },
+        ],
+      },
+    });
+  type TemplateSend = {
+    to: string;
+    message: { id: string; status: string } | null;
+    error: { code: string } | null;
+  };
+  const many = await sendMany();
+  expect(many.status()).toBe(200);
+  const answers = ((await many.json()) as { data: TemplateSend[] }).data;
+  expect(answers.map((a) => [a.to, a.message?.status ?? null, a.error?.code ?? null])).toEqual([
+    [`+${manyWaIds[0]}`, 'queued', null],
+    [`+${optedOutWaId}`, null, 'precondition_failed'],
+    [`+${manyWaIds[1]}`, 'queued', null],
+  ]);
+  const manyRetry = await sendMany();
+  expect(manyRetry.status()).toBe(200);
+  expect(manyRetry.headers()['idempotent-replayed']).toBe('true');
+  expect(((await manyRetry.json()) as { data: TemplateSend[] }).data).toEqual(answers);
+  for (const id of [answers[0]?.message?.id, answers[2]?.message?.id]) {
+    await expect(async () => {
+      const status = await request.get(`/api/v1/messages/${id}`, { headers: auth });
+      expect((await status.json()).data.status).toBe('accepted');
+    }).toPass({ timeout: 30_000 });
+  }
+  const sentMany = (await standInRequests(request))
+    .filter((r) => r.path === `/v26.0/${phoneNumberId}/messages`)
+    .map((r) => (r.body as { to?: string }).to)
+    .filter((to) => to === optedOutWaId || manyWaIds.includes(to ?? ''));
+  expect(sentMany.sort()).toEqual([...manyWaIds].sort());
 
   // Revoked in settings: the next request is refused.
   await page.getByRole('button', { name: 'Revoke Order system' }).click();
@@ -588,8 +664,50 @@ test('a key assigns and resolves several conversations in one call, all of them 
     await request.get('/api/v1/conversations?status=open', { headers: auth })
   ).json();
   expect(open.data).toEqual([]);
+
+  // Reopened and unassigned by a filter, two at a time; the second page is the last (ADR-166).
+  const updateMatching = (data: Record<string, unknown>) =>
+    request.post('/api/v1/conversations/update-matching', { headers: auth, data });
+  const unfiltered = await updateMatching({ filter: {}, change: { status: 'resolved' } });
+  expect(unfiltered.status()).toBe(422);
+  expect((await unfiltered.json()).error.issues).toEqual([
+    { path: 'filter', message: expect.any(String) },
+  ]);
+  const owners = {
+    filter: { status: 'resolved', assigneeId: memberId },
+    change: { status: 'open', assigneeId: null },
+    limit: 2,
+  };
+  const firstPage = await updateMatching(owners);
+  expect(firstPage.status()).toBe(200);
+  const first = (await firstPage.json()) as {
+    data: { id: string; status: string; assigneeId: string | null }[];
+    nextCursor: string | null;
+  };
+  expect(first.data.map((v) => [v.status, v.assigneeId])).toEqual([
+    ['open', null],
+    ['open', null],
+  ]);
+  expect(first.nextCursor).toEqual(expect.any(String));
+  const second = (await (await updateMatching({ ...owners, cursor: first.nextCursor })).json()) as {
+    data: { id: string }[];
+    nextCursor: string | null;
+  };
+  expect(second.nextCursor).toBeNull();
+  expect([...first.data, ...second.data].map((v) => v.id).sort()).toEqual([...ids].sort());
+  const waitingAgain = await (
+    await request.get('/api/v1/conversations?assigneeId=none&status=open', { headers: auth })
+  ).json();
+  expect(waitingAgain.data).toHaveLength(3);
+  await page.reload();
+  await expect(items).toHaveCount(3);
+  for (let i = 0; i < 3; i++) await expect(items.nth(i)).not.toContainText('Assigned to');
+
   const doc = await (await request.get('/api/v1/openapi.json')).json();
   expect(doc.paths['/conversations/update-many'].post.operationId).toBe('updateManyConversations');
+  expect(doc.paths['/conversations/update-matching'].post.operationId).toBe(
+    'updateMatchingConversations',
+  );
 });
 
 test('a key sends reply buttons and a list to a customer who wrote: the inbox shows them, and a picked row comes back through the API', async ({

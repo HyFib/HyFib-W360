@@ -210,10 +210,9 @@ describe('API reference (ADR-152)', () => {
     const conditions = search.findIndex((f) => f.name === 'conditions');
     expect(search[conditions]?.type).toEqual({
       kind: 'array',
-      items: { kind: 'shapes', count: 9 },
+      items: { kind: 'shapes', count: 10 },
     });
-    const shapes = search.filter((f) => f.shape);
-    expect(shapes.map((f) => f.name)).toEqual([
+    const conditionShapes = [
       'type = field',
       'type = name',
       'type = tag',
@@ -223,8 +222,22 @@ describe('API reference (ADR-152)', () => {
       'type = calling_code',
       'type = last_message',
       'type = campaign',
+    ];
+    const shapes = search.filter((f) => f.shape);
+    expect(shapes.filter((f) => f.depth === 1).map((f) => f.name)).toEqual([
+      ...conditionShapes,
+      'type = group',
     ]);
-    expect(shapes.every((f) => f.depth === 1)).toBe(true);
+    // A group's conditions (ADR-164) are listed inside it, a level deeper.
+    expect(shapes.filter((f) => f.depth === 3).map((f) => f.name)).toEqual(conditionShapes);
+    expect(shapes.every((f) => f.depth === 1 || f.depth === 3)).toBe(true);
+    const groupConditions = search.findIndex(
+      (f, i) => f.name === 'conditions' && f.depth === 2 && i > conditions,
+    );
+    expect(search[groupConditions]?.type).toEqual({
+      kind: 'array',
+      items: { kind: 'shapes', count: 9 },
+    });
     const tag = search.findIndex((f) => f.name === 'type = tag');
     expect(search.slice(tag + 1, tag + 4).map((f) => [f.name, f.depth])).toEqual([
       ['type', 2],

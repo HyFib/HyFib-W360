@@ -6,6 +6,7 @@ const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' 
 
 /** What an API key may do (ADR-052); each stands for a member permission needed to grant it. */
 export const API_SCOPES = [
+  'channels.read',
   'templates.read',
   'contacts.read',
   'contacts.write',
@@ -18,6 +19,8 @@ export const API_SCOPES = [
   'campaigns.read',
   'campaigns.stop',
   'automations.start',
+  'orders.read',
+  'orders.write',
   'webhooks.manage',
 ] as const;
 export type ApiScope = (typeof API_SCOPES)[number];

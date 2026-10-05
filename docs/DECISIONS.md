@@ -4481,8 +4481,8 @@ Decision:
   names, and update grants on both columns for the runtime role (it inserts them with its table
   grant). Existing endpoints have no headers; nothing is backfilled.
 
-Not built: other authentication schemes (OAuth client credentials, mutual TLS), headers computed
-per delivery (a signed token), headers per event type, values outside printable ASCII, and showing
+Not built: other authentication schemes (OAuth client credentials, built by ADR-173; mutual TLS),
+headers computed per delivery (a signed token), headers per event type, values outside printable ASCII, and showing
 a value again.
 
 ## ADR-119 Choosing the message statuses a webhook endpoint receives (2026-10-03)
@@ -4522,7 +4522,7 @@ Decision:
   nothing is backfilled.
 
 Not built: filters for other event types (conversation statuses (built by ADR-149), automations
-(built by ADR-145), campaigns (built by ADR-146)), filters on a message's fields (its template, number or sender), and retry settings per
+(built by ADR-145), campaigns (built by ADR-146)), filters on a message's fields (its template; its number, built by ADR-170, and its sender, built by ADR-172), and retry settings per
 status.
 
 ## ADR-120 Changing many conversations in one call through the public API (2026-10-03)
@@ -5806,7 +5806,7 @@ Decision:
 
 Not built: filters on other facts of a run (its trigger, how it ended (built by ADR-151), the key
 that started it), choosing automations by tag or folder, and filters for campaigns, templates,
-orders or conversations by team or channel.
+orders or conversations by team or channel (by number: built by ADR-170).
 
 ## ADR-146 Choosing the campaign statuses a webhook endpoint receives (P5-09) (2026-10-04)
 
@@ -6445,3 +6445,517 @@ Decision:
 - **No migration:** the single stop and this call share one step.
 
 Not built: stopping every run of an automation, or of a contact, without listing them.
+
+## ADR-163 Sending a template to many numbers in one call (P5-08) (2026-10-05)
+
+Context: a key sends an approved template to one number per call (ADR-052). An integration that
+tells many customers the same thing at once (a delay on every order of a route, the day's
+appointment reminders) needed one request per number, each against the key's rate limit. P5-08's
+Remaining listed bulk sends in one call.
+
+Decision:
+
+- **One template, up to 50 numbers:** `POST /api/v1/messages/send-many` takes `templateId`, an
+  optional `from` and `messages`, 1 to 50, each a number (`to`) with the values of the template's
+  variables; the scopes of one send (`messages.send`, and `messages.send_marketing` for a marketing
+  template), once per `Idempotency-Key`, and one request against the key's limits.
+- **Each as one send:** the template (the company's, approved, one HyFib can send), every send's
+  values and the number sent from are checked once for the call; then each number is sent to through
+  the steps a send to one number takes (`queueTemplateFor`): the contact, created when new; erasure,
+  the suppression list and consent for the template's category; the marketing frequency cap; then
+  the message, its send intent and its job, which the send pipeline delivers as any API send,
+  checking consent again before dispatch.
+- **Refusals in place:** each send runs in a savepoint (`tx.transaction`). A refusal for its contact
+  (`precondition_failed`: erased, opted out, on the suppression list, without the marketing opt-in
+  the company asks for, or at the frequency cap) rolls back to it, a contact created for it
+  included, and is answered in its place with its code and message while the others are sent;
+  anything else refuses the call.
+- **Refused as a whole, before any send:** a number that is not valid or is given twice (before
+  anything is read), and values that do not fill the template's variables, naming the place
+  (`messages.2.to`, `messages.1.variables`); a template or a WhatsApp number that cannot send, as
+  for one send.
+- **50 per call,** as ADR-161: each send keeps its savepoint's transaction id until the call
+  commits, and PostgreSQL caches 64 per transaction.
+- **One lock order:** a marketing template is counted under the campaign runner's company lock
+  (ADR-049), which the call takes once, before any contact is created or conversation locked. A send
+  to one number now takes it at the same point, before creating the contact (it took it after), so
+  the two wait for each other instead of deadlocking over a new number both create.
+- **Collisions:** the call keeps the conversations it sends in from its first send until it commits.
+  Another call taking several of them in another order at the same moment (another send to many
+  numbers, a start of many runs, a change of many conversations) can deadlock with it; PostgreSQL
+  ends one of the two, and when it is this call, it is refused as a whole (409, sending nothing) and
+  can be sent again with the same key. The operation documents it.
+- **The answer:** 200 with each number in the order given, in E.164: its message, queued, as a send
+  to one number answers it, or its refusal. Messages queued together may leave in any order, as
+  messages queued one after the other may.
+- **One implementation:** the single send and this call share the template, variables, number, lock
+  and queueing steps; this call and the start of many runs (ADR-161) share the checks of a list's
+  numbers (`phoneAt`, `assertEachNumberOnce`).
+- **No migration.**
+
+Not built: different templates in one call, reasons beside a refusal's message, more than 50 numbers
+per call, and a send to every contact of a segment through the API (campaigns do that, with approval
+and pacing).
+
+## ADR-164 Groups of conditions in contact searches through the API (P5-08) (2026-10-05)
+
+Context: `POST /contacts/search` (ADR-117) finds the contacts matching all of its conditions or any
+of them. A question mixing the two (VIPs who are in Pune or have more than six orders; contacts
+added this month who opted in to marketing or wrote in the last week) needed two searches merged by
+the caller, or a broader search filtered afterwards. ADR-117's Not built listed groups of
+conditions.
+
+Decision:
+
+- **Groups as conditions:** an item of `conditions` can be a group,
+  `{ "type": "group", "match": "all" | "any", "conditions": [...] }`, which a contact matches when
+  it matches all of the group's conditions, or any of them; the search joins its items, groups
+  included, by its own `match`. "All of these and any of those" is a search matching all, with a
+  group matching any.
+- **One level:** a group holds conditions, not groups. Two levels say every mix of all and any that
+  a person says in a sentence; a group inside a group is refused by the body's shape (422).
+- **20 conditions in all,** counted inside groups too, as a search held before; a group holds 1 to 20. ADR-117's windows still bound what a page reads.
+- **A group says its `match`:** it has no default, unlike the search's, which stays `all` for
+  searches written before groups.
+- **The same rules inside groups:** a condition in a group is checked and compiled as one outside it
+  (segments' rules, then `segmentConditionsSql`); a group is compiled as a segment with its own
+  `match`. A refusal names its place in the group, like `conditions.2.conditions.0.key`, and a
+  `last_message` or `campaign` condition in a group needs its scope as one outside does, checked
+  before anything is read.
+- **Segments are unchanged:** members' segments and campaigns keep one list, matched all or any, so
+  a search through the API can say more than a segment.
+- **No migration.**
+
+Not built: groups in segments, groups inside groups, the opposite of a group (most conditions have
+their own, like `not_has` and `not_within_days`), counting the matches, and orders other than newest
+first.
+
+## ADR-165 Changing the contacts a search finds, a page at a time (P5-08) (2026-10-05)
+
+Context: a key finds contacts with segments' conditions (ADR-117, ADR-164) and changes up to 100
+contacts it names in one call (ADR-122). Tagging every contact in Pune, or setting a field for
+everyone who opted in to marketing, meant reading the search page by page and sending each page's
+ids back to change them: twice the calls, and a contact changed in between by someone else was
+changed as the search had found it. P5-08's Remaining listed choosing contacts to change by a
+filter.
+
+Decision:
+
+- **Endpoint:** `POST /api/v1/contacts/update-matching` (`updateMatchingContacts`) takes a search's
+  `match` and `conditions` (groups included), a `change`, and a page: `limit` (1 to 100, 50 by
+  default) and `cursor`. The change holds custom field values (`fields`) and tags (`addTags`,
+  `removeTags`), at least one, the same for every contact; names and emails are a contact's own and
+  are not set for many at once.
+- **Both contact scopes:** `contacts.read` and `contacts.write`. The call finds contacts as a search
+  does and answers them, so a key that may only write contacts cannot use it to read the company's
+  contacts. `last_message` and `campaign` conditions need their scopes, as in a search, and
+  `contacts.write`, a writing scope, is refused while the company is suspended or restricted.
+- **A search page, changed:** each call reads one page as `POST /contacts/search` reads it (newest
+  first, in windows of 2,000, on exact keyset pages) and changes each of its contacts as
+  `PATCH /contacts/{id}` changes one, with the locks changing many contacts takes (ADR-122: the
+  fields' definitions shared, the contacts `FOR UPDATE` in id order), an audit entry as the key and
+  `contact.updated` for each contact the change changes. It answers the page's contacts as they now
+  are, with the next cursor.
+- **One snapshot:** the page is read and changed in one repeatable read transaction, so the change
+  reaches exactly the contacts the page found. A contact someone else changed after the page was
+  read refuses the call (409, changing nothing), and it can be sent again with the same cursor.
+- **Pages follow the conditions as they are:** a contact the change takes out of the search is not
+  read again (the cursor has passed it).
+- **All or none in a call:** a field the company does not have, a value of another type, or a
+  contact the change would give more than 50 tags refuses the call (422, naming the part, as
+  `change.fields.plan`).
+- **No `Idempotency-Key`:** what a contact already has changes nothing, and a contact the change took
+  out of the search is not found again, so a call sent again after a lost answer is safe: the pages
+  still reach every contact the search finds, each changed once. A call counts as one request.
+- **No migration.**
+
+Not built: names and emails for many contacts, consent for many contacts (consent needs each
+contact's evidence), erasing the contacts a search finds, counting the contacts a change would
+reach, and every page in one call.
+
+## ADR-166 Changing the conversations a filter finds, a page at a time (P5-08) (2026-10-05)
+
+Context: a key lists conversations by status, contact, number, member, team and time of change
+(ADR-072, ADR-093) and changes up to 100 conversations it names in one call (ADR-120). Resolving
+every open conversation of a team, or handing a member's conversations to another, meant listing
+them page by page and sending each page's ids back: twice the calls, and a conversation changed in
+between by someone else was changed as the list had found it. P5-08's Remaining listed choosing
+conversations to change by a filter; ADR-165 did it for contacts.
+
+Decision:
+
+- **Endpoint:** `POST /api/v1/conversations/update-matching` (`updateMatchingConversations`) takes
+  `filter`, the filters of `GET /conversations` (`status`, `contactId`, `channelId`, `assigneeId`
+  and `teamId`, these two with `none`, and `updatedSince`), at least one, so that no call changes
+  every conversation by mistake; `change`, any of `status`, `assigneeId` and `teamId` as
+  `PATCH /conversations/{id}` takes them, the same for every conversation; and a page: `limit` (1 to
+  100, 50 by default) and `cursor`.
+- **Both conversation scopes:** `conversations.read` and `conversations.write`. The call finds
+  conversations as the list does and answers them, so a key that may only change conversations
+  cannot list them through it; `conversations.write`, a writing scope, is refused while the company
+  is suspended or restricted.
+- **A page of the list, changed:** each call reads one page as `GET /conversations` reads it (newest
+  first, on exact keyset pages, erased contacts' conversations left out) and changes each of its
+  conversations as `PATCH` changes one, in that order (a team that assigns in turn gives them out in
+  it), with the locks changing many conversations takes (ADR-120): the member first, then the page's
+  rows `FOR UPDATE` in id order, the team as a conversation moves into it. It answers the page's
+  conversations as they now are, with the next cursor.
+- **The filter checked again under the locks, not one snapshot:** unlike ADR-165, the call runs read
+  committed, as every change of a conversation does. Routing, which a move into a team runs, takes
+  the company's routing lock and then counts each member's open conversations; a snapshot taken
+  before that lock would count without the conversations given out meanwhile and could push a member
+  past the team's limit. Instead the page's rows are locked with the filter again: a conversation
+  someone else took out of the filter after the page was read is left out (a page can then hold
+  fewer conversations than the limit while more follow), and one that still matches is changed as it
+  now is.
+- **Refused before the page is read:** a member who cannot answer conversations or a team that is
+  not the company's refuses the call (422, `change.assigneeId` or `change.teamId`), even when
+  nothing matches. The member is locked for share then, as `update-many` locks it; the team is only
+  read (teams are locked after conversations, as a team's deletion takes them) and locked as a
+  conversation moves into it.
+- **409 when routing crosses a move:** routing's sweeps take the routing lock before a
+  conversation's row, and a move into a team takes the rows first, so a call moving conversations
+  into a team while routing hands one of them out can be refused as a whole (409, changing nothing)
+  and sent again with the same cursor. `PATCH` and `update-many` meet the same refusal; their
+  descriptions now say so too.
+- **No `Idempotency-Key`:** what a conversation already has changes nothing, and one the change took
+  out of the filter is not found again, so a call sent again after a lost answer is safe: the pages
+  still reach every conversation the filter finds, each changed once. A call counts as one request.
+- **No migration.**
+
+Not built: filters `GET /conversations` does not have (such as the time of the last message),
+counting the conversations a change would reach, every page in one call, and notes for many
+conversations.
+
+## ADR-167 Reading WhatsApp orders through the public API (P5-08) (2026-10-05)
+
+Context: customers send carts from the company's WhatsApp catalog as orders (M-170); members
+confirm, fulfil or cancel them and ask for payment with a Payment Link (ADR-046). Order systems hear
+each order and each change through `order.received` and `order.status_changed` (ADR-085) but could
+not read orders: a missed delivery, a new integration or a nightly reconciliation had no way to list
+them. ADR-085 left reading orders through the public API unbuilt.
+
+Decision:
+
+- **A new reading scope, `orders.read`** ("Read WhatsApp orders"), granted with `commerce.read`, the
+  permission members read orders with; only owners and administrators create keys, and both hold it.
+  It only reads, so it works while the company is suspended or restricted, as every reading scope
+  does. Existing keys keep their scopes, and a plan version that chose its scopes (ADR-092) leaves
+  it out until a new version includes it.
+- **Commerce in the plan:** orders are Commerce's, so a plan without it reads none (403, reason
+  `not_in_plan`), as it sends no products (ADR-086); checked first in the transaction.
+- **Endpoints:** `GET /api/v1/orders` (`listOrders`) pages the company's orders newest first by when
+  they were received, on exact keyset pages (`commerce_orders_list_idx`), filtered by `status`,
+  `contactId`, `conversationId`, `reference` (the eight capitals members and customers quote) and
+  `updatedSince`; `GET /api/v1/orders/{id}` (`getOrder`) reads one. Another company's order and an
+  unknown id answer 404, and an id that is not a UUID is refused before any query.
+- **An order as the webhook describes it, with ids only:** reference, status and when it last
+  changed; the conversation, contact, number and order message by id; the Meta catalog; the
+  currency, subtotal and each item's content id, name, quantity and unit price, amounts as integers
+  in minor units (null where HyFib could not work them out); the items left out; the customer's
+  note; when it was received, paid and last changed. Not the customer's number or name, which a key
+  reads with `contacts.read`, and never the Payment Link or Razorpay's payment ids, which the
+  company's Razorpay account reports itself.
+- **Erased contacts:** orders are kept until the company is deleted (ADR-085), so an erased
+  contact's orders are still read, without the note erasure clears; their contact id names a contact
+  the API no longer finds.
+- **Reads only:** one read-only transaction per call. Items are written with their order and never
+  change, so they are read beside it without a shared snapshot. A call counts as one request.
+- **Migration 0115** replaces the key and plan scope checks with ones that also accept
+  `orders.read`, validated at once (one row per key and per plan version), as 0100 did.
+
+Not built: changing orders through the API (confirming, fulfilling, cancelling, asking for payment),
+store orders (the Shopify and WooCommerce copies, which the store reports itself), Payment Links,
+refunds and order reports.
+
+## ADR-168 Confirming, fulfilling and cancelling WhatsApp orders through the public API (P5-08) (2026-10-05)
+
+Context: since ADR-167 order systems read the orders customers send from the company's WhatsApp
+catalog, but moving an order on (confirming it, marking it fulfilled when it ships, cancelling it)
+still needed a member on the order page, so an order system that ships or cancels orders had to ask
+someone to click. ADR-167 left changing orders through the public API unbuilt.
+
+Decision:
+
+- **A new writing scope, `orders.write`** ("Confirm, fulfil and cancel WhatsApp orders"), granted
+  with `inbox.reply`: members change an order's status with `inbox.reply` and `commerce.read`, and
+  every role with the first has the second (unit-tested); owners and administrators, who create
+  keys, have both. Like every writing scope it is refused while the company is suspended or
+  restricted (423). Existing keys keep their scopes, and a plan version that chose its scopes
+  (ADR-092) leaves it out until a new version includes it.
+- **Commerce in the plan**, checked first in the transaction, as for reading orders (403, reason
+  `not_in_plan`).
+- **`PATCH /api/v1/orders/{id}`** (`updateOrder`) takes `status` (`confirmed`, `fulfilled` or
+  `cancelled`) and, if wanted, `expectedStatus`, and answers the order as `GET /orders/{id}` gives
+  it. The moves are the ones members make (`MEMBER_ORDER_TRANSITIONS`): a received order is
+  confirmed or cancelled, a confirmed one fulfilled or cancelled, a paid one fulfilled. Any other
+  move is refused with 409, naming the order's status, and so is an order not in `expectedStatus`;
+  nothing changes. Payment statuses come only from Razorpay (ADR-046): an order waiting for payment
+  is refused, as members cancel its Payment Link first (the order goes back to confirmed when the
+  link ends unpaid), and a paid order is never cancelled.
+- **Retries:** an order that already has the status asked for is answered as it is, whatever
+  `expectedStatus` says, with no new version, audit entry or event, so a call sent again after a
+  lost answer needs no `Idempotency-Key`. A call counts as one request.
+- **One write for members and keys:** the order's row is locked (`FOR UPDATE`, as members' changes
+  lock it), the move checked under the lock, and the status written by `writeLockedOrderStatus`
+  (`commerce/service.ts`), which members' changes now use too: the time of the change and the next
+  version, so a member's page opened before a key's change is refused as stale (an integration test,
+  run in CI). The table's trigger captures `order.status_changed` with the status before it
+  (ADR-085), as for a member's change; the audit entry `commerce.order_status_changed` names the key
+  (`api_key`) with `source: 'api'`. Nothing is sent to the customer, as for members.
+- **Another company's order** and an unknown id answer 404, and an id that is not a UUID is refused
+  before any query.
+- **Migration 0116** replaces the key and plan scope checks with ones that also accept
+  `orders.write`, as 0115 did.
+
+Not built: asking for payment or cancelling a Payment Link through the API, refunds, changing many
+orders in one call, a reason or note with the change, `order.status_changed` naming who changed the
+order, and store orders.
+
+## ADR-169 Acknowledging dead letters on the operations console (P5-10) (2026-10-05)
+
+Context: every platform administrator is emailed about each dead letter (ADR-091), and Operations →
+Queues lists the latest 100 with a Retry for the jobs that can be sent back once (ADR-108). Many
+need no retry: the work is obsolete, the company started it again, or the sweep ended it for the
+company (ADR-111). Nothing on the tab said that someone had already looked at a dead letter or what
+they found, so every administrator who read the email opened the same rows. ADR-141 left
+acknowledging the console's other lists unbuilt.
+
+Decision:
+
+- **Acknowledged with a note:** on Recent dead letters, a platform administrator acknowledges a dead
+  letter with a note of 10 to 500 characters (what was found or done), retried or not. The row shows
+  who acknowledged it, when, and the note; another administrator may acknowledge it again, replacing
+  the note. The platform audit log keeps each (`platform.dead_letter_acknowledged`, the note as its
+  reason, the dead letter and its queue in the metadata, and the company only when the job's
+  signature verified and the company still exists, as the console names it, ADR-054).
+- **Kept with the dead letter:** the time, the administrator and the note are columns of
+  `ops.dead_letters` (migration 0117), set together or not at all, so an acknowledgement lasts as
+  long as its dead letter: 30 days after the job failed (ADR-054's purge). A later failure of the
+  same work has a dead letter of its own and starts unacknowledged. Unlike a failing integration
+  (ADR-141), a dead letter does not recover, so nothing forgets an acknowledgement sooner.
+- **Where it is enforced:** `ops.platform_acknowledge_dead_letter` (SECURITY DEFINER, executable by
+  the platform role only) checks the administrator, the note (trimmed) and the dead letter, then
+  writes the columns and the audit entry in one transaction. Only the definer role writes the
+  columns; the platform role reads them with the rest of the row, as the console already read dead
+  letters. The company never sees them.
+- **Nothing else changes:** acknowledging neither retries the job nor changes whether it can be
+  retried, and the alert email (ADR-091) still tells each dead letter once, before anyone could
+  acknowledge it.
+- **The CSV** of Recent dead letters (ADR-158) gains "Acknowledged (UTC)": when, never who or the
+  note, as for failures.
+
+Not built: acknowledging receipts, quarantine entries and late queues; assigning a dead letter to
+someone; filtering the list by acknowledgement; deleting a note (a new acknowledgement replaces it).
+
+## ADR-170 Choosing the WhatsApp numbers whose events a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint receives the events of every WhatsApp number its company has. A company with a
+number per shop, brand or team often has a receiver per number (each shop's helpdesk, each brand's
+CRM), and every receiver was sent every number's messages, conversations, runs, orders and
+campaigns, read the number in each payload (`channel.id`) and dropped the rest. ADR-145 left filters
+by channel unbuilt.
+
+Decision:
+
+- **What an endpoint chooses:** `channelIds`, null for every number's events (as before, including
+  numbers connected later), or 1 to 100 of the company's numbers (channel accounts), in the order
+  given with repeats merged (compared in lower case), only while the endpoint takes an event that
+  happens on a number: `message.received`, `message.status`, the three conversation events, both
+  automation run events, both order events and `campaign.status_changed` (a campaign's events are
+  those of the number it sends from). Consent, contact and template events belong to no number: an
+  endpoint that names numbers still receives every one of them it takes. It is chosen in Settings →
+  Webhooks under "WhatsApp numbers", shown while such an event is ticked: "Every number’s events" or
+  "Only the events of the numbers ticked", from every number of the company in the order they were
+  connected, each named by its number and verified name (Meta's id for it until Meta reports them)
+  and marked when it is not active. The endpoint shows "Numbers whose events are sent: …". Through
+  the API it is `channelIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in
+  every endpoint the API answers: ids only, those messages, conversations and orders give as
+  `channelId`.
+- **Only the company's numbers:** each id must be a number of the endpoint's company, whatever its
+  status (a disconnected number may be chosen; it has no events until it is connected again).
+  Anything else is refused as `validation_failed`, the issue naming its place (`channelIds.<n>`; 422
+  through the API); another company's number gets the same message as an unknown id (the lookup runs
+  in the company's scope). A company's numbers are never deleted (the runtime role has no delete on
+  them; a number is disconnected), so a list never names one that is gone. A list given again is
+  checked again; one kept by a change is not (it was checked when it was chosen).
+- **Kept with its events:** a change that removes every such event clears the list, and a list given
+  without one is refused (`channelIds`). A `PATCH` that leaves it out keeps it; Settings always
+  sends it. A check in the database holds the same rule (null, or 1 to 100 ids without nulls while
+  one of those events is among the endpoint's). The ids are not foreign keys (an array cannot
+  reference rows); the services check them as above.
+- **Applied when the event is captured:** the triggers of those events (0025's for messages, 0070's
+  for conversations, 0055's for runs, 0063's for orders, 0065's for campaigns) now pass the number
+  of the row that changed as `channelId` in the event's detail. `app.capture_webhook_event` reads it
+  and takes it out before the event is stored, so stored events and payloads are unchanged (the
+  payload's `channel` is read from the row when it is delivered), and creates a delivery of such an
+  event only for the active endpoints that take it, pass its other filters and whose list is null or
+  holds the number. It writes no event when none takes it, as for the other filters. A campaign
+  without a number yet is on no list. The capture runs in the transaction that makes the change, so
+  whether a delivery exists is settled then: a change of the list applies to events captured after
+  it, and deliveries already created are still sent. Replays and test events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `channelIds` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` choose numbers in Settings, where they
+  are named and their status shown as Settings → Channels shows them; keys with `webhooks.manage`
+  choose them through the API, which answers and audits ids only. Deliveries of those events already
+  carry each event's number (`channel.id` and `channel.phone`) to the company's receivers.
+- **Migration 0118:** `channel_account_ids uuid[]` on `app.webhook_endpoints` with the check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role (it inserts it with its table grant), `app.capture_webhook_event` replaced with the
+  same signature (0114's, with the number condition), and the five trigger functions replaced with
+  the same names, so their owners, grants and triggers stay. Existing endpoints keep null; nothing
+  is backfilled.
+
+Not built: filters by team or by the member assigned, numbers chosen per event type (one list
+applies to every event of a number the endpoint takes), and a `GET /channels` listing a company's
+numbers through the API (built by ADR-171).
+
+## ADR-171 Reading the company's WhatsApp numbers through the public API (P5-08) (2026-10-05)
+
+Context: the public API names WhatsApp numbers by id everywhere (a message's, conversation's or
+order's `channelId`, a webhook event's `channel.id`, the `channelIds` an endpoint takes since
+ADR-170), and a send takes one as `from` when the company has several, but nothing listed them: a
+key learned a number's id only from a template's `channels`, with `templates.read`, or from
+something sent or received on it. ADR-170 left a listing unbuilt.
+
+Decision:
+
+- **A new reading scope, `channels.read`** ("Read WhatsApp numbers"), granted with the permission of
+  the same name, with which members see the numbers in Settings → Channels (every role but billing;
+  owners and administrators, who create keys, hold it). It only reads, so it works while the company
+  is suspended or restricted, as every reading scope does. Existing keys keep their scopes, and a
+  plan version that chose its scopes (ADR-092) leaves it out until a new version includes it. It
+  comes first in the list of scopes.
+- **`GET /api/v1/channels`** (`listChannels`) pages the company's numbers oldest first by when they
+  were added, on exact keyset pages, whatever their status; `status` narrows them (`active` for
+  those that send and receive). Each gives its id, the number and verified name WhatsApp shows (null
+  until Meta reports them), its status and when it was added: never Meta's ids for the number or its
+  account, the credential, the registration PIN or Meta's review fields. A company's numbers are
+  never deleted, so a number listed once stays listed.
+- **Reads only:** one read-only transaction per call; a call counts as one request.
+- **Migration 0119** replaces the key and plan scope checks with ones that also accept
+  `channels.read`, listed in the API's order, validated at once (one row per key and per plan
+  version), as 0115 and 0116 did.
+
+Not built: a number by id (`GET /channels/{id}`), the number's WhatsApp account, Meta's quality
+rating, and connecting or disconnecting numbers through the API.
+
+## ADR-172 Choosing who sent the messages whose statuses a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint that takes `message.status` receives the statuses of every message the company
+sends: members' replies, automations' messages, campaigns, the API's sends and HyFib's own (store
+order updates, satisfaction surveys). ADR-119 lets it choose the statuses, and left filters on a
+message's sender unbuilt. A system that sends through the API usually wants the statuses of its own
+messages only, and was sent every campaign's (thousands at a time) to read the event's
+`message.sentBy` and drop.
+
+Decision:
+
+- **A list of senders per endpoint,** for `message.status` only: null receives the statuses of every
+  message, as before; a list holds 1 to 5 of `agent` (a member), `bot` (an automation), `campaign`,
+  `api` and `system` (HyFib itself), the senders the event reports as `message.sentBy`, in that
+  order with repeats merged. It is chosen in Settings → Webhooks under "Message status" ("Messages
+  sent by", every sender ticked to begin with; saving them all ticked keeps none) and shown on the
+  endpoint as "Statuses of messages sent by: …", and through the API as `messageSenders` on
+  `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every endpoint the API
+  answers.
+- **Only with the event:** a list given for an endpoint that does not receive `message.status` is
+  refused (`messageSenders`; 422 through the API), received messages included. A change that removes
+  the event clears it, and a `PATCH` that leaves it out keeps it; Settings always sends it. A check
+  in the database holds the same rule (null, or 1 to 5 known senders while the event is among the
+  endpoint's; a contact, which sends no status, cannot be named).
+- **Applied when the event is captured,** with the statuses an endpoint names (ADR-119) and its
+  numbers (ADR-170): the trigger of message statuses (0025's, as 0118 left it) passes the message's
+  sender as `sentBy` in the event's detail, named as the payload names it (anything other than a
+  member, an automation, a campaign or the API is `system`), and `app.capture_webhook_event` takes
+  it out with the number before the event is stored, so stored events and payloads are unchanged. A
+  status's delivery is created only for the active endpoints whose list is null or holds the sender,
+  and no event is written when none takes it. A change of the list applies to statuses captured
+  after it; deliveries already created are still sent. Replays and test events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `messageSenders` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The list names kinds of senders only, never a member, an
+  automation, a campaign or a key.
+- **Migration 0120:** `message_senders text[]` on `app.webhook_endpoints` with the check, validated
+  at once (a company has at most 10 endpoints), an update grant on the column for the runtime role,
+  `app.capture_webhook_event` replaced with the same signature (0118's, with the sender condition)
+  and the message trigger function with the same name, so owners, grants and triggers stay. Existing
+  endpoints keep null; nothing is backfilled.
+
+Not built: statuses of the messages one API key, campaign, automation or template sent (an endpoint
+chooses kinds of senders only), and a sender filter for received messages (a contact sends them
+all).
+
+## ADR-173 OAuth 2.0 client credentials for webhook endpoints (P5-09) (2026-10-05)
+
+Context: a receiver may protect its webhook URL with OAuth 2.0 rather than a fixed key: it accepts
+only requests carrying an access token its authorization server issued for the client credentials
+grant (RFC 6749 section 4.4), and those tokens expire within minutes or hours. An endpoint's own
+headers (ADR-118) send a fixed value, so such a receiver needed a proxy that fetched tokens; ADR-118
+left other authentication schemes unbuilt.
+
+Decision:
+
+- **An OAuth client per endpoint, optional:** the token URL of the receiver's authorization server,
+  a client ID and secret it issued, and the scope to ask for, if any. It is set in Settings →
+  Webhooks ("OAuth 2.0": "Get an OAuth access token for each delivery"; on an endpoint's page the
+  client is kept, changed or removed) and through the API as `oauth` on `POST /webhook-endpoints`
+  and `PATCH /webhook-endpoints/{id}`; endpoints are shown and answered with the token URL, the
+  client ID and the scope, never the secret. The client ID and secret are printable ASCII, up to 200
+  and 500 characters, so that the HTTP Basic header stays within the 4,096 characters the egress
+  client sends; the scope is space-separated values without quotes or backslashes (RFC 6749 section
+  3.3), up to 500, empty for none.
+- **The token URL is held to the endpoint URL's rules:** https, no credentials, port 443 or an
+  unprivileged one, checked when it is saved; the token request goes through the egress client
+  (public addresses only, the name resolved once and the connection pinned to it, no redirects, the
+  same deadline and size limits).
+- **The secret is sealed and sent only to its token URL:** sealed with the keyring, bound to the
+  company and the endpoint (`webhook-oauth-secret:<company>:<endpoint>`), never shown again, logged,
+  audited, exported or kept in an API key's idempotency record; the keyring sweep re-encrypts it
+  (`webhook_oauth_secret`, in `ops.sealed_value_keys`). A change may leave the secret out to keep it
+  only while the token URL stays the same: a new token URL needs the secret again, so whoever
+  changes an endpoint without knowing the secret cannot have it sent elsewhere.
+- **Tokens:** before sending an endpoint's deliveries, the worker asks the token URL for a token as
+  RFC 6749 section 4.4.2 says (`grant_type=client_credentials` and the scope in a form; the client
+  in an HTTP Basic header, its identifier and secret each form-encoded, section 2.3.1), and takes a
+  200 holding a JSON `access_token` of type `Bearer` (any case), up to 4,000 characters of RFC
+  6750's token characters, so that it cannot inject a header. Each delivery sends it as
+  `Authorization: Bearer <token>`, after the endpoint's own headers. Tokens are kept in the worker
+  process's memory only, never stored, logged or shown: for the company's endpoint and its client as
+  configured (a changed token URL, identifier, secret or scope gets a new token), until a minute
+  before `expires_in` ends and for at most a day; a token without a lifetime of more than two
+  minutes serves only the deliveries sent with it. The deliveries of an endpoint that need a token
+  at once share one request; a process keeps the tokens of at most 1,000 endpoints, the least
+  recently used going first. A token the endpoint answers 401 to is dropped, so the next attempt
+  asks for a new one.
+- **A delivery without a token fails its attempt without calling the endpoint,** retried on the
+  usual schedule and counting toward the endpoint's 72 hours of failures:
+  `oauth_token_refused_<status>` (any answer but a 200, redirects included), `oauth_token_invalid`
+  (a 200 without a usable bearer token) or `oauth_token_` and the code of a request that failed
+  (`oauth_token_timeout`, `oauth_token_address_blocked`, …). Members read them in words, and
+  replaying failures by kind counts them as no valid answer ("No valid answer (timeouts, connection
+  errors, no access token)"). A secret the keyring cannot open ends the delivery without an attempt
+  (`payload_failed`, logged with the stage `oauth`), as headers that do not open do. The lease of a
+  delivery with a client covers a token request and the delivery.
+- **Either tokens or an Authorization header of the endpoint's own:** a change that would leave an
+  endpoint with both is refused, naming the header given or the client (`oauth`).
+- **Audited:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry the token URL's host
+  (`oauthTokenHost`) and, on a change, whether a new secret was given (`oauthSecretReplaced`), or
+  `oauthRemoved`; never the token URL's path, the client ID or the secret. The company data export
+  carries the token URL, the client ID and the scope.
+- **Permissions unchanged:** members with `developer.manage` (with a recent sign-in, as adding or
+  editing an endpoint needs) and keys with `webhooks.manage` for the endpoints keys added.
+- **Migration 0121:** `oauth_token_url`, `oauth_client_id`, `oauth_client_secret_ciphertext` and
+  `oauth_scope` on `app.webhook_endpoints`, with a check validated at once (all four null, or the
+  first three set within their lengths, each named as not null, and the scope optional); update
+  grants on the four columns for the runtime role; `ops.sealed_value_keys()` dropped as its owner
+  and created again with the OAuth secrets. Existing endpoints have no client; nothing is
+  backfilled.
+
+Not built: other grants and client authentication (authorization code, JWT assertions,
+`private_key_jwt`, mutual TLS), the client in the request body instead of HTTP Basic (RFC 6749
+allows it; Basic is the method servers must support for a client with a password), token revocation,
+one token shared by several endpoints, refreshing a token before it is needed, and sending a
+delivery again within its attempt after a 401.

@@ -201,6 +201,48 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    every endpoint starts with none. Web servers from before it neither show nor change the column:
    until the web rollout ends, an old server's change that drops `automation.run_ended` from an
    endpoint with a list fails on the check, and its other changes keep it.
+   Migration 0115 (ADR-167) widens the same scope checks as 0100, with the same brief locks. Web
+   servers from before it do not know the new scope: until the web rollout ends, an old server
+   answers Settings → API keys with an error for a company with a key holding `orders.read` (and the
+   platform plan pages for a plan version including it), and `/api/v1/orders` with 404; rolling web
+   servers back to an image from before it does the same.
+   Migration 0116 (ADR-168) widens the same scope checks again, with the same brief locks. Web
+   servers from before it do not know `orders.write`: until the web rollout ends, an old server
+   answers Settings → API keys with an error for a company with a key holding it (and the platform
+   plan pages for a plan version including it), and `PATCH /api/v1/orders/{id}` with 405 (404 on an
+   image from before 0115); rolling web servers back to an image from before it does the same.
+   Migration 0117 (ADR-169) adds three nullable columns and a check to `ops.dead_letters` (a brief
+   lock on a table of at most 30 days of dead letters) and the acknowledging function. Web servers
+   from before it neither show nor write acknowledgements, and their Queues CSV has no "Acknowledged
+   (UTC)" column; web servers of this release need it, or the Queues tab fails to load.
+   Migration 0118 (ADR-170) adds `channel_account_ids` to `app.webhook_endpoints` with a check
+   validated by reading the table, and replaces `app.capture_webhook_event` (keeping 0109's to
+   0114's filters) and the trigger functions of message, conversation, automation run, order and
+   campaign events with the same signatures; every endpoint starts with none. Web servers of this
+   release need it, as their reads of endpoints name the column; workers do not read it. Web servers
+   from before it neither show nor change the column: until the web rollout ends, an old server's
+   change that drops every event of a number from an endpoint with a list fails on the check, and
+   its other changes keep it.
+   Migration 0119 (ADR-171) widens the same scope checks again, with the same brief locks. Web
+   servers from before it do not know `channels.read`: until the web rollout ends, an old server
+   answers Settings → API keys with an error for a company with a key holding it (and the platform
+   plan pages for a plan version including it), and `/api/v1/channels` with 404; rolling web servers
+   back to an image from before it does the same.
+   Migration 0120 (ADR-172) adds `message_senders` to `app.webhook_endpoints` with a check validated
+   by reading the table, and replaces `app.capture_webhook_event` (keeping 0109's to 0118's filters)
+   and the message trigger function with the same signatures; every endpoint starts with none. Web
+   servers of this release need it, as their reads of endpoints name the column; workers do not read
+   it. Web servers from before it neither show nor change the column: until the web rollout ends, an
+   old server's change that drops `message.status` from an endpoint with a list fails on the check,
+   and its other changes keep it.
+   Migration 0121 (ADR-173) adds the four OAuth columns to `app.webhook_endpoints` with a check
+   validated by reading the table, grants their updates, and replaces `ops.sealed_value_keys()` with
+   the OAuth secrets. Workers and web servers of this release need it: the workers' claims and the
+   web servers' reads of endpoints name the columns. Workers roll out first, so no client can be set
+   while a worker from before it runs; workers from before it ignore clients, and their keyring
+   sweep leaves the OAuth secrets for the new ones. Rolling workers back while endpoints have
+   clients sends their deliveries without a token: receivers refuse them, and they are retried until
+   the new workers return or the endpoints have failed for 72 hours.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

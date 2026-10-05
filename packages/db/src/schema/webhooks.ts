@@ -32,6 +32,12 @@ export type WebhookMessageStatus =
   'accepted' | 'sent' | 'delivered' | 'read' | 'played' | 'failed' | 'canceled' | 'unknown_outcome';
 
 /**
+ * Who sent a message whose `message.status` an endpoint can choose to take (ADR-172), as the event's
+ * `message.sentBy` says: a member, an automation, a campaign, the API, or HyFib itself.
+ */
+export type WebhookMessageSender = 'agent' | 'bot' | 'campaign' | 'api' | 'system';
+
+/**
  * The parts of a contact whose change a `contact.updated` endpoint can choose (ADR-123); `fields`
  * is a change of any custom field.
  */
@@ -81,7 +87,10 @@ export type WebhookRunEndStatus = 'completed' | 'handed_off' | 'taken_over' | 's
 export const WEBHOOK_DELIVERY_STATES = ['pending', 'delivering', 'succeeded', 'failed'] as const;
 export type WebhookDeliveryState = (typeof WEBHOOK_DELIVERY_STATES)[number];
 
-/** A company's webhook endpoint (migration 0025); the secret is encrypted by the keyring. */
+/**
+ * A company's webhook endpoint (migration 0025); its secrets (signing, headers, OAuth client) are
+ * encrypted by the keyring.
+ */
 export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   id: uuid('id').primaryKey(),
   tenantId: uuid('tenant_id').notNull(),
@@ -101,6 +110,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * while `message.status` is among its events.
    */
   messageStatuses: text('message_statuses').array().$type<WebhookMessageStatus[]>(),
+  /**
+   * Who sent the messages whose `message.status` it takes (ADR-172); null takes every sender. Set
+   * only while `message.status` is among its events.
+   */
+  messageSenders: text('message_senders').array().$type<WebhookMessageSender[]>(),
   /**
    * The parts of a contact whose change it takes as `contact.updated` (ADR-123); null takes every
    * change. Set only while `contact.updated` is among its events.
@@ -136,6 +150,21 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * every end. Set only while `automation.run_ended` is among its events.
    */
   runEndStatuses: text('run_end_statuses').array().$type<WebhookRunEndStatus[]>(),
+  /**
+   * The WhatsApp numbers (channel accounts) whose events it takes (ADR-170): message,
+   * conversation, automation run, order and campaign events; null takes every number. Set only
+   * while one of those is among its events.
+   */
+  channelAccountIds: uuid('channel_account_ids').array(),
+  /**
+   * The endpoint's OAuth client (ADR-173): its authorization server's token endpoint, the client
+   * identifier, the secret encrypted by the keyring and the scope to ask for (null: none). All
+   * null without OAuth; the scope alone is optional.
+   */
+  oauthTokenUrl: text('oauth_token_url'),
+  oauthClientId: text('oauth_client_id'),
+  oauthClientSecretCiphertext: text('oauth_client_secret_ciphertext'),
+  oauthScope: text('oauth_scope'),
   state: text('state', { enum: ['active', 'disabled'] })
     .notNull()
     .default('active'),

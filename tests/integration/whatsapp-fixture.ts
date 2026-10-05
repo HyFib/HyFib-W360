@@ -2,7 +2,13 @@ import { randomBytes, randomInt } from 'node:crypto';
 import { inject } from 'vitest';
 import { PgBoss } from 'pg-boss';
 import { Keyring, systemClock, uuidv7, type Clock } from '@w360/core';
-import { authorizedTenantScope, channelAccounts, sql, whatsappAccounts } from '@w360/db';
+import {
+  authorizedTenantScope,
+  channelAccounts,
+  sql,
+  whatsappAccounts,
+  type ChannelStatus,
+} from '@w360/db';
 import {
   GraphClient,
   JobSigner,
@@ -66,6 +72,14 @@ export interface WhatsAppFixture {
   keyring: Keyring;
   jobs(): PgBossJobQueue;
   company(): Promise<Company>;
+  /**
+   * Another WhatsApp number of the company's account, and the company as seen on that number:
+   * `messagesBody` and `deliver` with it reach the new number, `channelAccountId` is the number's.
+   */
+  addNumber(
+    company: Company,
+    number?: { phone?: string | null; name?: string | null; status?: ChannelStatus },
+  ): Promise<Company>;
   ctx(company: Company, user: TestUser): Promise<TenantContext>;
   messagesBody(
     company: Company,
@@ -168,6 +182,25 @@ export async function startWhatsAppFixture(): Promise<WhatsAppFixture> {
         channelAccountId,
         token,
       };
+    },
+    async addNumber(company, number = {}) {
+      const phoneNumberId = nextExternalId();
+      const channelAccountId = uuidv7();
+      await dbs.app.run(authorizedTenantScope(company.tenant.id, company.owner.id), async (tx) => {
+        await tx.insert(channelAccounts).values({
+          id: channelAccountId,
+          tenantId: company.tenant.id,
+          whatsappAccountId: company.whatsappAccountId,
+          phoneNumberId,
+          status: number.status ?? 'active',
+          displayPhoneNumber: number.phone === undefined ? '+91 90000 00001' : number.phone,
+          verifiedName: number.name ?? null,
+        });
+        await tx.execute(
+          sql`select app.bind_provider_asset('meta_whatsapp', 'phone_number', ${phoneNumberId}, ${channelAccountId}::uuid, ${company.wabaId})`,
+        );
+      });
+      return { ...company, phoneNumberId, channelAccountId };
     },
     ctx(company, user) {
       return resolveTenantContext(

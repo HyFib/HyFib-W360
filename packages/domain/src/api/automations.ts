@@ -29,7 +29,6 @@ import {
 } from '../automations/graph';
 import { appendRunStep, endRun, lockActiveRun, signalAutomationRun } from '../automations/runs';
 import { checkTemplateEligibility } from '../consent/service';
-import { normalizePhone } from '../contacts/phone';
 import { contactForPhone } from '../contacts/service';
 import { emitTenantEvent } from '../messaging/events';
 import type { OutboundDeps } from '../messaging/outbound';
@@ -39,7 +38,7 @@ import { apiActor, assertAnyScope, assertScope, hasScope, type ApiContext } from
 import { apiErrorResponse } from './errors';
 import type { ApiResponse, IdempotencyInput } from './idempotency';
 import { API_LIMITS } from './model';
-import { explicitPhone, idempotent, phoneField } from './resources';
+import { assertEachNumberOnce, explicitPhone, idempotent, phoneAt, phoneField } from './resources';
 
 /**
  * Automations through the public API (ADR-077). A key with `automations.start` lists the
@@ -298,17 +297,7 @@ export async function apiStartManyAutomationRuns(
     phone: phoneAt(run.to, `runs.${i}.to`),
     inputs: run.inputs,
   }));
-  const firstAt = new Map<string, string>();
-  for (const run of runs) {
-    const earlier = firstAt.get(run.phone);
-    if (earlier !== undefined) {
-      const message = `Give each number once: ${run.place}.to is the number of ${earlier}.to.`;
-      throw new AppError('validation_failed', message, {
-        issues: [{ path: `${run.place}.to`, message }],
-      });
-    }
-    firstAt.set(run.phone, run.place);
-  }
+  assertEachNumberOnce(runs);
   const now = deps.clock.now();
   return deps.db.run(ctx.scope, (tx) =>
     idempotent(tx, ctx, idempotency, now, async () => {
@@ -344,17 +333,6 @@ export async function apiStartManyAutomationRuns(
       return { status: 200, body: { data: starts } };
     }),
   );
-}
-
-/** A number in a list of starts, refused at its place in the list when it is not one. */
-function phoneAt(raw: string, path: string): string {
-  const phone = normalizePhone(raw, { kind: 'explicit' });
-  if (!phone.ok) {
-    throw new AppError('validation_failed', phone.message, {
-      issues: [{ path, message: phone.message }],
-    });
-  }
-  return phone.e164;
 }
 
 /** What a start needs of the automation, checked once for a call (ADR-077, ADR-161). */

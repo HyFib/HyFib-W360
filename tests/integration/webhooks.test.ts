@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
+import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
 import {
   DEFAULT_EGRESS_POLICY,
   createEgressClient,
@@ -18,7 +18,10 @@ import {
   webhookEvents,
 } from '@w360/db';
 import {
+  apiSendMessage,
+  authenticateApiToken,
   consentChangedPayloadSchema,
+  createApiKeysService,
   createAutomationService,
   createConsentService,
   createContactsService,
@@ -41,6 +44,8 @@ import {
   WEBHOOK_TEMPLATE_STATUSES,
   WEBHOOK_USER_AGENT,
   webhookHeadersAad,
+  WebhookOAuthTokenCache,
+  webhookOAuthSecretAad,
   webhookSecretAad,
   type TenantContext,
   type WebhookDeliveryLogger,
@@ -55,8 +60,8 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * receiver (reached through the loopback allowance that exists for tests only): endpoints and their
  * secrets, capture by the database triggers for every event type, signed at-least-once delivery,
  * the retry schedule, interrupted attempts, deliveries that cannot be prepared, automatic
- * disabling with its notice, replays and test events, secret rotation, the address guard, dispatch
- * and retention, and isolation.
+ * disabling with its notice, replays and test events, secret rotation, OAuth clients and their
+ * tokens, the address guard, dispatch and retention, and isolation.
  */
 let fx: WhatsAppFixture;
 let receiver: Server;
@@ -68,6 +73,10 @@ interface Received {
   body: string;
 }
 const received: Received[] = [];
+/** What the authorization server answers at each /token/ path, for OAuth clients (ADR-173). */
+const tokenAnswers = new Map<string, { status: number; body: unknown }>();
+/** The bearer token each /bearer/ endpoint takes (ADR-173). */
+const acceptedTokens = new Map<string, string>();
 
 beforeAll(async () => {
   fx = await startWhatsAppFixture();
@@ -89,6 +98,18 @@ beforeAll(async () => {
         res.end();
       } else if (path.startsWith('/hang')) {
         // Never answers: the egress deadline ends the attempt.
+      } else if (path.startsWith('/token/')) {
+        const answer = tokenAnswers.get(path) ?? { status: 404, body: { error: 'not_found' } };
+        res.writeHead(answer.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(answer.body));
+      } else if (path.startsWith('/bearer/')) {
+        const accepted = acceptedTokens.get(path);
+        if (accepted && req.headers.authorization === `Bearer ${accepted}`) {
+          res.writeHead(204);
+        } else {
+          res.writeHead(401, { 'www-authenticate': 'Bearer error="invalid_token"' });
+        }
+        res.end();
       } else {
         res.writeHead(404);
         res.end();
@@ -119,10 +140,12 @@ const egress = (resolveTo: ResolvedAddress[] = [{ address: '127.0.0.1', family: 
     { resolve: async () => resolveTo },
   );
 
+/** The worker's delivery dependencies; each run keeps OAuth tokens of its own unless given some. */
 function deliveryDeps(
   clock: Clock = systemClock,
   client: EgressClient = egress(),
   logger: WebhookDeliveryLogger = failOnLog,
+  oauthTokens: WebhookOAuthTokenCache = new WebhookOAuthTokenCache(),
 ) {
   const jobs = fx.jobs();
   return {
@@ -135,6 +158,7 @@ function deliveryDeps(
     signer: fx.signer,
     notices: { outbox: { keyring: fx.keyring, jobs, signer: fx.signer }, appBaseUrl: APP_BASE_URL },
     logger,
+    oauthTokens,
   };
 }
 
@@ -143,9 +167,10 @@ const deliverDue = (
   clock?: Clock,
   client?: EgressClient,
   logger?: WebhookDeliveryLogger,
+  oauthTokens?: WebhookOAuthTokenCache,
 ) =>
   processWebhookDeliveries(
-    deliveryDeps(clock, client, logger),
+    deliveryDeps(clock, client, logger, oauthTokens),
     authorizedTenantScope(c.tenant.id, null),
   );
 
@@ -617,6 +642,307 @@ describe('endpoint headers (ADR-118)', () => {
         [e.id],
       ),
     ).rejects.toThrow(/webhook_endpoints_headers/);
+  });
+});
+
+describe('OAuth clients (ADR-173)', () => {
+  const auditsOf = async (c: Company, action: string) =>
+    (
+      await fx.query<{ metadata: Record<string, unknown> }>(
+        'SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id',
+        [c.tenant.id, action],
+      )
+    ).map((row) => row.metadata);
+  const SECRET = 's3cr:et/+';
+
+  /** An endpoint on a /bearer/ path of its own, getting tokens from a /token/ path of its own. */
+  async function addOAuthEndpoint(c: Company, scope: string | null = 'events.write read') {
+    const id = randomBytes(6).toString('hex');
+    const bearer = `/bearer/${id}`;
+    const token = `/token/${id}`;
+    const owner = await fx.ctx(c, c.owner);
+    const created = await webhooks().create(owner, {
+      url: `http://${HOST}:${port}${bearer}`,
+      eventTypes: ['consent.changed'],
+      oauth: {
+        tokenUrl: `http://${HOST}:${port}${token}`,
+        clientId: 'hyfib-test',
+        clientSecret: SECRET,
+        scope,
+      },
+    });
+    return { ...created, owner, bearer, token, tokenUrl: `http://${HOST}:${port}${token}` };
+  }
+  const issue = (path: string, accessToken: string, expiresIn: unknown = 3600) =>
+    tokenAnswers.set(path, {
+      status: 200,
+      body: { access_token: accessToken, token_type: 'Bearer', expires_in: expiresIn },
+    });
+  const authorizations = (path: string) => requestsTo(path).map((r) => r.headers.authorization);
+
+  it('get a token as the endpoint’s client, send it as a bearer token and keep it for the next deliveries', async () => {
+    const c = await fx.company();
+    const e = await addOAuthEndpoint(c);
+    issue(e.token, 'tok-1');
+    acceptedTokens.set(e.bearer, 'tok-1');
+    const tokens = new WebhookOAuthTokenCache();
+    const first = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(await deliverDue(c, systemClock, egress(), failOnLog, tokens)).toMatchObject({
+      attempted: 1,
+      succeeded: 1,
+    });
+    // The token request of RFC 6749 section 4.4.2: the client in a Basic header, its identifier
+    // and secret each form-encoded, and the grant and the scope in a form; nothing of the delivery.
+    const [asked] = requestsTo(e.token);
+    expect(asked?.headers.authorization).toBe(
+      `Basic ${Buffer.from('hyfib-test:s3cr%3Aet%2F%2B').toString('base64')}`,
+    );
+    expect(asked?.headers['content-type']).toBe('application/x-www-form-urlencoded');
+    expect(asked?.headers.accept).toBe('application/json');
+    expect(asked?.headers['user-agent']).toBe(WEBHOOK_USER_AGENT);
+    expect(Object.keys(asked?.headers ?? {}).filter((name) => name.startsWith('w360-'))).toEqual(
+      [],
+    );
+    expect(asked?.body).toBe('grant_type=client_credentials&scope=events.write+read');
+    const [delivered] = requestsTo(e.bearer);
+    expect(delivered?.headers.authorization).toBe('Bearer tok-1');
+    expect(delivered?.headers['w360-delivery-id']).toBe(first.deliveryId);
+    expect(signedWith(delivered!, e.secret)).toBe(true);
+
+    // The next deliveries, three sent together, use the token the process kept.
+    for (let i = 0; i < 3; i += 1) await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(await deliverDue(c, systemClock, egress(), failOnLog, tokens)).toMatchObject({
+      attempted: 3,
+      succeeded: 3,
+    });
+    expect(requestsTo(e.token)).toHaveLength(1);
+    // Another process keeps none yet: one request serves the deliveries it sends together.
+    for (let i = 0; i < 3; i += 1) await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(await deliverDue(c)).toMatchObject({ attempted: 3, succeeded: 3 });
+    expect(requestsTo(e.token)).toHaveLength(2);
+    expect(authorizations(e.bearer)).toEqual(Array.from({ length: 7 }, () => 'Bearer tok-1'));
+  });
+
+  it('fail an attempt without calling the endpoint when no token comes, and ask again at the next one', async () => {
+    const c = await fx.company();
+    const e = await addOAuthEndpoint(c, null);
+    acceptedTokens.set(e.bearer, 'tok-2');
+    tokenAnswers.set(e.token, { status: 401, body: { error: 'invalid_client' } });
+    const tokens = new WebhookOAuthTokenCache();
+    const test = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(await deliverDue(c, systemClock, egress(), failOnLog, tokens)).toMatchObject({
+      attempted: 1,
+      retrying: 1,
+    });
+    expect(requestsTo(e.token).map((r) => r.body)).toEqual(['grant_type=client_credentials']);
+    expect(requestsTo(e.bearer)).toHaveLength(0);
+    expect(await deliveriesOf(e.id)).toMatchObject([
+      {
+        id: test.deliveryId,
+        state: 'pending',
+        attempts: 1,
+        last_status_code: null,
+        last_error: 'oauth_token_refused_401',
+      },
+    ]);
+    // A 200 without a bearer token is none either, and a failure is not kept.
+    tokenAnswers.set(e.token, { status: 200, body: { access_token: 'tok-2', token_type: 'mac' } });
+    expect(await deliverDue(c, later(61_000), egress(), failOnLog, tokens)).toMatchObject({
+      attempted: 1,
+      retrying: 1,
+    });
+    expect(await deliveriesOf(e.id)).toMatchObject([
+      { attempts: 2, last_status_code: null, last_error: 'oauth_token_invalid' },
+    ]);
+    // Once the server gives one, the next attempt gets it and is delivered.
+    issue(e.token, 'tok-2');
+    expect(await deliverDue(c, later(362_000), egress(), failOnLog, tokens)).toMatchObject({
+      attempted: 1,
+      succeeded: 1,
+    });
+    expect(await deliveriesOf(e.id)).toMatchObject([
+      { state: 'succeeded', attempts: 3, last_status_code: 204, last_error: null },
+    ]);
+    expect(requestsTo(e.token)).toHaveLength(3);
+    expect(requestsTo(e.bearer).map((r) => r.headers['w360-delivery-attempt'])).toEqual(['3']);
+  });
+
+  it('replace a token the endpoint refuses at the next attempt', async () => {
+    const c = await fx.company();
+    const e = await addOAuthEndpoint(c);
+    issue(e.token, 'tok-old');
+    acceptedTokens.set(e.bearer, 'tok-old');
+    const tokens = new WebhookOAuthTokenCache();
+    await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(await deliverDue(c, systemClock, egress(), failOnLog, tokens)).toMatchObject({
+      succeeded: 1,
+    });
+    // The receiver revoked it: the token kept is answered 401 and dropped, and the attempt fails.
+    acceptedTokens.set(e.bearer, 'tok-new');
+    issue(e.token, 'tok-new');
+    const second = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(await deliverDue(c, systemClock, egress(), failOnLog, tokens)).toMatchObject({
+      attempted: 1,
+      retrying: 1,
+    });
+    expect(requestsTo(e.token)).toHaveLength(1);
+    expect((await deliveriesOf(e.id)).find((d) => d.id === second.deliveryId)).toMatchObject({
+      state: 'pending',
+      last_status_code: 401,
+      last_error: null,
+    });
+    expect(await deliverDue(c, later(61_000), egress(), failOnLog, tokens)).toMatchObject({
+      attempted: 1,
+      succeeded: 1,
+    });
+    expect(requestsTo(e.token)).toHaveLength(2);
+    expect(authorizations(e.bearer)).toEqual([
+      'Bearer tok-old',
+      'Bearer tok-old',
+      'Bearer tok-new',
+    ]);
+  });
+
+  it('hold the token URL to the address guard', async () => {
+    const c = await fx.company();
+    const e = await addOAuthEndpoint(c);
+    issue(e.token, 'tok-3');
+    await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(
+      await deliverDue(c, systemClock, egress([{ address: '10.0.0.7', family: 4 }])),
+    ).toMatchObject({
+      attempted: 1,
+      retrying: 1,
+    });
+    expect(await deliveriesOf(e.id)).toMatchObject([
+      { attempts: 1, last_status_code: null, last_error: 'oauth_token_address_blocked' },
+    ]);
+    expect(requestsTo(e.token)).toHaveLength(0);
+    expect(requestsTo(e.bearer)).toHaveLength(0);
+  });
+
+  it('keep the secret sealed, need it again for another token URL, refuse an Authorization header beside it, and are audited by host only', async () => {
+    const c = await fx.company();
+    const e = await addOAuthEndpoint(c);
+    const columns = async () => {
+      const [row] = await fx.query<{
+        oauth_token_url: string | null;
+        oauth_client_id: string | null;
+        oauth_client_secret_ciphertext: string | null;
+        oauth_scope: string | null;
+      }>(
+        `SELECT oauth_token_url, oauth_client_id, oauth_client_secret_ciphertext, oauth_scope
+           FROM app.webhook_endpoints WHERE id = $1`,
+        [e.id],
+      );
+      if (!row) throw new Error('endpoint missing');
+      return row;
+    };
+    const stored = await columns();
+    expect(stored).toMatchObject({
+      oauth_token_url: e.tokenUrl,
+      oauth_client_id: 'hyfib-test',
+      oauth_scope: 'events.write read',
+    });
+    expect(stored.oauth_client_secret_ciphertext).not.toContain(SECRET);
+    expect(
+      fx.keyring.decryptString(
+        stored.oauth_client_secret_ciphertext!,
+        webhookOAuthSecretAad(c.tenant.id, e.id),
+      ),
+    ).toBe(SECRET);
+    const [listed] = await webhooks().list(e.owner);
+    expect(listed?.oauth).toEqual({
+      tokenUrl: e.tokenUrl,
+      clientId: 'hyfib-test',
+      scope: 'events.write read',
+    });
+    expect(JSON.stringify(await webhooks().list(e.owner))).not.toContain(SECRET);
+    expect(await auditsOf(c, 'webhook.endpoint_created')).toEqual([
+      { host: HOST, eventTypes: ['consent.changed'], oauthTokenHost: HOST },
+    ]);
+
+    const change = (more: Record<string, unknown>) =>
+      webhooks().update(e.owner, {
+        endpointId: e.id,
+        url: `http://${HOST}:${port}${e.bearer}`,
+        description: '',
+        eventTypes: ['consent.changed'],
+        ...more,
+      });
+    // The same token URL keeps the secret; another needs it again, since the secret goes there.
+    await change({ oauth: { tokenUrl: e.tokenUrl, clientId: 'renamed', scope: null } });
+    expect(await columns()).toEqual({ ...stored, oauth_client_id: 'renamed', oauth_scope: null });
+    expect((await auditsOf(c, 'webhook.endpoint_updated')).at(-1)).toEqual({
+      host: HOST,
+      eventTypes: ['consent.changed'],
+      oauthTokenHost: HOST,
+      oauthSecretReplaced: false,
+    });
+    await expectAppError(
+      change({ oauth: { tokenUrl: `http://elsewhere.test:${port}/token/x`, clientId: 'renamed' } }),
+      'validation_failed',
+      /Enter the client secret again/,
+    );
+    // The endpoint cannot send an Authorization header of its own beside its client.
+    await expectAppError(
+      change({ headers: [{ name: 'Authorization', value: 'Bearer fixed' }] }),
+      'validation_failed',
+      /sends them as its Authorization header/,
+    );
+    expect(await columns()).toEqual({ ...stored, oauth_client_id: 'renamed', oauth_scope: null });
+    expect((await webhooks().list(e.owner))[0]?.headerNames).toEqual([]);
+    // Removed, the header may be given; then a client may not.
+    await change({ oauth: null, headers: [{ name: 'Authorization', value: 'Bearer fixed' }] });
+    expect(await columns()).toEqual({
+      oauth_token_url: null,
+      oauth_client_id: null,
+      oauth_client_secret_ciphertext: null,
+      oauth_scope: null,
+    });
+    expect((await auditsOf(c, 'webhook.endpoint_updated')).at(-1)).toEqual({
+      host: HOST,
+      eventTypes: ['consent.changed'],
+      headers: ['Authorization'],
+      oauthRemoved: true,
+    });
+    await expectAppError(
+      change({ oauth: { tokenUrl: e.tokenUrl, clientId: 'again', clientSecret: 'x' } }),
+      'validation_failed',
+      /sends them as its Authorization header/,
+    );
+    const audits = await fx.query<{ metadata: unknown }>(
+      'SELECT metadata FROM app.audit_events WHERE tenant_id = $1',
+      [c.tenant.id],
+    );
+    expect(JSON.stringify(audits)).not.toContain('s3cr');
+  });
+
+  it('are kept by the database together or not at all, with the scope alone optional', async () => {
+    const c = await fx.company();
+    const e = await addOAuthEndpoint(c);
+    for (const set of [
+      'oauth_token_url = NULL',
+      'oauth_client_id = NULL',
+      'oauth_client_secret_ciphertext = NULL',
+      "oauth_client_id = ''",
+      `oauth_client_id = repeat('i', ${WEBHOOK_LIMITS.oauthClientIdLength + 1})`,
+      `oauth_scope = repeat('s', ${WEBHOOK_LIMITS.oauthScopeLength + 1})`,
+      "oauth_scope = ''",
+      // A scope alone.
+      'oauth_token_url = NULL, oauth_client_id = NULL, oauth_client_secret_ciphertext = NULL',
+    ]) {
+      await expect(
+        fx.query(`UPDATE app.webhook_endpoints SET ${set} WHERE id = $1`, [e.id]),
+        set,
+      ).rejects.toThrow(/webhook_endpoints_oauth/);
+    }
+    await fx.query('UPDATE app.webhook_endpoints SET oauth_scope = NULL WHERE id = $1', [e.id]);
+    await fx.query(
+      `UPDATE app.webhook_endpoints SET oauth_token_url = NULL, oauth_client_id = NULL,
+         oauth_client_secret_ciphertext = NULL WHERE id = $1`,
+      [e.id],
+    );
   });
 });
 
@@ -1327,6 +1653,206 @@ describe('conversation status filters (ADR-149)', () => {
   });
 });
 
+describe('message sender filters (ADR-172)', () => {
+  it('are refused without message.status, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], messageSenders: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, messageSenders }),
+        'validation_failed',
+        message,
+      );
+    // A received message has no sender to choose, and a contact sends no status.
+    await refused(
+      ['message.received'],
+      ['api'],
+      /only for an endpoint that receives Message status/,
+    );
+    await refused(['message.status'], [], /at least one sender/);
+    await refused(['message.status'], ['contact'], /from the list/);
+    await refused(['message.status'], ['member'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['message.status', 'consent.changed'],
+      messageSenders: ['api', 'campaign', 'api'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ messageSenders: ['campaign', 'api'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['message.status', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.messageSenders;
+    expect(await current()).toEqual(['campaign', 'api']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['campaign', 'api']);
+    await change({ messageSenders: ['api'] });
+    expect(await current()).toEqual(['api']);
+    const updates = await fx.query<{ metadata: { messageSenders?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.messageSenders)).toEqual([['campaign', 'api'], ['api']]);
+    await change({ messageSenders: null });
+    expect(await current()).toBeNull();
+    await change({ messageSenders: ['system'] });
+    // The database refuses an empty list, more than five entries, a contact, an unknown sender or a
+    // missing one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET message_senders = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{agent,bot,campaign,api,system,api}'`,
+      `'{api,contact}'`,
+      `'{api,member}'`,
+      `ARRAY['api', NULL]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_message_senders/);
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], messageSenders: ['api'] }),
+      'validation_failed',
+      /only for an endpoint that receives Message status/,
+    );
+    // …and any list for an endpoint that does not take it, received messages included.
+    await change({ eventTypes: ['message.received'] });
+    await expect(setInDatabase(`'{api}'`)).rejects.toThrow(/webhook_endpoints_message_senders/);
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'message_senders',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  /** A text reply sent through the API by a key of the company and accepted by the stand-in. */
+  async function apiReply(c: Company, to: string, text: string) {
+    const owner = await fx.ctx(c, c.owner);
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      {
+        name: `Helpdesk ${randomBytes(3).toString('hex')}`,
+        scopes: ['messages.reply'],
+        expiresInDays: 0,
+      },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    const deps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock: systemClock };
+    const sent = await apiSendMessage(
+      deps,
+      key,
+      { type: 'text', to: `+${to}`, text },
+      { key: `reply-${randomBytes(6).toString('hex')}`, requestHash: sha256Hex(text) },
+    );
+    expect(sent.status).toBe(201);
+    const messageId = (sent.body as { data: { id: string } }).data.id;
+    fx.standIn.state.sendQueue.push({
+      kind: 'accept',
+      wamid: `wamid.api.${randomBytes(8).toString('hex')}`,
+    });
+    const [intent] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.send_intents WHERE message_id = $1',
+      [messageId],
+    );
+    const result = await processSendIntent(
+      {
+        ...deps,
+        keyring: fx.keyring,
+        graph: fx.graph,
+        rate: { capacity: 100, refillPerSecond: 100 },
+      },
+      authorizedTenantScope(c.tenant.id, null),
+      intent!.id,
+    );
+    expect(result.outcome).toBe('accepted');
+    return messageId;
+  }
+
+  it('send an endpoint only the statuses of messages the senders it names sent, another every status, and capture none nobody takes', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const from = waId();
+    const msg = await inbound(c, from, 'Hi');
+    const add = async (messageSenders: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: ['message.status', 'message.received'],
+        messageSenders,
+      });
+      return { ...created, path };
+    };
+    const statusEvents = async () =>
+      (await eventsOf(c))
+        .filter((e) => e.type === 'message.status')
+        .map((e) => [e.status, e.detail]);
+
+    // Only the API's messages: a member's reply is accepted with nothing captured.
+    const apiOnly = await add(['api']);
+    expect((await webhooks().list(owner))[0]?.messageSenders).toEqual(['api']);
+    await sendReply(c, msg.conversation_id, 'A member replies.');
+    expect(await statusEvents()).toEqual([]);
+    const fromApi = await apiReply(c, from, 'The API replies.');
+    // Stored as events always were: who sent it is not kept with the event.
+    expect(await statusEvents()).toEqual([['accepted', {}]]);
+    // Its other events are not filtered: the customer's next message is captured for it.
+    await inbound(c, from, 'Thanks');
+
+    // An endpoint for every sender hears both from now on.
+    const every = await add(null);
+    await sendReply(c, msg.conversation_id, 'Another member reply.');
+    await apiReply(c, from, 'Another API reply.');
+    const typesTo = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).map((d) => [d.type, d.status]);
+    expect(await typesTo(apiOnly.id)).toEqual([
+      ['message.status', 'accepted'],
+      ['message.received', null],
+      ['message.status', 'accepted'],
+    ]);
+    expect(await typesTo(every.id)).toEqual([
+      ['message.status', 'accepted'],
+      ['message.status', 'accepted'],
+    ]);
+
+    // Each status names who sent its message.
+    expect(await deliverDue(c)).toMatchObject({ attempted: 5, succeeded: 5 });
+    const sentByAt = (path: string) =>
+      requestsTo(path)
+        .filter((r) => r.headers['w360-event-type'] === 'message.status')
+        .map((r) => {
+          const { message } = messageStatusPayloadSchema.parse(JSON.parse(r.body)).data;
+          return [message.sentBy, message.id === fromApi ? 'first API reply' : 'later'];
+        })
+        .sort();
+    expect(sentByAt(apiOnly.path)).toEqual([
+      ['api', 'first API reply'],
+      ['api', 'later'],
+    ]);
+    expect(sentByAt(every.path)).toEqual([
+      ['agent', 'later'],
+      ['api', 'later'],
+    ]);
+  });
+});
+
 describe('run end filters (ADR-151)', () => {
   it('are refused without automation.run_ended, unknown, active or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
     const c = await fx.company();
@@ -1643,6 +2169,230 @@ describe('automation filters (ADR-145)', () => {
     for (const user of [c.agent, c.marketer]) {
       await expectAppError(webhooks().automationChoices(await fx.ctx(c, user)), 'forbidden');
     }
+  });
+});
+
+describe('number filters (ADR-170)', () => {
+  it('are refused without an event that happens on a number, empty, over 100 or naming a number of another company; kept by a change that leaves them out and cleared with the events; the database keeps them to those events', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const main = c.channelAccountId;
+    const outlet = (await fx.addNumber(c, { phone: '+91 90000 54321', name: 'Outlet' }))
+      .channelAccountId;
+    const closed = (await fx.addNumber(c, { phone: '+91 90000 11111', status: 'disconnected' }))
+      .channelAccountId;
+    const elsewhere = (await fx.company()).channelAccountId;
+    const url = 'https://hooks.example.com/in';
+    const refused = async (
+      eventTypes: string[],
+      channelIds: unknown,
+      message: RegExp,
+      path = 'channelIds',
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes, channelIds }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(channelIds)).toBe(path);
+    };
+    const needsTheEvents =
+      /only for an endpoint that receives message, conversation, automation, order or campaign events/;
+    await refused(
+      ['consent.changed', 'contact.updated', 'template.status_changed'],
+      [main],
+      needsTheEvents,
+    );
+    await refused(['message.received'], [], /at least one number/);
+    await refused(['message.received'], ['outlet'], /from the list/, 'channelIds.0');
+    await refused(
+      ['message.received'],
+      Array.from({ length: 101 }, () => uuidv7()),
+      /at most 100 numbers/,
+    );
+    // Only the company's numbers: not another company's or an unknown id.
+    await refused(['order.received'], [main, elsewhere], /of this company/, 'channelIds.1');
+    await refused(['campaign.status_changed'], [uuidv7()], /of this company/, 'channelIds.0');
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['message.received', 'consent.changed'],
+      channelIds: [outlet, main.toUpperCase(), outlet],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ channelIds: [outlet, main] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['message.received', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.channels;
+    expect(await current()).toEqual([
+      { id: outlet, label: '+91 90000 54321 · Outlet', status: 'active' },
+      { id: main, label: '+91 90000 00000', status: 'active' },
+    ]);
+    await change({ description: 'kept' });
+    expect((await current())?.map((n) => n.id)).toEqual([outlet, main]);
+    // A disconnected number can be chosen, and is named with its status.
+    await change({ channelIds: [closed] });
+    expect(await current()).toEqual([
+      { id: closed, label: '+91 90000 11111', status: 'disconnected' },
+    ]);
+    const updates = await fx.query<{ metadata: { channelIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.channelIds)).toEqual([[outlet, main], [closed]]);
+    // A list given again is checked again, changing nothing when it is refused.
+    await expectAppError(
+      change({ channelIds: [main, elsewhere] }),
+      'validation_failed',
+      /of this company/,
+    );
+    expect((await current())?.map((n) => n.id)).toEqual([closed]);
+    await change({ channelIds: null });
+    expect(await current()).toBeNull();
+    await change({ channelIds: [main] });
+    // Any event that happens on a number keeps the list.
+    await change({ eventTypes: ['campaign.status_changed', 'contact.created'] });
+    expect((await current())?.map((n) => n.id)).toEqual([main]);
+    // The database refuses an empty list, more than 100 or a missing id from an endpoint taking
+    // such an event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET channel_account_ids = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    const many = `ARRAY[${Array.from({ length: 101 }, () => `'${uuidv7()}'`).join(',')}]::uuid[]`;
+    for (const bad of [`'{}'`, many, `ARRAY['${main}', NULL]::uuid[]`]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_channel_account_ids/,
+      );
+    }
+    await change({ eventTypes: ['contact.created', 'consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['contact.created'], channelIds: [main] }),
+      'validation_failed',
+      needsTheEvents,
+    );
+    // …and any list for an endpoint that takes none.
+    await expect(setInDatabase(`ARRAY['${main}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_channel_account_ids/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'channel_account_ids',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('offer every number of the company in the order they were connected, whatever their status, to developers only', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const outlet = await fx.addNumber(c, { phone: '+91 90000 54321', name: 'Outlet' });
+    const pending = await fx.addNumber(c, { phone: null, status: 'onboarding' });
+    const d = await fx.company();
+    await fx.addNumber(d, { phone: '+91 90000 99999' });
+    expect(await webhooks().channelChoices(owner)).toEqual([
+      { id: c.channelAccountId, label: '+91 90000 00000', status: 'active' },
+      { id: outlet.channelAccountId, label: '+91 90000 54321 · Outlet', status: 'active' },
+      {
+        id: pending.channelAccountId,
+        label: `Phone number ID ${pending.phoneNumberId}`,
+        status: 'onboarding',
+      },
+    ]);
+    for (const user of [c.agent, c.marketer]) {
+      await expectAppError(webhooks().channelChoices(await fx.ctx(c, user)), 'forbidden');
+    }
+  });
+
+  it('send an endpoint that names numbers only the message events on them, another every number’s, events of no number to both, and capture none nobody takes', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const outlet = await fx.addNumber(c, { phone: '+91 90000 54321', name: 'Outlet' });
+    const add = async (eventTypes: WebhookEventType[], channelIds: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        channelIds,
+      });
+      return { ...created, path };
+    };
+    // The outlet's messages and their statuses, and every consent change.
+    const outletOnly = await add(
+      ['message.received', 'message.status', 'consent.changed'],
+      [outlet.channelAccountId],
+    );
+    const from = waId();
+    // A message to the first number: no endpoint takes it, so nothing is captured.
+    const main = await inbound(c, from, 'Hello main');
+    expect(await eventsOf(c)).toEqual([]);
+    // A message to the outlet is captured for it, stored as events always were.
+    const shop = await inbound(outlet, from, 'Hello outlet');
+    expect((await eventsOf(c)).map((e) => [e.type, e.detail])).toEqual([
+      ['message.received', { messageType: 'text' }],
+    ]);
+    // A reply from the outlet is captured when WhatsApp accepts it; one from the first number is
+    // not.
+    await sendReply(c, main.conversation_id, 'Reply from main');
+    await sendReply(c, shop.conversation_id, 'Reply from the outlet');
+    expect((await eventsOf(c)).map((e) => [e.type, e.status, e.detail])).toEqual([
+      ['message.received', null, { messageType: 'text' }],
+      ['message.status', 'accepted', {}],
+    ]);
+    // A consent change happens on no number: the endpoint takes it.
+    await createConsentService({ db: fx.dbs.app, clock: systemClock }).recordConsent(owner, {
+      contactId: main.contact_id,
+      purpose: 'marketing',
+      action: 'opt_in',
+    });
+    // An endpoint for every number's messages hears both numbers.
+    const everyNumber = await add(['message.received'], null);
+    await inbound(c, from, 'Main again');
+    await inbound(outlet, from, 'Outlet again');
+    const typesTo = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).map((d) => [d.type, d.status]);
+    expect(await typesTo(outletOnly.id)).toEqual([
+      ['message.received', null],
+      ['message.status', 'accepted'],
+      ['consent.changed', null],
+      ['message.received', null],
+    ]);
+    expect(await typesTo(everyNumber.id)).toEqual([
+      ['message.received', null],
+      ['message.received', null],
+    ]);
+    // Each delivery names the number its event happened on.
+    expect(await deliverDue(c)).toMatchObject({ attempted: 6, succeeded: 6 });
+    const numbersAt = (path: string) =>
+      requestsTo(path)
+        .map((r) => JSON.parse(r.body) as { type: string; data: { channel?: { id: string } } })
+        .filter((b) => b.data.channel)
+        .map((b) => [b.type, b.data.channel?.id])
+        .sort();
+    expect(numbersAt(outletOnly.path)).toEqual([
+      ['message.received', outlet.channelAccountId],
+      ['message.received', outlet.channelAccountId],
+      ['message.status', outlet.channelAccountId],
+    ]);
+    expect(numbersAt(everyNumber.path)).toEqual(
+      [
+        ['message.received', c.channelAccountId],
+        ['message.received', outlet.channelAccountId],
+      ].sort(),
+    );
   });
 });
 
@@ -2375,6 +3125,89 @@ describe('deliveries that cannot be prepared', () => {
     expect(
       requestsTo(broken.path).map((r) => [r.headers['w360-delivery-id'], r.headers.authorization]),
     ).toEqual([[replay.deliveryId, 'Bearer given-again']]);
+  });
+
+  it('an OAuth client the keyring cannot open fails each delivery to its endpoint alone, until given again (ADR-173)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const add = async (secret: string) => {
+      const id = randomBytes(6).toString('hex');
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}/bearer/${id}`,
+        eventTypes: ['consent.changed'],
+        oauth: {
+          tokenUrl: `http://${HOST}:${port}/token/${id}`,
+          clientId: 'hyfib-test',
+          clientSecret: secret,
+        },
+      });
+      tokenAnswers.set(`/token/${id}`, {
+        status: 200,
+        body: { access_token: `tok-${id}`, token_type: 'Bearer', expires_in: 3600 },
+      });
+      acceptedTokens.set(`/bearer/${id}`, `tok-${id}`);
+      return { ...created, bearer: `/bearer/${id}`, token: `/token/${id}` };
+    };
+    const broken = await add('broken-secret');
+    const fine = await add('fine-secret');
+    // The broken endpoint holds the other endpoint's sealed secret (as after a botched restore):
+    // bound to that endpoint, it does not open for this one.
+    await fx.query(
+      `UPDATE app.webhook_endpoints b
+          SET oauth_client_secret_ciphertext = f.oauth_client_secret_ciphertext
+         FROM app.webhook_endpoints f WHERE b.id = $1 AND f.id = $2`,
+      [broken.id, fine.id],
+    );
+    const first = await webhooks().sendTest(owner, { endpointId: broken.id });
+    await webhooks().sendTest(owner, { endpointId: fine.id });
+
+    const log = capturedLog();
+    expect(await deliverDue(c, systemClock, egress(), log.logger)).toMatchObject({
+      attempted: 1,
+      succeeded: 1,
+      failed: 1,
+    });
+    expect(await deliveriesOf(broken.id)).toMatchObject([
+      { id: first.deliveryId, state: 'failed', attempts: 0, last_error: 'payload_failed' },
+    ]);
+    expect(requestsTo(broken.token)).toHaveLength(0);
+    expect(requestsTo(broken.bearer)).toHaveLength(0);
+    expect(requestsTo(fine.bearer).map((r) => r.headers.authorization)).toEqual([
+      `Bearer tok-${fine.token.slice('/token/'.length)}`,
+    ]);
+    expect(log.lines.map((line) => line.fields)).toEqual([
+      {
+        tenantId: c.tenant.id,
+        deliveryId: first.deliveryId,
+        endpointId: broken.id,
+        eventType: 'ping',
+        stage: 'oauth',
+        errorClass: 'Error',
+        errorCode: null,
+      },
+    ]);
+    expect(JSON.stringify(log.lines)).not.toMatch(/secret|tok-/);
+
+    // Given again, the secret is sealed for this endpoint, and a replay delivers.
+    await webhooks().update(owner, {
+      endpointId: broken.id,
+      url: `http://${HOST}:${port}${broken.bearer}`,
+      description: '',
+      eventTypes: ['consent.changed'],
+      oauth: {
+        tokenUrl: `http://${HOST}:${port}${broken.token}`,
+        clientId: 'hyfib-test',
+        clientSecret: 'given-again',
+      },
+    });
+    const replay = await webhooks().replay(owner, { deliveryId: first.deliveryId });
+    expect(await deliverDue(c)).toMatchObject({ attempted: 1, succeeded: 1, failed: 0 });
+    expect(requestsTo(broken.bearer).map((r) => r.headers['w360-delivery-id'])).toEqual([
+      replay.deliveryId,
+    ]);
+    expect(requestsTo(broken.token)[0]?.headers.authorization).toBe(
+      `Basic ${Buffer.from('hyfib-test:given-again').toString('base64')}`,
+    );
   });
 
   it('a database error while building fails only its delivery: the claim goes on after its savepoint', async () => {

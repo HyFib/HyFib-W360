@@ -16,7 +16,7 @@ import {
   Table,
 } from '@w360/ui';
 import { CompanyLink, ListTitle, Utc } from '@/components/platform/ops';
-import { RetryDeadLetterForm } from '@/components/platform/ops-forms';
+import { AcknowledgeDeadLetterForm, RetryDeadLetterForm } from '@/components/platform/ops-forms';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
 
@@ -151,7 +151,10 @@ export default async function OpsQueuesPage() {
             company starts it again (ADR-111). Until then, and for other queues such as
             template.submit, Retry sends a job back to its queue once, for one more attempt, with
             your reason in the platform audit log (ADR-108, RUNBOOKS §10P). If it fails again, it is
-            listed again. The CSV gives when a job was retried, not by whom.
+            listed again. Acknowledge a dead letter with a note to tell the other administrators
+            what you found or did, retried or not; a later note replaces it, and the platform audit
+            log keeps each. The CSV gives when a job was retried or acknowledged, not by whom, and
+            never the note.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -170,6 +173,7 @@ export default async function OpsQueuesPage() {
                   <TH>
                     <span className="sr-only">Retry</span>
                   </TH>
+                  <TH>Acknowledged</TH>
                 </TR>
               </THead>
               <TBody>
@@ -234,6 +238,23 @@ export default async function OpsQueuesPage() {
                       ) : d.retryBlock ? (
                         DEAD_LETTER_RETRY_BLOCK_TEXT[d.retryBlock]
                       ) : null}
+                    </TD>
+                    <TD className="max-w-xs text-sm">
+                      {d.acknowledgedAt && d.acknowledgement ? (
+                        <div className="mb-2">
+                          <div>
+                            By {d.acknowledgedByName ?? 'an administrator'},{' '}
+                            <Utc at={d.acknowledgedAt} />
+                          </div>
+                          <div className="break-words text-xs text-muted-foreground">
+                            {d.acknowledgement}
+                          </div>
+                        </div>
+                      ) : null}
+                      <AcknowledgeDeadLetterForm
+                        deadLetterId={d.id}
+                        acknowledged={d.acknowledgedAt !== null}
+                      />
                     </TD>
                   </TR>
                 ))}

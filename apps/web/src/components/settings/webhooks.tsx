@@ -14,6 +14,8 @@ import {
   WEBHOOK_FAILURE_KINDS,
   WEBHOOK_FAILURE_LABELS,
   WEBHOOK_LIMITS,
+  WEBHOOK_MESSAGE_SENDER_LABELS,
+  WEBHOOK_MESSAGE_SENDERS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUS_LABELS,
@@ -23,15 +25,21 @@ import {
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUSES,
+  webhookChannelText,
+  webhookOAuthText,
   webhookReplayAllSummary,
   webhookReplaySummary,
   webhookTakesAutomationRuns,
+  webhookTakesChannelEvents,
   type WebhookAutomationChoice,
   type WebhookCampaignStatus,
+  type WebhookChannelChoice,
   type WebhookContactPart,
   type WebhookConversationStatus,
+  type WebhookEndpointOAuth,
   type WebhookEventType,
   type WebhookFailureKind,
+  type WebhookMessageSender,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookReplayPeriod,
@@ -117,6 +125,50 @@ function StatusChoices({
             <Label htmlFor={id} className="font-normal">
               {WEBHOOK_MESSAGE_STATUS_LABELS[status]}{' '}
               <span className="font-mono text-xs">({status})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * Who sent the messages whose `message.status` an endpoint takes (ADR-172), shown while it takes the
+ * event, as the event's `message.sentBy` names them.
+ */
+function SenderChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: WebhookMessageSender[];
+  onChange: (next: WebhookMessageSender[]) => void;
+}) {
+  return (
+    <fieldset className="ml-6 grid gap-1">
+      <legend className="mb-1 text-xs text-muted-foreground">
+        Messages sent by (all of them unless you untick some)
+      </legend>
+      {WEBHOOK_MESSAGE_SENDERS.map((sender) => {
+        const id = `${prefix}-sender-${sender}`;
+        return (
+          <div key={sender} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(sender)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_MESSAGE_SENDERS.filter((s) => s === sender || chosen.includes(s))
+                    : chosen.filter((s) => s !== sender),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {WEBHOOK_MESSAGE_SENDER_LABELS[sender]}{' '}
+              <span className="font-mono text-xs">({sender})</span>
             </Label>
           </div>
         );
@@ -318,12 +370,105 @@ function AutomationChoices({
   );
 }
 
+/**
+ * The WhatsApp numbers whose events an endpoint takes (ADR-170), shown while it takes an event that
+ * happens on a number: every number, including numbers connected later, or only those ticked. Any
+ * of the company's numbers can be chosen, whatever its status.
+ */
+function ChannelChoices({
+  prefix,
+  choices,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  choices: WebhookChannelChoice[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">WhatsApp numbers</legend>
+      <p className="text-xs text-muted-foreground">
+        Message, conversation, automation, order and campaign events happen on a number. Consent,
+        contact and template events are sent whichever numbers are chosen.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-channels`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every number’s events
+          <span className="block text-xs text-muted-foreground">
+            Including numbers connected later.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-channels`}
+          className="mt-1"
+          checked={!every}
+          disabled={choices.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only the events of the numbers ticked
+          {choices.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">
+              No WhatsApp number has been connected yet.
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid gap-1">
+          {choices.map((c) => {
+            const id = `${prefix}-channel-${c.id}`;
+            return (
+              <div key={c.id} className="flex items-center gap-2">
+                <Checkbox
+                  id={id}
+                  checked={chosen.includes(c.id)}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? choices
+                            .filter((l) => l.id === c.id || chosen.includes(l.id))
+                            .map((l) => l.id)
+                        : chosen.filter((x) => x !== c.id),
+                    )
+                  }
+                />
+                <Label htmlFor={id} className="font-normal">
+                  {webhookChannelText(c)}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
 function EventChoices({
   prefix,
   chosen,
   onChange,
   statuses,
   onStatusesChange,
+  senders,
+  onSendersChange,
   parts,
   onPartsChange,
   campaignStatuses,
@@ -342,6 +487,8 @@ function EventChoices({
   onChange: (next: WebhookEventType[]) => void;
   statuses: WebhookMessageStatus[];
   onStatusesChange: (next: WebhookMessageStatus[]) => void;
+  senders: WebhookMessageSender[];
+  onSendersChange: (next: WebhookMessageSender[]) => void;
   parts: WebhookContactPart[];
   onPartsChange: (next: WebhookContactPart[]) => void;
   campaignStatuses: WebhookCampaignStatus[];
@@ -380,7 +527,10 @@ function EventChoices({
               </Label>
             </div>
             {type === 'message.status' && chosen.includes(type) ? (
-              <StatusChoices prefix={prefix} chosen={statuses} onChange={onStatusesChange} />
+              <>
+                <StatusChoices prefix={prefix} chosen={statuses} onChange={onStatusesChange} />
+                <SenderChoices prefix={prefix} chosen={senders} onChange={onSendersChange} />
+              </>
             ) : null}
             {type === 'template.status_changed' && chosen.includes(type) ? (
               <ReachedStatusChoices
@@ -514,6 +664,164 @@ function HeaderRows({
   );
 }
 
+/** An endpoint's OAuth client as entered here (ADR-173); the secret never comes back. */
+interface OAuthFields {
+  tokenUrl: string;
+  clientId: string;
+  clientSecret: string;
+  scope: string;
+}
+
+/**
+ * What a change does to the endpoint's OAuth client: keeps it (or, without one, adds none), sets
+ * it (adds or changes it) or removes it.
+ */
+type OAuthChange = 'keep' | 'set' | 'remove';
+
+/**
+ * The OAuth client an endpoint gets access tokens as (ADR-173): its receiver's authorization server
+ * and the client it issued. A change shows the stored client, without its secret, which a member
+ * gives again only to replace it or when the token URL changes.
+ */
+function OAuthClientFields({
+  prefix,
+  stored,
+  change,
+  onChangeChange,
+  fields,
+  onFieldsChange,
+}: {
+  prefix: string;
+  /** The endpoint's client; null for a new endpoint or one without a client. */
+  stored: WebhookEndpointOAuth | null;
+  change: OAuthChange;
+  onChangeChange: (next: OAuthChange) => void;
+  fields: OAuthFields;
+  onFieldsChange: (next: OAuthFields) => void;
+}) {
+  const set = (part: Partial<OAuthFields>) => onFieldsChange({ ...fields, ...part });
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">OAuth 2.0</legend>
+      <p className="text-xs text-muted-foreground">
+        Optional: if your receiver wants an access token from its authorization server (the OAuth
+        2.0 client credentials grant), HyFib gets one as the client below and sends it as an
+        Authorization header with every delivery. The client secret is stored encrypted and never
+        shown again.
+      </p>
+      {stored ? (
+        <>
+          <p className="text-sm break-all">{webhookOAuthText(stored)}.</p>
+          {(
+            [
+              ['keep', 'Keep the OAuth client'],
+              ['set', 'Change the OAuth client'],
+              ['remove', 'Remove the OAuth client (stop getting tokens)'],
+            ] as const
+          ).map(([value, label]) => (
+            <label key={value} className="flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name={`${prefix}-oauth-change`}
+                checked={change === value}
+                onChange={() => onChangeChange(value)}
+              />
+              {label}
+            </label>
+          ))}
+        </>
+      ) : (
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id={`${prefix}-oauth`}
+            checked={change === 'set'}
+            onChange={(e) => onChangeChange(e.target.checked ? 'set' : 'keep')}
+          />
+          <Label htmlFor={`${prefix}-oauth`} className="font-normal">
+            Get an OAuth access token for each delivery
+          </Label>
+        </div>
+      )}
+      {change === 'set' ? (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field
+            id={`${prefix}-oauth-token-url`}
+            label="Token URL"
+            description="The authorization server’s https:// token endpoint."
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                type="url"
+                inputMode="url"
+                maxLength={WEBHOOK_LIMITS.urlLength}
+                autoComplete="off"
+                placeholder="https://auth.example.com/oauth2/token"
+                value={fields.tokenUrl}
+                onChange={(e) => set({ tokenUrl: e.target.value })}
+              />
+            )}
+          </Field>
+          <Field id={`${prefix}-oauth-client-id`} label="Client ID">
+            {(aria) => (
+              <Input
+                {...aria}
+                maxLength={WEBHOOK_LIMITS.oauthClientIdLength}
+                autoComplete="off"
+                value={fields.clientId}
+                onChange={(e) => set({ clientId: e.target.value })}
+              />
+            )}
+          </Field>
+          <Field
+            id={`${prefix}-oauth-client-secret`}
+            label="Client secret"
+            description={
+              stored
+                ? 'Leave empty to keep the stored secret, unless the token URL changes.'
+                : undefined
+            }
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                type="password"
+                maxLength={WEBHOOK_LIMITS.oauthClientSecretLength}
+                autoComplete="new-password"
+                value={fields.clientSecret}
+                onChange={(e) => set({ clientSecret: e.target.value })}
+              />
+            )}
+          </Field>
+          <Field
+            id={`${prefix}-oauth-scope`}
+            label="Scope"
+            description="Optional: the values the server expects, separated by spaces."
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                maxLength={WEBHOOK_LIMITS.oauthScopeLength}
+                autoComplete="off"
+                value={fields.scope}
+                onChange={(e) => set({ scope: e.target.value })}
+              />
+            )}
+          </Field>
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
+/** The fields for a client: the stored one's, without its secret, or empty. */
+const oauthFieldsOf = (stored: WebhookEndpointOAuth | null | undefined): OAuthFields => ({
+  tokenUrl: stored?.tokenUrl ?? '',
+  clientId: stored?.clientId ?? '',
+  clientSecret: '',
+  scope: stored?.scope ?? '',
+});
+
 /**
  * Adds an endpoint, or edits one (`endpoint` given). A new endpoint's secret is shown here once,
  * and stays on screen after the list updates.
@@ -522,6 +830,7 @@ export function WebhookEndpointForm({
   slug,
   endpoint,
   automationChoices,
+  channelChoices,
   atLimit = false,
 }: {
   slug: string;
@@ -532,6 +841,7 @@ export function WebhookEndpointForm({
     eventTypes: WebhookEventType[];
     headerNames: string[];
     messageStatuses: WebhookMessageStatus[] | null;
+    messageSenders: WebhookMessageSender[] | null;
     contactParts: WebhookContactPart[] | null;
     automationIds: string[] | null;
     campaignStatuses: WebhookCampaignStatus[] | null;
@@ -539,9 +849,13 @@ export function WebhookEndpointForm({
     templateStatuses: WebhookTemplateStatus[] | null;
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
+    channelIds: string[] | null;
+    oauth: WebhookEndpointOAuth | null;
   };
   /** The company's published automations, which an endpoint can choose (ADR-145). */
   automationChoices: WebhookAutomationChoice[];
+  /** The company's WhatsApp numbers, which an endpoint can choose (ADR-170). */
+  channelChoices: WebhookChannelChoice[];
   atLimit?: boolean;
 }) {
   const prefix = useId();
@@ -550,6 +864,9 @@ export function WebhookEndpointForm({
   const [eventTypes, setEventTypes] = useState<WebhookEventType[]>(endpoint?.eventTypes ?? []);
   const [statuses, setStatuses] = useState<WebhookMessageStatus[]>(
     endpoint?.messageStatuses ?? [...WEBHOOK_MESSAGE_STATUSES],
+  );
+  const [senders, setSenders] = useState<WebhookMessageSender[]>(
+    endpoint?.messageSenders ?? [...WEBHOOK_MESSAGE_SENDERS],
   );
   const [parts, setParts] = useState<WebhookContactPart[]>(
     endpoint?.contactParts ?? [...WEBHOOK_CONTACT_PARTS],
@@ -571,9 +888,14 @@ export function WebhookEndpointForm({
   );
   const [everyAutomation, setEveryAutomation] = useState(!endpoint?.automationIds);
   const [automationIds, setAutomationIds] = useState<string[]>(endpoint?.automationIds ?? []);
+  const [everyChannel, setEveryChannel] = useState(!endpoint?.channelIds);
+  const [channelIds, setChannelIds] = useState<string[]>(endpoint?.channelIds ?? []);
   const [headers, setHeaders] = useState<HeaderRow[]>([]);
   // Changing an endpoint keeps its headers unless they are given again.
   const [replaceHeaders, setReplaceHeaders] = useState(false);
+  // And its OAuth client unless it is changed or removed (ADR-173).
+  const [oauthChange, setOAuthChange] = useState<OAuthChange>('keep');
+  const [oauthFields, setOAuthFields] = useState<OAuthFields>(oauthFieldsOf(endpoint?.oauth));
   const [error, setError] = useState<ActionFailureState | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -602,6 +924,11 @@ export function WebhookEndpointForm({
         const messageStatuses =
           eventTypes.includes('message.status') && statuses.length < WEBHOOK_MESSAGE_STATUSES.length
             ? statuses
+            : null;
+        // Every sender ticked takes the statuses of every message (null, ADR-172).
+        const messageSenders =
+          eventTypes.includes('message.status') && senders.length < WEBHOOK_MESSAGE_SENDERS.length
+            ? senders
             : null;
         // Every part ticked takes every change, including parts added later (null).
         const contactParts =
@@ -641,11 +968,15 @@ export function WebhookEndpointForm({
           runEndStatuses.length < WEBHOOK_RUN_END_STATUSES.length
             ? runEndStatuses
             : null;
+        // Every number's events unless the numbers ticked are chosen (ADR-170).
+        const chosenChannels =
+          webhookTakesChannelEvents(eventTypes) && !everyChannel ? channelIds : null;
         const input = {
           url,
           description,
           eventTypes,
           messageStatuses,
+          messageSenders,
           contactParts,
           automationIds: chosenAutomations,
           campaignStatuses: chosenCampaignStatuses,
@@ -653,26 +984,45 @@ export function WebhookEndpointForm({
           templateStatuses: chosenTemplateStatuses,
           conversationStatuses: chosenConversationStatuses,
           runEndStatuses: chosenRunEndStatuses,
+          channelIds: chosenChannels,
         };
         const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
           setBusy(false);
           if (!r.ok) setError(r);
+        };
+        // The OAuth client to set (ADR-173); an empty secret keeps the stored one.
+        const oauth = {
+          tokenUrl: oauthFields.tokenUrl,
+          clientId: oauthFields.clientId,
+          scope: oauthFields.scope,
+          ...(oauthFields.clientSecret ? { clientSecret: oauthFields.clientSecret } : {}),
         };
         if (endpoint) {
           void updateWebhookEndpointAction(slug, {
             ...input,
             endpointId: endpoint.id,
             ...(replaceHeaders ? { headers } : {}),
+            ...(oauthChange === 'set'
+              ? { oauth }
+              : oauthChange === 'remove'
+                ? { oauth: null }
+                : {}),
           }).then((r) => {
             done(r);
             if (r.ok) {
               setSaved('Endpoint saved.');
               setHeaders([]);
               setReplaceHeaders(false);
+              setOAuthChange('keep');
+              setOAuthFields((fields) => ({ ...fields, clientSecret: '' }));
             }
           });
         } else {
-          void createWebhookEndpointAction(slug, { ...input, headers }).then((r) => {
+          void createWebhookEndpointAction(slug, {
+            ...input,
+            headers,
+            oauth: oauthChange === 'set' ? oauth : null,
+          }).then((r) => {
             done(r);
             if (r.ok) {
               setSecret(r.data.secret);
@@ -680,6 +1030,7 @@ export function WebhookEndpointForm({
               setDescription('');
               setEventTypes([]);
               setStatuses([...WEBHOOK_MESSAGE_STATUSES]);
+              setSenders([...WEBHOOK_MESSAGE_SENDERS]);
               setParts([...WEBHOOK_CONTACT_PARTS]);
               setCampaignStatuses([...WEBHOOK_CAMPAIGN_STATUSES]);
               setOrderStatuses([...WEBHOOK_ORDER_STATUSES]);
@@ -688,7 +1039,11 @@ export function WebhookEndpointForm({
               setRunEndStatuses([...WEBHOOK_RUN_END_STATUSES]);
               setEveryAutomation(true);
               setAutomationIds([]);
+              setEveryChannel(true);
+              setChannelIds([]);
               setHeaders([]);
+              setOAuthChange('keep');
+              setOAuthFields(oauthFieldsOf(null));
             }
           });
         }
@@ -738,6 +1093,8 @@ export function WebhookEndpointForm({
         onChange={setEventTypes}
         statuses={statuses}
         onStatusesChange={setStatuses}
+        senders={senders}
+        onSendersChange={setSenders}
         parts={parts}
         onPartsChange={setParts}
         campaignStatuses={campaignStatuses}
@@ -760,6 +1117,16 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryAutomation}
           chosen={automationIds}
           onChange={setAutomationIds}
+        />
+      ) : null}
+      {webhookTakesChannelEvents(eventTypes) ? (
+        <ChannelChoices
+          prefix={prefix}
+          choices={channelChoices}
+          every={everyChannel}
+          onEveryChange={setEveryChannel}
+          chosen={channelIds}
+          onChange={setChannelIds}
         />
       ) : null}
       <fieldset className="grid gap-2">
@@ -797,6 +1164,14 @@ export function WebhookEndpointForm({
           <HeaderRows prefix={prefix} rows={headers} onChange={setHeaders} />
         )}
       </fieldset>
+      <OAuthClientFields
+        prefix={prefix}
+        stored={endpoint?.oauth ?? null}
+        change={oauthChange}
+        onChangeChange={setOAuthChange}
+        fields={oauthFields}
+        onFieldsChange={setOAuthFields}
+      />
       <div>
         <Button type="submit" disabled={busy || !url.trim() || eventTypes.length === 0}>
           {endpoint ? (busy ? 'Saving…' : 'Save endpoint') : busy ? 'Adding…' : 'Add endpoint'}

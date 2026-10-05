@@ -32,6 +32,7 @@ import {
   storeWebhookReceipt,
   storeWebhookSecretAad,
   webhookHeadersAad,
+  webhookOAuthSecretAad,
   webhookSecretAad,
   type PlatformActor,
   type ResealState,
@@ -300,13 +301,16 @@ async function sealEverything(c: Company, ring: Keyring): Promise<Seeded[]> {
     ],
   );
   // An endpoint rotated once: its secret is version 2 and the one before was sealed as version 1.
+  // It gets OAuth tokens too (ADR-173).
   const endpointId = uuidv7();
   await fx.query(
     `INSERT INTO app.webhook_endpoints (id, tenant_id, url, event_types, secret_ciphertext,
        secret_version, previous_secret_ciphertext, previous_secret_expires_at, header_names,
-       headers_ciphertext, created_by_user_id)
+       headers_ciphertext, oauth_token_url, oauth_client_id, oauth_client_secret_ciphertext,
+       created_by_user_id)
      VALUES ($1, $2, 'https://hooks.reseal.test/w360', ARRAY['message.received'], $3, 2, $4,
-       now() + interval '1 day', ARRAY['X-Api-Key'], $5, $6)`,
+       now() + interval '1 day', ARRAY['X-Api-Key'], $5, 'https://auth.reseal.test/token',
+       'reseal-client', $6, $7)`,
     [
       endpointId,
       t,
@@ -333,6 +337,14 @@ async function sealEverything(c: Company, ring: Keyring): Promise<Seeded[]> {
         id: endpointId,
         plain: '[["X-Api-Key","key-123"]]',
         aad: webhookHeadersAad(t, endpointId),
+      }),
+      seal({
+        kind: 'webhook_oauth_secret',
+        table: 'app.webhook_endpoints',
+        column: 'oauth_client_secret_ciphertext',
+        id: endpointId,
+        plain: 'oauth-client-secret-5d',
+        aad: webhookOAuthSecretAad(t, endpointId),
       }),
       c.owner.id,
     ],
@@ -557,7 +569,7 @@ describe('re-encrypting under the primary key', () => {
       aad: receiptAad(receiptId),
     });
     const kinds = new Set(seeded.map((s) => s.kind));
-    expect(kinds.size).toBe(15);
+    expect(kinds.size).toBe(16);
     for (const s of seeded) expect(keyOf(await storedValue(s)), s.kind).toBe(r.ids.old);
 
     const console = await ops(r.during).keyring(staff);

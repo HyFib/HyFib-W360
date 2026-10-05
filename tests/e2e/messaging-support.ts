@@ -34,6 +34,9 @@ export async function connectTestChannel(opts: {
   token?: string;
   /** The account's id, when a test sets up the stand-in for it first (`newWabaId`). */
   wabaId?: string;
+  /** How WhatsApp shows the number: `+91 90000 12345` and `E2E Traders` unless given. */
+  displayPhoneNumber?: string;
+  verifiedName?: string;
 }) {
   const auth = new pg.Client({ connectionString: process.env.E2E_DATABASE_URL_AUTH });
   await auth.connect();
@@ -86,8 +89,15 @@ export async function connectTestChannel(opts: {
     await app.query(
       `INSERT INTO app.channel_accounts
          (id, tenant_id, whatsapp_account_id, phone_number_id, status, display_phone_number, verified_name)
-       VALUES ($1, $2, $3, $4, 'active', '+91 90000 12345', 'E2E Traders')`,
-      [channelAccountId, tenantId, whatsappAccountId, phoneNumberId],
+       VALUES ($1, $2, $3, $4, 'active', $5, $6)`,
+      [
+        channelAccountId,
+        tenantId,
+        whatsappAccountId,
+        phoneNumberId,
+        opts.displayPhoneNumber ?? '+91 90000 12345',
+        opts.verifiedName ?? 'E2E Traders',
+      ],
     );
     await app.query(
       `SELECT app.bind_provider_asset('meta_whatsapp', 'phone_number', $1, $2::uuid, $3)`,

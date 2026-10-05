@@ -1785,6 +1785,32 @@ are not cancelled through the API. 423 means the company is suspended or its pla
 sends then anyway). To stop a key from stopping campaigns, revoke it and create one without the
 scope.
 
+**`GET /api/v1/orders` answers 403 or 404, or an order seems missing (ADR-167).** 403 `forbidden`
+names the scope the key lacks, `orders.read` (keys keep the scopes they were created with: create a
+key with it); reason `not_in_plan` means the company's plan leaves out Commerce or the scope
+(ADR-092). 404 means the id is not one of the key's company's orders. Orders are listed newest first
+by when they were received, and filters narrow them: an order missing from a pass with
+`updatedSince` changed while the pass ran, so ask from a little before the previous pass began. An
+erased contact's orders have no note: erasure cleared it. Payment Links and payment ids are never in
+these answers; the company's Razorpay account has them.
+
+**`PATCH /api/v1/orders/{id}` answers 409, 403 or 423 (ADR-168).** 409 `conflict` names the order's
+status: the move is not one members can make from it (a received order is confirmed or cancelled, a
+confirmed one fulfilled or cancelled, a paid one fulfilled), the order was not in the
+`expectedStatus` given, or it is waiting for payment, which members end by cancelling its Payment
+Link in the app. Read the order (`GET /orders/{id}`) and decide again; an order already in the
+status asked for answers 200, so a retry is safe. 403 `forbidden` names the scope the key lacks
+(`orders.write`, granted by members with `inbox.reply`), or with reason `not_in_plan` the company's
+plan leaves out Commerce or the scope. 423 means the company is suspended or its plan has ended;
+reading orders still works.
+
+**`GET /api/v1/channels` answers 403, or a number shows no phone or name (ADR-171).** 403
+`forbidden` names the scope the key lacks, `channels.read` (keys keep the scopes they were created
+with: create a key with it); reason `not_in_plan` means the company's plan leaves the scope out
+(ADR-092). Every number of the company is listed, whatever its status (`status=active` for those
+that send and receive). A number still being connected has no phone or name until Meta reports
+them.
+
 **A search with `POST /api/v1/contacts/search` gives short or empty pages, or a 422 (ADR-117).**
 Its pages read at most 2,000 contacts, as filtered lists do (entry above): the integration sends the
 same conditions with each `nextCursor` until it is `null`. A 422 names the condition's part:
@@ -2134,6 +2160,43 @@ ended" on the endpoint's page (every end ticked takes them all, as a new endpoin
 `PATCH /webhook-endpoints/{id}` with `runEndStatuses` (null for every end). Removing the
 `automation.run_ended` event clears the list.
 
+**A receiver gets no events of some numbers (ADR-170).** An endpoint can take the events of chosen
+WhatsApp numbers only: the endpoints list shows them ("Numbers whose events are sent: …"), and the
+API answers `channelIds` (null takes every number's). Messages, message statuses, conversation
+changes, automation runs, orders and campaigns of another number are never queued for it, and when
+no endpoint of the company takes such an event, no event is recorded at all, so there is nothing to
+replay: events from before an edit are not sent afterwards. A campaign's events are those of the
+number it sends from; a campaign without a number yet is on no list. Consent, contact and template
+events are not filtered by number. To take more, tick the numbers under "WhatsApp numbers" on the
+endpoint's page or choose "Every number’s events" (which also takes numbers connected later), or
+`PATCH /webhook-endpoints/{id}` with `channelIds` (null for every number). Removing every event of a
+number clears the list.
+
+**A receiver gets the statuses of only some messages (ADR-172).** An endpoint can take
+`message.status` only for the messages some senders sent: members, automations, campaigns, the API
+or HyFib (store order updates and satisfaction surveys). The endpoints list shows them ("Statuses of
+messages sent by: …"), and the API answers `messageSenders` (null takes every message's); each
+status names its sender in `message.sentBy`. A status of another sender's message is never queued
+for it, and when no endpoint of the company takes a status, no event is recorded at all, so there is
+nothing to replay: statuses from before an edit are not sent afterwards. To take more, tick the
+senders under "Message status" on the endpoint's page (every sender ticked takes every message's),
+or `PATCH /webhook-endpoints/{id}` with `messageSenders` (null for every sender). Removing the
+`message.status` event clears the list.
+
+**Deliveries fail with `oauth_token_…`, or a receiver keeps answering 401 (ADR-173).** An endpoint
+with an OAuth client gets an access token from its token URL before its deliveries; when none comes,
+the attempt fails without calling the endpoint and is retried on the usual schedule.
+`oauth_token_refused_401` or `_400`: the authorization server refused the client ID, the secret or
+the scope; `oauth_token_refused_404` or a 3xx: the token URL is wrong (redirects are not followed);
+`oauth_token_invalid`: it answered 200 without a bearer token (an HTML page, or a token type other
+than Bearer); `oauth_token_timeout`, `_dns_failed`, `_connect_failed` or `_address_blocked`: the
+token URL cannot be reached, or is not a public https address. Check the client with the receiver's
+owner and change it on the endpoint's page ("Change the OAuth client"; a new token URL needs the
+secret again), or `PATCH /webhook-endpoints/{id}` with `oauth`. A token the endpoint answers 401 to
+is dropped and a new one is asked for at the next attempt; a 401 every time means the receiver does
+not accept the server's tokens (often the scope). Tokens live in each worker's memory, so restarting
+workers makes them ask again. Replay what failed meanwhile with the "No valid answer" failures.
+
 **A campaign event's results differ from the campaign page (ADR-150).** `campaign.results` are
 counted when the request is built (the `t` of its `W360-Signature`), as `GET /campaigns/{id}` counts
 them, and a retry or a replay counts again: an event delivered while the campaign's messages were on
@@ -2381,6 +2444,16 @@ Retry); a receipt queue (`webhook.process`, `billing.event-process`: retry the r
 Integrations page instead); the company is being deleted or is gone; or its work was ended for the
 company (ADR-111).
 
+**Acknowledging a dead letter (ADR-169).** The administrator who looks at a dead letter opens
+Acknowledge on its row and writes a note of 10 to 500 characters: what was found or done ("Meta's
+outage is over; retried it", "The company submitted the template again"). The row then shows who,
+when and the note, so the others need not look again; a later note replaces it, and the platform
+audit log keeps each (`platform.dead_letter_acknowledged`). An acknowledgement lasts as long as the
+dead letter (30 days after its job failed); a later failure of the same work is a new,
+unacknowledged dead letter. Acknowledging neither retries the job nor changes whether it can be
+retried, and does not stop the alert email, which tells each dead letter once anyway. "Dead letter
+not found." means it was purged since the page loaded.
+
 **A dead letter of those three queues stays unsettled.** The sweep leaves one alone while its
 company is being deleted, while a job for the same work waits or runs (the company started it again,
 or a retry), and when its envelope did not verify. Otherwise look for `ending stranded work failed;
@@ -2535,6 +2608,44 @@ denied for table job", run the migrations again. Workers of the previous release
 web servers of the previous release offer Retry on a settled dead letter, which the function
 refuses. The new retry settings of `template.delete` and `commerce.account` apply to jobs queued
 after the runner updated the queues.
+
+**Migration 0117 failed.** It adds `acknowledged_at`, `acknowledged_by_user_id` and
+`acknowledgement` to `ops.dead_letters` (with the check `dead_letters_acknowledged`) and creates
+`ops.platform_acknowledge_dead_letter`, in one transaction; a failure rolls it all back (usually the
+bootstrap roles: fix them and run the migrations again). Web servers of this release need it before
+they start, or the Queues tab fails to load; web servers and workers of the previous release work
+with it.
+
+**Migration 0118 failed.** It adds `channel_account_ids` to `app.webhook_endpoints` with the check
+`webhook_endpoints_channel_account_ids`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event` and the trigger functions of message, conversation, automation run,
+order and campaign events, in one transaction; a failure rolls it all back (usually the bootstrap
+roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
+release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
+endpoints name the column); workers of either release and web servers of the previous release work
+with it.
+
+**Migration 0119 failed.** It replaces `api_keys_scopes_check` on `app.api_keys` and
+`plans_api_scopes_check` on `ops.plans` with checks that also accept `channels.read`, in one
+transaction; a failure rolls it all back (usually a lock held on one of the tables: run the
+migrations again). Web servers of this release need it before a key or plan version holds the new
+scope; those of the previous release work with it.
+
+**Migration 0120 failed.** It adds `message_senders` to `app.webhook_endpoints` with the check
+`webhook_endpoints_message_senders`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event` and the message trigger function, in one transaction; a failure rolls it
+all back (usually the bootstrap roles, or a lock held on the table: fix it and run the migrations
+again). Web servers of this release need it before they start, or Settings → Webhooks and the
+endpoints API fail (their reads of endpoints name the column); workers of either release and web
+servers of the previous release work with it.
+
+**Migration 0121 failed.** It adds the four OAuth columns to `app.webhook_endpoints` with the check
+`webhook_endpoints_oauth`, grants their updates to the runtime role, and drops and creates
+`ops.sealed_value_keys()` as the definer role, in one transaction; a failure rolls it all back
+(usually the bootstrap roles: the migration role must be able to `SET ROLE w360_definer`; or a lock
+held on the table: fix it and run the migrations again). Workers and web servers of this release
+need it before they start (their reads of endpoints name the columns); those of the previous release
+work with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

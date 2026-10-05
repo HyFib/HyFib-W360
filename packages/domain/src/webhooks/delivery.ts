@@ -25,8 +25,18 @@ import { enqueueEmail, type OutboxDeps } from '../email/outbox';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { WEBHOOK_LIMITS, webhookHost, webhookRetryDelaySeconds } from './model';
+import {
+  fetchWebhookOAuthToken,
+  type WebhookOAuthClient,
+  type WebhookOAuthTokenCache,
+} from './oauth';
 import { buildWebhookPayload, WebhookEventGoneError } from './payloads';
-import { failPendingDeliveries, openWebhookHeaders, webhookSecretAad } from './service';
+import {
+  failPendingDeliveries,
+  openWebhookHeaders,
+  openWebhookOAuthClient,
+  webhookSecretAad,
+} from './service';
 import { webhookSignatureHeader } from './signing';
 
 /**
@@ -37,6 +47,8 @@ import { webhookSignatureHeader } from './signing';
  * expired (the worker was lost during the request) is attempted again, so a receiver can get an
  * event twice and deduplicates on its id: delivery is at least once, never exactly once. A delivery
  * whose payload or signature cannot be built fails alone (`payload_failed`) and the batch goes on.
+ * An endpoint with an OAuth client (ADR-173) gets an access token before its deliveries are sent,
+ * also with no transaction open.
  */
 
 export const WEBHOOK_USER_AGENT = 'HyFib-W360-Webhooks/1';
@@ -76,6 +88,8 @@ export interface WebhookDeliveryDeps extends WebhookDispatchDeps {
   notices: WebhookNoticeDeps;
   /** Hears of each delivery that could not be prepared, by ids and the error's class and code. */
   logger: WebhookDeliveryLogger;
+  /** The process's OAuth access tokens (ADR-173), kept in memory across jobs. */
+  oauthTokens: WebhookOAuthTokenCache;
 }
 
 interface ClaimedDelivery {
@@ -85,6 +99,8 @@ interface ClaimedDelivery {
   url: string;
   headers: Record<string, string>;
   body: string;
+  /** The endpoint's OAuth client, its secret opened (ADR-173); null without one. */
+  oauth: WebhookOAuthClient | null;
 }
 
 /** A delivery that failed at its claim because it could not be prepared (`payload_failed`). */
@@ -94,9 +110,9 @@ interface UnpreparedDelivery {
   eventType: string;
   /**
    * What failed: building the payload, signing it with the endpoint's secrets, or opening the
-   * endpoint's own headers (ADR-118).
+   * endpoint's own headers (ADR-118) or its OAuth client (ADR-173).
    */
-  stage: 'payload' | 'signature' | 'headers';
+  stage: 'payload' | 'signature' | 'headers' | 'oauth';
   errorClass: string;
   errorCode: string | null;
 }
@@ -204,7 +220,7 @@ export async function processWebhookDeliveries(
     // The requests, with no transaction open. Every outcome is recorded before an unexpected error
     // (a bug, not a failed request) is raised; its delivery is then attempted again after its lease.
     const settled = await Promise.allSettled(
-      batch.claimed.map((delivery) => attemptDelivery(deps.egress, delivery)),
+      batch.claimed.map((delivery) => sendDelivery(deps, scope.tenantId, delivery)),
     );
     let unexpected: unknown = null;
     for (const [index, result] of settled.entries()) {
@@ -291,6 +307,10 @@ async function claimDeliveries(
             previousSecretCiphertext: webhookEndpoints.previousSecretCiphertext,
             previousSecretExpiresAt: webhookEndpoints.previousSecretExpiresAt,
             headersCiphertext: webhookEndpoints.headersCiphertext,
+            oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
+            oauthClientId: webhookEndpoints.oauthClientId,
+            oauthClientSecretCiphertext: webhookEndpoints.oauthClientSecretCiphertext,
+            oauthScope: webhookEndpoints.oauthScope,
           })
           .from(webhookEndpoints)
           .where(
@@ -369,6 +389,15 @@ async function claimDeliveries(
       return opened;
     };
 
+    // The endpoint's OAuth client (ADR-173), opened once per endpoint and batch.
+    const oauthClients = new Map<string, WebhookOAuthClient | null>();
+    const endpointOAuth = (endpoint: NonNullable<ReturnType<typeof endpoints.get>>) => {
+      if (oauthClients.has(endpoint.id)) return oauthClients.get(endpoint.id) ?? null;
+      const opened = openWebhookOAuthClient(deps.keyring, tenantId, endpoint.id, endpoint);
+      oauthClients.set(endpoint.id, opened);
+      return opened;
+    };
+
     const claimed: ClaimedDelivery[] = [];
     const unprepared: UnpreparedDelivery[] = [];
     let ended = 0;
@@ -380,6 +409,8 @@ async function claimDeliveries(
       ended += 1;
     };
     const leaseUntil = new Date(now.getTime() + deps.timeoutMs + LEASE_MARGIN_MS);
+    // A token request may come first, with its own deadline (ADR-173).
+    const oauthLeaseUntil = new Date(leaseUntil.getTime() + deps.timeoutMs);
     const timestamp = Math.floor(now.getTime() / 1000);
 
     for (const delivery of due) {
@@ -400,6 +431,7 @@ async function claimDeliveries(
       let body: string;
       let signature: string;
       let headers: Record<string, string>;
+      let oauth: WebhookOAuthClient | null;
       let stage: UnpreparedDelivery['stage'] = 'payload';
       try {
         // In a savepoint, so that a database error while building leaves the claim usable.
@@ -409,14 +441,17 @@ async function claimDeliveries(
         signature = webhookSignatureHeader(signingSecrets(endpoint), timestamp, body);
         stage = 'headers';
         headers = endpointHeaders(endpoint);
+        stage = 'oauth';
+        oauth = endpointOAuth(endpoint);
       } catch (error) {
         if (error instanceof WebhookEventGoneError) {
           await end(delivery.id, 'event_gone');
           continue;
         }
-        // A bug, data the builder cannot describe, a secret or headers the keyring cannot open, or a
-        // database error. Thrown, it would roll back the batch, and the sweep would claim the same
-        // deliveries again every minute; ended without an attempt, it is replayed once fixed.
+        // A bug, data the builder cannot describe, a secret, headers or an OAuth client the keyring
+        // cannot open, or a database error. Thrown, it would roll back the batch, and the sweep would
+        // claim the same deliveries again every minute; ended without an attempt, it is replayed
+        // once fixed.
         await end(delivery.id, 'payload_failed');
         unprepared.push({
           deliveryId: delivery.id,
@@ -430,7 +465,12 @@ async function claimDeliveries(
       const attempt = delivery.attempts + 1;
       await tx
         .update(webhookDeliveries)
-        .set({ state: 'delivering', attempts: attempt, leaseUntil, lastAttemptAt: now })
+        .set({
+          state: 'delivering',
+          attempts: attempt,
+          leaseUntil: oauth ? oauthLeaseUntil : leaseUntil,
+          lastAttemptAt: now,
+        })
         .where(
           and(eq(webhookDeliveries.tenantId, tenantId), eq(webhookDeliveries.id, delivery.id)),
         );
@@ -440,6 +480,7 @@ async function claimDeliveries(
         attempt,
         url: endpoint.url,
         body,
+        oauth,
         headers: {
           // The endpoint's own first, so none of them can replace HyFib's.
           ...headers,
@@ -457,10 +498,45 @@ async function claimDeliveries(
   });
 }
 
+/**
+ * Sends a claimed delivery. With an OAuth client (ADR-173), a bearer token first: the one the process
+ * keeps, the one being asked for another delivery, or one asked for now. Without a token the attempt
+ * fails, with the token request's error and no status, as the endpoint was not called; a token the
+ * endpoint answers 401 to is dropped, so the next attempt asks for a new one.
+ */
+async function sendDelivery(
+  deps: WebhookDeliveryDeps,
+  tenantId: string,
+  delivery: ClaimedDelivery,
+): Promise<AttemptOutcome> {
+  const client = delivery.oauth;
+  if (!client) return attemptDelivery(deps.egress, delivery);
+  const started = performance.now();
+  const owner = { tenantId, endpointId: delivery.endpointId };
+  const got = await deps.oauthTokens.token(owner, client, deps.clock.now(), () =>
+    fetchWebhookOAuthToken(deps.egress, client, WEBHOOK_USER_AGENT, () => deps.clock.now()),
+  );
+  if (!got.ok) {
+    return {
+      ok: false,
+      statusCode: null,
+      error: got.error,
+      durationMs: Math.max(0, Math.round(performance.now() - started)),
+    };
+  }
+  const outcome = await attemptDelivery(deps.egress, {
+    ...delivery,
+    // After the endpoint's own headers, which cannot hold one (the services refuse it).
+    headers: { ...delivery.headers, authorization: `Bearer ${got.token.accessToken}` },
+  });
+  if (outcome.statusCode === 401) deps.oauthTokens.drop(owner, got.token.accessToken);
+  return outcome;
+}
+
 /** One POST through the egress client: a 2xx answer succeeds; anything else is a failed attempt. */
 async function attemptDelivery(
   egress: EgressClient,
-  delivery: ClaimedDelivery,
+  delivery: Pick<ClaimedDelivery, 'url' | 'headers' | 'body'>,
 ): Promise<AttemptOutcome> {
   const started = performance.now();
   try {

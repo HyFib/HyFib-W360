@@ -123,6 +123,10 @@ export const deadLetters = opsSchema.table('dead_letters', {
    */
   settledAt: tz('settled_at'),
   settledEnded: boolean('settled_ended'),
+  /** When a platform administrator noted that it was looked at, who, and the note (ADR-169). */
+  acknowledgedAt: tz('acknowledged_at'),
+  acknowledgedByUserId: text('acknowledged_by_user_id'),
+  acknowledgement: text('acknowledgement'),
 });
 
 /**
