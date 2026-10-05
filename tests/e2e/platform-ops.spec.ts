@@ -216,7 +216,10 @@ test('staff read the operations console and repair a quarantined webhook event',
     'Queue,Declared by this release,Retries,Dead-lettered after its retries,Wait limit (minutes),In the database,',
   );
   expect(queuesCsv.text).toMatch(/\r\ncommerce\.store,Yes,5,Yes,60,Yes,\d+,\d+,\d+,\d+,/);
-  expect(queuesCsv.text).toMatch(/\r\nbilling\.auto-recharge,Yes,0,No,\d+,Yes,/);
+  // A queue that never retries still dead-letters its failures, and the outbox sweep, which
+  // retries once, has no dead letter (packages/contracts/src/jobs.ts).
+  expect(queuesCsv.text).toMatch(/\r\nbilling\.auto-recharge,Yes,0,Yes,15,Yes,\d+,/);
+  expect(queuesCsv.text).toMatch(/\r\nops\.outbox-sweep,Yes,1,No,15,Yes,\d+,/);
   const deadLetters = await downloadCsv(page, 'Download CSV: Recent dead letters');
   expect(deadLetters.name).toMatch(/^hyfib-dead-letters-\d{4}-\d{2}-\d{2}\.csv$/);
   expect(deadLetters.text).toContain(
