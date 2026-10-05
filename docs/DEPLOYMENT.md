@@ -263,6 +263,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    plan pages for a plan version including it), and `/api/v1/campaigns/{id}/resume` with 404;
    rolling web servers back to an image from before it does the same. Workers are not affected: the
    runner checks a campaign's launcher as before.
+   Migration 0125 (ADR-177) adds three nullable columns and a check to `ops.queue_waits` (a row per
+   queue, so the check is validated at once), narrows the worker role's read of the table to the
+   check's columns, creates `ops.record_queue_waits` again with the same signature and owner, and
+   adds `ops.platform_acknowledge_late_queue`. Workers of either release keep working: their sweep
+   reads only those columns and calls the function as before. Web servers of this release need it,
+   as the Queues tab reads the new columns; web servers from before it show no acknowledgements, and
+   a note written meanwhile stays for the new ones.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

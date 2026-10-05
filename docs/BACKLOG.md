@@ -769,10 +769,14 @@ verification, app review, Embedded Signup configuration).
   left out). **[Acknowledging dead letters built; its database tests run only in CI]** (ADR-169: a
   platform administrator acknowledges a dead letter on the Queues tab with a note, shown with who
   and when to the other administrators, replaced by a later note and kept in the platform audit log;
-  it lasts as long as the dead letter, and the CSV gives when, never who or the note). Remaining:
+  it lasts as long as the dead letter, and the CSV gives when, never who or the note).
+  **[Acknowledging late queues built; its database tests run only in CI]** (ADR-177: a platform
+  administrator acknowledges a late queue on the Queues tab with a note, shown with who and when
+  to the other administrators, replaced by a later note and kept in the platform audit log; it
+  lasts while the queue stays late, and the CSV gives when, never who or the note). Remaining:
   other alert channels, longer trends and charts, Meta's quality webhook (unconfirmed), exports
-  beyond the rows a tab lists, assigning failures and acknowledging receipts, quarantine entries and
-  late queues, paging and rollups for many companies.
+  beyond the rows a tab lists, assigning failures and acknowledging receipts and quarantine
+  entries, paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

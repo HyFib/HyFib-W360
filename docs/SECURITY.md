@@ -1403,6 +1403,15 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   columns of `ops.dead_letters`, which a check keeps together; the platform role reads them on the
   console, the company never sees them, and the CSV export gives the time only, never who or the
   note (unit tests; integration and e2e tests, run in CI only).
+- Acknowledging late queues (ADR-177): through `ops.platform_acknowledge_late_queue` (SECURITY
+  DEFINER, executable only by the platform role), which checks the platform administrator, the note
+  (10 to 500 characters, trimmed) and that the queue is still late since the time the page showed,
+  and writes the platform audit entry (`platform.late_queue_acknowledged`, the note as its reason,
+  no company) in the same transaction. Only the definer role writes the acknowledgement columns of
+  `ops.queue_waits`, which a check keeps together and to a late queue, and the check that finds the
+  queue on time clears them. The platform role reads them on the console; the worker's role, which
+  read the whole table, now reads only the check's columns; companies never see them; the CSV gives
+  the time only (unit tests; integration tests, run in CI only).
 
 Company export and deletion (Settings → Company data, ADR-055):
 

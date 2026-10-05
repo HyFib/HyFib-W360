@@ -5626,8 +5626,9 @@ page view as their start. The console now parses them (an integration test compa
 stored times).
 
 Not built: assigning a failure to someone, acknowledging the console's other lists (dead letters,
-receipts, quarantine, late queues), editing or deleting a note (a new acknowledgement replaces it),
-and leaving acknowledged failures out of the alert email (each failure is emailed once anyway).
+built by ADR-169; receipts; quarantine; late queues, built by ADR-177), editing or deleting a note
+(a new acknowledgement replaces it), and leaving acknowledged failures out of the alert email (each
+failure is emailed once anyway).
 
 ## ADR-142 Clearing the braces advisory from the Next.js ESLint plugin (2026-10-04)
 
@@ -6747,8 +6748,9 @@ Decision:
 - **The CSV** of Recent dead letters (ADR-158) gains "Acknowledged (UTC)": when, never who or the
   note, as for failures.
 
-Not built: acknowledging receipts, quarantine entries and late queues; assigning a dead letter to
-someone; filtering the list by acknowledgement; deleting a note (a new acknowledgement replaces it).
+Not built: acknowledging receipts and quarantine entries (late queues: built by ADR-177); assigning
+a dead letter to someone; filtering the list by acknowledgement; deleting a note (a new
+acknowledgement replaces it).
 
 ## ADR-170 Choosing the WhatsApp numbers whose events a webhook endpoint receives (P5-09) (2026-10-05)
 
@@ -7109,3 +7111,42 @@ Decision:
 Not built: resuming through the API what members or HyFib paused, a key as a campaign's launcher,
 raising caps, approving, scheduling, creating or editing campaigns through the API, and resuming
 many campaigns in one call.
+
+## ADR-177 Acknowledging late queues on the operations console (P5-10) (2026-10-05)
+
+Context: since ADR-096 every platform administrator is emailed once each time a queue falls behind,
+and Operations → Queues shows since when. As with failing integrations (ADR-141) and dead letters
+(ADR-169), nothing there said that someone had already looked at a late queue or what they found, so
+every administrator who read the email opened the same tab, and two could restart the same worker or
+each assume that the other had. ADR-169 left acknowledging late queues unbuilt.
+
+Decision:
+
+- **Acknowledged with a note:** on Job queues, a platform administrator acknowledges a queue that is
+  late with a note of 10 to 500 characters (what was found or done). The queue's row shows who
+  acknowledged it, when, and the note; another administrator may acknowledge it again, replacing the
+  note. The platform audit log keeps each (`platform.late_queue_acknowledged`, the note as its
+  reason, the queue, since when it was late and its waiting jobs in the metadata, no company).
+- **While it stays late:** the time, the administrator and the note are columns of `ops.queue_waits`
+  (migration 0125), set together or not at all and only while the queue is late (a check holds
+  both). The worker's check that finds the queue back on time (under half its limit, as ADR-096
+  decides) clears them with the alert's mark, so the next time it falls behind it starts
+  unacknowledged, as it is emailed again. A page names the lateness it shows by when it began (to
+  the millisecond, as the console reads it): a page left open cannot acknowledge a queue that
+  recovered (409, "no longer late since then") or a later spell of the same queue.
+- **Where it is enforced:** `ops.platform_acknowledge_late_queue` (SECURITY DEFINER, executable by
+  the platform role only) checks the administrator, the note (trimmed) and the queue's lateness,
+  then writes the columns and the audit entry in one transaction. Only the definer role writes the
+  columns. Platform staff read them with the rest of the row, as the console already read it; the
+  worker's table grant becomes a grant on the check's own columns, so it never reads a note.
+  `ops.record_queue_waits` is created again with the same signature (dropped by its owner and
+  recreated, as 0011 explains), its owner and grants restored.
+- **Nothing else changes:** acknowledging neither changes whether the queue is late nor its alert:
+  the email (ADR-096) still tells each spell once, before anyone could acknowledge it, and the
+  overview counts late queues as before.
+- **The CSV** of Job queues (ADR-158) gains "Acknowledged (UTC)" after "Staff emailed (UTC)": when,
+  never who or the note, as for dead letters.
+
+Not built: acknowledging receipts and quarantine entries, assigning a late queue to someone, a
+reminder while an acknowledged queue stays late, and deleting a note (a new acknowledgement replaces
+it).

@@ -1318,7 +1318,7 @@ describe('queue waits and late queues (ADR-096)', () => {
     expect((await ops().queues(staff)).waitsFresh).toBe(true);
   });
 
-  it('keeps the table to its two functions, the functions to the worker, and refuses what is not a check', async () => {
+  it('keeps the table to its functions, the check and the alert to the worker, the notes from it, and refuses what is not a check', async () => {
     const privilege = async (role: string, action: string) =>
       (
         await fx.query<{ ok: boolean }>(
@@ -1326,8 +1326,31 @@ describe('queue waits and late queues (ADR-096)', () => {
           [role, action],
         )
       )[0]!.ok;
+    expect(await privilege('w360_platform', 'SELECT')).toBe(true);
+    // The worker reads the check's columns, never an acknowledgement (ADR-177).
+    expect(await privilege('w360_app', 'SELECT')).toBe(false);
+    const readable = async (column: string) =>
+      (
+        await fx.query<{ ok: boolean }>(
+          `SELECT has_column_privilege('w360_app', 'ops.queue_waits', $1, 'SELECT') AS ok`,
+          [column],
+        )
+      )[0]!.ok;
+    for (const column of [
+      'queue',
+      'waiting',
+      'oldest_waiting_since',
+      'limit_minutes',
+      'checked_at',
+      'late_since',
+      'alerted_at',
+    ]) {
+      expect(await readable(column), column).toBe(true);
+    }
+    for (const column of ['acknowledged_at', 'acknowledged_by_user_id', 'acknowledgement']) {
+      expect(await readable(column), column).toBe(false);
+    }
     for (const role of ['w360_app', 'w360_platform']) {
-      expect(await privilege(role, 'SELECT'), role).toBe(true);
       for (const action of ['INSERT', 'UPDATE', 'DELETE']) {
         expect(await privilege(role, action), `${role} ${action}`).toBe(false);
       }
@@ -1351,6 +1374,224 @@ describe('queue waits and late queues (ADR-096)', () => {
         JSON.stringify(bad),
       ).rejects.toThrow(/violates check constraint/);
     }
+  });
+
+  describe('acknowledging late queues (ADR-177)', () => {
+    /** A declared queue whose oldest job had waited `minutes` minutes at a check now. */
+    const recordWait = (queue: string, minutes: number | null) =>
+      fx.dbs.app.run(systemScope, (tx) =>
+        tx.execute(
+          sql`select ops.record_queue_waits(${JSON.stringify([
+            {
+              queue,
+              waiting: minutes === null ? 0 : 3,
+              oldest_waiting_since:
+                minutes === null ? null : new Date(Date.now() - minutes * 60_000).toISOString(),
+              limit_minutes: 15,
+            },
+          ])}::jsonb)`,
+        ),
+      );
+    async function namedStaff(name: string): Promise<PlatformActor> {
+      const user = await createUser(fx.dbs, { twoFactor: true, name });
+      await fx.dbs.ownerPool.query(
+        `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_operator')`,
+        [user.id],
+      );
+      return { userId: user.id, role: 'platform_operator', correlationId: uuidv7() };
+    }
+    const waitOn = async (queue: string) =>
+      (await ops().queues(staff)).queues.find((q) => q.name === queue)!.wait!;
+    const acknowledge = (actor: PlatformActor, queue: string, lateSince: Date, note: string) =>
+      ops().acknowledgeLateQueue(actor, { queue, lateSince: lateSince.toISOString(), note });
+    const audits = (queue: string) =>
+      fx.query<{
+        actor_user_id: string;
+        reason: string;
+        target_tenant_id: string | null;
+        metadata: { queue: string; lateSince: string; waiting: number };
+        correlation_id: string;
+      }>(
+        `SELECT actor_user_id, reason, target_tenant_id, metadata, correlation_id
+           FROM ops.platform_audit_events
+          WHERE action = 'platform.late_queue_acknowledged' AND metadata->>'queue' = $1
+          ORDER BY occurred_at, id`,
+        [queue],
+      );
+
+    it('records who looked at a late queue and their note; another administrator replaces it; each is audited; the check that finds it on time forgets it', async () => {
+      const queue = 'crm.reminder';
+      await recordWait(queue, 20);
+      const late = await waitOn(queue);
+      expect(late.lateSince).toBeInstanceOf(Date);
+      expect(late.acknowledgement).toBeNull();
+
+      const asha = await namedStaff('Asha Ops');
+      await acknowledge(
+        asha,
+        queue,
+        late.lateSince!,
+        '  Reminder worker restarted; watching it.  ',
+      );
+      const first = (await waitOn(queue)).acknowledgement!;
+      expect([first.byName, first.note]).toEqual([
+        'Asha Ops',
+        'Reminder worker restarted; watching it.',
+      ]);
+      expect(Date.now() - first.at.getTime()).toBeLessThan(60_000);
+      const ravi = await namedStaff('Ravi Ops');
+      await acknowledge(ravi, queue, late.lateSince!, 'A burst of reminders; it is draining.');
+      // Still late at the next check: the note stays, and so does the lateness it is about.
+      await recordWait(queue, 12);
+      expect(await waitOn(queue)).toMatchObject({
+        lateSince: late.lateSince,
+        acknowledgement: { byName: 'Ravi Ops', note: 'A burst of reminders; it is draining.' },
+      });
+      const audited = await audits(queue);
+      expect(audited.map((a) => [a.actor_user_id, a.reason, a.correlation_id])).toEqual([
+        [asha.userId, 'Reminder worker restarted; watching it.', asha.correlationId],
+        [ravi.userId, 'A burst of reminders; it is draining.', ravi.correlationId],
+      ]);
+      expect(audited[0]!.target_tenant_id).toBeNull();
+      expect(audited[0]!.metadata).toMatchObject({ queue, waiting: 3 });
+      expect(new Date(audited[0]!.metadata.lateSince).getTime()).toBe(late.lateSince!.getTime());
+
+      // The Queues tab's CSV gives when, never who or the note.
+      const file = await ops().exportList(staff, 'queues', 30);
+      const line = file.body.split('\r\n').find((l) => l.startsWith(`${queue},`))!;
+      const cells = line.split(',');
+      expect(cells[QUEUES_CSV_COLUMNS.indexOf('Acknowledged (UTC)')]).toMatch(
+        /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/,
+      );
+      for (const left of ['Ravi', 'Asha', 'draining', 'restarted']) {
+        expect(file.body).not.toContain(left);
+      }
+
+      // Back under half its limit: on time, and the note is forgotten with the lateness.
+      await recordWait(queue, 5);
+      expect(await waitOn(queue)).toMatchObject({ lateSince: null, acknowledgement: null });
+      const [row] = await fx.query(
+        `SELECT acknowledged_at, acknowledged_by_user_id, acknowledgement
+           FROM ops.queue_waits WHERE queue = $1`,
+        [queue],
+      );
+      expect(row).toEqual({
+        acknowledged_at: null,
+        acknowledged_by_user_id: null,
+        acknowledgement: null,
+      });
+      // Late again later: a new lateness, without a note, that the old page cannot acknowledge.
+      await recordWait(queue, 20);
+      const again = await waitOn(queue);
+      expect(again.acknowledgement).toBeNull();
+      expect(again.lateSince!.getTime()).toBeGreaterThan(late.lateSince!.getTime());
+      await expectCode(
+        acknowledge(asha, queue, late.lateSince!, 'Reminder worker restarted; watching it.'),
+        'conflict',
+      );
+      await acknowledge(asha, queue, again.lateSince!, 'Late again after the deploy; checking.');
+      expect((await waitOn(queue)).acknowledgement?.note).toBe(
+        'Late again after the deploy; checking.',
+      );
+      await recordWait(queue, null);
+      expect((await waitOn(queue)).acknowledgement).toBeNull();
+    });
+
+    it('refuses a queue on time, an unknown queue, bad notes and anyone who is not an administrator, changing nothing', async () => {
+      const queue = 'flow.sync';
+      await recordWait(queue, null);
+      const onTime = await waitOn(queue);
+      expect(onTime.lateSince).toBeNull();
+      await expectCode(
+        acknowledge(staff, queue, new Date(), 'Nothing is late here, but noted.'),
+        'conflict',
+      );
+      await expectCode(
+        acknowledge(staff, 'it.never-checked', new Date(), 'Looking into this queue now.'),
+        'not_found',
+      );
+      await recordWait(queue, 20);
+      const late = (await waitOn(queue)).lateSince!;
+      await expectCode(acknowledge(staff, queue, late, 'Too short'), 'validation_failed');
+      await expectCode(acknowledge(staff, queue, late, 'x'.repeat(501)), 'validation_failed');
+      await expectCode(
+        ops().acknowledgeLateQueue(staff, { queue, lateSince: 'now', note: 'Looking at it now.' }),
+        'validation_failed',
+      );
+      // The function checks the note itself too, whatever calls it, and trims it.
+      const direct = (note: string) =>
+        fx.dbs.platform.run(staff.userId, (tx) =>
+          tx.execute(
+            sql`select ops.platform_acknowledge_late_queue(${queue}, ${late.toISOString()}::timestamptz, ${note}, 'c')`,
+          ),
+        );
+      await expectCode(direct('   short   '), 'precondition_failed');
+      await expectCode(direct('x'.repeat(501)), 'precondition_failed');
+      const outsider = await createUser(fx.dbs, { twoFactor: true });
+      await expectCode(
+        acknowledge(
+          { userId: outsider.id, role: 'platform_operator', correlationId: uuidv7() },
+          queue,
+          late,
+          'Looking into this queue now.',
+        ),
+        'forbidden',
+      );
+      expect((await waitOn(queue)).acknowledgement).toBeNull();
+      expect(await audits(queue)).toEqual([]);
+      await direct('   Noted straight in SQL.   ');
+      expect((await waitOn(queue)).acknowledgement?.note).toBe('Noted straight in SQL.');
+      await recordWait(queue, null);
+    });
+
+    it('keeps the writing to the definer functions and the acknowledging to platform staff, and a note to a late queue', async () => {
+      const queue = 'commerce.link';
+      await recordWait(queue, 20);
+      const late = (await waitOn(queue)).lateSince!;
+      for (const pool of [fx.dbs.appPool, fx.dbs.platformPool]) {
+        await expect(
+          pool.query(
+            `UPDATE ops.queue_waits SET acknowledgement = 'Changed by hand here.' WHERE queue = $1`,
+            [queue],
+          ),
+        ).rejects.toThrow(/permission denied for table/);
+      }
+      await expect(
+        fx.dbs.appPool.query(
+          `SELECT ops.platform_acknowledge_late_queue($1, $2::timestamptz, 'Looking into this queue now.', 'c')`,
+          [queue, late.toISOString()],
+        ),
+      ).rejects.toThrow(/permission denied for function/);
+      const [fn] = await fx.query<{ owner: string; definer: boolean; config: unknown }>(
+        `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer, p.proconfig AS config
+           FROM pg_proc p
+          WHERE p.oid = 'ops.platform_acknowledge_late_queue(text,timestamptz,text,text)'::regprocedure`,
+      );
+      expect(fn).toEqual({
+        owner: 'w360_definer',
+        definer: true,
+        config: ['search_path=pg_catalog, pg_temp'],
+      });
+      // A note, its author and its time go together, keep to their length, and need a late queue.
+      await expect(
+        fx.query(`UPDATE ops.queue_waits SET acknowledged_at = now() WHERE queue = $1`, [queue]),
+      ).rejects.toThrow(/queue_waits_acknowledged/);
+      await expect(
+        fx.query(
+          `UPDATE ops.queue_waits SET acknowledged_at = now(), acknowledged_by_user_id = $2,
+                  acknowledgement = 'short' WHERE queue = $1`,
+          [queue, staff.userId],
+        ),
+      ).rejects.toThrow(/queue_waits_acknowledged/);
+      await recordWait(queue, null);
+      await expect(
+        fx.query(
+          `UPDATE ops.queue_waits SET acknowledged_at = now(), acknowledged_by_user_id = $2,
+                  acknowledgement = 'Noted while on time.' WHERE queue = $1`,
+          [queue, staff.userId],
+        ),
+      ).rejects.toThrow(/queue_waits_acknowledged/);
+    });
   });
 });
 

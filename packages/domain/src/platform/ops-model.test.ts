@@ -641,7 +641,7 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
     ).toEqual([EMAILS_CSV_COLUMNS.join(','), 'invitation,2,0', 'password_reset,0,3', '']);
   });
 
-  it('writes each queue’s policy, counts, wait in whole minutes and dead letters', () => {
+  it('writes each queue’s policy, counts, wait in whole minutes, when a late one was acknowledged (never who or the note) and dead letters', () => {
     const checkedAt = at('2026-10-05T07:05:30Z');
     const store: QueueRow = {
       name: 'commerce.store',
@@ -656,6 +656,11 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
         lateSince: at('2026-10-05T06:00:00Z'),
         alertedAt: at('2026-10-05T06:01:00Z'),
         checkedAt,
+        acknowledgement: {
+          at: at('2026-10-05T06:20:40Z'),
+          byName: 'Asha Ops',
+          note: 'Shopify is rate limiting us; waiting it out.',
+        },
       },
     };
     const quiet: QueueRow = {
@@ -678,6 +683,7 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
         lateSince: null,
         alertedAt: null,
         checkedAt,
+        acknowledgement: null,
       },
     };
     const gone: QueueRow = {
@@ -691,16 +697,27 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
     const skewed: QueueRow = {
       ...store,
       name: 'commerce.sync',
-      wait: { ...store.wait!, oldestWaitMs: -5_000, lateSince: null, alertedAt: null },
+      wait: {
+        ...store.wait!,
+        oldestWaitMs: -5_000,
+        lateSince: null,
+        alertedAt: null,
+        acknowledgement: null,
+      },
     };
     expect(lines(queuesCsv([store, quiet, gone, skewed]))).toEqual([
       QUEUES_CSV_COLUMNS.join(','),
-      'commerce.store,Yes,5,Yes,60,Yes,4,1,2,3,125,2026-10-05 06:00,2026-10-05 06:01,2026-10-05 07:05,1,2',
-      'billing.auto-recharge,Yes,0,No,15,Yes,0,0,0,0,,,,2026-10-05 07:05,0,0',
-      'it.gone,No,,,,No,,,,,,,,,0,1',
-      'commerce.sync,Yes,5,Yes,60,Yes,4,1,2,3,0,,,2026-10-05 07:05,1,2',
+      'commerce.store,Yes,5,Yes,60,Yes,4,1,2,3,125,2026-10-05 06:00,2026-10-05 06:01,2026-10-05 06:20,2026-10-05 07:05,1,2',
+      'billing.auto-recharge,Yes,0,No,15,Yes,0,0,0,0,,,,,2026-10-05 07:05,0,0',
+      'it.gone,No,,,,No,,,,,,,,,,0,1',
+      'commerce.sync,Yes,5,Yes,60,Yes,4,1,2,3,0,,,,2026-10-05 07:05,1,2',
       '',
     ]);
+    expect(QUEUES_CSV_COLUMNS.indexOf('Acknowledged (UTC)')).toBe(
+      QUEUES_CSV_COLUMNS.indexOf('Staff emailed (UTC)') + 1,
+    );
+    const file = queuesCsv([store]);
+    for (const left of ['Asha', 'Shopify', 'rate limiting']) expect(file).not.toContain(left);
   });
 
   it('writes dead letters with what became of each job and when one was acknowledged, never who retried or acknowledged it or the note', () => {
@@ -814,7 +831,7 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
       'Kind,Failed,Waiting',
       'Queue,Declared by this release,Retries,Dead-lettered after its retries,Wait limit (minutes),' +
         'In the database,Ready,Deferred,Active,Failed,Oldest wait (minutes),Late since (UTC),' +
-        'Staff emailed (UTC),Waits checked (UTC),Dead letters (24 hours),Dead letters (7 days)',
+        'Staff emailed (UTC),Acknowledged (UTC),Waits checked (UTC),Dead letters (24 hours),Dead letters (7 days)',
       'Failed (UTC),Dead letter,Queue,Signature verified,Company,Address,Reference,Error,' +
         'Error code,Retries,Staff emailed (UTC),Retried (UTC),Work settled (UTC),Retry,' +
         'Can be retried until (UTC),Acknowledged (UTC)',

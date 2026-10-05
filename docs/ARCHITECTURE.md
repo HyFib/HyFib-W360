@@ -1651,6 +1651,14 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   platform role only) with the platform audit entry in one transaction. The Queues tab's read
   (`recentDeadLetters`) joins the administrator's name through `acknowledgers`, an alias of
   `auth.users` beside the one for who retried; the CSV writes the time only.
+- **Acknowledging late queues** (ADR-177, migration 0125): `acknowledged_at`,
+  `acknowledged_by_user_id` and `acknowledgement` on `ops.queue_waits`, set together and only while
+  the queue is late (the check `queue_waits_acknowledged`), written by
+  `ops.platform_acknowledge_late_queue` (definer, platform role only, the lateness named by its
+  start) with the platform audit entry in one transaction, and cleared by `ops.record_queue_waits`
+  when the check finds the queue back on time, as it clears the alert's mark. The Queues tab's read
+  (`queueWaitsByName`) joins the administrator's name through `acknowledgers`; the worker's grant
+  covers the check's columns only; the CSV writes the time only.
 - **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
   90 days) and a health card on each company's platform page. Every page re-checks the platform
   actor. The functions read every company on each view, which suits the test envelope; paging and

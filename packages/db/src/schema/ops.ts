@@ -142,7 +142,8 @@ export const platformAlerts = opsSchema.table('platform_alerts', {
  * How long jobs wait in each queue, as the worker's minute sweep last read them from pg-boss
  * (ADR-096): jobs pg-boss would hand to a worker now and when the oldest became due. Late past the
  * queue's limit until the wait is back under half of it. Written only through
- * `ops.record_queue_waits` and `ops.mark_queue_alert`; the worker and platform staff read.
+ * `ops.record_queue_waits`, `ops.mark_queue_alert` and `ops.platform_acknowledge_late_queue`;
+ * platform staff read it all, the worker only the check (not the acknowledgement, ADR-177).
  */
 export const queueWaits = opsSchema.table('queue_waits', {
   queue: text('queue').primaryKey(),
@@ -152,6 +153,10 @@ export const queueWaits = opsSchema.table('queue_waits', {
   checkedAt: tz('checked_at').notNull(),
   lateSince: tz('late_since'),
   alertedAt: tz('alerted_at'),
+  /** An administrator's note while the queue is late (ADR-177), cleared once it is on time. */
+  acknowledgedAt: tz('acknowledged_at'),
+  acknowledgedByUserId: text('acknowledged_by_user_id'),
+  acknowledgement: text('acknowledgement'),
 });
 
 /** What happened at one provider while a company was deleted (ADR-055). */

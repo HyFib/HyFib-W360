@@ -322,6 +322,20 @@ const deadLetterRetrySchema = z.object({
   reason: z.string().trim().min(10, 'Give a reason of at least 10 characters').max(2000),
 });
 
+/**
+ * A late queue the console lists, named by the time it fell behind as the page shows it, and what
+ * the administrator noted about it (ADR-177).
+ */
+const lateQueueAcknowledgeSchema = z.object({
+  queue: z.string().regex(/^[a-z][a-z0-9_.-]{0,99}$/, 'Choose a queue from the list'),
+  lateSince: z.iso.datetime({ offset: true, message: 'Reload the page and try again' }),
+  note: z
+    .string()
+    .trim()
+    .min(10, 'Write a note of at least 10 characters')
+    .max(500, 'Write a note of at most 500 characters'),
+});
+
 /** A dead letter the console lists and what the administrator noted about it (ADR-169). */
 const deadLetterAcknowledgeSchema = z.object({
   deadLetterId: z.uuid(),
@@ -430,9 +444,26 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     });
   }
 
-  /** The last check of each queue's waits, by queue (ADR-096). */
+  /**
+   * The last check of each queue's waits, by queue (ADR-096), with the acknowledgement of a late
+   * queue and the name of the administrator who made it (ADR-177).
+   */
   async function queueWaitsByName(tx: Tx): Promise<Map<string, QueueWait>> {
-    const rows = await tx.select().from(queueWaits);
+    const rows = await tx
+      .select({
+        queue: queueWaits.queue,
+        waiting: queueWaits.waiting,
+        oldestWaitingSince: queueWaits.oldestWaitingSince,
+        limitMinutes: queueWaits.limitMinutes,
+        lateSince: queueWaits.lateSince,
+        alertedAt: queueWaits.alertedAt,
+        checkedAt: queueWaits.checkedAt,
+        acknowledgedAt: queueWaits.acknowledgedAt,
+        acknowledgedByName: acknowledgers.name,
+        acknowledgement: queueWaits.acknowledgement,
+      })
+      .from(queueWaits)
+      .leftJoin(acknowledgers, eq(acknowledgers.id, queueWaits.acknowledgedByUserId));
     return new Map(
       rows.map((r) => [
         r.queue,
@@ -446,6 +477,10 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           lateSince: r.lateSince,
           alertedAt: r.alertedAt,
           checkedAt: r.checkedAt,
+          acknowledgement:
+            r.acknowledgedAt && r.acknowledgement
+              ? { at: r.acknowledgedAt, byName: r.acknowledgedByName, note: r.acknowledgement }
+              : null,
         },
       ]),
     );
@@ -1053,6 +1088,21 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
       await platformDb.run(actor.userId, async (tx) => {
         await tx.execute(
           sql`select ops.platform_acknowledge_dead_letter(${data.deadLetterId}::uuid, ${data.note}, ${actor.correlationId})`,
+        );
+      });
+    },
+
+    /**
+     * Records that a platform administrator looked at a queue that is late now, with a note,
+     * replacing an earlier one (ADR-177). The definer function checks the administrator, the note
+     * and that the queue is still late since the time the page showed, and audits it in the same
+     * transaction.
+     */
+    async acknowledgeLateQueue(actor: PlatformActor, input: unknown): Promise<void> {
+      const data = parseInput(lateQueueAcknowledgeSchema, input);
+      await platformDb.run(actor.userId, async (tx) => {
+        await tx.execute(
+          sql`select ops.platform_acknowledge_late_queue(${data.queue}, ${data.lateSince}::timestamptz, ${data.note}, ${actor.correlationId})`,
         );
       });
     },

@@ -216,6 +216,8 @@ test('staff read the operations console and repair a quarantined webhook event',
     'Queue,Declared by this release,Retries,Dead-lettered after its retries,Wait limit (minutes),In the database,',
   );
   expect(queuesCsv.text).toMatch(/\r\ncommerce\.store,Yes,5,Yes,60,Yes,\d+,\d+,\d+,\d+,/);
+  // When a late queue was acknowledged is a column of its own (ADR-177), never who or the note.
+  expect(queuesCsv.text).toContain('Staff emailed (UTC),Acknowledged (UTC),Waits checked (UTC)');
   // A queue that never retries still dead-letters its failures, and the outbox sweep, which
   // retries once, has no dead letter (packages/contracts/src/jobs.ts).
   expect(queuesCsv.text).toMatch(/\r\nbilling\.auto-recharge,Yes,0,Yes,15,Yes,\d+,/);

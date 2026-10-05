@@ -1,5 +1,57 @@
 # Progress
 
+## 2026-10-05 — Phase 5: acknowledging late queues on the operations console (P5-10, ADR-177)
+
+Status: **Implemented; its database tests run in CI only (test data only).** Nothing on the Queues
+tab said that someone had already looked at a late queue. The local PostgreSQL is unavailable (its
+Docker daemon stopped), so migration 0125 and the integration tests below were written but not run
+here.
+
+### Completed
+
+- **Design (ADR-177):** a note of 10 to 500 characters on a late queue, replaced by a later one,
+  audited, kept while the queue stays late and cleared by the check that finds it on time; the CSV
+  gives the time only.
+- **Database:** migration 0125 (the columns and their check, the worker's column grant,
+  `ops.record_queue_waits` clearing them, `ops.platform_acknowledge_late_queue`); the schema's
+  columns (`packages/db`).
+- **Domain:** `acknowledgeLateQueue` and the Queues tab's read with the administrator's name
+  (`platform/ops.ts`); the acknowledgement on `QueueWait` and the CSV column (`ops-model.ts`).
+- **Web:** Acknowledge under a late queue's lateness on Job queues, with who, when and the note; the
+  action.
+- **Tests:**
+  - Unit (3 new in `late-queue-acknowledgements.test.ts`, 2 changed in `ops-model.test.ts`): the
+    input, the definer call and the CSV column.
+  - Integration (3 new and 1 changed in `platform-ops.test.ts`, 1 changed in
+    `tenant-isolation.test.ts`): the acknowledgement's life, the refusals, the grants, the function
+    and the check. Written for CI; not run here.
+  - E2E (`platform-ops.spec.ts` extended): the CSV column. No queue falls behind in an e2e run, so
+    the form is not exercised end to end. Written for CI; not run here.
+- **Docs:** ADR-177 (and ADR-141's and ADR-169's "Not built" annotated); SECURITY; ARCHITECTURE;
+  THREAT-MODEL T172; DEPLOYMENT and RUNBOOKS (migration 0125, acknowledging a late queue);
+  DATA-RETENTION; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 9 deliberate regressions tried, all caught on the unit-tested parts (the
+  queue name, the time and the note taken, the note untrimmed, the time not cast, the arguments
+  swapped, the CSV value left out, misplaced or taken from the email). The function, the check, the
+  clearing and the form need the database or a browser, so their regressions are left to the
+  integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 805 passed (81 files)                                               |
+| `pnpm test:integration`, e2e, migration 0125       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 9 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Acknowledging receipts and quarantine entries; assigning a late queue to someone; a reminder while
+  an acknowledged queue stays late.
+
 ## 2026-10-05 — Phase 5: resuming through the public API the campaigns keys paused (P5-08, ADR-176)
 
 Status: **Implemented; its database and browser tests run in CI only (Graph stand-in only).** A key

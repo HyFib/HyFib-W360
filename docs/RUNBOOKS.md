@@ -2490,6 +2490,16 @@ unacknowledged dead letter. Acknowledging neither retries the job nor changes wh
 retried, and does not stop the alert email, which tells each dead letter once anyway. "Dead letter
 not found." means it was purged since the page loaded.
 
+**Acknowledging a late queue (ADR-177).** The administrator who looks at a late queue opens
+Acknowledge under its lateness on Job queues and writes a note of 10 to 500 characters: what was
+found or done ("Worker restarted at 10:05; draining", "Shopify rate limits; it catches up by
+itself"). The row then shows who, when and the note, so the others need not look again; a later note
+replaces it, and the platform audit log keeps each (`platform.late_queue_acknowledged`). The note
+lasts while the queue stays late: the worker's check that finds it back under half its limit clears
+it, and the next time it falls behind it starts unacknowledged and is emailed again. Acknowledging
+changes neither the lateness nor the alert. "This queue is no longer late since then." means the
+queue recovered, or fell behind again, since the page loaded: reload it.
+
 **A dead letter of those three queues stays unsettled.** The sweep leaves one alone while its
 company is being deleted, while a job for the same work waits or runs (the company started it again,
 or a retry), and when its envelope did not verify. Otherwise look for `ending stranded work failed;
@@ -2704,6 +2714,13 @@ with it.
 transaction; a failure rolls it all back (usually a lock held on one of the tables: run the
 migrations again). Web servers of this release need it before a key or plan version holds the new
 scope; those of the previous release work with it.
+
+**Migration 0125 failed.** It adds the acknowledgement columns and their check to `ops.queue_waits`,
+replaces the worker role's read of the table with a read of the check's columns, creates
+`ops.record_queue_waits` again and adds `ops.platform_acknowledge_late_queue`, in one transaction; a
+failure rolls it all back (usually the bootstrap roles, or a lock held on the table by a sweep: run
+the migrations again). Web servers of this release need it before they show the Queues tab; workers
+of either release and web servers of the previous release work with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

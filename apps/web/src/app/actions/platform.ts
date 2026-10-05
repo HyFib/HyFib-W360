@@ -333,6 +333,19 @@ export async function acknowledgeDeadLetterAction(input: unknown): Promise<Actio
 }
 
 /**
+ * Acknowledges a queue that is late now on the operations console, with a note, or replaces the
+ * note (audited, ADR-177).
+ */
+export async function acknowledgeLateQueueAction(input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.platformOps.acknowledgeLateQueue(actor, input);
+    refresh();
+    return null;
+  });
+}
+
+/**
  * Acknowledges a company's failing integration on the operations console, with a note (audited,
  * ADR-141).
  */
