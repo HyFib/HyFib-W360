@@ -1603,6 +1603,14 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   message trigger stores in the detail against the list, with the endpoint's other filters. Settings
   (checkboxes under "Message received") and the API (`messageTypes`) set it; a change that drops the
   event clears it.
+- **Run end reason filters** (migration 0138, ADR-192): `run_end_reasons` on an endpoint lists the
+  reasons a run ended for that it takes as `automation.run_ended`, null for every reason; a check
+  keeps it to 1 to 21 known reasons, to endpoints taking the event and to reasons of the ends they
+  take. `app.capture_webhook_event` (replaced with the same signature) matches the `endReason` the
+  run trigger stores in the detail against the list for the ends it names reasons of (each status
+  paired with its reasons in the function); the runs of other ends pass on the end filter alone.
+  Settings (reasons by status under "Automation ended") and the API (`runEndReasons`) set it; a
+  change of the ends keeps the reasons of the ends kept, and one that drops the event clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and

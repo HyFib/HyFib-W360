@@ -267,6 +267,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       consentChanges: null,
       contactSources: null,
       messageTypes: null,
+      runEndReasons: null,
       channelIds: null,
       teamIds: null,
       templateIds: null,
@@ -1880,6 +1881,123 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { messageTypes: [] }))).toMatchObject({
       path: 'messageTypes',
+    });
+  });
+
+  it('choose why the runs an endpoint receives ended, of the ends it receives, kept by changes that leave them out (less those of ends dropped) and cleared with the event (ADR-192)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The reasons need automation.run_ended, at least one, each from the list (by place) and of an
+    // end the endpoint receives.
+    const refusals = [
+      [['automation.run_started'], null, ['expired'], 'runEndReasons'],
+      [['automation.run_ended'], null, [], 'runEndReasons'],
+      [['automation.run_ended'], null, ['expired', 'failed'], 'runEndReasons.1'],
+      [['automation.run_ended'], null, ['budget'], 'runEndReasons.0'],
+      [['automation.run_ended'], ['completed'], ['send_failed'], 'runEndReasons'],
+    ] as const;
+    for (const [index, [events, runEndStatuses, runEndReasons, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, runEndStatuses, runEndReasons },
+            idem(`run-end-reasons-bad-${index}`, JSON.stringify(runEndReasons)),
+          ),
+        ),
+        JSON.stringify(runEndReasons),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'run-end-reasons-1', {
+      url: receiverUrl(),
+      events: ['automation.run_started', 'automation.run_ended'],
+      runEndStatuses: ['completed', 'failed'],
+      runEndReasons: ['send_failed', 'no_next', 'send_blocked'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.runEndReasons).toEqual(['no_next', 'send_blocked', 'send_failed']);
+    expect((await api().get(key.ctx, id)).runEndReasons).toEqual([
+      'no_next',
+      'send_blocked',
+      'send_failed',
+    ]);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({
+      runEndReasons: ['no_next', 'send_blocked', 'send_failed'],
+    });
+
+    expect(await api().update(key.ctx, id, { description: 'Alerts' })).toMatchObject({
+      runEndReasons: ['no_next', 'send_blocked', 'send_failed'],
+    });
+    // Dropping an end drops its reasons from the list.
+    expect(await api().update(key.ctx, id, { runEndStatuses: ['failed'] })).toMatchObject({
+      runEndStatuses: ['failed'],
+      runEndReasons: ['send_blocked', 'send_failed'],
+    });
+    expect(await api().update(key.ctx, id, { runEndReasons: ['expired'] })).toMatchObject({
+      runEndReasons: ['expired'],
+    });
+    const updates = await fx.query<{ metadata: { runEndReasons?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.runEndReasons)).toEqual([
+      ['no_next', 'send_blocked', 'send_failed'],
+      ['send_blocked', 'send_failed'],
+      ['expired'],
+    ]);
+    // A reason of an end it no longer receives is refused against the ends it keeps…
+    expect(await issueOf(api().update(key.ctx, id, { runEndReasons: ['end_node'] }))).toMatchObject(
+      { path: 'runEndReasons' },
+    );
+    // …or against the ends given with it.
+    expect(
+      await issueOf(
+        api().update(key.ctx, id, { runEndStatuses: ['stopped'], runEndReasons: ['expired'] }),
+      ),
+    ).toMatchObject({ path: 'runEndReasons' });
+    // The ends changing so that none of its reasons is left takes every reason.
+    expect(await api().update(key.ctx, id, { runEndStatuses: ['completed'] })).toMatchObject({
+      runEndStatuses: ['completed'],
+      runEndReasons: null,
+    });
+    // Dropping the event clears the list.
+    expect(
+      await api().update(key.ctx, id, {
+        runEndStatuses: null,
+        runEndReasons: ['end_node', 'handoff_node'],
+      }),
+    ).toMatchObject({ runEndStatuses: null, runEndReasons: ['end_node', 'handoff_node'] });
+    expect(await api().update(key.ctx, id, { events: ['automation.run_started'] })).toMatchObject({
+      events: ['automation.run_started'],
+      runEndReasons: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { runEndReasons: ['expired'] }))).toMatchObject({
+      path: 'runEndReasons',
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['automation.run_ended'],
+        runEndReasons: ['expired'],
+      }),
+    ).toMatchObject({ runEndReasons: ['expired'] });
+    expect(await api().update(key.ctx, id, { runEndReasons: null })).toMatchObject({
+      runEndReasons: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { runEndReasons: [] }))).toMatchObject({
+      path: 'runEndReasons',
     });
   });
 

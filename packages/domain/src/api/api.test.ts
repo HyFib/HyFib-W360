@@ -122,6 +122,8 @@ import {
   WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT,
   WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT,
   WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT,
+  WEBHOOK_RUN_END_REASONS_NEED_THE_EVENT,
+  WEBHOOK_RUN_END_REASONS_NEED_THE_ENDS,
   WEBHOOK_ASSIGNEES_NEED_THE_EVENTS,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS,
@@ -1392,6 +1394,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'messageTypes',
       'oauth',
       'orderStatuses',
+      'runEndReasons',
       'runEndStatuses',
       'runTriggers',
       'teamIds',
@@ -1983,6 +1986,74 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(
       Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
     ).toContain('messageTypes');
+  });
+
+  it('take end reasons only with automation.run_ended and of the ends chosen, each once, and a list of them alone is a change (ADR-192)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['automation.run_ended'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        runEndReasons: ['send_failed', 'end_node', 'send_failed'],
+      }).runEndReasons,
+    ).toEqual(['end_node', 'send_failed']);
+    const withoutTheEvent = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['automation.run_started'],
+      runEndReasons: ['expired'],
+    });
+    expect(withoutTheEvent.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['runEndReasons', WEBHOOK_RUN_END_REASONS_NEED_THE_EVENT],
+    ]);
+    // A reason of an end the endpoint does not take would never be sent.
+    const ofAnotherEnd = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      runEndStatuses: ['completed', 'stopped'],
+      runEndReasons: ['end_node', 'send_failed'],
+    });
+    expect(ofAnotherEnd.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['runEndReasons', WEBHOOK_RUN_END_REASONS_NEED_THE_ENDS],
+    ]);
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        runEndStatuses: ['completed', 'failed'],
+        runEndReasons: ['send_failed'],
+      }).runEndReasons,
+    ).toEqual(['send_failed']);
+    for (const body of [
+      { ...base, runEndReasons: [] },
+      { ...base, runEndReasons: ['failed'] },
+      { ...base, runEndReasons: ['budget'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, runEndReasons: null }).runEndReasons,
+    ).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ runEndReasons: null })).toEqual({
+      runEndReasons: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ runEndReasons: ['expired'] })).toEqual({
+      runEndReasons: ['expired'],
+    });
+    // Answered as a list of reasons, or null.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: unknown[] } }[] }>;
+      required?: string[];
+    };
+    const answeredReasons = answered.properties.runEndReasons?.anyOf?.find((t) => t.items)?.items
+      ?.enum;
+    expect(answeredReasons).toHaveLength(21);
+    expect(answeredReasons).not.toContain('failed');
+    expect(answered.required).toContain('runEndReasons');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('runEndReasons');
   });
 
   it('take members only with an event of a conversation, each once, and a list of them alone is a change (ADR-181)', () => {

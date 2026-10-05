@@ -671,7 +671,7 @@ interface RunEventBody {
   };
 }
 
-test('automation run events reach an endpoint: a live run starts and ends, a member’s test run sends nothing, an endpoint can take chosen automations only, and another only the ends it chooses', async ({
+test('automation run events reach an endpoint: a live run starts and ends, a member’s test run sends nothing, an endpoint can take chosen automations only, another only the ends it chooses, and another the runs of an end that ended for chosen reasons only (ADR-192)', async ({
   page,
   request,
 }) => {
@@ -894,8 +894,39 @@ test('automation run events reach an endpoint: a live run starts and ends, a mem
   await page.reload();
   await expect(page.getByText('Automation runs started by: API')).toBeVisible();
 
+  // A fourth endpoint takes the ends of runs, completions only when nothing came next (ADR-192):
+  // the reasons of the other ends stay ticked, and the last one ticked of an end stays.
+  const reasonsPath = `${path}/reasons`;
+  const forReasons = () =>
+    received.filter((r) => r.path === reasonsPath).map((r) => JSON.parse(r.body) as RunEventBody);
+  const reasonBox = (name: string) => page.getByRole('checkbox', { name, exact: true });
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${reasonsPath}`);
+  await page.getByRole('checkbox', { name: /Automation ended/ }).check();
+  await reasonBox('Reached an End step (end_node)').uncheck();
+  await expect(reasonBox('Reached a step with nothing after it (no_next)')).toBeDisabled();
+  await expect(reasonBox('Older than 7 days (expired)')).toBeChecked();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await expect(page.getByLabel('Signing secret')).toBeVisible();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  await page.reload();
+  await expect(
+    page.getByText('Automation ends narrowed to: Reached a step with nothing after it'),
+  ).toBeVisible();
+  await page
+    .getByRole('list', { name: 'Endpoints' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Automation ends narrowed to:' })
+    .getByRole('link', { name: /Deliveries and settings/ })
+    .click();
+  await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
+  await expect(reasonBox('Reached an End step (end_node)')).not.toBeChecked();
+  await expect(reasonBox('Reached a step with nothing after it (no_next)')).toBeChecked();
+  // It names no reason a run fails for, so it takes every failure.
+  await expect(reasonBox('A message could not be sent (send_blocked)')).toBeChecked();
+
   // A fifth customer writes "bye": Farewell's run starts and completes, and the first endpoint
-  // hears both. The completion is captured for no other endpoint: the second has no delivery.
+  // hears both. The second endpoint, which takes no completion, has no delivery.
   const fifth = randomWaId();
   await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, fifth, 'bye'));
   await expect(async () => expect(forUs()).toHaveLength(8)).toPass({ timeout: 30_000 });
@@ -924,6 +955,12 @@ test('automation run events reach an endpoint: a live run starts and ends, a mem
   await expect(triggerBox('API (api)')).toBeChecked();
   await expect(triggerBox('Keyword (keyword)')).not.toBeChecked();
   expect(forApi()).toEqual([]);
+  // Nothing came after Farewell's message, so the fourth endpoint hears its completion.
+  await expect(async () => expect(forReasons()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(forReasons()[0]).toMatchObject({
+    type: 'automation.run_ended',
+    data: { run: { status: 'completed', endReason: 'no_next' }, contact: { phone: `+${fifth}` } },
+  });
 
   // Both automations are archived: Greeter, not chosen, is no longer offered; Farewell, chosen,
   // stays listed and ticked, marked archived.

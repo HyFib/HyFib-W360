@@ -4045,6 +4045,127 @@ describe('message type filters (ADR-191)', () => {
   });
 });
 
+describe('run end reason filters (ADR-192)', () => {
+  it('are refused without automation.run_ended, unknown, empty or of an end not taken, kept by a change that leaves them out (less those of ends dropped) and cleared with the event; the database keeps them to the event and the ends', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (
+      eventTypes: string[],
+      runEndStatuses: unknown,
+      runEndReasons: unknown,
+      message: RegExp,
+    ) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, runEndStatuses, runEndReasons }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvent = /only for an endpoint that receives Automation ended/;
+    const needsTheEnds = /only of the ends the endpoint receives/;
+    await refused(['automation.run_started'], undefined, ['expired'], needsTheEvent);
+    await refused(['automation.run_ended'], undefined, [], /at least one end reason/);
+    await refused(['automation.run_ended'], undefined, ['failed'], /from the list/);
+    await refused(['automation.run_ended'], undefined, ['budget'], /from the list/);
+    // A reason of an end the endpoint does not take would never be sent.
+    await refused(['automation.run_ended'], ['completed'], ['send_failed'], needsTheEnds);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['automation.run_ended', 'consent.changed'],
+      runEndStatuses: ['completed', 'failed'],
+      runEndReasons: ['send_failed', 'end_node', 'send_failed'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ runEndReasons: ['end_node', 'send_failed'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['automation.run_ended', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.runEndReasons;
+    expect(await current()).toEqual(['end_node', 'send_failed']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['end_node', 'send_failed']);
+    await change({ runEndReasons: ['no_next', 'expired'] });
+    expect(await current()).toEqual(['no_next', 'expired']);
+    const updates = await fx.query<{ metadata: { runEndReasons?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.runEndReasons)).toEqual([
+      ['end_node', 'send_failed'],
+      ['no_next', 'expired'],
+    ]);
+    // Dropping an end drops its reasons; none left takes every reason of the ends kept.
+    await change({ runEndStatuses: ['completed'] });
+    expect(await current()).toEqual(['no_next']);
+    await change({ runEndStatuses: ['failed'] });
+    expect(await current()).toBeNull();
+    // Reasons given are checked against the ends given, or else the ends the endpoint keeps.
+    await expectAppError(
+      change({ runEndReasons: ['end_node'] }),
+      'validation_failed',
+      needsTheEnds,
+    );
+    await expectAppError(
+      change({ runEndStatuses: ['stopped', 'failed'], runEndReasons: ['expired', 'end_node'] }),
+      'validation_failed',
+      needsTheEnds,
+    );
+    await change({ runEndStatuses: null, runEndReasons: ['end_node'] });
+    expect(await current()).toEqual(['end_node']);
+    await change({ runEndReasons: null });
+    expect(await current()).toBeNull();
+    await change({ runEndReasons: ['take_over'] });
+    // The database refuses an empty list, more than twenty-one entries, a status, an unknown reason
+    // or a missing one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET ${value} WHERE id = $1`, [created.id]);
+    for (const bad of [
+      `run_end_reasons = '{}'`,
+      `run_end_reasons = '{end_node,no_next,handoff_node,agent_replied,assigned,take_over,api_replied,stopped_by_member,conversation_resolved,opted_out,contact_erased,automation_archived,stopped_by_api,budget_steps,budget_loop,budget_messages,budget_http,expired,send_blocked,send_failed,error,error}'`,
+      `run_end_reasons = '{take_over,failed}'`,
+      `run_end_reasons = '{budget}'`,
+      `run_end_reasons = ARRAY['take_over', NULL]::text[]`,
+      `run_end_reasons = ARRAY[['take_over']]::text[]`,
+      // …a reason of an end it does not take, however the ends or the reasons change…
+      `run_end_statuses = '{completed,stopped}'`,
+      `run_end_statuses = '{failed}', run_end_reasons = '{take_over}'`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_run_end_reasons/);
+    }
+    await setInDatabase(`run_end_statuses = '{taken_over}'`);
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], runEndReasons: ['expired'] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // …and any list for an endpoint that does not take it, run starts included.
+    await change({ eventTypes: ['automation.run_started'] });
+    await expect(setInDatabase(`run_end_reasons = '{expired}'`)).rejects.toThrow(
+      /webhook_endpoints_run_end_reasons/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'run_end_reasons',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('event capture', () => {
   it('records an event only for subscribed types, with one delivery per active subscribed endpoint, and none from a rolled-back change', async () => {
     const c = await fx.company();

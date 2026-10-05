@@ -44,6 +44,9 @@ import {
   WEBHOOK_CONTACT_SOURCES,
   WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS,
   WEBHOOK_RECEIVED_MESSAGE_TYPES,
+  WEBHOOK_RUN_END_REASON_LABELS,
+  WEBHOOK_RUN_END_REASONS,
+  WEBHOOK_RUN_END_REASONS_BY_END,
   WEBHOOK_CAMPAIGN_EVENTS,
   WEBHOOK_TEAM_EVENTS,
   WEBHOOK_TEMPLATE_EVENTS,
@@ -78,6 +81,9 @@ import {
   webhookTakesTemplateEvents,
   webhookTeamText,
   webhookTemplateText,
+  webhookRunEndReasonsChosen,
+  webhookRunEndReasonsTicked,
+  webhookRunEndTakesReason,
 } from './model';
 import {
   automationRunEndedPayloadSchema,
@@ -142,6 +148,10 @@ import {
   webhookContactSourcesSchema,
   webhookMessageTypesFor,
   webhookMessageTypesSchema,
+  webhookRunEndReasonsFor,
+  webhookRunEndReasonsNeedTheEnds,
+  webhookRunEndReasonsSchema,
+  WEBHOOK_RUN_END_REASONS_NEED_THE_ENDS,
   webhookHeadersAad,
   webhookHeadersSchema,
   webhookMessageSendersFor,
@@ -2719,5 +2729,127 @@ describe('message type filters (ADR-191)', () => {
     expect(webhookMessageTypesFor(['message.received'], null, ['text'])).toBeNull();
     expect(webhookMessageTypesFor(['message.received'], undefined, null)).toBeNull();
     expect(webhookMessageTypesFor(['message.status'], ['text'], ['text'])).toBeNull();
+  });
+});
+
+describe('run end reason filters (ADR-192)', () => {
+  it('take 1 to 21 of the reasons a run ends for, once each in their order; null takes every reason', () => {
+    expect(WEBHOOK_RUN_END_REASONS).toHaveLength(21);
+    expect(webhookRunEndReasonsSchema.parse(['send_failed', 'end_node', 'send_failed'])).toEqual([
+      'end_node',
+      'send_failed',
+    ]);
+    expect(webhookRunEndReasonsSchema.parse([...WEBHOOK_RUN_END_REASONS].reverse())).toEqual([
+      ...WEBHOOK_RUN_END_REASONS,
+    ]);
+    expect(webhookRunEndReasonsSchema.parse(null)).toBeNull();
+    // A status is no reason, nor is anything else.
+    for (const refused of [
+      [],
+      ['failed'],
+      ['Expired'],
+      ['budget'],
+      ['expired', null],
+      'expired',
+      [...WEBHOOK_RUN_END_REASONS, 'expired'],
+    ]) {
+      expect(webhookRunEndReasonsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookRunEndReasonsSchema.safeParse(['failed']).error?.issues[0]?.message).toBe(
+      'Choose end reasons from the list.',
+    );
+    expect(webhookRunEndReasonsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one end reason, or take every end.',
+    );
+    expect(
+      webhookRunEndReasonsSchema.safeParse([...WEBHOOK_RUN_END_REASONS, 'expired']).error?.issues[0]
+        ?.message,
+    ).toBe('Give each end reason once.');
+  });
+
+  it('are the reasons runs end for, by the end they belong to, each named', () => {
+    expect(WEBHOOK_RUN_END_REASONS_BY_END).toEqual(AUTOMATION_END_REASONS);
+    expect(Object.keys(WEBHOOK_RUN_END_REASONS_BY_END)).toEqual([...WEBHOOK_RUN_END_STATUSES]);
+    expect([...WEBHOOK_RUN_END_REASONS]).toEqual(Object.values(AUTOMATION_END_REASONS).flat());
+    expect(Object.keys(WEBHOOK_RUN_END_REASON_LABELS)).toEqual([...WEBHOOK_RUN_END_REASONS]);
+    expect(WEBHOOK_RUN_END_REASON_LABELS).toMatchObject({
+      end_node: 'Reached an End step',
+      stopped_by_api: 'Stopped through the API',
+      expired: 'Older than 7 days',
+      send_failed: 'A message did not reach the customer',
+    });
+  });
+
+  it('narrow the ends they name reasons of, and are chosen among the ends taken only', () => {
+    expect(webhookRunEndTakesReason(null, 'expired')).toBe(true);
+    expect(webhookRunEndTakesReason(['failed'], 'expired')).toBe(true);
+    expect(webhookRunEndTakesReason(['completed', 'failed'], 'end_node')).toBe(true);
+    expect(webhookRunEndTakesReason(['completed'], 'expired')).toBe(false);
+    expect(webhookRunEndTakesReason(['taken_over', 'stopped'], 'handoff_node')).toBe(false);
+    const refused = webhookRunEndReasonsNeedTheEnds();
+    expect(isAppError(refused) && refused.code).toBe('validation_failed');
+    expect(refused.message).toBe('Choose end reasons only of the ends the endpoint receives.');
+    expect(refused.issues).toEqual([
+      { path: 'runEndReasons', message: WEBHOOK_RUN_END_REASONS_NEED_THE_ENDS },
+    ]);
+  });
+
+  it('are kept only while the endpoint takes automation.run_ended: given, kept for the ends kept, or cleared', () => {
+    const ended = ['automation.run_ended'] as const;
+    expect(webhookRunEndReasonsFor([...ended], null, ['send_failed'], null)).toEqual([
+      'send_failed',
+    ]);
+    expect(webhookRunEndReasonsFor([...ended], ['failed'], ['expired'], ['send_failed'])).toEqual([
+      'expired',
+    ]);
+    expect(
+      webhookRunEndReasonsFor([...ended], null, undefined, ['end_node', 'send_failed']),
+    ).toEqual(['end_node', 'send_failed']);
+    // The reasons of an end it no longer takes go; none left takes every reason.
+    expect(
+      webhookRunEndReasonsFor([...ended], ['failed'], undefined, ['end_node', 'send_failed']),
+    ).toEqual(['send_failed']);
+    expect(webhookRunEndReasonsFor([...ended], ['completed'], undefined, ['send_failed'])).toBe(
+      null,
+    );
+    expect(webhookRunEndReasonsFor([...ended], ['failed'], null, ['send_failed'])).toBeNull();
+    expect(webhookRunEndReasonsFor([...ended], null, undefined, null)).toBeNull();
+    expect(
+      webhookRunEndReasonsFor(['automation.run_started'], null, ['expired'], ['expired']),
+    ).toBeNull();
+  });
+
+  it('are shown ticked as the runs are taken, and sent for the ends they narrow only', () => {
+    expect(webhookRunEndReasonsTicked(null)).toEqual([...WEBHOOK_RUN_END_REASONS]);
+    // An end the list names no reason of takes its every run, so all of its reasons show ticked.
+    const ticked = webhookRunEndReasonsTicked(['send_failed', 'no_next']);
+    expect(ticked).toEqual([
+      'no_next',
+      ...AUTOMATION_END_REASONS.handed_off,
+      ...AUTOMATION_END_REASONS.taken_over,
+      ...AUTOMATION_END_REASONS.stopped,
+      'send_failed',
+    ]);
+    expect(webhookRunEndReasonsChosen(null, ticked)).toEqual(['no_next', 'send_failed']);
+    expect(webhookRunEndReasonsChosen(null, [...WEBHOOK_RUN_END_REASONS])).toBeNull();
+    expect(webhookRunEndReasonsChosen(['failed'], [...WEBHOOK_RUN_END_REASONS])).toBeNull();
+    // An end not taken sends none of its reasons, however they are ticked.
+    expect(webhookRunEndReasonsChosen(['completed', 'stopped'], ticked)).toEqual(['no_next']);
+    expect(webhookRunEndReasonsChosen(['handed_off'], ticked)).toBeNull();
+    expect(
+      webhookRunEndReasonsChosen(
+        ['failed'],
+        WEBHOOK_RUN_END_REASONS.filter((r) => r !== 'expired' && r !== 'error'),
+      ),
+    ).toEqual([
+      'budget_steps',
+      'budget_loop',
+      'budget_messages',
+      'budget_http',
+      'send_blocked',
+      'send_failed',
+    ]);
   });
 });

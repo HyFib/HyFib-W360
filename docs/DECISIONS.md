@@ -7733,3 +7733,67 @@ Decision:
 Not built: filters on a received message's words or on the kind of an interactive reply (button or
 list), types for `message.status` (the messages HyFib sends), and filters on the contact who sent it
 (a tag, a field's value).
+
+## ADR-192 Choosing why the runs a webhook endpoint receives ended (P5-09) (2026-10-05)
+
+Context: an endpoint that takes `automation.run_ended` receives the end of every run, or of the
+automations, ends and triggers it chose (ADR-145, ADR-151, ADR-183). An end is coarse: "failed"
+covers a message that could not be sent, a step, loop, message or web request limit, a run older
+than 7 days and an error, and "completed" both an End step and a step with nothing after it. A
+receiver that acts on some reasons only (an alert when a message could not be sent, but not when a
+run grew old) was sent every end of the status and had to read `run.endReason` and drop the rest.
+
+Decision:
+
+- **A list of reasons per endpoint,** for `automation.run_ended` only: the 21 reasons a run ends
+  for, as the payload's `run.endReason` names them, each belonging to one end (completed:
+  `end_node`, `no_next`; handed_off: `handoff_node`; taken_over: `agent_replied`, `assigned`,
+  `take_over`, `api_replied`; stopped: `stopped_by_member`, `conversation_resolved`, `opted_out`,
+  `contact_erased`, `automation_archived`, `stopped_by_api`; failed: `budget_steps`, `budget_loop`,
+  `budget_messages`, `budget_http`, `expired`, `send_blocked`, `send_failed`, `error`). Null
+  receives every reason, as before; a list holds 1 to 21 of them, kept in that order. Through the
+  API it is `runEndReasons` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in
+  every endpoint the API answers.
+- **A list narrows the ends it names reasons of:** a run's end counts only when its reason is
+  listed, for an end the list names reasons of; the runs of the endpoint's other ends are narrowed
+  by the ends alone (ADR-151), as a list of custom fields narrows field changes and leaves the other
+  parts to the parts (ADR-184). An endpoint taking every end and naming `send_blocked` and
+  `send_failed` receives every completion, hand-off, take-over and stop and, of the failures, those
+  two only; one taking only the failed end with the same list receives those failures only. So a
+  list never hides the runs of an end it names no reason of, and an end added to the endpoint later
+  receives its every run, rather than none.
+- **Only reasons of the ends taken:** a reason of an end the endpoint does not take could never
+  match, so a list naming one is refused (`runEndReasons`, "Choose end reasons only of the ends the
+  endpoint receives."; 422 through the API), checked against the ends given with it, or else the
+  ends the endpoint keeps. A change of the ends that leaves the reasons out keeps those of the ends
+  kept; none left takes every reason. A list given for an endpoint that does not take
+  `automation.run_ended` is refused; a change that removes the event clears it, and a `PATCH` that
+  leaves it out keeps it. A check in the database holds the same rules (null, or 1 to 21 known
+  reasons, one dimension, without a null, while `automation.run_ended` is among the endpoint's
+  events and only of the ends it takes), so a change of the ends alone cannot strand a reason
+  either.
+- **Settings:** under "Automation ended", below the statuses, "Why the runs ended, by status" lists
+  the reasons of each status ticked, all ticked unless some are unticked. The last reason ticked of
+  a status stays ticked (unticking the status stops its runs), and a status with every reason ticked
+  is not narrowed, so saving everything ticked keeps no list. The endpoints list shows "Automation
+  ends narrowed to: …".
+- **Matched as captured:** `app.capture_webhook_event` creates an `automation.run_ended` delivery
+  only for the active endpoints whose list is null, holds the reason the run ended for, or names no
+  reason of the end the run ended with (its status, paired with its reasons in the function as the
+  runs' own check pairs them), applied with the endpoints' other filters, and writes no event when
+  no endpoint takes it. The run trigger has always passed the reason in the event's detail, and a
+  run's end and reason are set once. Run starts and other events are not narrowed; replays and test
+  events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `runEndReasons` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0138:** `run_end_reasons text[]` on `app.webhook_endpoints` with the check, validated
+  at once (a company has at most 10 endpoints), an update grant on the column for the runtime role,
+  and `app.capture_webhook_event` replaced with the same signature, so its owner and grants stay.
+  Existing endpoints keep null; nothing is backfilled.
+
+Not built: filters on the step a run failed at or on the API key that started or stopped it, and
+reasons for `automation.run_started` (a run starting has none; its trigger is chosen with ADR-183).
+A reason added to automations later needs a migration that adds it to the check and to the capture's
+pairs, as it needs one for the runs' own check.

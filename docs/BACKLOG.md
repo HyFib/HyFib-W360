@@ -754,9 +754,12 @@ verification, app review, Embedded Signup configuration).
   `api` for an integration that adds contacts itself, or every contact's as before). **[Message type
   filters built; their database tests run only in CI]** (ADR-191: an endpoint takes the received
   messages of the types it chooses, such as text and button and list replies for a chatbot, or every
-  message as before). Remaining:
+  message as before). **[Run end reason filters built; their database tests run only in CI]**
+  (ADR-192: an endpoint takes the ends of the runs that ended for the reasons it chooses, each
+  narrowing the end it belongs to, such as only the failures to send among failed runs, or every end
+  as before). Remaining:
   filters for other event types and on a message's or contact's values (such as by tag or a field's
-  value, or a run's end reason or key), other authentication (headers computed
+  value, or the key that started a run), other authentication (headers computed
   per delivery, other OAuth grants),
   mutual TLS, fixed egress addresses, events for store orders, Payment Links and each step of a run,
   `createdAt` finer than the millisecond, load tests.

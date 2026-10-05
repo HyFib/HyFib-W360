@@ -27,6 +27,7 @@ import {
   WEBHOOK_CONSENT_CHANGES,
   WEBHOOK_CONTACT_SOURCES,
   WEBHOOK_RECEIVED_MESSAGE_TYPES,
+  WEBHOOK_RUN_END_REASONS,
   WEBHOOK_RETRY_SECONDS,
   WEBHOOK_TEMPLATE_STATUSES,
 } from '../webhooks/model';
@@ -559,6 +560,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The types of the received messages the endpoint receives as message.received, as message.type names them; null receives every type.',
+    ),
+  runEndReasons: z
+    .array(z.enum(WEBHOOK_RUN_END_REASONS))
+    .nullable()
+    .describe(
+      'The reasons the runs the endpoint receives as automation.run_ended ended for, as run.endReason names them, each narrowing the end it belongs to; null receives every reason.',
     ),
   channelIds: z
     .array(z.uuid())

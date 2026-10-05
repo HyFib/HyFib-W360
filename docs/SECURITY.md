@@ -1040,6 +1040,13 @@ Phase 5 rules (outgoing webhooks, P5-09):
   `app.capture_webhook_event` to the type the message trigger stores: it narrows what one endpoint
   receives and never adds an event or a delivery for another endpoint or company. Audited with the
   list (unit tests; integration and e2e tests, run in CI only).
+- An endpoint can take the runs of an end that ended for chosen reasons only (ADR-192), chosen the
+  same way. A list holds only the 21 reasons a run ends for, is kept only while the endpoint takes
+  `automation.run_ended` and only with reasons of the ends it takes (a database check too, which
+  also refuses a null entry), and is applied in `app.capture_webhook_event` to the reason the run
+  trigger stores: it narrows what one endpoint receives and never adds an event or a delivery for
+  another endpoint or company. Audited with the list (unit tests; integration and e2e tests, run in
+  CI only).
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

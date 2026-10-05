@@ -1,5 +1,62 @@
 # Progress
 
+## 2026-10-05 — Phase 5: choosing why the runs a webhook endpoint receives ended (P5-09, ADR-192)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every
+endpoint taking `automation.run_ended` received every end of the statuses it took, whatever the
+reason. The local PostgreSQL is unavailable (its Docker daemon stopped), so migration 0138, the
+integration tests and the changed e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-192):** `runEndReasons`, null for every reason or 1 to 21 of the reasons a run ends
+  for, only with `automation.run_ended` and only of the ends taken, each list narrowing the ends it
+  names reasons of; matched to the reason the run trigger stores.
+- **Database:** migration 0138 (the column and its check, the column grant,
+  `app.capture_webhook_event`); the schema's column (`packages/db`).
+- **Domain:** the list's schema, keeping and refusal (`webhookRunEndReasonsSchema`,
+  `webhookRunEndReasonsFor`, `webhookRunEndReasonsNeedTheEnds`); the reasons by end, their labels
+  and the helpers Settings uses in the model; `runEndReasons` in the settings service, the API
+  (create, update, answers) and the OpenAPI document; the export column.
+- **Web:** "Why the runs ended, by status" under Automation ended in the endpoint form (all ticked
+  unless some are unticked, the last of a status kept) and "Automation ends narrowed to: …" on the
+  endpoints list.
+- **Tests:**
+  - Unit (5 new in `webhooks.test.ts`, 1 new and 1 changed in `api.test.ts`): the list's rules, its
+    reasons by end and labels, which ends take a reason, keeping and clearing, the reasons Settings
+    ticks and sends, the API schemas and the OpenAPI entries.
+  - Integration (1 new in `webhooks.test.ts`, 1 new in `webhook-events.test.ts`, 1 new and 1 changed
+    in `api-webhook-endpoints.test.ts`): refusals, keeping and clearing, audits, the check and the
+    grant, capture by reason with the other ends passing, the API. Written for CI; not run here.
+  - E2E (1 changed in `webhook-events.spec.ts`): an endpoint narrowing completions to those with
+    nothing next hears Farewell's. Written for CI; not run here.
+- **Docs:** ADR-192; SECURITY; ARCHITECTURE; THREAT-MODEL T186; DEPLOYMENT and RUNBOOKS (migration
+  0138, a receiver missing automation ends); DATA-RETENTION; BACKLOG P5-09; feature matrix H-014,
+  W-138 and W-139.
+- **Mutation checks:** 19 deliberate regressions tried, all caught on the unit-tested parts (the
+  order or repeats kept, an empty list, a list kept without the event, for another event or by a
+  null, the reasons of ends dropped kept, none left kept as an empty list, any end taking a reason,
+  a reason under the wrong end, the reasons Settings ticks and sends, a label, the API's
+  refinements, change rule and field, the OpenAPI field). The services' checks, the capture and the
+  form need the database or a browser, so their regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 855 passed (82 files)                                                |
+| `pnpm test:integration`, e2e, migration 0138       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 19 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Filters on the step a run failed at or on the API key that started or stopped it; a reason added
+  to automations later needs a migration for the check and the capture.
+
 ## 2026-10-05 — Phase 5: choosing the types of the received messages a webhook endpoint receives (P5-09, ADR-191)
 
 Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every

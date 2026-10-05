@@ -2265,6 +2265,17 @@ to replay. To take more, tick the templates under "Templates" on the endpoint's 
 `templateIds` (null for every template). Removing both Message status and Template status clears the
 list.
 
+**A receiver misses automation ends (ADR-192).** An endpoint can take the runs of an end that ended
+for chosen reasons only. The endpoints list shows them ("Automation ends narrowed to: …"), and the
+API answers `runEndReasons` (null takes every reason). A list narrows only the ends it names reasons
+of: a run that ended with one of them goes only when its reason is listed (a failure for `expired`
+is never queued for an endpoint naming `send_failed` only), and when no endpoint of the company
+takes an end, it is not recorded at all, so there is nothing to replay. The runs of its other ends
+go as before. To take more, tick the reasons by status under "Automation ended" on the endpoint's
+page, or `PATCH /webhook-endpoints/{id}` with `runEndReasons` (null for every reason). A reason of
+an end the endpoint does not take is refused: take its status first. Removing Automation ended
+clears the list.
+
 **A receiver misses received messages (ADR-191).** An endpoint can take the received messages of
 chosen types only. The endpoints list shows them ("Received messages sent: …"), and the API answers
 `messageTypes` (null takes every type). A message goes by its type (`message.type`): those of other
@@ -2917,6 +2928,14 @@ release work with it.
 
 **Migration 0137 failed.** It adds `message_types` to `app.webhook_endpoints` with the check
 `webhook_endpoints_message_types`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event`, in one transaction; a failure rolls it all back (usually the bootstrap
+roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
+release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
+endpoints name the column); workers of either release and web servers of the previous release work
+with it.
+
+**Migration 0138 failed.** It adds `run_end_reasons` to `app.webhook_endpoints` with the check
+`webhook_endpoints_run_end_reasons`, grants its update to the runtime role, and replaces
 `app.capture_webhook_event`, in one transaction; a failure rolls it all back (usually the bootstrap
 roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
 release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of

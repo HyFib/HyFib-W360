@@ -31,6 +31,9 @@ import {
   WEBHOOK_CONTACT_SOURCES,
   WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS,
   WEBHOOK_RECEIVED_MESSAGE_TYPES,
+  WEBHOOK_RUN_END_REASON_LABELS,
+  WEBHOOK_RUN_END_REASONS,
+  WEBHOOK_RUN_END_REASONS_BY_END,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUSES,
   webhookAssigneeText,
@@ -40,6 +43,8 @@ import {
   webhookOAuthText,
   webhookReplayAllSummary,
   webhookReplaySummary,
+  webhookRunEndReasonsChosen,
+  webhookRunEndReasonsTicked,
   webhookTakesAutomationRuns,
   webhookTakesCampaignEvents,
   webhookTakesChannelEvents,
@@ -48,6 +53,7 @@ import {
   webhookTakesTemplateEvents,
   webhookTeamText,
   webhookTemplateText,
+  type AutomationEndReason,
   type WebhookAssigneeChoice,
   type WebhookAutomationChoice,
   type WebhookCampaignStatus,
@@ -475,6 +481,67 @@ function MessageTypeChoices({
               {WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS[type]}{' '}
               <span className="font-mono text-xs">({type})</span>
             </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * Why the runs an endpoint takes as `automation.run_ended` ended (ADR-192), by end, shown for the
+ * ends it takes: every reason of an end unless some are unticked. The last reason ticked of an end
+ * stays ticked: unticking the end above stops its runs.
+ */
+function RunEndReasonChoices({
+  prefix,
+  ends,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  ends: WebhookRunEndStatus[];
+  chosen: AutomationEndReason[];
+  onChange: (next: AutomationEndReason[]) => void;
+}) {
+  return (
+    <fieldset className="ml-6 grid gap-2">
+      <legend className="mb-1 text-xs text-muted-foreground">
+        Why the runs ended, by status (every reason unless you untick some; untick a status above to
+        stop its runs)
+      </legend>
+      {WEBHOOK_RUN_END_STATUSES.filter((end) => ends.includes(end)).map((end) => {
+        const reasons: readonly AutomationEndReason[] = WEBHOOK_RUN_END_REASONS_BY_END[end];
+        const ticked = reasons.filter((reason) => chosen.includes(reason));
+        return (
+          <div key={end} className="grid gap-1">
+            <span className="text-xs font-medium">{WEBHOOK_RUN_END_STATUS_LABELS[end]}</span>
+            {reasons.map((reason) => {
+              const id = `${prefix}-run-end-reason-${reason}`;
+              const checked = chosen.includes(reason);
+              return (
+                <div key={reason} className="flex items-center gap-2">
+                  <Checkbox
+                    id={id}
+                    checked={checked}
+                    disabled={checked && ticked.length === 1}
+                    onChange={(e) =>
+                      onChange(
+                        e.target.checked
+                          ? WEBHOOK_RUN_END_REASONS.filter(
+                              (r) => r === reason || chosen.includes(r),
+                            )
+                          : chosen.filter((r) => r !== reason),
+                      )
+                    }
+                  />
+                  <Label htmlFor={id} className="font-normal">
+                    {WEBHOOK_RUN_END_REASON_LABELS[reason]}{' '}
+                    <span className="font-mono text-xs">({reason})</span>
+                  </Label>
+                </div>
+              );
+            })}
           </div>
         );
       })}
@@ -1192,6 +1259,8 @@ function EventChoices({
   onContactSourcesChange,
   messageTypes,
   onMessageTypesChange,
+  runEndReasons,
+  onRunEndReasonsChange,
 }: {
   prefix: string;
   chosen: WebhookEventType[];
@@ -1218,6 +1287,8 @@ function EventChoices({
   onContactSourcesChange: (next: ContactSource[]) => void;
   messageTypes: WebhookReceivedMessageType[];
   onMessageTypesChange: (next: WebhookReceivedMessageType[]) => void;
+  runEndReasons: AutomationEndReason[];
+  onRunEndReasonsChange: (next: AutomationEndReason[]) => void;
 }) {
   return (
     <fieldset className="grid gap-2">
@@ -1277,14 +1348,22 @@ function EventChoices({
               />
             ) : null}
             {type === 'automation.run_ended' && chosen.includes(type) ? (
-              <ReachedStatusChoices
-                prefix={prefix}
-                kind="run"
-                statuses={WEBHOOK_RUN_END_STATUSES}
-                labels={WEBHOOK_RUN_END_STATUS_LABELS}
-                chosen={runEndStatuses}
-                onChange={onRunEndStatusesChange}
-              />
+              <>
+                <ReachedStatusChoices
+                  prefix={prefix}
+                  kind="run"
+                  statuses={WEBHOOK_RUN_END_STATUSES}
+                  labels={WEBHOOK_RUN_END_STATUS_LABELS}
+                  chosen={runEndStatuses}
+                  onChange={onRunEndStatusesChange}
+                />
+                <RunEndReasonChoices
+                  prefix={prefix}
+                  ends={runEndStatuses}
+                  chosen={runEndReasons}
+                  onChange={onRunEndReasonsChange}
+                />
+              </>
             ) : null}
             {type === 'consent.changed' && chosen.includes(type) ? (
               <ConsentChoices
@@ -1602,6 +1681,8 @@ export function WebhookEndpointForm({
     contactSources: ContactSource[] | null;
     /** The types of the received messages it takes (ADR-191); null for every type. */
     messageTypes: WebhookReceivedMessageType[] | null;
+    /** Why the runs it takes ended (ADR-192), narrowing the ends they belong to; null: every one. */
+    runEndReasons: AutomationEndReason[] | null;
     channelIds: string[] | null;
     /** The teams it names (ADR-174), deleted ones without a name; null for every team. */
     teams: WebhookEndpointTeam[] | null;
@@ -1668,6 +1749,9 @@ export function WebhookEndpointForm({
   );
   const [messageTypes, setMessageTypes] = useState<WebhookReceivedMessageType[]>(
     endpoint?.messageTypes ?? [...WEBHOOK_RECEIVED_MESSAGE_TYPES],
+  );
+  const [runEndReasons, setRunEndReasons] = useState<AutomationEndReason[]>(
+    webhookRunEndReasonsTicked(endpoint?.runEndReasons ?? null),
   );
   const [everyAutomation, setEveryAutomation] = useState(!endpoint?.automationIds);
   const [automationIds, setAutomationIds] = useState<string[]>(endpoint?.automationIds ?? []);
@@ -1793,6 +1877,10 @@ export function WebhookEndpointForm({
           messageTypes.length < WEBHOOK_RECEIVED_MESSAGE_TYPES.length
             ? messageTypes
             : null;
+        // Every reason ticked of an end takes its every run; those ticked narrow the others (ADR-192).
+        const chosenRunEndReasons = eventTypes.includes('automation.run_ended')
+          ? webhookRunEndReasonsChosen(chosenRunEndStatuses, runEndReasons)
+          : null;
         // Every number's events unless the numbers ticked are chosen (ADR-170).
         const chosenChannels =
           webhookTakesChannelEvents(eventTypes) && !everyChannel ? channelIds : null;
@@ -1825,6 +1913,7 @@ export function WebhookEndpointForm({
           consentChanges: chosenConsentChanges,
           contactSources: chosenContactSources,
           messageTypes: chosenMessageTypes,
+          runEndReasons: chosenRunEndReasons,
           channelIds: chosenChannels,
           teamIds: chosenTeams,
           templateIds: chosenTemplates,
@@ -1886,6 +1975,7 @@ export function WebhookEndpointForm({
               setConsentChanges([...WEBHOOK_CONSENT_CHANGES]);
               setContactSources([...WEBHOOK_CONTACT_SOURCES]);
               setMessageTypes([...WEBHOOK_RECEIVED_MESSAGE_TYPES]);
+              setRunEndReasons([...WEBHOOK_RUN_END_REASONS]);
               setEveryAutomation(true);
               setAutomationIds([]);
               setEveryChannel(true);
@@ -1972,6 +2062,8 @@ export function WebhookEndpointForm({
         onContactSourcesChange={setContactSources}
         messageTypes={messageTypes}
         onMessageTypesChange={setMessageTypes}
+        runEndReasons={runEndReasons}
+        onRunEndReasonsChange={setRunEndReasons}
       />
       {webhookTakesFieldChanges(eventTypes, parts) ? (
         <FieldChoices

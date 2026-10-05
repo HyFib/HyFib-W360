@@ -356,6 +356,14 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `message.received` from an endpoint with a list fails on the check, and its other changes keep
    it.
 
+   Migration 0138 (ADR-192) adds `run_end_reasons` to `app.webhook_endpoints` with a check validated
+   by reading the table, and replaces `app.capture_webhook_event` (keeping 0137's message type
+   filter) with the same signature; every endpoint starts with none. Web servers of this release
+   need it, as their reads of endpoints name the column; workers do not read it. Web servers from
+   before it neither show nor change the column: until the web rollout ends, an old server's change
+   that drops `automation.run_ended`, or an end the list names reasons of, from an endpoint with a
+   list fails on the check, and its other changes keep it.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

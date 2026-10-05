@@ -1,5 +1,6 @@
 import { integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { jsonb } from './columns';
+import type { AutomationEndReason } from './automations';
 import type { ContactSource, MessageType } from './messaging';
 import { appSchema } from './tenancy';
 
@@ -223,6 +224,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * type. Set only while `message.received` is among its events.
    */
   messageTypes: text('message_types').array().$type<WebhookReceivedMessageType[]>(),
+  /**
+   * The reasons the runs it takes as `automation.run_ended` ended for (ADR-192), applied with the
+   * ends it chose; null takes every reason. Set only while `automation.run_ended` is among its events.
+   */
+  runEndReasons: text('run_end_reasons').array().$type<AutomationEndReason[]>(),
   /**
    * The endpoint's OAuth client (ADR-173): its authorization server's token endpoint, the client
    * identifier, the secret encrypted by the keyring and the scope to ask for (null: none). All
