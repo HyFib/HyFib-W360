@@ -1804,6 +1804,13 @@ status asked for answers 200, so a retry is safe. 403 `forbidden` names the scop
 plan leaves out Commerce or the scope. 423 means the company is suspended or its plan has ended;
 reading orders still works.
 
+**`GET /api/v1/channels` answers 403, or a number shows no phone or name (ADR-171).** 403
+`forbidden` names the scope the key lacks, `channels.read` (keys keep the scopes they were created
+with: create a key with it); reason `not_in_plan` means the company's plan leaves the scope out
+(ADR-092). Every number of the company is listed, whatever its status (`status=active` for those
+that send and receive). A number still being connected has no phone or name until Meta reports
+them.
+
 **A search with `POST /api/v1/contacts/search` gives short or empty pages, or a 422 (ADR-117).**
 Its pages read at most 2,000 contacts, as filtered lists do (entry above): the integration sends the
 same conditions with each `nextCursor` until it is `null`. A 422 names the condition's part:
@@ -2592,6 +2599,12 @@ roles, or a lock held on the table: fix it and run the migrations again). Web se
 release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
 endpoints name the column); workers of either release and web servers of the previous release work
 with it.
+
+**Migration 0119 failed.** It replaces `api_keys_scopes_check` on `app.api_keys` and
+`plans_api_scopes_check` on `ops.plans` with checks that also accept `channels.read`, in one
+transaction; a failure rolls it all back (usually a lock held on one of the tables: run the
+migrations again). Web servers of this release need it before a key or plan version holds the new
+scope; those of the previous release work with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

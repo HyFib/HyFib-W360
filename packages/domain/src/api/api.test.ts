@@ -195,6 +195,8 @@ describe('API scopes', () => {
   });
 
   it('need the permission a member needs for the same work', () => {
+    // Members see the company's numbers in Settings → Channels with channels.read (ADR-171).
+    expect(API_SCOPE_INFO['channels.read'].permission).toBe('channels.read');
     expect(API_SCOPE_INFO['messages.send'].permission).toBe('inbox.reply');
     expect(API_SCOPE_INFO['messages.send_marketing'].permission).toBe('campaigns.send');
     expect(API_SCOPE_INFO['messages.reply'].permission).toBe('inbox.reply');

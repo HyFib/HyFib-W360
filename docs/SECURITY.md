@@ -451,9 +451,10 @@ Phase 5 rules (Public API, P5-08):
   `conversations.read` (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075),
   `automations.publish` for `automations.start` (ADR-077), `tenant.settings.manage` for
   `contact_fields.manage` (ADR-115), `campaigns.read` for the scope of the same name (ADR-125),
-  `campaigns.send` for `campaigns.stop` (ADR-128), `commerce.read` for `orders.read` (ADR-167), and
-  `inbox.reply` for `orders.write` (ADR-168). Nobody grants a key more than they hold, and rotating
-  needs the same. A key keeps the scopes it was created with.
+  `campaigns.send` for `campaigns.stop` (ADR-128), `commerce.read` for `orders.read` (ADR-167),
+  `inbox.reply` for `orders.write` (ADR-168), and `channels.read` for the scope of the same name
+  (ADR-171). Nobody grants a key more than they hold, and rotating needs the same. A key keeps the
+  scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -631,6 +632,12 @@ Phase 5 rules (Public API, P5-08):
   waiting for payment is left to members, and a paid order is never cancelled. The change is audited
   as the key and moves the order's version on, so a member's page opened before it is refused as
   stale (unit tests; integration and e2e tests, run in CI only).
+- Reading numbers (ADR-171): `GET /channels` needs `channels.read`, granted only with the permission
+  of the same name, checked before anything is read. It reads in the key's company only (row
+  security and an explicit company condition), takes a page and a status from the list and nothing
+  else, and gives each number's id, the number and verified name WhatsApp shows, its status and when
+  it was added: never Meta's ids for the number or its account, the credential, the registration PIN
+  or Meta's review fields (unit tests; integration and e2e tests, run in CI only).
 - The message feed (ADR-088) needs `conversations.read`, checked before its query is read, and
   reads only in the key's company scope: other companies' messages are never in it, erased
   contacts' conversations are left out, internal notes are not messages and media is never

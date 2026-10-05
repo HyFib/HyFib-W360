@@ -21,6 +21,7 @@ import {
   apiGetMessage,
   apiKeyReminderNotice,
   apiListAutomations,
+  apiListChannels,
   apiListContacts,
   apiListConversationMessages,
   apiListConversationNotes,
@@ -4086,6 +4087,70 @@ describe('assigning conversations (ADR-093)', () => {
       'Agent',
     ]);
     expect(await apiListTeams(deps(), theirs.ctx, {})).toEqual({ data: [], nextCursor: null });
+  });
+
+  it('read the company’s WhatsApp numbers with channels.read, oldest first, a page at a time (ADR-171)', async () => {
+    const c = await fx.company();
+    const outlet = await fx.addNumber(c, { phone: '+91 90000 54321', name: 'Outlet' });
+    const closed = await fx.addNumber(c, { phone: '+91 90000 11111', status: 'disconnected' });
+    const pending = await fx.addNumber(c, { phone: null, status: 'onboarding' });
+    const reader = await apiKey(c, ['channels.read']);
+    const [main] = await fx.query<{ created_at: Date }>(
+      'SELECT created_at FROM app.channel_accounts WHERE id = $1',
+      [c.channelAccountId],
+    );
+
+    // Every number, whatever its status, in the order it was added: its number, verified name and
+    // status only, never Meta's ids.
+    const all = await apiListChannels(deps(), reader.ctx, {});
+    expect(all.data.map((n) => [n.id, n.phone, n.name, n.status])).toEqual([
+      [c.channelAccountId, '+91 90000 00000', null, 'active'],
+      [outlet.channelAccountId, '+91 90000 54321', 'Outlet', 'active'],
+      [closed.channelAccountId, '+91 90000 11111', null, 'disconnected'],
+      [pending.channelAccountId, null, null, 'onboarding'],
+    ]);
+    expect(all.data[0]?.createdAt).toBe(main!.created_at.toISOString());
+    expect(all.nextCursor).toBeNull();
+    for (const n of all.data) {
+      expect(Object.keys(n)).toEqual(['id', 'phone', 'name', 'status', 'createdAt']);
+    }
+    for (const metaId of [c.phoneNumberId, outlet.phoneNumberId, c.wabaId]) {
+      expect(JSON.stringify(all)).not.toContain(metaId);
+    }
+
+    // Pages never skip or repeat a number, and a status narrows them.
+    const first = await apiListChannels(deps(), reader.ctx, { limit: 3 });
+    expect(first.data).toEqual(all.data.slice(0, 3));
+    expect(first.nextCursor).not.toBeNull();
+    expect(
+      await apiListChannels(deps(), reader.ctx, { limit: 3, cursor: first.nextCursor ?? '' }),
+    ).toEqual({ data: all.data.slice(3), nextCursor: null });
+    expect(
+      (await apiListChannels(deps(), reader.ctx, { status: 'active' })).data.map((n) => n.id),
+    ).toEqual([c.channelAccountId, outlet.channelAccountId]);
+    expect(await apiListChannels(deps(), reader.ctx, { status: 'failed' })).toEqual({
+      data: [],
+      nextCursor: null,
+    });
+
+    // Reads need channels.read, go on while the company is suspended, and stay in the company.
+    const sender = await apiKey(c, ['messages.send', 'templates.read', 'webhooks.manage']);
+    await expectAppError(
+      apiListChannels(deps(), sender.ctx, {}),
+      'forbidden',
+      /channels\.read scope/,
+    );
+    const suspended = {
+      ...reader.ctx,
+      tenant: { ...reader.ctx.tenant, status: 'suspended' as const },
+    };
+    expect(await apiListChannels(deps(), suspended, {})).toEqual(all);
+    const other = await fx.company();
+    const theirs = await apiKey(other, ['channels.read']);
+    expect(await apiListChannels(deps(), theirs.ctx, {})).toEqual({
+      data: [expect.objectContaining({ id: other.channelAccountId, status: 'active' })],
+      nextCursor: null,
+    });
   });
 
   it('assign, reassign, unassign and move conversations as the inbox does, audited as the key', async () => {

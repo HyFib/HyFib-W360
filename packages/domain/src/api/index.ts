@@ -21,6 +21,7 @@ export * from './conversations';
 export * from './orders';
 export * from './message-changes';
 export * from './members';
+export * from './channels';
 export * from './automations';
 export * from './webhook-endpoints';
 export * from './campaigns';

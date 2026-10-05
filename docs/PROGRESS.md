@@ -1,5 +1,55 @@
 # Progress
 
+## 2026-10-05 — Phase 5: reading the company's WhatsApp numbers through the public API (P5-08, ADR-171)
+
+Status: **Implemented; its database and browser tests run in CI only.** Keys named numbers by id
+everywhere but could not list them. The local PostgreSQL is unavailable (its Docker daemon stopped),
+so migration 0119, the integration test and the e2e step below were written but not run here.
+
+### Completed
+
+- **Design (ADR-171):** a reading scope `channels.read`, granted with the permission of the same
+  name; `GET /channels` with every number oldest first, filtered by status, each with its number,
+  verified name, status and time added, never Meta's ids.
+- **Database:** migration 0119 (the key and plan scope checks); the scope in the schema's list
+  (`packages/db`).
+- **Domain:** `apiListChannels` (`api/channels.ts`), the scope's description, the operation and its
+  `Channel` schema in the OpenAPI document.
+- **Web:** the route `GET /api/v1/channels`; Settings → API keys and the platform plan pages offer
+  the scope from the list.
+- **Tests:**
+  - Unit (5 new in `channels.test.ts`, 1 changed in `api.test.ts`): the scope, its permission, place
+    and words, the parameters, refusals before anything is read, the read-only transaction, the
+    operation and its schema.
+  - Integration (1 new in `api.test.ts`): every number in order with its fields, pages, the status
+    filter, Meta's ids absent, the scope refused, reads while suspended, another company apart.
+    Written for CI; not run here.
+  - E2E (`api.spec.ts` extended): the key gets "Read WhatsApp numbers" and lists the number its send
+    used. Written for CI; not run here.
+- **Docs:** ADR-171 (and ADR-170's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T166; DEPLOYMENT and RUNBOOKS (migration 0119, the 403); BACKLOG P5-08 and P5-09; feature matrix
+  H-033 and W-134.
+- **Mutation checks:** 17 deliberate regressions tried, all caught on the unit-tested parts (another
+  scope or none, a writing transaction, any status, larger pages, unknown parameters, another
+  permission, a writing scope, the words, the list's order, the database list, the route, the
+  operation, the schema and its fields, the overview). The query itself needs the database, so its
+  regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 769 passed (79 files)                                                |
+| `pnpm test:integration`, e2e, migration 0119       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 17 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- A number by id; the number's account and quality rating; connecting numbers through the API.
+
 ## 2026-10-05 — Phase 5: webhook endpoints for chosen WhatsApp numbers (P5-09, ADR-170)
 
 Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every

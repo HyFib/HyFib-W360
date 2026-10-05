@@ -223,6 +223,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    from before it neither show nor change the column: until the web rollout ends, an old server's
    change that drops every event of a number from an endpoint with a list fails on the check, and
    its other changes keep it.
+   Migration 0119 (ADR-171) widens the same scope checks again, with the same brief locks. Web
+   servers from before it do not know `channels.read`: until the web rollout ends, an old server
+   answers Settings → API keys with an error for a company with a key holding it (and the platform
+   plan pages for a plan version including it), and `/api/v1/channels` with 404; rolling web servers
+   back to an image from before it does the same.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

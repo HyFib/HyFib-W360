@@ -6809,5 +6809,34 @@ Decision:
 
 Not built: filters by team or by the member assigned, numbers chosen per event type (one list
 applies to every event of a number the endpoint takes), and a `GET /channels` listing a company's
-numbers through the API (keys read their ids from messages, conversations, orders, templates and
-events).
+numbers through the API (built by ADR-171).
+
+## ADR-171 Reading the company's WhatsApp numbers through the public API (P5-08) (2026-10-05)
+
+Context: the public API names WhatsApp numbers by id everywhere (a message's, conversation's or
+order's `channelId`, a webhook event's `channel.id`, the `channelIds` an endpoint takes since
+ADR-170), and a send takes one as `from` when the company has several, but nothing listed them: a
+key learned a number's id only from a template's `channels`, with `templates.read`, or from
+something sent or received on it. ADR-170 left a listing unbuilt.
+
+Decision:
+
+- **A new reading scope, `channels.read`** ("Read WhatsApp numbers"), granted with the permission of
+  the same name, with which members see the numbers in Settings → Channels (every role but billing;
+  owners and administrators, who create keys, hold it). It only reads, so it works while the company
+  is suspended or restricted, as every reading scope does. Existing keys keep their scopes, and a
+  plan version that chose its scopes (ADR-092) leaves it out until a new version includes it. It
+  comes first in the list of scopes.
+- **`GET /api/v1/channels`** (`listChannels`) pages the company's numbers oldest first by when they
+  were added, on exact keyset pages, whatever their status; `status` narrows them (`active` for
+  those that send and receive). Each gives its id, the number and verified name WhatsApp shows (null
+  until Meta reports them), its status and when it was added: never Meta's ids for the number or its
+  account, the credential, the registration PIN or Meta's review fields. A company's numbers are
+  never deleted, so a number listed once stays listed.
+- **Reads only:** one read-only transaction per call; a call counts as one request.
+- **Migration 0119** replaces the key and plan scope checks with ones that also accept
+  `channels.read`, listed in the API's order, validated at once (one row per key and per plan
+  version), as 0115 and 0116 did.
+
+Not built: a number by id (`GET /channels/{id}`), the number's WhatsApp account, Meta's quality
+rating, and connecting or disconnecting numbers through the API.

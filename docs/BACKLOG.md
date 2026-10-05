@@ -598,6 +598,10 @@ verification, app review, Embedded Signup configuration).
   in the plan: an order confirmed, fulfilled or cancelled as members move it, from an expected
   status when one is given, payment statuses left to Razorpay; a retry changes nothing; migration
   0116).
+  **[Reading WhatsApp numbers built; its database tests run only in CI]** (ADR-171: `GET /channels`
+  with the new `channels.read` scope, granted with the permission of the same name: every number of
+  the company oldest first on exact pages, filtered by status, with its number, verified name and
+  status and the id the rest of the API names it by, never Meta's ids; migration 0119).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   media downloads, a contact card's contacts (Meta's
   contact object is not confirmed), changing a field's type, changing
@@ -697,8 +701,7 @@ verification, app review, Embedded Signup configuration).
   or contact's values (such as by campaign, template, team, assigned member, tag or field key, or a
   run's trigger or end reason), which tags were added or removed, other authentication (OAuth client
   credentials, headers computed per delivery), mutual TLS, fixed egress addresses, events for store
-  orders, Payment Links and each step of a run, `createdAt` finer than the millisecond, a
-  `GET /channels` listing the company's numbers, load tests.
+  orders, Payment Links and each step of a run, `createdAt` finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

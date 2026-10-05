@@ -67,7 +67,7 @@ test('an API key created in settings sends an approved template once, and stops 
     });
   }).toPass({ timeout: 30_000 });
 
-  // A key with three scopes; its token is shown once.
+  // A key with four scopes; its token is shown once.
   await page.goto(`/c/${slug}/settings/api-keys`);
   await expect(page.getByText('No API keys yet.')).toBeVisible();
   await page.getByLabel('Name', { exact: true }).fill('Order system');
@@ -76,6 +76,7 @@ test('an API key created in settings sends an approved template once, and stops 
     .getByRole('checkbox', { name: /Create and change contacts and record consent/ })
     .check();
   await page.getByRole('checkbox', { name: /Send utility templates/ }).check();
+  await page.getByRole('checkbox', { name: /Read WhatsApp numbers/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const tokenField = page.getByLabel('API key', { exact: true });
   await expect(tokenField).toBeVisible();
@@ -139,8 +140,20 @@ test('an API key created in settings sends an approved template once, and stops 
     });
   const first = await send();
   expect(first.status()).toBe(201);
-  const queued = (await first.json()).data as { id: string; status: string };
+  const queued = (await first.json()).data as { id: string; status: string; channelId: string };
   expect(queued.status).toBe('queued');
+  // It is sent from the company's only number, as GET /channels lists it (ADR-171).
+  const numbers = await request.get('/api/v1/channels', { headers: auth });
+  expect(numbers.status()).toBe(200);
+  expect(((await numbers.json()) as { data: unknown[] }).data).toEqual([
+    {
+      id: queued.channelId,
+      phone: '+91 90000 12345',
+      name: 'E2E Traders',
+      status: 'active',
+      createdAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+    },
+  ]);
   const retry = await send();
   expect(retry.status()).toBe(201);
   expect(retry.headers()['idempotent-replayed']).toBe('true');

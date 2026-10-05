@@ -9,6 +9,7 @@ export type { ApiScope } from '@w360/db';
  */
 
 export const API_SCOPE_KEYS = [
+  'channels.read',
   'templates.read',
   'contacts.read',
   'contacts.write',
@@ -34,6 +35,13 @@ export const API_SCOPE_INFO: Record<
   ApiScope,
   { label: string; description: string; permission: Permission; writes: boolean }
 > = {
+  'channels.read': {
+    label: 'Read WhatsApp numbers',
+    description:
+      "List the company's WhatsApp numbers with each one's number, verified name and status, and the id messages, conversations, orders and webhook events name it by and a send takes to choose it. Never Meta's ids or credentials.",
+    permission: 'channels.read',
+    writes: false,
+  },
   'templates.read': {
     label: 'Read templates',
     description: 'List approved templates and their variables.',

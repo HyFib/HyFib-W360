@@ -3,6 +3,7 @@ import {
   AUTOMATION_END_REASONS,
   AUTOMATION_RUN_STATUSES,
   CAMPAIGN_STATUSES,
+  CHANNEL_STATUSES,
   CONVERSATION_STATUSES,
   MESSAGE_STATUSES,
   TEAM_ASSIGNMENT_MODES,
@@ -286,6 +287,29 @@ export const apiMemberSchema = z.object({
     .boolean()
     .describe('Whether the member takes new conversations now (round-robin teams give them some).'),
   teamIds: z.array(z.uuid()).describe('The teams the member belongs to.'),
+});
+
+/** A WhatsApp number of the company (ADR-171). */
+export const apiChannelSchema = z.object({
+  id: z
+    .uuid()
+    .describe(
+      'The number, as messages, conversations, orders and webhook events name it (`channelId`, `channel.id`) and a send takes it (`from`).',
+    ),
+  phone: z
+    .string()
+    .nullable()
+    .describe('The number as WhatsApp shows it, like +91 98765 43210; null until Meta reports it.'),
+  name: z
+    .string()
+    .nullable()
+    .describe('The business name WhatsApp verified for the number; null until Meta reports it.'),
+  status: z
+    .enum(CHANNEL_STATUSES)
+    .describe(
+      '`active`: it sends and receives; `onboarding`: being connected; `needs_reconnect`: the WhatsApp account must be connected again; `disconnected`; `failed`: connecting it failed.',
+    ),
+  createdAt: z.iso.datetime().describe('When the number was added to the company.'),
 });
 
 /** A team conversations can be moved to (ADR-093). */
@@ -683,7 +707,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, pause and cancel campaigns, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, pause and cancel campaigns, list your WhatsApp numbers, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -709,6 +733,27 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf({ type: 'array', items: ref('Template') })),
             },
             ...errors(401, 403, 429, 500),
+          },
+        },
+      },
+      '/channels': {
+        get: {
+          operationId: 'listChannels',
+          summary: 'WhatsApp numbers, oldest first',
+          description: `${scopeNote('channels.read')} The company's WhatsApp numbers, whatever their status: the ids messages, conversations, orders and webhook events name them by, and that \`from\` takes on POST /messages when the company has several. Meta's ids for them and their credentials are never given.`,
+          parameters: [
+            ...pageParams,
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: [...CHANNEL_STATUSES] },
+              description:
+                'Only the numbers with this status (`active` for those that send and receive).',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of numbers.', content: pageOf('Channel') },
+            ...errors(401, 403, 422, 429, 500),
           },
         },
       },
@@ -2047,6 +2092,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         UpdateConversation: jsonSchema(apiUpdateConversationSchema, 'input'),
         UpdateManyConversations: jsonSchema(apiUpdateManyConversationsSchema, 'input'),
         UpdateMatchingConversations: jsonSchema(apiUpdateMatchingConversationsSchema, 'input'),
+        Channel: jsonSchema(apiChannelSchema),
         Member: jsonSchema(apiMemberSchema),
         Team: jsonSchema(apiTeamSchema),
         AddConversationNote: jsonSchema(apiAddNoteSchema, 'input'),
@@ -2095,6 +2141,7 @@ export function buildOpenApiDocument(serverUrl: string) {
 /** The routes the document describes: method and path template (checked by a unit test). */
 export const API_ROUTES = [
   ['get', '/templates'],
+  ['get', '/channels'],
   ['get', '/contacts'],
   ['post', '/contacts'],
   ['post', '/contacts/search'],

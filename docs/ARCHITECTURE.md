@@ -1158,6 +1158,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`commerce/service.ts`), shared with members' `setOrderStatus`, writes the status, its time and
   the next version, and the trigger of 0063 captures `order.status_changed`. The answer is read as
   `GET /orders/{id}` reads it (`readApiOrder`).
+- **Numbers through the API (ADR-171):** `GET /channels` (`api/channels.ts`, `channels.read`) reads
+  `channel_accounts` in the company oldest first on exact keyset cursors (`created_at`, `id`), with
+  `status` as an equality, and gives the id, `display_phone_number`, `verified_name`, the status and
+  `created_at`; Meta's ids, the credential, the PIN and Meta's review fields are never selected.
 - **Message feed (ADR-088):** `GET /messages` (`apiListMessages`, `conversations.read`) pages the
   company's messages across conversations newest first on exact keyset cursors, joined to their
   conversation and contact (erased contacts' conversations left out), with `direction`,
