@@ -734,7 +734,8 @@ Phase 5 rules (outgoing webhooks, P5-09):
 
 - Members with `developer.manage` (owners and administrators) add, edit, turn off, delete and test
   the company's webhook endpoints, rotate their secrets and replay deliveries, one at a time or an
-  endpoint's failed ones together (ADR-095); API keys with `webhooks.manage` do the same for the
+  endpoint's failed ones together, of every event or of those chosen (ADR-095, ADR-156); API keys
+  with `webhooks.manage` do the same for the
   endpoints keys added (ADR-081, ADR-083). Every change is
   audited with the endpoint's host only; the full URL (which may carry a receiver's token) and the
   secret are never logged.

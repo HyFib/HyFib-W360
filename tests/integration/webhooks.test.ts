@@ -2580,14 +2580,19 @@ describe('endpoint health', () => {
 });
 
 /** Events and deliveries to the endpoint that failed for good, written straight to the tables. */
-async function failedDirectly(c: Company, endpointId: string, count: number) {
+async function failedDirectly(
+  c: Company,
+  endpointId: string,
+  count: number,
+  type: WebhookEventType = 'message.received',
+) {
   const rows = Array.from({ length: count }, () => ({ eventId: uuidv7(), deliveryId: uuidv7() }));
   await fx.dbs.app.run(authorizedTenantScope(c.tenant.id, null), async (tx) => {
     await tx.insert(webhookEvents).values(
       rows.map((r) => ({
         id: r.eventId,
         tenantId: c.tenant.id,
-        type: 'message.received' as const,
+        type,
         detail: {},
       })),
     );
@@ -2608,6 +2613,69 @@ async function failedDirectly(c: Company, endpointId: string, count: number) {
 }
 
 describe('replaying failed deliveries (ADR-095)', () => {
+  it('replays only the failed deliveries of the events chosen, and the audit entry names them (ADR-156)', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['message.received', 'consent.changed']);
+    const messages = await failedDirectly(c, e.id, 2);
+    const consents = await failedDirectly(c, e.id, 1, 'consent.changed');
+    const replayed = async () =>
+      (await deliveriesOf(e.id))
+        .filter((d) => d.replay_of !== null)
+        .map((d) => d.event_id)
+        .sort();
+    expect(
+      await webhooks().replayFailed(e.owner, {
+        endpointId: e.id,
+        period: '1h',
+        events: ['consent.changed'],
+      }),
+    ).toEqual({ queued: 1, more: false });
+    expect(await replayed()).toEqual(consents.map((r) => r.eventId));
+    // An event none of whose deliveries failed queues nothing.
+    expect(
+      await webhooks().replayFailed(e.owner, {
+        endpointId: e.id,
+        period: '1h',
+        events: ['contact.created'],
+      }),
+    ).toEqual({ queued: 0, more: false });
+    // Every event: the messages' deliveries, the consent one being already queued.
+    expect(await webhooks().replayFailed(e.owner, { endpointId: e.id, period: '1h' })).toEqual({
+      queued: 2,
+      more: false,
+    });
+    expect(await replayed()).toEqual([...messages, ...consents].map((r) => r.eventId).sort());
+    const audits = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.deliveries_replayed' ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(audits.map((a) => a.metadata)).toEqual([
+      {
+        host: HOST,
+        since: expect.any(String),
+        events: ['consent.changed'],
+        queued: 1,
+        more: false,
+      },
+      {
+        host: HOST,
+        since: expect.any(String),
+        events: ['contact.created'],
+        queued: 0,
+        more: false,
+      },
+      { host: HOST, since: expect.any(String), queued: 2, more: false },
+    ]);
+    // Events the list does not know, or none, are refused before anything is read.
+    for (const events of [['order.shipped'], []]) {
+      await expectAppError(
+        webhooks().replayFailed(e.owner, { endpointId: e.id, period: '1h', events }),
+        'validation_failed',
+      );
+    }
+  });
+
   it('replays every event whose deliveries all failed in the period, once each, leaving out test events, gone events and other endpoints', async () => {
     const c = await fx.company();
     const e = await addEndpoint(c, 'fail', ['message.received']);

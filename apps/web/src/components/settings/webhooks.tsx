@@ -963,17 +963,23 @@ export function ReplayDeliveryButton({
 
 /**
  * Replays the endpoint's failed deliveries from a chosen period, 500 at most at a time (ADR-095):
- * one new delivery per event whose deliveries all failed.
+ * one new delivery per event whose deliveries all failed, of every event or of one the endpoint
+ * receives (ADR-156).
  */
 export function ReplayFailedDeliveriesForm({
   slug,
   endpointId,
+  events,
 }: {
   slug: string;
   endpointId: string;
+  /** The events the endpoint receives, offered as a choice beside every event. */
+  events: readonly WebhookEventType[];
 }) {
   const selectId = useId();
+  const eventId = useId();
   const [period, setPeriod] = useState<WebhookReplayPeriod>('24h');
+  const [eventType, setEventType] = useState<WebhookEventType | ''>('');
   const [error, setError] = useState<ActionFailureState | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -986,11 +992,13 @@ export function ReplayFailedDeliveriesForm({
         setBusy(true);
         setError(null);
         setDone(null);
-        void replayFailedWebhookDeliveriesAction(slug, endpointId, period).then((r) => {
-          setBusy(false);
-          if (r.ok) setDone(webhookReplaySummary(r.data));
-          else setError(r);
-        });
+        void replayFailedWebhookDeliveriesAction(slug, endpointId, period, eventType || null).then(
+          (r) => {
+            setBusy(false);
+            if (r.ok) setDone(webhookReplaySummary(r.data));
+            else setError(r);
+          },
+        );
       }}
     >
       <div className="flex flex-wrap items-end gap-2">
@@ -1005,6 +1013,22 @@ export function ReplayFailedDeliveriesForm({
             {WEBHOOK_REPLAY_PERIODS.map((p) => (
               <option key={p.key} value={p.key}>
                 {p.label}
+              </option>
+            ))}
+          </Select>
+        </div>
+        <div className="grid gap-1">
+          <Label htmlFor={eventId}>Events</Label>
+          <Select
+            id={eventId}
+            className="w-auto min-w-40"
+            value={eventType}
+            onChange={(e) => setEventType(e.target.value as WebhookEventType | '')}
+          >
+            <option value="">Every event</option>
+            {events.map((type) => (
+              <option key={type} value={type}>
+                {WEBHOOK_EVENT_INFO[type].label} ({type})
               </option>
             ))}
           </Select>

@@ -567,6 +567,7 @@ const replayFailedSchema = endpointIdSchema.extend({
     WEBHOOK_REPLAY_PERIODS.map((p) => p.key),
     { error: 'Choose a period from the list' },
   ),
+  events: webhookEventTypesSchema.optional(),
 });
 
 export interface WebhookEndpointView {
@@ -958,14 +959,14 @@ export interface WebhookFailedReplay {
  * queued included), deliveries that failed because what the event names no longer exists
  * (`event_gone`, which would fail again at once) and test events. The endpoint is locked first, so
  * calls at the same time queue each event once. With `keysOnly`, only endpoints keys added are found
- * (ADR-083).
+ * (ADR-083); with `events`, only the failed deliveries of those events are replayed (ADR-156).
  */
 export async function replayFailedWebhookDeliveries(
   tx: Tx,
   tenantId: string,
   endpointId: string,
   since: Date,
-  options: { keysOnly?: boolean } = {},
+  options: { keysOnly?: boolean; events?: readonly WebhookEventType[] } = {},
 ): Promise<WebhookFailedReplay & { endpoint: LockedWebhookEndpoint }> {
   const endpoint = await lockWebhookEndpoint(tx, tenantId, endpointId, 'no key update', options);
   if (endpoint.state !== 'active') {
@@ -983,6 +984,7 @@ export async function replayFailedWebhookDeliveries(
       join app.webhook_events e on e.tenant_id = ${tenantId} and e.id = f.event_id
      where f.last_error is distinct from 'event_gone'
        and e.type <> 'ping'
+       and ${options.events ? sql`e.type = any(${sql.param([...options.events])}::text[])` : sql`true`}
        and not exists (
          select 1 from app.webhook_deliveries o
           where o.tenant_id = ${tenantId} and o.event_id = f.event_id
@@ -1490,7 +1492,8 @@ export function createWebhooksService(deps: {
 
     /**
      * Delivers again every event whose deliveries to an active endpoint all failed in the chosen
-     * period, 500 at most per call (ADR-095). Audited once, with the count.
+     * period, 500 at most per call (ADR-095), of the chosen events or of every event (ADR-156).
+     * Audited once, with the count and the events chosen.
      */
     async replayFailed(
       ctx: TenantContext,
@@ -1498,11 +1501,13 @@ export function createWebhooksService(deps: {
       meta: RequestMeta = {},
     ): Promise<WebhookFailedReplay> {
       assertCan(ctx, 'developer.manage');
-      const { endpointId, period } = parseInput(replayFailedSchema, input);
+      const { endpointId, period, events } = parseInput(replayFailedSchema, input);
       const hours = WEBHOOK_REPLAY_PERIODS.find((p) => p.key === period)?.hours ?? 1;
       const since = new Date(clock.now().getTime() - hours * 3_600_000);
       return db.run(ctx.scope, async (tx) => {
-        const replayed = await replayFailedWebhookDeliveries(tx, ctx.tenant.id, endpointId, since);
+        const replayed = await replayFailedWebhookDeliveries(tx, ctx.tenant.id, endpointId, since, {
+          events,
+        });
         await recordAudit(
           tx,
           ctx,
@@ -1513,6 +1518,7 @@ export function createWebhooksService(deps: {
             metadata: {
               host: webhookHost(replayed.endpoint.url),
               since: since.toISOString(),
+              ...(events ? { events } : {}),
               queued: replayed.queued,
               more: replayed.more,
             },

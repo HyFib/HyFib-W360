@@ -218,6 +218,8 @@ test('a receiver that was down gets its failed events again with one replay from
   await page.goto(`/c/${slug}/settings/webhooks`);
   await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${path}`);
   await page.getByRole('checkbox', { name: /Message received/ }).check();
+  // Template statuses too: none changes in this test, so none of their deliveries can fail.
+  await page.getByRole('checkbox', { name: /Template status/ }).check();
   await page.getByRole('button', { name: 'Add endpoint' }).click();
   await page.getByRole('button', { name: 'I have stored the secret' }).click();
 
@@ -241,8 +243,21 @@ test('a receiver that was down gets its failed events again with one replay from
   await page.getByRole('link', { name: `Deliveries and settings for ${HOST}` }).click();
   const deliveries = page.getByRole('list', { name: 'Deliveries' }).getByRole('listitem');
   await expect(deliveries.filter({ hasText: 'Failed' })).toHaveCount(2);
-  await page.getByLabel('Failed deliveries from').selectOption({ label: 'the last hour' });
-  await page.getByRole('button', { name: 'Replay failed deliveries' }).click();
+  const replayForm = page.getByRole('form', { name: 'Replay failed deliveries' });
+  await replayForm.getByLabel('Failed deliveries from').selectOption({ label: 'the last hour' });
+  // Of one event (ADR-156): no template event failed, so nothing comes back; then the messages.
+  const replayEvents = replayForm.getByLabel('Events', { exact: true });
+  await expect(replayEvents.getByRole('option')).toHaveText([
+    'Every event',
+    'Message received (message.received)',
+    'Template status (template.status_changed)',
+  ]);
+  await replayEvents.selectOption({ label: 'Template status (template.status_changed)' });
+  await replayForm.getByRole('button', { name: 'Replay failed deliveries' }).click();
+  await expect(page.getByText('No failed deliveries to replay from that period.')).toBeVisible();
+  expect(forUs()).toHaveLength(2);
+  await replayEvents.selectOption({ label: 'Message received (message.received)' });
+  await replayForm.getByRole('button', { name: 'Replay failed deliveries' }).click();
   await expect(page.getByText('Replaying 2 deliveries.')).toBeVisible();
   await expect(async () => expect(forUs()).toHaveLength(4)).toPass({ timeout: 30_000 });
   expect(

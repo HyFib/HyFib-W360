@@ -1,5 +1,55 @@
 # Progress
 
+## 2026-10-05 — Phase 5: replaying an endpoint's failed deliveries by event type (P5-09, ADR-156)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A replay of an
+endpoint's failed deliveries sent every failed event of the period again. The local PostgreSQL is
+unavailable (its Docker daemon stopped), so the integration and e2e tests below were written but not
+run here.
+
+### Completed
+
+- **Design (ADR-156):** `events` on `POST /webhook-endpoints/{id}/replay-failed` and an "Events"
+  choice in Settings → Webhooks' replay form; the rest of ADR-095 unchanged; the audit entry names
+  the events.
+- **Domain:** `webhooks/service.ts` (`replayFailedWebhookDeliveries` takes `events`, one more
+  condition on the event's type; the settings schema and audit); `api/webhook-endpoints.ts` (the
+  body's `events`, passed and audited); `api/openapi.ts` (the operation's description).
+- **Web:** the replay form's "Events" choice (every event, or one the endpoint receives) and its
+  server action.
+- **Tests:**
+  - Unit (1 new and 2 extended in `api.test.ts`): `events` kept once each in the list's order; an
+    empty list, an unknown event and a string refused; the schema's properties and the operation's
+    description.
+  - Integration (1 new in `webhooks.test.ts`, 1 extended in `api-webhook-endpoints.test.ts`): only
+    the event chosen is replayed, an event none of whose deliveries failed queues nothing, then
+    every event; the audit names the events; unknown events and an empty list refused; through the
+    API, two failed messages left out for another event and queued for theirs. Written for CI; not
+    run here.
+  - E2E (`webhooks.spec.ts` extended): the endpoint also takes template statuses; the replay form
+    lists every event and the endpoint's two; a replay of template statuses queues nothing and one
+    of messages brings both back. Written for CI; not run here.
+- **Docs:** ADR-156; SECURITY (the webhook rules); ARCHITECTURE; BACKLOG P5-09; feature matrix H-014
+  and W-139.
+- **Mutation checks:** 3 deliberate regressions tried on the unit-tested parts (the body without
+  events, any strings taken as events, the operation not mentioning them), all caught; the service's
+  filter, its audit and the form need the database, so their regressions are left to the integration
+  and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 712 passed (75 files; 1 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Replays across endpoints, and by a delivery's error or HTTP status.
+
 ## 2026-10-05 — Phase 5: exporting the console's health and signals lists (P5-10, ADR-155)
 
 Status: **Implemented; its database tests run in CI only (test data only).** Every company's health

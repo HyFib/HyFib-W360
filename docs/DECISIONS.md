@@ -6219,3 +6219,26 @@ Decision:
 
 Not built: exports of the action lists (onboarding, integrations, queues, keys), other formats,
 scheduled exports.
+
+## ADR-156 Replaying an endpoint's failed deliveries by event type (P5-09) (2026-10-05)
+
+Context: since ADR-095 a member or a key replays every event whose deliveries to an endpoint all
+failed in a period, 500 per call. A receiver that failed for some events only (a bug in its handler
+for `contact.updated`, say, while it took `message.received` without trouble) got every failed event
+of the period again, including those it had since read through the API. P5-09's Remaining listed
+replays by event type.
+
+Decision:
+
+- **Of the events chosen:** `POST /api/v1/webhook-endpoints/{id}/replay-failed` takes `events`
+  beside `since`: known event types, at least one, kept once each in the list's order. Left out, the
+  failed deliveries of every event are replayed, as before. Settings → Webhooks' replay form offers
+  "Every event" or one of the events the endpoint receives.
+- **Everything else as ADR-095:** the same failed deliveries are chosen (every delivery of the event
+  to the endpoint failed, not `event_gone`, not a test event), oldest event first, 500 per call with
+  `more`, the endpoint locked and on, once per `Idempotency-Key` through the API.
+- **Audit:** `webhook.deliveries_replayed` names the events chosen, as the member or as the key.
+- **No migration:** the filter is one more condition on the event's type in the query that chooses
+  the deliveries.
+
+Not built: replays across endpoints, replays by a delivery's error or HTTP status.

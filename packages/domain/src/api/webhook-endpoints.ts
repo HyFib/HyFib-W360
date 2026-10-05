@@ -385,6 +385,11 @@ export const apiReplayFailedDeliveriesSchema = z
       .describe(
         'Replay the failed deliveries queued at or after this time. Deliveries are kept 30 days.',
       ),
+    events: webhookEventTypesSchema
+      .optional()
+      .describe(
+        'Replay only the failed deliveries of these events. Left out, those of every event are replayed.',
+      ),
   })
   .strict();
 
@@ -1065,9 +1070,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
 
     /**
      * POST /api/v1/webhook-endpoints/{id}/replay-failed: every event whose deliveries to the
-     * endpoint all failed since `since`, delivered again, at most 500 per call and once per
-     * `Idempotency-Key` (ADR-095). Answered with how many were queued and whether more remain.
-     * Audited as the key, once per call.
+     * endpoint all failed since `since`, of the `events` given or of every event (ADR-156),
+     * delivered again, at most 500 per call and once per `Idempotency-Key` (ADR-095). Answered with
+     * how many were queued and whether more remain. Audited as the key, once per call.
      */
     async replayFailed(
       ctx: ApiContext,
@@ -1077,7 +1082,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
     ): Promise<ApiResponse> {
       assertScope(ctx, 'webhooks.manage');
       endpointId(id);
-      const { since } = parseInput(apiReplayFailedDeliveriesSchema, input);
+      const { since, events } = parseInput(apiReplayFailedDeliveriesSchema, input);
       const now = clock.now();
       const from = new Date(since);
       if (from.getTime() > now.getTime()) {
@@ -1087,10 +1092,12 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         idempotent(tx, ctx, idempotency, now, async () => {
           const replayed = await replayFailedWebhookDeliveries(tx, ctx.tenant.id, id, from, {
             keysOnly: true,
+            events,
           });
           await audit(tx, ctx, 'webhook.deliveries_replayed', id, {
             host: webhookHost(replayed.endpoint.url),
             since: from.toISOString(),
+            ...(events ? { events } : {}),
             queued: replayed.queued,
             more: replayed.more,
           });

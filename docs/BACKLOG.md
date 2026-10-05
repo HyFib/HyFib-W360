@@ -644,11 +644,14 @@ verification, app review, Embedded Signup configuration).
   locally verified]** (ADR-151: an endpoint takes `automation.run_ended` only for the ways a run
   ends that it chooses, completed, handed off, taken over, stopped or failed, in Settings or through
   the API, or every end as before; applied where events are captured, with the automations it
-  names). Remaining: filters for other event types and on a message's or contact's values (such as
-  by campaign, template, tag or field key, or a run's trigger or end reason), which tags were added
-  or removed, other authentication (OAuth client credentials, headers computed per delivery), mutual
-  TLS, fixed egress addresses, events for store orders, Payment Links and each step of a run,
-  `createdAt` finer than the millisecond, replays across endpoints or by event type, load tests.
+  names). **[Replays by event type built; their database tests run only in CI]** (ADR-156: an
+  endpoint's failed deliveries replayed for the events chosen only, `events` through the API or one
+  of the endpoint's events in Settings, audited with them). Remaining: filters for other event types
+  and on a message's or contact's values (such as by campaign, template, tag or field key, or a
+  run's trigger or end reason), which tags were added or removed, other authentication (OAuth client
+  credentials, headers computed per delivery), mutual TLS, fixed egress addresses, events for store
+  orders, Payment Links and each step of a run, `createdAt` finer than the millisecond, replays
+  across endpoints, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,
