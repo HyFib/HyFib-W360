@@ -234,7 +234,7 @@ export interface Runtime {
 const FLOW_ENDPOINT_TIMEOUT_MS = 7_000;
 
 async function init(): Promise<Runtime> {
-  const config = loadWebConfig();
+  const config = getWebConfig();
   const logger = createLogger({ name: 'w360-web', level: config.LOG_LEVEL });
   const trustedProxies = parseTrustedProxies(config.TRUSTED_PROXIES);
   const keyring = Keyring.fromEnv(
@@ -555,7 +555,19 @@ async function init(): Promise<Runtime> {
   };
 }
 
-const holder = globalThis as unknown as { __w360Runtime?: Promise<Runtime> };
+const holder = globalThis as unknown as {
+  __w360Runtime?: Promise<Runtime>;
+  __w360WebConfig?: WebConfig;
+};
+
+/**
+ * The web tier's configuration alone, read once per process: for the pages that need nothing else
+ * (the API reference, ADR-152), which render without the database.
+ */
+export function getWebConfig(): WebConfig {
+  holder.__w360WebConfig ??= loadWebConfig();
+  return holder.__w360WebConfig;
+}
 
 export function getRuntime(): Promise<Runtime> {
   if (!holder.__w360Runtime) {

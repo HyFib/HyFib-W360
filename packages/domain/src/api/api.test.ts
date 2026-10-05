@@ -1649,11 +1649,23 @@ describe("replaying an endpoint's failed deliveries through the API (ADR-095)", 
       { since: 'yesterday' },
       { since: '2026-09-30' },
       { since: '2026-09-30T08:00:00Z', until: '2026-09-30T09:00:00Z' },
+      { since: '2026-09-30T08:00:00Z', events: [] },
+      { since: '2026-09-30T08:00:00Z', events: ['order.shipped'] },
+      { since: '2026-09-30T08:00:00Z', events: 'message.received' },
     ]) {
       expect(apiReplayFailedDeliveriesSchema.safeParse(body).success, JSON.stringify(body)).toBe(
         false,
       );
     }
+  });
+
+  it('takes the events to replay, kept once each in the list’s order (ADR-156)', () => {
+    expect(
+      apiReplayFailedDeliveriesSchema.parse({
+        since: '2026-09-30T08:00:00Z',
+        events: ['contact.created', 'message.received', 'contact.created'],
+      }),
+    ).toEqual({ since: '2026-09-30T08:00:00Z', events: ['message.received', 'contact.created'] });
   });
 
   it('refuses a time still to come before anything is read', async () => {
@@ -1714,6 +1726,10 @@ describe("replaying an endpoint's failed deliveries through the API (ADR-095)", 
       required: ['since'],
       additionalProperties: false,
     });
+    expect(
+      Object.keys((schemas.ReplayFailedDeliveries as { properties: object }).properties),
+    ).toEqual(['since', 'events']);
+    expect(op?.description).toContain('only those of the `events` given');
     expect(Object.keys((schemas.FailedReplay as { properties: object }).properties)).toEqual([
       'queued',
       'more',

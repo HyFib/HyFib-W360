@@ -1,5 +1,312 @@
 # Progress
 
+## 2026-10-05 — Phase 5: each company's usage against the window before (P5-10, ADR-157)
+
+Status: **Implemented; its database tests run in CI only (test data only).** The console's Usage tab
+had nothing to compare a company's sending with. The local PostgreSQL is unavailable (its Docker
+daemon stopped), so the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-157):** for 7 and 30 days, each company's sending and receipts in the window before,
+  with the change, under Sent and Received, in the totals and in the CSV; none for 90 days; read in
+  one statement, so in one snapshot.
+- **Domain:** `platform/ops.ts` (`usageRows` takes the window and reads both windows in one
+  statement; `USAGE_COMPARED_WINDOWS`; the totals' `previous`); `platform/ops-model.ts`
+  (`UsagePrevious`, `usageChange`, the CSV's two columns).
+- **Web:** the Usage tab's Sent and Received cells and totals, and its description for each window.
+- **Tests:**
+  - Unit (1 new and 1 changed in `ops-model.test.ts`): the change rounded with its sign, "none
+    before", nothing when 0 in both; the CSV's two columns, empty for 90 days.
+  - Integration (1 new in `platform-ops.test.ts`): a company's three replies of 10 days ago are the
+    7 days before its two of today, are inside the 30 days with nothing before, and 90 days has no
+    window before; the CSV's last two columns. Written for CI; not run here.
+  - E2E (`platform-ops.spec.ts` extended): the tab's wording for 30, 90 and 7 days and the CSV
+    line's two new columns. Written for CI; not run here.
+- **Docs:** ADR-157; ARCHITECTURE; BACKLOG P5-10; feature matrix H-034. SECURITY is unchanged: the
+  window before is read through the same definer function, counts only.
+- **Mutation checks:** 10 deliberate regressions of the change and the CSV tried, all caught by the
+  unit tests; the statement that reads both windows needs the database, so none were tried there.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 713 passed (75 files; 1 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 10 tried, all caught (unit tests)                               |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Comparisons of the other figures, trends over more than two windows, charts, alerts on a fall.
+
+## 2026-10-05 — Phase 5: replaying an endpoint's failed deliveries by event type (P5-09, ADR-156)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A replay of an
+endpoint's failed deliveries sent every failed event of the period again. The local PostgreSQL is
+unavailable (its Docker daemon stopped), so the integration and e2e tests below were written but not
+run here.
+
+### Completed
+
+- **Design (ADR-156):** `events` on `POST /webhook-endpoints/{id}/replay-failed` and an "Events"
+  choice in Settings → Webhooks' replay form; the rest of ADR-095 unchanged; the audit entry names
+  the events.
+- **Domain:** `webhooks/service.ts` (`replayFailedWebhookDeliveries` takes `events`, one more
+  condition on the event's type; the settings schema and audit); `api/webhook-endpoints.ts` (the
+  body's `events`, passed and audited); `api/openapi.ts` (the operation's description).
+- **Web:** the replay form's "Events" choice (every event, or one the endpoint receives) and its
+  server action.
+- **Tests:**
+  - Unit (1 new and 2 extended in `api.test.ts`): `events` kept once each in the list's order; an
+    empty list, an unknown event and a string refused; the schema's properties and the operation's
+    description.
+  - Integration (1 new in `webhooks.test.ts`, 1 extended in `api-webhook-endpoints.test.ts`): only
+    the event chosen is replayed, an event none of whose deliveries failed queues nothing, then
+    every event; the audit names the events; unknown events and an empty list refused; through the
+    API, two failed messages left out for another event and queued for theirs. Written for CI; not
+    run here.
+  - E2E (`webhooks.spec.ts` extended): the endpoint also takes template statuses; the replay form
+    lists every event and the endpoint's two; a replay of template statuses queues nothing and one
+    of messages brings both back. Written for CI; not run here.
+- **Docs:** ADR-156; SECURITY (the webhook rules); ARCHITECTURE; BACKLOG P5-09; feature matrix H-014
+  and W-139.
+- **Mutation checks:** 3 deliberate regressions tried on the unit-tested parts (the body without
+  events, any strings taken as events, the operation not mentioning them), all caught; the service's
+  filter, its audit and the form need the database, so their regressions are left to the integration
+  and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 712 passed (75 files; 1 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Replays across endpoints, and by a delivery's error or HTTP status.
+
+## 2026-10-05 — Phase 5: exporting the console's health and signals lists (P5-10, ADR-155)
+
+Status: **Implemented; its database tests run in CI only (test data only).** Every company's health
+and the Signals tab could be read on screen only. The local PostgreSQL is unavailable (its Docker
+daemon stopped), so the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-155):** "Download CSV" on the Overview (every company's health, worst first) and on
+  the Signals tab, through one audited export for the console's lists; the Usage tab's link moves to
+  it.
+- **Domain:** `platform/ops-model.ts` (`OPS_EXPORT_LISTS`, `byHealth`, `healthCsv`, `signalsCsv`,
+  `opsCsvFilename`; `CompanyHealth` and `CompanySignals` moved here); `platform/ops.ts`
+  (`signalRows`, shared with the tab, and `exportList`, which replaces ADR-154's `exportUsage` and
+  audits `platform.ops_<list>_exported`).
+- **Web:** `platform/ops/export/[list]/route.ts` (replaces ADR-154's
+  `platform/ops/usage/export/route.ts`; any other name is not found) and "Download CSV" on the
+  Overview and Signals tabs.
+- **Tests:**
+  - Unit (4 new in `ops-model.test.ts`): worst first, then by issues, then by name; every health
+    column with a formula neutralised, issues in words and quoted, times to the minute in UTC, an
+    unrated number and no plan left empty; the Signals lines with their signals in words; the list
+    names and filenames.
+  - Integration (1 new in `platform-ops.test.ts`, 1 changed for `exportList`): the company's health
+    line (a warning, its three issues, its numbers, the YELLOW rating, the last day's sending, the
+    failing endpoint) and its Signals line, without message text or the endpoint's token; one audit
+    entry per export with the count of companies and the window; a non-administrator refused with
+    neither. Written for CI; not run here.
+  - E2E (`platform-ops.spec.ts` extended): the Overview's download with the new company healthy and
+    the Signals tab's without it (it has sent nothing). Written for CI; not run here.
+- **Docs:** ADR-155; SECURITY (the console's row); THREAT-MODEL T75; ARCHITECTURE; BACKLOG P5-10;
+  feature matrix H-034.
+- **Mutation checks:** 25 deliberate regressions of the CSV builders tried, all caught by the unit
+  tests (one survived the first run: the order's tie-break on the number of issues, whose test
+  companies were already in name order; the test now orders them the other way). The service and the
+  route need the database, so none were tried there.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 711 passed (75 files; 4 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 25 tried, all caught (unit tests)                               |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Exports of the action lists (onboarding, integrations, queues, keys), other formats, scheduled exports.
+
+## 2026-10-05 — Phase 5: exporting the console's usage table (P5-10, ADR-154)
+
+Status: **Implemented; its database tests run in CI only (test data only).** The console's Usage tab
+could be read on screen only. The local PostgreSQL is unavailable (its Docker daemon stopped), so
+the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-154):** "Download CSV" on the Usage tab for the window shown, a line per company
+  with the tab's figures, formula-safe; each export written to the platform audit log in the
+  transaction that reads the rows, before the file is returned.
+- **Domain:** `platform/ops-model.ts` (`USAGE_CSV_COLUMNS`, `usageCsv`, `usageCsvFilename`);
+  `platform/ops.ts` (`usageRows`, shared with the tab, and `exportUsage`, which audits
+  `platform.ops_usage_exported`).
+- **Web:** `platform/ops/usage/export/route.ts` (behind the page's platform actor check;
+  `private, no-store`, `nosniff`, an attachment) and the tab's "Download CSV" link.
+- **Tests:**
+  - Unit (2 new in `ops-model.test.ts`): the columns, a line per company in order, a formula
+    neutralised and quoted, a comma quoted, periods as UTC days, an empty export, the filename.
+  - Integration (1 new in `platform-ops.test.ts`): the file with its header and the company's one
+    line, without message text, and exactly one audit entry with the window and the count of
+    companies; a non-administrator refused with neither. Written for CI; not run here.
+  - E2E (`platform-ops.spec.ts` extended): "Download CSV" on the Usage tab gives
+    `hyfib-usage-30-days-<day>.csv` with the company's line and its two API requests. Written for
+    CI; not run here.
+- **Docs:** ADR-154; SECURITY (the console's row); THREAT-MODEL T75; ARCHITECTURE; BACKLOG P5-10;
+  feature matrix H-034.
+- **Mutation checks:** 11 deliberate regressions of the CSV builder tried, all caught by the unit
+  tests (no header, no byte-order mark, a formula edited instead of neutralised, lines not written
+  through `csvLine`, columns swapped or showing another figure, periods with their time or in a
+  local format, the filename without the window, a column missing from the header); the service and
+  the route need the database, so none were tried there.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 707 passed (75 files; 2 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 11 tried, all caught (unit tests)                               |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Exports of the console's other lists, other formats, scheduled exports.
+
+## 2026-10-05 — Phase 5: API requests on the operations console (P5-10, ADR-153)
+
+Status: **Implemented; its database tests run in CI only (test data only).** The console's Usage tab
+said that API request counts were not recorded, although since ADR-061 each company's plan counts
+every request its keys make. The local PostgreSQL is unavailable (its Docker daemon stopped), so the
+integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-153):** an "API requests" column on the Usage tab, beside automation runs and read
+  the same way: each company's latest API request counter, the plan's, with its period's start; 0
+  when its keys made no request. No migration: the platform role reads the counters under 0023's
+  policy, as the platform company page does.
+- **Domain:** `platform/ops.ts` (`latestApiRequests`, and `usage()` rows as `CompanyUsage`, the
+  activity with `apiRequests` and `apiPeriodStart`); `platform/ops-model.ts` (`CompanyUsage`).
+- **Web:** `/platform/ops/usage`: the column, and the tab's text no longer says API requests are not
+  recorded.
+- **Tests:**
+  - Integration (1 new in `platform-ops.test.ts`): a company's latest API request counter and its
+    period, an earlier period's ignored, beside its automation runs; a company without requests at 0
+    and no period. Written for CI; not run here.
+  - E2E (`platform-ops.spec.ts` extended): an owner creates an API key, makes two requests, and the
+    Usage tab shows 2 for the company with the period's start. Written for CI; not run here.
+- **Docs:** ADR-153 (and ADR-054's "Not built" annotated); SECURITY (the console's row);
+  THREAT-MODEL T75; ARCHITECTURE; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** none: every check of this slice needs the database.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 705 passed (75 files; none new)                                 |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Each key's count on the console, requests over the tab's window, refused requests, trends.
+
+## 2026-10-05 — Phase 5: an API reference page made from the OpenAPI document (P5-08, ADR-152)
+
+Status: **Implemented; the page is locally verified (test data only).** Since ADR-052 the public API
+was described by its OpenAPI 3.1 document at `/api/v1/openapi.json` alone: a developer imported it
+into Postman or a viewer to read an operation's parameters or a webhook body, and Settings linked to
+the JSON only. A documentation site was recorded as not built (W-140). The local PostgreSQL has been
+unavailable since its Docker daemon stopped before this slice began, so the integration suite and
+the e2e tests that need the database run in CI only.
+
+### Completed
+
+- **Design (ADR-152):** `/developers` shows the document the API serves, for anyone, signed in or
+  not: each operation once, grouped by the first segment of its path, with its parameters, request
+  body and answers; each webhook event with its signed headers, body and the answer it expects; each
+  schema with the fields inside fields and each shape of a union; contents and links from each type
+  to its schema. Text only; a reference it cannot follow fails the page rather than leaving part of
+  it out; no session, company data or database; the document and its reference built once and
+  kept in memory, not per request.
+- **Domain:** `api/reference.ts` (new): `apiReference` turns the document into groups, events and
+  schemas; `referenceType` names types, `referenceNotes` words limits, allowed values and defaults,
+  `referenceFields` lists the fields inside fields and the shapes of unions, and `referenceText`
+  makes paragraphs and code spans.
+- **Web:** `app/developers/page.tsx` (new) and `components/developers/reference.tsx` (new: the
+  operation, event and schema sections, their tables and type names, text rendered as text);
+  `server/api-docs.ts` (new: `publicApiDocs`, the document as JSON and its reference, built once and
+  kept in memory by each server bundle that imports it, the page's and the route's, from
+  `getWebConfig`, the web configuration alone, which `runtime.ts` now shares);
+  `/api/v1/openapi.json` serves that JSON without starting the runtime; Settings → API keys and
+  Settings → Webhooks link to the page.
+- **Tests:**
+  - Unit (9 new in `reference.test.ts`): each operation of the route table once, grouped and titled
+    in the document's order; each event and schema once, every schema a type names listed and no
+    type left unnamed; paragraphs and code; the types; the notes; the fields inside fields, arrays,
+    maps and unions, shapes named by their one constant or their place; parameters (a shared one
+    resolved), request bodies and answers; events' headers, body and answer; a missing shared
+    parameter refused.
+  - E2E (1 new, `developers.spec.ts`; 2 extended): without signing in, the page has exactly one
+    section for each operation, event and schema of the document the API serves, shows its base
+    address and introduction, its contents and type links lead to their sections, nested fields and
+    shapes have rows, and it fits a phone screen; Settings → API keys and Settings → Webhooks link
+    to it (`api-keys.spec.ts`, `webhooks.spec.ts`, which need the database and run in CI).
+- **Docs:** ADR-152; SECURITY (the reference's row and rule); THREAT-MODEL T161; ARCHITECTURE;
+  BACKLOG P5-08; feature matrix H-033 and W-140.
+- **Mutation checks:** 71 deliberate regressions tried, all caught. 49 in the domain by the unit
+  tests (paragraphs and code, each kind of type and note and their wording, the lead-ins, the fields
+  inside fields, arrays, maps and unions, shapes named by their constant or their place, depths,
+  required fields, shared parameters resolved or refused, request bodies, answers, events' headers
+  and bodies, groups and titles, operations by method, the server address); one of them survived the
+  first run (a shape with two constant fields named by the first), and a test of such a shape now
+  catches it. 22 in the web through the e2e test (the contents' links, the sections' anchors,
+  schemas left out, tables not named, type links, the base address, a session required, statuses
+  rewritten, a table wider than a phone, the contents and the main heading, the introduction, the
+  document link, nested rows, shape rows, events' headers and answers, and the page and the document
+  made from different documents); two of them were tried before the page and the document route came
+  to share one builder, which now rules that out, and two more against the builder itself.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                                                             | Result                                                                                                                                                                    |
+| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                  | clean                                                                                                                                                                     |
+| `pnpm test` (unit)                                                                  | 705 passed (75 files; 9 new)                                                                                                                                              |
+| `pnpm test:integration`                                                             | not run here: the local PostgreSQL is unavailable (its Docker daemon stopped); CI runs it on PostgreSQL 17 and 18 (this slice changes no database code or domain service) |
+| `pnpm build`                                                                        | passed                                                                                                                                                                    |
+| e2e: developers (chromium, mobile-chromium) against `next start` without a database | 2 passed; Firefox and WebKit are not installed here, and the api-keys and webhooks additions need the database, so CI runs them                                           |
+| Mutation checks                                                                     | 71 tried, all caught (49 by unit tests, 22 through the e2e test)                                                                                                          |
+| gitleaks 8.30.1 on the staged changes                                               | no leaks found                                                                                                                                                            |
+
+### Known gaps
+
+- A changelog, code samples, a console for trying requests, search, references for other
+  versions.
+
 ## 2026-10-05 — Phase 5: choosing how the automation runs a webhook endpoint receives ended (P5-09, ADR-151)
 
 Status: **Implemented and locally verified (test data only).** Since ADR-078 an endpoint that took

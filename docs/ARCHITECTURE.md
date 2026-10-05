@@ -1069,11 +1069,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   locks the endpoint (refused when off), selects for each event the latest failed delivery to it
   queued since the given time (`DISTINCT ON (event_id)` over `webhook_deliveries_endpoint_idx`),
   drops `event_gone` failures (but not `payload_failed` ones, sent once HyFib fixed the cause),
-  `ping` events and events with any delivery to the endpoint that did not fail
-  (`webhook_deliveries_event_idx`), and inserts up to `WEBHOOK_LIMITS.replayBatch` (500)
-  new deliveries oldest event first, reading one more row to say whether more remain. Settings
-  (`webhooks.replayFailed`, a period) and the API (`POST /webhook-endpoints/{id}/replay-failed`,
-  `since`, inside `idempotent`, `keysOnly`) call it and audit once per call.
+  `ping` events, events of other types than those given (`events`, ADR-156) and events with any
+  delivery to the endpoint that did not fail (`webhook_deliveries_event_idx`), and inserts up to
+  `WEBHOOK_LIMITS.replayBatch` (500) new deliveries oldest event first, reading one more row to say
+  whether more remain. Settings (`webhooks.replayFailed`, a period) and the API
+  (`POST /webhook-endpoints/{id}/replay-failed`, `since`, inside `idempotent`, `keysOnly`) call it
+  and audit once per call.
 - **Notes through the API (0060–0062, ADR-084):** `POST /conversations/{id}/notes` with
   `conversations.write` (`apiAddConversationNote`, `api/conversations.ts`) runs inside `idempotent`:
   it locks the conversation `FOR UPDATE` (the order erasure takes), checks that it is visible (the
@@ -1179,6 +1180,16 @@ true`); the same key with another request (method, path and body hashed) answers
   limit clears this period's marks.
 - **OpenAPI** (`api/openapi.ts`): `GET /api/v1/openapi.json` (no key; cacheable 5 minutes) is built
   from the zod schemas that validate requests; a unit test checks it against the route handlers.
+- **API reference (ADR-152) [built]:** the web tier builds the document once with the configured
+  address alone and keeps it in memory (`publicApiDocs` in `server/api-docs.ts`, from `getWebConfig`;
+  each server bundle that imports it, the page's and the route's, keeps its own copy), without
+  starting the runtime, and serves it as built. The page `/developers` (no sign-in) shows the same
+  document: `apiReference` (`api/reference.ts`, pure) turns it into groups of operations by the
+  first segment of their paths, webhook events and schemas, with named types, notes for limits,
+  allowed values and defaults, the fields inside fields and the shapes of unions, and descriptions
+  as paragraphs and code spans; `components/developers/reference.tsx` renders them as text, with
+  contents and links from each type to its schema. Settings → API keys and Settings → Webhooks link
+  to it.
 - **Expiry reminders (0040, ADR-067):** the minute messaging sweep (`api/expiry-reminders.ts`) lists,
   through the definer function `ops.api_key_expiry_reminders_due` (company and key ids only, over a
   partial index), keys that can still be used, were not rotated, expire within 7 days and were not
@@ -1503,8 +1514,23 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   90 days) and a health card on each company's platform page. Every page re-checks the platform
   actor. The functions read every company on each view, which suits the test envelope; paging and
   precomputed rollups come with growth.
+- **API requests on the Usage tab (ADR-153):** `usage()` also reads each company's latest
+  `api_requests` row of `app.usage_counters` through the platform role (0023's policy), in the same
+  transaction, and joins it to the companies the activity function returns; the tab shows it, with
+  the period's start, beside automation runs.
+- **The window before (ADR-157):** for the 7- and 30-day windows, `usageRows` reads the activity
+  since the window's start and since twice as far back in one statement (two calls of the STABLE
+  definer function, so one snapshot) and gives each company the difference, the window before's
+  sending and receipts; 90 days has none (the function reads at most 93 days back).
+- **Exports (ADR-154, ADR-155):** `/platform/ops/export/[list]` (a route handler behind the pages'
+  platform actor check; `usage`, `health` or `signals`, any other name not found) calls
+  `exportList`, which reads the list's rows with the tab's own reads (`usageRows`, `healthFacts`
+  sorted by `byHealth`, `signalRows`), inserts `platform.ops_<list>_exported` into
+  `ops.platform_audit_events` in that transaction and returns `usageCsv`, `healthCsv` or
+  `signalsCsv` (`platform/ops-model.ts`, formula-safe through `contacts/csv`); the Overview, Signals
+  and Usage tabs link to it as "Download CSV".
 - **Not built yet:** other alert channels, trends,
-  quality updates from Meta's quality webhook, API request counts, exports, sweeps for the work of
+  quality updates from Meta's quality webhook, exports of the action lists, sweeps for the work of
   `channel.onboard`, `commerce.account` and `template.delete`, retrying several dead letters at
   once, and acknowledging the console's other lists (dead letters, receipts, late queues).
 

@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import {
+  Button,
   Card,
   CardContent,
   CardDescription,
@@ -14,13 +15,27 @@ import {
   TR,
   Table,
 } from '@w360/ui';
-import { USAGE_WINDOWS } from '@w360/domain';
+import { USAGE_WINDOWS, usageChange } from '@w360/domain';
 import { CompanyLink, StatTile } from '@/components/platform/ops';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
 
 export const metadata: Metadata = { title: 'Usage · Operations' };
 export const dynamic = 'force-dynamic';
+
+/** A count in the window before and how it moved (ADR-157); nothing when it is 0 in both. */
+function before(current: number, previous: number): string | null {
+  const change = usageChange(current, previous);
+  if (change === null) return null;
+  return previous === 0 ? change : `${previous} before · ${change}`;
+}
+
+function Before({ current, previous }: { current: number; previous: number | undefined }) {
+  const text = previous === undefined ? null : before(current, previous);
+  return text ? (
+    <div className="whitespace-nowrap text-xs text-muted-foreground">{text}</div>
+  ) : null;
+}
 
 export default async function OpsUsagePage({
   searchParams,
@@ -54,9 +69,18 @@ export default async function OpsUsagePage({
         <StatTile
           label="Messages sent"
           value={t.outbound}
-          detail={`${t.campaign} by campaigns · ${t.bot} by automations · ${t.api} through the API`}
+          detail={[
+            `${t.campaign} by campaigns · ${t.bot} by automations · ${t.api} through the API`,
+            o.previous ? before(t.outbound, o.previous.outbound) : null,
+          ]
+            .filter(Boolean)
+            .join(' · ')}
         />
-        <StatTile label="Messages received" value={t.inbound} />
+        <StatTile
+          label="Messages received"
+          value={t.inbound}
+          detail={o.previous ? (before(t.inbound, o.previous.inbound) ?? undefined) : undefined}
+        />
         <StatTile label="Webhook deliveries" value={t.webhookDeliveries} />
         <StatTile
           label="Members and numbers"
@@ -66,10 +90,21 @@ export default async function OpsUsagePage({
       </section>
       <Card>
         <CardHeader>
-          <CardTitle>By company ({o.days} days)</CardTitle>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle>By company ({o.days} days)</CardTitle>
+            <Button asChild variant="outline" size="sm">
+              <a href={`/platform/ops/export/usage?days=${o.days}`} download>
+                Download CSV
+              </a>
+            </Button>
+          </div>
           <CardDescription>
-            Busiest first. Automation runs are the plan&apos;s counter for its current period (from
-            the date shown). API request counts are not recorded; messages sent through the API are.
+            Busiest first. Automation runs and API requests are the plan&apos;s counters for its
+            current period (from the date shown); messages sent through the API also count under
+            Sent.{' '}
+            {o.previous
+              ? `Under Sent and Received, the ${o.days} days before and the change.`
+              : 'The 90 days before are not compared: the console reads at most 93 days back.'}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -85,6 +120,7 @@ export default async function OpsUsagePage({
                   <TH>Received</TH>
                   <TH>Webhook deliveries</TH>
                   <TH>Automation runs</TH>
+                  <TH>API requests</TH>
                   <TH>Members</TH>
                   <TH>Numbers</TH>
                 </TR>
@@ -95,7 +131,10 @@ export default async function OpsUsagePage({
                     <TD>
                       <CompanyLink id={a.tenantId} name={a.name} slug={a.slug} />
                     </TD>
-                    <TD className="tabular-nums">{a.outbound}</TD>
+                    <TD className="tabular-nums">
+                      {a.outbound}
+                      <Before current={a.outbound} previous={a.previous?.outbound} />
+                    </TD>
                     <TD className="whitespace-nowrap text-xs text-muted-foreground">
                       {a.outbound === 0
                         ? '—'
@@ -110,13 +149,24 @@ export default async function OpsUsagePage({
                             .map(([label, n]) => `${n} ${label}`)
                             .join(' · ')}
                     </TD>
-                    <TD className="tabular-nums">{a.inbound}</TD>
+                    <TD className="tabular-nums">
+                      {a.inbound}
+                      <Before current={a.inbound} previous={a.previous?.inbound} />
+                    </TD>
                     <TD className="tabular-nums">{a.webhookDeliveries}</TD>
                     <TD className="tabular-nums">
                       {a.automationRuns}
                       {a.runsPeriodStart ? (
                         <div className="text-xs text-muted-foreground">
                           from {a.runsPeriodStart.toISOString().slice(0, 10)}
+                        </div>
+                      ) : null}
+                    </TD>
+                    <TD className="tabular-nums">
+                      {a.apiRequests}
+                      {a.apiPeriodStart ? (
+                        <div className="text-xs text-muted-foreground">
+                          from {a.apiPeriodStart.toISOString().slice(0, 10)}
                         </div>
                       ) : null}
                     </TD>

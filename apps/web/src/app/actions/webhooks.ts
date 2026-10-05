@@ -136,11 +136,16 @@ export async function replayFailedWebhookDeliveriesAction(
   slug: string,
   endpointId: string,
   period: WebhookReplayPeriod,
+  event: string | null,
 ): Promise<ActionResult<{ queued: number; more: boolean }>> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);
     const { webhooks } = await getRuntime();
-    const replayed = await webhooks.replayFailed(ctx, { endpointId, period }, await requestMeta());
+    const replayed = await webhooks.replayFailed(
+      ctx,
+      { endpointId, period, ...(event ? { events: [event] } : {}) },
+      await requestMeta(),
+    );
     refresh();
     return replayed;
   });

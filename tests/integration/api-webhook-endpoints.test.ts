@@ -1677,13 +1677,43 @@ describe('replaying failed deliveries through the API (ADR-095)', () => {
       api().replayFailed(key.ctx, members.id, { since }, idem('rf-7', since)),
       'not_found',
     );
+    // Only the events given (ADR-156): two more failed messages, left out for another event.
+    await failedDeliveries(c, id, 2);
+    const contacts = { since, events: ['contact.created'] };
+    expect(
+      (await api().replayFailed(key.ctx, id, contacts, idem('rf-9', JSON.stringify(contacts))))
+        .body,
+    ).toEqual({ data: { queued: 0, more: false } });
+    const received = { since, events: ['message.received'] };
+    expect(
+      (await api().replayFailed(key.ctx, id, received, idem('rf-10', JSON.stringify(received))))
+        .body,
+    ).toEqual({ data: { queued: 2, more: false } });
+    const [named] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.deliveries_replayed'
+        ORDER BY occurred_at DESC, id DESC LIMIT 1`,
+      [c.tenant.id],
+    );
+    expect(named?.metadata).toEqual({
+      host: HOST,
+      since,
+      events: ['message.received'],
+      queued: 2,
+      more: false,
+      source: 'api',
+    });
+    await expectAppError(
+      api().replayFailed(key.ctx, id, { since, events: ['nope'] }, idem('rf-11', 'nope')),
+      'validation_failed',
+    );
     await settings().setEnabled(owner, { endpointId: id, enabled: false });
     await expectAppError(
       api().replayFailed(key.ctx, id, { since }, idem('rf-8', since)),
       'precondition_failed',
     );
     // No refusal queued anything.
-    expect(await replays()).toHaveLength(2);
+    expect(await replays()).toHaveLength(4);
     expect(
       await fx.query(
         'SELECT 1 FROM app.webhook_deliveries WHERE endpoint_id = $1 AND replay_of IS NOT NULL',

@@ -17,6 +17,9 @@ import {
   purgeDeadLetters,
   queueWaitLimits,
   recordDeadLetters,
+  HEALTH_CSV_COLUMNS,
+  SIGNALS_CSV_COLUMNS,
+  USAGE_CSV_COLUMNS,
   type PlatformActor,
 } from '@w360/domain';
 import { createUser } from './helpers';
@@ -262,6 +265,162 @@ describe('company health and signals', () => {
     expect(usage.totals.outbound).toBeGreaterThanOrEqual(5);
     expect((await ops().usage(staff, 12345)).days).toBe(30);
     expect(JSON.stringify([overview, signals, usage])).not.toContain(MESSAGE_TEXT);
+  });
+
+  it("gives each company's latest API request count on the Usage tab, as its automation runs (ADR-153)", async () => {
+    const quiet = await fx.company();
+    const august = new Date('2026-08-01T00:00:00.000Z');
+    const september = new Date('2026-09-01T00:00:00.000Z');
+    const counter = (tenantId: string, metric: string, periodStart: Date, used: number) =>
+      fx.query(
+        `INSERT INTO app.usage_counters (id, tenant_id, metric, period_start, used)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [uuidv7(), tenantId, metric, periodStart, used],
+      );
+    await counter(company.tenant.id, 'api_requests', august, 900);
+    await counter(company.tenant.id, 'api_requests', september, 42);
+    await counter(company.tenant.id, 'automation_runs', september, 7);
+    // Another company's requests are its own.
+    await counter(quiet.tenant.id, 'automation_runs', september, 3);
+    const rows = (await ops().usage(staff, 30)).rows;
+    const line = (tenantId: string) => {
+      const r = rows.find((row) => row.tenantId === tenantId);
+      return r && [r.apiRequests, r.apiPeriodStart?.toISOString() ?? null, r.automationRuns];
+    };
+    expect(line(company.tenant.id)).toEqual([42, september.toISOString(), 7]);
+    expect(line(quiet.tenant.id)).toEqual([0, null, 3]);
+  });
+
+  it('compares each company with the window before, in one snapshot, for 7 and 30 days only (ADR-157)', async () => {
+    const trend = await fx.company();
+    await fx.deliver(
+      fx.messagesBody(trend, { messages: [{ waId: '919876500009', text: 'Hello again' }] }),
+    );
+    const [conversation] = await fx.query<{ id: string }>(
+      `SELECT id FROM app.conversations WHERE tenant_id = $1`,
+      [trend.tenant.id],
+    );
+    // Three replies 10 days ago (in the 7 days before the last 7) and two now.
+    for (const age of ['10 days', '10 days', '10 days', '0 days', '0 days']) {
+      await fx.query(
+        `INSERT INTO app.messages (id, tenant_id, conversation_id, channel_account_id, direction,
+           type, status, sender_type, created_at)
+         VALUES ($1, $2, $3, $4, 'outbound', 'text', 'delivered', 'agent', now() - $5::interval)`,
+        [uuidv7(), trend.tenant.id, conversation!.id, trend.channelAccountId, age],
+      );
+    }
+    const line = async (days: number) => {
+      const usage = await ops().usage(staff, days);
+      const r = usage.rows.find((row) => row.tenantId === trend.tenant.id);
+      return { usage, r: r && [r.outbound, r.inbound, r.previous] };
+    };
+    const week = await line(7);
+    expect(week.r).toEqual([2, 1, { outbound: 3, inbound: 0 }]);
+    expect(week.usage.previous?.outbound).toBeGreaterThanOrEqual(3);
+    // Over 30 days the replies of 10 days ago are in the window, and nothing came before.
+    const month = await line(30);
+    expect(month.r).toEqual([5, 1, { outbound: 0, inbound: 0 }]);
+    const quarter = await line(90);
+    expect(quarter.r).toEqual([5, 1, null]);
+    expect(quarter.usage.previous).toBeNull();
+    // The CSV's last two columns are the window before, empty for 90 days (exported by another
+    // administrator, so the ADR-154 test's audit entries stay its own).
+    const exporter = await platformStaff();
+    const csvLine = async (days: number) =>
+      (await ops().exportList(exporter, 'usage', days)).body
+        .split('\r\n')
+        .find((l) => l.includes(`,${trend.tenant.slug},`));
+    expect(await csvLine(7)).toMatch(/,3,0$/);
+    expect(await csvLine(90)).toMatch(/,,$/);
+  });
+
+  it('exports the Usage tab as CSV only after writing the export to the platform audit log (ADR-154)', async () => {
+    const file = await ops().exportList(staff, 'usage', 7);
+    expect(file.filename).toMatch(/^hyfib-usage-7-days-\d{4}-\d{2}-\d{2}\.csv$/);
+    const lines = file.body.replace(/^\uFEFF/, '').split('\r\n');
+    expect(lines[0]).toBe(USAGE_CSV_COLUMNS.join(','));
+    expect(lines.at(-1)).toBe('');
+    const companies = lines.slice(1, -1);
+    expect(companies.filter((l) => l.includes(`,${company.tenant.slug},`))).toHaveLength(1);
+    expect(file.body).not.toContain(MESSAGE_TEXT);
+    const audits = await fx.query<{ metadata: { days: number; companies: number } }>(
+      `SELECT metadata FROM ops.platform_audit_events
+        WHERE action = 'platform.ops_usage_exported' AND actor_user_id = $1`,
+      [staff.userId],
+    );
+    expect(audits.map((a) => a.metadata)).toEqual([{ days: 7, companies: companies.length }]);
+    // Someone who is not a platform administrator gets neither a file nor an entry.
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    const actor: PlatformActor = {
+      userId: outsider.id,
+      role: 'platform_operator',
+      correlationId: uuidv7(),
+    };
+    await expectCode(ops().exportList(actor, 'usage', 7), 'forbidden');
+    const [refused] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM ops.platform_audit_events WHERE actor_user_id = $1`,
+      [outsider.id],
+    );
+    expect(refused?.n).toBe(0);
+  });
+
+  it("exports every company's health and the Signals tab, each with its audit entry (ADR-155)", async () => {
+    const csvLines = (body: string) => body.replace(/^\uFEFF/, '').split('\r\n');
+    const slug = company.tenant.slug;
+    const health = await ops().exportList(staff, 'health', 30);
+    expect(health.filename).toMatch(/^hyfib-health-\d{4}-\d{2}-\d{2}\.csv$/);
+    const healthLines = csvLines(health.body);
+    expect(healthLines[0]).toBe(HEALTH_CSV_COLUMNS.join(','));
+    expect(healthLines.at(-1)).toBe('');
+    // The company's facts as the console shows them: a warning, its issues in words, its numbers,
+    // the YELLOW rating, the last day's sending and the failing endpoint.
+    expect(healthLines.filter((l) => l.includes(`,${slug},`))).toEqual([
+      expect.stringMatching(
+        new RegExp(
+          `^Company ${slug},${slug},active,[a-z_]*,\\d{4}-\\d{2}-\\d{2},warning,` +
+            '1 number to reconnect or set up again; A number is rated YELLOW; ' +
+            '1 webhook endpoint failing or turned off for failing,2,1,1,0,YELLOW,' +
+            '\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2},0,5,2,1,\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2},1,0,0,0,0,0,0$',
+        ),
+      ),
+    ]);
+    const signals = await ops().exportList(staff, 'signals', 30);
+    expect(signals.filename).toMatch(/^hyfib-signals-7-days-\d{4}-\d{2}-\d{2}\.csv$/);
+    const signalLines = csvLines(signals.body);
+    expect(signalLines[0]).toBe(SIGNALS_CSV_COLUMNS.join(','));
+    expect(signalLines.filter((l) => l.includes(`,${slug},`))).toEqual([
+      `Company ${slug},${slug},active,5,2,2,1,1,1,1,YELLOW,A number is rated YELLOW`,
+    ]);
+    expect(health.body + signals.body).not.toContain(MESSAGE_TEXT);
+    expect(health.body + signals.body).not.toContain(SECRET_TOKEN);
+    const audits = await fx.query<{ action: string; metadata: Record<string, number> }>(
+      `SELECT action, metadata FROM ops.platform_audit_events
+        WHERE action IN ('platform.ops_health_exported', 'platform.ops_signals_exported')
+          AND actor_user_id = $1
+        ORDER BY occurred_at, id`,
+      [staff.userId],
+    );
+    expect(audits).toEqual([
+      { action: 'platform.ops_health_exported', metadata: { companies: healthLines.length - 2 } },
+      {
+        action: 'platform.ops_signals_exported',
+        metadata: { days: 7, companies: signalLines.length - 2 },
+      },
+    ]);
+    // Someone who is not a platform administrator gets neither a file nor an entry.
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    const actor: PlatformActor = {
+      userId: outsider.id,
+      role: 'platform_operator',
+      correlationId: uuidv7(),
+    };
+    await expectCode(ops().exportList(actor, 'health', 30), 'forbidden');
+    await expectCode(ops().exportList(actor, 'signals', 30), 'forbidden');
+    const [refused] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM ops.platform_audit_events WHERE actor_user_id = $1`,
+      [outsider.id],
+    );
+    expect(refused?.n).toBe(0);
   });
 });
 

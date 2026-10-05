@@ -63,7 +63,8 @@ export default async function WebhookEndpointPage({
           <CardDescription>
             The latest 100{failedOnly ? ' failed' : ''} deliveries, newest first. A replay sends the
             same event again as a new delivery, with the same event id. Replaying failed deliveries
-            sends every event whose deliveries all failed in the period again, 500 at a time.
+            sends every event whose deliveries all failed in the period again, or only those of one
+            event, 500 at a time.
             {active ? '' : ' Turn the endpoint on to replay deliveries.'}
           </CardDescription>
         </CardHeader>
@@ -86,7 +87,11 @@ export default async function WebhookEndpointPage({
             )}
           </p>
           {active ? (
-            <ReplayFailedDeliveriesForm slug={ctx.tenant.slug} endpointId={endpointId} />
+            <ReplayFailedDeliveriesForm
+              slug={ctx.tenant.slug}
+              endpointId={endpointId}
+              events={endpoint.eventTypes}
+            />
           ) : null}
           {deliveries.length === 0 ? (
             <p className="text-sm text-muted-foreground">

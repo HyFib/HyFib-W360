@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import {
   Badge,
+  Button,
   Card,
   CardContent,
   CardDescription,
@@ -32,7 +33,14 @@ export default async function OpsSignalsPage() {
     <div className="grid grid-cols-1 gap-6">
       <Card>
         <CardHeader>
-          <CardTitle>Sending signals ({r.windowDays} days)</CardTitle>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle>Sending signals ({r.windowDays} days)</CardTitle>
+            <Button asChild variant="outline" size="sm">
+              <a href="/platform/ops/export/signals" download>
+                Download CSV
+              </a>
+            </Button>
+          </div>
           <CardDescription>
             A signal asks for a review, not a verdict: nothing is suspended automatically, and a
             suspension is a reasoned action on the company&apos;s page. The thresholds are

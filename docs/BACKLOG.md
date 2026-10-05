@@ -557,6 +557,10 @@ verification, app review, Embedded Signup configuration).
   **[What was left out of a message built, locally verified]** (ADR-132: every message says
   `contentTooLarge` when WhatsApp sent more than a message may hold, so its content was not kept,
   and `contactsLeftOut` when a contact card left contacts out; the same in `message.received`).
+  **[An API reference page built, locally verified]** (ADR-152, W-140: `/developers`, for anyone,
+  shows the OpenAPI document the API serves, each operation, webhook event and schema once, with
+  named types, limits, allowed values and defaults, the fields inside fields and the shapes of
+  unions, as text; linked from Settings → API keys and Settings → Webhooks).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   choosing conversations to change by a filter, media downloads, a contact card's contacts (Meta's
   contact object is not confirmed), starting or stopping runs for many
@@ -640,44 +644,57 @@ verification, app review, Embedded Signup configuration).
   locally verified]** (ADR-151: an endpoint takes `automation.run_ended` only for the ways a run
   ends that it chooses, completed, handed off, taken over, stopped or failed, in Settings or through
   the API, or every end as before; applied where events are captured, with the automations it
-  names). Remaining: filters for other event types and on a message's or contact's values (such as
-  by campaign, template, tag or field key, or a run's trigger or end reason), which tags were added
-  or removed, other authentication (OAuth client credentials, headers computed per delivery), mutual
-  TLS, fixed egress addresses, events for store orders, Payment Links and each step of a run,
-  `createdAt` finer than the millisecond, replays across endpoints or by event type, load tests.
+  names). **[Replays by event type built; their database tests run only in CI]** (ADR-156: an
+  endpoint's failed deliveries replayed for the events chosen only, `events` through the API or one
+  of the endpoint's events in Settings, audited with them). Remaining: filters for other event types
+  and on a message's or contact's values (such as by campaign, template, tag or field key, or a
+  run's trigger or end reason), which tags were added or removed, other authentication (OAuth client
+  credentials, headers computed per delivery), mutual TLS, fixed egress addresses, events for store
+  orders, Payment Links and each step of a run, `createdAt` finer than the millisecond, replays
+  across endpoints, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,
   Meta and Razorpay receipts needing attention, quarantine, email delivery counts), Queues (pg-boss
   counts per queue with retry policy, dead letters recorded by the worker without error messages),
-  Signals (7-day review flags and security event counts) and Usage (7, 30 or 90 days); a health
-  card on each company's platform page; audited receipt retry and quarantine resolution.
-  **[Failure alerts built, locally verified]** (ADR-091: every platform administrator emailed once
-  about each dead letter, each receipt that used all its attempts and each unresolved quarantine
-  entry, at most every 15 minutes, counts only; a receipt whose worker stopped during its last
-  attempt is now listed and retryable). **[Queue waits and alerts for late queues built, locally
-  verified]** (ADR-096: the worker's minute sweep records each queue's ready jobs and the oldest
-  one's wait, shown on the Queues tab with the queue's limit; every platform administrator is
-  emailed once each time a queue's oldest job waits past its limit, at most every 15 minutes, and
-  the console says when the worker stopped checking). **[Dead letter retries built, locally
-  verified]** (ADR-108: a platform administrator sends a dead letter's failed job back to its queue
-  once, with a reason, in the platform audit log; refused for unverified jobs, companies being
-  deleted, jobs pg-boss no longer keeps, queues that never retry or whose receipts have their own
-  retry, and work already waiting; needed for `template.submit`, whose work no sweep signals
-  again). **[Stranded work settled, locally verified]** (ADR-111: the minute sweep ends the work of
-  `channel.onboard`, `commerce.account` and `template.delete` dead letters in the company's scope,
-  unless a job for the same work waits or runs again: the number's setup fails with its step, the
-  keys' check fails, a deletion goes back to Meta's last status; the template sync keeps a deletion
-  while its job tries; deletions and key checks retry longer). **[Alerts for companies' failing
-  integrations built, locally verified]** (ADR-139: every platform administrator emailed once about
-  each failure the Integrations page lists, by kind and with counts only, at most every 15 minutes,
-  from the console's own list; a failure not listed for an hour is forgotten). **[Acknowledging
-  failing integrations built, locally verified]** (ADR-141: a platform administrator acknowledges a
-  failure Current failures lists with a note, shown with who and when to the other administrators
-  and kept in the platform audit log; replaced by a later note; refused once the failure recovered
-  or changed state; forgotten an hour after the failure stops being listed). Remaining: other alert
-  channels, trends, Meta's quality webhook (unconfirmed), API request counts, exports, assigning
-  failures and acknowledging the console's other lists, paging and rollups for many companies.
+  Signals (7-day review flags and security event counts) and Usage (7, 30 or 90 days); a health card
+  on each company's platform page; audited receipt retry and quarantine resolution. **[Failure
+  alerts built, locally verified]** (ADR-091: every platform administrator emailed once about each
+  dead letter, each receipt that used all its attempts and each unresolved quarantine entry, at most
+  every 15 minutes, counts only; a receipt whose worker stopped during its last attempt is now
+  listed and retryable). **[Queue waits and alerts for late queues built, locally verified]**
+  (ADR-096: the worker's minute sweep records each queue's ready jobs and the oldest one's wait,
+  shown on the Queues tab with the queue's limit; every platform administrator is emailed once each
+  time a queue's oldest job waits past its limit, at most every 15 minutes, and the console says
+  when the worker stopped checking). **[Dead letter retries built, locally verified]** (ADR-108: a
+  platform administrator sends a dead letter's failed job back to its queue once, with a reason, in
+  the platform audit log; refused for unverified jobs, companies being deleted, jobs pg-boss no
+  longer keeps, queues that never retry or whose receipts have their own retry, and work already
+  waiting; needed for `template.submit`, whose work no sweep signals again). **[Stranded work
+  settled, locally verified]** (ADR-111: the minute sweep ends the work of `channel.onboard`,
+  `commerce.account` and `template.delete` dead letters in the company's scope, unless a job for the
+  same work waits or runs again: the number's setup fails with its step, the keys' check fails, a
+  deletion goes back to Meta's last status; the template sync keeps a deletion while its job tries;
+  deletions and key checks retry longer). **[Alerts for companies' failing integrations built,
+  locally verified]** (ADR-139: every platform administrator emailed once about each failure the
+  Integrations page lists, by kind and with counts only, at most every 15 minutes, from the
+  console's own list; a failure not listed for an hour is forgotten). **[Acknowledging failing
+  integrations built, locally verified]** (ADR-141: a platform administrator acknowledges a failure
+  Current failures lists with a note, shown with who and when to the other administrators and kept
+  in the platform audit log; replaced by a later note; refused once the failure recovered or changed
+  state; forgotten an hour after the failure stops being listed). **[API request counts on the Usage
+  tab built; its tests run only in CI]** (ADR-153: each company's latest API request counter, the
+  plan's, beside its automation runs, read by the platform role). **[An export of the Usage tab
+  built; its database tests run only in CI]** (ADR-154: "Download CSV" for the window shown,
+  formula-safe, each export in the platform audit log before the file is returned). **[Exports of
+  the health and signals lists built; their database tests run only in CI]** (ADR-155: "Download
+  CSV" on the Overview for every company's health, worst first, and on the Signals tab, through one
+  audited export for the console's lists). **[The window before on the Usage tab built; its database
+  tests run only in CI]** (ADR-157: each company's sending and receipts in the 7 or 30 days before,
+  with the change, on screen and in the CSV; read in one snapshot). Remaining: other alert channels,
+  longer trends and charts, Meta's quality webhook (unconfirmed), exports of the action lists
+  (onboarding, integrations, queues), assigning failures and acknowledging the console's other
+  lists, paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

@@ -1321,7 +1321,7 @@ precomputed rollups and paging come with growth.
 
 **Not built.** Alerts (email or pager) on these conditions, trends over time, number quality
 updates from Meta's `phone_number_quality_update` webhook (quality is as of the last health
-check), API request counts (not recorded), exports, the age of the oldest waiting job, and
+check), API request counts (not recorded; the plan's counter is shown since ADR-153), exports, the age of the oldest waiting job, and
 acknowledging or snoozing an issue.
 
 **Migrations 0026 and 0027.** 0026 adds `ops.dead_letters`, `ops.purge_dead_letters`, the four read
@@ -6091,3 +6091,177 @@ Decision:
 
 Not built: filters on a run's end reason, its trigger or the key that started it, on how long it
 ran, or by tag or folder.
+
+## ADR-152 An API reference page made from the OpenAPI document (P5-08) (2026-10-05)
+
+Context: since ADR-052 the public API has been described by one OpenAPI 3.1 document at
+`/api/v1/openapi.json`, generated from the schemas that validate requests, and by nothing a person
+can read: a developer imported the 314 KB document into Postman or a viewer to learn an operation's
+parameters or a webhook body, and Settings → API keys and Settings → Webhooks linked to the JSON
+only. The feature matrix recorded a documentation site as not built (W-140).
+
+Decision:
+
+- **A page made from the document, for anyone:** `/developers` shows the document the API serves,
+  built by the same call with the same address, so it never describes more or less: each operation
+  once, grouped by the first segment of its path in the document's order (`Contacts`,
+  `Webhook endpoints`), with its summary, description, parameters, request body and answers; each
+  webhook event with the headers every delivery carries, its body and the answer HyFib expects; each
+  schema with its fields. Contents at the top lead to every group, operation, event and schema
+  (`#op-<operationId>`, `#event-<type>`, `#schema-<name>`), and a schema named in a type leads to
+  it. Settings → API keys and Settings → Webhooks link to it (Webhooks to its events), beside the
+  document.
+- **No sign-in, nothing private:** the page reads no session, no company data and no database: only
+  the configured address, through the web configuration alone (`getWebConfig`, which the runtime now
+  shares). The document route needs no more, so neither starts the runtime (database pool, keyring,
+  job queue) any longer.
+- **Words, not a viewer:** `apiReference` (domain, pure) turns the document into what the page
+  shows. Types are named (a schema, `string (uuid)`, `array of Contact`, `map of string`, "one of 9
+  objects", a constant value), a nullable value with its other option; limits, allowed values and
+  defaults are notes ("1 to 100", "One of `asc` or `desc`", "At most 1,000 characters", "Default
+  50"), those of each key, item or value after a lead-in; a pattern is left out where a format says
+  the same. Fields inside fields are indented under theirs, and a union of objects (a contact
+  search's conditions) lists each shape, named by its one constant field (`type = tag`), otherwise
+  by its place.
+- **Text only:** descriptions become paragraphs at line breaks and code between backticks (an
+  unpaired backtick stays text); nothing in the document is rendered as HTML, so
+  `Authorization: Bearer <API key>` reads as written.
+- **Refused rather than left out:** a reference the page cannot follow (outside the document) or a
+  shared parameter the document lacks stops the page with an error instead of dropping part of it;
+  the unit tests build the reference from the real document, so such a document fails them first.
+- **Built once, not per request:** the document and its reference depend on the code and the
+  configured address alone, so the web tier builds them once and keeps them in memory
+  (`publicApiDocs`; the page's and the route's server bundles each keep a copy), and the route serves
+  the JSON it built. The page is rendered for each request, with its CSP nonce, and like every page is
+  `private, no-store` and asked not to be indexed; the document stays `public, max-age=300`.
+
+Not built: a changelog, code samples, a console for trying requests, search, and references for
+other versions (there is one, `v1`).
+
+## ADR-153 API requests on the operations console (P5-10) (2026-10-05)
+
+Context: the console's Usage tab (ADR-054) lists each company's sending, receipts, webhook
+deliveries, automation runs, members and numbers, and said that API request counts were not
+recorded. Since ADR-061 a company's plan counts every request its API keys make, one counter per
+usage period, which Billing and the company's platform page show against the plan's limit; staff
+watching the platform had no list of which companies use the API, or how much.
+
+Decision:
+
+- **The plan's counter on the Usage tab:** an "API requests" column beside "Automation runs", read
+  the same way: each company's latest API request counter with the day its period started ("from
+  …"), 0 and no date when its keys have made no request. It is the count the plan's limit applies to
+  (requests a key's or the company's monthly limit refused are not in it), for the plan's period,
+  not for the 7, 30 or 90 days the tab's other columns cover, as the tab says.
+- **Read by the platform role, without a migration:** 0023's policy already lets the platform role
+  read every company's `app.usage_counters`, as the platform company page does. The service reads
+  each company's latest `api_requests` row in the transaction that reads the activity and joins it
+  to the companies `ops.platform_ops_activity` returns, so deleted companies stay out; company ids,
+  periods and counts only. The definer function is unchanged.
+- **The tab's text** no longer says API requests are not recorded; messages sent through the API
+  still count under Sent.
+
+Not built: each key's count (ADR-097 shows it to the company in Settings → API keys), requests over
+the tab's window, refused requests, trends.
+
+## ADR-154 Exporting the console's usage table (P5-10) (2026-10-05)
+
+Context: the console's Usage tab (ADR-054, ADR-153) shows each company's sending, receipts, webhook
+deliveries, automation runs, API requests, members and numbers over 7, 30 or 90 days, on screen
+only, and P5-10's Remaining listed exports. Staff comparing usage with plans or planning capacity
+copied the figures by hand.
+
+Decision:
+
+- **"Download CSV" on the Usage tab,** for the window shown: a line per company in the tab's order
+  with its name, address and status and the tab's figures (sending by sender, failures, receipts,
+  webhook deliveries, automation runs and API requests with the days their periods started, members,
+  numbers); UTF-8 with a byte-order mark, RFC 4180 quoting and the contacts export's formula
+  neutralisation, so a company name starting with `=`, `+`, `-` or `@` cannot run in a spreadsheet;
+  named `hyfib-usage-<days>-days-<day>.csv`.
+- **Audited before it leaves:** the service writes `platform.ops_usage_exported` to the platform
+  audit log, with the window and how many companies, in the transaction that reads the rows, and
+  returns the file only once that entry commits with them. The tab's checks run first (the page's
+  platform actor, then the definer function's administrator check), so a refused export writes
+  nothing and returns no file.
+- **The tab's data and nothing else,** from the same reads (ADR-153's counters included): no
+  message, contact or person. Served as an attachment, `private, no-store` and `nosniff`.
+
+Not built: exports of the console's other lists, other formats, scheduled exports.
+
+## ADR-155 Exporting the console's health and signals lists (P5-10) (2026-10-05)
+
+Context: ADR-154 made the Usage tab downloadable. Every company's health (the facts behind its level
+and issues) and the Signals tab could still be read on screen only, and the Overview lists only the
+companies needing attention. Staff preparing a review of companies at risk, or keeping a record of
+sending signals, copied them by hand.
+
+Decision:
+
+- **"Download CSV" on the Overview,** for every company, healthy ones included: worst first
+  (critical, then warnings, then healthy; more issues first; then by name, as the Overview orders
+  those needing attention), with its address, status, plan status, creation day, level and issues as
+  the console words them, and every fact the Overview and a company's page show: numbers by state,
+  the worst quality rating and when it was checked, the last 24 hours' sending, the last message,
+  failing and turned-off webhook endpoints, failed stores, payment accounts, catalog and Flow syncs,
+  and dead letters in 7 days. Times are to the minute in UTC. Named `hyfib-health-<day>.csv`.
+- **"Download CSV" on the Signals tab,** for the tab's lines over its 7 days, in its order: sending,
+  failures, marketing templates delivered and opt-outs, Meta's errors 131050 and 131049, complaints,
+  the worst quality rating and the signals in words. Named `hyfib-signals-7-days-<day>.csv`.
+- **One export for the console's lists:** `/platform/ops/export/{usage,health,signals}` (the Usage
+  tab's link moves there; any other name is not found). One service call reads the list's rows with
+  the tab's own reads and writes `platform.ops_<list>_exported` to the platform audit log, with how
+  many companies and the window where the list has one, in that transaction, before the file is
+  returned (ADR-154's rules). The same CSV writer: UTF-8 with a byte-order mark, RFC 4180 quoting
+  and formula neutralisation.
+- **Counts, states, codes and labels only,** as on the screens (ADR-054): no message, contact or
+  person.
+
+Not built: exports of the action lists (onboarding, integrations, queues, keys), other formats,
+scheduled exports.
+
+## ADR-156 Replaying an endpoint's failed deliveries by event type (P5-09) (2026-10-05)
+
+Context: since ADR-095 a member or a key replays every event whose deliveries to an endpoint all
+failed in a period, 500 per call. A receiver that failed for some events only (a bug in its handler
+for `contact.updated`, say, while it took `message.received` without trouble) got every failed event
+of the period again, including those it had since read through the API. P5-09's Remaining listed
+replays by event type.
+
+Decision:
+
+- **Of the events chosen:** `POST /api/v1/webhook-endpoints/{id}/replay-failed` takes `events`
+  beside `since`: known event types, at least one, kept once each in the list's order. Left out, the
+  failed deliveries of every event are replayed, as before. Settings → Webhooks' replay form offers
+  "Every event" or one of the events the endpoint receives.
+- **Everything else as ADR-095:** the same failed deliveries are chosen (every delivery of the event
+  to the endpoint failed, not `event_gone`, not a test event), oldest event first, 500 per call with
+  `more`, the endpoint locked and on, once per `Idempotency-Key` through the API.
+- **Audit:** `webhook.deliveries_replayed` names the events chosen, as the member or as the key.
+- **No migration:** the filter is one more condition on the event's type in the query that chooses
+  the deliveries.
+
+Not built: replays across endpoints, replays by a delivery's error or HTTP status.
+
+## ADR-157 Each company's usage against the window before (P5-10) (2026-10-05)
+
+Context: the console's Usage tab (ADR-054, ADR-153) shows each company's sending and receipts over
+7, 30 or 90 days, with nothing to compare them with: staff could not tell a company whose sending
+had halved, which often comes before it leaves, from one that always sent little. P5-10's Remaining
+listed trends.
+
+Decision:
+
+- **The window before, for 7 and 30 days:** under Sent and Received, each company's count in the 7
+  or 30 days before the window and how it moved (`+25%`, `-40%`, "none before" when it was 0;
+  nothing when it is 0 in both), and the same for the totals. The CSV (ADR-154) gains "Sent in the
+  window before" and "Received in the window before" as its last two columns.
+- **Not for 90 days:** the activity function reads at most 93 days back (ADR-054), so 180 days
+  cannot be read; the tab says so and the CSV leaves the two columns empty.
+- **Exact, in one snapshot:** the window before is the activity since twice as far back less the
+  window's own. Both are calls of `ops.platform_ops_activity`, which is STABLE, in one statement, so
+  they see the same snapshot and a message written between them cannot be counted in one and not the
+  other. No migration: the definer function is unchanged.
+
+Not built: comparisons of the other figures (failures, webhook deliveries, the plans' counters,
+which are per period), trends over more than two windows, charts, alerts on a fall.

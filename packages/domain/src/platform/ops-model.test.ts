@@ -1,13 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import {
+  HEALTH_CSV_COLUMNS,
   OPS_SIGNAL_RULES,
+  SIGNALS_CSV_COLUMNS,
+  USAGE_CSV_COLUMNS,
+  byHealth,
+  healthCsv,
   healthIssues,
   healthLevel,
+  isOpsExportList,
+  opsCsvFilename,
   qualityRank,
   quarantineExternalIds,
   signalFlags,
+  signalsCsv,
+  usageChange,
+  usageCsv,
   type CompanyActivity,
+  type CompanyHealth,
   type CompanyHealthFacts,
+  type CompanyUsage,
 } from './ops-model';
 
 const healthy: CompanyHealthFacts = {
@@ -184,5 +196,181 @@ describe('quarantine ids', () => {
     expect(quarantineExternalIds({ field: 'messages' })).toEqual([
       { key: 'field', value: 'messages' },
     ]);
+  });
+});
+
+describe('the Usage tab as CSV (ADR-154)', () => {
+  const busy: CompanyUsage = {
+    ...quiet,
+    name: '=HYPERLINK("https://example.com")',
+    outbound: 5,
+    outboundBySender: { agent: 1, bot: 1, campaign: 2, api: 1, system: 0 },
+    failed: 1,
+    inbound: 3,
+    webhookDeliveries: 4,
+    automationRuns: 7,
+    runsPeriodStart: new Date('2026-09-01T00:00:00Z'),
+    members: 2,
+    apiRequests: 42,
+    apiPeriodStart: new Date('2026-09-15T05:30:00Z'),
+    previous: { outbound: 9, inbound: 0 },
+  };
+  const idle: CompanyUsage = {
+    ...quiet,
+    name: 'Quiet, Ltd',
+    slug: 'quiet',
+    status: 'suspended',
+    apiRequests: 0,
+    apiPeriodStart: null,
+    previous: null,
+  };
+
+  it('writes the tab’s columns and a line per company, formula-safe, periods as UTC days', () => {
+    const csv = usageCsv([busy, idle]);
+    expect(csv.startsWith('\uFEFF')).toBe(true);
+    expect(csv.slice(1).split('\r\n')).toEqual([
+      USAGE_CSV_COLUMNS.join(','),
+      `"'=HYPERLINK(""https://example.com"")",acme,active,5,1,1,2,1,0,1,3,4,7,2026-09-01,42,2026-09-15,2,1,9,0`,
+      // No window before (90 days): its two columns stay empty.
+      '"Quiet, Ltd",quiet,suspended,0,0,0,0,0,0,0,0,0,0,,0,,1,1,,',
+      '',
+    ]);
+    expect(USAGE_CSV_COLUMNS).toHaveLength(20);
+    expect(usageCsv([])).toBe(`\uFEFF${USAGE_CSV_COLUMNS.join(',')}\r\n`);
+  });
+
+  it('names the file by its window and the UTC day it was made', () => {
+    expect(opsCsvFilename('usage', new Date('2026-10-05T23:30:00Z'), 30)).toBe(
+      'hyfib-usage-30-days-2026-10-05.csv',
+    );
+    expect(opsCsvFilename('usage', new Date('2026-10-06T00:00:00Z'), 7)).toBe(
+      'hyfib-usage-7-days-2026-10-06.csv',
+    );
+  });
+});
+
+describe('usage against the window before (ADR-157)', () => {
+  it('says how a count moved, rounded, and nothing when it is 0 in both', () => {
+    expect(usageChange(125, 100)).toBe('+25%');
+    expect(usageChange(60, 100)).toBe('-40%');
+    expect(usageChange(0, 3)).toBe('-100%');
+    expect(usageChange(1001, 1000)).toBe('0%');
+    expect(usageChange(999, 1000)).toBe('0%');
+    expect(usageChange(2, 3)).toBe('-33%');
+    expect(usageChange(5, 0)).toBe('none before');
+    expect(usageChange(0, 0)).toBeNull();
+  });
+});
+
+describe('the health and signals lists as CSV (ADR-155)', () => {
+  const assess = (facts: Partial<CompanyHealthFacts>): CompanyHealth => {
+    const all = { ...healthy, ...facts };
+    const issues = healthIssues(all);
+    return { facts: all, issues, level: healthLevel(issues) };
+  };
+
+  it('orders companies worst first, then by how many issues, then by name', () => {
+    const fine = assess({ name: 'Able' });
+    const alsoFine = assess({ name: 'Baker' });
+    const warned = assess({ name: 'Cobalt', deadLetters7d: 1 });
+    // Two warnings come before one, whatever the names.
+    const twice = assess({ name: 'Delta', deadLetters7d: 1, endpointsFailing: 1 });
+    const critical = assess({ name: 'Echo', accountsReconnect: 1 });
+    expect(
+      [alsoFine, warned, fine, critical, twice].sort(byHealth).map((c) => c.facts.name),
+    ).toEqual(['Echo', 'Delta', 'Cobalt', 'Able', 'Baker']);
+  });
+
+  it('writes every company’s facts, level and issues, formula-safe, times to the minute in UTC', () => {
+    const sick = assess({
+      name: '+Sick',
+      slug: 'sick',
+      status: 'restricted',
+      planStatus: 'past_due',
+      numbersTotal: 3,
+      numbersActive: 0,
+      numbersReconnect: 2,
+      numbersFailed: 1,
+      qualityRating: 'yellow',
+      qualityCheckedAt: new Date('2026-10-04T08:15:42Z'),
+      accountsReconnect: 1,
+      outbound24h: 7,
+      failed24h: 4,
+      inbound24h: 5,
+      lastMessageAt: new Date('2026-10-05T06:30:59Z'),
+      endpointsFailing: 2,
+      endpointsAutoDisabled: 1,
+      storesFailed: 3,
+      paymentAccountsFailed: 4,
+      catalogSyncsFailed: 5,
+      flowSyncsFailed: 6,
+      deadLetters7d: 8,
+    });
+    const fresh = assess({
+      name: 'New, Ltd',
+      slug: 'new',
+      planStatus: null,
+      numbersTotal: 0,
+      numbersActive: 0,
+      qualityRating: 'UNKNOWN',
+      qualityCheckedAt: null,
+      outbound24h: 0,
+      inbound24h: 0,
+      lastMessageAt: null,
+    });
+    const csv = healthCsv([sick, fresh]);
+    expect(csv.startsWith('\uFEFF')).toBe(true);
+    expect(csv.slice(1).split('\r\n')).toEqual([
+      HEALTH_CSV_COLUMNS.join(','),
+      // The issues hold commas, so the cell is quoted.
+      `'+Sick,sick,restricted,past_due,2026-09-01,critical,"No active WhatsApp number: 3 numbers to reconnect or set up again; 1 WhatsApp account to reconnect; A number is rated YELLOW; 3 webhook endpoints failing or turned off for failing; Failed: 3 stores, payment account check, catalog sync, 6 Flow syncs; 8 jobs dead-lettered in 7 days; Plan past due",3,0,2,1,YELLOW,2026-10-04 08:15,1,7,4,5,2026-10-05 06:30,2,1,3,4,5,6,8`,
+      '"New, Ltd",new,active,,2026-09-01,ok,,0,0,0,0,,,0,0,0,0,,0,0,0,0,0,0,0',
+      '',
+    ]);
+    expect(HEALTH_CSV_COLUMNS).toHaveLength(25);
+    expect(healthCsv([])).toBe(`\uFEFF${HEALTH_CSV_COLUMNS.join(',')}\r\n`);
+  });
+
+  it('writes the Signals tab’s lines with their signals in words', () => {
+    const loud: CompanyActivity = {
+      ...quiet,
+      name: '@Loud',
+      slug: 'loud',
+      outbound: 120,
+      failed: 30,
+      marketingDelivered: 200,
+      marketingOptOuts: 9,
+      error131050: 21,
+      error131049: 3,
+      complaints: 5,
+    };
+    const csv = signalsCsv([
+      { activity: loud, quality: 'red', flags: signalFlags(loud, 'red') },
+      { activity: { ...quiet, outbound: 4 }, quality: null, flags: [] },
+    ]);
+    expect(csv.startsWith('\uFEFF')).toBe(true);
+    expect(csv.slice(1).split('\r\n')).toEqual([
+      SIGNALS_CSV_COLUMNS.join(','),
+      "'@Loud,loud,active,120,30,200,9,21,3,5,RED,30 of 120 messages failed (25%); 9 marketing opt-outs for 200 marketing templates delivered (5%); 21 sends to people who stopped marketing messages (131050); 5 numbers suppressed after complaints; A number is rated RED",
+      'Acme,acme,active,4,0,0,0,0,0,0,,',
+      '',
+    ]);
+    expect(SIGNALS_CSV_COLUMNS).toHaveLength(12);
+  });
+
+  it('names the lists it exports and their files', () => {
+    expect(['usage', 'health', 'signals', 'onboarding', ''].map(isOpsExportList)).toEqual([
+      true,
+      true,
+      true,
+      false,
+      false,
+    ]);
+    expect(opsCsvFilename('health', new Date('2026-10-05T23:59:59Z'))).toBe(
+      'hyfib-health-2026-10-05.csv',
+    );
+    expect(opsCsvFilename('signals', new Date('2026-10-05T00:00:00Z'), 7)).toBe(
+      'hyfib-signals-7-days-2026-10-05.csv',
+    );
   });
 });

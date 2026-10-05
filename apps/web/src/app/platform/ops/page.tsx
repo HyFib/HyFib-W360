@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import {
   Badge,
+  Button,
   Card,
   CardContent,
   CardDescription,
@@ -82,10 +83,18 @@ export default async function OpsOverviewPage() {
       </section>
       <Card>
         <CardHeader>
-          <CardTitle>Companies needing attention</CardTitle>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle>Companies needing attention</CardTitle>
+            <Button asChild variant="outline" size="sm">
+              <a href="/platform/ops/export/health" download>
+                Download CSV
+              </a>
+            </Button>
+          </div>
           <CardDescription>
             From numbers, sending in the last 24 hours, integrations, dead letters and plans. The
-            thresholds are HyFib&apos;s own (ADR-054).
+            thresholds are HyFib&apos;s own (ADR-054). The CSV has every company&apos;s health,
+            worst first, healthy companies included.
           </CardDescription>
         </CardHeader>
         <CardContent>

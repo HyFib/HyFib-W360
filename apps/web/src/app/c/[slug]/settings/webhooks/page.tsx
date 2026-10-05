@@ -68,6 +68,13 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
           <p>
             An event can arrive more than once and out of order: use its id to ignore repeats. The
             bodies are described in the{' '}
+            <Link
+              className="font-medium underline underline-offset-4"
+              href="/developers#webhook-events"
+            >
+              API reference
+            </Link>{' '}
+            and in the{' '}
             <a
               className="font-medium underline underline-offset-4"
               href="/api/v1/openapi.json"
