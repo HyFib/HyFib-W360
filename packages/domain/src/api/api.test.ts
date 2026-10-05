@@ -110,6 +110,7 @@ import {
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
 } from '../webhooks/service';
+import { WEBHOOK_FAILURE_KINDS } from '../webhooks/model';
 
 describe('API tokens', () => {
   it('have a public prefix, a 256-bit secret and only their SHA-256 is kept', () => {
@@ -1652,6 +1653,9 @@ describe("replaying an endpoint's failed deliveries through the API (ADR-095)", 
       { since: '2026-09-30T08:00:00Z', events: [] },
       { since: '2026-09-30T08:00:00Z', events: ['order.shipped'] },
       { since: '2026-09-30T08:00:00Z', events: 'message.received' },
+      { since: '2026-09-30T08:00:00Z', failures: [] },
+      { since: '2026-09-30T08:00:00Z', failures: ['server_errors'] },
+      { since: '2026-09-30T08:00:00Z', failures: 'no_answer' },
     ]) {
       expect(apiReplayFailedDeliveriesSchema.safeParse(body).success, JSON.stringify(body)).toBe(
         false,
@@ -1666,6 +1670,24 @@ describe("replaying an endpoint's failed deliveries through the API (ADR-095)", 
         events: ['contact.created', 'message.received', 'contact.created'],
       }),
     ).toEqual({ since: '2026-09-30T08:00:00Z', events: ['message.received', 'contact.created'] });
+  });
+
+  it('takes how the failures to replay went, kept once each in the list’s order (ADR-159)', () => {
+    expect(
+      apiReplayFailedDeliveriesSchema.parse({
+        since: '2026-09-30T08:00:00Z',
+        failures: ['not_attempted', 'no_answer', 'server_error', 'no_answer'],
+      }),
+    ).toEqual({
+      since: '2026-09-30T08:00:00Z',
+      failures: ['server_error', 'no_answer', 'not_attempted'],
+    });
+    expect(
+      apiReplayFailedDeliveriesSchema.parse({
+        since: '2026-09-30T08:00:00Z',
+        failures: [...WEBHOOK_FAILURE_KINDS].reverse(),
+      }).failures,
+    ).toEqual(['server_error', 'client_error', 'other_answer', 'no_answer', 'not_attempted']);
   });
 
   it('refuses a time still to come before anything is read', async () => {
@@ -1726,10 +1748,20 @@ describe("replaying an endpoint's failed deliveries through the API (ADR-095)", 
       required: ['since'],
       additionalProperties: false,
     });
-    expect(
-      Object.keys((schemas.ReplayFailedDeliveries as { properties: object }).properties),
-    ).toEqual(['since', 'events']);
+    const replayFields = (
+      schemas.ReplayFailedDeliveries as {
+        properties: Record<string, { items?: { enum?: string[] }; description?: string }>;
+      }
+    ).properties;
+    expect(Object.keys(replayFields)).toEqual(['since', 'events', 'failures']);
+    expect(replayFields.failures?.items?.enum).toEqual([...WEBHOOK_FAILURE_KINDS]);
+    for (const kind of WEBHOOK_FAILURE_KINDS) {
+      expect(replayFields.failures?.description).toContain(`\`${kind}\``);
+    }
     expect(op?.description).toContain('only those of the `events` given');
+    expect(op?.description).toContain(
+      'only those whose latest failed delivery failed in one of the `failures` given',
+    );
     expect(Object.keys((schemas.FailedReplay as { properties: object }).properties)).toEqual([
       'queued',
       'more',

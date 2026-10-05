@@ -734,11 +734,10 @@ Phase 5 rules (outgoing webhooks, P5-09):
 
 - Members with `developer.manage` (owners and administrators) add, edit, turn off, delete and test
   the company's webhook endpoints, rotate their secrets and replay deliveries, one at a time or an
-  endpoint's failed ones together, of every event or of those chosen (ADR-095, ADR-156); API keys
-  with `webhooks.manage` do the same for the
-  endpoints keys added (ADR-081, ADR-083). Every change is
-  audited with the endpoint's host only; the full URL (which may carry a receiver's token) and the
-  secret are never logged.
+  endpoint's failed ones together, of every event or of those chosen, and of every failure or of
+  those chosen (ADR-095, ADR-156, ADR-159); API keys with `webhooks.manage` do the same for the
+  endpoints keys added (ADR-081, ADR-083). Every change is audited with the endpoint's host only;
+  the full URL (which may carry a receiver's token) and the secret are never logged.
 - An endpoint's URL must pass the egress guard's rules when saved (https, no credentials, port 443
   or from 1024) and every request goes through the egress guard: private, loopback, link-local,
   metadata and reserved addresses are refused after DNS resolution, the connection is pinned to the

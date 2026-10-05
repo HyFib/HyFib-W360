@@ -1069,12 +1069,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   locks the endpoint (refused when off), selects for each event the latest failed delivery to it
   queued since the given time (`DISTINCT ON (event_id)` over `webhook_deliveries_endpoint_idx`),
   drops `event_gone` failures (but not `payload_failed` ones, sent once HyFib fixed the cause),
-  `ping` events, events of other types than those given (`events`, ADR-156) and events with any
-  delivery to the endpoint that did not fail (`webhook_deliveries_event_idx`), and inserts up to
-  `WEBHOOK_LIMITS.replayBatch` (500) new deliveries oldest event first, reading one more row to say
-  whether more remain. Settings (`webhooks.replayFailed`, a period) and the API
-  (`POST /webhook-endpoints/{id}/replay-failed`, `since`, inside `idempotent`, `keysOnly`) call it
-  and audit once per call.
+  `ping` events, events of other types than those given (`events`, ADR-156), events whose latest
+  failed delivery failed in other ways than those given (`failures`, ADR-159: by its code when it
+  has one, `endpoint_disabled` and `payload_failed` not attempted and any other no valid answer,
+  else by its status, 5xx, 4xx or another) and events with any delivery to the endpoint that did not
+  fail (`webhook_deliveries_event_idx`), and inserts up to `WEBHOOK_LIMITS.replayBatch` (500) new
+  deliveries oldest event first, reading one more row to say whether more remain. Settings
+  (`webhooks.replayFailed`, a period) and the API (`POST /webhook-endpoints/{id}/replay-failed`,
+  `since`, inside `idempotent`, `keysOnly`) call it and audit once per call.
 - **Notes through the API (0060–0062, ADR-084):** `POST /conversations/{id}/notes` with
   `conversations.write` (`apiAddConversationNote`, `api/conversations.ts`) runs inside `idempotent`:
   it locks the conversation `FOR UPDATE` (the order erasure takes), checks that it is visible (the

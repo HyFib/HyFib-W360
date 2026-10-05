@@ -1,5 +1,63 @@
 # Progress
 
+## 2026-10-05 — Phase 5: replaying an endpoint's failed deliveries by how they failed (P5-09, ADR-159)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A replay of an
+endpoint's failed deliveries sent the events a receiver had refused again with those it had missed.
+The local PostgreSQL is unavailable (its Docker daemon stopped), so the integration and e2e tests
+below were written but not run here.
+
+### Completed
+
+- **Design (ADR-159):** five kinds of failure by the latest failed delivery's code, else its status;
+  `failures` on `POST /webhook-endpoints/{id}/replay-failed` and a "Failures" choice in Settings →
+  Webhooks' replay form; the rest of ADR-095 and ADR-156 unchanged; the audit entry names the kinds.
+- **Domain:** `webhooks/model.ts` (`WEBHOOK_FAILURE_KINDS`, their labels,
+  `WEBHOOK_UNATTEMPTED_ERRORS`); `webhooks/service.ts` (`webhookFailureKindsSchema`;
+  `replayFailedWebhookDeliveries` takes `failures`, one more condition on the latest failed
+  delivery's code and status; the settings schema and audit); `api/webhook-endpoints.ts` (the body's
+  `failures`, described kind by kind, passed and audited); `api/openapi.ts` (the operation's
+  description).
+- **Web:** the replay form's "Failures" choice (every failure, or one kind) and its server action.
+- **Tests:**
+  - Unit (1 new and 2 extended in `api.test.ts`): the kinds kept once each in the list's order; an
+    empty list, an unknown kind and a string refused; the schema's properties, the field's kinds and
+    description, and the operation's description.
+  - Integration (1 new in `webhooks.test.ts`, 1 extended in `api-webhook-endpoints.test.ts`): each
+    kind replayed alone, at the edges of its statuses (500 and 599, 400 and 499, 101 and 302) and
+    with its codes (a timeout, a status that was not valid, an interrupted attempt after a 503, the
+    endpoint turned off after a 500, a request not prepared); an event whose earlier delivery was
+    answered 500 and whose latest got no answer counted by the latest, and its replay naming it; a
+    refused consent event left out when only messages are chosen; nothing left of the kinds
+    replayed; the audit names the kinds; unknown kinds and an empty list refused; through the API,
+    two messages whose code says more than their 500 left out of server errors and queued with no
+    valid answer, audited with the kinds. Written for CI; not run here.
+  - E2E (`webhooks.spec.ts` extended): the replay form lists every failure and the five kinds; the
+    endpoint's deliveries, answered 500 and then ended when it was turned off, are not server errors
+    (nothing queued) and come back as not attempted. Written for CI; not run here.
+- **Docs:** ADR-159; SECURITY (the webhook rules); ARCHITECTURE; BACKLOG P5-09; feature matrix H-014
+  and W-139.
+- **Mutation checks:** 8 tried, all caught on the unit-tested parts (an empty list accepted, a kind
+  missing from the list, kinds kept in the order given or twice, kinds reordered, the API field
+  renamed, a kind misnamed in its description, the operation not mentioning the kinds). The
+  service's condition, its audit and the form need the database, so their regressions are left to
+  the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 721 passed (75 files; 1 new, 2 extended)                        |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 8 tried, all caught on the unit-tested parts                    |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Replays by one status or error code, replays across endpoints.
+
 ## 2026-10-05 — Phase 5: exporting the console's action lists (P5-10, ADR-158)
 
 Status: **Implemented; its database tests run in CI only (test data only).** The Onboarding,

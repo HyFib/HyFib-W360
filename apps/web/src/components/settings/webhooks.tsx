@@ -11,6 +11,8 @@ import {
   WEBHOOK_CONVERSATION_STATUSES,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
+  WEBHOOK_FAILURE_KINDS,
+  WEBHOOK_FAILURE_LABELS,
   WEBHOOK_LIMITS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_MESSAGE_STATUSES,
@@ -28,6 +30,7 @@ import {
   type WebhookContactPart,
   type WebhookConversationStatus,
   type WebhookEventType,
+  type WebhookFailureKind,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookReplayPeriod,
@@ -978,8 +981,10 @@ export function ReplayFailedDeliveriesForm({
 }) {
   const selectId = useId();
   const eventId = useId();
+  const failureId = useId();
   const [period, setPeriod] = useState<WebhookReplayPeriod>('24h');
   const [eventType, setEventType] = useState<WebhookEventType | ''>('');
+  const [failure, setFailure] = useState<WebhookFailureKind | ''>('');
   const [error, setError] = useState<ActionFailureState | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -992,13 +997,17 @@ export function ReplayFailedDeliveriesForm({
         setBusy(true);
         setError(null);
         setDone(null);
-        void replayFailedWebhookDeliveriesAction(slug, endpointId, period, eventType || null).then(
-          (r) => {
-            setBusy(false);
-            if (r.ok) setDone(webhookReplaySummary(r.data));
-            else setError(r);
-          },
-        );
+        void replayFailedWebhookDeliveriesAction(
+          slug,
+          endpointId,
+          period,
+          eventType || null,
+          failure || null,
+        ).then((r) => {
+          setBusy(false);
+          if (r.ok) setDone(webhookReplaySummary(r.data));
+          else setError(r);
+        });
       }}
     >
       <div className="flex flex-wrap items-end gap-2">
@@ -1029,6 +1038,22 @@ export function ReplayFailedDeliveriesForm({
             {events.map((type) => (
               <option key={type} value={type}>
                 {WEBHOOK_EVENT_INFO[type].label} ({type})
+              </option>
+            ))}
+          </Select>
+        </div>
+        <div className="grid gap-1">
+          <Label htmlFor={failureId}>Failures</Label>
+          <Select
+            id={failureId}
+            className="w-auto min-w-40"
+            value={failure}
+            onChange={(e) => setFailure(e.target.value as WebhookFailureKind | '')}
+          >
+            <option value="">Every failure</option>
+            {WEBHOOK_FAILURE_KINDS.map((kind) => (
+              <option key={kind} value={kind}>
+                {WEBHOOK_FAILURE_LABELS[kind]}
               </option>
             ))}
           </Select>

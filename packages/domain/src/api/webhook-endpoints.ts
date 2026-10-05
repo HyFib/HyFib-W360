@@ -69,6 +69,7 @@ import {
   WEBHOOK_PARTS_NEED_THE_EVENT,
   WEBHOOK_STATUSES_NEED_THE_EVENT,
   webhookEventTypesSchema,
+  webhookFailureKindsSchema,
   webhookHeadersSchema,
   webhookMessageStatusesFor,
   webhookMessageStatusesSchema,
@@ -389,6 +390,11 @@ export const apiReplayFailedDeliveriesSchema = z
       .optional()
       .describe(
         'Replay only the failed deliveries of these events. Left out, those of every event are replayed.',
+      ),
+    failures: webhookFailureKindsSchema
+      .optional()
+      .describe(
+        'Replay only the events whose latest failed delivery failed in one of these ways: `server_error` (answered with HTTP 5xx), `client_error` (HTTP 4xx), `other_answer` (HTTP 1xx or 3xx; redirects are not followed), `no_answer` (no valid answer: a timeout, a host or address that failed, a broken connection, an answer too large or without a valid status, an interrupted attempt) or `not_attempted` (ended without an attempt: the endpoint was off, or HyFib could not prepare the request). Left out, every failure is replayed.',
       ),
   })
   .strict();
@@ -1082,7 +1088,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
     ): Promise<ApiResponse> {
       assertScope(ctx, 'webhooks.manage');
       endpointId(id);
-      const { since, events } = parseInput(apiReplayFailedDeliveriesSchema, input);
+      const { since, events, failures } = parseInput(apiReplayFailedDeliveriesSchema, input);
       const now = clock.now();
       const from = new Date(since);
       if (from.getTime() > now.getTime()) {
@@ -1093,11 +1099,13 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           const replayed = await replayFailedWebhookDeliveries(tx, ctx.tenant.id, id, from, {
             keysOnly: true,
             events,
+            failures,
           });
           await audit(tx, ctx, 'webhook.deliveries_replayed', id, {
             host: webhookHost(replayed.endpoint.url),
             since: from.toISOString(),
             ...(events ? { events } : {}),
+            ...(failures ? { failures } : {}),
             queued: replayed.queued,
             more: replayed.more,
           });

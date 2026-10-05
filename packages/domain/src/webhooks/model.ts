@@ -338,6 +338,35 @@ export const WEBHOOK_REPLAY_PERIODS = [
 
 export type WebhookReplayPeriod = (typeof WEBHOOK_REPLAY_PERIODS)[number]['key'];
 
+/**
+ * How a failed delivery's last attempt went, to replay only some failures (ADR-159): answered with
+ * a server error (HTTP 5xx), refused (HTTP 4xx), answered otherwise (HTTP 1xx or 3xx: redirects are
+ * not followed), not validly answered (a timeout, a host or address that failed, a broken
+ * connection, an answer too large or without a valid status, an interrupted attempt), or ended
+ * without an attempt (the endpoint was off, or HyFib could not prepare the request). A code says
+ * more than a status, as in `webhookErrorLabel`.
+ */
+export const WEBHOOK_FAILURE_KINDS = [
+  'server_error',
+  'client_error',
+  'other_answer',
+  'no_answer',
+  'not_attempted',
+] as const;
+
+export type WebhookFailureKind = (typeof WEBHOOK_FAILURE_KINDS)[number];
+
+export const WEBHOOK_FAILURE_LABELS: Record<WebhookFailureKind, string> = {
+  server_error: 'Server errors (HTTP 5xx)',
+  client_error: 'Refused (HTTP 4xx)',
+  other_answer: 'Other answers (HTTP 1xx or 3xx)',
+  no_answer: 'No valid answer (timeouts, connection errors)',
+  not_attempted: 'Not attempted (endpoint off, request not prepared)',
+};
+
+/** The codes that end a delivery without an attempt; `event_gone` ones are never replayed. */
+export const WEBHOOK_UNATTEMPTED_ERRORS = ['endpoint_disabled', 'payload_failed'] as const;
+
 /** What a replay of failed deliveries did, in the words Settings → Webhooks shows it. */
 export function webhookReplaySummary(result: { queued: number; more: boolean }): string {
   if (result.queued === 0) return 'No failed deliveries to replay from that period.';

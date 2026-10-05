@@ -1707,13 +1707,48 @@ describe('replaying failed deliveries through the API (ADR-095)', () => {
       api().replayFailed(key.ctx, id, { since, events: ['nope'] }, idem('rf-11', 'nope')),
       'validation_failed',
     );
+    // Only the failures given (ADR-159): two more failed messages whose code says there was no valid
+    // answer, which says more than the 500 an earlier attempt left, so server errors leave them out.
+    await failedDeliveries(c, id, 2);
+    const servers = { since, failures: ['server_error'] };
+    expect(
+      (await api().replayFailed(key.ctx, id, servers, idem('rf-12', JSON.stringify(servers)))).body,
+    ).toEqual({ data: { queued: 0, more: false } });
+    const unanswered = {
+      since,
+      events: ['message.received'],
+      failures: ['no_answer', 'server_error'],
+    };
+    expect(
+      (await api().replayFailed(key.ctx, id, unanswered, idem('rf-13', JSON.stringify(unanswered))))
+        .body,
+    ).toEqual({ data: { queued: 2, more: false } });
+    const [kinds] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.deliveries_replayed'
+        ORDER BY occurred_at DESC, id DESC LIMIT 1`,
+      [c.tenant.id],
+    );
+    expect(kinds?.metadata).toEqual({
+      host: HOST,
+      since,
+      events: ['message.received'],
+      failures: ['server_error', 'no_answer'],
+      queued: 2,
+      more: false,
+      source: 'api',
+    });
+    await expectAppError(
+      api().replayFailed(key.ctx, id, { since, failures: ['timeouts'] }, idem('rf-14', 'timeouts')),
+      'validation_failed',
+    );
     await settings().setEnabled(owner, { endpointId: id, enabled: false });
     await expectAppError(
       api().replayFailed(key.ctx, id, { since }, idem('rf-8', since)),
       'precondition_failed',
     );
     // No refusal queued anything.
-    expect(await replays()).toHaveLength(4);
+    expect(await replays()).toHaveLength(6);
     expect(
       await fx.query(
         'SELECT 1 FROM app.webhook_deliveries WHERE endpoint_id = $1 AND replay_of IS NOT NULL',

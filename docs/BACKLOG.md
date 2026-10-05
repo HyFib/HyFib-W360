@@ -646,12 +646,15 @@ verification, app review, Embedded Signup configuration).
   the API, or every end as before; applied where events are captured, with the automations it
   names). **[Replays by event type built; their database tests run only in CI]** (ADR-156: an
   endpoint's failed deliveries replayed for the events chosen only, `events` through the API or one
-  of the endpoint's events in Settings, audited with them). Remaining: filters for other event types
-  and on a message's or contact's values (such as by campaign, template, tag or field key, or a
-  run's trigger or end reason), which tags were added or removed, other authentication (OAuth client
-  credentials, headers computed per delivery), mutual TLS, fixed egress addresses, events for store
-  orders, Payment Links and each step of a run, `createdAt` finer than the millisecond, replays
-  across endpoints, load tests.
+  of the endpoint's events in Settings, audited with them). **[Replays by how deliveries failed
+  built; their database tests run only in CI]** (ADR-159: only the events whose latest failed
+  delivery was answered with a server error, refused, answered otherwise, not validly answered or
+  not attempted, as chosen, `failures` through the API or one kind in Settings, audited with them).
+  Remaining: filters for other event types and on a message's or contact's values (such as by
+  campaign, template, tag or field key, or a run's trigger or end reason), which tags were added or
+  removed, other authentication (OAuth client credentials, headers computed per delivery), mutual
+  TLS, fixed egress addresses, events for store orders, Payment Links and each step of a run,
+  `createdAt` finer than the millisecond, replays across endpoints, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

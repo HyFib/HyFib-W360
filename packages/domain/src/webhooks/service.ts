@@ -32,12 +32,14 @@ import {
   WEBHOOK_CONTACT_PARTS,
   WEBHOOK_CONVERSATION_STATUSES,
   WEBHOOK_EVENT_KEYS,
+  WEBHOOK_FAILURE_KINDS,
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_TEMPLATE_STATUSES,
+  WEBHOOK_UNATTEMPTED_ERRORS,
   webhookHost,
   webhookTakesAutomationRuns,
   type WebhookAutomationChoice,
@@ -45,6 +47,7 @@ import {
   type WebhookContactPart,
   type WebhookConversationStatus,
   type WebhookEndpointAutomation,
+  type WebhookFailureKind,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookRunEndStatus,
@@ -447,6 +450,12 @@ export const webhookEventTypesSchema = z
   .min(1, 'Choose at least one event')
   .transform((chosen) => WEBHOOK_EVENT_KEYS.filter((e) => chosen.includes(e)));
 
+/** How the failures to replay went (ADR-159): known kinds, at least one, once each in order. */
+export const webhookFailureKindsSchema = z
+  .array(z.enum(WEBHOOK_FAILURE_KINDS, { error: 'Choose failures from the list' }))
+  .min(1, 'Choose at least one kind of failure')
+  .transform((chosen) => WEBHOOK_FAILURE_KINDS.filter((k) => chosen.includes(k)));
+
 const endpointFields = z.object({
   url: z
     .string({ error: 'Enter the endpoint URL' })
@@ -568,6 +577,7 @@ const replayFailedSchema = endpointIdSchema.extend({
     { error: 'Choose a period from the list' },
   ),
   events: webhookEventTypesSchema.optional(),
+  failures: webhookFailureKindsSchema.optional(),
 });
 
 export interface WebhookEndpointView {
@@ -959,23 +969,36 @@ export interface WebhookFailedReplay {
  * queued included), deliveries that failed because what the event names no longer exists
  * (`event_gone`, which would fail again at once) and test events. The endpoint is locked first, so
  * calls at the same time queue each event once. With `keysOnly`, only endpoints keys added are found
- * (ADR-083); with `events`, only the failed deliveries of those events are replayed (ADR-156).
+ * (ADR-083); with `events`, only the failed deliveries of those events are replayed (ADR-156); with
+ * `failures`, only events whose latest failed delivery failed in one of those ways (ADR-159).
  */
 export async function replayFailedWebhookDeliveries(
   tx: Tx,
   tenantId: string,
   endpointId: string,
   since: Date,
-  options: { keysOnly?: boolean; events?: readonly WebhookEventType[] } = {},
+  options: {
+    keysOnly?: boolean;
+    events?: readonly WebhookEventType[];
+    failures?: readonly WebhookFailureKind[];
+  } = {},
 ): Promise<WebhookFailedReplay & { endpoint: LockedWebhookEndpoint }> {
   const endpoint = await lockWebhookEndpoint(tx, tenantId, endpointId, 'no key update', options);
   if (endpoint.state !== 'active') {
     throw new AppError('precondition_failed', 'Turn the endpoint on to replay deliveries.');
   }
+  // How the latest failed delivery's last attempt went (WEBHOOK_FAILURE_KINDS): a code says more
+  // than a status an earlier attempt left. A failed delivery has one or the other; a 2xx succeeds.
+  const failureKind = sql`case
+    when f.last_error = any(${sql.param([...WEBHOOK_UNATTEMPTED_ERRORS])}::text[]) then 'not_attempted'
+    when f.last_error is not null then 'no_answer'
+    when f.last_status_code between 500 and 599 then 'server_error'
+    when f.last_status_code between 400 and 499 then 'client_error'
+    when f.last_status_code is not null then 'other_answer' end`;
   const failed = await tx.execute<{ id: string; event_id: string }>(sql`
     select f.id, f.event_id
       from (
-        select distinct on (d.event_id) d.id, d.event_id, d.last_error
+        select distinct on (d.event_id) d.id, d.event_id, d.last_error, d.last_status_code
           from app.webhook_deliveries d
          where d.tenant_id = ${tenantId} and d.endpoint_id = ${endpointId}
            and d.state = 'failed' and d.created_at >= ${since.toISOString()}::timestamptz
@@ -985,6 +1008,7 @@ export async function replayFailedWebhookDeliveries(
      where f.last_error is distinct from 'event_gone'
        and e.type <> 'ping'
        and ${options.events ? sql`e.type = any(${sql.param([...options.events])}::text[])` : sql`true`}
+       and ${options.failures ? sql`${failureKind} = any(${sql.param([...options.failures])}::text[])` : sql`true`}
        and not exists (
          select 1 from app.webhook_deliveries o
           where o.tenant_id = ${tenantId} and o.event_id = f.event_id
@@ -1501,12 +1525,13 @@ export function createWebhooksService(deps: {
       meta: RequestMeta = {},
     ): Promise<WebhookFailedReplay> {
       assertCan(ctx, 'developer.manage');
-      const { endpointId, period, events } = parseInput(replayFailedSchema, input);
+      const { endpointId, period, events, failures } = parseInput(replayFailedSchema, input);
       const hours = WEBHOOK_REPLAY_PERIODS.find((p) => p.key === period)?.hours ?? 1;
       const since = new Date(clock.now().getTime() - hours * 3_600_000);
       return db.run(ctx.scope, async (tx) => {
         const replayed = await replayFailedWebhookDeliveries(tx, ctx.tenant.id, endpointId, since, {
           events,
+          failures,
         });
         await recordAudit(
           tx,
@@ -1519,6 +1544,7 @@ export function createWebhooksService(deps: {
               host: webhookHost(replayed.endpoint.url),
               since: since.toISOString(),
               ...(events ? { events } : {}),
+              ...(failures ? { failures } : {}),
               queued: replayed.queued,
               more: replayed.more,
             },

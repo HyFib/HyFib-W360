@@ -6307,3 +6307,38 @@ Decision:
 Not built: exports beyond the rows a tab lists (its latest 100 dead letters, receipts and quarantine
 entries, 200 signups and number setups, 500 failures and new companies), an export of the Keys tab,
 other formats, scheduled exports.
+
+## ADR-159 Replaying an endpoint's failed deliveries by how they failed (P5-09) (2026-10-05)
+
+Context: ADR-156 let a replay of an endpoint's failed deliveries choose the events. A receiver that
+was down for an hour, answering 502 or not answering at all, and that also refused some events for
+reasons of its own (a 400 for a payload its handler rejects) got the refused events again with the
+rest when the period was replayed, to refuse them again. ADR-156 left out replays by a delivery's
+error or HTTP status.
+
+Decision:
+
+- **Five kinds of failure,** by how the event's latest failed delivery to the endpoint ended: server
+  errors (HTTP 5xx), refused (HTTP 4xx), other answers (HTTP 1xx or 3xx: redirects are not
+  followed), no valid answer (a timeout, a host or address that failed, a broken connection, an
+  answer too large or without a valid status, an attempt its worker stopped during) and not
+  attempted (the endpoint was turned off, or HyFib could not prepare the request). As the
+  deliveries list says it, a code that ended the delivery says more than the status an earlier
+  attempt left: a delivery answered 500 and then ended when the endpoint was turned off was not
+  attempted, and one answered 503 and then interrupted got no valid answer.
+- **Of the failures chosen:** `POST /api/v1/webhook-endpoints/{id}/replay-failed` takes `failures`
+  beside `since` and `events`: `server_error`, `client_error`, `other_answer`, `no_answer` and
+  `not_attempted`, at least one, kept once each in that order. Left out, every failure is replayed,
+  as before. Settings → Webhooks' replay form offers "Every failure" or one kind, beside the events.
+- **The latest failed delivery decides,** the one a replay names in `replayOf`: an event answered
+  500 and then replayed without an answer is replayed again with "No valid answer", not with the
+  server errors.
+- **Everything else as ADR-095 and ADR-156:** the same events are chosen (every delivery of the
+  event to the endpoint failed, not `event_gone`, not a test event), oldest event first, 500 per
+  call with `more`, the endpoint locked and on, once per `Idempotency-Key` through the API.
+- **Audit:** `webhook.deliveries_replayed` names the failures chosen, beside the events, as the
+  member or as the key.
+- **No migration:** one more condition on the latest failed delivery's code and status in the query
+  that chooses the deliveries.
+
+Not built: replays by one status or error code, replays across endpoints.
