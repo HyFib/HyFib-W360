@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { expect, test } from './fixtures';
 import {
   connectTestChannel,
@@ -18,7 +19,7 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
   page,
   request,
 }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(240_000);
   const email = uniqueEmail('campaigns');
   const slug = `cmp-${Date.now().toString(36)}`;
   await signUpAndVerify(page, { name: 'Cam Campaigns', email, password: PASSWORD });
@@ -366,4 +367,86 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
   await page.reload();
   await expect(page.getByText('Cancelled', { exact: true }).first()).toBeVisible();
   await expect(page.getByRole('listitem').filter({ hasText: byKey })).toHaveCount(2);
+
+  // A key that writes drafts creates one from the completed campaign's number and template and
+  // edits it (ADR-186); members find it in the app, its history naming the key, and a key that only
+  // reads campaigns gets no settings.
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Campaign drafts');
+  await page.getByRole('checkbox', { name: /Create and edit campaign drafts/ }).check();
+  await page.getByRole('checkbox', { name: /Read campaigns/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const draftField = page.getByLabel('API key', { exact: true });
+  await expect(draftField).toBeVisible();
+  const draftAuth = { Authorization: `Bearer ${await draftField.inputValue()}` };
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const spring = (
+    (await (await request.get(`/api/v1/campaigns/${campaignId}`, { headers: auth })).json()) as {
+      data: { templateId: string; channel: { id: string } };
+    }
+  ).data;
+  const readerCreates = await request.post('/api/v1/campaigns', {
+    headers: auth,
+    data: { name: 'Not allowed' },
+  });
+  expect(readerCreates.status()).toBe(403);
+  const drafted = await request.post('/api/v1/campaigns', {
+    headers: { ...draftAuth, 'Idempotency-Key': randomUUID() },
+    data: {
+      name: 'Winter preview',
+      channelId: spring.channel.id,
+      templateId: spring.templateId,
+      variables: { body: [{ source: 'name', fallback: 'there' }] },
+      audience: { conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
+    },
+  });
+  expect(drafted.status()).toBe(201);
+  const winter = ((await drafted.json()) as { data: { id: string } & Record<string, unknown> })
+    .data;
+  expect(winter).toMatchObject({
+    name: 'Winter preview',
+    status: 'draft',
+    templateName: 'spring_sale',
+    version: 1,
+    settings: { audience: { match: 'all', conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] } },
+  });
+  const edited = await request.patch(`/api/v1/campaigns/${winter.id}`, {
+    headers: draftAuth,
+    data: { expectedVersion: 1, maxMessages: 500 },
+  });
+  expect(edited.status()).toBe(200);
+  expect(((await edited.json()) as { data: unknown }).data).toMatchObject({
+    version: 2,
+    settings: { maxMessages: 500 },
+  });
+  // A change made from a version read before is refused, and changes nothing.
+  const stale = await request.patch(`/api/v1/campaigns/${winter.id}`, {
+    headers: draftAuth,
+    data: { expectedVersion: 1, maxMessages: 400 },
+  });
+  expect(stale.status()).toBe(409);
+  const readOnly = await request.get(`/api/v1/campaigns/${winter.id}`, { headers: auth });
+  expect(((await readOnly.json()) as { data: unknown }).data).toMatchObject({
+    id: winter.id,
+    status: 'draft',
+    version: null,
+    settings: null,
+  });
+  // A completed campaign is not edited, and the refusal names its status.
+  const notDraft = await request.patch(`/api/v1/campaigns/${campaignId}`, {
+    headers: draftAuth,
+    data: { maxMessages: 400 },
+  });
+  expect(notDraft.status()).toBe(409);
+  expect(((await notDraft.json()) as { error: unknown }).error).toMatchObject({
+    code: 'conflict',
+    message: "Only draft campaigns can be edited. This campaign's status is completed.",
+  });
+  await page.goto(`/c/${slug}/campaigns/${winter.id}`);
+  await expect(page.getByRole('heading', { name: 'Winter preview', level: 1 })).toBeVisible();
+  const byDrafts = 'through the API, key “Campaign drafts”';
+  await expect(page.getByRole('listitem').filter({ hasText: byDrafts })).toHaveCount(2);
+  await expect(
+    page.getByRole('listitem').filter({ hasText: 'Created' }).filter({ hasText: byDrafts }),
+  ).toHaveCount(1);
 });

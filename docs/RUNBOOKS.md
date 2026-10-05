@@ -1801,6 +1801,21 @@ who launched the campaign has left or can no longer send campaigns (a member who
 the app, under their own authority). 423 means the company is suspended or its plan ended. To stop a
 key from resuming campaigns, revoke it and create one without the scope.
 
+**A key created or changed a campaign draft, or `POST /api/v1/campaigns` or
+`PATCH /api/v1/campaigns/{id}` answers 403, 404, 409, 422 or 423 (ADR-186).** The draft's history
+names the key ("Created through the API, key “name”", "Edited through the API, key “name”"), and
+Settings → Audit log lists `campaign.created` and `campaign.updated` with the key as the actor and
+the request's id. A key's draft sends nothing until a member submits and starts it. 403 `forbidden`
+names the scope the key lacks, `campaigns.write` (create a key with it), or `not_in_plan` (ADR-092).
+404 names what is not the company's: the campaign, the WhatsApp number, the template or the segment
+(an archived segment too). 409 names the campaign's status (only drafts are edited) or, with
+`expectedVersion`, the draft's version: someone changed it since the key read it, so read it again
+(`GET /campaigns/{id}` with a key that also holds `campaigns.write`) and retry. 422 names the
+setting that failed members' checks (a condition by segments' rules, the time zone, the window, the
+date and time, the spending cap). 423 means the company is suspended or its plan ended. To stop a
+key from writing drafts, revoke it and create one without the scope; members edit or cancel the
+drafts it wrote in the app.
+
 **`GET /api/v1/orders` answers 403 or 404, or an order seems missing (ADR-167).** 403 `forbidden`
 names the scope the key lacks, `orders.read` (keys keep the scopes they were created with: create a
 key with it); reason `not_in_plan` means the company's plan leaves out Commerce or the scope
@@ -2845,6 +2860,12 @@ it all back (usually the bootstrap roles, or a lock held on the table: fix it an
 again). Web servers of this release need it before they start, or Settings → Webhooks and the
 endpoints API fail (their reads of endpoints name the column); workers of either release and web
 servers of the previous release work with it.
+
+**Migration 0134 failed.** It replaces `api_keys_scopes_check` on `app.api_keys` and
+`plans_api_scopes_check` on `ops.plans` with checks that also accept `campaigns.write`, in one
+transaction; a failure rolls it all back (usually a lock held on one of the tables: run the
+migrations again). Web servers of this release need it before a key or plan version holds the new
+scope; those of the previous release work with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

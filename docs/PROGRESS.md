@@ -1,5 +1,62 @@
 # Progress
 
+## 2026-10-05 — Phase 5: creating and editing campaign drafts through the public API (P5-08, ADR-186)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Keys
+read, paused, cancelled and resumed campaigns, but every campaign was made in the app. The local
+PostgreSQL is unavailable (its Docker daemon stopped), so migration 0134, the integration tests and
+the changed e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-186):** `campaigns.write` (granted with members' `campaigns.write`);
+  `POST /campaigns` and `PATCH /campaigns/{id}` for drafts only, with members' checks and a version;
+  settings answered to keys with the scope; submitting and starting stay with members.
+- **Database:** migration 0134 (the key and plan scope checks with 18 scopes); the scope in
+  `packages/db`.
+- **Domain:** members' draft save split into `prepareCampaignDraft` and `writeLockedCampaignDraft`,
+  shared with the API; `campaignDraftInputOf` and `microsToAmount`; `apiCreateCampaign`,
+  `apiUpdateCampaign`, `apiDraftInputFrom` and the settings and version in `GET /campaigns/{id}`;
+  the scope; the OpenAPI document (`createCampaign`, `updateCampaign`).
+- **Web:** `POST /api/v1/campaigns` and `PATCH /api/v1/campaigns/{id}`; Settings → API keys offers
+  the scope from the scope list.
+- **Tests:**
+  - Unit (6 new and 3 changed in `api.test.ts`): the scope, refusals before any read, the schemas,
+    keeping and clearing settings, the stored values read back through members' checks, the OpenAPI
+    entries.
+  - Integration (2 new in `api-campaigns.test.ts`): creating with every setting once per
+    Idempotency-Key, members' refusals, the history and audit naming the key, a member starting a
+    key's draft; editing, versions against a member's edit, a submitted campaign, another company's
+    draft. Written for CI; not run here.
+  - E2E (1 changed in `campaigns.spec.ts`): a key creates and edits a draft, a stale version and a
+    completed campaign are refused, a reading key gets no settings, and the draft's history names
+    the key. Written for CI; not run here.
+- **Docs:** ADR-186 (and the "Not built" of ADR-125, ADR-128 and ADR-176 annotated); SECURITY;
+  ARCHITECTURE; THREAT-MODEL T180; DEPLOYMENT and RUNBOOKS (migration 0134, a key's draft); BACKLOG
+  P5-08; feature matrix H-033 and W-134.
+- **Mutation checks:** 19 deliberate regressions tried, all caught on the unit-tested parts (the
+  scope's kind, permission and place, a blank name, unknown fields, an empty audience, groups, a
+  version alone, null keeping a setting, the time zone, the stored values, the time to send, the
+  idempotency parameter, the conflict, settings for every key). The services' checks and the routes
+  need the database or a browser, so their regressions are left to the integration and e2e tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 834 passed (82 files)                                                |
+| `pnpm test:integration`, e2e, migration 0134       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 19 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Submitting, approving and starting through the API; cancelling or deleting drafts; test sends; a
+  draft's review through the API; many drafts in one call.
+
 ## 2026-10-05 — Phase 5: choosing the campaigns whose message statuses and changes a webhook endpoint receives (P5-09, ADR-185)
 
 Status: **Implemented; its database and browser tests run in CI only (test receivers only).** An

@@ -4779,10 +4779,10 @@ Decision:
   at once, as 0092 did (one row per key and per plan version).
 
 Not built: changing campaigns through the API (creating, submitting, approving, pausing, resuming or
-cancelling them; pausing and cancelling since ADR-128), each recipient's outcome (since ADR-127),
-costs, filters by template, number or time, results for a time range or grouped by day, and campaign
-results in `campaign.status_changed` (ADR-087 left them out: they change with every message status;
-built by ADR-150, counted when each event is delivered).
+cancelling them; pausing and cancelling since ADR-128, creating and editing drafts since ADR-186),
+each recipient's outcome (since ADR-127), costs, filters by template, number or time, results for a
+time range or grouped by day, and campaign results in `campaign.status_changed` (ADR-087 left them
+out: they change with every message status; built by ADR-150, counted when each event is delivered).
 
 ## ADR-126 Conversation and campaign conditions in contact searches through the public API (2026-10-03)
 
@@ -4944,9 +4944,9 @@ Decision:
   campaigns' pause reason check with `api` added; existing rows already satisfy them.
 
 Not built: resuming (built by ADR-176 for the campaigns keys paused), approving, scheduling,
-creating or editing campaigns through the API, cancelling drafts, stopping many campaigns in one
-call, a reason or note given with the call, and `campaign.status_changed` naming who cancelled a
-campaign.
+creating or editing campaigns through the API (drafts: built by ADR-186), cancelling drafts,
+stopping many campaigns in one call, a reason or note given with the call, and
+`campaign.status_changed` naming who cancelled a campaign.
 
 ## ADR-129 Database errors without the data they quote (SEC-11) (2026-10-03)
 
@@ -7113,8 +7113,8 @@ Decision:
   existing rows already satisfy them.
 
 Not built: resuming through the API what members or HyFib paused, a key as a campaign's launcher,
-raising caps, approving, scheduling, creating or editing campaigns through the API, and resuming
-many campaigns in one call.
+raising caps, approving, scheduling, creating or editing campaigns through the API (drafts: built by
+ADR-186), and resuming many campaigns in one call.
 
 ## ADR-177 Acknowledging late queues on the operations console (P5-10) (2026-10-05)
 
@@ -7486,3 +7486,56 @@ Decision:
 
 Not built: the campaign a reply is attributed to (ADR-025) in `message.received`, filters by a
 campaign's template or audience, and campaigns chosen per event type (one list serves both events).
+
+## ADR-186 Creating and editing campaign drafts through the public API (P5-08) (2026-10-05)
+
+Context: keys read campaigns (ADR-125) and pause, cancel and resume them (ADR-128, ADR-176), but
+every campaign was made in the app: an integration that plans campaigns elsewhere (a CRM's segments,
+a merchandising calendar) had a member type each one again. ADR-128 kept creating and editing with
+members because a campaign sends under a member's authority, but a draft sends nothing.
+
+Decision:
+
+- **A new writing scope, `campaigns.write`** ("Create and edit campaign drafts"), granted only by
+  members holding `campaigns.write`, the permission members create and edit drafts with (owners,
+  administrators and marketers by default). Existing keys gain nothing; a plan version that chose
+  its scopes (ADR-092) leaves it out until a new version includes it, and one with every scope
+  (`NULL`) includes it. As a writing scope it is refused while the company is suspended or
+  restricted (423, ADR-052).
+- **Drafts only:** `POST /campaigns` creates a draft with the settings given, and
+  `PATCH /campaigns/{id}` changes the settings given and keeps the others. The settings are those of
+  members' editor: the name, the number (`channelId`), the template, its variables, the audience (a
+  segment, or conditions as a segment holds them: `POST /contacts/search`'s conditions without
+  groups), the schedule (now, or a date and time in a time zone), the daily window, the rate, the
+  message cap, the spending cap and the sending period. Settings left out of a new draft start as a
+  member's new draft does: none, at once, in the company's time zone, sending for 24 hours.
+  Submitting, approving and starting stay with members, under the authority of a member allowed to
+  send campaigns and with every check a submission makes; a campaign that is no longer a draft is
+  refused with 409 naming its status.
+- **Members' checks, one implementation:** members' save and the API both call
+  `prepareCampaignDraft` (the time zone, window, variables, date and time, and spending cap) and
+  then `writeLockedCampaignDraft` on the locked draft (the company's number, template and segment, a
+  segment not archived, and conditions by segments' rules), in `campaigns/service.ts`; members' save
+  keeps its checks and their order.
+- **Versions:** every change raises the draft's version, members' and keys' alike. `PATCH` takes an
+  optional `expectedVersion`: given, a draft changed since (by a member or another key) is refused
+  with 409 and keeps its settings; left out, the change applies to the draft as it is. Members' save
+  compares the version they loaded, as before, so a key's change between a member's load and save is
+  reported to the member.
+- **Answers:** both calls answer the campaign as `GET /campaigns/{id}` describes it, with `version`
+  and `settings` (as members' editor holds them: the date and time as YYYY-MM-DDTHH:mm, the window
+  as HH:MM, the spending cap in major units). `GET /campaigns/{id}` answers both to a key that also
+  holds `campaigns.write`, and null for both to a key that only reads campaigns, which still gets
+  counts only (ADR-125: no audience, variables, pacing or costs).
+- **Who did it:** a key's draft has no creator (`created_by_user_id` null); its `created` and
+  `edited` campaign events name no member and carry the key's id (`apiKeyId`), so members' history
+  reads "through the API, key “name”"; the audit rows `campaign.created` and `campaign.updated` are
+  the key's (`api_key`), with the request's id and `source` `api`.
+- **Retries:** `POST` takes an optional `Idempotency-Key` (one draft per key: a retry answers the
+  first draft); `PATCH` sets values, so a retry sets the same settings again and raises the version.
+- **Migration 0134** replaces the key and plan scope checks with the 18 scopes (as 0124 did);
+  existing rows already satisfy them.
+
+Not built: submitting, approving, scheduling or starting campaigns through the API (a key is not a
+member), cancelling or deleting drafts, test sends, a draft's review (the audience breakdown and the
+cost estimate) through the API, and creating many drafts in one call.

@@ -611,12 +611,16 @@ verification, app review, Embedded Signup configuration).
   `PATCH /contacts/{id}` takes `phone` and changes a number as members do: one WhatsApp gave
   stays, one another contact has or one on the suppression list is refused; only that call
   changes numbers; no migration).
+  **[Creating and editing campaign drafts built; its database tests run only in CI]** (ADR-186:
+  `POST /campaigns` and `PATCH /campaigns/{id}` with the new `campaigns.write` scope, granted with
+  `campaigns.write`: a draft's settings as members edit them, checked as members' are, with a
+  version; members submit and start it; migration 0134).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   media downloads, a contact card's contacts (Meta's
   contact object is not confirmed), changing a field's type, changing
   numbers in calls that change many contacts,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
-  resuming what members or HyFib paused, approving, scheduling, creating and editing campaigns
+  resuming what members or HyFib paused, approving, scheduling and starting campaigns
   through the API, campaign
   recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose
   per scope since ADR-092). The one-argument key lookup kept for rolling deploys (0051) is dropped

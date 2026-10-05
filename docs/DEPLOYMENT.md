@@ -320,6 +320,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    gain `message.campaignId` from workers of this release: until the worker rollout ends, a delivery
    an older worker prepares leaves it out.
 
+   Migration 0134 (ADR-186) widens the same scope checks again, with the same brief locks. Web
+   servers from before it do not know `campaigns.write`: until the web rollout ends, an old server
+   answers Settings → API keys with an error for a company with a key holding it (and the platform
+   plan pages for a plan version including it), and `POST /api/v1/campaigns` and
+   `PATCH /api/v1/campaigns/{id}` with 405 (their routes only read there); rolling web servers back
+   to an image from before it does the same. Workers are not affected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

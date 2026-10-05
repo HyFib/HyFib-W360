@@ -20,6 +20,7 @@ export const API_SCOPE_KEYS = [
   'conversations.read',
   'conversations.write',
   'campaigns.read',
+  'campaigns.write',
   'campaigns.stop',
   'campaigns.resume',
   'automations.start',
@@ -110,6 +111,13 @@ export const API_SCOPE_INFO: Record<
       "List the company's campaigns and read each one's progress and results: messages sent, delivered, read and failed, replies and opt-outs, and why recipients were skipped. A key that also reads contacts lists each campaign's recipients and what happened to each. Never members or costs.",
     permission: 'campaigns.read',
     writes: false,
+  },
+  'campaigns.write': {
+    label: 'Create and edit campaign drafts',
+    description:
+      'Create campaign drafts and edit them as members do: the name, the number and template, the variables, the audience (a segment or conditions), the schedule, the sending window and the caps. A draft sends nothing: members submit and start it in the app, under the authority of a member allowed to send campaigns.',
+    permission: 'campaigns.write',
+    writes: true,
   },
   'campaigns.stop': {
     label: 'Pause and cancel campaigns',

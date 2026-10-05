@@ -786,6 +786,149 @@ function toBudget(budget: { amount: string; currency: string } | null) {
   return { budgetMicros: micros, budgetCurrency: budget.currency };
 }
 
+/** Members' and keys' refusal to edit a campaign that is no longer a draft (ADR-186). */
+export const DRAFTS_ONLY = 'Only draft campaigns can be edited.';
+
+/** A draft's settings, as members save them and keys give them (ADR-186), without its version. */
+export type CampaignDraftInput = Omit<z.infer<typeof updateCampaignSchema>, 'expectedVersion'>;
+
+/**
+ * A draft's settings checked as far as they can be without the database: the time zone, the
+ * sending window, the variables, the date and time to send and the spending cap. Members' checks,
+ * shared with keys (ADR-186).
+ */
+export function prepareCampaignDraft(data: CampaignDraftInput) {
+  if (!isValidTimeZone(data.schedule.timezone))
+    throw new AppError('validation_failed', 'Choose a valid time zone.');
+  const window = data.window
+    ? { start: parseTimeOfDay(data.window.start), end: parseTimeOfDay(data.window.end) }
+    : null;
+  if (window && (window.start === null || window.end === null || window.start === window.end))
+    throw new AppError(
+      'validation_failed',
+      'Enter a sending window with different start and end times.',
+    );
+  const variables = campaignVariablesSchema.safeParse(data.variables ?? {});
+  if (!variables.success)
+    throw new AppError('validation_failed', 'Choose a value for every template variable.');
+  const scheduledLocal =
+    data.schedule.kind === 'later' ? toScheduledLocal(data.schedule.local) : null;
+  if (data.schedule.kind === 'later' && !scheduledLocal)
+    throw new AppError('validation_failed', 'Enter the date and time to send.');
+  return { data, window, variables: variables.data, scheduledLocal, budget: toBudget(data.budget) };
+}
+export type PreparedCampaignDraft = ReturnType<typeof prepareCampaignDraft>;
+
+/**
+ * Writes a prepared draft to a campaign the caller locked and found to be a draft (members also
+ * compare the version they saw): its number, template and segment must be the company's (a segment
+ * not archived) and conditions must pass segments' rules, and the version goes up. The caller
+ * records the campaign event and the audit (ADR-186).
+ */
+export async function writeLockedCampaignDraft(
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+  draft: PreparedCampaignDraft,
+): Promise<void> {
+  const { data, window, variables, scheduledLocal, budget } = draft;
+  if (data.channelAccountId && !(await loadChannel(tx, tenantId, data.channelAccountId)))
+    throw notFound('WhatsApp number');
+  const template = await loadTemplate(tx, tenantId, data.templateId);
+  if (data.templateId && !template) throw notFound('Template');
+  let segmentId: string | null = null;
+  let audienceDefinition: SegmentDefinition | null = null;
+  if (data.audience.kind === 'segment') {
+    const [s] = await tx
+      .select({ id: segments.id })
+      .from(segments)
+      .where(
+        and(
+          eq(segments.tenantId, tenantId),
+          eq(segments.id, data.audience.segmentId),
+          isNull(segments.archivedAt),
+        ),
+      );
+    if (!s) throw notFound('Segment');
+    segmentId = s.id;
+  } else if (data.audience.kind === 'conditions') {
+    const def = parseInput(segmentDefinitionSchema, data.audience.definition);
+    const problem = await checkSegmentDefinition(
+      tx,
+      tenantId,
+      def,
+      await loadFieldTypes(tx, tenantId),
+    );
+    if (problem) throw new AppError('validation_failed', problem);
+    audienceDefinition = def;
+  }
+  await tx
+    .update(campaigns)
+    .set({
+      name: data.name,
+      channelAccountId: data.channelAccountId,
+      templateId: data.templateId,
+      variables,
+      segmentId,
+      audienceDefinition,
+      timezone: data.schedule.timezone,
+      scheduleKind: data.schedule.kind,
+      scheduledLocal,
+      windowStart: window && window.start !== null ? `${formatTimeOfDay(window.start)}:00` : null,
+      windowEnd: window && window.end !== null ? `${formatTimeOfDay(window.end)}:00` : null,
+      ratePerMinute: data.ratePerMinute,
+      maxMessages: data.maxMessages,
+      ...budget,
+      stopAfterHours: data.stopAfterHours,
+      version: sql`${campaigns.version} + 1`,
+    })
+    .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
+}
+
+/** An amount in micros as members type it: major units, without trailing zeros (ADR-186). */
+export function microsToAmount(micros: number): string {
+  const units = Math.floor(micros / 1_000_000);
+  const fraction = String(micros % 1_000_000)
+    .padStart(6, '0')
+    .replace(/0+$/, '');
+  return fraction ? `${units}.${fraction}` : String(units);
+}
+
+/**
+ * A stored draft's settings as members' editor shows them and keys read and give them (ADR-186):
+ * the date and time to send as YYYY-MM-DDTHH:mm, the window as HH:MM, the spending cap in major
+ * units.
+ */
+export function campaignDraftInputOf(c: CampaignRow): CampaignDraftInput {
+  return {
+    name: c.name,
+    channelAccountId: c.channelAccountId,
+    templateId: c.templateId,
+    variables: readCampaignVariables(c.variables),
+    audience: c.segmentId
+      ? { kind: 'segment', segmentId: c.segmentId }
+      : c.audienceDefinition
+        ? { kind: 'conditions', definition: c.audienceDefinition }
+        : { kind: 'none' },
+    schedule: {
+      kind: c.scheduleKind,
+      ...(c.scheduledLocal ? { local: c.scheduledLocal.slice(0, 16).replace(' ', 'T') } : {}),
+      timezone: c.timezone,
+    },
+    window:
+      c.windowStart && c.windowEnd
+        ? { start: c.windowStart.slice(0, 5), end: c.windowEnd.slice(0, 5) }
+        : null,
+    ratePerMinute: c.ratePerMinute,
+    maxMessages: c.maxMessages,
+    budget:
+      c.budgetMicros !== null && c.budgetCurrency
+        ? { amount: microsToAmount(c.budgetMicros), currency: c.budgetCurrency }
+        : null,
+    stopAfterHours: c.stopAfterHours,
+  };
+}
+
 // Service ----------------------------------------------------------------------------------------
 
 export function createCampaignsService(deps: CampaignDeps) {
@@ -1058,86 +1201,17 @@ export function createCampaignsService(deps: CampaignDeps) {
     async updateDraft(ctx: TenantContext, campaignId: string, input: unknown, meta: RequestMeta) {
       assertCan(ctx, 'campaigns.write');
       if (!z.uuid().safeParse(campaignId).success) throw notFound('Campaign');
-      const data = parseInput(updateCampaignSchema, input);
-      if (!isValidTimeZone(data.schedule.timezone))
-        throw new AppError('validation_failed', 'Choose a valid time zone.');
-      const window = data.window
-        ? { start: parseTimeOfDay(data.window.start), end: parseTimeOfDay(data.window.end) }
-        : null;
-      if (window && (window.start === null || window.end === null || window.start === window.end))
-        throw new AppError(
-          'validation_failed',
-          'Enter a sending window with different start and end times.',
-        );
-      const variables = campaignVariablesSchema.safeParse(data.variables ?? {});
-      if (!variables.success)
-        throw new AppError('validation_failed', 'Choose a value for every template variable.');
-      const scheduledLocal =
-        data.schedule.kind === 'later' ? toScheduledLocal(data.schedule.local) : null;
-      if (data.schedule.kind === 'later' && !scheduledLocal)
-        throw new AppError('validation_failed', 'Enter the date and time to send.');
-      const budget = toBudget(data.budget);
+      const { expectedVersion, ...data } = parseInput(updateCampaignSchema, input);
+      const draft = prepareCampaignDraft(data);
       return db.run(ctx.scope, async (tx) => {
         const c = await lockCampaign(tx, ctx.tenant.id, campaignId);
-        if (c.status !== 'draft')
-          throw new AppError('conflict', 'Only draft campaigns can be edited.');
-        if (c.version !== data.expectedVersion)
+        if (c.status !== 'draft') throw new AppError('conflict', DRAFTS_ONLY);
+        if (c.version !== expectedVersion)
           throw new AppError(
             'conflict',
             'Someone else changed this campaign. Reload the page to see their version.',
           );
-        if (data.channelAccountId && !(await loadChannel(tx, ctx.tenant.id, data.channelAccountId)))
-          throw notFound('WhatsApp number');
-        const template = await loadTemplate(tx, ctx.tenant.id, data.templateId);
-        if (data.templateId && !template) throw notFound('Template');
-        let segmentId: string | null = null;
-        let audienceDefinition: SegmentDefinition | null = null;
-        if (data.audience.kind === 'segment') {
-          const [s] = await tx
-            .select({ id: segments.id })
-            .from(segments)
-            .where(
-              and(
-                eq(segments.tenantId, ctx.tenant.id),
-                eq(segments.id, data.audience.segmentId),
-                isNull(segments.archivedAt),
-              ),
-            );
-          if (!s) throw notFound('Segment');
-          segmentId = s.id;
-        } else if (data.audience.kind === 'conditions') {
-          const def = parseInput(segmentDefinitionSchema, data.audience.definition);
-          const problem = await checkSegmentDefinition(
-            tx,
-            ctx.tenant.id,
-            def,
-            await loadFieldTypes(tx, ctx.tenant.id),
-          );
-          if (problem) throw new AppError('validation_failed', problem);
-          audienceDefinition = def;
-        }
-        await tx
-          .update(campaigns)
-          .set({
-            name: data.name,
-            channelAccountId: data.channelAccountId,
-            templateId: data.templateId,
-            variables: variables.data,
-            segmentId,
-            audienceDefinition,
-            timezone: data.schedule.timezone,
-            scheduleKind: data.schedule.kind,
-            scheduledLocal,
-            windowStart:
-              window && window.start !== null ? `${formatTimeOfDay(window.start)}:00` : null,
-            windowEnd: window && window.end !== null ? `${formatTimeOfDay(window.end)}:00` : null,
-            ratePerMinute: data.ratePerMinute,
-            maxMessages: data.maxMessages,
-            ...budget,
-            stopAfterHours: data.stopAfterHours,
-            version: sql`${campaigns.version} + 1`,
-          })
-          .where(and(eq(campaigns.tenantId, ctx.tenant.id), eq(campaigns.id, campaignId)));
+        await writeLockedCampaignDraft(tx, ctx.tenant.id, campaignId, draft);
         await recordCampaignEvent(tx, ctx.tenant.id, campaignId, 'edited', ctx.user.id);
         await recordAudit(
           tx,

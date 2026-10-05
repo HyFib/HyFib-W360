@@ -936,6 +936,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the counters counted again, the status and next run set and the runner signalled, with the event
   naming the key (`apiKeyId`, no member) and `launched_by_user_id` kept. The audit row is the key's,
   and `campaign.status_changed` comes from the status trigger.
+- **Campaign drafts (0134, ADR-186):** `apiCreateCampaign` and `apiUpdateCampaign`
+  (`api/campaigns.ts`, `campaigns.write`, writing) turn the request into members' draft input
+  (`apiDraftInputFrom`, from a new draft's defaults or from the locked draft through
+  `campaignDraftInputOf`), then call `prepareCampaignDraft` and `writeLockedCampaignDraft`
+  (`campaigns/service.ts`), which members' save calls too. A key's draft is inserted without a
+  creator; the `created` and `edited` events carry the key's id and the audit rows are the key's.
+  `PATCH` refuses any status but draft and, when given, a version other than the draft's. Answers
+  add `version` and `settings`, which `GET /campaigns/{id}` gives only to keys that hold
+  `campaigns.write`.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions (`last_message` with `conversations.read` and `campaign` with
   `campaigns.read` since ADR-126, a named campaign checked to be the company's, `name` since

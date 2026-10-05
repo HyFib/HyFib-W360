@@ -60,8 +60,10 @@ import {
 } from './automations';
 import {
   apiCampaignRecipientSchema,
+  apiCampaignDetailSchema,
   apiCampaignSchema,
-  apiCampaignWithResultsSchema,
+  apiCreateCampaignSchema,
+  apiUpdateCampaignSchema,
 } from './campaigns';
 import { apiContactFieldCreateSchema, apiContactFieldUpdateSchema } from './contact-fields';
 import { apiContactSearchSchema, apiUpdateMatchingContactsSchema } from './contact-search';
@@ -1409,19 +1411,47 @@ export function buildOpenApiDocument(serverUrl: string) {
             ...errors(401, 403, 422, 429, 500),
           },
         },
+        post: {
+          operationId: 'createCampaign',
+          summary: 'Create a campaign draft',
+          description: `${scopeNote('campaigns.write')} A draft with the settings given, checked as members' drafts are: the number, template and segment must be the company's (a segment not archived), and conditions are checked by segments' rules (a field's comparisons by its type, a campaign of the company). Settings left out start as a member's new draft does: no number, template or audience, starting at once once submitted, in the company's time zone, sending for 24 hours. A draft sends nothing: members review, submit and start it in the app, under the authority of a member allowed to send campaigns, and a submission checks what a draft needs (an approved template of the number's WhatsApp account, every variable filled, an audience). Its history in the app names the key. One draft per \`Idempotency-Key\`: a retry answers with the draft as first created.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateCampaign')) },
+          responses: {
+            '201': {
+              description: 'The draft, with its settings.',
+              content: json(dataOf(ref('CampaignWithResults'))),
+            },
+            ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
+          },
+        },
       },
       '/campaigns/{id}': {
         get: {
           operationId: 'getCampaign',
-          summary: 'A campaign with its results',
-          description: `${scopeNote('campaigns.read')} The results are counted when the campaign is read, as its page in the app counts them: messages sent, delivered, read and failed, replies and opt-outs, why recipients were skipped and the commonest WhatsApp error codes of failed messages; null for a draft. Counts only (GET /campaigns/{id}/recipients lists the recipients): never members or costs.`,
+          summary: 'A campaign with its results and settings',
+          description: `${scopeNote('campaigns.read')} The results are counted when the campaign is read, as its page in the app counts them: messages sent, delivered, read and failed, replies and opt-outs, why recipients were skipped and the commonest WhatsApp error codes of failed messages; null for a draft. Counts only (GET /campaigns/{id}/recipients lists the recipients): never members or costs. A key that also holds \`campaigns.write\` gets its settings, as members edit them while it is a draft, and its version; other keys get null for both.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           responses: {
             '200': {
-              description: 'The campaign with its results.',
+              description: 'The campaign with its results and settings.',
               content: json(dataOf(ref('CampaignWithResults'))),
             },
             ...errors(401, 403, 404, 429, 500),
+          },
+        },
+        patch: {
+          operationId: 'updateCampaign',
+          summary: 'Edit a campaign draft',
+          description: `${scopeNote('campaigns.write')} Changes the settings given and keeps the others, as a member saving the draft would, with the same checks as POST /campaigns. Only a draft is edited: any other status is refused with 409, naming it. With \`expectedVersion\`, a draft changed since you read it (by a member or a key) is refused with 409 and keeps its settings. A retry sets the same settings again. Its history in the app names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateCampaign')) },
+          responses: {
+            '200': {
+              description: 'The draft, with its settings.',
+              content: json(dataOf(ref('CampaignWithResults'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -2172,7 +2202,9 @@ export function buildOpenApiDocument(serverUrl: string) {
         Campaign: jsonSchema(apiCampaignSchema),
         Order: jsonSchema(apiOrderSchema),
         UpdateOrder: jsonSchema(apiUpdateOrderSchema, 'input'),
-        CampaignWithResults: jsonSchema(apiCampaignWithResultsSchema),
+        CampaignWithResults: jsonSchema(apiCampaignDetailSchema),
+        CreateCampaign: jsonSchema(apiCreateCampaignSchema, 'input'),
+        UpdateCampaign: jsonSchema(apiUpdateCampaignSchema, 'input'),
         CampaignRecipient: jsonSchema(apiCampaignRecipientSchema),
         Automation: jsonSchema(apiAutomationSchema),
         AutomationRun: jsonSchema(apiAutomationRunSchema),
@@ -2243,7 +2275,9 @@ export const API_ROUTES = [
   ['get', '/members'],
   ['get', '/teams'],
   ['get', '/campaigns'],
+  ['post', '/campaigns'],
   ['get', '/campaigns/{id}'],
+  ['patch', '/campaigns/{id}'],
   ['get', '/campaigns/{id}/recipients'],
   ['post', '/campaigns/{id}/pause'],
   ['post', '/campaigns/{id}/resume'],

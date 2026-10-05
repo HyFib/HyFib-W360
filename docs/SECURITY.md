@@ -450,11 +450,12 @@ Phase 5 rules (Public API, P5-08):
   ADR-070), `campaigns.send` for `messages.send_marketing`, `inbox.read_all` for
   `conversations.read` (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075),
   `automations.publish` for `automations.start` (ADR-077), `tenant.settings.manage` for
-  `contact_fields.manage` (ADR-115), `campaigns.read` for the scope of the same name (ADR-125),
-  `campaigns.send` for `campaigns.stop` (ADR-128) and `campaigns.resume` (ADR-176), `commerce.read`
-  for `orders.read` (ADR-167), `inbox.reply` for `orders.write` (ADR-168), and `channels.read` for
-  the scope of the same name (ADR-171). Nobody grants a key more than they hold, and rotating needs
-  the same. A key keeps the scopes it was created with.
+  `contact_fields.manage` (ADR-115), `campaigns.read` and `campaigns.write` for the scopes of the
+  same names (ADR-125, ADR-186), `campaigns.send` for `campaigns.stop` (ADR-128) and
+  `campaigns.resume` (ADR-176), `commerce.read` for `orders.read` (ADR-167), `inbox.reply` for
+  `orders.write` (ADR-168), and `channels.read` for the scope of the same name (ADR-171). Nobody
+  grants a key more than they hold, and rotating needs the same. A key keeps the scopes it was
+  created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -731,6 +732,20 @@ Phase 5 rules (Public API, P5-08):
   names the key with the request's id, and members' history names it. A leaked key with the scope
   can undo the pauses keys made until it is revoked; members can pause again, which such a key
   cannot lift.
+- Creating and editing campaign drafts (ADR-186): `POST /campaigns` and `PATCH /campaigns/{id}` need
+  `campaigns.write`, a writing scope granted only by members holding `campaigns.write` (the
+  permission members edit drafts with) and refused while the company is suspended or restricted.
+  They write drafts only: a draft sends nothing, a campaign that is no longer a draft is refused,
+  and submitting, approving and starting stay with members, so a key never becomes the authority a
+  campaign sends under and sends nothing by itself. Members' checks run on every write in the key's
+  company (RLS and explicit filters): the number, template and segment must be the company's
+  (another company's answers 404, as an unknown one does), conditions pass segments' rules, and the
+  time zone, window, variables, date and caps are checked as members' are. A key's draft names no
+  member; its campaign events carry the key's id, and the audit rows name the key with the request's
+  id. `GET /campaigns/{id}` answers a draft's settings (audience, variables, pacing and spending
+  cap) only to keys that also hold `campaigns.write`; a key that only reads campaigns still gets
+  counts (ADR-125). A leaked key with the scope can create drafts and change the company's drafts
+  until it is revoked, which members see in each draft's history before they submit it.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so

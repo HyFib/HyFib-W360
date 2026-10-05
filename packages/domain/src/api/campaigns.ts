@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AppError, notFound } from '@w360/core';
+import { AppError, notFound, uuidv7 } from '@w360/core';
 import {
   CAMPAIGN_COMPLETION_REASONS,
   CAMPAIGN_PAUSE_REASONS,
@@ -15,6 +15,7 @@ import {
   exactTimestamp,
   messageTemplates,
   sql,
+  tenants,
   type MessageStatus,
   type CampaignStatus,
   type RecipientState,
@@ -30,18 +31,29 @@ import {
   toCampaignResults,
   type CampaignResults,
 } from '../campaigns/results';
+import { SEGMENT_LIMITS } from '../campaigns/segments';
 import {
+  DRAFTS_ONLY,
   campaignAnalytics,
+  campaignDraftInputOf,
   campaignLauncherStanding,
   cancelLockedCampaign,
   lockCampaign,
   pauseLockedCampaign,
+  prepareCampaignDraft,
+  recordCampaignEvent,
   resumeLockedCampaign,
+  writeLockedCampaignDraft,
+  type CampaignDraftInput,
 } from '../campaigns/service';
+import { campaignVariablesSchema, readCampaignVariables } from '../campaigns/variables';
 import type { OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
-import { apiActor, assertScope, type ApiContext } from './context';
+import { apiSearchConditionSchema } from './contact-search';
+import { apiActor, assertScope, hasScope, type ApiContext } from './context';
+import type { ApiResponse, IdempotencyInput } from './idempotency';
 import { API_LIMITS } from './model';
+import { idempotent } from './resources';
 
 /**
  * Campaigns through the public API (ADR-125): a key with `campaigns.read` lists the company's
@@ -49,7 +61,9 @@ import { API_LIMITS } from './model';
  * results as members' campaign page counts them (`campaignAnalytics`), when it is read. A key that
  * also reads contacts lists a campaign's recipients, each with what happened to it (ADR-127).
  * Never members or costs. A key with `campaigns.stop` pauses and cancels campaigns as members do
- * (ADR-128); everything else that changes a campaign stays with members.
+ * (ADR-128), one with `campaigns.resume` resumes what keys paused (ADR-176), and one with
+ * `campaigns.write` creates and edits drafts (ADR-186); submitting, approving and starting stay with
+ * members.
  */
 
 export const apiCampaignListQuerySchema = z
@@ -111,6 +125,136 @@ export const apiCampaignWithResultsSchema = apiCampaignSchema.extend({
     .nullable()
     .describe('Counted when read; null for a draft, which has no recipients yet.'),
 });
+
+const timezoneField = z.string().min(1).max(64).describe('An IANA time zone, like Asia/Kolkata.');
+
+/** Who a draft goes to (ADR-186): one of the company's segments, or conditions as one holds them. */
+const apiAudienceSchema = z
+  .union([
+    z
+      .object({
+        segmentId: z
+          .uuid()
+          .describe("One of the company's segments that is not archived (members' segments)."),
+      })
+      .strict(),
+    z
+      .object({
+        match: z
+          .enum(['all', 'any'])
+          .default('all')
+          .describe('all: a contact matches every condition; any: at least one of them.'),
+        conditions: z
+          .array(apiSearchConditionSchema)
+          .min(1, 'Add at least one condition')
+          .max(SEGMENT_LIMITS.conditions)
+          .describe(
+            `1 to ${SEGMENT_LIMITS.conditions} conditions, as POST /contacts/search takes them but without groups, as a segment holds them.`,
+          ),
+      })
+      .strict(),
+  ])
+  .nullable()
+  .describe(
+    "Who it goes to: one of the company's segments, or conditions checked by segments' rules; null for none yet. The contacts are taken when a member submits it.",
+  );
+
+/** How a draft fills its template's variables (ADR-186), as members choose it. */
+const apiVariablesSchema = campaignVariablesSchema.describe(
+  "How each of the template's variables is filled for a recipient, in order (header, then body): fixed text (static), the contact's name with a fallback (name), or a custom field with an optional fallback (field). A recipient whose variable has no value and no fallback is skipped.",
+);
+
+const apiWindowSchema = z
+  .object({
+    start: z.string().max(8).describe('HH:MM.'),
+    end: z.string().max(8).describe('HH:MM; before the start, the window runs past midnight.'),
+  })
+  .strict()
+  .nullable()
+  .describe("A daily sending window in the campaign's time zone; null sends at any time.");
+
+const apiBudgetSchema = z
+  .object({
+    amount: z.string().max(20).describe('In major units, like 2500 or 2500.50.'),
+    currency: z.string().regex(/^[A-Z]{3}$/),
+  })
+  .strict()
+  .nullable()
+  .describe("A spending cap on the campaign's estimated Meta charges; null for none.");
+
+/** A campaign's settings as members' editor holds them (ADR-186). */
+export const apiCampaignSettingsSchema = z.object({
+  variables: apiVariablesSchema,
+  audience: apiAudienceSchema,
+  schedule: z
+    .object({
+      kind: z.enum(['now', 'later']),
+      local: z
+        .string()
+        .nullable()
+        .describe('For later: the date and time to start, YYYY-MM-DDTHH:mm, in `timezone`.'),
+      timezone: timezoneField,
+    })
+    .describe('When it starts once a member submits it: at once (now), or at a time (later).'),
+  window: apiWindowSchema,
+  ratePerMinute: z
+    .number()
+    .int()
+    .nullable()
+    .describe("At most this many messages a minute; null for the number's own rate."),
+  maxMessages: z.number().int().nullable().describe('At most this many messages; null for no cap.'),
+  budget: apiBudgetSchema,
+  stopAfterHours: z
+    .number()
+    .int()
+    .describe('Sending stops this many hours after it starts; the rest is recorded as expired.'),
+});
+export type ApiCampaignSettings = z.infer<typeof apiCampaignSettingsSchema>;
+
+/**
+ * A campaign as `GET /campaigns/{id}` answers it (ADR-125), with its settings and version for a key
+ * that edits drafts (ADR-186): a key that only reads campaigns gets counts, never the settings.
+ */
+export const apiCampaignDetailSchema = apiCampaignWithResultsSchema.extend({
+  version: z
+    .number()
+    .int()
+    .nullable()
+    .describe(
+      'Goes up with every change of the draft, by a member or a key; PATCH /campaigns/{id} takes it as expectedVersion. Null unless the key holds campaigns.write.',
+    ),
+  settings: apiCampaignSettingsSchema
+    .nullable()
+    .describe(
+      'Its settings, as members edit them while it is a draft and as they were when it was submitted. Null unless the key holds campaigns.write.',
+    ),
+});
+export type ApiCampaignDetail = z.infer<typeof apiCampaignDetailSchema>;
+
+type StoredCampaign = Awaited<ReturnType<typeof lockCampaign>>;
+
+function toApiSettings(c: StoredCampaign): ApiCampaignSettings {
+  const d = campaignDraftInputOf(c);
+  return {
+    variables: readCampaignVariables(c.variables),
+    audience:
+      d.audience.kind === 'segment'
+        ? { segmentId: d.audience.segmentId }
+        : d.audience.kind === 'conditions'
+          ? (d.audience.definition as ApiCampaignSettings['audience'])
+          : null,
+    schedule: {
+      kind: d.schedule.kind,
+      local: d.schedule.local ?? null,
+      timezone: d.schedule.timezone,
+    },
+    window: d.window,
+    ratePerMinute: d.ratePerMinute,
+    maxMessages: d.maxMessages,
+    budget: d.budget,
+    stopAfterHours: d.stopAfterHours,
+  };
+}
 
 const campaignColumns = {
   id: campaigns.id,
@@ -220,29 +364,49 @@ export async function apiListCampaigns(
 
 /**
  * One of the company's campaigns with its results counted now, in the snapshot its row is read
- * in: null for a draft, which has no recipients yet.
+ * in: null for a draft, which has no recipients yet. With its version and settings for a key that
+ * also edits drafts (ADR-186).
  */
 export async function apiGetCampaign(
   deps: Pick<OutboundDeps, 'db'>,
   ctx: ApiContext,
   campaignId: string,
-): Promise<ApiCampaign & { results: ApiCampaignResults | null }> {
+): Promise<ApiCampaignDetail> {
   assertScope(ctx, 'campaigns.read');
   if (!z.uuid().safeParse(campaignId).success) throw notFound('Campaign');
   return deps.db.run(
     ctx.scope,
     async (tx) => {
-      const [row] = await selectCampaigns(
-        tx,
-        and(eq(campaigns.tenantId, ctx.tenant.id), eq(campaigns.id, campaignId)),
-      );
-      if (!row) throw notFound('Campaign');
-      if (row.status === 'draft') return { ...toApiCampaign(row), results: null };
-      const counted = await campaignAnalytics(tx, ctx.tenant.id, campaignId);
-      return { ...toApiCampaign(row), results: toCampaignResults(counted) };
+      return readApiCampaignDetail(tx, ctx.tenant.id, campaignId, hasScope(ctx, 'campaigns.write'));
     },
     { isolationLevel: 'repeatable read', accessMode: 'read only' },
   );
+}
+
+/**
+ * A campaign with its results (null for a draft), as read in `tx`, and its version and settings for
+ * a key that edits drafts (`withSettings`).
+ */
+async function readApiCampaignDetail(
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+  withSettings: boolean,
+): Promise<ApiCampaignDetail> {
+  const where = and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId));
+  const [row] = await selectCampaigns(tx, where);
+  const [stored] = await tx.select().from(campaigns).where(where);
+  if (!row || !stored) throw notFound('Campaign');
+  const results =
+    row.status === 'draft'
+      ? null
+      : toCampaignResults(await campaignAnalytics(tx, tenantId, campaignId));
+  return {
+    ...toApiCampaign(row),
+    results,
+    version: withSettings ? stored.version : null,
+    settings: withSettings ? toApiSettings(stored) : null,
+  };
 }
 
 export const apiCampaignRecipientQuerySchema = z
@@ -540,5 +704,265 @@ export async function apiCancelCampaign(
       );
     }
     return readApiCampaign(tx, ctx.tenant.id, campaignId);
+  });
+}
+
+// Drafts through the API (ADR-186) ---------------------------------------------------------------
+
+const nameField = z
+  .string()
+  .trim()
+  .min(1, 'Enter a name')
+  .max(120)
+  .describe('1 to 120 characters.');
+
+/** What a key gives a draft (ADR-186); each left out keeps what the draft has. */
+const draftFields = {
+  channelId: z
+    .uuid()
+    .nullable()
+    .describe('The WhatsApp number it sends from, as GET /channels lists it; null for none yet.'),
+  templateId: z
+    .uuid()
+    .nullable()
+    .describe(
+      "The template it sends, as GET /templates lists it; null for none yet. A member submits it only with an approved marketing or utility template of the number's WhatsApp account.",
+    ),
+  variables: apiVariablesSchema,
+  audience: apiAudienceSchema,
+  schedule: z
+    .discriminatedUnion('kind', [
+      z.object({ kind: z.literal('now'), timezone: timezoneField.optional() }).strict(),
+      z
+        .object({
+          kind: z.literal('later'),
+          local: z
+            .string()
+            .max(25)
+            .describe('The date and time to start, YYYY-MM-DDTHH:mm, in `timezone`.'),
+          timezone: timezoneField.optional(),
+        })
+        .strict(),
+    ])
+    .describe(
+      "When it starts once a member submits it: at once (now), or at a time (later). Without a time zone, the draft's stays (a new draft takes the company's).",
+    ),
+  window: apiWindowSchema,
+  ratePerMinute: z
+    .number()
+    .int()
+    .min(1)
+    .max(6000)
+    .nullable()
+    .describe("At most this many messages a minute; null for the number's own rate."),
+  maxMessages: z
+    .number()
+    .int()
+    .min(1)
+    .max(1_000_000)
+    .nullable()
+    .describe('At most this many messages; null for no cap.'),
+  budget: apiBudgetSchema,
+  stopAfterHours: z
+    .number()
+    .int()
+    .min(1)
+    .max(168)
+    .describe('Sending stops this many hours after it starts; the rest is recorded as expired.'),
+};
+
+export const apiCreateCampaignSchema = z
+  .object({
+    name: nameField,
+    channelId: draftFields.channelId.optional(),
+    templateId: draftFields.templateId.optional(),
+    variables: draftFields.variables.optional(),
+    audience: draftFields.audience.optional(),
+    schedule: draftFields.schedule.optional(),
+    window: draftFields.window.optional(),
+    ratePerMinute: draftFields.ratePerMinute.optional(),
+    maxMessages: draftFields.maxMessages.optional(),
+    budget: draftFields.budget.optional(),
+    stopAfterHours: draftFields.stopAfterHours.optional(),
+  })
+  .strict();
+
+export const apiUpdateCampaignSchema = z
+  .object({
+    expectedVersion: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe(
+        "The draft's version as you read it (GET /campaigns/{id}); the change is refused with 409 when the draft has changed since. Left out, the change applies to the draft as it is.",
+      ),
+    name: nameField.optional(),
+    channelId: draftFields.channelId.optional(),
+    templateId: draftFields.templateId.optional(),
+    variables: draftFields.variables.optional(),
+    audience: draftFields.audience.optional(),
+    schedule: draftFields.schedule.optional(),
+    window: draftFields.window.optional(),
+    ratePerMinute: draftFields.ratePerMinute.optional(),
+    maxMessages: draftFields.maxMessages.optional(),
+    budget: draftFields.budget.optional(),
+    stopAfterHours: draftFields.stopAfterHours.optional(),
+  })
+  .strict()
+  .refine(
+    (data) => Object.keys(data).some((key) => key !== 'expectedVersion'),
+    'Give at least one setting to change',
+  );
+
+type ApiDraftGiven = Omit<z.infer<typeof apiUpdateCampaignSchema>, 'expectedVersion'>;
+
+/** A new draft's settings, as members' new drafts start (ADR-186). */
+const newDraftInput = (name: string, timezone: string): CampaignDraftInput => ({
+  name,
+  channelAccountId: null,
+  templateId: null,
+  variables: { header: [], body: [] },
+  audience: { kind: 'none' },
+  schedule: { kind: 'now', timezone },
+  window: null,
+  ratePerMinute: null,
+  maxMessages: null,
+  budget: null,
+  stopAfterHours: 24,
+});
+
+/** The draft's settings with those a key gave (ADR-186): each left out keeps the draft's. */
+export function apiDraftInputFrom(
+  base: CampaignDraftInput,
+  given: ApiDraftGiven,
+): CampaignDraftInput {
+  const { audience, schedule } = given;
+  return {
+    name: given.name ?? base.name,
+    channelAccountId: given.channelId === undefined ? base.channelAccountId : given.channelId,
+    templateId: given.templateId === undefined ? base.templateId : given.templateId,
+    variables: given.variables ?? base.variables,
+    audience:
+      audience === undefined
+        ? base.audience
+        : audience === null
+          ? { kind: 'none' }
+          : 'segmentId' in audience
+            ? { kind: 'segment', segmentId: audience.segmentId }
+            : { kind: 'conditions', definition: audience },
+    schedule: schedule
+      ? {
+          kind: schedule.kind,
+          ...(schedule.kind === 'later' ? { local: schedule.local } : {}),
+          timezone: schedule.timezone ?? base.schedule.timezone,
+        }
+      : base.schedule,
+    window: given.window === undefined ? base.window : given.window,
+    ratePerMinute: given.ratePerMinute === undefined ? base.ratePerMinute : given.ratePerMinute,
+    maxMessages: given.maxMessages === undefined ? base.maxMessages : given.maxMessages,
+    budget: given.budget === undefined ? base.budget : given.budget,
+    stopAfterHours: given.stopAfterHours ?? base.stopAfterHours,
+  };
+}
+
+/**
+ * Creates a campaign draft with the settings given (ADR-186), once per Idempotency-Key, checked as
+ * members' drafts are: the number, template and segment must be the company's and conditions pass
+ * segments' rules. The draft is the key's (no member created it) and sends nothing until a member
+ * submits it.
+ */
+export async function apiCreateCampaign(
+  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput | null,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'campaigns.write');
+  const given = parseInput(apiCreateCampaignSchema, input);
+  return deps.db.run(ctx.scope, async (tx) => {
+    // A new draft takes the company's time zone, as members' new drafts do.
+    const [company] = await tx
+      .select({ timezone: tenants.timezone })
+      .from(tenants)
+      .where(eq(tenants.id, ctx.tenant.id));
+    if (!company) throw notFound('Company');
+    const draft = prepareCampaignDraft(
+      apiDraftInputFrom(newDraftInput(given.name, company.timezone), given),
+    );
+    return idempotent(tx, ctx, idempotency, deps.clock.now(), async () => {
+      const id = uuidv7();
+      await tx.insert(campaigns).values({
+        id,
+        tenantId: ctx.tenant.id,
+        name: given.name,
+        variables: { header: [], body: [] },
+        timezone: company.timezone,
+        createdByUserId: null,
+      });
+      await writeLockedCampaignDraft(tx, ctx.tenant.id, id, draft);
+      await recordCampaignEvent(tx, ctx.tenant.id, id, 'created', null, { apiKeyId: ctx.key.id });
+      await recordSystemAudit(
+        tx,
+        ctx.tenant.id,
+        {
+          action: 'campaign.created',
+          subjectType: 'campaign',
+          subjectId: id,
+          metadata: { source: 'api' },
+          correlationId: ctx.requestId,
+        },
+        apiActor(ctx),
+      );
+      return {
+        status: 201,
+        body: { data: await readApiCampaignDetail(tx, ctx.tenant.id, id, true) },
+      };
+    });
+  });
+}
+
+/**
+ * Edits one of the company's drafts with the settings given (ADR-186), with the campaign row
+ * locked: each setting left out stays, and the result is checked as members' edits are. A campaign
+ * that is no longer a draft is refused with 409 naming its status, and so is a draft whose version
+ * is not the one given. A retry sets the same settings again.
+ */
+export async function apiUpdateCampaign(
+  deps: Pick<OutboundDeps, 'db'>,
+  ctx: ApiContext,
+  campaignId: string,
+  input: unknown,
+): Promise<ApiCampaignDetail> {
+  assertScope(ctx, 'campaigns.write');
+  if (!z.uuid().safeParse(campaignId).success) throw notFound('Campaign');
+  const { expectedVersion, ...given } = parseInput(apiUpdateCampaignSchema, input);
+  return deps.db.run(ctx.scope, async (tx) => {
+    const c = await lockCampaign(tx, ctx.tenant.id, campaignId);
+    if (c.status !== 'draft') throw statusRefusal(DRAFTS_ONLY, c.status);
+    if (expectedVersion !== undefined && c.version !== expectedVersion) {
+      throw new AppError(
+        'conflict',
+        `This draft has changed since you read it: its version is ${c.version}. Read it again and give the version it has.`,
+      );
+    }
+    const draft = prepareCampaignDraft(apiDraftInputFrom(campaignDraftInputOf(c), given));
+    await writeLockedCampaignDraft(tx, ctx.tenant.id, campaignId, draft);
+    await recordCampaignEvent(tx, ctx.tenant.id, campaignId, 'edited', null, {
+      apiKeyId: ctx.key.id,
+    });
+    await recordSystemAudit(
+      tx,
+      ctx.tenant.id,
+      {
+        action: 'campaign.updated',
+        subjectType: 'campaign',
+        subjectId: campaignId,
+        metadata: { source: 'api' },
+        correlationId: ctx.requestId,
+      },
+      apiActor(ctx),
+    );
+    return readApiCampaignDetail(tx, ctx.tenant.id, campaignId, true);
   });
 }

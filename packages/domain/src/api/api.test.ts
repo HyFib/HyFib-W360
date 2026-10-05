@@ -18,8 +18,19 @@ import {
   apiListCampaigns,
   apiPauseCampaign,
   apiResumeCampaign,
+  apiCreateCampaign,
+  apiCreateCampaignSchema,
+  apiDraftInputFrom,
+  apiUpdateCampaign,
+  apiUpdateCampaignSchema,
 } from './campaigns';
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
+import {
+  campaignDraftInputOf,
+  microsToAmount,
+  prepareCampaignDraft,
+  type CampaignDraftInput,
+} from '../campaigns/service';
 import { allowedNetworksSchema, bearerToken, generateApiToken, networkEntryProblem } from './keys';
 import {
   apiAddressRefusal,
@@ -197,6 +208,7 @@ describe('API scopes', () => {
       'messages.send_marketing',
       'messages.reply',
       'conversations.write',
+      'campaigns.write',
       'campaigns.stop',
       'campaigns.resume',
       'automations.start',
@@ -219,6 +231,8 @@ describe('API scopes', () => {
     expect(API_SCOPE_INFO['campaigns.stop'].permission).toBe('campaigns.send');
     // And resume them with it (ADR-176).
     expect(API_SCOPE_INFO['campaigns.resume'].permission).toBe('campaigns.send');
+    // Members create and edit drafts with campaigns.write (ADR-186).
+    expect(API_SCOPE_INFO['campaigns.write'].permission).toBe('campaigns.write');
     expect(API_SCOPE_INFO['conversations.read'].permission).toBe('inbox.read_all');
     expect(API_SCOPE_INFO['conversations.write'].permission).toBe('inbox.supervise');
     expect(API_SCOPE_INFO['automations.start'].permission).toBe('automations.publish');
@@ -3474,12 +3488,21 @@ describe('reading campaigns (ADR-125)', () => {
     expect(schemas.CampaignWithResults?.properties.results).toMatchObject({
       anyOf: expect.arrayContaining([{ type: 'null' }]),
     });
-    // Counts only: no recipients, members, costs or the draft's settings.
+    // Counts only: no recipients, members or costs. The draft's settings and version are answered
+    // to keys that edit drafts only, and are null for the others (ADR-186).
     expect(Object.keys(schemas.CampaignWithResults?.properties ?? {}).sort()).toEqual(
-      [...Object.keys(schemas.Campaign?.properties ?? {}), 'results'].sort(),
+      [...Object.keys(schemas.Campaign?.properties ?? {}), 'results', 'settings', 'version'].sort(),
     );
     for (const hidden of ['recipients', 'variables', 'budgetMicros', 'launchedBy', 'segmentId']) {
       expect(Object.keys(schemas.CampaignWithResults?.properties ?? {})).not.toContain(hidden);
+    }
+    for (const held of ['settings', 'version'] as const) {
+      expect(schemas.CampaignWithResults?.properties[held]).toMatchObject({
+        anyOf: expect.arrayContaining([{ type: 'null' }]),
+      });
+      expect(schemas.CampaignWithResults?.properties[held]?.description).toContain(
+        'Null unless the key holds campaigns.write.',
+      );
     }
     expect(doc.info.description).toContain('read campaigns, their results and their recipients');
     expect(API_ROUTES).toEqual(
@@ -3831,6 +3854,301 @@ describe('resuming campaigns keys paused (ADR-176)', () => {
       'pause and cancel campaigns and resume the ones you paused',
     );
     expect(API_ROUTES).toEqual(expect.arrayContaining([['post', '/campaigns/{id}/resume']]));
+  });
+});
+
+describe('campaign drafts through the API (ADR-186)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const id = '0190a000-0000-7000-8000-000000000003';
+  const segment = '0190a000-0000-7000-8000-000000000004';
+  const number = '0190a000-0000-7000-8000-000000000005';
+  const base: CampaignDraftInput = {
+    name: 'Diwali offer',
+    channelAccountId: number,
+    templateId: null,
+    variables: { header: [], body: [{ source: 'name', fallback: 'there' }] },
+    audience: { kind: 'segment', segmentId: segment },
+    schedule: { kind: 'later', local: '2026-11-01T09:00', timezone: 'Asia/Kolkata' },
+    window: { start: '09:00', end: '20:00' },
+    ratePerMinute: 100,
+    maxMessages: 5000,
+    budget: { amount: '2500.5', currency: 'INR' },
+    stopAfterHours: 48,
+  };
+
+  it('have their own writing scope, which members who edit drafts grant, and never start a campaign', () => {
+    expect(API_SCOPE_KEYS.indexOf('campaigns.write')).toBe(
+      API_SCOPE_KEYS.indexOf('campaigns.read') + 1,
+    );
+    expect(API_SCOPE_INFO['campaigns.write']).toMatchObject({
+      label: 'Create and edit campaign drafts',
+      permission: 'campaigns.write',
+      writes: true,
+    });
+    for (const words of [
+      'Create campaign drafts and edit them as members do',
+      'the audience (a segment or conditions)',
+      'A draft sends nothing: members submit and start it in the app, under the authority of a member allowed to send campaigns.',
+    ]) {
+      expect(API_SCOPE_INFO['campaigns.write'].description).toContain(words);
+    }
+  });
+
+  it('are refused before anything is read: without the scope, outside the plan, while the company is not active, and a bad id is not found', async () => {
+    const body = { name: 'Diwali offer' };
+    for (const scopes of [['campaigns.read'], ['campaigns.stop', 'campaigns.resume']]) {
+      expect(await code(apiCreateCampaign({} as never, ctx(scopes), body, null))).toBe('forbidden');
+      expect(await code(apiUpdateCampaign({} as never, ctx(scopes), id, body))).toBe('forbidden');
+    }
+    await expect(
+      apiCreateCampaign({} as never, ctx(['campaigns.read']), body, null),
+    ).rejects.toThrow('This API key does not have the campaigns.write scope.');
+    await expect(
+      apiUpdateCampaign(
+        {} as never,
+        ctx(['campaigns.write'], 'active', ['campaigns.read']),
+        id,
+        body,
+      ),
+    ).rejects.toMatchObject({ code: 'forbidden', details: { apiReason: 'not_in_plan' } });
+    for (const status of ['suspended', 'restricted']) {
+      expect(
+        await code(apiCreateCampaign({} as never, ctx(['campaigns.write'], status), body, null)),
+      ).toBe('tenant_suspended');
+    }
+    expect(
+      await code(apiUpdateCampaign({} as never, ctx(['campaigns.write']), 'not-an-id', body)),
+    ).toBe('not_found');
+  });
+
+  it("take a name and any of a draft's settings, refusing unknown or malformed ones", () => {
+    expect(apiCreateCampaignSchema.parse({ name: '  Diwali offer ' })).toEqual({
+      name: 'Diwali offer',
+    });
+    const full = {
+      name: 'Diwali offer',
+      channelId: number,
+      templateId: null,
+      variables: { body: [{ source: 'static', value: 'Asha' }] },
+      audience: { conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
+      schedule: { kind: 'later', local: '2026-11-01T09:00' },
+      window: { start: '09:00', end: '20:00' },
+      ratePerMinute: 100,
+      maxMessages: 5000,
+      budget: { amount: '2500', currency: 'INR' },
+      stopAfterHours: 48,
+    };
+    expect(apiCreateCampaignSchema.parse(full)).toEqual({
+      ...full,
+      variables: { header: [], body: [{ source: 'static', value: 'Asha' }] },
+      audience: { match: 'all', conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
+    });
+    expect(apiCreateCampaignSchema.parse({ name: 'A', audience: { segmentId: segment } })).toEqual({
+      name: 'A',
+      audience: { segmentId: segment },
+    });
+    for (const body of [
+      {},
+      { name: ' ' },
+      { name: 'x'.repeat(121) },
+      { name: 'A', launch: true },
+      { name: 'A', status: 'scheduled' },
+      { name: 'A', channelId: 'main' },
+      { name: 'A', audience: { segmentId: segment, conditions: [] } },
+      { name: 'A', audience: { conditions: [] } },
+      {
+        name: 'A',
+        audience: {
+          conditions: [
+            { type: 'group', match: 'any', conditions: [{ type: 'tag', op: 'has', tag: 'a' }] },
+          ],
+        },
+      },
+      { name: 'A', schedule: { kind: 'later' } },
+      { name: 'A', schedule: { kind: 'soon' } },
+      { name: 'A', variables: { body: [{ source: 'static', value: '' }] } },
+      { name: 'A', ratePerMinute: 0 },
+      { name: 'A', maxMessages: 1_000_001 },
+      { name: 'A', budget: { amount: '2500', currency: 'inr' } },
+      { name: 'A', stopAfterHours: 169 },
+      { name: 'A', window: { start: '09:00' } },
+    ]) {
+      expect(apiCreateCampaignSchema.safeParse(body).success, JSON.stringify(body)).toBe(false);
+    }
+    expect(apiUpdateCampaignSchema.parse({ maxMessages: null })).toEqual({ maxMessages: null });
+    expect(apiUpdateCampaignSchema.parse({ expectedVersion: 3, name: 'B' })).toEqual({
+      expectedVersion: 3,
+      name: 'B',
+    });
+    for (const body of [{}, { expectedVersion: 3 }, { expectedVersion: -1, name: 'B' }]) {
+      expect(apiUpdateCampaignSchema.safeParse(body).success, JSON.stringify(body)).toBe(false);
+    }
+    expect(
+      apiUpdateCampaignSchema.safeParse({ expectedVersion: 3 }).error?.issues[0]?.message,
+    ).toBe('Give at least one setting to change');
+  });
+
+  it('keep every setting left out, clear those given as null and keep the time zone without one', () => {
+    expect(apiDraftInputFrom(base, {})).toEqual(base);
+    expect(apiDraftInputFrom(base, { name: 'Renamed', maxMessages: null })).toEqual({
+      ...base,
+      name: 'Renamed',
+      maxMessages: null,
+    });
+    expect(
+      apiDraftInputFrom(base, {
+        channelId: null,
+        audience: null,
+        window: null,
+        ratePerMinute: null,
+        budget: null,
+      }),
+    ).toEqual({
+      ...base,
+      channelAccountId: null,
+      audience: { kind: 'none' },
+      window: null,
+      ratePerMinute: null,
+      budget: null,
+    });
+    const conditions = {
+      match: 'any' as const,
+      conditions: [{ type: 'tag' as const, op: 'has' as const, tag: 'vip' }],
+    };
+    expect(apiDraftInputFrom(base, { audience: conditions }).audience).toEqual({
+      kind: 'conditions',
+      definition: conditions,
+    });
+    expect(apiDraftInputFrom(base, { schedule: { kind: 'now' } }).schedule).toEqual({
+      kind: 'now',
+      timezone: 'Asia/Kolkata',
+    });
+    expect(
+      apiDraftInputFrom(base, {
+        schedule: { kind: 'later', local: '2026-12-01T10:30', timezone: 'Europe/London' },
+      }).schedule,
+    ).toEqual({ kind: 'later', local: '2026-12-01T10:30', timezone: 'Europe/London' });
+  });
+
+  it('read a stored draft back as members type it, and pass members’ checks again unchanged', () => {
+    expect([2_500_000_000, 2_500_500_000, 1, 0].map(microsToAmount)).toEqual([
+      '2500',
+      '2500.5',
+      '0.000001',
+      '0',
+    ]);
+    const stored = {
+      name: 'Diwali offer',
+      channelAccountId: number,
+      templateId: null,
+      variables: { header: [], body: [{ source: 'name', fallback: 'there' }] },
+      segmentId: null,
+      audienceDefinition: { match: 'all', conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
+      scheduleKind: 'later',
+      scheduledLocal: '2026-11-01 09:00:00',
+      timezone: 'Asia/Kolkata',
+      windowStart: '09:00:00',
+      windowEnd: '20:00:00',
+      ratePerMinute: 100,
+      maxMessages: 5000,
+      budgetMicros: 2_500_500_000,
+      budgetCurrency: 'INR',
+      stopAfterHours: 48,
+    } as unknown as Parameters<typeof campaignDraftInputOf>[0];
+    const input = campaignDraftInputOf(stored);
+    expect(input).toEqual({
+      ...base,
+      audience: { kind: 'conditions', definition: stored.audienceDefinition },
+    });
+    const prepared = prepareCampaignDraft(input);
+    expect(prepared).toMatchObject({
+      scheduledLocal: '2026-11-01 09:00:00',
+      budget: { budgetMicros: 2_500_500_000, budgetCurrency: 'INR' },
+    });
+    expect(
+      campaignDraftInputOf({
+        ...stored,
+        segmentId: segment,
+        audienceDefinition: null,
+        scheduleKind: 'now',
+        scheduledLocal: null,
+        windowStart: null,
+        windowEnd: null,
+        budgetMicros: null,
+        budgetCurrency: null,
+      }),
+    ).toMatchObject({
+      audience: { kind: 'segment', segmentId: segment },
+      schedule: { kind: 'now', timezone: 'Asia/Kolkata' },
+      window: null,
+      budget: null,
+    });
+  });
+
+  it('are described: the scope, the checks, drafts only, the version and the draft as the answer', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    type Operation = {
+      operationId: string;
+      description: string;
+      parameters: Record<string, unknown>[];
+      requestBody?: unknown;
+      responses: Record<string, unknown>;
+    };
+    const paths = doc.paths as unknown as Record<string, Record<string, Operation>>;
+    const create = paths['/campaigns']?.post;
+    expect(create?.operationId).toBe('createCampaign');
+    expect(create?.parameters).toEqual([
+      { $ref: '#/components/parameters/IdempotencyKeyOptional' },
+    ]);
+    expect(JSON.stringify(create?.requestBody)).toContain('#/components/schemas/CreateCampaign"');
+    expect(JSON.stringify(create?.responses['201'])).toContain('CampaignWithResults');
+    for (const words of [
+      'Scope: `campaigns.write`.',
+      "checked as members' drafts are",
+      'A draft sends nothing: members review, submit and start it in the app',
+      'One draft per `Idempotency-Key`',
+    ]) {
+      expect(create?.description).toContain(words);
+    }
+    const update = paths['/campaigns/{id}']?.patch;
+    expect(update?.operationId).toBe('updateCampaign');
+    expect(Object.keys(update?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '404', '409', '422', '423']),
+    );
+    for (const words of [
+      'Scope: `campaigns.write`.',
+      'Changes the settings given and keeps the others',
+      'Only a draft is edited: any other status is refused with 409, naming it.',
+      'With `expectedVersion`, a draft changed since you read it',
+    ]) {
+      expect(update?.description).toContain(words);
+    }
+    const schemas = doc.components.schemas as unknown as Record<
+      string,
+      { properties: Record<string, unknown>; required?: string[] }
+    >;
+    expect(schemas.CreateCampaign?.required).toEqual(['name']);
+    expect(Object.keys(schemas.UpdateCampaign?.properties ?? {})).toContain('expectedVersion');
+    expect(Object.keys(schemas.CreateCampaign?.properties ?? {})).not.toContain('expectedVersion');
+    expect(paths['/campaigns/{id}']?.get?.description).toContain(
+      'A key that also holds `campaigns.write` gets its settings',
+    );
+    expect(API_ROUTES).toEqual(
+      expect.arrayContaining([
+        ['post', '/campaigns'],
+        ['patch', '/campaigns/{id}'],
+      ]),
+    );
   });
 });
 
