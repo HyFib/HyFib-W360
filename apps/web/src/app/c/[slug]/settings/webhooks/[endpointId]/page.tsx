@@ -42,10 +42,11 @@ export default async function WebhookEndpointPage({
   const endpoint = (await webhooks.list(ctx)).find((e) => e.id === endpointId);
   if (!endpoint) notFound();
   const failedOnly = failed === '1';
-  const [deliveries, automationChoices, channelChoices] = await Promise.all([
+  const [deliveries, automationChoices, channelChoices, teamChoices] = await Promise.all([
     webhooks.deliveries(ctx, { endpointId, failedOnly }),
     webhooks.automationChoices(ctx),
     webhooks.channelChoices(ctx),
+    webhooks.teamChoices(ctx),
   ]);
   const tz = ctx.tenant.timezone;
   const host = webhookHost(endpoint.url) ?? endpoint.url;
@@ -192,10 +193,12 @@ export default async function WebhookEndpointPage({
               conversationStatuses: endpoint.conversationStatuses,
               runEndStatuses: endpoint.runEndStatuses,
               channelIds: endpoint.channels?.map((c) => c.id) ?? null,
+              teams: endpoint.teams,
               oauth: endpoint.oauth,
             }}
             automationChoices={automationChoices}
             channelChoices={channelChoices}
+            teamChoices={teamChoices}
           />
         </CardContent>
       </Card>

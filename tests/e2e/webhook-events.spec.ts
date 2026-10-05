@@ -293,6 +293,99 @@ test('conversation team and assignment events name the team and the member: a me
   expect(forUs()).toHaveLength(3);
 });
 
+test("an endpoint for one team receives only its conversations' events: messages once a conversation joins the team, and the change of team when it leaves (ADR-174)", async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const email = uniqueEmail('hookteams');
+  const slug = `hookteams-${Date.now().toString(36)}`;
+  const path = `/team-filter/${slug}`;
+  const forUs = () =>
+    received
+      .filter((r) => r.path === path)
+      .map((r) => ({ ...r, json: JSON.parse(r.body) as EventBody }));
+  await signUpAndVerify(page, { name: 'Tia Teams', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Team Filter Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  // Two teams that assign by hand.
+  await page.goto(`/c/${slug}/settings/teams`);
+  for (const name of ['Returns', 'Billing']) {
+    const form = page.locator('form', { has: page.getByRole('button', { name: 'Create team' }) });
+    await form.getByLabel('Team name').fill(name);
+    await form.getByRole('button', { name: 'Create team' }).click();
+    await expect(page.getByRole('heading', { name: new RegExp(name) })).toBeVisible();
+  }
+
+  // An endpoint for the messages and team changes of the Returns team's conversations.
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${path}`);
+  await page.getByRole('checkbox', { name: /Message received/ }).check();
+  await page.getByRole('checkbox', { name: /Conversation team/ }).check();
+  await page
+    .getByRole('radio', { name: /Only the events of the conversations of the teams ticked/ })
+    .check();
+  await page.getByRole('checkbox', { name: 'Returns', exact: true }).check();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  const secretField = page.getByLabel('Signing secret');
+  await expect(secretField).toBeVisible();
+  const secret = await secretField.inputValue();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  await page.reload();
+  await expect(page.getByText('Teams whose conversations’ events are sent: Returns')).toBeVisible();
+
+  // A customer writes: the conversation is in no team, so nothing is sent.
+  const waId = randomWaId();
+  await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, waId, 'Wrong size'));
+  await page.goto(`/c/${slug}/inbox`);
+  const item = page.getByRole('link', { name: /Priya Customer/ });
+  await expect(item).toContainText('Unassigned', { timeout: 30_000 });
+  await item.click();
+  await expect(page.getByText('Wrong size')).toBeVisible();
+  const teamControl = page
+    .getByLabel('Team', { exact: true })
+    .and(page.locator('select:not([name="team"])'));
+
+  // Into Returns: the change is sent, then the customer's next message.
+  const [returnsId] = await teamControl.selectOption({ label: 'Returns' });
+  await expect(async () => expect(forUs()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(signatureValid(forUs()[0]!.headers, forUs()[0]!.body, secret)).toBe(true);
+  expect(forUs()[0]!.json).toMatchObject({
+    type: 'conversation.team_changed',
+    data: { conversation: { teamId: returnsId, previousTeamId: null } },
+  });
+  await expect(teamControl).toHaveValue(returnsId!);
+  await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, waId, 'Any news?'));
+  await expect(async () => expect(forUs()).toHaveLength(2)).toPass({ timeout: 30_000 });
+  expect(forUs()[1]!.json.type).toBe('message.received');
+  expect(forUs()[1]!.body).toContain('Any news?');
+
+  // Into Billing: the change is sent to the team it left; the next message is not.
+  const [billingId] = await teamControl.selectOption({ label: 'Billing' });
+  await expect(async () => expect(forUs()).toHaveLength(3)).toPass({ timeout: 30_000 });
+  expect(forUs()[2]!.json).toMatchObject({
+    type: 'conversation.team_changed',
+    data: { conversation: { teamId: billingId, previousTeamId: returnsId } },
+  });
+  await expect(teamControl).toHaveValue(billingId!);
+  await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, waId, 'For billing'));
+  await expect(page.getByText('For billing')).toBeVisible({ timeout: 30_000 });
+  // Back into Returns: its change arrives after anything captured before it would have.
+  await teamControl.selectOption({ label: 'Returns' });
+  await expect(async () => expect(forUs()).toHaveLength(4)).toPass({ timeout: 30_000 });
+  expect(forUs().map((r) => r.json.type)).toEqual([
+    'conversation.team_changed',
+    'message.received',
+    'conversation.team_changed',
+    'conversation.team_changed',
+  ]);
+  expect(forUs().some((r) => r.body.includes('For billing'))).toBe(false);
+});
+
 /** An automation run event body, as far as this test reads it. */
 interface RunEventBody {
   type: string;

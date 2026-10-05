@@ -34,6 +34,7 @@ import {
   WEBHOOK_CONVERSATION_STATUSES,
   WEBHOOK_RUN_END_STATUS_LABELS,
   WEBHOOK_RUN_END_STATUSES,
+  WEBHOOK_TEAM_EVENTS,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
@@ -56,6 +57,8 @@ import {
   webhookRetryDelaySeconds,
   webhookTakesAutomationRuns,
   webhookTakesChannelEvents,
+  webhookTakesTeamEvents,
+  webhookTeamText,
 } from './model';
 import {
   automationRunEndedPayloadSchema,
@@ -116,6 +119,8 @@ import {
   webhookMessageStatusesSchema,
   webhookOrderStatusesFor,
   webhookOrderStatusesSchema,
+  webhookTeamIdsFor,
+  webhookTeamIdsSchema,
   webhookTemplateStatusesFor,
   webhookTemplateStatusesSchema,
 } from './service';
@@ -1999,5 +2004,75 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     expect(webhookErrorLabel('oauth_token_refused_400', 500)).toBe(
       'The authorization server refused an access token (HTTP 400)',
     );
+  });
+});
+
+describe('team filters (ADR-174)', () => {
+  const support = '2a3b4c5d-6e7f-4081-9293-a4b5c6d7e8f9';
+  const sales = '3b4c5d6e-7f80-4192-a3b4-c5d6e7f8091a';
+
+  it('take 1 to 50 teams, once each and in lower case, in the order given; null takes every conversation', () => {
+    expect(webhookTeamIdsSchema.parse([sales, support.toUpperCase(), sales, support])).toEqual([
+      sales,
+      support,
+    ]);
+    expect(webhookTeamIdsSchema.parse(null)).toBeNull();
+    const ids = Array.from(
+      { length: WEBHOOK_LIMITS.teams + 1 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(WEBHOOK_LIMITS.teams).toBe(50);
+    expect(webhookTeamIdsSchema.parse(ids.slice(1))).toEqual(ids.slice(1));
+    for (const refused of [[], ids, ['support'], [support, null], support, [42]]) {
+      expect(webhookTeamIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(false);
+    }
+    expect(webhookTeamIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one team, or take every conversation.',
+    );
+    expect(webhookTeamIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 50 teams.',
+    );
+  });
+
+  it("apply to a conversation's messages and changes, whose payloads name it, and no other event", () => {
+    expect(WEBHOOK_TEAM_EVENTS).toEqual([
+      'message.received',
+      'message.status',
+      'conversation.status_changed',
+      'conversation.assignment_changed',
+      'conversation.team_changed',
+    ]);
+    const payloads = {
+      'message.received': messageReceivedPayloadSchema,
+      'message.status': messageStatusPayloadSchema,
+      'conversation.status_changed': conversationStatusPayloadSchema,
+      'conversation.assignment_changed': conversationAssignmentPayloadSchema,
+      'conversation.team_changed': conversationTeamPayloadSchema,
+    } satisfies Record<(typeof WEBHOOK_TEAM_EVENTS)[number], unknown>;
+    for (const type of WEBHOOK_EVENT_KEYS) {
+      const ofATeam = WEBHOOK_TEAM_EVENTS.some((t) => t === type);
+      expect(webhookTakesTeamEvents([type]), type).toBe(ofATeam);
+    }
+    // Each names the conversation it belongs to, so a receiver can look its team up.
+    for (const type of WEBHOOK_TEAM_EVENTS) {
+      expect('conversation' in payloads[type].shape.data.shape, type).toBe(true);
+    }
+    expect(webhookTakesTeamEvents(['consent.changed', 'message.status'])).toBe(true);
+    expect(webhookTakesTeamEvents(['order.received', 'automation.run_started'])).toBe(false);
+    expect(webhookTakesTeamEvents([])).toBe(false);
+  });
+
+  it('are kept only while the endpoint takes an event of a conversation: given, kept, or cleared', () => {
+    expect(webhookTeamIdsFor(['message.received'], [support], null)).toEqual([support]);
+    expect(webhookTeamIdsFor(['conversation.team_changed'], undefined, [sales])).toEqual([sales]);
+    expect(webhookTeamIdsFor(['message.status'], null, [sales])).toBeNull();
+    expect(webhookTeamIdsFor(['message.received'], undefined, null)).toBeNull();
+    expect(webhookTeamIdsFor(['consent.changed', 'order.received'], [support], [sales])).toBeNull();
+    expect(webhookTeamIdsFor(['automation.run_ended'], undefined, [sales])).toBeNull();
+  });
+
+  it('name a team, or say it was deleted', () => {
+    expect(webhookTeamText({ id: support, name: 'Support' })).toBe('Support');
+    expect(webhookTeamText({ id: sales, name: null })).toBe('A deleted team');
   });
 });

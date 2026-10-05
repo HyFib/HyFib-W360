@@ -112,10 +112,12 @@ import {
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
   WEBHOOK_SENDERS_NEED_THE_EVENT,
+  WEBHOOK_TEAMS_NEED_THE_EVENTS,
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
 } from '../webhooks/service';
 import {
   WEBHOOK_CHANNEL_EVENTS,
+  WEBHOOK_TEAM_EVENTS,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_FAILURE_KINDS,
   WEBHOOK_LIMITS,
@@ -1357,6 +1359,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'oauth',
       'orderStatuses',
       'runEndStatuses',
+      'teamIds',
       'templateStatuses',
     ]);
     expect(update.additionalProperties).toBe(false);
@@ -1541,6 +1544,66 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(keys(answered.properties.oauth)).toEqual(['clientId', 'scope', 'tokenUrl']);
     expect(answered.required).toContain('oauth');
     expect(doc.info.description).toContain('send it as `Authorization: Bearer <token>`');
+  });
+
+  it('take teams only with an event of a conversation, each once, and a list of them alone is a change (ADR-174)', () => {
+    const a = '0190e9a1-0000-7000-8000-00000000001a';
+    const b = '0190e9a1-0000-7000-8000-00000000001b';
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    // Each event of a conversation allows a list, alongside events of none.
+    for (const event of WEBHOOK_TEAM_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          teamIds: [b, a.toUpperCase(), b],
+        }).teamIds,
+        event,
+      ).toEqual([b, a]);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['order.received', 'automation.run_started', 'campaign.status_changed'],
+      teamIds: [a],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['teamIds', WEBHOOK_TEAMS_NEED_THE_EVENTS],
+    ]);
+    const message = { ...base, events: ['message.received'] };
+    for (const body of [
+      { ...message, teamIds: [] },
+      { ...message, teamIds: ['support'] },
+      {
+        ...message,
+        teamIds: Array.from(
+          { length: WEBHOOK_LIMITS.teams + 1 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiCreateWebhookEndpointSchema.parse({ ...message, teamIds: null }).teamIds).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ teamIds: null })).toEqual({ teamIds: null });
+    expect(apiUpdateWebhookEndpointSchema.parse({ teamIds: [a] })).toEqual({ teamIds: [a] });
+    // Answered as a list or null, and described in the overview.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.teamIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('teamIds');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('teamIds');
+    expect(doc.info.description).toContain(
+      'It can likewise name teams (its `teamIds`, or the teams chosen in Settings → Webhooks)',
+    );
   });
 
   it('take numbers only with an event that happens on one, each once, and a list of them alone is a change (ADR-170)', () => {

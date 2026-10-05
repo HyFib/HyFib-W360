@@ -926,6 +926,14 @@ Phase 5 rules (outgoing webhooks, P5-09):
   its trigger in the same transaction: it narrows what one endpoint receives and never adds an event
   or a delivery for another endpoint or company. The sender passed is not stored with the event.
   Audited with the list (unit tests; integration and e2e tests, run in CI only).
+- An endpoint can take the message and conversation events of chosen teams' conversations only
+  (ADR-174), chosen the same way. A list may add only teams of the endpoint's company (checked in
+  its scope), is kept only while the endpoint takes such an event (a database check too, which also
+  refuses a null entry), and is applied in `app.capture_webhook_event`, which reads the
+  conversation's team in the company's scope (the definer role through its column grant): it narrows
+  what one endpoint receives and never adds an event or a delivery for another endpoint or company.
+  A team deleted later stays on the list and matches nothing, so a list never widens by itself.
+  Audited with the list (unit tests; integration and e2e tests, run in CI only).
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

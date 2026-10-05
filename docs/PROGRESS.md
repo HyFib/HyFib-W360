@@ -1,5 +1,61 @@
 # Progress
 
+## 2026-10-05 — Phase 5: choosing the teams whose conversations' events a webhook endpoint receives (P5-09, ADR-174)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every
+endpoint received every conversation's message and conversation events. The local PostgreSQL is
+unavailable (its Docker daemon stopped), so migration 0122, the integration tests and the e2e test
+below were written but not run here.
+
+### Completed
+
+- **Design (ADR-174):** `teamIds`, null for every conversation or 1 to 50 of the company's teams,
+  only with a message or conversation event; by the team a conversation is in when the event is
+  captured, a change of team also reaching the team it left; a deleted team stays and matches
+  nothing.
+- **Database:** migration 0122 (the column and its check, the column grant,
+  `app.capture_webhook_event` reading the conversation's team when an endpoint names teams); the
+  schema's column (`packages/db`).
+- **Domain:** the list's schema, keeping and checking (`webhookTeamIdsSchema`, `webhookTeamIdsFor`,
+  `assertWebhookTeams`), the endpoint view naming the teams, `teamChoices`, create and update with
+  the audit; `WEBHOOK_TEAM_EVENTS` and the labels in the model; `teamIds` in the API (create,
+  update, answers) and the OpenAPI document; the export column.
+- **Web:** "Teams" in the endpoint form (every conversation's events, or the teams ticked, a deleted
+  one listed until unticked) and "Teams whose conversations’ events are sent: …" on the endpoints
+  list.
+- **Tests:**
+  - Unit (4 new in `webhooks.test.ts`, 1 new and 1 changed in `api.test.ts`): the list's rules, the
+    events it narrows, keeping and clearing, the labels, the API schemas and the OpenAPI entries.
+  - Integration (3 new in `webhooks.test.ts`, 1 new in `api-webhook-endpoints.test.ts`): refusals,
+    keeping and clearing, a deleted team, audits, the check and the grant, the choices, and capture
+    by team. Written for CI; not run here.
+  - E2E (1 new in `webhook-events.spec.ts`): an endpoint for one team of two. Written for CI; not
+    run here.
+- **Docs:** ADR-174 (and ADR-170's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T169; DEPLOYMENT and RUNBOOKS (migration 0122, a receiver missing a conversation's events);
+  DATA-RETENTION; BACKLOG P5-09; feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 15 deliberate regressions tried, all caught on the unit-tested parts (an
+  empty or long list, repeats or case kept, any text taken, a list kept without its events or by a
+  null, the events narrowed, the limit, the label of a deleted team, the API's refinement, change
+  rule and field, the OpenAPI field and overview). The services' checks, the capture and the form
+  need the database or a browser, so their regressions are left to the integration and e2e tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 794 passed (80 files)                                                |
+| `pnpm test:integration`, e2e, migration 0122       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 15 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Filters by the member assigned; teams for automation run and order events; teams per event type.
+
 ## 2026-10-05 — Phase 5: OAuth 2.0 client credentials for webhook endpoints (P5-09, ADR-173)
 
 Status: **Implemented; its database and browser tests run in CI only (test receivers and

@@ -2197,6 +2197,17 @@ is dropped and a new one is asked for at the next attempt; a 401 every time mean
 not accept the server's tokens (often the scope). Tokens live in each worker's memory, so restarting
 workers makes them ask again. Replay what failed meanwhile with the "No valid answer" failures.
 
+**A receiver misses a conversation's events (ADR-174).** An endpoint can take the message and
+conversation events of chosen teams' conversations only. The endpoints list shows them ("Teams whose
+conversations’ events are sent: …"), and the API answers `teamIds` (null takes every
+conversation's). A conversation's events go by the team it is in when they happen: one in no team,
+or in another team, is never queued for the endpoint (a change of team reaches the team it left as
+well as the one it joined), and when no endpoint of the company takes an event, it is not recorded
+at all, so there is nothing to replay. A team deleted since it was chosen shows as "A deleted team"
+and matches nothing. To take more, tick the teams under "Teams" on the endpoint's page or choose
+"Every conversation’s events", or `PATCH /webhook-endpoints/{id}` with `teamIds` (null for every
+conversation). Removing every message and conversation event clears the list.
+
 **A campaign event's results differ from the campaign page (ADR-150).** `campaign.results` are
 counted when the request is built (the `t` of its `W360-Signature`), as `GET /campaigns/{id}` counts
 them, and a retry or a replay counts again: an event delivered while the campaign's messages were on
@@ -2646,6 +2657,14 @@ servers of the previous release work with it.
 held on the table: fix it and run the migrations again). Workers and web servers of this release
 need it before they start (their reads of endpoints name the columns); those of the previous release
 work with it.
+
+**Migration 0122 failed.** It adds `team_ids` to `app.webhook_endpoints` with the check
+`webhook_endpoints_team_ids`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event`, in one transaction; a failure rolls it all back (usually the bootstrap
+roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
+release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
+endpoints name the column); workers of either release and web servers of the previous release work
+with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

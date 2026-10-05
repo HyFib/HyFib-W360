@@ -1540,6 +1540,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'conversation_statuses',
       'run_end_statuses',
       'channel_account_ids',
+      'team_ids',
       'oauth_token_url',
       'oauth_client_id',
       'oauth_scope',

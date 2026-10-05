@@ -17,6 +17,7 @@ import {
   webhookChannelText,
   webhookOAuthText,
   webhookHost,
+  webhookTeamText,
   type WebhookEndpointView,
 } from '@w360/domain';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
@@ -46,10 +47,11 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'developer.manage')) notFound();
   const { webhooks } = await getRuntime();
-  const [endpoints, automationChoices, channelChoices] = await Promise.all([
+  const [endpoints, automationChoices, channelChoices, teamChoices] = await Promise.all([
     webhooks.list(ctx),
     webhooks.automationChoices(ctx),
     webhooks.channelChoices(ctx),
+    webhooks.teamChoices(ctx),
   ]);
   const tz = ctx.tenant.timezone;
   const base = `/c/${ctx.tenant.slug}/settings/webhooks`;
@@ -193,6 +195,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.channels.map(webhookChannelText).join(', ')}
                       </p>
                     ) : null}
+                    {e.teams ? (
+                      <p className="text-xs text-muted-foreground">
+                        Teams whose conversations’ events are sent:{' '}
+                        {e.teams.map(webhookTeamText).join(', ')}
+                      </p>
+                    ) : null}
                     {e.headerNames.length > 0 ? (
                       <p className="text-xs text-muted-foreground">
                         Headers sent: {e.headerNames.join(', ')} (values hidden)
@@ -313,6 +321,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
             slug={ctx.tenant.slug}
             automationChoices={automationChoices}
             channelChoices={channelChoices}
+            teamChoices={teamChoices}
             atLimit={endpoints.length >= WEBHOOK_LIMITS.endpoints}
           />
         </CardContent>

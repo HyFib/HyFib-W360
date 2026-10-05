@@ -2396,6 +2396,233 @@ describe('number filters (ADR-170)', () => {
   });
 });
 
+describe('team filters (ADR-174)', () => {
+  /** A team of the company, written as the teams settings write one. */
+  async function teamOf(c: Company, name: string) {
+    const id = uuidv7();
+    await fx.query('INSERT INTO app.teams (id, tenant_id, name) VALUES ($1, $2, $3)', [
+      id,
+      c.tenant.id,
+      name,
+    ]);
+    return id;
+  }
+  /** Moves a conversation to a team (or out of every team), as the inbox does. */
+  const moveTo = (conversationId: string, teamId: string | null) =>
+    fx.query('UPDATE app.conversations SET team_id = $2 WHERE id = $1', [conversationId, teamId]);
+
+  it("are refused without an event of a conversation, empty, over 50 or naming another company's team; kept by a change that leaves them out, a deleted team included, and cleared with the events; the database keeps them to those events", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const support = await teamOf(c, 'Support');
+    const sales = await teamOf(c, 'Sales');
+    const elsewhere = await teamOf(await fx.company(), 'Support');
+    const url = 'https://hooks.example.com/in';
+    const refused = async (
+      eventTypes: string[],
+      teamIds: unknown,
+      message: RegExp,
+      path = 'teamIds',
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes, teamIds }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(teamIds)).toBe(path);
+    };
+    const needsTheEvents = /only for an endpoint that receives message or conversation events/;
+    await refused(
+      ['consent.changed', 'order.received', 'automation.run_started', 'campaign.status_changed'],
+      [support],
+      needsTheEvents,
+    );
+    await refused(['message.received'], [], /at least one team/);
+    await refused(['message.received'], ['support'], /from the list/, 'teamIds.0');
+    await refused(
+      ['message.received'],
+      Array.from({ length: 51 }, () => uuidv7()),
+      /at most 50/,
+    );
+    // Only the company's teams: not another company's or an unknown id.
+    await refused(['message.status'], [support, elsewhere], /of this company/, 'teamIds.1');
+    await refused(['conversation.team_changed'], [uuidv7()], /of this company/, 'teamIds.0');
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['message.received', 'consent.changed'],
+      teamIds: [sales, support.toUpperCase(), sales],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { teamIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => a.metadata.teamIds);
+    expect(await audits('webhook.endpoint_created')).toEqual([[sales, support]]);
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['message.received', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.teams;
+    expect(await current()).toEqual([
+      { id: sales, name: 'Sales' },
+      { id: support, name: 'Support' },
+    ]);
+    await change({ description: 'kept' });
+    expect((await current())?.map((t) => t.id)).toEqual([sales, support]);
+    // A team deleted since it was chosen stays on the list, unnamed, and a list given again may
+    // keep it; a deleted team the list did not hold is refused like any unknown one.
+    await fx.query('DELETE FROM app.teams WHERE id = $1', [sales]);
+    expect(await current()).toEqual([
+      { id: sales, name: null },
+      { id: support, name: 'Support' },
+    ]);
+    await change({ teamIds: [support, sales] });
+    expect((await current())?.map((t) => t.id)).toEqual([support, sales]);
+    const gone = await teamOf(c, 'Gone');
+    await fx.query('DELETE FROM app.teams WHERE id = $1', [gone]);
+    await expectAppError(
+      change({ teamIds: [support, gone] }),
+      'validation_failed',
+      /of this company/,
+    );
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [sales, support],
+      [support, sales],
+    ]);
+    await change({ teamIds: null });
+    expect(await current()).toBeNull();
+    await change({ teamIds: [support] });
+    // Any event of a conversation keeps the list.
+    await change({ eventTypes: ['conversation.status_changed', 'order.received'] });
+    expect((await current())?.map((t) => t.id)).toEqual([support]);
+    // The database refuses an empty list, more than 50 or a missing id from an endpoint taking
+    // such an event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET team_ids = ${value} WHERE id = $1`, [created.id]);
+    const many = `ARRAY[${Array.from({ length: 51 }, () => `'${uuidv7()}'`).join(',')}]::uuid[]`;
+    for (const bad of [`'{}'`, many, `ARRAY['${support}', NULL]::uuid[]`]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_team_ids/);
+    }
+    await change({ eventTypes: ['order.received', 'consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['order.received'], teamIds: [support] }),
+      'validation_failed',
+      needsTheEvents,
+    );
+    // …and any list for an endpoint that takes none.
+    await expect(setInDatabase(`ARRAY['${support}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_team_ids/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'team_ids', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it("offer the company's teams by name, to developers only", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const support = await teamOf(c, 'Support');
+    const billing = await teamOf(c, 'Billing');
+    await teamOf(await fx.company(), 'Elsewhere');
+    expect(await webhooks().teamChoices(owner)).toEqual([
+      { id: billing, name: 'Billing' },
+      { id: support, name: 'Support' },
+    ]);
+    for (const user of [c.agent, c.marketer]) {
+      await expectAppError(webhooks().teamChoices(await fx.ctx(c, user)), 'forbidden');
+    }
+  });
+
+  it("send an endpoint that names teams only its conversations' events, a change of team to the team left and joined, events of no conversation to both, and capture none nobody takes", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const support = await teamOf(c, 'Support');
+    const sales = await teamOf(c, 'Sales');
+    const add = async (eventTypes: WebhookEventType[], teamIds: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        teamIds,
+      });
+      return { ...created, path };
+    };
+    const supportOnly = await add(
+      ['message.received', 'message.status', 'conversation.team_changed', 'consent.changed'],
+      [support],
+    );
+    const from = waId();
+    // A message in a conversation of no team: no endpoint takes it, so nothing is captured.
+    const first = await inbound(c, from, 'Hello');
+    expect(await eventsOf(c)).toEqual([]);
+    // The conversation joins Support: the change and the next message are captured, stored as
+    // events always were.
+    await moveTo(first.conversation_id, support);
+    await inbound(c, from, 'Still there?');
+    await sendReply(c, first.conversation_id, 'Support here');
+    expect((await eventsOf(c)).map((e) => [e.type, e.status, e.detail])).toEqual([
+      ['conversation.team_changed', null, { teamId: support, previousTeamId: null }],
+      ['message.received', null, { messageType: 'text' }],
+      ['message.status', 'accepted', {}],
+    ]);
+    // It moves to Sales: the change reaches Support, which it left; its next message does not.
+    await moveTo(first.conversation_id, sales);
+    await inbound(c, from, 'Thanks, Sales');
+    // A consent change belongs to no conversation: the endpoint takes it.
+    await createConsentService({ db: fx.dbs.app, clock: systemClock }).recordConsent(owner, {
+      contactId: first.contact_id,
+      purpose: 'marketing',
+      action: 'opt_in',
+    });
+    // An endpoint for every conversation's messages hears every team's, and those of no team.
+    const everyTeam = await add(['message.received'], null);
+    await inbound(c, from, 'Sales again');
+    await moveTo(first.conversation_id, null);
+    await inbound(c, from, 'Nobody now');
+    const typesTo = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).map((d) => [d.type, d.status]);
+    expect(await typesTo(supportOnly.id)).toEqual([
+      ['conversation.team_changed', null],
+      ['message.received', null],
+      ['message.status', 'accepted'],
+      ['conversation.team_changed', null],
+      ['consent.changed', null],
+    ]);
+    expect(await typesTo(everyTeam.id)).toEqual([
+      ['message.received', null],
+      ['message.received', null],
+    ]);
+    // Each delivery names its conversation; the team changes name the teams.
+    expect(await deliverDue(c)).toMatchObject({ attempted: 7, succeeded: 7 });
+    const changes = requestsTo(supportOnly.path)
+      .map((r) => JSON.parse(r.body) as { type: string; data: Record<string, unknown> })
+      .filter((b) => b.type === 'conversation.team_changed')
+      .map((b) => b.data.conversation);
+    expect(changes).toHaveLength(2);
+    for (const body of requestsTo(supportOnly.path).map(
+      (r) => JSON.parse(r.body) as { type: string; data: { conversation?: { id: string } } },
+    )) {
+      if (body.type !== 'consent.changed') {
+        expect(body.data.conversation?.id, body.type).toBe(first.conversation_id);
+      }
+    }
+  });
+});
+
 describe('event capture', () => {
   it('records an event only for subscribed types, with one delivery per active subscribed endpoint, and none from a rolled-back change', async () => {
     const c = await fx.company();

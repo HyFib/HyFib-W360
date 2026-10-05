@@ -46,6 +46,8 @@ export async function createWebhookEndpointAction(
     runEndStatuses: string[] | null;
     /** The WhatsApp numbers whose events it takes (ADR-170); null takes every number. */
     channelIds: string[] | null;
+    /** The teams whose conversations' events it takes (ADR-174); null takes every one's. */
+    teamIds: string[] | null;
     /** Its OAuth client (ADR-173); null: none. */
     oauth: WebhookOAuthActionInput | null;
   },
@@ -88,6 +90,8 @@ export async function updateWebhookEndpointAction(
     runEndStatuses: string[] | null;
     /** The WhatsApp numbers whose events it takes (ADR-170); null takes every number. */
     channelIds: string[] | null;
+    /** The teams whose conversations' events it takes (ADR-174); null takes every one's. */
+    teamIds: string[] | null;
     /**
      * Given, its OAuth client (null removes it, ADR-173): a secret left out keeps the stored one
      * while the token URL stays the same. Left out, it stays.

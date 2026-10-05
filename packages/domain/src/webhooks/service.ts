@@ -15,6 +15,7 @@ import {
   inArray,
   isNotNull,
   sql,
+  teams,
   users,
   webhookDeliveries,
   webhookEndpoints,
@@ -45,6 +46,7 @@ import {
   webhookHost,
   webhookTakesAutomationRuns,
   webhookTakesChannelEvents,
+  webhookTakesTeamEvents,
   type WebhookAutomationChoice,
   type WebhookCampaignStatus,
   type WebhookChannelChoice,
@@ -53,11 +55,13 @@ import {
   type WebhookEndpointAutomation,
   type WebhookEndpointChannel,
   type WebhookEndpointOAuth,
+  type WebhookEndpointTeam,
   type WebhookFailureKind,
   type WebhookMessageSender,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookRunEndStatus,
+  type WebhookTeamChoice,
   type WebhookTemplateStatus,
 } from './model';
 import {
@@ -613,6 +617,61 @@ const channelChoiceColumns = {
   status: channelAccounts.status,
 };
 
+/**
+ * The teams whose conversations' message and conversation events an endpoint takes (ADR-174), each
+ * once; null takes every conversation's, including those of teams added later.
+ */
+export const webhookTeamIdsSchema = z
+  .array(z.uuid({ error: 'Choose teams from the list.' }))
+  .min(1, 'Choose at least one team, or take every conversation.')
+  .max(WEBHOOK_LIMITS.teams, `Choose at most ${WEBHOOK_LIMITS.teams} teams.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_TEAMS_NEED_THE_EVENTS =
+  'Choose teams only for an endpoint that receives message or conversation events.';
+
+export const WEBHOOK_TEAMS_NOT_FOUND = 'Choose teams of this company.';
+
+/**
+ * The teams an endpoint keeps after it is added or changed: every conversation (null) unless it
+ * takes an event of a conversation; then those given, or else the ones it had.
+ */
+export function webhookTeamIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesTeamEvents(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses teams a list adds to an endpoint unless each is the company's (ADR-174). Teams the
+ * endpoint's list already held may have been deleted since, and stay: they match no conversation.
+ * `tx` is in the company's scope.
+ */
+export async function assertWebhookTeams(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+  held: readonly string[] | null = null,
+): Promise<void> {
+  const added = (ids ?? []).filter((id) => !held?.includes(id));
+  if (added.length === 0) return;
+  const rows = await tx
+    .select({ id: teams.id })
+    .from(teams)
+    .where(and(eq(teams.tenantId, tenantId), inArray(teams.id, added)));
+  const found = new Set(rows.map((r) => r.id));
+  const index = (ids ?? []).findIndex((id) => added.includes(id) && !found.has(id));
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_TEAMS_NOT_FOUND, {
+    issues: [{ path: `teamIds.${index}`, message: WEBHOOK_TEAMS_NOT_FOUND }],
+  });
+}
+
 /** A new signing secret: `whsec_` and 32 random bytes. */
 export function generateWebhookSecret(): string {
   return `whsec_${randomBytes(32).toString('base64url')}`;
@@ -679,6 +738,11 @@ const endpointFields = z.object({
    * Given, the numbers whose events it takes (null: every number, ADR-170); left out, they stay.
    */
   channelIds: webhookChannelIdsSchema.optional(),
+  /**
+   * Given, the teams whose conversations' events it takes (null: every conversation's, ADR-174);
+   * left out, they stay.
+   */
+  teamIds: webhookTeamIdsSchema.optional(),
   /** Given, its OAuth client (null: none, ADR-173); left out, it stays. */
   oauth: webhookOAuthSchema.nullable().optional(),
 });
@@ -745,6 +809,12 @@ const channelsNeedTheEvents = {
     !data.channelIds || webhookTakesChannelEvents(data.eventTypes),
   options: { path: ['channelIds'], message: WEBHOOK_CHANNELS_NEED_THE_EVENTS },
 };
+/** Teams are chosen only for an endpoint that takes events of conversations (ADR-174). */
+const teamsNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; teamIds?: unknown }) =>
+    !data.teamIds || webhookTakesTeamEvents(data.eventTypes),
+  options: { path: ['teamIds'], message: WEBHOOK_TEAMS_NEED_THE_EVENTS },
+};
 const endpointSchema = endpointFields
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
   .refine(sendersNeedTheEvent.check, sendersNeedTheEvent.options)
@@ -755,7 +825,8 @@ const endpointSchema = endpointFields
   .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
-  .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options);
+  .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
+  .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options);
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointFields
   .extend({ endpointId: z.uuid() })
@@ -768,7 +839,8 @@ const updateSchema = endpointFields
   .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
-  .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options);
+  .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
+  .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
 const replayAllFailedSchema = z.object({
@@ -820,6 +892,11 @@ export interface WebhookEndpointView {
   runEndStatuses: WebhookRunEndStatus[] | null;
   /** The numbers whose events it takes (ADR-170), as stored, named; null takes every number. */
   channels: WebhookEndpointChannel[] | null;
+  /**
+   * The teams whose conversations' events it takes (ADR-174), as stored, named; null takes every
+   * conversation's.
+   */
+  teams: WebhookEndpointTeam[] | null;
   /** Where it gets OAuth tokens and as which client (ADR-173); the secret is never shown. */
   oauth: WebhookEndpointOAuth | null;
   createdAt: Date;
@@ -1046,6 +1123,7 @@ export async function lockWebhookEndpoint(
       conversationStatuses: webhookEndpoints.conversationStatuses,
       runEndStatuses: webhookEndpoints.runEndStatuses,
       channelAccountIds: webhookEndpoints.channelAccountIds,
+      teamIds: webhookEndpoints.teamIds,
       headerNames: webhookEndpoints.headerNames,
       oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
       oauthClientId: webhookEndpoints.oauthClientId,
@@ -1093,6 +1171,7 @@ export async function insertWebhookEndpoint(
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
     channelAccountIds: string[] | null;
+    teamIds: string[] | null;
     /** Its OAuth client (ADR-173), checked by `checkedWebhookOAuth` with nothing stored. */
     oauth: CheckedWebhookOAuth | null;
     creator: WebhookEndpointCreator;
@@ -1129,6 +1208,7 @@ export async function insertWebhookEndpoint(
     conversationStatuses: input.conversationStatuses,
     runEndStatuses: input.runEndStatuses,
     channelAccountIds: input.channelAccountIds,
+    teamIds: input.teamIds,
     ...webhookOAuthColumns(keyring, tenantId, id, input.oauth, NO_WEBHOOK_OAUTH),
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
@@ -1514,6 +1594,7 @@ export function createWebhooksService(deps: {
               conversationStatuses: webhookEndpoints.conversationStatuses,
               runEndStatuses: webhookEndpoints.runEndStatuses,
               channelAccountIds: webhookEndpoints.channelAccountIds,
+              teamIds: webhookEndpoints.teamIds,
               oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
               oauthClientId: webhookEndpoints.oauthClientId,
               oauthScope: webhookEndpoints.oauthScope,
@@ -1578,6 +1659,16 @@ export function createWebhooksService(deps: {
                     ),
                   );
           const numberById = new Map(numbered.map((n) => [n.id, n]));
+          // The teams endpoints chose (ADR-174); one deleted since is named by its absence.
+          const teamIds = [...new Set(rows.flatMap((r) => r.teamIds ?? []))];
+          const namedTeams =
+            teamIds.length === 0
+              ? []
+              : await tx
+                  .select({ id: teams.id, name: teams.name })
+                  .from(teams)
+                  .where(and(eq(teams.tenantId, ctx.tenant.id), inArray(teams.id, teamIds)));
+          const teamNameById = new Map(namedTeams.map((t) => [t.id, t.name]));
           return rows.map((r) => {
             const recent: Record<WebhookDeliveryState, number> = {
               pending: 0,
@@ -1592,6 +1683,7 @@ export function createWebhooksService(deps: {
               keyPrefix,
               automationIds,
               channelAccountIds,
+              teamIds: chosenTeams,
               oauthTokenUrl,
               oauthClientId,
               oauthScope,
@@ -1610,6 +1702,9 @@ export function createWebhooksService(deps: {
                       ? { id, label: webhookChannelLabel(number), status: number.status }
                       : { id, label: 'Unknown number', status: null };
                   })
+                : null,
+              teams: chosenTeams
+                ? chosenTeams.map((id) => ({ id, name: teamNameById.get(id) ?? null }))
                 : null,
               automations: automationIds
                 ? automationIds.map((id) => {
@@ -1686,6 +1781,24 @@ export function createWebhooksService(deps: {
       return rows.map((r) => ({ id: r.id, label: webhookChannelLabel(r), status: r.status }));
     },
 
+    /**
+     * The teams an endpoint can choose to take the conversations' events of (ADR-174): every team
+     * of the company, by name.
+     */
+    async teamChoices(ctx: TenantContext): Promise<WebhookTeamChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      return db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({ id: teams.id, name: teams.name })
+            .from(teams)
+            .where(eq(teams.tenantId, ctx.tenant.id))
+            .orderBy(asc(teams.name), asc(teams.id)),
+        { accessMode: 'read only' },
+      );
+    },
+
     /** A new endpoint; its secret is returned once. */
     async create(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
@@ -1722,6 +1835,8 @@ export function createWebhooksService(deps: {
         const runEndStatuses = webhookRunEndStatusesFor(data.eventTypes, data.runEndStatuses, null);
         const channelIds = webhookChannelIdsFor(data.eventTypes, data.channelIds, null);
         await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
+        const teamIds = webhookTeamIdsFor(data.eventTypes, data.teamIds, null);
+        await assertWebhookTeams(tx, ctx.tenant.id, teamIds);
         const oauth = data.oauth
           ? checkedWebhookOAuth(data.oauth, NO_WEBHOOK_OAUTH, deps.egressPolicy)
           : null;
@@ -1745,6 +1860,7 @@ export function createWebhooksService(deps: {
           conversationStatuses,
           runEndStatuses,
           channelAccountIds: channelIds,
+          teamIds,
           oauth,
           creator: { userId: ctx.user.id },
         });
@@ -1769,6 +1885,7 @@ export function createWebhooksService(deps: {
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
               ...(channelIds ? { channelIds } : {}),
+              ...(teamIds ? { teamIds } : {}),
               ...(oauth ? { oauthTokenHost: oauth.host } : {}),
             },
           },
@@ -1843,6 +1960,11 @@ export function createWebhooksService(deps: {
         if (data.channelIds !== undefined) {
           await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
         }
+        const teamIds = webhookTeamIdsFor(data.eventTypes, data.teamIds, endpoint.teamIds);
+        // And the teams it adds: those it held may have been deleted since (ADR-174).
+        if (data.teamIds !== undefined) {
+          await assertWebhookTeams(tx, ctx.tenant.id, teamIds, endpoint.teamIds);
+        }
         // Left out, the OAuth client stays as it is (ADR-173).
         const oauth = data.oauth
           ? checkedWebhookOAuth(data.oauth, endpoint, deps.egressPolicy)
@@ -1868,6 +1990,7 @@ export function createWebhooksService(deps: {
             conversationStatuses,
             runEndStatuses,
             channelAccountIds: channelIds,
+            teamIds,
             ...(data.headers
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
               : {}),
@@ -1903,6 +2026,7 @@ export function createWebhooksService(deps: {
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
               ...(channelIds ? { channelIds } : {}),
+              ...(teamIds ? { teamIds } : {}),
               ...webhookOAuthAudit(oauth, endpoint),
             },
           },

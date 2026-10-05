@@ -324,6 +324,8 @@ export const WEBHOOK_LIMITS = {
   automations: 20,
   /** The WhatsApp numbers an endpoint can choose to take the events of (ADR-170). */
   channels: 100,
+  /** The teams an endpoint can choose to take the conversations' events of (ADR-174). */
+  teams: 50,
   /**
    * An endpoint's OAuth client (ADR-173): its identifier, secret and scope, short enough that the
    * Basic header stays within what the egress client sends, and the longest token kept.
@@ -394,6 +396,40 @@ export interface WebhookEndpointChannel {
   label: string;
   /** Null only for a number the company no longer had, which cannot happen: numbers are kept. */
   status: ChannelStatus | null;
+}
+
+/**
+ * The events of a conversation, which an endpoint can take for chosen teams' conversations
+ * (ADR-174): its messages and its changes. A conversation's team is the one it is in when the event
+ * happens; `conversation.team_changed` belongs to the team it left as well.
+ */
+export const WEBHOOK_TEAM_EVENTS = [
+  'message.received',
+  'message.status',
+  'conversation.status_changed',
+  'conversation.assignment_changed',
+  'conversation.team_changed',
+] as const satisfies readonly WebhookEventType[];
+
+/** A team of the company, which an endpoint can choose to take the conversations' events of. */
+export interface WebhookTeamChoice {
+  id: string;
+  name: string;
+}
+
+/** A team an endpoint takes the conversations' events of (ADR-174), as stored. */
+export interface WebhookEndpointTeam {
+  id: string;
+  /** The team's name; null for a team deleted since it was chosen, which matches nothing. */
+  name: string | null;
+}
+
+/** A team as Settings → Webhooks lists it. */
+export const webhookTeamText = (team: WebhookEndpointTeam): string => team.name ?? 'A deleted team';
+
+/** Whether an endpoint with these events takes events of conversations, and can choose teams. */
+export function webhookTakesTeamEvents(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_TEAM_EVENTS.some((type) => eventTypes.includes(type));
 }
 
 /**

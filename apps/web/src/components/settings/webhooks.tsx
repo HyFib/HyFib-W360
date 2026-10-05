@@ -31,12 +31,15 @@ import {
   webhookReplaySummary,
   webhookTakesAutomationRuns,
   webhookTakesChannelEvents,
+  webhookTakesTeamEvents,
+  webhookTeamText,
   type WebhookAutomationChoice,
   type WebhookCampaignStatus,
   type WebhookChannelChoice,
   type WebhookContactPart,
   type WebhookConversationStatus,
   type WebhookEndpointOAuth,
+  type WebhookEndpointTeam,
   type WebhookEventType,
   type WebhookFailureKind,
   type WebhookMessageSender,
@@ -44,6 +47,7 @@ import {
   type WebhookOrderStatus,
   type WebhookReplayPeriod,
   type WebhookRunEndStatus,
+  type WebhookTeamChoice,
   type WebhookTemplateStatus,
 } from '@w360/domain/webhook-model';
 import {
@@ -461,6 +465,105 @@ function ChannelChoices({
   );
 }
 
+/**
+ * The teams whose conversations' events an endpoint takes (ADR-174): every conversation's, or those
+ * of the teams ticked. A team deleted since it was chosen stays listed, ticked, until it is
+ * unticked: it matches no conversation.
+ */
+function TeamChoices({
+  prefix,
+  choices,
+  stored,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  choices: WebhookTeamChoice[];
+  /** The teams the endpoint names now, so a deleted one stays listed until it is saved without. */
+  stored: readonly WebhookEndpointTeam[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const listed = [
+    ...choices.map((c) => ({ id: c.id, text: c.name })),
+    ...stored.filter((t) => t.name === null).map((t) => ({ id: t.id, text: webhookTeamText(t) })),
+  ];
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Teams</legend>
+      <p className="text-xs text-muted-foreground">
+        Message and conversation events belong to the team the conversation is in when they happen,
+        and a change of team to the team it left as well. Other events are sent whichever teams are
+        chosen.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-teams`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every conversation’s events
+          <span className="block text-xs text-muted-foreground">
+            Including teams added later, and conversations in no team.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-teams`}
+          className="mt-1"
+          checked={!every}
+          disabled={listed.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only the events of the conversations of the teams ticked
+          {listed.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">
+              The company has no team yet.
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid gap-1">
+          {listed.map((t) => {
+            const id = `${prefix}-team-${t.id}`;
+            return (
+              <div key={t.id} className="flex items-center gap-2">
+                <Checkbox
+                  id={id}
+                  checked={chosen.includes(t.id)}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? listed
+                            .filter((l) => l.id === t.id || chosen.includes(l.id))
+                            .map((l) => l.id)
+                        : chosen.filter((x) => x !== t.id),
+                    )
+                  }
+                />
+                <Label htmlFor={id} className="font-normal">
+                  {t.text}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
 function EventChoices({
   prefix,
   chosen,
@@ -831,6 +934,7 @@ export function WebhookEndpointForm({
   endpoint,
   automationChoices,
   channelChoices,
+  teamChoices,
   atLimit = false,
 }: {
   slug: string;
@@ -850,12 +954,16 @@ export function WebhookEndpointForm({
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
     channelIds: string[] | null;
+    /** The teams it names (ADR-174), deleted ones without a name; null for every team. */
+    teams: WebhookEndpointTeam[] | null;
     oauth: WebhookEndpointOAuth | null;
   };
   /** The company's published automations, which an endpoint can choose (ADR-145). */
   automationChoices: WebhookAutomationChoice[];
   /** The company's WhatsApp numbers, which an endpoint can choose (ADR-170). */
   channelChoices: WebhookChannelChoice[];
+  /** The company's teams, which an endpoint can choose (ADR-174). */
+  teamChoices: WebhookTeamChoice[];
   atLimit?: boolean;
 }) {
   const prefix = useId();
@@ -890,6 +998,8 @@ export function WebhookEndpointForm({
   const [automationIds, setAutomationIds] = useState<string[]>(endpoint?.automationIds ?? []);
   const [everyChannel, setEveryChannel] = useState(!endpoint?.channelIds);
   const [channelIds, setChannelIds] = useState<string[]>(endpoint?.channelIds ?? []);
+  const [everyTeam, setEveryTeam] = useState(!endpoint?.teams);
+  const [teamIds, setTeamIds] = useState<string[]>(endpoint?.teams?.map((t) => t.id) ?? []);
   const [headers, setHeaders] = useState<HeaderRow[]>([]);
   // Changing an endpoint keeps its headers unless they are given again.
   const [replaceHeaders, setReplaceHeaders] = useState(false);
@@ -971,6 +1081,8 @@ export function WebhookEndpointForm({
         // Every number's events unless the numbers ticked are chosen (ADR-170).
         const chosenChannels =
           webhookTakesChannelEvents(eventTypes) && !everyChannel ? channelIds : null;
+        // Every conversation's events unless the teams ticked are chosen (ADR-174).
+        const chosenTeams = webhookTakesTeamEvents(eventTypes) && !everyTeam ? teamIds : null;
         const input = {
           url,
           description,
@@ -985,6 +1097,7 @@ export function WebhookEndpointForm({
           conversationStatuses: chosenConversationStatuses,
           runEndStatuses: chosenRunEndStatuses,
           channelIds: chosenChannels,
+          teamIds: chosenTeams,
         };
         const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
           setBusy(false);
@@ -1041,6 +1154,8 @@ export function WebhookEndpointForm({
               setAutomationIds([]);
               setEveryChannel(true);
               setChannelIds([]);
+              setEveryTeam(true);
+              setTeamIds([]);
               setHeaders([]);
               setOAuthChange('keep');
               setOAuthFields(oauthFieldsOf(null));
@@ -1127,6 +1242,17 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryChannel}
           chosen={channelIds}
           onChange={setChannelIds}
+        />
+      ) : null}
+      {webhookTakesTeamEvents(eventTypes) ? (
+        <TeamChoices
+          prefix={prefix}
+          choices={teamChoices}
+          stored={endpoint?.teams ?? []}
+          every={everyTeam}
+          onEveryChange={setEveryTeam}
+          chosen={teamIds}
+          onChange={setTeamIds}
         />
       ) : null}
       <fieldset className="grid gap-2">

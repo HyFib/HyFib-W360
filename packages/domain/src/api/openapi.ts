@@ -530,6 +530,12 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       "The WhatsApp numbers whose message, conversation, automation run, order and campaign events the endpoint receives; null receives every number's, including numbers connected later. Consent, contact and template events are not narrowed.",
     ),
+  teamIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The teams whose conversations' message and conversation events the endpoint receives, by the team a conversation is in when the event happens (conversation.team_changed also by the team it left); null receives every conversation's. Other events are not narrowed.",
+    ),
   oauth: z
     .object({
       tokenUrl: z.string().describe('Where HyFib asks for access tokens.'),
@@ -733,7 +739,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         '',
         `POST /messages needs an \`Idempotency-Key\` header: a retry with the same key and body returns the first response (header \`Idempotent-Replayed: true\`) and never sends twice; responses are kept ${API_LIMITS.idempotencyHours} hours. Delivery itself follows WhatsApp: read the status with GET /messages/{id}.`,
         '',
-        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact and template event it takes.`,
+        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact and template event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens.`,
       ].join('\n'),
     },
     servers: [{ url: serverUrl }],

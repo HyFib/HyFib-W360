@@ -704,9 +704,13 @@ verification, app review, Embedded Signup configuration).
   names). **[OAuth client credentials built; their database tests run only in CI]** (ADR-173: an
   endpoint gets an access token from its receiver's authorization server as the client a member or
   key sets, and sends it as a bearer token with every delivery; the secret sealed and needed again
-  for a new token URL, tokens kept in the worker's memory only). Remaining: filters for other event
-  types and on a message's
-  or contact's values (such as by campaign, template, team, assigned member, tag or field key, or a
+  for a new token URL, tokens kept in the worker's memory only). **[Team filters built; their
+  database tests run only in CI]** (ADR-174: an endpoint takes the message and conversation events
+  of the conversations of the teams it chooses, 1 to 50 of the company's teams, in Settings or
+  through the API, or every conversation's as before; by the team a conversation is in when the
+  event is captured, a change of team also reaching the team it left). Remaining: filters for
+  other event types and on a message's
+  or contact's values (such as by campaign, template, assigned member, tag or field key, or a
   run's trigger or end reason), which tags were added or removed, other authentication (headers
   computed per delivery, other OAuth grants), mutual TLS, fixed egress addresses, events for store
   orders, Payment Links and each step of a run, `createdAt` finer than the millisecond, load tests.

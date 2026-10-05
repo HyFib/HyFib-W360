@@ -6807,7 +6807,7 @@ Decision:
   the same names, so their owners, grants and triggers stay. Existing endpoints keep null; nothing
   is backfilled.
 
-Not built: filters by team or by the member assigned, numbers chosen per event type (one list
+Not built: filters by team (built by ADR-174) or by the member assigned, numbers chosen per event type (one list
 applies to every event of a number the endpoint takes), and a `GET /channels` listing a company's
 numbers through the API (built by ADR-171).
 
@@ -6959,3 +6959,52 @@ Not built: other grants and client authentication (authorization code, JWT asser
 allows it; Basic is the method servers must support for a client with a password), token revocation,
 one token shared by several endpoints, refreshing a token before it is needed, and sending a
 delivery again within its attempt after a 401.
+
+## ADR-174 Choosing the teams whose conversations' events a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint receives the message and conversation events of every conversation its company
+has. Companies route conversations to teams (support, sales, returns), and each team often works in
+a tool of its own: a helpdesk for support, a CRM for sales. Each tool was sent every team's
+conversations and had to look the team up and drop the rest. ADR-170 narrows events by WhatsApp
+number and left filters by team unbuilt.
+
+Decision:
+
+- **A list of teams per endpoint,** for the events of a conversation only: `message.received`,
+  `message.status`, `conversation.status_changed`, `conversation.assignment_changed` and
+  `conversation.team_changed`. Null receives every conversation's events, as before; a list holds 1
+  to 50 of the company's teams, in the order given with repeats merged. It is chosen in Settings →
+  Webhooks ("Teams": every conversation's events, or only those of the conversations of the teams
+  ticked) and shown on the endpoint as "Teams whose conversations’ events are sent: …", and through
+  the API as `teamIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every
+  endpoint the API answers.
+- **Only with those events:** a list given for an endpoint that takes none of them is refused
+  (`teamIds`; 422 through the API). A change that removes them clears it, and a `PATCH` that leaves
+  it out keeps it; Settings always sends it. A check in the database holds the same rule (null, or 1
+  to 50 ids without a null while one of the five events is among the endpoint's).
+- **A conversation's team is the one it is in when the event is captured,** read from the
+  conversation (after the change, for the conversation's own events), so a conversation in no team
+  is on no list, and `conversation.team_changed` reaches the endpoints of the team the conversation
+  left (its stored `previousTeamId`) as well as of the team it joined. Applied in
+  `app.capture_webhook_event` with the endpoints' other filters; the team is read only when an
+  active endpoint of the company that takes the event names teams, and no event is written when none
+  takes it. Stored events and payloads are unchanged; replays and test events too. Consent, contact,
+  template, automation run, order and campaign events are not narrowed: an endpoint that names teams
+  still receives every one of them it takes.
+- **The company's teams:** a list given now may add only teams of the endpoint's company. A team
+  deleted later stays on the lists that held it (its conversations leave it first, so it matches
+  nothing), and a list given again may keep it but not add it back: an endpoint's list never widens
+  by itself. Settings names such a team "A deleted team"; the API answers its id.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `teamIds` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The choices list the company's teams by name to members with
+  `developer.manage`.
+- **Migration 0122:** `team_ids uuid[]` on `app.webhook_endpoints` with the check, validated at once
+  (a company has at most 10 endpoints), an update grant on the column for the runtime role, and
+  `app.capture_webhook_event` replaced with the same signature (0120's, with the team condition), so
+  its owner and grants stay. The triggers are unchanged. Existing endpoints keep null; nothing is
+  backfilled.
+
+Not built: filters by the member a conversation is assigned to, teams for automation run and order
+events (which can belong to a conversation too), and teams chosen per event type.
