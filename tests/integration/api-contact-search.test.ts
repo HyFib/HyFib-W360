@@ -663,6 +663,89 @@ describe('finding contacts by name (ADR-143)', () => {
   });
 });
 
+describe('groups of conditions (ADR-164)', () => {
+  it('finds contacts matching all of some conditions and any of others, and names a refusal inside a group by its place', async () => {
+    const c = await fx.company();
+    await defineFields(c);
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const add = async (displayName: string, attributes: Record<string, string>, tags: string[]) => {
+      const created = await service.createContact(owner, {
+        displayName,
+        phone: nextPhone(),
+        attributes,
+      });
+      if (tags.length > 0) await service.addTags(owner, created.id, tags);
+    };
+    await add('Asha', { city: 'Pune', orders: '5' }, ['vip']);
+    await add('Bina', { city: 'Delhi', orders: '1' }, ['vip']);
+    await add('Chitra', { city: 'Mumbai', orders: '9' }, ['vip']);
+    await add('Dev', { city: 'Pune', orders: '7' }, []);
+    const ctx = await apiKey(c, ['contacts.read']);
+    const inPune = { type: 'field', key: 'city', op: 'equals', value: 'pune' };
+    const busy = { type: 'field', key: 'orders', op: 'greater_than', value: 6 };
+
+    // VIPs who are in Pune or have more than 6 orders.
+    const vips = await apiSearchContacts(deps(), ctx, {
+      conditions: [
+        { type: 'tag', op: 'has', tag: 'vip' },
+        { type: 'group', match: 'any', conditions: [inPune, busy] },
+      ],
+    });
+    expect(names(vips)).toEqual(['Chitra', 'Asha']);
+    // Any of: in Pune with more than 6 orders, or in Delhi.
+    const either = await apiSearchContacts(deps(), ctx, {
+      match: 'any',
+      conditions: [
+        { type: 'group', match: 'all', conditions: [inPune, busy] },
+        { type: 'field', key: 'city', op: 'equals', value: 'delhi' },
+      ],
+    });
+    expect(names(either)).toEqual(['Dev', 'Bina']);
+    // A group of one condition finds what the condition alone finds.
+    const alone = await apiSearchContacts(deps(), ctx, { conditions: [busy] });
+    const grouped = await apiSearchContacts(deps(), ctx, {
+      conditions: [{ type: 'group', match: 'any', conditions: [busy] }],
+    });
+    expect(names(grouped)).toEqual(names(alone));
+    expect(names(alone)).toEqual(['Dev', 'Chitra']);
+
+    // A condition the company's fields do not allow, inside a group, is named by its place.
+    expect(
+      await refusal(
+        apiSearchContacts(deps(), ctx, {
+          conditions: [
+            { type: 'tag', op: 'has', tag: 'vip' },
+            {
+              type: 'group',
+              match: 'any',
+              conditions: [inPune, { type: 'field', key: 'plan', op: 'is_set' }],
+            },
+          ],
+        }),
+      ),
+    ).toEqual({
+      code: 'validation_failed',
+      paths: ['conditions.1.conditions.1.key'],
+      message: 'The company has no custom field with the key plan (GET /contact-fields).',
+    });
+    // So is a campaign the company does not have.
+    const withCampaigns = await apiKey(c, ['contacts.read', 'campaigns.read']);
+    const missing = await refusal(
+      apiSearchContacts(deps(), withCampaigns, {
+        conditions: [
+          {
+            type: 'group',
+            match: 'any',
+            conditions: [inPune, { type: 'campaign', campaignId: uuidv7(), outcome: 'delivered' }],
+          },
+        ],
+      }),
+    );
+    expect(missing.paths).toEqual(['conditions.0.conditions.1.campaignId']);
+  });
+});
+
 describe('segments with dates that do not exist (ADR-117)', () => {
   it('refuses a creation day or a date comparison that does not exist, instead of failing in the query', async () => {
     const c = await fx.company();

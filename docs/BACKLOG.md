@@ -576,11 +576,15 @@ verification, app review, Embedded Signup configuration).
   values and each checked as one send is, in a savepoint, so a refused number is answered in its
   place and changes nothing while the others are sent; numbers that are not valid or given twice and
   values that do not fill the variables refuse the call).
+  **[Groups of conditions in contact searches built; their database tests run only in CI]**
+  (ADR-164: `POST /contacts/search` takes groups of conditions a contact matches together, all of a
+  group's conditions or any, one level deep, 20 conditions in all; a refusal inside a group names
+  its place).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   choosing conversations to change by a filter, media downloads, a contact card's contacts (Meta's
   contact object is not confirmed), changing a field's type, changing
   numbers, choosing
-  contacts to change by a filter, groups of conditions,
+  contacts to change by a filter,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
   resuming, approving, scheduling, creating and editing campaigns through the API, campaign
   recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose

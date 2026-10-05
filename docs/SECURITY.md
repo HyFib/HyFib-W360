@@ -717,6 +717,10 @@ Phase 5 rules (Public API, P5-08):
   the SQL text; `contains` escapes `%` and `_`, so a value is never a pattern. Each page reads at
   most 2,000 contacts, so no condition can make one request read every contact a company has. It
   writes nothing.
+- Groups of conditions in contact searches (ADR-164) are checked, bound and scoped as conditions
+  outside them (a `last_message` or `campaign` condition in a group needs its scope, checked before
+  anything is read), hold no groups and count toward the search's 20 conditions, so a search reads
+  no more than before.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

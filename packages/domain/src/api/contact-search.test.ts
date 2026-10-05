@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { isAppError } from '@w360/core';
 import type { Database } from '@w360/db';
-import { apiContactSearchSchema, apiSearchContacts } from './contact-search';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import { apiContactSearchSchema, apiSearchContacts, contactSearchSql } from './contact-search';
 import type { ApiContext } from './context';
 import { API_ROUTES, buildOpenApiDocument } from './openapi';
 
@@ -237,6 +238,143 @@ describe('contact searches through the API (ADR-117)', () => {
       'calling_code',
       'last_message',
       'campaign',
+      'group',
     ]);
+  });
+});
+
+describe('groups of conditions in contact searches (ADR-164)', () => {
+  const source = (value: string) => ({ type: 'source', source: value });
+  const group = (match: string, conditions: unknown[]) => ({ type: 'group', match, conditions });
+
+  it('takes groups of 1 to 20 conditions, each with its match, holding no groups, 20 conditions in all', () => {
+    const parse = (conditions: unknown[]) => apiContactSearchSchema.safeParse({ conditions });
+    expect(parse([isSet, group('any', [source('api'), source('import')])]).success).toBe(true);
+    expect(parse([group('all', [isSet])]).success).toBe(true);
+    // 20 conditions in all, counted inside groups too.
+    expect(
+      parse([...Array.from({ length: 10 }, () => isSet), group('any', Array(10).fill(isSet))])
+        .success,
+    ).toBe(true);
+    const tooMany = parse([
+      ...Array.from({ length: 11 }, () => isSet),
+      group('any', Array(10).fill(isSet)),
+    ]);
+    expect(tooMany.success).toBe(false);
+    expect(tooMany.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['conditions', 'At most 20 conditions in all, those in groups included.'],
+    ]);
+    for (const conditions of [
+      [group('any', [])],
+      [group('any', Array(21).fill(isSet))],
+      [group('some', [isSet])],
+      [{ type: 'group', conditions: [isSet] }],
+      [group('any', [group('all', [isSet])])],
+      [{ ...group('any', [isSet]), extra: true }],
+      [group('any', [{ ...isSet, extra: true }])],
+    ]) {
+      expect(parse(conditions).success, JSON.stringify(conditions)).toBe(false);
+    }
+  });
+
+  it('looks inside groups for the scopes conditions need, before it reads anything', async () => {
+    const lastMessage = { type: 'last_message', op: 'within_days', days: 7 };
+    const campaign = { type: 'campaign', campaignId: TENANT, outcome: 'delivered' };
+    const refused = async (scopes: string[], conditions: unknown[]) => {
+      try {
+        await apiSearchContacts({ db: untouched }, ctx(scopes), { conditions });
+      } catch (error) {
+        if (isAppError(error)) return error.publicMessage;
+        throw error;
+      }
+      throw new Error('expected a refusal');
+    };
+    expect(await refused(['contacts.read'], [isSet, group('any', [isSet, lastMessage])])).toBe(
+      'This API key does not have the conversations.read scope.',
+    );
+    expect(await refused(['contacts.read', 'conversations.read'], [group('all', [campaign])])).toBe(
+      'This API key does not have the campaigns.read scope.',
+    );
+    const { db, reads } = reached();
+    await expect(
+      apiSearchContacts({ db }, ctx(['contacts.read', 'conversations.read', 'campaigns.read']), {
+        conditions: [group('any', [lastMessage, campaign])],
+      }),
+    ).rejects.toThrow('reached the database');
+    expect(reads).toHaveLength(1);
+  });
+
+  it('joins each group’s conditions by its match, inside the search’s match', () => {
+    const render = (match: 'all' | 'any', items: Parameters<typeof contactSearchSql>[1]) =>
+      new PgDialect().sqlToQuery(contactSearchSql(match, items, 'Asia/Kolkata', new Map()));
+    const col = (name: string) => `"app"."contacts"."${name}"`;
+    expect(
+      render('any', [
+        { type: 'source', source: 'api' },
+        {
+          match: 'all',
+          conditions: [
+            { type: 'source', source: 'import' },
+            { type: 'calling_code', prefix: '91' },
+          ],
+        },
+      ]),
+    ).toMatchObject({
+      sql: `(((${col('source')} = $1)) or ((${col('source')} = $2) and (${col('phone_e164')} like $3)))`,
+      params: ['api', 'import', '+91%'],
+    });
+    expect(
+      render('all', [
+        {
+          match: 'any',
+          conditions: [
+            { type: 'source', source: 'api' },
+            { type: 'source', source: 'import' },
+          ],
+        },
+        { type: 'calling_code', prefix: '971' },
+      ]),
+    ).toMatchObject({
+      sql: `(((${col('source')} = $1) or (${col('source')} = $2)) and ((${col('phone_e164')} like $3)))`,
+      params: ['api', 'import', '+971%'],
+    });
+  });
+
+  it('is described: groups, their limit and the place of a refusal inside one', () => {
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      paths: Record<string, Record<string, { description: string }>>;
+      components: { schemas: Record<string, unknown> };
+    };
+    const description = doc.paths['/contacts/search']?.post?.description ?? '';
+    for (const words of [
+      'Conditions can also be put in groups a contact matches together',
+      'a group holds conditions, not groups, and a search holds at most 20 conditions in all',
+      '`conditions.2.conditions.0.key` in a group',
+    ]) {
+      expect(description).toContain(words);
+    }
+    const body = doc.components.schemas.ContactSearch as {
+      properties: {
+        conditions: {
+          items: {
+            oneOf: {
+              properties: {
+                type: { const: string };
+                match?: { enum: string[] };
+                conditions?: { minItems: number; maxItems: number; items: { oneOf: unknown[] } };
+              };
+              required: string[];
+            }[];
+          };
+        };
+      };
+    };
+    const groupShape = body.properties.conditions.items.oneOf.find(
+      (o) => o.properties.type.const === 'group',
+    );
+    expect(groupShape?.required).toEqual(['type', 'match', 'conditions']);
+    expect(groupShape?.properties.match?.enum).toEqual(['all', 'any']);
+    expect(groupShape?.properties.conditions).toMatchObject({ minItems: 1, maxItems: 20 });
+    expect(groupShape?.properties.conditions?.items.oneOf).toHaveLength(9);
   });
 });

@@ -935,6 +935,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   compiles them with `segmentConditionsSql`, which `segmentWhere` wraps for segments and campaigns.
   Its pages and `GET /contacts`'s come from one function, `apiContactPage` (`api/contacts.ts`): the
   window's edge, then the matching rows down to it, in one repeatable read snapshot.
+- **Groups of conditions (ADR-164):** an item of the search's `conditions` can be a group with its
+  own `match`. `placedConditions` lists every condition with its place, for the scope checks and the
+  campaigns named; `segmentCondition` checks each one as before, naming its place; and
+  `contactSearchSql` joins the search's items by its `match`, compiling a group with
+  `segmentConditionsSql` as a segment of its own and a single condition as a segment of one.
 - **Following contact changes (0091, ADR-114):** triggers on `contacts` (insert, and an update of
   the columns the API describes), `contact_tags` (insert, delete) and `contact_consents` (set, status
   changed) call `app.capture_contact_change`, which inserts one `app.contact_changes` row per contact

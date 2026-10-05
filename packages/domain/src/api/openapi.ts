@@ -45,6 +45,7 @@ import {
   templateStatusPayloadSchema,
 } from '../webhooks/payloads';
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
+import { SEGMENT_LIMITS } from '../campaigns/segments';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
 import {
@@ -734,7 +735,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'searchContacts',
           summary: 'Contacts matching conditions, as segments find them, newest first',
-          description: `${scopeNote('contacts.read')} Finds contacts with segments' conditions and comparisons: the contact's name, custom field values, tags, consent, the day a contact was added (in the company's time zone), where it came from and its country calling code, whether it wrote in the last days (\`last_message\`, which also needs \`conversations.read\`) and what happened to a campaign's message to it (\`campaign\`, which also needs \`campaigns.read\`), matching all of them or any. Answers as GET /contacts does: newest first, erased contacts left out, pages that never skip or repeat a contact. Each page reads at most ${API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US')} of the company's contacts: when the conditions leave out most of them, a page can hold fewer contacts than \`limit\`, or none, and still give a \`nextCursor\`; send the same conditions with it until it is \`null\`. A condition the company's fields do not allow, or a campaign it does not have, is refused, naming it (like \`conditions.1.key\`). It only reads, so no \`Idempotency-Key\` is needed.`,
+          description: `${scopeNote('contacts.read')} Finds contacts with segments' conditions and comparisons: the contact's name, custom field values, tags, consent, the day a contact was added (in the company's time zone), where it came from and its country calling code, whether it wrote in the last days (\`last_message\`, which also needs \`conversations.read\`) and what happened to a campaign's message to it (\`campaign\`, which also needs \`campaigns.read\`), matching all of them or any. Conditions can also be put in groups a contact matches together, all of a group's conditions or any (\`type\` \`group\`, with its own \`match\`), so a search can ask for all of some conditions and any of others: a group holds conditions, not groups, and a search holds at most ${SEGMENT_LIMITS.conditions} conditions in all, those in groups included. Answers as GET /contacts does: newest first, erased contacts left out, pages that never skip or repeat a contact. Each page reads at most ${API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US')} of the company's contacts: when the conditions leave out most of them, a page can hold fewer contacts than \`limit\`, or none, and still give a \`nextCursor\`; send the same conditions with it until it is \`null\`. A condition the company's fields do not allow, or a campaign it does not have, is refused, naming it (like \`conditions.1.key\`, or \`conditions.2.conditions.0.key\` in a group). It only reads, so no \`Idempotency-Key\` is needed.`,
           requestBody: { required: true, content: json(ref('ContactSearch')) },
           responses: {
             '200': { description: 'A page of contacts.', content: pageOf('Contact') },

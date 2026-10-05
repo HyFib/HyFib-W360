@@ -6496,3 +6496,36 @@ Decision:
 Not built: different templates in one call, reasons beside a refusal's message, more than 50 numbers
 per call, and a send to every contact of a segment through the API (campaigns do that, with approval
 and pacing).
+
+## ADR-164 Groups of conditions in contact searches through the API (P5-08) (2026-10-05)
+
+Context: `POST /contacts/search` (ADR-117) finds the contacts matching all of its conditions or any
+of them. A question mixing the two (VIPs who are in Pune or have more than six orders; contacts
+added this month who opted in to marketing or wrote in the last week) needed two searches merged by
+the caller, or a broader search filtered afterwards. ADR-117's Not built listed groups of
+conditions.
+
+Decision:
+
+- **Groups as conditions:** an item of `conditions` can be a group,
+  `{ "type": "group", "match": "all" | "any", "conditions": [...] }`, which a contact matches when
+  it matches all of the group's conditions, or any of them; the search joins its items, groups
+  included, by its own `match`. "All of these and any of those" is a search matching all, with a
+  group matching any.
+- **One level:** a group holds conditions, not groups. Two levels say every mix of all and any that
+  a person says in a sentence; a group inside a group is refused by the body's shape (422).
+- **20 conditions in all,** counted inside groups too, as a search held before; a group holds 1 to 20. ADR-117's windows still bound what a page reads.
+- **A group says its `match`:** it has no default, unlike the search's, which stays `all` for
+  searches written before groups.
+- **The same rules inside groups:** a condition in a group is checked and compiled as one outside it
+  (segments' rules, then `segmentConditionsSql`); a group is compiled as a segment with its own
+  `match`. A refusal names its place in the group, like `conditions.2.conditions.0.key`, and a
+  `last_message` or `campaign` condition in a group needs its scope as one outside does, checked
+  before anything is read.
+- **Segments are unchanged:** members' segments and campaigns keep one list, matched all or any, so
+  a search through the API can say more than a segment.
+- **No migration.**
+
+Not built: groups in segments, groups inside groups, the opposite of a group (most conditions have
+their own, like `not_has` and `not_within_days`), counting the matches, and orders other than newest
+first.

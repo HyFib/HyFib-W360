@@ -1,5 +1,54 @@
 # Progress
 
+## 2026-10-05 — Phase 5: groups of conditions in contact searches (P5-08, ADR-164)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A search matched all of
+its conditions or any. The local PostgreSQL is unavailable (its Docker daemon stopped), so the
+integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-164):** `POST /contacts/search` takes groups of conditions a contact matches
+  together, all of a group's conditions or any, one level deep and 20 conditions in all; conditions
+  in groups are checked, compiled and scoped as those outside, and a refusal inside a group names
+  its place. Segments are unchanged.
+- **Domain:** `api/contact-search.ts` (the group in the body, `placedConditions`, `segmentCondition`
+  naming a place, `contactSearchSql`); `api/openapi.ts` (the operation's words).
+- **Tests:**
+  - Unit (4 new in `contact-search.test.ts`, 2 extended there and in `reference.test.ts`): groups of
+    1 to 20 conditions with their match, holding no groups, 20 conditions in all; the scopes of
+    conditions inside groups checked before anything is read; the SQL joining each group by its
+    match inside the search's, rendered; the operation's words, the group's shape and the reference
+    page listing a group's conditions inside it.
+  - Integration (1 new in `api-contact-search.test.ts`): all of some conditions and any of others,
+    any of a group or a condition, a group of one finding what its condition finds, refusals inside
+    a group named by their place. Written for CI; not run here.
+  - E2E (`api-contact-search.spec.ts` extended): a search of two groups over HTTP and a refusal
+    inside a group. Written for CI; not run here.
+- **Docs:** ADR-164; SECURITY (contact searches); ARCHITECTURE; BACKLOG P5-08; feature matrix H-033
+  and W-134.
+- **Mutation checks:** 11 tried, all caught on the unit-tested parts (no limit on conditions in all,
+  a group counted as one, an empty group, a group's closed shape or required match, conditions in
+  groups left out of the scope checks, each joiner inverted or widened, the operation's words). The
+  places of refusals inside groups and what a search finds need the database, so their regressions
+  are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 737 passed (75 files; 4 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 11 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Groups in segments, groups inside groups, the opposite of a group, counting the matches, orders
+  other than newest first.
+
 ## 2026-10-05 — Phase 5: sending a template to many numbers in one call (P5-08, ADR-163)
 
 Status: **Implemented; its database tests run in CI only (test data only).** A key sent a template
