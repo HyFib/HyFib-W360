@@ -561,9 +561,15 @@ verification, app review, Embedded Signup configuration).
   shows the OpenAPI document the API serves, each operation, webhook event and schema once, with
   named types, limits, allowed values and defaults, the fields inside fields and the shapes of
   unions, as text; linked from Settings → API keys and Settings → Webhooks).
+  **[Starting an automation for many contacts built; its database tests run only in CI]** (ADR-161:
+  `POST /automations/{id}/runs/start-many` starts an automation for up to 50 contacts, each with its
+  own inputs, in the order given, each start with a start's checks in a savepoint, so a start
+  refused for its contact is answered in its place and changes nothing while the others start;
+  numbers that are not valid or given twice and inputs the automation does not take refuse the
+  call).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   choosing conversations to change by a filter, media downloads, a contact card's contacts (Meta's
-  contact object is not confirmed), starting or stopping runs for many
+  contact object is not confirmed), stopping runs for many
   contacts in one call, bulk sends in one call, changing a field's type, changing numbers, choosing
   contacts to change by a filter, groups of conditions,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),

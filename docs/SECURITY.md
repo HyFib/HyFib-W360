@@ -532,6 +532,16 @@ Phase 5 rules (Public API, P5-08):
   when it is sent. The run records its key (`api_key_id`, fixed by the run guard); its inputs are
   kept with its answers and cleared with them (erasure, 30 days after the run ends), and the audit
   entry leaves them out. A key reads only runs keys of its company started.
+- Starting an automation for many contacts in one call (ADR-161,
+  `POST /automations/{id}/runs/start-many`) needs `automations.start` and starts each run through
+  the steps a start of one run takes, with all of its checks for each contact, in a savepoint of its
+  own: a refused start is answered in its place and leaves nothing behind, a contact created for it
+  included, while the others start (an integration test, run in CI). Numbers that are not valid and
+  a number given twice refuse the whole call before anything is read, and inputs the automation does
+  not take before any start, naming their place in the list; the automation's own refusals and a
+  plan without automations refuse the whole call. At most 50 starts per call, once per
+  `Idempotency-Key`; a call counts as one request against the key's limits, and each run against the
+  plan's runs.
 - Stopping runs through the API (ADR-079) needs `automations.start` and an active company, and
   reaches only runs keys of the company started: a key cannot stop the automations customers start
   by writing, members' test runs or another company's runs (404). The stop runs under the

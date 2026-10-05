@@ -158,6 +158,12 @@ export const API_LIMITS = {
   conversationsPerChange: 100,
   /** Contacts one call to POST /contacts/update-many changes (ADR-122). */
   contactsPerChange: 100,
+  /**
+   * Runs one call to POST /automations/{id}/runs/start-many starts (ADR-161). Each run started keeps
+   * its savepoint's transaction id until the call commits, and PostgreSQL caches 64 per transaction:
+   * beyond them, every snapshot taken while the call runs looks subtransactions up on disk.
+   */
+  runsPerStart: 50,
   keyRate: { capacity: 50, refillPerSecond: 10 },
   companyRate: { capacity: 200, refillPerSecond: 30 },
   authFailureRate: { capacity: 20, refillPerSecond: 0.2 },

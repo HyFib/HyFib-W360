@@ -875,7 +875,7 @@ test('a key starts an automation made to start through the API: its template goe
   page,
   request,
 }) => {
-  test.setTimeout(240_000);
+  test.setTimeout(300_000);
   const email = uniqueEmail('apiflow');
   const slug = `apiflow-${Date.now().toString(36)}`;
   await signUpAndVerify(page, { name: 'Dev Clinic', email, password: PASSWORD });
@@ -1102,4 +1102,72 @@ test('a key starts an automation made to start through the API: its template goe
     page.getByRole('paragraph').filter({ hasText: 'Stopped through the API.' }),
   ).toBeVisible();
   await expect(page.getByRole('table')).toContainText('Stopped through the API.');
+
+  // It starts the automation for two more contacts in one call (ADR-161), once per
+  // Idempotency-Key; in a later call a contact a run already handles is answered in its place
+  // while the other starts, and each run sends the template with its own inputs.
+  const [third, fourth, fifth] = [randomWaId(), randomWaId(), randomWaId()];
+  const startMany = (patients: [string, string][], key: string) =>
+    request.post(`/api/v1/automations/${automationId}/runs/start-many`, {
+      headers: { ...auth, 'Idempotency-Key': key },
+      data: {
+        runs: patients.map(([to, patient]) => ({
+          to: `+${to}`,
+          inputs: { patient, appointment_time: '7 pm' },
+        })),
+      },
+    });
+  const startedRun = expect.objectContaining({ automationId, status: 'running' });
+  const manyKey = randomUUID();
+  const firstMany: [string, string][] = [
+    [third, 'Meera'],
+    [fourth, 'Kiran'],
+  ];
+  const many = await startMany(firstMany, manyKey);
+  expect(many.status()).toBe(200);
+  const manyStarts = (await many.json()).data as unknown[];
+  expect(manyStarts).toEqual([
+    { to: `+${third}`, run: startedRun, error: null },
+    { to: `+${fourth}`, run: startedRun, error: null },
+  ]);
+  const manyRetry = await startMany(firstMany, manyKey);
+  expect(manyRetry.headers()['idempotent-replayed']).toBe('true');
+  expect((await manyRetry.json()).data).toEqual(manyStarts);
+  const later = await startMany(
+    [
+      [fourth, 'Kiran'],
+      [fifth, 'Farah'],
+    ],
+    randomUUID(),
+  );
+  expect(later.status()).toBe(200);
+  expect((await later.json()).data).toEqual([
+    {
+      to: `+${fourth}`,
+      run: null,
+      error: expect.objectContaining({ code: 'conflict', reason: 'automation_busy' }),
+    },
+    { to: `+${fifth}`, run: startedRun, error: null },
+  ]);
+  await expect
+    .poll(
+      async () =>
+        (await standInRequests(request))
+          .filter((r) => r.path === `/v26.0/${phoneNumberId}/messages`)
+          .map(
+            (r) =>
+              r.body as {
+                to?: string;
+                template?: { components: { type: string; parameters?: { text?: string }[] }[] };
+              } | null,
+          )
+          .filter((b) => [third, fourth, fifth].includes(b?.to ?? ''))
+          .map((b) => {
+            const body = b?.template?.components.find((c) => c.type === 'body');
+            return `${b?.to}: ${body?.parameters?.[0]?.text}`;
+          })
+          .sort(),
+      { timeout: 60_000 },
+    )
+    .toEqual([`${third}: Meera`, `${fourth}: Kiran`, `${fifth}: Farah`].sort());
 });

@@ -1015,6 +1015,22 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   run's first job follow in the same transaction. `automation_runs_api_key` keeps `api_key_id` set
   exactly for `api` runs, the run guard keeps it fixed, and `automation_runs_api_key_idx` (0053,
   built concurrently) serves the foreign key.
+- **Starting an automation for many contacts (ADR-161):** `POST /automations/{id}/runs/start-many`
+  (`apiStartManyAutomationRuns`, `automations.start`, an `Idempotency-Key` required) takes up to
+  `API_LIMITS.runsPerStart` (50, as each run started keeps its savepoint's transaction id and
+  PostgreSQL caches 64 per transaction) starts. The numbers are normalised and a repeat refused,
+  naming its place, before the transaction. In the idempotency key's transaction the automation is
+  checked once (`loadApiAutomation`), then every start's inputs (`inputVariables`, 422 at
+  `runs.<i>.inputs`), then the marketing scope and the number (`sendingChannel`); a start of one run
+  takes the same three steps. Each start then runs `startRunFor` (the contact, eligibility, the
+  conversation, the plan, the run with its step, event, audit entry and first job) in a savepoint
+  (`tx.transaction`): a `conflict` or `precondition_failed` refusal rolls back to it and is answered
+  in the start's place through `apiErrorResponse`, while any other error (a plan without automations
+  included) refuses the call. The call keeps the conversations it starts in and, on a plan with a
+  run limit, the `automation_runs` usage counter from its first start until it commits, while other
+  starts take a conversation before the counter: a start for a contact further down the list can
+  deadlock with it, and PostgreSQL's `40P01` comes back from `db.run` as a retryable 409
+  (`mapDatabaseError`), the call starting nothing.
 - **Stopping runs through the API (0057–0058, ADR-079):** `POST /automation-runs/{id}/stop` with
   `automations.start` (`apiStopAutomationRun`) finds a run keys of the company started, locks the
   conversation `FOR UPDATE` and then the active run (`lockActiveRun`), and ends it with `endRun` as

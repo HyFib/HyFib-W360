@@ -1,5 +1,68 @@
 # Progress
 
+## 2026-10-05 — Phase 5: starting an automation for many contacts in one call (P5-08, ADR-161)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A key started an
+automation for one contact per call. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-161):** `POST /automations/{id}/runs/start-many` starts the automation for up to 50
+  contacts in the order given, the automation checked once and each start, with a start's own
+  checks, in a savepoint, so a start refused for its contact is answered in its place and changes
+  nothing while the others start; numbers that are not valid or given twice and inputs the
+  automation does not take refuse the call. 50, so the savepoints of the runs started stay within
+  the 64 subtransaction ids PostgreSQL caches per transaction; a call that deadlocks with a run
+  starting at the same moment for one of its contacts is refused as a whole (409), starting nothing.
+- **Domain:** `api/automations.ts` (a start of one run split into `loadApiAutomation`,
+  `inputVariables`, `sendingChannel` and `startRunFor`, which both calls share;
+  `apiStartManyAutomationRuns` and its schema); `api/model.ts` (`API_LIMITS.runsPerStart`);
+  `api/openapi.ts` (the operation, `StartManyAutomationRuns`, `AutomationRunStart`, the route list).
+- **Web:** the route `api/v1/automations/[id]/runs/start-many`.
+- **Tests:**
+  - Unit (3 new in `api.test.ts`): the body takes 1 to 50 starts and nothing else; the scope, the
+    id, an empty list, a number that is not valid and a number given twice refused before anything
+    is read, each named by its place; the operation, its body, its answer, its words and the 409 of
+    a collision.
+  - Integration (2 new in `api.test.ts`): one call answering each start in its place (started; on
+    the suppression list; opted out; another run handling the conversation; a member holding it),
+    the runs with their own inputs and contacts, no contact left for a refused start, the retry
+    answering the same and starting nothing; refused as a whole: a number given twice, inputs at
+    `runs.1.inputs` and a paused automation; the plan's runs used up in the middle of a call, the
+    rest refused without a contact, and a plan without automations refusing the call. Written for
+    CI; not run here.
+  - E2E (`api.spec.ts` extended, its time limit raised from 4 to 5 minutes): two contacts started
+    over HTTP in one call, its retry replayed, a busy contact answered in its place in a later call
+    while another starts, each template with its own inputs through the Graph stand-in. Written for
+    CI; not run here.
+- **Docs:** ADR-161; SECURITY (the automation rules); THREAT-MODEL T95; ARCHITECTURE; BACKLOG P5-08;
+  feature matrix H-033 and W-086 (whose note that stopping runs through the API was not built, stale
+  since ADR-079, is corrected).
+- **Mutation checks:** 20 tried, all caught on the unit-tested parts (the scope or the id not
+  checked, a repeat taken or not named, a bad number not named by its place, the list without a
+  minimum, a maximum or its closed shape, the limit raised, the route unlisted or answering another
+  method, the operation's body, answer, refusal codes and words, and the 409 of a collision left out
+  of its responses or its words). The savepoints, the refusals in place and the records need the
+  database, so their regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 727 passed (75 files; 3 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 20 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Stopping runs for many contacts in one call; starting many automations in one call. A collision
+  with a run starting at the same moment refuses the whole call (409) rather than the one start; the
+  integration tests do not provoke it.
+
 ## 2026-10-05 — Phase 5: replaying the failed deliveries of every endpoint at once (P5-09, ADR-160)
 
 Status: **Implemented; its database tests run in CI only (test data only).** A company whose

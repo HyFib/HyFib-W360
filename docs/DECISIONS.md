@@ -6372,3 +6372,46 @@ Decision:
 - **No migration:** an endpoint's replay is now one step that both calls share.
 
 Not built: replays across companies for staff, replays of a chosen list of endpoints.
+
+## ADR-161 Starting an automation for many contacts in one call (P5-08) (2026-10-05)
+
+Context: since ADR-077 a key starts an automation for one contact per call. A booking system that
+sends tomorrow's reminders to 80 patients needed 80 calls, each with its own `Idempotency-Key`,
+paced to stay within the key's limits (a burst of 50, then 10 a second). P5-08's Remaining listed
+starting or stopping runs for many contacts in one call.
+
+Decision:
+
+- **Up to 50 starts in one call:** `POST /api/v1/automations/{id}/runs/start-many` takes `runs`,
+  each the `to` and `inputs` a start of one run takes, at most 50, each number once; scope
+  `automations.start`, an `Idempotency-Key` required, one request against the key's limits.
+- **Why 50:** each run started keeps its savepoint's transaction id until the call commits.
+  PostgreSQL caches 64 per transaction; beyond them, every snapshot taken anywhere while the call
+  runs looks subtransactions up on disk, which slows the whole database. 50 leaves room.
+- **The automation checked once, each contact on its own:** the automation's checks run once for the
+  call (published, started through the API, active, its number, the marketing scope). Each start
+  then takes, in the order given, the steps of a start of one run (the contact, created when new;
+  erasure, suppression and opt-outs; the conversation, not held by a member or handled by another
+  run; the hourly limit; the plan's runs) in a savepoint of its own.
+- **Not all or none:** a start refused for its contact (409 or 412, as one start answers it) rolls
+  back alone, a contact created for it included, and is answered in its place with its code, message
+  and reason, while the others start. Unlike changing many conversations or contacts (ADR-120,
+  ADR-122), where a refusal means a mistake in the call, such a refusal is a fact about one contact
+  that asking again does not change; refusing the other starts for it would only make the caller
+  send them again without it.
+- **Refused as a whole, starting nothing:** a number that is not valid or given twice (before
+  anything is read) and inputs the automation does not take (422, naming the place, as
+  `runs.3.inputs`); an automation that cannot start (404, 412); a plan without automations (403).
+- **The answer:** 200 with each number, as normalised, and its run or its refusal, in the order
+  given; a retry with the same key answers as the first call did and starts nothing more.
+- **Records as one start's:** each run records its key and inputs, with its first step, the live
+  `automation.started` event, an audit entry as the key and its first job.
+- **Concurrent starts:** the call is one transaction. Until it ends it keeps each conversation it
+  starts a run in and, on a plan with a monthly run limit, the company's run count from its first
+  start, while every other start takes a conversation before the count. A run starting at the same
+  moment for a contact further down the list (a customer's message, another call) can therefore
+  deadlock with the call. PostgreSQL ends one of the two; when it ends the call, the call is refused
+  as a whole (409, starting nothing) and can be sent again with the same `Idempotency-Key`.
+- **No migration:** a start of one run is now four steps that both calls share.
+
+Not built: stopping runs for many contacts in one call, starting many automations in one call.
