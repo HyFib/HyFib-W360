@@ -207,6 +207,7 @@ test('a catalog is read from Meta, products are sent in a chat and an order is p
     .getByRole('checkbox', { name: /Reply with text, buttons, lists, products and reactions/ })
     .check();
   await page.getByRole('checkbox', { name: /Read WhatsApp orders/ }).check();
+  await page.getByRole('checkbox', { name: /Confirm, fulfil and cancel WhatsApp orders/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const token = await page.getByLabel('API key', { exact: true }).inputValue();
   await page.getByRole('button', { name: 'I have stored the key' }).click();
@@ -363,8 +364,28 @@ test('a catalog is read from Meta, products are sent in a chat and an order is p
   const one = await request.get(`/api/v1/orders/${apiOrder.id}`, { headers: auth });
   expect(((await one.json()) as { data: unknown }).data).toEqual(apiOrder);
   await expect(page.getByText('Paid', { exact: true }).first()).toBeVisible();
-  await page.getByRole('button', { name: 'Mark fulfilled' }).click();
+
+  // The order system fulfils it with the same key (ADR-168): a paid order is never cancelled
+  // through the API, and a retry of the fulfilment changes nothing.
+  const orderPath = `/api/v1/orders/${apiOrder.id}`;
+  const cancelPaid = await request.patch(orderPath, {
+    headers: auth,
+    data: { status: 'cancelled' },
+  });
+  expect(cancelPaid.status()).toBe(409);
+  expect(((await cancelPaid.json()) as { error: { message: string } }).error.message).toMatch(
+    /This order's status is paid\.$/,
+  );
+  const fulfil = { status: 'fulfilled', expectedStatus: 'paid' };
+  const fulfilled = await request.patch(orderPath, { headers: auth, data: fulfil });
+  expect(fulfilled.status()).toBe(200);
+  const fulfilledOrder = ((await fulfilled.json()) as { data: { status: string } }).data;
+  expect(fulfilledOrder.status).toBe('fulfilled');
+  const again = await request.patch(orderPath, { headers: auth, data: fulfil });
+  expect(((await again.json()) as { data: unknown }).data).toEqual(fulfilledOrder);
+  await page.reload();
   await expect(page.getByText('Fulfilled', { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Mark fulfilled' })).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
 
   // The order list shows it fulfilled.

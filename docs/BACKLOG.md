@@ -593,6 +593,11 @@ verification, app review, Embedded Signup configuration).
   the plan: the orders customers send from the catalog, newest first on exact pages, filtered by
   status, contact, conversation, reference or time of change, with their items, amounts in minor
   units and ids only, never Payment Links; migration 0115).
+  **[Changing WhatsApp orders built; its database tests run only in CI]** (ADR-168:
+  `PATCH /orders/{id}` with the new `orders.write` scope, granted with `inbox.reply`, and Commerce
+  in the plan: an order confirmed, fulfilled or cancelled as members move it, from an expected
+  status when one is given, payment statuses left to Razorpay; a retry changes nothing; migration
+  0116).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   media downloads, a contact card's contacts (Meta's
   contact object is not confirmed), changing a field's type, changing

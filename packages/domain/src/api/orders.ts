@@ -14,11 +14,13 @@ import {
   type OrderStatus,
   type Tx,
 } from '@w360/db';
-import { ORDER_REFERENCE_RE } from '../commerce/model';
+import { recordSystemAudit } from '../audit';
+import { MEMBER_ORDER_TRANSITIONS, ORDER_REFERENCE_RE } from '../commerce/model';
+import { writeLockedOrderStatus } from '../commerce/service';
 import type { OutboundDeps } from '../messaging/outbound';
 import { loadEntitlements } from '../plans/entitlements';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
-import { assertScope, type ApiContext } from './context';
+import { apiActor, assertScope, type ApiContext } from './context';
 import { API_LIMITS } from './model';
 
 /**
@@ -26,7 +28,9 @@ import { API_LIMITS } from './model';
  * WhatsApp catalog, as the Orders page shows them and as `order.received` webhooks describe them
  * (ADR-085), with the conversation, the contact and the number by id only. A key needs
  * `orders.read`, and the company's plan Commerce. Payment Links and Razorpay's payment ids are
- * never read; an erased contact's orders keep no note (erasure clears it).
+ * never read; an erased contact's orders keep no note (erasure clears it). With `orders.write` a
+ * key confirms, fulfils and cancels them as members do (ADR-168); payment stays with members and
+ * Razorpay.
  */
 
 export const apiOrderListQuerySchema = z
@@ -46,6 +50,23 @@ export const apiOrderListQuerySchema = z
       .optional()
       .describe(
         'Only orders changed at or after this time (received, a new status, or the note cleared when the contact was erased).',
+      ),
+  })
+  .strict();
+
+/** What `PATCH /orders/{id}` takes: the status to move the order to, from the one expected. */
+export const apiUpdateOrderSchema = z
+  .object({
+    status: z
+      .enum(['confirmed', 'fulfilled', 'cancelled'])
+      .describe(
+        'The status to move the order to, as members do: a received order is confirmed or cancelled, a confirmed one fulfilled or cancelled, a paid one fulfilled.',
+      ),
+    expectedStatus: z
+      .enum(ORDER_STATUSES)
+      .optional()
+      .describe(
+        'Move the order only from this status: one in another status is refused (409), unless it already has `status`.',
       ),
   })
   .strict();
@@ -240,6 +261,17 @@ export async function apiListOrders(
   );
 }
 
+/** One of the company's orders with its items, or null when it has none with this id. */
+async function readApiOrder(tx: Tx, tenantId: string, orderId: string): Promise<ApiOrder | null> {
+  const [row] = await tx
+    .select(orderColumns)
+    .from(commerceOrders)
+    .where(and(eq(commerceOrders.tenantId, tenantId), eq(commerceOrders.id, orderId)));
+  if (!row) return null;
+  const items = await itemsOf(tx, tenantId, [row.id]);
+  return toApiOrder(row, items.get(row.id) ?? []);
+}
+
 /** One of the company's WhatsApp orders, with its items. */
 export async function apiGetOrder(
   deps: Pick<OutboundDeps, 'db'>,
@@ -252,16 +284,86 @@ export async function apiGetOrder(
     ctx.scope,
     async (tx) => {
       await assertCommerceInPlan(tx, ctx.tenant.id);
-      const [row] = await tx
-        .select(orderColumns)
-        .from(commerceOrders)
-        .where(and(eq(commerceOrders.tenantId, ctx.tenant.id), eq(commerceOrders.id, orderId)));
-      if (!row) return null;
-      const items = await itemsOf(tx, ctx.tenant.id, [row.id]);
-      return toApiOrder(row, items.get(row.id) ?? []);
+      return readApiOrder(tx, ctx.tenant.id, orderId);
     },
     { accessMode: 'read only' },
   );
+  if (!order) throw notFound('Order');
+  return order;
+}
+
+/** A refusal that names the order's status, as `status` gives it. */
+const orderStatusRefusal = (message: string, status: OrderStatus) =>
+  new AppError('conflict', `${message} This order's status is ${status}.`);
+
+/**
+ * Moves one of the company's orders on as members do on the order page (ADR-168), in one
+ * transaction with the order's row locked: a received order is confirmed or cancelled, a confirmed
+ * one fulfilled or cancelled, a paid one fulfilled, through the write members' changes use, so the
+ * order's version moves on and the `order.status_changed` webhook event is captured. An order that
+ * already has the status asked for is answered as it is, whatever `expectedStatus` says, so a retry
+ * changes nothing; any other move, or an order not in `expectedStatus`, is refused with 409, naming
+ * its status. Payment statuses come only from Razorpay, and an order waiting for payment is moved
+ * by members, who cancel its Payment Link first.
+ */
+export async function apiUpdateOrder(
+  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+  ctx: ApiContext,
+  orderId: string,
+  input: unknown,
+): Promise<ApiOrder> {
+  assertScope(ctx, 'orders.write');
+  if (!z.uuid().safeParse(orderId).success) throw notFound('Order');
+  const data = parseInput(apiUpdateOrderSchema, input);
+  const order = await deps.db.run(ctx.scope, async (tx) => {
+    await assertCommerceInPlan(tx, ctx.tenant.id);
+    const [current] = await tx
+      .select({
+        id: commerceOrders.id,
+        reference: commerceOrders.reference,
+        status: commerceOrders.status,
+        version: commerceOrders.version,
+      })
+      .from(commerceOrders)
+      .where(and(eq(commerceOrders.tenantId, ctx.tenant.id), eq(commerceOrders.id, orderId)))
+      .for('update');
+    if (!current) return null;
+    if (current.status !== data.status) {
+      if (data.expectedStatus && data.expectedStatus !== current.status) {
+        throw orderStatusRefusal(
+          `The order is not ${data.expectedStatus}, so it was not changed.`,
+          current.status,
+        );
+      }
+      if (!MEMBER_ORDER_TRANSITIONS[current.status].includes(data.status)) {
+        throw orderStatusRefusal(
+          current.status === 'awaiting_payment'
+            ? 'An order waiting for payment is not changed through the API: members cancel its Payment Link in the app first.'
+            : `The order cannot move to ${data.status} from its status.`,
+          current.status,
+        );
+      }
+      await writeLockedOrderStatus(tx, ctx.tenant.id, current, data.status, deps.clock.now());
+      await recordSystemAudit(
+        tx,
+        ctx.tenant.id,
+        {
+          action: 'commerce.order_status_changed',
+          subjectType: 'commerce_order',
+          subjectId: current.id,
+          metadata: {
+            reference: current.reference,
+            from: current.status,
+            to: data.status,
+            source: 'api',
+          },
+          correlationId: ctx.requestId,
+        },
+        apiActor(ctx),
+      );
+    }
+    return readApiOrder(tx, ctx.tenant.id, orderId);
+  });
   if (!order) throw notFound('Order');
   return order;
 }

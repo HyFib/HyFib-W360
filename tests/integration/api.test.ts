@@ -37,6 +37,7 @@ import {
   apiUpdateConversation,
   apiUpdateManyConversations,
   apiUpdateMatchingConversations,
+  apiUpdateOrder,
   apiStartAutomationRun,
   apiStartManyAutomationRuns,
   apiStopAutomationRun,
@@ -2949,6 +2950,213 @@ describe('WhatsApp orders (ADR-167)', () => {
     }
     await onPlan(c, ['commerce']);
     expect((await apiGetOrder(deps(), reader.ctx, order.id)).id).toBe(order.id);
+  });
+
+  it('are moved on as members move them, as the key, and a retry changes nothing (ADR-168)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await createWebhooksService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      keyring: fx.keyring,
+      egressPolicy: { allowLoopbackForTests: true },
+    }).create(owner, {
+      url: 'https://hooks.receiver.test/orders',
+      eventTypes: ['order.status_changed'],
+    });
+    const writer = await apiKey(c, ['orders.write'], 'Order system');
+    const change = (id: string, input: unknown) => apiUpdateOrder(deps(), writer.ctx, id, input);
+    const order = await sendCart(
+      c,
+      '919811100721',
+      [{ retailerId: 'sku-1', quantity: 3, price: 10 }],
+      'Ring twice',
+    );
+    const versionBefore = await versionOf(order.id);
+
+    // Confirmed from received, as the key, and answered as GET /orders/{id} gives the order.
+    const confirmed = await change(order.id, { status: 'confirmed', expectedStatus: 'received' });
+    expect(confirmed).toMatchObject({
+      id: order.id,
+      reference: order.reference,
+      status: 'confirmed',
+      subtotalMinor: 3_000,
+      customerNote: 'Ring twice',
+    });
+    expect(confirmed.items.map((i) => [i.retailerId, i.quantity])).toEqual([['sku-1', 3]]);
+    const reader = await apiKey(c, ['orders.read']);
+    expect(await apiGetOrder(deps(), reader.ctx, order.id)).toEqual(confirmed);
+    expect(await versionOf(order.id)).toBe(versionBefore + 1);
+    const audit = () =>
+      fx.query<{ actor_type: string; actor_id: string; metadata: Record<string, unknown> }>(
+        `SELECT actor_type, actor_id, metadata FROM app.audit_events
+          WHERE tenant_id = $1 AND subject_id = $2 AND action = 'commerce.order_status_changed'
+          ORDER BY created_at, id`,
+        [c.tenant.id, order.id],
+      );
+    expect(await audit()).toEqual([
+      {
+        actor_type: 'api_key',
+        actor_id: writer.id,
+        metadata: { reference: order.reference, from: 'received', to: 'confirmed', source: 'api' },
+      },
+    ]);
+    const events = async () =>
+      (
+        await fx.query<{ status: string; detail: { orderId: string; previousStatus: string } }>(
+          `SELECT status, detail FROM app.webhook_events
+            WHERE tenant_id = $1 AND type = 'order.status_changed' ORDER BY created_at, id`,
+          [c.tenant.id],
+        )
+      ).map((e) => [e.detail.orderId, e.detail.previousStatus, e.status]);
+    expect(await events()).toEqual([[order.id, 'received', 'confirmed']]);
+
+    // A retry, even with the status it expected the first time, changes nothing.
+    expect(await change(order.id, { status: 'confirmed', expectedStatus: 'received' })).toEqual(
+      confirmed,
+    );
+    expect(await versionOf(order.id)).toBe(versionBefore + 1);
+    expect(await audit()).toHaveLength(1);
+    expect(await events()).toHaveLength(1);
+
+    // A member's page opened before the key's change is stale.
+    await expectAppError(
+      commerce().setOrderStatus(owner, {
+        id: order.id,
+        expectedVersion: versionBefore,
+        status: 'cancelled',
+      }),
+      'conflict',
+      /Someone else changed this/,
+    );
+
+    // Not in the status expected, or a move members cannot make: refused naming the status.
+    await expectAppError(
+      change(order.id, { status: 'cancelled', expectedStatus: 'received' }),
+      'conflict',
+      /^The order is not received, so it was not changed\. This order's status is confirmed\.$/,
+    );
+    const other = await sendCart(c, '919811100722', [
+      { retailerId: 'sku-2', quantity: 1, price: 5 },
+    ]);
+    await expectAppError(
+      change(other.id, { status: 'fulfilled' }),
+      'conflict',
+      /^The order cannot move to fulfilled from its status\. This order's status is received\.$/,
+    );
+    expect(await versionOf(order.id)).toBe(versionBefore + 1);
+    expect(await versionOf(other.id)).toBe(1);
+
+    // Fulfilled from confirmed, after which nothing moves it; cancelled from received, for good.
+    expect((await change(order.id, { status: 'fulfilled' })).status).toBe('fulfilled');
+    await expectAppError(
+      change(order.id, { status: 'cancelled' }),
+      'conflict',
+      /status is fulfilled\.$/,
+    );
+    expect(
+      (await change(other.id, { status: 'cancelled', expectedStatus: 'received' })).status,
+    ).toBe('cancelled');
+    await expectAppError(
+      change(other.id, { status: 'confirmed' }),
+      'conflict',
+      /status is cancelled\.$/,
+    );
+
+    // Payment statuses are Razorpay's: an order waiting for payment is left to members, who cancel
+    // its Payment Link; a paid one is fulfilled, never cancelled.
+    const waiting = await sendCart(c, '919811100723', [
+      { retailerId: 'sku-3', quantity: 1, price: 7 },
+    ]);
+    const paid = await sendCart(c, '919811100724', [
+      { retailerId: 'sku-4', quantity: 2, price: 9 },
+    ]);
+    await fx.query(`UPDATE app.commerce_orders SET status = 'awaiting_payment' WHERE id = $1`, [
+      waiting.id,
+    ]);
+    await fx.query(
+      `UPDATE app.commerce_orders SET status = 'paid', paid_at = now() WHERE id = $1`,
+      [paid.id],
+    );
+    for (const status of ['confirmed', 'fulfilled', 'cancelled']) {
+      await expectAppError(
+        change(waiting.id, { status }),
+        'conflict',
+        /members cancel its Payment Link in the app first\. This order's status is awaiting_payment\.$/,
+      );
+    }
+    await expectAppError(change(paid.id, { status: 'cancelled' }), 'conflict', /status is paid\.$/);
+    const fulfilled = await change(paid.id, { status: 'fulfilled', expectedStatus: 'paid' });
+    expect([fulfilled.status, fulfilled.paidAt]).toEqual(['fulfilled', expect.any(String)]);
+    expect(await events()).toEqual([
+      [order.id, 'received', 'confirmed'],
+      [order.id, 'confirmed', 'fulfilled'],
+      [other.id, 'received', 'cancelled'],
+      [waiting.id, 'received', 'awaiting_payment'],
+      [paid.id, 'received', 'paid'],
+      [paid.id, 'paid', 'fulfilled'],
+    ]);
+  });
+
+  it('need orders.write, an active company, Commerce in the plan and the company’s own order (ADR-168)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const writer = await apiKey(c, ['orders.write']);
+    const order = await sendCart(c, '919811100731', [
+      { retailerId: 'sku-1', quantity: 1, price: 19.99 },
+    ]);
+    const theirs = await sendCart(other, '919811100732', [
+      { retailerId: 'sku-1', quantity: 1, price: 19.99 },
+    ]);
+    const confirm = { status: 'confirmed' };
+    const statusOf = async (orderId: string) =>
+      (
+        await fx.query<{ status: string }>('SELECT status FROM app.commerce_orders WHERE id = $1', [
+          orderId,
+        ])
+      )[0]!.status;
+
+    // Another company's order and one that does not exist are not found, and nothing changes.
+    await expectAppError(apiUpdateOrder(deps(), writer.ctx, theirs.id, confirm), 'not_found');
+    await expectAppError(apiUpdateOrder(deps(), writer.ctx, uuidv7(), confirm), 'not_found');
+    expect(await statusOf(theirs.id)).toBe('received');
+
+    // A key that only reads orders, or one of a suspended company, changes none.
+    const reader = await apiKey(c, ['orders.read']);
+    await expectAppError(
+      apiUpdateOrder(deps(), reader.ctx, order.id, confirm),
+      'forbidden',
+      /orders\.write/,
+    );
+    const suspended = {
+      ...writer.ctx,
+      tenant: { ...writer.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(apiUpdateOrder(deps(), suspended, order.id, confirm), 'tenant_suspended');
+
+    // A plan without Commerce changes no orders; with it again, it does.
+    await onPlan(c, []);
+    const error = await expectAppError(
+      apiUpdateOrder(deps(), writer.ctx, order.id, confirm),
+      'forbidden',
+      /does not include Commerce/,
+    );
+    expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    expect(await statusOf(order.id)).toBe('received');
+    await onPlan(c, ['commerce']);
+    expect((await apiUpdateOrder(deps(), writer.ctx, order.id, confirm)).status).toBe('confirmed');
+
+    // Granting the scope needs inbox.reply, which members change orders with.
+    const owner = await fx.ctx(c, c.owner);
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'inbox.reply')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Orders', scopes: ['orders.write'], expiresInDays: 30 }),
+      'forbidden',
+      /Confirm, fulfil and cancel WhatsApp orders/,
+    );
   });
 });
 

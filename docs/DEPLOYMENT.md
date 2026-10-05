@@ -206,6 +206,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    answers Settings → API keys with an error for a company with a key holding `orders.read` (and the
    platform plan pages for a plan version including it), and `/api/v1/orders` with 404; rolling web
    servers back to an image from before it does the same.
+   Migration 0116 (ADR-168) widens the same scope checks again, with the same brief locks. Web
+   servers from before it do not know `orders.write`: until the web rollout ends, an old server
+   answers Settings → API keys with an error for a company with a key holding it (and the platform
+   plan pages for a plan version including it), and `PATCH /api/v1/orders/{id}` with 405 (404 on an
+   image from before 0115); rolling web servers back to an image from before it does the same.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

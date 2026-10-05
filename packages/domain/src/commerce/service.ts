@@ -138,6 +138,28 @@ export interface OrderListItem {
   receivedAt: string;
 }
 
+/**
+ * Writes the new status of an order whose row the caller locked, as members change it on the order
+ * page and API keys through `PATCH /orders/{id}` (ADR-168): the time of the change and the next
+ * version, so a page opened before either change is refused as stale. Each caller checks the move
+ * against MEMBER_ORDER_TRANSITIONS and writes its own audit row; the table's trigger captures the
+ * `order.status_changed` webhook event.
+ */
+export async function writeLockedOrderStatus(
+  tx: Tx,
+  tenantId: string,
+  order: { id: string; version: number },
+  status: OrderStatus,
+  now: Date,
+): Promise<number> {
+  const version = order.version + 1;
+  await tx
+    .update(commerceOrders)
+    .set({ status, statusChangedAt: now, version })
+    .where(and(eq(commerceOrders.tenantId, tenantId), eq(commerceOrders.id, order.id)));
+  return version;
+}
+
 export function createCommerceService(deps: CommerceDeps) {
   const { db } = deps;
 
@@ -927,11 +949,13 @@ export function createCommerceService(deps: CommerceDeps) {
               : 'The order cannot move to that status from its current one.',
           );
         }
-        const version = order.version + 1;
-        await tx
-          .update(commerceOrders)
-          .set({ status: data.status, statusChangedAt: deps.clock.now(), version })
-          .where(and(eq(commerceOrders.tenantId, ctx.tenant.id), eq(commerceOrders.id, order.id)));
+        const version = await writeLockedOrderStatus(
+          tx,
+          ctx.tenant.id,
+          order,
+          data.status,
+          deps.clock.now(),
+        );
         await recordAudit(
           tx,
           ctx,

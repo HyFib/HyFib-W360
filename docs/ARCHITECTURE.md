@@ -1152,6 +1152,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`commerce_orders_list_idx`), the filters as plain equalities and `updated_at >= updatedSince`,
   and the page's items in one query (`itemsOf`, by order and position). `toApiOrder` gives the order
   the `order.*` webhooks describe (ADR-085), with ids in place of the contact and number objects.
+- **Changing orders through the API (ADR-168):** `PATCH /orders/{id}` (`apiUpdateOrder`,
+  `orders.write`) checks Commerce in the plan, locks the order's row and checks the move against
+  `MEMBER_ORDER_TRANSITIONS` (and `expectedStatus`) under the lock; `writeLockedOrderStatus`
+  (`commerce/service.ts`), shared with members' `setOrderStatus`, writes the status, its time and
+  the next version, and the trigger of 0063 captures `order.status_changed`. The answer is read as
+  `GET /orders/{id}` reads it (`readApiOrder`).
 - **Message feed (ADR-088):** `GET /messages` (`apiListMessages`, `conversations.read`) pages the
   company's messages across conversations newest first on exact keyset cursors, joined to their
   conversation and contact (erased contacts' conversations left out), with `direction`,

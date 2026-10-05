@@ -6,7 +6,13 @@ import { ORDER_REFERENCE_RE } from '../commerce/model';
 import type { ApiContext } from './context';
 import { API_SCOPE_INFO } from './model';
 import { API_ROUTES, buildOpenApiDocument } from './openapi';
-import { apiGetOrder, apiListOrders, apiOrderListQuerySchema } from './orders';
+import {
+  apiGetOrder,
+  apiListOrders,
+  apiOrderListQuerySchema,
+  apiUpdateOrder,
+  apiUpdateOrderSchema,
+} from './orders';
 
 const TENANT = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
 const OTHER = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';
@@ -169,7 +175,9 @@ describe('WhatsApp orders through the API (ADR-167)', () => {
     ]) {
       expect(list.description).toContain(words);
     }
-    expect(list.responses['403']?.description).toContain('reading orders (reason not_in_plan)');
+    expect(list.responses['403']?.description).toContain(
+      'reading or changing orders (reason not_in_plan)',
+    );
 
     const one = doc.paths['/orders/{id}']?.get as {
       operationId: string;
@@ -209,5 +217,133 @@ describe('WhatsApp orders through the API (ADR-167)', () => {
     expect(JSON.stringify(schema)).not.toMatch(
       /"(phone|contactName|paymentLink\w*|shortUrl|paymentId)"/,
     );
+  });
+});
+
+describe('changing WhatsApp orders through the API (ADR-168)', () => {
+  const deps = (db: Database) => ({ db, clock: { now: () => new Date() } });
+
+  it('need orders.write, a writing scope the database accepts, granted with inbox.reply', () => {
+    expect(API_SCOPES).toContain('orders.write');
+    expect(API_SCOPE_INFO['orders.write']).toMatchObject({
+      label: 'Confirm, fulfil and cancel WhatsApp orders',
+      permission: 'inbox.reply',
+      writes: true,
+    });
+    for (const words of ['as members do', 'Never payments', 'Payment Links', 'Commerce']) {
+      expect(API_SCOPE_INFO['orders.write'].description).toContain(words);
+    }
+    // Members change an order with inbox.reply and commerce.read: every role with the first has
+    // the second, and owners and administrators, who create keys, have both.
+    for (const [role, permissions] of Object.entries(ROLE_PERMISSIONS)) {
+      if (permissions.has('inbox.reply')) expect(permissions.has('commerce.read'), role).toBe(true);
+    }
+    for (const role of ['owner', 'admin'] as const) {
+      expect(ROLE_PERMISSIONS[role].has('inbox.reply')).toBe(true);
+    }
+  });
+
+  it('take a status members can choose and, if wanted, the status expected, nothing else', () => {
+    const parse = (input: unknown) => apiUpdateOrderSchema.safeParse(input);
+    for (const status of ['confirmed', 'fulfilled', 'cancelled']) {
+      expect(parse({ status }).success, status).toBe(true);
+      for (const expectedStatus of ORDER_STATUSES) {
+        expect(parse({ status, expectedStatus }).success, expectedStatus).toBe(true);
+      }
+    }
+    for (const input of [
+      {},
+      { status: 'received' },
+      { status: 'awaiting_payment' },
+      { status: 'paid' },
+      { status: 'shipped' },
+      { status: 'Confirmed' },
+      { status: 'confirmed', expectedStatus: 'shipped' },
+      { status: 'confirmed', expectedStatus: null },
+      { status: 'cancelled', reason: 'Out of stock' },
+      { status: 'fulfilled', expectedVersion: 2 },
+      { status: 'fulfilled', note: 'Shipped' },
+    ]) {
+      expect(parse(input).success, JSON.stringify(input)).toBe(false);
+    }
+  });
+
+  it('refuse a key without orders.write, a suspended company and a bad request before reading anything', async () => {
+    const change = (scopes: string[], input: unknown, id = TENANT, status = 'active') =>
+      refusal(apiUpdateOrder(deps(untouched), ctx(scopes, status), id, input));
+    expect(await change(['orders.read'], { status: 'confirmed' })).toEqual([
+      'forbidden',
+      'This API key does not have the orders.write scope.',
+      [],
+    ]);
+    for (const status of ['suspended', 'restricted']) {
+      expect((await change(['orders.write'], { status: 'confirmed' }, TENANT, status))[0]).toBe(
+        'tenant_suspended',
+      );
+    }
+    expect((await change(['orders.write'], { status: 'confirmed' }, 'not-an-id'))[0]).toBe(
+      'not_found',
+    );
+    expect((await change(['orders.write'], { status: 'paid' }))[2]).toEqual(['status']);
+    expect((await change(['orders.write'], { status: 'cancelled', why: 'x' }))[0]).toBe(
+      'validation_failed',
+    );
+  });
+
+  it('change the order in one read committed transaction', async () => {
+    const { db, runs } = reached();
+    await expect(
+      apiUpdateOrder(deps(db), ctx(['orders.write']), TENANT, { status: 'fulfilled' }),
+    ).rejects.toThrow('reached the database');
+    expect(runs).toEqual([undefined]);
+  });
+
+  it('is described: the scope, the moves, refusals, payments, the event and retries', () => {
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      paths: Record<string, Record<string, Record<string, unknown>>>;
+      components: { schemas: Record<string, unknown> };
+    };
+    expect(API_ROUTES).toContainEqual(['patch', '/orders/{id}']);
+    const op = doc.paths['/orders/{id}']?.patch as {
+      operationId: string;
+      description: string;
+      requestBody: unknown;
+      responses: Record<string, { content?: unknown }>;
+    };
+    expect(op.operationId).toBe('updateOrder');
+    expect(op.requestBody).toEqual({
+      required: true,
+      content: { 'application/json': { schema: { $ref: '#/components/schemas/UpdateOrder' } } },
+    });
+    expect(op.responses['200']?.content).toEqual(
+      (doc.paths['/orders/{id}']?.get as { responses: Record<string, { content?: unknown }> })
+        .responses['200']?.content,
+    );
+    expect(Object.keys(op.responses)).toEqual(
+      expect.arrayContaining(['200', '403', '404', '409', '422', '423', '429']),
+    );
+    for (const words of [
+      'Scope: `orders.write`.',
+      'a received order is confirmed or cancelled, a confirmed one fulfilled or cancelled, a paid one fulfilled',
+      '(403, reason not_in_plan)',
+      '`order.status_changed` webhook event follows',
+      '(409, naming the order’s status, changing nothing)',
+      'an order not in `expectedStatus`',
+      'members cancel its Payment Link in the app first',
+      'Nothing is sent to the customer.',
+      'whatever `expectedStatus` says, so a retry is safe without an `Idempotency-Key`',
+    ]) {
+      expect(op.description).toContain(words);
+    }
+    const schema = doc.components.schemas.UpdateOrder as {
+      properties: { status: { enum: string[] }; expectedStatus: { enum: string[] } };
+      required: string[];
+      additionalProperties: boolean;
+    };
+    expect(Object.keys(schema.properties)).toEqual(['status', 'expectedStatus']);
+    expect(schema.properties.status.enum).toEqual(['confirmed', 'fulfilled', 'cancelled']);
+    expect(schema.properties.expectedStatus.enum).toEqual([...ORDER_STATUSES]);
+    expect(schema.required).toEqual(['status']);
+    expect(schema.additionalProperties).toBe(false);
   });
 });

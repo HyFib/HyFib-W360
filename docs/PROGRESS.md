@@ -1,5 +1,61 @@
 # Progress
 
+## 2026-10-05 — Phase 5: confirming, fulfilling and cancelling WhatsApp orders through the API (P5-08, ADR-168)
+
+Status: **Implemented; its database tests run in CI only (test data only).** Order systems read
+orders since ADR-167 but needed a member to move them on. The local PostgreSQL is unavailable (its
+Docker daemon stopped), so migration 0116, the integration tests and the e2e step below were written
+but not run here.
+
+### Completed
+
+- **Design (ADR-168):** a new writing scope, `orders.write`, granted with `inbox.reply`; Commerce in
+  the plan; `PATCH /orders/{id}` with `status` and an optional `expectedStatus`, the moves members
+  make, payment statuses left to Razorpay, retries changing nothing.
+- **Database:** migration 0116 widens the key and plan scope checks; `API_SCOPES` (`packages/db`).
+- **Domain:** `apiUpdateOrder` and `apiUpdateOrderSchema` (`api/orders.ts`, with `readApiOrder`
+  shared with `apiGetOrder`); `writeLockedOrderStatus` (`commerce/service.ts`), now used by members'
+  changes too; the scope's label, description and permission (`api/model.ts`); `api/openapi.ts` (the
+  operation, `UpdateOrder`, the route list, the 403's words).
+- **Web:** `PATCH` on the route `api/v1/orders/[id]`; Settings → API keys and the platform plan
+  pages list the scope from the shared list.
+- **Tests:**
+  - Unit (5 new in `orders.test.ts`, 2 changed in `api.test.ts`): the scope, its permission and
+    words, every role with `inbox.reply` holding `commerce.read`; the change's body; refusals before
+    anything is read; one read committed transaction; the operation, its body and words.
+  - Integration (2 new in `api.test.ts`): every move and refusal naming the status, the expected
+    status, the version, the audit entry as the key, the order events, a member's stale page,
+    retries and payment statuses; another company's and an unknown order, a reading key, a suspended
+    company, a plan without Commerce and granting the scope. Written for CI; not run here.
+  - E2E (`commerce.spec.ts` extended): the key created in Settings fulfils the paid order over HTTP,
+    is refused when cancelling it, and a retry answers the same; the order page shows it fulfilled.
+    Written for CI; not run here.
+- **Docs:** ADR-168; SECURITY (scopes, changing orders); ARCHITECTURE; THREAT-MODEL T163; DEPLOYMENT
+  (migration 0116); RUNBOOKS; BACKLOG P5-08; feature matrix H-033 and W-134.
+- **Mutation checks:** 24 tried, all caught on the unit-tested parts (a reading key changing orders,
+  a malformed id reaching the database, the body unchecked, `paid` taken or cancelling not offered,
+  `expectedStatus` required or null, other fields taken, a read-only transaction, another
+  permission, changes while suspended, the scope's words, the database list without the scope, the
+  operation's route, id, body, schema, responses and words, the route's method). The moves, the
+  version, the audit entry, the company scoping and the plan check need the database, so their
+  regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 756 passed (77 files; 5 new)                                    |
+| `pnpm test:integration`, e2e, migration 0116       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 24 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Payment Links and refunds through the API, changing many orders in one call, a reason with the
+  change, events naming who changed an order, store orders.
+
 ## 2026-10-05 — Phase 5: reading WhatsApp orders through the API (P5-08, ADR-167)
 
 Status: **Implemented; its database tests run in CI only (test data only).** Order systems heard

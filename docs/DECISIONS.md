@@ -6667,3 +6667,47 @@ Decision:
 Not built: changing orders through the API (confirming, fulfilling, cancelling, asking for payment),
 store orders (the Shopify and WooCommerce copies, which the store reports itself), Payment Links,
 refunds and order reports.
+
+## ADR-168 Confirming, fulfilling and cancelling WhatsApp orders through the public API (P5-08) (2026-10-05)
+
+Context: since ADR-167 order systems read the orders customers send from the company's WhatsApp
+catalog, but moving an order on (confirming it, marking it fulfilled when it ships, cancelling it)
+still needed a member on the order page, so an order system that ships or cancels orders had to ask
+someone to click. ADR-167 left changing orders through the public API unbuilt.
+
+Decision:
+
+- **A new writing scope, `orders.write`** ("Confirm, fulfil and cancel WhatsApp orders"), granted
+  with `inbox.reply`: members change an order's status with `inbox.reply` and `commerce.read`, and
+  every role with the first has the second (unit-tested); owners and administrators, who create
+  keys, have both. Like every writing scope it is refused while the company is suspended or
+  restricted (423). Existing keys keep their scopes, and a plan version that chose its scopes
+  (ADR-092) leaves it out until a new version includes it.
+- **Commerce in the plan**, checked first in the transaction, as for reading orders (403, reason
+  `not_in_plan`).
+- **`PATCH /api/v1/orders/{id}`** (`updateOrder`) takes `status` (`confirmed`, `fulfilled` or
+  `cancelled`) and, if wanted, `expectedStatus`, and answers the order as `GET /orders/{id}` gives
+  it. The moves are the ones members make (`MEMBER_ORDER_TRANSITIONS`): a received order is
+  confirmed or cancelled, a confirmed one fulfilled or cancelled, a paid one fulfilled. Any other
+  move is refused with 409, naming the order's status, and so is an order not in `expectedStatus`;
+  nothing changes. Payment statuses come only from Razorpay (ADR-046): an order waiting for payment
+  is refused, as members cancel its Payment Link first (the order goes back to confirmed when the
+  link ends unpaid), and a paid order is never cancelled.
+- **Retries:** an order that already has the status asked for is answered as it is, whatever
+  `expectedStatus` says, with no new version, audit entry or event, so a call sent again after a
+  lost answer needs no `Idempotency-Key`. A call counts as one request.
+- **One write for members and keys:** the order's row is locked (`FOR UPDATE`, as members' changes
+  lock it), the move checked under the lock, and the status written by `writeLockedOrderStatus`
+  (`commerce/service.ts`), which members' changes now use too: the time of the change and the next
+  version, so a member's page opened before a key's change is refused as stale (an integration test,
+  run in CI). The table's trigger captures `order.status_changed` with the status before it
+  (ADR-085), as for a member's change; the audit entry `commerce.order_status_changed` names the key
+  (`api_key`) with `source: 'api'`. Nothing is sent to the customer, as for members.
+- **Another company's order** and an unknown id answer 404, and an id that is not a UUID is refused
+  before any query.
+- **Migration 0116** replaces the key and plan scope checks with ones that also accept
+  `orders.write`, as 0115 did.
+
+Not built: asking for payment or cancelling a Payment Link through the API, refunds, changing many
+orders in one call, a reason or note with the change, `order.status_changed` naming who changed the
+order, and store orders.

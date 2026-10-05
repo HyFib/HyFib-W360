@@ -182,6 +182,7 @@ describe('API scopes', () => {
       'conversations.write',
       'campaigns.stop',
       'automations.start',
+      'orders.write',
       'webhooks.manage',
     ]);
     expect([...API_SEND_SCOPES]).toEqual(API_SCOPE_KEYS.filter((s) => s.startsWith('messages.')));
@@ -199,6 +200,9 @@ describe('API scopes', () => {
     expect(API_SCOPE_INFO['conversations.read'].permission).toBe('inbox.read_all');
     expect(API_SCOPE_INFO['conversations.write'].permission).toBe('inbox.supervise');
     expect(API_SCOPE_INFO['automations.start'].permission).toBe('automations.publish');
+    // Members read orders with commerce.read (ADR-167) and change them with inbox.reply (ADR-168).
+    expect(API_SCOPE_INFO['orders.read'].permission).toBe('commerce.read');
+    expect(API_SCOPE_INFO['orders.write'].permission).toBe('inbox.reply');
     expect(API_SCOPE_INFO['webhooks.manage'].permission).toBe('developer.manage');
   });
 

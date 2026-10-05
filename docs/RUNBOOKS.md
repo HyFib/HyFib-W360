@@ -1794,6 +1794,16 @@ by when they were received, and filters narrow them: an order missing from a pas
 erased contact's orders have no note: erasure cleared it. Payment Links and payment ids are never in
 these answers; the company's Razorpay account has them.
 
+**`PATCH /api/v1/orders/{id}` answers 409, 403 or 423 (ADR-168).** 409 `conflict` names the order's
+status: the move is not one members can make from it (a received order is confirmed or cancelled, a
+confirmed one fulfilled or cancelled, a paid one fulfilled), the order was not in the
+`expectedStatus` given, or it is waiting for payment, which members end by cancelling its Payment
+Link in the app. Read the order (`GET /orders/{id}`) and decide again; an order already in the
+status asked for answers 200, so a retry is safe. 403 `forbidden` names the scope the key lacks
+(`orders.write`, granted by members with `inbox.reply`), or with reason `not_in_plan` the company's
+plan leaves out Commerce or the scope. 423 means the company is suspended or its plan has ended;
+reading orders still works.
+
 **A search with `POST /api/v1/contacts/search` gives short or empty pages, or a 422 (ADR-117).**
 Its pages read at most 2,000 contacts, as filtered lists do (entry above): the integration sends the
 same conditions with each `nextCursor` until it is `null`. A 422 names the condition's part:

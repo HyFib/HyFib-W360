@@ -78,6 +78,7 @@ import {
   apiUpdateMatchingConversationsSchema,
 } from './conversations';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
+import { apiUpdateOrderSchema } from './orders';
 import {
   apiConsentSchema,
   apiContactCreateSchema,
@@ -601,7 +602,7 @@ const errors = (...statuses: number[]) =>
           {
             400: 'The request is malformed (for example invalid JSON or a missing header).',
             401: 'No valid API key: missing, unknown, revoked or expired.',
-            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one or Commerce when sending products or reading orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
+            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one or Commerce when sending products or reading or changing orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
             404: 'Not found in the company.',
             409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit). Pausing or cancelling a campaign: its status does not allow it, and the message names the status.',
             412: "A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it. Starting an automation: it is not published, archived or not started through the API (automation_unavailable), paused (automation_paused), its number is not active (channel_unavailable), or the plan's automation runs for the month are used up (automation_quota).",
@@ -1543,6 +1544,24 @@ export function buildOpenApiDocument(serverUrl: string) {
             ...errors(401, 403, 404, 429, 500),
           },
         },
+        patch: {
+          operationId: 'updateOrder',
+          summary: 'Confirm, fulfil or cancel a WhatsApp order',
+          description: [
+            `${scopeNote('orders.write')} As members do on the order page: a received order is confirmed or cancelled, a confirmed one fulfilled or cancelled, a paid one fulfilled. Needs Commerce in the company’s plan (403, reason not_in_plan). The order’s \`order.status_changed\` webhook event follows, as for a member’s change.`,
+            'Any other move is refused (409, naming the order’s status, changing nothing), and so is an order not in `expectedStatus` when you give it. Payment statuses come only from Razorpay, and an order waiting for payment is not changed through the API: members cancel its Payment Link in the app first. Nothing is sent to the customer.',
+            'An order that already has the status asked for is answered as it is, whatever `expectedStatus` says, so a retry is safe without an `Idempotency-Key`.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateOrder')) },
+          responses: {
+            '200': {
+              description: 'The order, as it now is.',
+              content: json(dataOf(ref('Order'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
       },
       '/webhook-endpoints': {
         get: {
@@ -2028,6 +2047,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         ConversationNote: jsonSchema(apiConversationNoteSchema),
         Campaign: jsonSchema(apiCampaignSchema),
         Order: jsonSchema(apiOrderSchema),
+        UpdateOrder: jsonSchema(apiUpdateOrderSchema, 'input'),
         CampaignWithResults: jsonSchema(apiCampaignWithResultsSchema),
         CampaignRecipient: jsonSchema(apiCampaignRecipientSchema),
         Automation: jsonSchema(apiAutomationSchema),
@@ -2110,6 +2130,7 @@ export const API_ROUTES = [
   ['post', '/automation-runs/stop-many'],
   ['get', '/orders'],
   ['get', '/orders/{id}'],
+  ['patch', '/orders/{id}'],
   ['get', '/webhook-endpoints'],
   ['post', '/webhook-endpoints'],
   ['post', '/webhook-endpoints/replay-failed'],
