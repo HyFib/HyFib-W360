@@ -6,8 +6,12 @@ import {
   qualityRank,
   quarantineExternalIds,
   signalFlags,
+  USAGE_CSV_COLUMNS,
+  usageCsv,
+  usageCsvFilename,
   type CompanyActivity,
   type CompanyHealthFacts,
+  type CompanyUsage,
 } from './ops-model';
 
 const healthy: CompanyHealthFacts = {
@@ -184,5 +188,52 @@ describe('quarantine ids', () => {
     expect(quarantineExternalIds({ field: 'messages' })).toEqual([
       { key: 'field', value: 'messages' },
     ]);
+  });
+});
+
+describe('the Usage tab as CSV (ADR-154)', () => {
+  const busy: CompanyUsage = {
+    ...quiet,
+    name: '=HYPERLINK("https://example.com")',
+    outbound: 5,
+    outboundBySender: { agent: 1, bot: 1, campaign: 2, api: 1, system: 0 },
+    failed: 1,
+    inbound: 3,
+    webhookDeliveries: 4,
+    automationRuns: 7,
+    runsPeriodStart: new Date('2026-09-01T00:00:00Z'),
+    members: 2,
+    apiRequests: 42,
+    apiPeriodStart: new Date('2026-09-15T05:30:00Z'),
+  };
+  const idle: CompanyUsage = {
+    ...quiet,
+    name: 'Quiet, Ltd',
+    slug: 'quiet',
+    status: 'suspended',
+    apiRequests: 0,
+    apiPeriodStart: null,
+  };
+
+  it('writes the tab’s columns and a line per company, formula-safe, periods as UTC days', () => {
+    const csv = usageCsv([busy, idle]);
+    expect(csv.startsWith('\uFEFF')).toBe(true);
+    expect(csv.slice(1).split('\r\n')).toEqual([
+      USAGE_CSV_COLUMNS.join(','),
+      `"'=HYPERLINK(""https://example.com"")",acme,active,5,1,1,2,1,0,1,3,4,7,2026-09-01,42,2026-09-15,2,1`,
+      '"Quiet, Ltd",quiet,suspended,0,0,0,0,0,0,0,0,0,0,,0,,1,1',
+      '',
+    ]);
+    expect(USAGE_CSV_COLUMNS).toHaveLength(18);
+    expect(usageCsv([])).toBe(`\uFEFF${USAGE_CSV_COLUMNS.join(',')}\r\n`);
+  });
+
+  it('names the file by its window and the UTC day it was made', () => {
+    expect(usageCsvFilename(30, new Date('2026-10-05T23:30:00Z'))).toBe(
+      'hyfib-usage-30-days-2026-10-05.csv',
+    );
+    expect(usageCsvFilename(7, new Date('2026-10-06T00:00:00Z'))).toBe(
+      'hyfib-usage-7-days-2026-10-06.csv',
+    );
   });
 });

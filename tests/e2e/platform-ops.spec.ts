@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import pg from 'pg';
 import { expect, test } from './fixtures';
 import {
@@ -142,6 +143,18 @@ test('staff read the operations console and repair a quarantined webhook event',
   expect(apiColumn).toBeGreaterThan(0);
   await expect(usageRow.getByRole('cell').nth(apiColumn)).toHaveText(
     /^2\s*from \d{4}-\d{2}-\d{2}$/,
+  );
+  // The same table as CSV (ADR-154): the company's line with its two API requests.
+  const downloading = page.waitForEvent('download');
+  await page.getByRole('link', { name: 'Download CSV' }).click();
+  const download = await downloading;
+  expect(download.suggestedFilename()).toMatch(/^hyfib-usage-30-days-\d{4}-\d{2}-\d{2}\.csv$/);
+  const csv = await readFile(await download.path(), 'utf8');
+  expect(csv).toContain('Company,Address,Status,Sent,');
+  expect(csv).toMatch(
+    new RegExp(
+      `\\r\\n${companyName},ops-${suffix},[a-z_]+,(?:\\d+,){10}(?:\\d{4}-\\d{2}-\\d{2})?,2,\\d{4}-\\d{2}-\\d{2},\\d+,\\d+\\r\\n`,
+    ),
   );
   await page.getByRole('link', { name: '7 days' }).click();
   await expect(page.getByText('By company (7 days)')).toBeVisible();

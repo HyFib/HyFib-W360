@@ -1,5 +1,53 @@
 # Progress
 
+## 2026-10-05 — Phase 5: exporting the console's usage table (P5-10, ADR-154)
+
+Status: **Implemented; its database tests run in CI only (test data only).** The console's Usage tab
+could be read on screen only. The local PostgreSQL is unavailable (its Docker daemon stopped), so
+the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-154):** "Download CSV" on the Usage tab for the window shown, a line per company
+  with the tab's figures, formula-safe; each export written to the platform audit log in the
+  transaction that reads the rows, before the file is returned.
+- **Domain:** `platform/ops-model.ts` (`USAGE_CSV_COLUMNS`, `usageCsv`, `usageCsvFilename`);
+  `platform/ops.ts` (`usageRows`, shared with the tab, and `exportUsage`, which audits
+  `platform.ops_usage_exported`).
+- **Web:** `platform/ops/usage/export/route.ts` (behind the page's platform actor check;
+  `private, no-store`, `nosniff`, an attachment) and the tab's "Download CSV" link.
+- **Tests:**
+  - Unit (2 new in `ops-model.test.ts`): the columns, a line per company in order, a formula
+    neutralised and quoted, a comma quoted, periods as UTC days, an empty export, the filename.
+  - Integration (1 new in `platform-ops.test.ts`): the file with its header and the company's one
+    line, without message text, and exactly one audit entry with the window and the count of
+    companies; a non-administrator refused with neither. Written for CI; not run here.
+  - E2E (`platform-ops.spec.ts` extended): "Download CSV" on the Usage tab gives
+    `hyfib-usage-30-days-<day>.csv` with the company's line and its two API requests. Written for
+    CI; not run here.
+- **Docs:** ADR-154; SECURITY (the console's row); THREAT-MODEL T75; ARCHITECTURE; BACKLOG P5-10;
+  feature matrix H-034.
+- **Mutation checks:** 11 deliberate regressions of the CSV builder tried, all caught by the unit
+  tests (no header, no byte-order mark, a formula edited instead of neutralised, lines not written
+  through `csvLine`, columns swapped or showing another figure, periods with their time or in a
+  local format, the filename without the window, a column missing from the header); the service and
+  the route need the database, so none were tried there.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 707 passed (75 files; 2 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 11 tried, all caught (unit tests)                               |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Exports of the console's other lists, other formats, scheduled exports.
+
 ## 2026-10-05 — Phase 5: API requests on the operations console (P5-10, ADR-153)
 
 Status: **Implemented; its database tests run in CI only (test data only).** The console's Usage tab

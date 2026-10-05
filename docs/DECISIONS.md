@@ -6163,3 +6163,28 @@ Decision:
 
 Not built: each key's count (ADR-097 shows it to the company in Settings → API keys), requests over
 the tab's window, refused requests, trends.
+
+## ADR-154 Exporting the console's usage table (P5-10) (2026-10-05)
+
+Context: the console's Usage tab (ADR-054, ADR-153) shows each company's sending, receipts, webhook
+deliveries, automation runs, API requests, members and numbers over 7, 30 or 90 days, on screen
+only, and P5-10's Remaining listed exports. Staff comparing usage with plans or planning capacity
+copied the figures by hand.
+
+Decision:
+
+- **"Download CSV" on the Usage tab,** for the window shown: a line per company in the tab's order
+  with its name, address and status and the tab's figures (sending by sender, failures, receipts,
+  webhook deliveries, automation runs and API requests with the days their periods started, members,
+  numbers); UTF-8 with a byte-order mark, RFC 4180 quoting and the contacts export's formula
+  neutralisation, so a company name starting with `=`, `+`, `-` or `@` cannot run in a spreadsheet;
+  named `hyfib-usage-<days>-days-<day>.csv`.
+- **Audited before it leaves:** the service writes `platform.ops_usage_exported` to the platform
+  audit log, with the window and how many companies, in the transaction that reads the rows, and
+  returns the file only once that entry commits with them. The tab's checks run first (the page's
+  platform actor, then the definer function's administrator check), so a refused export writes
+  nothing and returns no file.
+- **The tab's data and nothing else,** from the same reads (ADR-153's counters included): no
+  message, contact or person. Served as an attachment, `private, no-store` and `nosniff`.
+
+Not built: exports of the console's other lists, other formats, scheduled exports.

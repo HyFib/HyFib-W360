@@ -4,6 +4,8 @@
  * Meta rules; nothing here acts on a company. Browser-safe: no I/O.
  */
 
+import { CSV_BOM, csvLine } from '../contacts/csv';
+
 export const OPS_HEALTH_RULES = {
   /** Failure rates are judged only with at least this many outbound messages in 24 hours. */
   minOutbound24h: 20,
@@ -208,6 +210,70 @@ export interface CompanyActivity {
 export interface CompanyUsage extends CompanyActivity {
   apiRequests: number;
   apiPeriodStart: Date | null;
+}
+
+/** The Usage tab's columns in its CSV (ADR-154). */
+export const USAGE_CSV_COLUMNS = [
+  'Company',
+  'Address',
+  'Status',
+  'Sent',
+  'Sent by agents',
+  'Sent by automations',
+  'Sent by campaigns',
+  'Sent through the API',
+  'Sent by the system',
+  'Failed',
+  'Received',
+  'Webhook deliveries',
+  'Automation runs',
+  'Automation runs from',
+  'API requests',
+  'API requests from',
+  'Members',
+  'Numbers',
+] as const;
+
+const csvDay = (at: Date | null) => (at ? at.toISOString().slice(0, 10) : '');
+
+/**
+ * The Usage tab as CSV (ADR-154): a line per company in the tab's order, formula-safe (a company
+ * name starting with `=`, `+`, `-` or `@` is neutralised), the counters' periods as UTC days.
+ */
+export function usageCsv(rows: readonly CompanyUsage[]): string {
+  return (
+    CSV_BOM +
+    csvLine(USAGE_CSV_COLUMNS) +
+    rows
+      .map((r) =>
+        csvLine([
+          r.name,
+          r.slug,
+          r.status,
+          r.outbound,
+          r.outboundBySender.agent,
+          r.outboundBySender.bot,
+          r.outboundBySender.campaign,
+          r.outboundBySender.api,
+          r.outboundBySender.system,
+          r.failed,
+          r.inbound,
+          r.webhookDeliveries,
+          r.automationRuns,
+          csvDay(r.runsPeriodStart),
+          r.apiRequests,
+          csvDay(r.apiPeriodStart),
+          r.members,
+          r.numbers,
+        ]),
+      )
+      .join('')
+  );
+}
+
+/** `hyfib-usage-30-days-2026-10-05.csv`: the window and the UTC day of the export. */
+export function usageCsvFilename(days: number, at: Date): string {
+  return `hyfib-usage-${days}-days-${csvDay(at)}.csv`;
 }
 
 export type SignalKey =

@@ -46,6 +46,8 @@ import {
   signalFlags,
   type CompanyActivity,
   type CompanyUsage,
+  usageCsv,
+  usageCsvFilename,
   type CompanyHealthFacts,
   type HealthIssue,
   type HealthLevel,
@@ -184,6 +186,20 @@ async function latestApiRequests(
     .orderBy(usageCounters.tenantId, desc(usageCounters.periodStart));
   return new Map(counters.map((c) => [c.tenantId, { used: c.used, periodStart: c.periodStart }]));
 }
+
+/** Each company's activity since a time with its plan's API request counter (ADR-153). */
+async function usageRows(tx: Tx, since: Date): Promise<CompanyUsage[]> {
+  const activity = await activitySince(tx, since, null);
+  const api = await latestApiRequests(tx);
+  return activity.map((a) => ({
+    ...a,
+    apiRequests: api.get(a.tenantId)?.used ?? 0,
+    apiPeriodStart: api.get(a.tenantId)?.periodStart ?? null,
+  }));
+}
+
+const usageWindow = (days: number): UsageWindow =>
+  (USAGE_WINDOWS as readonly number[]).includes(days) ? (days as UsageWindow) : 30;
 
 export interface CompanyHealth {
   facts: CompanyHealthFacts;
@@ -801,18 +817,10 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
 
     /** Usage per company over the last `days` days, busiest first, with totals. */
     async usage(actor: PlatformActor, days: number) {
-      const window: UsageWindow = (USAGE_WINDOWS as readonly number[]).includes(days)
-        ? (days as UsageWindow)
-        : 30;
+      const window = usageWindow(days);
       const since = new Date(clock.now().getTime() - window * DAY_MS);
       return platformDb.run(actor.userId, async (tx) => {
-        const activity = await activitySince(tx, since, null);
-        const api = await latestApiRequests(tx);
-        const rows: CompanyUsage[] = activity.map((a) => ({
-          ...a,
-          apiRequests: api.get(a.tenantId)?.used ?? 0,
-          apiPeriodStart: api.get(a.tenantId)?.periodStart ?? null,
-        }));
+        const rows = await usageRows(tx, since);
         const sum = (pick: (a: CompanyActivity) => number) =>
           rows.reduce((total, a) => total + pick(a), 0);
         return {
@@ -831,6 +839,32 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
             numbers: sum((a) => a.numbers),
           },
         };
+      });
+    },
+
+    /**
+     * The Usage tab as CSV (ADR-154). The export is written to the platform audit log (the window
+     * and how many companies) in the transaction that reads the rows, before the file is returned,
+     * so no file leaves without its entry.
+     */
+    async exportUsage(
+      actor: PlatformActor,
+      days: number,
+    ): Promise<{ filename: string; body: string }> {
+      const window = usageWindow(days);
+      const now = clock.now();
+      const since = new Date(now.getTime() - window * DAY_MS);
+      return platformDb.run(actor.userId, async (tx) => {
+        const rows = await usageRows(tx, since);
+        await tx.insert(platformAuditEvents).values({
+          id: uuidv7(),
+          actorUserId: actor.userId,
+          action: 'platform.ops_usage_exported',
+          result: 'success',
+          correlationId: actor.correlationId,
+          metadata: { days: window, companies: rows.length },
+        });
+        return { filename: usageCsvFilename(window, now), body: usageCsv(rows) };
       });
     },
 

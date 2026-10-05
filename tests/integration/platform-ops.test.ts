@@ -17,6 +17,7 @@ import {
   purgeDeadLetters,
   queueWaitLimits,
   recordDeadLetters,
+  USAGE_CSV_COLUMNS,
   type PlatformActor,
 } from '@w360/domain';
 import { createUser } from './helpers';
@@ -286,6 +287,36 @@ describe('company health and signals', () => {
     };
     expect(line(company.tenant.id)).toEqual([42, september.toISOString(), 7]);
     expect(line(quiet.tenant.id)).toEqual([0, null, 3]);
+  });
+
+  it('exports the Usage tab as CSV only after writing the export to the platform audit log (ADR-154)', async () => {
+    const file = await ops().exportUsage(staff, 7);
+    expect(file.filename).toMatch(/^hyfib-usage-7-days-\d{4}-\d{2}-\d{2}\.csv$/);
+    const lines = file.body.replace(/^\uFEFF/, '').split('\r\n');
+    expect(lines[0]).toBe(USAGE_CSV_COLUMNS.join(','));
+    expect(lines.at(-1)).toBe('');
+    const companies = lines.slice(1, -1);
+    expect(companies.filter((l) => l.includes(`,${company.tenant.slug},`))).toHaveLength(1);
+    expect(file.body).not.toContain(MESSAGE_TEXT);
+    const audits = await fx.query<{ metadata: { days: number; companies: number } }>(
+      `SELECT metadata FROM ops.platform_audit_events
+        WHERE action = 'platform.ops_usage_exported' AND actor_user_id = $1`,
+      [staff.userId],
+    );
+    expect(audits.map((a) => a.metadata)).toEqual([{ days: 7, companies: companies.length }]);
+    // Someone who is not a platform administrator gets neither a file nor an entry.
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    const actor: PlatformActor = {
+      userId: outsider.id,
+      role: 'platform_operator',
+      correlationId: uuidv7(),
+    };
+    await expectCode(ops().exportUsage(actor, 7), 'forbidden');
+    const [refused] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM ops.platform_audit_events WHERE actor_user_id = $1`,
+      [outsider.id],
+    );
+    expect(refused?.n).toBe(0);
   });
 });
 

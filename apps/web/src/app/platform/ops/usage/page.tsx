@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import {
+  Button,
   Card,
   CardContent,
   CardDescription,
@@ -66,7 +67,14 @@ export default async function OpsUsagePage({
       </section>
       <Card>
         <CardHeader>
-          <CardTitle>By company ({o.days} days)</CardTitle>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle>By company ({o.days} days)</CardTitle>
+            <Button asChild variant="outline" size="sm">
+              <a href={`/platform/ops/usage/export?days=${o.days}`} download>
+                Download CSV
+              </a>
+            </Button>
+          </div>
           <CardDescription>
             Busiest first. Automation runs and API requests are the plan&apos;s counters for its
             current period (from the date shown); messages sent through the API also count under
