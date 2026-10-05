@@ -895,9 +895,15 @@ describe('pausing and cancelling campaigns (ADR-128)', () => {
       queuedCount: 0,
     });
     expect(paused).not.toHaveProperty('results');
-    // The answer is the campaign as GET /campaigns/{id} reads it.
+    // The answer is the campaign as GET /campaigns/{id} reads it, without the results, settings
+    // and version that call adds (ADR-186).
     const reader = await apiKey(s.c, ['campaigns.read']);
-    const { results: _results, ...read } = await apiGetCampaign(deps(), reader, flash);
+    const {
+      results: _results,
+      settings: _settings,
+      version: _version,
+      ...read
+    } = await apiGetCampaign(deps(), reader, flash);
     expect(paused).toEqual(read);
     // The queued messages were not sent, and their recipients wait for the resume.
     const notSent = { status: 'canceled', error_code: 'campaign_paused' };
@@ -1049,7 +1055,12 @@ describe('pausing and cancelling campaigns (ADR-128)', () => {
     const done = await s.draft('Festive launch');
     await s.run(done);
     const reader = await apiKey(s.c, ['campaigns.read']);
-    const { results: _results, ...completed } = await apiGetCampaign(deps(), reader, done);
+    const {
+      results: _results,
+      settings: _settings,
+      version: _version,
+      ...completed
+    } = await apiGetCampaign(deps(), reader, done);
     expect(completed.status).toBe('completed');
     expect(await cancel(done)).toEqual(completed);
     expect(await refused(pause(done))).toMatchObject({
@@ -1169,9 +1180,15 @@ describe('resuming campaigns keys paused (ADR-176)', () => {
     const resumed = await apiResumeCampaign(outbound(), resumer, flash);
     expect(resumed).toMatchObject({ id: flash, status: 'running', pauseReason: null });
     expect(resumed).not.toHaveProperty('results');
-    // The answer is the campaign as GET /campaigns/{id} reads it.
+    // The answer is the campaign as GET /campaigns/{id} reads it, without the results, settings
+    // and version that call adds (ADR-186).
     const reader = await apiKey(s.c, ['campaigns.read']);
-    const { results: _results, ...read } = await apiGetCampaign(deps(), reader, flash);
+    const {
+      results: _results,
+      settings: _settings,
+      version: _version,
+      ...read
+    } = await apiGetCampaign(deps(), reader, flash);
     expect(resumed).toEqual(read);
     // It sends under the authority of the member who launched it, as before the pause.
     expect(
