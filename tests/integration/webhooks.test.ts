@@ -45,6 +45,7 @@ import {
   type TenantContext,
   type WebhookDeliveryLogger,
   type WebhookEventType,
+  type WebhookFailureKind,
 } from '@w360/domain';
 import { acceptInvitation, createUser, failOnLog, invite } from './helpers';
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
@@ -2612,7 +2613,336 @@ async function failedDirectly(
   return rows;
 }
 
+/**
+ * One event per outcome, each with one delivery to the endpoint that failed for good with that last
+ * error and status, written straight to the tables (ADR-159).
+ */
+async function failedAs(
+  c: Company,
+  endpointId: string,
+  outcomes: readonly { error: string | null; status: number | null }[],
+  type: WebhookEventType = 'message.received',
+) {
+  const rows = outcomes.map((o) => ({ ...o, eventId: uuidv7(), deliveryId: uuidv7() }));
+  await fx.dbs.app.run(authorizedTenantScope(c.tenant.id, null), async (tx) => {
+    await tx
+      .insert(webhookEvents)
+      .values(rows.map((r) => ({ id: r.eventId, tenantId: c.tenant.id, type, detail: {} })));
+    await tx.insert(webhookDeliveries).values(
+      rows.map((r) => ({
+        id: r.deliveryId,
+        tenantId: c.tenant.id,
+        endpointId,
+        eventId: r.eventId,
+        state: 'failed' as const,
+        attempts: WEBHOOK_LIMITS.attempts,
+        lastError: r.error,
+        lastStatusCode: r.status,
+      })),
+    );
+  });
+  return rows;
+}
+
 describe('replaying failed deliveries (ADR-095)', () => {
+  it('replays only the events whose latest failed delivery failed in the ways chosen, and the audit entry names them (ADR-159)', async () => {
+    const c = await fx.company();
+    const e = await addEndpoint(c, 'ok', ['message.received', 'consent.changed']);
+    // An attempt leaves a status or a code; a code that ended a delivery without an attempt says more
+    // than the status an earlier attempt left.
+    const kinds: Record<WebhookFailureKind, { error: string | null; status: number | null }[]> = {
+      server_error: [
+        { error: null, status: 500 },
+        { error: null, status: 599 },
+      ],
+      client_error: [
+        { error: null, status: 400 },
+        { error: null, status: 499 },
+      ],
+      other_answer: [
+        { error: null, status: 302 },
+        { error: null, status: 101 },
+      ],
+      no_answer: [
+        { error: 'timeout', status: null },
+        { error: 'invalid_status', status: null },
+        { error: 'interrupted', status: 503 },
+      ],
+      not_attempted: [
+        { error: 'endpoint_disabled', status: 500 },
+        { error: 'payload_failed', status: null },
+      ],
+    };
+    const events: Record<string, string[]> = {};
+    for (const [kind, outcomes] of Object.entries(kinds)) {
+      events[kind] = (await failedAs(c, e.id, outcomes)).map((r) => r.eventId);
+    }
+    // A refused consent event, left out when only messages are chosen.
+    const [consent] = await failedAs(c, e.id, [{ error: null, status: 422 }], 'consent.changed');
+    // An event whose earlier delivery was answered 500 and whose latest one got no answer counts as
+    // no answer, and its replay names the latest.
+    const [retried] = await failedAs(c, e.id, [{ error: null, status: 500 }]);
+    await fx.query(
+      `UPDATE app.webhook_deliveries SET created_at = now() - interval '10 minutes' WHERE id = $1`,
+      [retried!.deliveryId],
+    );
+    const latestId = uuidv7();
+    await fx.dbs.app.run(authorizedTenantScope(c.tenant.id, null), async (tx) => {
+      await tx.insert(webhookDeliveries).values({
+        id: latestId,
+        tenantId: c.tenant.id,
+        endpointId: e.id,
+        eventId: retried!.eventId,
+        state: 'failed',
+        attempts: WEBHOOK_LIMITS.attempts,
+        lastError: 'connect_failed',
+      });
+    });
+    const replays = async () =>
+      new Map(
+        (await deliveriesOf(e.id))
+          .filter((d) => d.replay_of !== null)
+          .map((d) => [d.event_id, d.replay_of] as const),
+      );
+    const replay = (input: Record<string, unknown>) =>
+      webhooks().replayFailed(e.owner, { endpointId: e.id, period: '1h', ...input });
+
+    expect(await replay({ events: ['message.received'], failures: ['client_error'] })).toEqual({
+      queued: 2,
+      more: false,
+    });
+    expect([...(await replays()).keys()].sort()).toEqual([...events.client_error!].sort());
+    expect(await replay({ failures: ['server_error'] })).toEqual({ queued: 2, more: false });
+    expect(await replay({ failures: ['other_answer'] })).toEqual({ queued: 2, more: false });
+    expect(await replay({ failures: ['not_attempted'] })).toEqual({ queued: 2, more: false });
+    expect(await replay({ failures: ['no_answer'] })).toEqual({ queued: 4, more: false });
+    const replayed = await replays();
+    for (const kind of Object.keys(kinds)) {
+      for (const eventId of events[kind]!) expect(replayed.has(eventId), kind).toBe(true);
+    }
+    expect(replayed.get(retried!.eventId)).toBe(latestId);
+    expect(replayed.has(consent!.eventId)).toBe(false);
+    // Nothing of those kinds is left; the refused consent event is, for its own kind.
+    expect(await replay({ failures: ['server_error', 'no_answer'] })).toEqual({
+      queued: 0,
+      more: false,
+    });
+    expect(await replay({ failures: ['client_error'] })).toEqual({ queued: 1, more: false });
+    expect((await replays()).has(consent!.eventId)).toBe(true);
+    const audits = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.deliveries_replayed' ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(audits.map((a) => a.metadata)).toEqual([
+      {
+        host: HOST,
+        since: expect.any(String),
+        events: ['message.received'],
+        failures: ['client_error'],
+        queued: 2,
+        more: false,
+      },
+      ...(['server_error', 'other_answer', 'not_attempted'] as const).map((kind) => ({
+        host: HOST,
+        since: expect.any(String),
+        failures: [kind],
+        queued: 2,
+        more: false,
+      })),
+      { host: HOST, since: expect.any(String), failures: ['no_answer'], queued: 4, more: false },
+      {
+        host: HOST,
+        since: expect.any(String),
+        failures: ['server_error', 'no_answer'],
+        queued: 0,
+        more: false,
+      },
+      { host: HOST, since: expect.any(String), failures: ['client_error'], queued: 1, more: false },
+    ]);
+    // Kinds the list does not know, or none, are refused before anything is read.
+    for (const failures of [['server_errors'], []]) {
+      await expectAppError(replay({ failures }), 'validation_failed');
+    }
+  });
+
+  it('replays every endpoint that is on, 500 at most across them in the order they were added, audited once per endpoint (ADR-160)', async () => {
+    const c = await fx.company();
+    const first = await addEndpoint(c, 'ok', ['message.received']);
+    const second = await addEndpoint(c, 'ok', ['message.received', 'consent.changed']);
+    const off = await addEndpoint(c, 'ok', ['message.received']);
+    const owner = first.owner;
+    const atFirst = await failedDirectly(c, first.id, WEBHOOK_LIMITS.replayBatch);
+    const [message] = await failedDirectly(c, second.id, 1);
+    const [consent] = await failedDirectly(c, second.id, 1, 'consent.changed');
+    const [atOff] = await failedDirectly(c, off.id, 1);
+    await webhooks().setEnabled(owner, { endpointId: off.id, enabled: false });
+    const replaysAt = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).filter((d) => d.replay_of !== null).map((d) => d.event_id);
+    const firstUrl = `http://${HOST}:${port}${first.path}`;
+    const secondUrl = `http://${HOST}:${port}${second.path}`;
+
+    // The first endpoint takes the whole batch; the second, with failures of its own, queues
+    // nothing this time and says it has more. The endpoint that is off is left out.
+    expect(await webhooks().replayAllFailed(owner, { period: '1h' })).toEqual({
+      queued: WEBHOOK_LIMITS.replayBatch,
+      more: true,
+      endpoints: [
+        { id: first.id, url: firstUrl, queued: WEBHOOK_LIMITS.replayBatch, more: false },
+        { id: second.id, url: secondUrl, queued: 0, more: true },
+      ],
+    });
+    expect((await replaysAt(first.id)).sort()).toEqual(atFirst.map((r) => r.eventId).sort());
+    expect(await replaysAt(second.id)).toEqual([]);
+    // Of one event, then of one kind of failure: the first endpoint's events are waiting now.
+    expect(
+      await webhooks().replayAllFailed(owner, { period: '1h', events: ['consent.changed'] }),
+    ).toEqual({
+      queued: 1,
+      more: false,
+      endpoints: [
+        { id: first.id, url: firstUrl, queued: 0, more: false },
+        { id: second.id, url: secondUrl, queued: 1, more: false },
+      ],
+    });
+    expect(await replaysAt(second.id)).toEqual([consent!.eventId]);
+    expect(
+      await webhooks().replayAllFailed(owner, { period: '1h', failures: ['server_error'] }),
+    ).toEqual({
+      queued: 0,
+      more: false,
+      endpoints: [
+        { id: first.id, url: firstUrl, queued: 0, more: false },
+        { id: second.id, url: secondUrl, queued: 0, more: false },
+      ],
+    });
+    expect(
+      await webhooks().replayAllFailed(owner, { period: '1h', failures: ['no_answer'] }),
+    ).toEqual({
+      queued: 1,
+      more: false,
+      endpoints: [
+        { id: first.id, url: firstUrl, queued: 0, more: false },
+        { id: second.id, url: secondUrl, queued: 1, more: false },
+      ],
+    });
+    expect((await replaysAt(second.id)).sort()).toEqual(
+      [consent!.eventId, message!.eventId].sort(),
+    );
+    expect(await replaysAt(off.id)).toEqual([]);
+    expect((await deliveriesOf(off.id)).map((d) => d.event_id)).toEqual([atOff!.eventId]);
+
+    // One entry per endpoint replayed and call, marked as a replay of every endpoint.
+    const audits = await fx.query<{ subject_id: string; metadata: Record<string, unknown> }>(
+      `SELECT subject_id, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.deliveries_replayed' ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    const entry = (queued: number, more: boolean, chosen: Record<string, unknown> = {}) => ({
+      host: HOST,
+      since: expect.any(String),
+      ...chosen,
+      queued,
+      more,
+      allEndpoints: true,
+    });
+    expect(audits.map((a) => a.subject_id)).toEqual(
+      Array.from({ length: 4 }, () => [first.id, second.id]).flat(),
+    );
+    expect(audits.map((a) => a.metadata)).toEqual([
+      entry(WEBHOOK_LIMITS.replayBatch, false),
+      entry(0, true),
+      entry(0, false, { events: ['consent.changed'] }),
+      entry(1, false, { events: ['consent.changed'] }),
+      entry(0, false, { failures: ['server_error'] }),
+      entry(0, false, { failures: ['server_error'] }),
+      entry(0, false, { failures: ['no_answer'] }),
+      entry(1, false, { failures: ['no_answer'] }),
+    ]);
+
+    // Refused: to members without developer.manage, a period or a kind not in the list, and a
+    // company with no endpoint on (another company's endpoints are never replayed).
+    const agent = await fx.ctx(c, c.agent);
+    await expectAppError(webhooks().replayAllFailed(agent, { period: '1h' }), 'forbidden');
+    await expectAppError(webhooks().replayAllFailed(owner, { period: '2h' }), 'validation_failed');
+    await expectAppError(
+      webhooks().replayAllFailed(owner, { period: '1h', failures: ['timeouts'] }),
+      'validation_failed',
+    );
+    const other = await fx.company();
+    await expectAppError(
+      webhooks().replayAllFailed(await fx.ctx(other, other.owner), { period: '1h' }),
+      'precondition_failed',
+    );
+    for (const e of [first, second]) {
+      await webhooks().setEnabled(owner, { endpointId: e.id, enabled: false });
+    }
+    await expectAppError(
+      webhooks().replayAllFailed(owner, { period: '1h' }),
+      'precondition_failed',
+      /Turn an endpoint on/,
+    );
+    expect(await replaysAt(off.id)).toEqual([]);
+  });
+
+  it('waits for an endpoint’s own replay, locking every endpoint first, and queues each event once (ADR-160)', async () => {
+    const c = await fx.company();
+    const first = await addEndpoint(c, 'ok', ['message.received']);
+    const second = await addEndpoint(c, 'ok', ['message.received']);
+    const atFirst = await failedDirectly(c, first.id, 2);
+    const atSecond = await failedDirectly(c, second.id, 5);
+    // The second endpoint's own replay holds it and has queued its first two events again: a
+    // replay of every endpoint waits for it, then finds those two waiting and queues the rest.
+    const holder = await fx.dbs.adminPool.connect();
+    let replaying: Promise<unknown> | undefined;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT 1 FROM app.webhook_endpoints WHERE id = $1 FOR NO KEY UPDATE', [
+        second.id,
+      ]);
+      for (const r of atSecond.slice(0, 2)) {
+        await holder.query(
+          `INSERT INTO app.webhook_deliveries (id, tenant_id, endpoint_id, event_id, replay_of)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [uuidv7(), c.tenant.id, second.id, r.eventId, r.deliveryId],
+        );
+      }
+      const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+      replaying = webhooks().replayAllFailed(first.owner, { period: '1h' });
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await fx.query<{ n: number }>(
+            `SELECT count(*)::int AS n FROM pg_stat_activity
+              WHERE datname = current_database() AND $1 = ANY (pg_blocking_pids(pid))`,
+            [lock!.pid],
+          );
+          if (waiting!.n < 1) throw new Error('the replay is not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+      // Nothing is queued at the first endpoint while it waits: every endpoint is locked first.
+      expect((await deliveriesOf(first.id)).filter((d) => d.replay_of !== null)).toEqual([]);
+    } finally {
+      await holder.query('COMMIT');
+      holder.release();
+    }
+    expect(await replaying).toEqual({
+      queued: 5,
+      more: false,
+      endpoints: [
+        { id: first.id, url: expect.any(String), queued: 2, more: false },
+        { id: second.id, url: expect.any(String), queued: 3, more: false },
+      ],
+    });
+    for (const [e, rows] of [
+      [first, atFirst],
+      [second, atSecond],
+    ] as const) {
+      const replays = (await deliveriesOf(e.id)).filter((d) => d.replay_of !== null);
+      expect(replays.map((d) => d.event_id).sort()).toEqual(rows.map((r) => r.eventId).sort());
+    }
+  });
+
   it('replays only the failed deliveries of the events chosen, and the audit entry names them (ADR-156)', async () => {
     const c = await fx.company();
     const e = await addEndpoint(c, 'ok', ['message.received', 'consent.changed']);

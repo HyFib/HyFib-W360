@@ -17,12 +17,31 @@ import {
   purgeDeadLetters,
   queueWaitLimits,
   recordDeadLetters,
+  deadLettersCsv,
+  emailsCsv,
+  failuresCsv,
+  newCompaniesCsv,
+  numberSetupsCsv,
+  quarantineCsv,
+  queuesCsv,
+  receiptsCsv,
+  signupsCsv,
+  DEAD_LETTERS_CSV_COLUMNS,
+  EMAILS_CSV_COLUMNS,
+  FAILURES_CSV_COLUMNS,
   HEALTH_CSV_COLUMNS,
+  NEW_COMPANIES_CSV_COLUMNS,
+  NUMBER_SETUPS_CSV_COLUMNS,
+  QUARANTINE_CSV_COLUMNS,
+  QUEUES_CSV_COLUMNS,
+  RECEIPTS_CSV_COLUMNS,
   SIGNALS_CSV_COLUMNS,
+  SIGNUPS_CSV_COLUMNS,
   USAGE_CSV_COLUMNS,
+  type OpsExportList,
   type PlatformActor,
 } from '@w360/domain';
-import { createUser } from './helpers';
+import { createTenant, createUser } from './helpers';
 import {
   nextExternalId,
   startWhatsAppFixture,
@@ -1829,5 +1848,295 @@ describe('acknowledging companies’ failing integrations (ADR-141)', () => {
         config: ['search_path=pg_catalog, pg_temp'],
       })),
     );
+  });
+});
+
+describe('exports of the onboarding, integrations and queues lists (ADR-158)', () => {
+  const MINUTE = '\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}';
+  const csvLines = (body: string) => body.replace(/^\uFEFF/, '').split('\r\n');
+  const exports = async (actor: PlatformActor) =>
+    fx.query<{ action: string; metadata: Record<string, number> }>(
+      `SELECT action, metadata FROM ops.platform_audit_events
+        WHERE actor_user_id = $1 AND action LIKE 'platform.ops\\_%\\_exported'
+        ORDER BY occurred_at, id`,
+      [actor.userId],
+    );
+
+  it('exports the Onboarding tab’s three lists as the tab reads them, each with its entry', async () => {
+    const exporter = await platformStaff();
+    const acme = await fx.company();
+    const slug = acme.tenant.slug;
+    await fx.query(
+      `INSERT INTO app.channel_onboarding_sessions (id, tenant_id, state_hash, created_by_user_id,
+         auth_session_id, status, failure_reason, expires_at)
+       VALUES ($1, $2, $3, $4, 'sess_x', 'failed', 'Meta refused the code, try again.',
+         now() + interval '1 hour')`,
+      [uuidv7(), acme.tenant.id, randomBytes(32).toString('hex'), acme.owner.id],
+    );
+    await fx.query(
+      `INSERT INTO app.channel_accounts (id, tenant_id, whatsapp_account_id, phone_number_id,
+         display_phone_number, status, onboarding_step, onboarding_error)
+       VALUES ($1, $2, $3, $4, '+91 90000 22222', 'failed', 'register_number',
+         'Meta refused the PIN.')`,
+      [uuidv7(), acme.tenant.id, acme.whatsappAccountId, nextExternalId()],
+    );
+    // A company created without any number, and one whose only number is being set up.
+    const bare = await createTenant(fx.dbs, await createUser(fx.dbs));
+    const setting = await fx.company();
+    await fx.query(`UPDATE app.channel_accounts SET status = 'onboarding' WHERE id = $1`, [
+      setting.channelAccountId,
+    ]);
+
+    const tab = await ops().onboarding(exporter);
+    const signups = await ops().exportList(exporter, 'signups', 30);
+    expect(signups.filename).toMatch(/^hyfib-signups-30-days-\d{4}-\d{2}-\d{2}\.csv$/);
+    expect(signups.body).toBe(signupsCsv(tab.sessions));
+    const signupLines = csvLines(signups.body);
+    expect(signupLines[0]).toBe(SIGNUPS_CSV_COLUMNS.join(','));
+    expect(signupLines.filter((l) => l.includes(`,${slug},`))).toEqual([
+      expect.stringMatching(
+        new RegExp(
+          `^Company ${slug},${slug},Failed,"Meta refused the code, try again\\.",${MINUTE},Yes$`,
+        ),
+      ),
+    ]);
+
+    const setups = await ops().exportList(exporter, 'number-setups', 30);
+    expect(setups.filename).toMatch(/^hyfib-number-setups-\d{4}-\d{2}-\d{2}\.csv$/);
+    expect(setups.body).toBe(numberSetupsCsv(tab.numbers));
+    const setupLines = csvLines(setups.body);
+    expect(setupLines[0]).toBe(NUMBER_SETUPS_CSV_COLUMNS.join(','));
+    expect(setupLines.filter((l) => l.includes(`,${slug},`))).toEqual([
+      expect.stringMatching(
+        new RegExp(
+          `^Company ${slug},${slug},'\\+91 90000 22222,Failed,Registering the number,` +
+            `Meta refused the PIN\\.,${MINUTE}$`,
+        ),
+      ),
+    ]);
+
+    const fresh = await ops().exportList(exporter, 'new-companies', 30);
+    expect(fresh.filename).toMatch(/^hyfib-new-companies-30-days-\d{4}-\d{2}-\d{2}\.csv$/);
+    expect(fresh.body).toBe(newCompaniesCsv(tab.stalled));
+    const freshLines = csvLines(fresh.body);
+    expect(freshLines[0]).toBe(NEW_COMPANIES_CSV_COLUMNS.join(','));
+    expect(freshLines.filter((l) => l.includes(`,${bare.slug},`))).toEqual([
+      expect.stringMatching(new RegExp(`^Company ${bare.slug},${bare.slug},active,${MINUTE},No$`)),
+    ]);
+    const settingSlug = setting.tenant.slug;
+    expect(freshLines.filter((l) => l.includes(`,${settingSlug},`))).toEqual([
+      expect.stringMatching(
+        new RegExp(`^Company ${settingSlug},${settingSlug},active,${MINUTE},Yes$`),
+      ),
+    ]);
+    // A company with an active number is not a new company without one.
+    expect(freshLines.some((l) => l.includes(`,${slug},`))).toBe(false);
+    expect(tab.stalled.some((c) => c.slug === slug)).toBe(false);
+
+    expect(await exports(exporter)).toEqual([
+      {
+        action: 'platform.ops_signups_exported',
+        metadata: { days: 30, rows: signupLines.length - 2 },
+      },
+      { action: 'platform.ops_number_setups_exported', metadata: { rows: setupLines.length - 2 } },
+      {
+        action: 'platform.ops_new_companies_exported',
+        metadata: { days: 30, companies: freshLines.length - 2 },
+      },
+    ]);
+  });
+
+  it('exports the Integrations tab’s lists without who acknowledged a failure, its note or an address', async () => {
+    const exporter = await platformStaff();
+    const beta = await fx.company();
+    const slug = beta.tenant.slug;
+    // This test's own markers: other tests leave receipts whose last error names SECRET_TOKEN,
+    // and the receipts list shows each receipt's last error, as the tab does.
+    const urlToken = `tok_${randomBytes(8).toString('hex')}`;
+    const messageText = `Export test message ${randomBytes(4).toString('hex')}`;
+    const address = `nobody-${randomBytes(4).toString('hex')}@export.test`;
+    const endpointId = uuidv7();
+    await fx.query(
+      `INSERT INTO app.webhook_endpoints (id, tenant_id, url, event_types, secret_ciphertext,
+         created_by_user_id, failing_since, last_failure_at)
+       VALUES ($1, $2, $3, ARRAY['message.received'], 'sealed', $4, now() - interval '5 minutes',
+         now())`,
+      [
+        endpointId,
+        beta.tenant.id,
+        `https://${slug}.example.com/hook?token=${urlToken}`,
+        beta.owner.id,
+      ],
+    );
+    const note = 'Taken by the export test: the receiver is down until noon.';
+    await ops().acknowledgeFailure(exporter, {
+      source: 'webhook_endpoint',
+      subjectId: endpointId,
+      state: 'failing',
+      note,
+    });
+    const receiptId = uuidv7();
+    await fx.query(
+      `INSERT INTO ops.webhook_receipts (id, provider, received_at, body_sha256, body_ciphertext,
+         body_size, status, attempts, last_error)
+       VALUES ($1, 'meta_whatsapp', now(), $2, 'sealed-body', 10, 'failed', 12, 'boom, twice')`,
+      [receiptId, randomBytes(32).toString('hex')],
+    );
+    const stranger = { ...beta, wabaId: nextExternalId(), phoneNumberId: nextExternalId() };
+    const { receiptId: quarantined } = await fx.deliver(
+      fx.messagesBody(stranger, { messages: [{ waId: '919876500004', text: messageText }] }),
+    );
+    // A refused email: the console counts it by kind and never shows the address.
+    await fx.query(
+      `INSERT INTO ops.email_outbox (id, kind, to_address, status, attempts, last_error)
+       VALUES ($1, 'it.export.refused', $2, 'failed', 5, $3)`,
+      [uuidv7(), address, `refused ${address}`],
+    );
+
+    const tab = await ops().integrations(exporter);
+    const failures = await ops().exportList(exporter, 'failures', 30);
+    expect(failures.filename).toMatch(/^hyfib-failures-\d{4}-\d{2}-\d{2}\.csv$/);
+    expect(failures.body).toBe(failuresCsv(tab.failures));
+    const failureLines = csvLines(failures.body);
+    expect(failureLines[0]).toBe(FAILURES_CSV_COLUMNS.join(','));
+    expect(failureLines.filter((l) => l.includes(`,${slug},`))).toEqual([
+      expect.stringMatching(
+        new RegExp(
+          `^Company ${slug},${slug},Webhook endpoint,${slug}\\.example\\.com,Failing,,${MINUTE},${MINUTE}$`,
+        ),
+      ),
+    ]);
+    expect(tab.failures.find((f) => f.subjectId === endpointId)?.acknowledgement?.note).toBe(note);
+    expect(failures.body).not.toContain('receiver is down');
+
+    const receipts = await ops().exportList(exporter, 'receipts', 30);
+    expect(receipts.filename).toMatch(/^hyfib-receipts-\d{4}-\d{2}-\d{2}\.csv$/);
+    expect(receipts.body).toBe(receiptsCsv(tab.receipts));
+    const receiptLines = csvLines(receipts.body);
+    expect(receiptLines[0]).toBe(RECEIPTS_CSV_COLUMNS.join(','));
+    expect(receiptLines.filter((l) => l.includes(`,${receiptId},`))).toEqual([
+      expect.stringMatching(
+        new RegExp(
+          `^${MINUTE},${receiptId},Meta \\(WhatsApp\\),Failed all attempts,12,"boom, twice",,Can be retried$`,
+        ),
+      ),
+    ]);
+
+    const quarantine = await ops().exportList(exporter, 'quarantine', 30);
+    expect(quarantine.filename).toMatch(/^hyfib-quarantine-\d{4}-\d{2}-\d{2}\.csv$/);
+    expect(quarantine.body).toBe(quarantineCsv(tab.quarantine));
+    const quarantineLines = csvLines(quarantine.body);
+    expect(quarantineLines[0]).toBe(QUARANTINE_CSV_COLUMNS.join(','));
+    expect(quarantineLines.filter((l) => l.includes(`,${quarantined},`))).toEqual([
+      expect.stringMatching(
+        new RegExp(
+          `^${MINUTE},${quarantined},Meta \\(WhatsApp\\),Unknown account or number,` +
+            `waba: ${stranger.wabaId}; phoneNumberId: ${stranger.phoneNumberId},,Yes$`,
+        ),
+      ),
+    ]);
+
+    const emails = await ops().exportList(exporter, 'emails', 30);
+    expect(emails.filename).toMatch(/^hyfib-emails-7-days-\d{4}-\d{2}-\d{2}\.csv$/);
+    expect(emails.body).toBe(emailsCsv(tab.emails));
+    const emailLines = csvLines(emails.body);
+    expect(emailLines[0]).toBe(EMAILS_CSV_COLUMNS.join(','));
+    expect(emailLines).toContain('it.export.refused,1,0');
+
+    // Endpoints are shown by their host: no URL's token, this test's or another's, is exported.
+    expect(failures.body).not.toContain(SECRET_TOKEN);
+    const everything = failures.body + receipts.body + quarantine.body + emails.body;
+    for (const secret of [urlToken, messageText, address]) {
+      expect(everything).not.toContain(secret);
+    }
+    expect(await exports(exporter)).toEqual([
+      { action: 'platform.ops_failures_exported', metadata: { rows: failureLines.length - 2 } },
+      { action: 'platform.ops_receipts_exported', metadata: { rows: receiptLines.length - 2 } },
+      {
+        action: 'platform.ops_quarantine_exported',
+        metadata: { rows: quarantineLines.length - 2 },
+      },
+      {
+        action: 'platform.ops_emails_exported',
+        metadata: { days: 7, rows: emailLines.length - 2 },
+      },
+    ]);
+  });
+
+  it('exports the Queues tab’s lists as the tab reads them, never naming who retried a job', async () => {
+    const exporter = await platformStaff();
+    const gamma = await fx.company();
+    const slug = gamma.tenant.slug;
+    const letterId = uuidv7();
+    await fx.query(
+      `INSERT INTO ops.dead_letters (id, source_queue, source_job_id, kind, tenant_id, ref, verified,
+         retries, error_name, error_code, failed_at)
+       VALUES ($1, 'commerce.store', $2, 'commerce.store', $3, 'store-export', true, 5, 'AppError',
+         'provider_rejected', now())`,
+      [letterId, uuidv7(), gamma.tenant.id],
+    );
+
+    const tab = await ops().queues(exporter);
+    const queues = await ops().exportList(exporter, 'queues', 30);
+    expect(queues.filename).toMatch(/^hyfib-queues-\d{4}-\d{2}-\d{2}\.csv$/);
+    expect(queues.body).toBe(queuesCsv(tab.queues));
+    const queueLines = csvLines(queues.body);
+    expect(queueLines[0]).toBe(QUEUES_CSV_COLUMNS.join(','));
+    // Every declared queue has its line, with its policy.
+    expect(queueLines.length - 2).toBeGreaterThanOrEqual(ALL_QUEUES.length);
+    const store = tab.queues.find((q) => q.name === 'commerce.store');
+    expect(store?.deadLetters.last24h).toBeGreaterThanOrEqual(1);
+    expect(queueLines.filter((l) => l.startsWith('commerce.store,'))).toEqual([
+      expect.stringMatching(/^commerce\.store,Yes,5,Yes,60,Yes,\d+,\d+,\d+,\d+,/),
+    ]);
+
+    const letters = await ops().exportList(exporter, 'dead-letters', 30);
+    expect(letters.filename).toMatch(/^hyfib-dead-letters-\d{4}-\d{2}-\d{2}\.csv$/);
+    expect(letters.body).toBe(deadLettersCsv(tab.deadLetters));
+    const letterLines = csvLines(letters.body);
+    expect(letterLines[0]).toBe(DEAD_LETTERS_CSV_COLUMNS.join(','));
+    expect(letterLines.filter((l) => l.includes(`,${letterId},`))).toEqual([
+      expect.stringMatching(
+        new RegExp(
+          `^${MINUTE},${letterId},commerce\\.store,Yes,Company ${slug},${slug},store-export,` +
+            `AppError,provider_rejected,5,,,,Can be retried,${MINUTE}$`,
+        ),
+      ),
+    ]);
+    expect(await exports(exporter)).toEqual([
+      { action: 'platform.ops_queues_exported', metadata: { rows: queueLines.length - 2 } },
+      {
+        action: 'platform.ops_dead_letters_exported',
+        metadata: { rows: letterLines.length - 2 },
+      },
+    ]);
+  });
+
+  it('refuses every list to anyone who is not a platform administrator, writing nothing', async () => {
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    const actor: PlatformActor = {
+      userId: outsider.id,
+      role: 'platform_operator',
+      correlationId: uuidv7(),
+    };
+    const lists: OpsExportList[] = [
+      'signups',
+      'number-setups',
+      'new-companies',
+      'failures',
+      'receipts',
+      'quarantine',
+      'emails',
+      'queues',
+      'dead-letters',
+    ];
+    for (const list of lists) {
+      await expectCode(ops().exportList(actor, list, 30), 'forbidden');
+    }
+    const [refused] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM ops.platform_audit_events WHERE actor_user_id = $1`,
+      [outsider.id],
+    );
+    expect(refused?.n).toBe(0);
   });
 });

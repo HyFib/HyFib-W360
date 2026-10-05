@@ -47,7 +47,11 @@ import {
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
-import { apiStartAutomationSchema } from './automations';
+import {
+  apiStartAutomationSchema,
+  apiStartManyAutomationRunsSchema,
+  apiStopManyAutomationRunsSchema,
+} from './automations';
 import {
   apiCampaignRecipientSchema,
   apiCampaignSchema,
@@ -302,6 +306,27 @@ export const apiAutomationRunSchema = z.object({
   endedAt: z.iso.datetime().nullable(),
 });
 
+/** What a start of many runs answers for one number (ADR-161). */
+export const apiAutomationRunStartSchema = z.object({
+  to: z.string().describe('The number, in E.164 form.'),
+  run: apiAutomationRunSchema.nullable().describe('The run, as it starts; null when it did not.'),
+  error: z
+    .object({
+      code: z.enum(['conflict', 'precondition_failed']),
+      message: z.string(),
+      reason: z
+        .string()
+        .optional()
+        .describe(
+          'automation_busy, automation_limit, automation_quota or conversation_assigned; none for consent and the suppression list, which the message names.',
+        ),
+    })
+    .nullable()
+    .describe(
+      'Why the run did not start, as a start of one run would refuse it; null when it did.',
+    ),
+});
+
 export const apiWebhookEndpointSchema = z.object({
   id: z.uuid(),
   url: z.string(),
@@ -427,6 +452,16 @@ export const apiFailedReplaySchema = z.object({
   more: z
     .boolean()
     .describe('Whether more failed deliveries remain: call again to queue the next ones.'),
+});
+
+/** What a replay of every endpoint's failed deliveries queued (ADR-160). */
+export const apiFailedReplayAcrossSchema = apiFailedReplaySchema.extend({
+  endpoints: z
+    .array(z.object({ id: z.uuid().describe('The endpoint.'), ...apiFailedReplaySchema.shape }))
+    .max(WEBHOOK_LIMITS.endpoints)
+    .describe(
+      'What each endpoint that is on queued, in the order the endpoints were added. Endpoints that are off are left out.',
+    ),
 });
 
 export const apiWebhookEndpointWithSecretSchema = apiWebhookEndpointSchema.extend({
@@ -1228,6 +1263,30 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/automations/{id}/runs/start-many': {
+        post: {
+          operationId: 'startManyAutomationRuns',
+          summary: 'Start an automation for many contacts',
+          description: [
+            `${scopeNote('automations.start')} An automation that sends marketing templates also needs \`messages.send_marketing\`. Starts the published automation for up to ${API_LIMITS.runsPerStart} contacts, in the order given, each as POST /automations/{id}/runs starts one: the contact with the number (created when new), with every input its trigger declares. The call counts as one request.`,
+            'Each start is answered in its place with its run, or with why it did not start (the contact erased, opted out or on the suppression list, a member assigned to the conversation or another automation handling it, the hourly limit for the conversation, or the plan out of automation runs): a refused start changes nothing, a contact created for it included, and the others still start.',
+            'Refused as a whole, starting nothing: an automation that cannot start (as for one run), a number that is not valid or given twice, or inputs the automation does not take (422, naming the place, as `runs.3.inputs`). One call per `Idempotency-Key`: a retry answers as the first request did.',
+            'The call is one transaction holding the conversations it starts in until it ends. When it collides with a run starting at the same moment for a contact further down the list, it can be refused as a whole (409, starting nothing): send it again with the same `Idempotency-Key`.',
+          ].join('\n\n'),
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKey' },
+          ],
+          requestBody: { required: true, content: json(ref('StartManyAutomationRuns')) },
+          responses: {
+            '200': {
+              description: 'Each start, in the order given: its run, or why it did not start.',
+              content: json(dataOf({ type: 'array', items: ref('AutomationRunStart') })),
+            },
+            ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
+          },
+        },
+      },
       '/automation-runs/{id}': {
         get: {
           operationId: 'getAutomationRun',
@@ -1255,6 +1314,24 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('AutomationRun'))),
             },
             ...errors(401, 403, 404, 423, 429, 500),
+          },
+        },
+      },
+      '/automation-runs/stop-many': {
+        post: {
+          operationId: 'stopManyAutomationRuns',
+          summary: 'Stop many runs started through the API',
+          description: [
+            `${scopeNote('automations.start')} Up to ${API_LIMITS.runsPerStop} runs keys of the company started, each stopped as POST /automation-runs/{id}/stop stops one: a running or waiting run ends as \`stopped\` with the reason \`stopped_by_api\`, and a run that has already ended is answered as it is. All of them or none: an id that names no run a key of the company started refuses the call (422, naming the field, as \`runIds.3\`), and nothing is stopped.`,
+            'The runs are stopped in the order given and answered in it. A call counts as one request against the rate and monthly limits. A run that has ended stays as it is, so a retry is safe without an `Idempotency-Key`.',
+          ].join('\n\n'),
+          requestBody: { required: true, content: json(ref('StopManyAutomationRuns')) },
+          responses: {
+            '200': {
+              description: 'The runs, as they now are, in the order given.',
+              content: json(dataOf({ type: 'array', items: ref('AutomationRun') })),
+            },
+            ...errors(400, 401, 403, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -1290,6 +1367,23 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('WebhookEndpointWithSecret'))),
             },
             ...errors(400, 401, 403, 412, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/webhook-endpoints/replay-failed': {
+        post: {
+          operationId: 'replayAllFailedWebhookDeliveries',
+          summary: "Deliver every endpoint's failed events again",
+          description: `${scopeNote('webhooks.manage')} What POST /webhook-endpoints/{id}/replay-failed does for one endpoint, for every endpoint the API key added that is on, with the same \`since\`, \`events\` and \`failures\`: at most ${WEBHOOK_LIMITS.replayBatch} new deliveries per call across them, endpoint by endpoint in the order they were added, each one's oldest event first. \`more\` says whether another call would queue more, and \`endpoints\` what each endpoint queued. Endpoints that are off are left out; when none is on, the call is refused (412). One call per \`Idempotency-Key\`; audited as the key, once per endpoint.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],
+          requestBody: { required: true, content: json(ref('ReplayFailedDeliveries')) },
+          responses: {
+            '200': {
+              description:
+                'How many deliveries were queued, at each endpoint, and whether more remain.',
+              content: json(dataOf(ref('FailedReplayAcrossEndpoints'))),
+            },
+            ...errors(400, 401, 403, 412, 422, 423, 429, 500),
           },
         },
       },
@@ -1399,7 +1493,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'replayFailedWebhookDeliveries',
           summary: "Deliver an endpoint's failed events again",
-          description: `${scopeNote('webhooks.manage')} Every event whose deliveries to the endpoint all failed, from deliveries queued at or after \`since\` (only those of the \`events\` given, when given), is delivered again as a new delivery whose \`replayOf\` names its latest failed one, oldest event first, at most ${WEBHOOK_LIMITS.replayBatch} per call; \`more\` says whether another call would queue more. Left out: events delivered since or already waiting to be, deliveries that failed because what the event names no longer exists (\`event_gone\`), and test events. The endpoint must be on (412 otherwise). One call per \`Idempotency-Key\`; audited as the key, once per call.`,
+          description: `${scopeNote('webhooks.manage')} Every event whose deliveries to the endpoint all failed, from deliveries queued at or after \`since\` (only those of the \`events\` given, and only those whose latest failed delivery failed in one of the \`failures\` given, when given), is delivered again as a new delivery whose \`replayOf\` names its latest failed one, oldest event first, at most ${WEBHOOK_LIMITS.replayBatch} per call; \`more\` says whether another call would queue more. Left out: events delivered since or already waiting to be, deliveries that failed because what the event names no longer exists (\`event_gone\`), and test events. The endpoint must be on (412 otherwise). One call per \`Idempotency-Key\`; audited as the key, once per call.`,
           parameters: [
             { $ref: '#/components/parameters/Id' },
             { $ref: '#/components/parameters/IdempotencyKey' },
@@ -1725,6 +1819,9 @@ export function buildOpenApiDocument(serverUrl: string) {
         Automation: jsonSchema(apiAutomationSchema),
         AutomationRun: jsonSchema(apiAutomationRunSchema),
         StartAutomationRun: jsonSchema(apiStartAutomationSchema, 'input'),
+        StartManyAutomationRuns: jsonSchema(apiStartManyAutomationRunsSchema, 'input'),
+        StopManyAutomationRuns: jsonSchema(apiStopManyAutomationRunsSchema, 'input'),
+        AutomationRunStart: jsonSchema(apiAutomationRunStartSchema),
         WebhookEndpoint: jsonSchema(apiWebhookEndpointSchema),
         WebhookEndpointWithSecret: jsonSchema(apiWebhookEndpointWithSecretSchema),
         WebhookDelivery: jsonSchema(apiWebhookDeliverySchema),
@@ -1732,6 +1829,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         UpdateWebhookEndpoint: jsonSchema(apiUpdateWebhookEndpointSchema, 'input'),
         ReplayFailedDeliveries: jsonSchema(apiReplayFailedDeliveriesSchema, 'input'),
         FailedReplay: jsonSchema(apiFailedReplaySchema),
+        FailedReplayAcrossEndpoints: jsonSchema(apiFailedReplayAcrossSchema),
         Error: jsonSchema(apiErrorSchema),
         WebhookMessageReceived: jsonSchema(messageReceivedPayloadSchema),
         WebhookMessageStatus: jsonSchema(messageStatusPayloadSchema),
@@ -1789,10 +1887,13 @@ export const API_ROUTES = [
   ['post', '/campaigns/{id}/cancel'],
   ['get', '/automations'],
   ['post', '/automations/{id}/runs'],
+  ['post', '/automations/{id}/runs/start-many'],
   ['get', '/automation-runs/{id}'],
   ['post', '/automation-runs/{id}/stop'],
+  ['post', '/automation-runs/stop-many'],
   ['get', '/webhook-endpoints'],
   ['post', '/webhook-endpoints'],
+  ['post', '/webhook-endpoints/replay-failed'],
   ['get', '/webhook-endpoints/{id}'],
   ['patch', '/webhook-endpoints/{id}'],
   ['delete', '/webhook-endpoints/{id}'],

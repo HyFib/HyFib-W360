@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AppError, notFound, uuidv7 } from '@w360/core';
+import { AppError, isAppError, notFound, uuidv7 } from '@w360/core';
 import {
   and,
   asc,
@@ -29,12 +29,14 @@ import {
 } from '../automations/graph';
 import { appendRunStep, endRun, lockActiveRun, signalAutomationRun } from '../automations/runs';
 import { checkTemplateEligibility } from '../consent/service';
+import { normalizePhone } from '../contacts/phone';
 import { contactForPhone } from '../contacts/service';
 import { emitTenantEvent } from '../messaging/events';
 import type { OutboundDeps } from '../messaging/outbound';
 import { consumeAutomationRun } from '../plans/entitlements';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import { apiActor, assertAnyScope, assertScope, hasScope, type ApiContext } from './context';
+import { apiErrorResponse } from './errors';
 import type { ApiResponse, IdempotencyInput } from './idempotency';
 import { API_LIMITS } from './model';
 import { explicitPhone, idempotent, phoneField } from './resources';
@@ -62,6 +64,33 @@ export const apiStartAutomationSchema = z
       .default({})
       .describe(
         'A text for each input the automation declares (`inputs` in GET /api/v1/automations), by name.',
+      ),
+  })
+  .strict();
+
+/** Starting an automation for many contacts in one call (ADR-161): what one start takes, each. */
+export const apiStartManyAutomationRunsSchema = z
+  .object({
+    runs: z
+      .array(apiStartAutomationSchema)
+      .min(1, 'Give at least one run to start')
+      .max(API_LIMITS.runsPerStart, `At most ${API_LIMITS.runsPerStart} runs start in one call`)
+      .describe(
+        `The contacts to start the automation for, each with its own inputs, at most ${API_LIMITS.runsPerStart}; each number once.`,
+      ),
+  })
+  .strict();
+
+/** Stopping many runs in one call (ADR-162): the runs, each as POST /automation-runs/{id}/stop takes it. */
+export const apiStopManyAutomationRunsSchema = z
+  .object({
+    runIds: z
+      .array(z.uuid({ error: 'Give the ids of runs keys started (POST /automations/{id}/runs).' }))
+      .min(1, 'Give at least one run.')
+      .max(API_LIMITS.runsPerStop, `Give at most ${API_LIMITS.runsPerStop} runs.`)
+      .refine((ids) => new Set(ids).size === ids.length, 'Give each run once.')
+      .describe(
+        `The runs to stop, 1 to ${API_LIMITS.runsPerStop}, each once; they are stopped in this order.`,
       ),
   })
   .strict();
@@ -229,21 +258,127 @@ export async function apiStartAutomationRun(
   const now = deps.clock.now();
   return deps.db.run(ctx.scope, (tx) =>
     idempotent(tx, ctx, idempotency, now, async () => {
-      const run = await startRun(deps, tx, ctx, automationId, phone, data.inputs, now);
+      const automation = await loadApiAutomation(tx, ctx, automationId);
+      const variables = inputVariables(automation, data.inputs, 'inputs');
+      const channelId = await sendingChannel(tx, ctx, automation);
+      const run = await startRunFor(deps, tx, ctx, automation, channelId, phone, variables, now);
       return { status: 201, body: { data: run } };
     }),
   );
 }
 
-async function startRun(
+/** What a start of many runs answered for one number (ADR-161): its run, or why it did not start. */
+export interface ApiAutomationRunStart {
+  to: string;
+  run: ApiAutomationRun | null;
+  error: { code: string; message: string; reason?: string } | null;
+}
+
+/**
+ * Starts an automation for many contacts in one call (ADR-161), in the order given: the
+ * automation's checks once for the call, then each start with a single start's checks in a
+ * savepoint, so a refusal that depends on the contact (consent, the suppression list, the
+ * conversation, the plan's runs left) rolls back that start alone, a contact created for it
+ * included, and is answered in its place. Numbers that are not valid and a number given twice
+ * refuse the call before anything is read, inputs the automation does not take before any start.
+ * One call per idempotency key.
+ */
+export async function apiStartManyAutomationRuns(
   deps: OutboundDeps,
+  ctx: ApiContext,
+  automationId: string,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'automations.start');
+  if (!z.uuid().safeParse(automationId).success) throw notFound('Automation');
+  const data = parseInput(apiStartManyAutomationRunsSchema, input);
+  const runs = data.runs.map((run, i) => ({
+    place: `runs.${i}`,
+    phone: phoneAt(run.to, `runs.${i}.to`),
+    inputs: run.inputs,
+  }));
+  const firstAt = new Map<string, string>();
+  for (const run of runs) {
+    const earlier = firstAt.get(run.phone);
+    if (earlier !== undefined) {
+      const message = `Give each number once: ${run.place}.to is the number of ${earlier}.to.`;
+      throw new AppError('validation_failed', message, {
+        issues: [{ path: `${run.place}.to`, message }],
+      });
+    }
+    firstAt.set(run.phone, run.place);
+  }
+  const now = deps.clock.now();
+  return deps.db.run(ctx.scope, (tx) =>
+    idempotent(tx, ctx, idempotency, now, async () => {
+      const automation = await loadApiAutomation(tx, ctx, automationId);
+      const prepared = runs.map((run) => ({
+        phone: run.phone,
+        variables: inputVariables(automation, run.inputs, `${run.place}.inputs`),
+      }));
+      const channelId = await sendingChannel(tx, ctx, automation);
+      const starts: ApiAutomationRunStart[] = [];
+      for (const { phone, variables } of prepared) {
+        try {
+          const run = await tx.transaction((sp) =>
+            startRunFor(deps, sp, ctx, automation, channelId, phone, variables, now),
+          );
+          starts.push({ to: phone, run, error: null });
+        } catch (error) {
+          // A plan without automations (forbidden) refuses the whole call, as for one start.
+          if (
+            !isAppError(error) ||
+            (error.code !== 'conflict' && error.code !== 'precondition_failed')
+          ) {
+            throw error;
+          }
+          const { code, message, reason } = apiErrorResponse(error, ctx.requestId).body.error;
+          starts.push({
+            to: phone,
+            run: null,
+            error: { code, message, ...(reason ? { reason } : {}) },
+          });
+        }
+      }
+      return { status: 200, body: { data: starts } };
+    }),
+  );
+}
+
+/** A number in a list of starts, refused at its place in the list when it is not one. */
+function phoneAt(raw: string, path: string): string {
+  const phone = normalizePhone(raw, { kind: 'explicit' });
+  if (!phone.ok) {
+    throw new AppError('validation_failed', phone.message, {
+      issues: [{ path, message: phone.message }],
+    });
+  }
+  return phone.e164;
+}
+
+/** What a start needs of the automation, checked once for a call (ADR-077, ADR-161). */
+interface LoadedApiAutomation {
+  id: string;
+  versionId: string;
+  /** The inputs its trigger declares. */
+  inputs: readonly string[];
+  /** The step a run starts at. */
+  start: string;
+  /** The templates its steps send. */
+  templateIds: string[];
+  channelAccountId: string | null;
+}
+
+/**
+ * The automation, when it is published, starts through the API and is active (archived,
+ * unpublished, other triggers and paused automations are refused).
+ */
+async function loadApiAutomation(
   tx: Tx,
   ctx: ApiContext,
   automationId: string,
-  phone: string,
-  givenInputs: Record<string, string>,
-  now: Date,
-): Promise<ApiAutomationRun> {
+): Promise<LoadedApiAutomation> {
   const tenantId = ctx.tenant.id;
   const [automation] = await tx
     .select({
@@ -290,15 +425,44 @@ async function startRun(
   if (automation.status !== 'active') {
     throw refused('precondition_failed', 'This automation is paused.', 'automation_paused');
   }
-  const inputs = apiInputValues(trigger.data.inputs, givenInputs);
+  return {
+    id: automation.id,
+    versionId: version.id,
+    inputs: trigger.data.inputs,
+    start: graph.data.start,
+    templateIds: templatesOf(graph.data),
+    channelAccountId: version.channelAccountId,
+  };
+}
+
+/** A start's inputs as the run's variables, refused at `path` when the trigger does not take them. */
+function inputVariables(
+  automation: LoadedApiAutomation,
+  given: Record<string, string>,
+  path: string,
+): Record<string, string> {
+  const inputs = apiInputValues(automation.inputs, given);
   if (!inputs.ok) {
     throw new AppError('validation_failed', inputs.message, {
-      issues: [{ path: 'inputs', message: inputs.message }],
+      issues: [{ path, message: inputs.message }],
     });
   }
+  return inputs.variables;
+}
+
+/**
+ * The number the automation sends from, when the key may start what it sends (marketing templates
+ * need the marketing scope) and the number is active.
+ */
+async function sendingChannel(
+  tx: Tx,
+  ctx: ApiContext,
+  automation: LoadedApiAutomation,
+): Promise<string> {
+  const tenantId = ctx.tenant.id;
   // Marketing templates need the key's marketing scope, as publishing them needs campaigns.send,
   // and the plan must include it (ADR-092).
-  const templateIds = templatesOf(graph.data);
+  const templateIds = automation.templateIds;
   if (templateIds.length > 0 && !hasScope(ctx, 'messages.send_marketing')) {
     const [marketing] = await tx
       .select({ id: messageTemplates.id })
@@ -320,7 +484,7 @@ async function startRun(
       );
     }
   }
-  const channelId = version.channelAccountId;
+  const channelId = automation.channelAccountId;
   const [channel] = channelId
     ? await tx
         .select({ status: channelAccounts.status })
@@ -334,7 +498,25 @@ async function startRun(
       'channel_unavailable',
     );
   }
+  return channelId;
+}
 
+/**
+ * Starts a run of the automation for the contact with this number: the checks that depend on the
+ * contact and its conversation, then the run. A refusal throws; the caller's transaction or
+ * savepoint rolls back what it wrote, a contact created for the number included.
+ */
+async function startRunFor(
+  deps: OutboundDeps,
+  tx: Tx,
+  ctx: ApiContext,
+  automation: LoadedApiAutomation,
+  channelId: string,
+  phone: string,
+  variables: Record<string, string>,
+  now: Date,
+): Promise<ApiAutomationRun> {
+  const tenantId = ctx.tenant.id;
   // Erasure, suppression and opt-outs; a refusal rolls back a contact created for the number. Each
   // template step checks its own category's consent when it sends.
   const contactId = await contactForPhone(tx, tenantId, {
@@ -433,16 +615,16 @@ async function startRun(
     id: runId,
     tenantId,
     automationId: automation.id,
-    versionId: version.id,
+    versionId: automation.versionId,
     conversationId: conversation.id,
     contactId,
     channelAccountId: channelId,
     mode: 'live',
     triggerType: 'api',
     apiKeyId: ctx.key.id,
-    variables: inputs.variables,
+    variables,
     status: 'running',
-    currentNodeId: graph.data.start,
+    currentNodeId: automation.start,
     nextStepAt: now,
     startedAt,
   });
@@ -527,52 +709,132 @@ export async function apiStopAutomationRun(
   assertScope(ctx, 'automations.start');
   if (!z.uuid().safeParse(runId).success) throw notFound('Automation run');
   return deps.db.run(ctx.scope, async (tx) => {
-    const startedByKey = and(
-      eq(automationRuns.tenantId, ctx.tenant.id),
-      eq(automationRuns.id, runId),
-      eq(automationRuns.triggerType, 'api'),
-      isNotNull(automationRuns.apiKeyId),
-    );
     const [peek] = await tx
-      .select({
-        conversationId: automationRuns.conversationId,
-        automationId: automationRuns.automationId,
-      })
+      .select(stopColumns)
       .from(automationRuns)
-      .where(startedByKey);
+      .where(startedByKey(ctx.tenant.id, [runId]));
     if (!peek) throw notFound('Automation run');
     // The conversation row first, as for every change to its run.
-    await tx
-      .select({ id: conversations.id })
-      .from(conversations)
-      .where(
-        and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, peek.conversationId)),
-      )
-      .for('update');
-    const run = await lockActiveRun(tx, ctx.tenant.id, peek.conversationId);
-    if (run?.id === runId) {
-      await appendRunStep(tx, ctx.tenant.id, run.id, {
-        nodeId: run.currentNodeId,
-        nodeType: null,
-        outcome: 'stopped',
-        detail: 'stopped_by_api',
-      });
-      await endRun(tx, run, { status: 'stopped', reason: 'stopped_by_api', now: deps.clock.now() });
-      await recordSystemAudit(
-        tx,
-        ctx.tenant.id,
-        {
-          action: 'automation.run_stopped',
-          subjectType: 'automation_run',
-          subjectId: run.id,
-          metadata: { automationId: peek.automationId, source: 'api' },
-          correlationId: ctx.requestId,
-        },
-        apiActor(ctx),
-      );
-    }
-    const [row] = await tx.select(runColumns).from(automationRuns).where(startedByKey);
+    await lockConversations(tx, ctx.tenant.id, [peek.conversationId]);
+    await stopRunIfActive(tx, ctx, peek, deps.clock.now());
+    const [row] = await tx
+      .select(runColumns)
+      .from(automationRuns)
+      .where(startedByKey(ctx.tenant.id, [runId]));
     if (!row) throw new Error('The run was not found after stopping it');
     return toApiRun(row);
   });
+}
+
+/**
+ * Stops many runs keys started in one call (ADR-162), each as POST /automation-runs/{id}/stop stops
+ * one, in one transaction: all of them or none. An id that names no run a key of the company
+ * started refuses the call, naming its place, before anything is locked. The runs' conversations are
+ * then locked in id order in one statement, as changing many conversations locks them (ADR-120), so
+ * calls stopping the same runs take turns instead of deadlocking; each run is stopped in the order
+ * given, or answered as it is when it has ended.
+ */
+export async function apiStopManyAutomationRuns(
+  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+  ctx: ApiContext,
+  input: unknown,
+): Promise<ApiAutomationRun[]> {
+  assertScope(ctx, 'automations.start');
+  const { runIds } = parseInput(apiStopManyAutomationRunsSchema, input);
+  return deps.db.run(ctx.scope, async (tx) => {
+    const found = new Map(
+      (
+        await tx.select(stopColumns).from(automationRuns).where(startedByKey(ctx.tenant.id, runIds))
+      ).map((run) => [run.id, run]),
+    );
+    const runs = runIds.map((id, index) => {
+      const run = found.get(id);
+      if (!run) throw unknownRun(index);
+      return run;
+    });
+    await lockConversations(
+      tx,
+      ctx.tenant.id,
+      runs.map((run) => run.conversationId),
+    );
+    const now = deps.clock.now();
+    for (const run of runs) await stopRunIfActive(tx, ctx, run, now);
+    const rows = new Map(
+      (
+        await tx.select(runColumns).from(automationRuns).where(startedByKey(ctx.tenant.id, runIds))
+      ).map((row) => [row.id, row]),
+    );
+    return runIds.map((id) => {
+      const row = rows.get(id);
+      if (!row) throw new Error('A run was not found after stopping it');
+      return toApiRun(row);
+    });
+  });
+}
+
+/** The runs with these ids that keys of the company started (ADR-077). */
+const startedByKey = (tenantId: string, ids: string[]) =>
+  and(
+    eq(automationRuns.tenantId, tenantId),
+    inArray(automationRuns.id, ids),
+    eq(automationRuns.triggerType, 'api'),
+    isNotNull(automationRuns.apiKeyId),
+  );
+
+const stopColumns = {
+  id: automationRuns.id,
+  conversationId: automationRuns.conversationId,
+  automationId: automationRuns.automationId,
+};
+
+const unknownRun = (index: number) => {
+  const message =
+    'Give the id of a run a key of the company started (POST /automations/{id}/runs).';
+  return new AppError('validation_failed', message, {
+    issues: [{ path: `runIds.${index}`, message }],
+  });
+};
+
+/** Locks the conversations' rows for update, in id order, in one statement. */
+async function lockConversations(tx: Tx, tenantId: string, ids: string[]): Promise<void> {
+  await tx
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(and(eq(conversations.tenantId, tenantId), inArray(conversations.id, [...new Set(ids)])))
+    .orderBy(asc(conversations.id))
+    .for('update');
+}
+
+/**
+ * Ends the run as `stopped_by_api` when it is still its conversation's active run (ADR-079), with
+ * its step and the audit entry as the key; a run that has ended is left as it is. The caller holds
+ * the conversation's row lock, which every change to its run takes first.
+ */
+async function stopRunIfActive(
+  tx: Tx,
+  ctx: ApiContext,
+  run: { id: string; automationId: string; conversationId: string },
+  now: Date,
+): Promise<void> {
+  const active = await lockActiveRun(tx, ctx.tenant.id, run.conversationId);
+  if (active?.id !== run.id) return;
+  await appendRunStep(tx, ctx.tenant.id, active.id, {
+    nodeId: active.currentNodeId,
+    nodeType: null,
+    outcome: 'stopped',
+    detail: 'stopped_by_api',
+  });
+  await endRun(tx, active, { status: 'stopped', reason: 'stopped_by_api', now });
+  await recordSystemAudit(
+    tx,
+    ctx.tenant.id,
+    {
+      action: 'automation.run_stopped',
+      subjectType: 'automation_run',
+      subjectId: active.id,
+      metadata: { automationId: run.automationId, source: 'api' },
+      correlationId: ctx.requestId,
+    },
+    apiActor(ctx),
+  );
 }

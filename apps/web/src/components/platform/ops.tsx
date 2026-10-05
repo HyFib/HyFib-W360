@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
-import { Badge, Card, CardContent } from '@w360/ui';
-import type { HealthIssue, HealthLevel } from '@w360/domain';
+import { Badge, Button, Card, CardContent, CardTitle } from '@w360/ui';
+import type { HealthIssue, HealthLevel, OpsExportList } from '@w360/domain';
 
 /** One number on the operations overview, optionally linking to the page that explains it. */
 export function StatTile({
@@ -39,6 +39,23 @@ export function StatTile({
         body
       )}
     </Card>
+  );
+}
+
+/**
+ * A list's title with "Download CSV" for it (ADR-158). The link's name gives the list, so a tab
+ * with several lists tells their links apart.
+ */
+export function ListTitle({ title, list }: { title: string; list: OpsExportList }) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <CardTitle>{title}</CardTitle>
+      <Button asChild variant="outline" size="sm">
+        <a href={`/platform/ops/export/${list}`} download aria-label={`Download CSV: ${title}`}>
+          Download CSV
+        </a>
+      </Button>
+    </div>
   );
 }
 

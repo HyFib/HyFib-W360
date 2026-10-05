@@ -6265,3 +6265,183 @@ Decision:
 
 Not built: comparisons of the other figures (failures, webhook deliveries, the plans' counters,
 which are per period), trends over more than two windows, charts, alerts on a fall.
+
+## ADR-158 Exporting the console's action lists (P5-10) (2026-10-05)
+
+Context: ADR-154 and ADR-155 made the Usage tab, every company's health and the Signals tab
+downloadable, and left out the lists staff act on: the Onboarding tab's failed and abandoned
+signups, failed or stuck number setups and new companies without a number; the Integrations tab's
+current failures, Meta and Razorpay receipts needing attention, quarantined events and email
+delivery; and the Queues tab's queues and dead letters. Staff handing a list to the person fixing
+it, or keeping a record of a bad day, copied it by hand.
+
+Decision:
+
+- **"Download CSV" on each list of the three tabs,** for the rows the tab shows, in its order and in
+  its words: an outcome, a state, a step, a problem or a reason as the tab says it, times to the
+  minute in UTC, Yes or No for the tab's yes-or-no facts. A queue's oldest wait is in whole minutes,
+  empty when nothing waited or the worker did not check the queue; a dead letter's last columns say
+  what became of its job, or why it cannot be retried, as the tab does. Each link is named after its
+  list ("Download CSV: Recent dead letters"), so a tab with several lists tells them apart.
+- **The same export:** `/platform/ops/export/<list>` for `signups`, `number-setups`,
+  `new-companies`, `failures`, `receipts`, `quarantine`, `emails`, `queues` and `dead-letters`,
+  beside ADR-155's three lists, through the same service call: the tab's own read of the list (each
+  tab's reads are now one per list, shared by the tab and its exports),
+  `platform.ops_<list>_exported` in the platform audit log with how many rows (companies, for new
+  companies without a number) and the window where the list has one (30 days for signups and new
+  companies, 7 for email delivery), in that transaction, before the file is returned, and the same
+  writer: UTF-8 with a byte-order mark, RFC 4180 quoting and formula neutralisation. Named
+  `hyfib-dead-letters-<day>.csv`, `hyfib-signups-30-days-<day>.csv` and so on.
+- **Refused before any read:** an export checks, in its transaction, that the actor is a platform
+  administrator and refuses anyone else before the list is read. The lists read through a definer
+  function were refused there already; the others, the platform role's own reads of number setups,
+  receipts, quarantine, emails, queues and dead letters, were refused only by the pages' platform
+  actor check, which stays.
+- **What the screens show, less people and notes:** who acknowledged a failure (ADR-141) or retried
+  a job (ADR-108) is left out, and so is an acknowledgement's note: the file gives when a failure
+  was acknowledged and when a job was retried, and the rest stays in the console and the platform
+  audit log. Errors are the providers' answers as the tab shows them (an endpoint by its host only);
+  emails are counted by kind, never with an address; quarantine entries carry only the allow-listed
+  provider ids.
+
+Not built: exports beyond the rows a tab lists (its latest 100 dead letters, receipts and quarantine
+entries, 200 signups and number setups, 500 failures and new companies), an export of the Keys tab,
+other formats, scheduled exports.
+
+## ADR-159 Replaying an endpoint's failed deliveries by how they failed (P5-09) (2026-10-05)
+
+Context: ADR-156 let a replay of an endpoint's failed deliveries choose the events. A receiver that
+was down for an hour, answering 502 or not answering at all, and that also refused some events for
+reasons of its own (a 400 for a payload its handler rejects) got the refused events again with the
+rest when the period was replayed, to refuse them again. ADR-156 left out replays by a delivery's
+error or HTTP status.
+
+Decision:
+
+- **Five kinds of failure,** by how the event's latest failed delivery to the endpoint ended: server
+  errors (HTTP 5xx), refused (HTTP 4xx), other answers (HTTP 1xx or 3xx: redirects are not
+  followed), no valid answer (a timeout, a host or address that failed, a broken connection, an
+  answer too large or without a valid status, an attempt its worker stopped during) and not
+  attempted (the endpoint was turned off, or HyFib could not prepare the request). As the
+  deliveries list says it, a code that ended the delivery says more than the status an earlier
+  attempt left: a delivery answered 500 and then ended when the endpoint was turned off was not
+  attempted, and one answered 503 and then interrupted got no valid answer.
+- **Of the failures chosen:** `POST /api/v1/webhook-endpoints/{id}/replay-failed` takes `failures`
+  beside `since` and `events`: `server_error`, `client_error`, `other_answer`, `no_answer` and
+  `not_attempted`, at least one, kept once each in that order. Left out, every failure is replayed,
+  as before. Settings → Webhooks' replay form offers "Every failure" or one kind, beside the events.
+- **The latest failed delivery decides,** the one a replay names in `replayOf`: an event answered
+  500 and then replayed without an answer is replayed again with "No valid answer", not with the
+  server errors.
+- **Everything else as ADR-095 and ADR-156:** the same events are chosen (every delivery of the
+  event to the endpoint failed, not `event_gone`, not a test event), oldest event first, 500 per
+  call with `more`, the endpoint locked and on, once per `Idempotency-Key` through the API.
+- **Audit:** `webhook.deliveries_replayed` names the failures chosen, beside the events, as the
+  member or as the key.
+- **No migration:** one more condition on the latest failed delivery's code and status in the query
+  that chooses the deliveries.
+
+Not built: replays by one status or error code, replays across endpoints.
+
+## ADR-160 Replaying the failed deliveries of every endpoint at once (P5-09) (2026-10-05)
+
+Context: since ADR-095 a replay works on one endpoint. A company whose endpoints all failed for the
+same reason (its gateway was down for an hour, or a certificate expired on a host they share)
+replayed each endpoint in turn, up to ten times, with the same period, events and failures. P5-09's
+Remaining listed replays across endpoints.
+
+Decision:
+
+- **Every endpoint that is on, in one call:** Settings → Webhooks gains "Replay failed deliveries"
+  under the endpoints, with an endpoint's period, events (every event, or one an endpoint that is on
+  receives) and failures. Through the API, `POST /api/v1/webhook-endpoints/replay-failed` takes the
+  `since`, `events` and `failures` of an endpoint's call, for the endpoints keys added (scope
+  `webhooks.manage`, once per `Idempotency-Key`). Endpoints that are off are left out; when none is
+  on, the call is refused (412), as an endpoint's is.
+- **One batch, endpoint by endpoint:** at most 500 new deliveries per call across the endpoints, in
+  the order they were added, each one's oldest event first; at each endpoint the events an
+  endpoint's own replay would choose (ADR-095, ADR-156, ADR-159). `more` says whether another call
+  would queue more: once the batch is used up, each endpoint left is only asked whether it has any.
+  The answer gives each endpoint's `queued` and `more`; Settings says how many deliveries go to each
+  endpoint's host.
+- **Locked together:** every endpoint is locked, in that order, before any is read, so an endpoint's
+  own replay at the same time queues each event once, and two replays of every endpoint cannot
+  deadlock.
+- **Audit:** one `webhook.deliveries_replayed` entry per endpoint that is on, as an endpoint's own
+  replay writes it, marked `allEndpoints`.
+- **No migration:** an endpoint's replay is now one step that both calls share.
+
+Not built: replays across companies for staff, replays of a chosen list of endpoints.
+
+## ADR-161 Starting an automation for many contacts in one call (P5-08) (2026-10-05)
+
+Context: since ADR-077 a key starts an automation for one contact per call. A booking system that
+sends tomorrow's reminders to 80 patients needed 80 calls, each with its own `Idempotency-Key`,
+paced to stay within the key's limits (a burst of 50, then 10 a second). P5-08's Remaining listed
+starting or stopping runs for many contacts in one call.
+
+Decision:
+
+- **Up to 50 starts in one call:** `POST /api/v1/automations/{id}/runs/start-many` takes `runs`,
+  each the `to` and `inputs` a start of one run takes, at most 50, each number once; scope
+  `automations.start`, an `Idempotency-Key` required, one request against the key's limits.
+- **Why 50:** each run started keeps its savepoint's transaction id until the call commits.
+  PostgreSQL caches 64 per transaction; beyond them, every snapshot taken anywhere while the call
+  runs looks subtransactions up on disk, which slows the whole database. 50 leaves room.
+- **The automation checked once, each contact on its own:** the automation's checks run once for the
+  call (published, started through the API, active, its number, the marketing scope). Each start
+  then takes, in the order given, the steps of a start of one run (the contact, created when new;
+  erasure, suppression and opt-outs; the conversation, not held by a member or handled by another
+  run; the hourly limit; the plan's runs) in a savepoint of its own.
+- **Not all or none:** a start refused for its contact (409 or 412, as one start answers it) rolls
+  back alone, a contact created for it included, and is answered in its place with its code, message
+  and reason, while the others start. Unlike changing many conversations or contacts (ADR-120,
+  ADR-122), where a refusal means a mistake in the call, such a refusal is a fact about one contact
+  that asking again does not change; refusing the other starts for it would only make the caller
+  send them again without it.
+- **Refused as a whole, starting nothing:** a number that is not valid or given twice (before
+  anything is read) and inputs the automation does not take (422, naming the place, as
+  `runs.3.inputs`); an automation that cannot start (404, 412); a plan without automations (403).
+- **The answer:** 200 with each number, as normalised, and its run or its refusal, in the order
+  given; a retry with the same key answers as the first call did and starts nothing more.
+- **Records as one start's:** each run records its key and inputs, with its first step, the live
+  `automation.started` event, an audit entry as the key and its first job.
+- **Concurrent starts:** the call is one transaction. Until it ends it keeps each conversation it
+  starts a run in and, on a plan with a monthly run limit, the company's run count from its first
+  start, while every other start takes a conversation before the count. A run starting at the same
+  moment for a contact further down the list (a customer's message, another call) can therefore
+  deadlock with the call. PostgreSQL ends one of the two; when it ends the call, the call is refused
+  as a whole (409, starting nothing) and can be sent again with the same `Idempotency-Key`.
+- **No migration:** a start of one run is now four steps that both calls share.
+
+Not built: stopping runs for many contacts in one call, starting many automations in one call.
+
+## ADR-162 Stopping many runs in one call (P5-08) (2026-10-05)
+
+Context: since ADR-079 a key stops one run per call. An integration that started an automation for
+many contacts in one call (ADR-161) and then calls them off (the appointments moved, the offer was
+withdrawn) needed one call per run. P5-08's Remaining listed stopping runs for many contacts in one
+call.
+
+Decision:
+
+- **Up to 100 runs in one call:** `POST /api/v1/automation-runs/stop-many` takes `runIds`, 1 to 100,
+  each once; scope `automations.start`, one request against the key's limits, and no
+  `Idempotency-Key`: a run that has ended stays as it is, so a retry answers the same.
+- **Each as one stop:** each run is stopped through the step `POST /automation-runs/{id}/stop` uses
+  (ADR-079): a running or waiting run ends as `stopped` with the reason `stopped_by_api`, with its
+  step and an audit entry as the key, and a run that has ended is answered as it is.
+- **All of them or none:** an id that names no run a key of the company started (another company's,
+  one customers started by writing, one that does not exist) refuses the call (422, naming the
+  place, as `runIds.3`) before anything is locked, and nothing is stopped. Unlike ADR-161's starts,
+  such an id is a mistake in the call, so it is refused as changing many conversations refuses one
+  (ADR-120).
+- **Locks:** the runs' conversations are locked in id order in one statement, as ADR-120 locks them,
+  then each run in the order given, so calls stopping the same runs take turns. Stopping counts
+  nothing against the plan, so no shared counter is held across runs.
+- **100, not 50:** nothing is answered in place, so the call opens no savepoint per run and the
+  subtransaction limit behind ADR-161's 50 does not apply.
+- **The answer:** 200 with each run as it now is, in the order given.
+- **No migration:** the single stop and this call share one step.
+
+Not built: stopping every run of an automation, or of a contact, without listing them.

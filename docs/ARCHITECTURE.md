@@ -1015,6 +1015,22 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   run's first job follow in the same transaction. `automation_runs_api_key` keeps `api_key_id` set
   exactly for `api` runs, the run guard keeps it fixed, and `automation_runs_api_key_idx` (0053,
   built concurrently) serves the foreign key.
+- **Starting an automation for many contacts (ADR-161):** `POST /automations/{id}/runs/start-many`
+  (`apiStartManyAutomationRuns`, `automations.start`, an `Idempotency-Key` required) takes up to
+  `API_LIMITS.runsPerStart` (50, as each run started keeps its savepoint's transaction id and
+  PostgreSQL caches 64 per transaction) starts. The numbers are normalised and a repeat refused,
+  naming its place, before the transaction. In the idempotency key's transaction the automation is
+  checked once (`loadApiAutomation`), then every start's inputs (`inputVariables`, 422 at
+  `runs.<i>.inputs`), then the marketing scope and the number (`sendingChannel`); a start of one run
+  takes the same three steps. Each start then runs `startRunFor` (the contact, eligibility, the
+  conversation, the plan, the run with its step, event, audit entry and first job) in a savepoint
+  (`tx.transaction`): a `conflict` or `precondition_failed` refusal rolls back to it and is answered
+  in the start's place through `apiErrorResponse`, while any other error (a plan without automations
+  included) refuses the call. The call keeps the conversations it starts in and, on a plan with a
+  run limit, the `automation_runs` usage counter from its first start until it commits, while other
+  starts take a conversation before the counter: a start for a contact further down the list can
+  deadlock with it, and PostgreSQL's `40P01` comes back from `db.run` as a retryable 409
+  (`mapDatabaseError`), the call starting nothing.
 - **Stopping runs through the API (0057–0058, ADR-079):** `POST /automation-runs/{id}/stop` with
   `automations.start` (`apiStopAutomationRun`) finds a run keys of the company started, locks the
   conversation `FOR UPDATE` and then the active run (`lockActiveRun`), and ends it with `endRun` as
@@ -1023,6 +1039,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   log and the audit entry (as the key) follow in the same transaction; a run that has ended is
   answered as it is. 0057 replaces `automation_runs_end` `NOT VALID` to allow the reason; 0058
   validates it.
+- **Stopping many runs through the API (ADR-162):** `POST /automation-runs/stop-many`
+  (`apiStopManyAutomationRuns`, `automations.start`, up to `API_LIMITS.runsPerStop` (100) ids) reads
+  the runs keys of the company started with those ids in one statement and refuses the call, naming
+  the place, when one is missing; it then locks their conversations `FOR UPDATE` in id order in one
+  statement (`lockConversations`, as ADR-120 locks them) and stops each run in the order given
+  through the single stop's step (`stopRunIfActive`: the active run locked with `lockActiveRun`, its
+  step, `endRun` as `stopped_by_api`, the audit entry as the key), leaving a run that has ended as
+  it is. The answer reads the runs again, in the order given.
 - **Buttons and lists through the API (ADR-080):** `POST /messages` with `type` `buttons` or `list`
   (`apiSendButtons`, `apiSendList`) takes the same path as a text reply (`sendReply`: the contact
   who wrote in the last 24 hours, the conversation locked `FOR UPDATE`, the automation ended as
@@ -1069,12 +1093,20 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   locks the endpoint (refused when off), selects for each event the latest failed delivery to it
   queued since the given time (`DISTINCT ON (event_id)` over `webhook_deliveries_endpoint_idx`),
   drops `event_gone` failures (but not `payload_failed` ones, sent once HyFib fixed the cause),
-  `ping` events, events of other types than those given (`events`, ADR-156) and events with any
-  delivery to the endpoint that did not fail (`webhook_deliveries_event_idx`), and inserts up to
-  `WEBHOOK_LIMITS.replayBatch` (500) new deliveries oldest event first, reading one more row to say
-  whether more remain. Settings (`webhooks.replayFailed`, a period) and the API
-  (`POST /webhook-endpoints/{id}/replay-failed`, `since`, inside `idempotent`, `keysOnly`) call it
-  and audit once per call.
+  `ping` events, events of other types than those given (`events`, ADR-156), events whose latest
+  failed delivery failed in other ways than those given (`failures`, ADR-159: by its code when it
+  has one, `endpoint_disabled` and `payload_failed` not attempted and any other no valid answer,
+  else by its status, 5xx, 4xx or another) and events with any delivery to the endpoint that did not
+  fail (`webhook_deliveries_event_idx`), and inserts up to `WEBHOOK_LIMITS.replayBatch` (500) new
+  deliveries oldest event first, reading one more row to say whether more remain. Settings
+  (`webhooks.replayFailed`, a period) and the API (`POST /webhook-endpoints/{id}/replay-failed`,
+  `since`, inside `idempotent`, `keysOnly`) call it and audit once per call. A replay of every
+  endpoint (ADR-160, `replayFailedAcrossEndpoints`) locks the company's endpoints (with `keysOnly`,
+  those keys added) in the order they were added, in one `FOR NO KEY UPDATE` statement, then runs
+  each endpoint that is on through the same step (`replayLockedEndpoint`) with what is left of the
+  batch, a limit of 0 only finding whether an endpoint has more; Settings
+  (`webhooks.replayAllFailed`) and the API (`POST /webhook-endpoints/replay-failed`) audit once per
+  endpoint.
 - **Notes through the API (0060–0062, ADR-084):** `POST /conversations/{id}/notes` with
   `conversations.write` (`apiAddConversationNote`, `api/conversations.ts`) runs inside `idempotent`:
   it locks the conversation `FOR UPDATE` (the order erasure takes), checks that it is visible (the
@@ -1522,15 +1554,18 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   since the window's start and since twice as far back in one statement (two calls of the STABLE
   definer function, so one snapshot) and gives each company the difference, the window before's
   sending and receipts; 90 days has none (the function reads at most 93 days back).
-- **Exports (ADR-154, ADR-155):** `/platform/ops/export/[list]` (a route handler behind the pages'
-  platform actor check; `usage`, `health` or `signals`, any other name not found) calls
-  `exportList`, which reads the list's rows with the tab's own reads (`usageRows`, `healthFacts`
-  sorted by `byHealth`, `signalRows`), inserts `platform.ops_<list>_exported` into
-  `ops.platform_audit_events` in that transaction and returns `usageCsv`, `healthCsv` or
-  `signalsCsv` (`platform/ops-model.ts`, formula-safe through `contacts/csv`); the Overview, Signals
-  and Usage tabs link to it as "Download CSV".
+- **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
+  pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
+  `exportList`, which checks in its transaction that the actor is a platform administrator, reads
+  the list's rows with the tab's own read (`usageRows`, `healthFacts` sorted by `byHealth`,
+  `signalRows`; for the Onboarding, Integrations and Queues tabs one read per list, such as
+  `signupProblems`, `integrationFailures`, `openQuarantine`, `queueRows` or `recentDeadLetters`,
+  which the tabs share), inserts `platform.ops_<list>_exported` (`opsExportAction`) into
+  `ops.platform_audit_events` in that transaction and returns the list's CSV (`usageCsv` to
+  `deadLettersCsv` in `platform/ops-model.ts`, formula-safe through `contacts/csv`); each tab links
+  to it as "Download CSV", named after its list where a tab has several (`ListTitle`).
 - **Not built yet:** other alert channels, trends,
-  quality updates from Meta's quality webhook, exports of the action lists, sweeps for the work of
+  quality updates from Meta's quality webhook, sweeps for the work of
   `channel.onboard`, `commerce.account` and `template.delete`, retrying several dead letters at
   once, and acknowledging the console's other lists (dead letters, receipts, late queues).
 

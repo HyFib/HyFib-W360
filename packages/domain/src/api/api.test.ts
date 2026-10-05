@@ -110,6 +110,13 @@ import {
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
 } from '../webhooks/service';
+import { WEBHOOK_FAILURE_KINDS, WEBHOOK_LIMITS } from '../webhooks/model';
+import {
+  apiStartManyAutomationRuns,
+  apiStartManyAutomationRunsSchema,
+  apiStopManyAutomationRuns,
+  apiStopManyAutomationRunsSchema,
+} from './automations';
 
 describe('API tokens', () => {
   it('have a public prefix, a 256-bit secret and only their SHA-256 is kept', () => {
@@ -1652,6 +1659,9 @@ describe("replaying an endpoint's failed deliveries through the API (ADR-095)", 
       { since: '2026-09-30T08:00:00Z', events: [] },
       { since: '2026-09-30T08:00:00Z', events: ['order.shipped'] },
       { since: '2026-09-30T08:00:00Z', events: 'message.received' },
+      { since: '2026-09-30T08:00:00Z', failures: [] },
+      { since: '2026-09-30T08:00:00Z', failures: ['server_errors'] },
+      { since: '2026-09-30T08:00:00Z', failures: 'no_answer' },
     ]) {
       expect(apiReplayFailedDeliveriesSchema.safeParse(body).success, JSON.stringify(body)).toBe(
         false,
@@ -1666,6 +1676,24 @@ describe("replaying an endpoint's failed deliveries through the API (ADR-095)", 
         events: ['contact.created', 'message.received', 'contact.created'],
       }),
     ).toEqual({ since: '2026-09-30T08:00:00Z', events: ['message.received', 'contact.created'] });
+  });
+
+  it('takes how the failures to replay went, kept once each in the list’s order (ADR-159)', () => {
+    expect(
+      apiReplayFailedDeliveriesSchema.parse({
+        since: '2026-09-30T08:00:00Z',
+        failures: ['not_attempted', 'no_answer', 'server_error', 'no_answer'],
+      }),
+    ).toEqual({
+      since: '2026-09-30T08:00:00Z',
+      failures: ['server_error', 'no_answer', 'not_attempted'],
+    });
+    expect(
+      apiReplayFailedDeliveriesSchema.parse({
+        since: '2026-09-30T08:00:00Z',
+        failures: [...WEBHOOK_FAILURE_KINDS].reverse(),
+      }).failures,
+    ).toEqual(['server_error', 'client_error', 'other_answer', 'no_answer', 'not_attempted']);
   });
 
   it('refuses a time still to come before anything is read', async () => {
@@ -1726,11 +1754,98 @@ describe("replaying an endpoint's failed deliveries through the API (ADR-095)", 
       required: ['since'],
       additionalProperties: false,
     });
-    expect(
-      Object.keys((schemas.ReplayFailedDeliveries as { properties: object }).properties),
-    ).toEqual(['since', 'events']);
+    const replayFields = (
+      schemas.ReplayFailedDeliveries as {
+        properties: Record<string, { items?: { enum?: string[] }; description?: string }>;
+      }
+    ).properties;
+    expect(Object.keys(replayFields)).toEqual(['since', 'events', 'failures']);
+    expect(replayFields.failures?.items?.enum).toEqual([...WEBHOOK_FAILURE_KINDS]);
+    for (const kind of WEBHOOK_FAILURE_KINDS) {
+      expect(replayFields.failures?.description).toContain(`\`${kind}\``);
+    }
     expect(op?.description).toContain('only those of the `events` given');
+    expect(op?.description).toContain(
+      'only those whose latest failed delivery failed in one of the `failures` given',
+    );
     expect(Object.keys((schemas.FailedReplay as { properties: object }).properties)).toEqual([
+      'queued',
+      'more',
+    ]);
+  });
+
+  it('refuses a time still to come for every endpoint too, before anything is read (ADR-160)', async () => {
+    const endpoints = createApiWebhookEndpoints({
+      clock: { now: () => new Date('2026-09-30T08:00:00Z') },
+    } as never);
+    const ctx = {
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(['webhooks.manage']) },
+      planScopes: null,
+    } as unknown as ApiContext;
+    const error: unknown = await endpoints
+      .replayAllFailed(ctx, { since: '2026-09-30T08:00:01Z' }, { key: 'k-1', requestHash: 'h' })
+      .catch((caught: unknown) => caught);
+    expect(isAppError(error) && error.code).toBe('validation_failed');
+    expect(isAppError(error) && error.issues).toEqual([
+      { path: 'since', message: 'Give a time in the past.' },
+    ]);
+  });
+
+  it('describes the replay of every endpoint: the same body, 500 across the endpoints that are on, what each queued (ADR-160)', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const op = (
+      doc.paths as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            description: string;
+            parameters: unknown[];
+            requestBody: unknown;
+            responses: Record<string, { content?: unknown }>;
+          }
+        >
+      >
+    )['/webhook-endpoints/replay-failed']?.post;
+    expect(op?.operationId).toBe('replayAllFailedWebhookDeliveries');
+    expect(op?.parameters).toEqual([{ $ref: '#/components/parameters/IdempotencyKey' }]);
+    expect(op?.requestBody).toEqual({
+      required: true,
+      content: {
+        'application/json': { schema: { $ref: '#/components/schemas/ReplayFailedDeliveries' } },
+      },
+    });
+    expect(Object.keys(op?.responses ?? {})).toEqual(expect.arrayContaining(['200', '412', '422']));
+    expect(Object.keys(op?.responses ?? {})).not.toContain('404');
+    expect(op?.responses['200']?.content).toEqual({
+      'application/json': {
+        schema: {
+          type: 'object',
+          properties: { data: { $ref: '#/components/schemas/FailedReplayAcrossEndpoints' } },
+          required: ['data'],
+        },
+      },
+    });
+    for (const words of [
+      'every endpoint the API key added that is on',
+      'at most 500 new deliveries per call across them',
+      'in the order they were added',
+      'Endpoints that are off are left out; when none is on, the call is refused (412)',
+      'once per endpoint',
+    ]) {
+      expect(op?.description).toContain(words);
+    }
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const across = schemas.FailedReplayAcrossEndpoints as {
+      properties: Record<string, { maxItems?: number; items?: { properties: object } }>;
+    };
+    expect(Object.keys(across.properties)).toEqual(['queued', 'more', 'endpoints']);
+    expect(across.properties.endpoints?.maxItems).toBe(WEBHOOK_LIMITS.endpoints);
+    expect(Object.keys(across.properties.endpoints?.items?.properties ?? {})).toEqual([
+      'id',
       'queued',
       'more',
     ]);
@@ -1752,6 +1867,7 @@ describe('webhook deliveries through the API (ADR-083)', () => {
       () => endpoints.sendTest(ctx, 'e', idempotency),
       () => endpoints.replay(ctx, 'd', idempotency),
       () => endpoints.replayFailed(ctx, 'e', { since: 'x' }, idempotency),
+      () => endpoints.replayAllFailed(ctx, { since: 'x' }, idempotency),
     ]) {
       const error: unknown = await call().catch((caught: unknown) => caught);
       expect(isAppError(error) && error.code).toBe('forbidden');
@@ -3040,5 +3156,273 @@ describe('pausing and cancelling campaigns (ADR-128)', () => {
         ['post', '/campaigns/{id}/cancel'],
       ]),
     );
+  });
+});
+
+describe('starting an automation for many contacts in one call (ADR-161)', () => {
+  const ctx = (scopes: string[]) =>
+    ({
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: null,
+      requestId: 'r',
+    }) as unknown as ApiContext;
+  const automationId = '0192a1b2-0000-7000-8000-000000000001';
+  const run = (to: string) => ({ to, inputs: { patient: 'Asha' } });
+  // Every refusal here comes before anything is read: the dependencies are never used.
+  const start = (scopes: string[], id: string, body: unknown) =>
+    apiStartManyAutomationRuns({} as never, ctx(scopes), id, body, { key: 'k-1', requestHash: 'h' })
+      .then(() => null)
+      .catch((caught: unknown) => caught);
+
+  it('takes 1 to 50 runs, each as a start of one run takes it', () => {
+    const parse = (body: unknown) => apiStartManyAutomationRunsSchema.safeParse(body).success;
+    expect(parse({ runs: [run('+919811100001')] })).toBe(true);
+    expect(
+      parse({
+        runs: Array.from({ length: API_LIMITS.runsPerStart }, (_, i) =>
+          run(`+9198111${String(i).padStart(5, '0')}`),
+        ),
+      }),
+    ).toBe(true);
+    expect(API_LIMITS.runsPerStart).toBe(50);
+    for (const body of [
+      { runs: [] },
+      {
+        runs: Array.from({ length: API_LIMITS.runsPerStart + 1 }, (_, i) =>
+          run(`+9198111${String(i).padStart(5, '0')}`),
+        ),
+      },
+      { runs: [{ ...run('+919811100001'), from: 'x' }] },
+      { runs: [run('+919811100001')], automationId },
+      { runs: run('+919811100001') },
+      {},
+    ]) {
+      expect(parse(body), JSON.stringify(body).slice(0, 80)).toBe(false);
+    }
+  });
+
+  it('refuses before anything is read: the scope, the automation id, a number that is not one or given twice', async () => {
+    const forbidden = await start(['contacts.read'], automationId, {
+      runs: [run('+919811100001')],
+    });
+    expect(isAppError(forbidden) && forbidden.code).toBe('forbidden');
+    const missing = await start(['automations.start'], 'not-a-uuid', {
+      runs: [run('+919811100001')],
+    });
+    expect(isAppError(missing) && missing.code).toBe('not_found');
+    const empty = await start(['automations.start'], automationId, { runs: [] });
+    expect(isAppError(empty) && empty.code).toBe('validation_failed');
+    const notANumber = await start(['automations.start'], automationId, {
+      runs: [run('+919811100001'), run('+919811100002'), run('12345')],
+    });
+    expect(isAppError(notANumber) && notANumber.code).toBe('validation_failed');
+    expect(isAppError(notANumber) && notANumber.issues?.map((i) => i.path)).toEqual(['runs.2.to']);
+    // The same number twice, however it is written.
+    const twice = await start(['automations.start'], automationId, {
+      runs: [run('+91 98111 00001'), run('+919811100002'), run('+919811100001')],
+    });
+    expect(isAppError(twice) && twice.code).toBe('validation_failed');
+    expect(isAppError(twice) && twice.issues).toEqual([
+      {
+        path: 'runs.2.to',
+        message: 'Give each number once: runs.2.to is the number of runs.0.to.',
+      },
+    ]);
+  });
+
+  it('is described: each start answered in its place, the call refused as a whole only for what cannot start at all', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const op = (
+      doc.paths as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            description: string;
+            parameters: unknown[];
+            requestBody: unknown;
+            responses: Record<string, { content?: unknown }>;
+          }
+        >
+      >
+    )['/automations/{id}/runs/start-many']?.post;
+    expect(op?.operationId).toBe('startManyAutomationRuns');
+    expect(op?.parameters).toEqual([
+      { $ref: '#/components/parameters/Id' },
+      { $ref: '#/components/parameters/IdempotencyKey' },
+    ]);
+    expect(op?.requestBody).toEqual({
+      required: true,
+      content: {
+        'application/json': { schema: { $ref: '#/components/schemas/StartManyAutomationRuns' } },
+      },
+    });
+    expect(op?.responses['200']?.content).toEqual({
+      'application/json': {
+        schema: {
+          type: 'object',
+          properties: {
+            data: { type: 'array', items: { $ref: '#/components/schemas/AutomationRunStart' } },
+          },
+          required: ['data'],
+        },
+      },
+    });
+    expect(Object.keys(op?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '403', '404', '409', '412', '422']),
+    );
+    for (const words of [
+      'for up to 50 contacts, in the order given',
+      'The call counts as one request.',
+      'a refused start changes nothing, a contact created for it included, and the others still start',
+      'a number that is not valid or given twice',
+      'naming the place, as `runs.3.inputs`',
+      'One call per `Idempotency-Key`',
+      'it can be refused as a whole (409, starting nothing): send it again with the same `Idempotency-Key`',
+    ]) {
+      expect(op?.description).toContain(words);
+    }
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const body = schemas.StartManyAutomationRuns as {
+      properties: { runs: { minItems?: number; maxItems?: number; items?: { $ref?: string } } };
+      required: string[];
+      additionalProperties: boolean;
+    };
+    expect(body.required).toEqual(['runs']);
+    expect(body.additionalProperties).toBe(false);
+    expect(body.properties.runs.minItems).toBe(1);
+    expect(body.properties.runs.maxItems).toBe(API_LIMITS.runsPerStart);
+    const answer = schemas.AutomationRunStart as {
+      properties: Record<
+        string,
+        { anyOf?: { properties?: Record<string, { enum?: string[] }> }[] }
+      >;
+      required: string[];
+    };
+    expect(Object.keys(answer.properties)).toEqual(['to', 'run', 'error']);
+    expect(answer.required).toEqual(['to', 'run', 'error']);
+    const error = answer.properties.error?.anyOf?.find((o) => o.properties);
+    expect(error?.properties?.code?.enum).toEqual(['conflict', 'precondition_failed']);
+  });
+});
+
+describe('stopping many runs in one call (ADR-162)', () => {
+  const ctx = (scopes: string[]) =>
+    ({
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: null,
+      requestId: 'r',
+    }) as unknown as ApiContext;
+  const runId = (i: number) => `0192a1b2-0000-7000-8000-${String(i).padStart(12, '0')}`;
+  // Every refusal here comes before anything is read: the dependencies are never used.
+  const stop = (scopes: string[], body: unknown) =>
+    apiStopManyAutomationRuns({} as never, ctx(scopes), body)
+      .then(() => null)
+      .catch((caught: unknown) => caught);
+
+  it('takes 1 to 100 run ids, each once, and nothing else', () => {
+    const parse = (body: unknown) => apiStopManyAutomationRunsSchema.safeParse(body).success;
+    expect(API_LIMITS.runsPerStop).toBe(100);
+    expect(parse({ runIds: [runId(1)] })).toBe(true);
+    expect(
+      parse({ runIds: Array.from({ length: API_LIMITS.runsPerStop }, (_, i) => runId(i)) }),
+    ).toBe(true);
+    for (const body of [
+      { runIds: [] },
+      { runIds: Array.from({ length: API_LIMITS.runsPerStop + 1 }, (_, i) => runId(i)) },
+      { runIds: [runId(1), runId(2), runId(1)] },
+      { runIds: ['not-a-run'] },
+      { runIds: [runId(1)], reason: 'done' },
+      { runIds: runId(1) },
+      {},
+    ]) {
+      expect(parse(body), JSON.stringify(body).slice(0, 80)).toBe(false);
+    }
+  });
+
+  it('refuses before anything is read: the scope, an empty list, a repeat, an id that is not one', async () => {
+    const forbidden = await stop(['contacts.read'], { runIds: [runId(1)] });
+    expect(isAppError(forbidden) && forbidden.code).toBe('forbidden');
+    const suspended = await apiStopManyAutomationRuns(
+      {} as never,
+      { ...ctx(['automations.start']), tenant: { id: 't', status: 'suspended' } } as ApiContext,
+      { runIds: [runId(1)] },
+    ).catch((caught: unknown) => caught);
+    expect(isAppError(suspended) && suspended.code).toBe('tenant_suspended');
+    for (const body of [
+      { runIds: [] },
+      { runIds: [runId(1), runId(1)] },
+      { runIds: [runId(1), 'x'] },
+    ]) {
+      const refused = await stop(['automations.start'], body);
+      expect(isAppError(refused) && refused.code, JSON.stringify(body)).toBe('validation_failed');
+    }
+  });
+
+  it('is described: all or none, in the order given, a retry safe without a key', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const op = (
+      doc.paths as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            description: string;
+            parameters?: unknown[];
+            requestBody: unknown;
+            responses: Record<string, { content?: unknown }>;
+          }
+        >
+      >
+    )['/automation-runs/stop-many']?.post;
+    expect(op?.operationId).toBe('stopManyAutomationRuns');
+    expect(op?.parameters).toBeUndefined();
+    expect(op?.requestBody).toEqual({
+      required: true,
+      content: {
+        'application/json': { schema: { $ref: '#/components/schemas/StopManyAutomationRuns' } },
+      },
+    });
+    expect(op?.responses['200']?.content).toEqual({
+      'application/json': {
+        schema: {
+          type: 'object',
+          properties: {
+            data: { type: 'array', items: { $ref: '#/components/schemas/AutomationRun' } },
+          },
+          required: ['data'],
+        },
+      },
+    });
+    expect(Object.keys(op?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '403', '422', '423']),
+    );
+    expect(Object.keys(op?.responses ?? {})).not.toContain('404');
+    for (const words of [
+      'Up to 100 runs keys of the company started',
+      'a run that has already ended is answered as it is',
+      'All of them or none',
+      '(422, naming the field, as `runIds.3`)',
+      'The runs are stopped in the order given and answered in it.',
+      'A call counts as one request',
+      'a retry is safe without an `Idempotency-Key`',
+    ]) {
+      expect(op?.description).toContain(words);
+    }
+    const body = (doc.components as { schemas: Record<string, Record<string, unknown>> }).schemas
+      .StopManyAutomationRuns as {
+      properties: { runIds: { minItems?: number; maxItems?: number } };
+      required: string[];
+      additionalProperties: boolean;
+    };
+    expect(body.required).toEqual(['runIds']);
+    expect(body.additionalProperties).toBe(false);
+    expect(body.properties.runIds.minItems).toBe(1);
+    expect(body.properties.runIds.maxItems).toBe(API_LIMITS.runsPerStop);
   });
 });

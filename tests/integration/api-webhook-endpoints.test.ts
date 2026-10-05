@@ -1707,18 +1707,179 @@ describe('replaying failed deliveries through the API (ADR-095)', () => {
       api().replayFailed(key.ctx, id, { since, events: ['nope'] }, idem('rf-11', 'nope')),
       'validation_failed',
     );
+    // Only the failures given (ADR-159): two more failed messages whose code says there was no valid
+    // answer, which says more than the 500 an earlier attempt left, so server errors leave them out.
+    await failedDeliveries(c, id, 2);
+    const servers = { since, failures: ['server_error'] };
+    expect(
+      (await api().replayFailed(key.ctx, id, servers, idem('rf-12', JSON.stringify(servers)))).body,
+    ).toEqual({ data: { queued: 0, more: false } });
+    const unanswered = {
+      since,
+      events: ['message.received'],
+      failures: ['no_answer', 'server_error'],
+    };
+    expect(
+      (await api().replayFailed(key.ctx, id, unanswered, idem('rf-13', JSON.stringify(unanswered))))
+        .body,
+    ).toEqual({ data: { queued: 2, more: false } });
+    const [kinds] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.deliveries_replayed'
+        ORDER BY occurred_at DESC, id DESC LIMIT 1`,
+      [c.tenant.id],
+    );
+    expect(kinds?.metadata).toEqual({
+      host: HOST,
+      since,
+      events: ['message.received'],
+      failures: ['server_error', 'no_answer'],
+      queued: 2,
+      more: false,
+      source: 'api',
+    });
+    await expectAppError(
+      api().replayFailed(key.ctx, id, { since, failures: ['timeouts'] }, idem('rf-14', 'timeouts')),
+      'validation_failed',
+    );
     await settings().setEnabled(owner, { endpointId: id, enabled: false });
     await expectAppError(
       api().replayFailed(key.ctx, id, { since }, idem('rf-8', since)),
       'precondition_failed',
     );
     // No refusal queued anything.
-    expect(await replays()).toHaveLength(4);
+    expect(await replays()).toHaveLength(6);
     expect(
       await fx.query(
         'SELECT 1 FROM app.webhook_deliveries WHERE endpoint_id = $1 AND replay_of IS NOT NULL',
         [members.id],
       ),
     ).toEqual([]);
+  });
+
+  it('replay the failed deliveries of every endpoint the key added that is on, once per Idempotency-Key, audited once per endpoint (ADR-160)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage'], 'Zap connector');
+    const add = async (name: string) =>
+      (await addThroughApi(key.ctx, name, { url: receiverUrl(), events: ['message.received'] }))
+        .body.data.id;
+    const first = await add('all-1');
+    const second = await add('all-2');
+    const off = await add('all-3');
+    const owner = await fx.ctx(c, c.owner);
+    // An endpoint a member added is never the key's to replay.
+    const members = await settings().create(owner, {
+      url: receiverUrl(),
+      eventTypes: ['message.received'],
+    });
+    await failedDeliveries(c, first, 2);
+    await failedDeliveries(c, second, 1);
+    await failedDeliveries(c, off, 1);
+    await failedDeliveries(c, members.id, 1);
+    await settings().setEnabled(owner, { endpointId: off, enabled: false });
+    const since = new Date(Date.now() - 3_600_000).toISOString();
+    const replayedAt = (endpointId: string) =>
+      fx.query<{ event_id: string }>(
+        'SELECT event_id FROM app.webhook_deliveries WHERE endpoint_id = $1 AND replay_of IS NOT NULL',
+        [endpointId],
+      );
+
+    const answer = await api().replayAllFailed(key.ctx, { since }, idem('ra-1', since));
+    expect(answer).toEqual({
+      status: 200,
+      replayed: false,
+      body: {
+        data: {
+          queued: 3,
+          more: false,
+          endpoints: [
+            { id: first, queued: 2, more: false },
+            { id: second, queued: 1, more: false },
+          ],
+        },
+      },
+    });
+    // The same key answers the same and queues nothing more.
+    expect(await api().replayAllFailed(key.ctx, { since }, idem('ra-1', since))).toEqual({
+      ...answer,
+      replayed: true,
+    });
+    expect(await replayedAt(first)).toHaveLength(2);
+    expect(await replayedAt(second)).toHaveLength(1);
+    expect(await replayedAt(off)).toEqual([]);
+    expect(await replayedAt(members.id)).toEqual([]);
+    const audit = await fx.query<{ subject_id: string; actor_type: string; metadata: unknown }>(
+      `SELECT subject_id, actor_type, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.deliveries_replayed' ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(audit).toEqual(
+      [
+        [first, 2],
+        [second, 1],
+      ].map(([subject, queued]) => ({
+        subject_id: subject,
+        actor_type: 'api_key',
+        metadata: { host: HOST, since, queued, more: false, allEndpoints: true, source: 'api' },
+      })),
+    );
+
+    // Of the events and failures given, as an endpoint's own replay takes them: another failed
+    // message whose code says there was no valid answer is left out of server errors.
+    await failedDeliveries(c, second, 1);
+    const servers = { since, events: ['message.received'], failures: ['server_error'] };
+    expect(
+      (await api().replayAllFailed(key.ctx, servers, idem('ra-2', JSON.stringify(servers)))).body,
+    ).toEqual({
+      data: {
+        queued: 0,
+        more: false,
+        endpoints: [
+          { id: first, queued: 0, more: false },
+          { id: second, queued: 0, more: false },
+        ],
+      },
+    });
+    const unanswered = { since, failures: ['no_answer'] };
+    expect(
+      (await api().replayAllFailed(key.ctx, unanswered, idem('ra-3', JSON.stringify(unanswered))))
+        .body,
+    ).toEqual({
+      data: {
+        queued: 1,
+        more: false,
+        endpoints: [
+          { id: first, queued: 0, more: false },
+          { id: second, queued: 1, more: false },
+        ],
+      },
+    });
+
+    // Refused: a time still to come, a kind not in the list, a key without the scope, and none of
+    // the key's endpoints on.
+    const future = new Date(Date.now() + 60_000).toISOString();
+    await expectAppError(
+      api().replayAllFailed(key.ctx, { since: future }, idem('ra-4', future)),
+      'validation_failed',
+      /in the past/,
+    );
+    await expectAppError(
+      api().replayAllFailed(key.ctx, { since, failures: ['timeouts'] }, idem('ra-5', 'timeouts')),
+      'validation_failed',
+    );
+    const reader = await apiKey(c, ['contacts.read']);
+    await expectAppError(
+      api().replayAllFailed(reader.ctx, { since }, idem('ra-6', since)),
+      'forbidden',
+    );
+    for (const id of [first, second]) {
+      await settings().setEnabled(owner, { endpointId: id, enabled: false });
+    }
+    await expectAppError(
+      api().replayAllFailed(key.ctx, { since }, idem('ra-7', since)),
+      'precondition_failed',
+    );
+    expect(await replayedAt(members.id)).toEqual([]);
+    expect(await replayedAt(off)).toEqual([]);
   });
 });

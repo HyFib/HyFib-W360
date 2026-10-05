@@ -1,5 +1,338 @@
 # Progress
 
+## 2026-10-05 — Phase 5: stopping many runs in one call (P5-08, ADR-162)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A key stopped one run
+per call. The local PostgreSQL is unavailable (its Docker daemon stopped), so the integration and
+e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-162):** `POST /automation-runs/stop-many` stops up to 100 runs keys started, each as
+  one stop does, all of them or none: an id that names no run a key of the company started refuses
+  the call, naming its place; the conversations are locked in id order in one statement, then each
+  run in the order given.
+- **Domain:** `api/automations.ts` (the single stop's step shared as `stopRunIfActive`, with
+  `startedByKey` and `lockConversations`; `apiStopManyAutomationRuns` and its schema);
+  `api/model.ts` (`API_LIMITS.runsPerStop`); `api/openapi.ts` (the operation,
+  `StopManyAutomationRuns`, the route list).
+- **Web:** the route `api/v1/automation-runs/stop-many`.
+- **Tests:**
+  - Unit (3 new in `api.test.ts`): the body takes 1 to 100 run ids, each once, and nothing else; the
+    scope and the company's status checked, and an empty list, a repeat and an id that is not one
+    refused, before anything is read; the operation, its body, its answer and its words.
+  - Integration (1 new in `api.test.ts`): an unknown id and another company's key refuse the call by
+    place and stop nothing; a waiting, a running, a stopped and a newer run in one call, in the
+    order given, each stopped with its step and an audit entry as the key, the stopped one answered
+    as it was; a retry answers the same and records nothing. Written for CI; not run here.
+  - E2E (`api.spec.ts` extended): two runs started in one call are stopped over HTTP in one call,
+    and the call answers the same again. Written for CI; not run here.
+- **Docs:** ADR-162; SECURITY (the automation rules); THREAT-MODEL T95; ARCHITECTURE; BACKLOG P5-08;
+  feature matrix H-033 and W-086.
+- **Mutation checks:** 15 tried, all caught on the unit-tested parts (the scope not checked, the
+  list without a minimum, a maximum, its once-each rule, its id format or its closed shape, the
+  limit raised, the route unlisted or answering another method, the operation's body, answer, words
+  and an unknown id described as 404). The read, the locks and the stops need the database, so their
+  regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 730 passed (75 files; 3 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 15 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Stopping every run of an automation, or of a contact, without listing them.
+
+## 2026-10-05 — Fix: the Onboarding tab's new companies without a number, and three new integration tests
+
+Status: **Fixed; the integration tests run in CI only (the local PostgreSQL is unavailable).** PR
+#31's first CI run (head `7b4e105`) failed three integration tests that were written for CI and had
+not run anywhere before: two of ADR-158 in `platform-ops.test.ts` and one of ADR-160 in
+`api-webhook-endpoints.test.ts`. One of them found a bug in the operations console that predates
+these slices.
+
+### Cause
+
+- **The Onboarding tab (ADR-054):** `companiesCreatedSince` decides whether each new company has an
+  active number, or one being set up, with a subquery in its select list. In a select from one
+  table, drizzle writes the columns inside SQL fields without their table, so
+  `c.tenant_id = ${tenants.id}` became `c.tenant_id = "id"`, which PostgreSQL reads as the number's
+  own id: no company ever had a number. The tab listed every company created in its window as
+  without a number, counted none as connected and never said a number was being set up, and its
+  export (ADR-158) copied the list. Confirmed by rendering the query with drizzle's `toSQL()` before
+  and after the fix.
+- **The Integrations export test (ADR-158)** checked that the shared `SECRET_TOKEN` appeared in none
+  of the tab's files, but other tests leave failed receipts whose last error names it, and the
+  receipts list shows each receipt's last error, as the tab does.
+- **The test of the API's replay of every endpoint (ADR-160)** compared the first answer without
+  `replayed: false`, which every idempotent answer carries.
+
+### Completed
+
+- `platform/ops.ts`: the subqueries name the company by its table (`${tenants}.id`), with a comment
+  saying why. No other select from one table puts a column of that table in a subquery of its select
+  list (a scan of `packages/domain`).
+- `platform-ops.test.ts`: the Onboarding export test adds a company whose only number is being set
+  up (listed, "Number being set up" Yes) and checks that the tab leaves out the company with an
+  active number; the Integrations export test uses markers of its own for the endpoint's URL token,
+  the message and the email address, and still checks that no endpoint URL's token, its own or
+  another test's, reaches the failures file.
+- `api-webhook-endpoints.test.ts`: the first answer is compared with `replayed: false`.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                                       | Result                                                        |
+| ------------------------------------------------------------- | ------------------------------------------------------------- |
+| The query rendered with drizzle's `toSQL()`, before and after | `c.tenant_id = "id"`, then `c.tenant_id = "app"."tenants".id` |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`            | clean                                                         |
+| `pnpm test` (unit)                                            | 727 passed (75 files)                                         |
+| `pnpm test:integration`                                       | not run here: the local PostgreSQL is unavailable; CI runs it |
+
+## 2026-10-05 — Phase 5: starting an automation for many contacts in one call (P5-08, ADR-161)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A key started an
+automation for one contact per call. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-161):** `POST /automations/{id}/runs/start-many` starts the automation for up to 50
+  contacts in the order given, the automation checked once and each start, with a start's own
+  checks, in a savepoint, so a start refused for its contact is answered in its place and changes
+  nothing while the others start; numbers that are not valid or given twice and inputs the
+  automation does not take refuse the call. 50, so the savepoints of the runs started stay within
+  the 64 subtransaction ids PostgreSQL caches per transaction; a call that deadlocks with a run
+  starting at the same moment for one of its contacts is refused as a whole (409), starting nothing.
+- **Domain:** `api/automations.ts` (a start of one run split into `loadApiAutomation`,
+  `inputVariables`, `sendingChannel` and `startRunFor`, which both calls share;
+  `apiStartManyAutomationRuns` and its schema); `api/model.ts` (`API_LIMITS.runsPerStart`);
+  `api/openapi.ts` (the operation, `StartManyAutomationRuns`, `AutomationRunStart`, the route list).
+- **Web:** the route `api/v1/automations/[id]/runs/start-many`.
+- **Tests:**
+  - Unit (3 new in `api.test.ts`): the body takes 1 to 50 starts and nothing else; the scope, the
+    id, an empty list, a number that is not valid and a number given twice refused before anything
+    is read, each named by its place; the operation, its body, its answer, its words and the 409 of
+    a collision.
+  - Integration (2 new in `api.test.ts`): one call answering each start in its place (started; on
+    the suppression list; opted out; another run handling the conversation; a member holding it),
+    the runs with their own inputs and contacts, no contact left for a refused start, the retry
+    answering the same and starting nothing; refused as a whole: a number given twice, inputs at
+    `runs.1.inputs` and a paused automation; the plan's runs used up in the middle of a call, the
+    rest refused without a contact, and a plan without automations refusing the call. Written for
+    CI; not run here.
+  - E2E (`api.spec.ts` extended, its time limit raised from 4 to 5 minutes): two contacts started
+    over HTTP in one call, its retry replayed, a busy contact answered in its place in a later call
+    while another starts, each template with its own inputs through the Graph stand-in. Written for
+    CI; not run here.
+- **Docs:** ADR-161; SECURITY (the automation rules); THREAT-MODEL T95; ARCHITECTURE; BACKLOG P5-08;
+  feature matrix H-033 and W-086 (whose note that stopping runs through the API was not built, stale
+  since ADR-079, is corrected).
+- **Mutation checks:** 20 tried, all caught on the unit-tested parts (the scope or the id not
+  checked, a repeat taken or not named, a bad number not named by its place, the list without a
+  minimum, a maximum or its closed shape, the limit raised, the route unlisted or answering another
+  method, the operation's body, answer, refusal codes and words, and the 409 of a collision left out
+  of its responses or its words). The savepoints, the refusals in place and the records need the
+  database, so their regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 727 passed (75 files; 3 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 20 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Stopping runs for many contacts in one call; starting many automations in one call. A collision
+  with a run starting at the same moment refuses the whole call (409) rather than the one start; the
+  integration tests do not provoke it.
+
+## 2026-10-05 — Phase 5: replaying the failed deliveries of every endpoint at once (P5-09, ADR-160)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A company whose
+endpoints all failed for the same reason replayed each endpoint in turn. The local PostgreSQL is
+unavailable (its Docker daemon stopped), so the integration and e2e tests below were written but not
+run here.
+
+### Completed
+
+- **Design (ADR-160):** one replay for every endpoint that is on, 500 across them in the order they
+  were added, the endpoints locked together first; "Replay failed deliveries" on Settings → Webhooks
+  and `POST /webhook-endpoints/replay-failed` for keys; audited once per endpoint.
+- **Domain:** `webhooks/service.ts` (an endpoint's replay is now one shared step,
+  `replayLockedEndpoint`, taking a limit; `replayFailedAcrossEndpoints`; the settings
+  `replayAllFailed`); `webhooks/model.ts` (`webhookReplayAllSummary`); `api/webhook-endpoints.ts`
+  (`replayAllFailed`); `api/openapi.ts` (the operation, `FailedReplayAcrossEndpoints`, the route
+  list).
+- **Web:** the route `api/v1/webhook-endpoints/replay-failed`; the replay form for every endpoint
+  (the events the endpoints that are on receive) on Settings → Webhooks, shown while one is on, and
+  its server action, which sends each endpoint back by its host only.
+- **Tests:**
+  - Unit (3 new, 1 extended in `api.test.ts` and `webhooks.test.ts`): the scope and a time still to
+    come refused before anything is read; the operation, its body, its answer and its words; the
+    summary by host, with an endpoint that queued nothing left out and more said.
+  - Integration (2 new in `webhooks.test.ts`, 1 new in `api-webhook-endpoints.test.ts`): the first
+    endpoint taking the whole batch while the second says it has more, then the second's events of
+    one event and one kind of failure; an endpoint that is off left out; one audit entry per
+    endpoint and call; refusals (a member without the permission, a period or a kind not in the
+    list, no endpoint on); a replay of every endpoint waiting for an endpoint's own and queuing each
+    event once; through the API, only the key's endpoints, once per Idempotency-Key, audited as the
+    key. Written for CI; not run here.
+  - E2E (`webhooks.spec.ts` extended): with no endpoint on, nothing is offered; a message that
+    failed while the receiver was down is sent again from the Webhooks page, with the same event id.
+    Written for CI; not run here.
+- **Docs:** ADR-160; SECURITY (the webhook rules); ARCHITECTURE; BACKLOG P5-09; feature matrix H-014
+  and W-139.
+- **Mutation checks:** 16 tried, all caught on the unit-tested parts (the scope or the time not
+  checked, the route unlisted or answering another method, the operation taking an id, its answer
+  without the endpoints, its words, the endpoints without a maximum or with the id last, and five in
+  the summary). The shared step, the locks, the audit and the form need the database, so their
+  regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 724 passed (75 files; 3 new, 1 extended)                        |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 16 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Replays across companies for staff, replays of a chosen list of endpoints.
+
+## 2026-10-05 — Phase 5: replaying an endpoint's failed deliveries by how they failed (P5-09, ADR-159)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A replay of an
+endpoint's failed deliveries sent the events a receiver had refused again with those it had missed.
+The local PostgreSQL is unavailable (its Docker daemon stopped), so the integration and e2e tests
+below were written but not run here.
+
+### Completed
+
+- **Design (ADR-159):** five kinds of failure by the latest failed delivery's code, else its status;
+  `failures` on `POST /webhook-endpoints/{id}/replay-failed` and a "Failures" choice in Settings →
+  Webhooks' replay form; the rest of ADR-095 and ADR-156 unchanged; the audit entry names the kinds.
+- **Domain:** `webhooks/model.ts` (`WEBHOOK_FAILURE_KINDS`, their labels,
+  `WEBHOOK_UNATTEMPTED_ERRORS`); `webhooks/service.ts` (`webhookFailureKindsSchema`;
+  `replayFailedWebhookDeliveries` takes `failures`, one more condition on the latest failed
+  delivery's code and status; the settings schema and audit); `api/webhook-endpoints.ts` (the body's
+  `failures`, described kind by kind, passed and audited); `api/openapi.ts` (the operation's
+  description).
+- **Web:** the replay form's "Failures" choice (every failure, or one kind) and its server action;
+  the endpoint page's description of its replay mentions the kinds of failure.
+- **Tests:**
+  - Unit (1 new and 2 extended in `api.test.ts`): the kinds kept once each in the list's order; an
+    empty list, an unknown kind and a string refused; the schema's properties, the field's kinds and
+    description, and the operation's description.
+  - Integration (1 new in `webhooks.test.ts`, 1 extended in `api-webhook-endpoints.test.ts`): each
+    kind replayed alone, at the edges of its statuses (500 and 599, 400 and 499, 101 and 302) and
+    with its codes (a timeout, a status that was not valid, an interrupted attempt after a 503, the
+    endpoint turned off after a 500, a request not prepared); an event whose earlier delivery was
+    answered 500 and whose latest got no answer counted by the latest, and its replay naming it; a
+    refused consent event left out when only messages are chosen; nothing left of the kinds
+    replayed; the audit names the kinds; unknown kinds and an empty list refused; through the API,
+    two messages whose code says more than their 500 left out of server errors and queued with no
+    valid answer, audited with the kinds. Written for CI; not run here.
+  - E2E (`webhooks.spec.ts` extended): the replay form lists every failure and the five kinds; the
+    endpoint's deliveries, answered 500 and then ended when it was turned off, are not server errors
+    (nothing queued) and come back as not attempted. Written for CI; not run here.
+- **Docs:** ADR-159; SECURITY (the webhook rules); ARCHITECTURE; BACKLOG P5-09; feature matrix H-014
+  and W-139.
+- **Mutation checks:** 8 tried, all caught on the unit-tested parts (an empty list accepted, a kind
+  missing from the list, kinds kept in the order given or twice, kinds reordered, the API field
+  renamed, a kind misnamed in its description, the operation not mentioning the kinds). The
+  service's condition, its audit and the form need the database, so their regressions are left to
+  the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 721 passed (75 files; 1 new, 2 extended)                        |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 8 tried, all caught on the unit-tested parts                    |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Replays by one status or error code, replays across endpoints.
+
+## 2026-10-05 — Phase 5: exporting the console's action lists (P5-10, ADR-158)
+
+Status: **Implemented; its database tests run in CI only (test data only).** The Onboarding,
+Integrations and Queues tabs' lists could be read on screen only. The local PostgreSQL is
+unavailable (its Docker daemon stopped), so the integration and e2e tests below were written but not
+run here.
+
+### Completed
+
+- **Design (ADR-158):** "Download CSV" on each list of the three tabs through ADR-155's audited
+  export, each export refused to anyone but a platform administrator before any read, without who
+  acknowledged or retried or the notes.
+- **Domain:** `platform/ops-model.ts` (nine CSV builders with their columns, `opsExportAction`,
+  `OPS_WINDOWS.emailDays`; the console's row types moved here from `ops.ts`, with `SignupProblem`,
+  `NumberSetupProblem`, `CompanyWithoutNumber`, `QuarantineEntry`, `EmailDeliveryCount` and
+  `DeadLetterLine`; the step and receipt problem labels moved here from the pages);
+  `platform/ops.ts` (one read per list, shared by the tabs and `exportFile`, now inside the service;
+  `exportList` checks the administrator first).
+- **Web:** `ListTitle` in `components/platform/ops.tsx` (a list's title with its named "Download
+  CSV" link) on the Onboarding, Integrations and Queues tabs' nine cards; Current failures and
+  Recent dead letters say what their CSVs leave out.
+- **Tests:**
+  - Unit (7 new in `ops-model.test.ts`): each file's header text; each list's lines with its words
+    and formula neutralisation; an acknowledgement by its time, without who or the note; receipts'
+    three retry states and a worker stopped during the last attempt; quarantine ids; a queue's wait
+    in whole minutes, none, unchecked and a clock ahead; each dead letter's fate and never who
+    retried; the audit actions within the audit log's pattern and the filenames.
+  - Integration (4 new in `platform-ops.test.ts`): each tab's lists exported equal to the CSV of the
+    tab's own read, with the seeded lines (a failed signup, a refused number registration, a company
+    without a number, an acknowledged failing endpoint labelled by its host, an exhausted receipt, a
+    quarantined event's ids, a refused email counted without its address, a retryable dead letter)
+    and one audit entry each; a non-administrator refused for all nine lists with no entry. Written
+    for CI; not run here.
+  - E2E (`platform-ops.spec.ts` extended): every download of the three tabs, the new company among
+    those without a number, the quarantined event's account id without its text, the queues with
+    their policies, and an acknowledged failure's line with its time but neither who nor the note.
+    Written for CI; not run here.
+- **Docs:** ADR-158; SECURITY (the console's row); THREAT-MODEL T75; ARCHITECTURE; BACKLOG P5-10;
+  feature matrix H-034.
+- **Mutation checks:** 60 tried, all caught by the unit tests (one, a column missing from a header,
+  survived the first run: the tests compared each header with the same constant; a test now pins
+  each file's header text). The service, the route and the pages need the database, so none were
+  tried there.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                                                                                                                                                               |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                                                                                                                                                |
+| `pnpm test` (unit)                                 | 720 passed (75 files; 7 new)                                                                                                                                                                         |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them                                                                                                                                      |
+| `pnpm build`                                       | passed                                                                                                                                                                                               |
+| Mutation checks                                    | 60 tried, all caught by the unit tests (one, a column missing from a header, survived the first run: the tests compared each header with the same constant; a test now pins each file's header text) |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                                                                                                                                                       |
+
+### Known gaps
+
+- Exports beyond the rows a tab lists, an export of the Keys tab, other formats, scheduled exports.
+
 ## 2026-10-05 — Phase 5: each company's usage against the window before (P5-10, ADR-157)
 
 Status: **Implemented; its database tests run in CI only (test data only).** The console's Usage tab

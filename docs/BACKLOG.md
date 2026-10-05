@@ -561,10 +561,20 @@ verification, app review, Embedded Signup configuration).
   shows the OpenAPI document the API serves, each operation, webhook event and schema once, with
   named types, limits, allowed values and defaults, the fields inside fields and the shapes of
   unions, as text; linked from Settings → API keys and Settings → Webhooks).
+  **[Starting an automation for many contacts built; its database tests run only in CI]** (ADR-161:
+  `POST /automations/{id}/runs/start-many` starts an automation for up to 50 contacts, each with its
+  own inputs, in the order given, each start with a start's checks in a savepoint, so a start
+  refused for its contact is answered in its place and changes nothing while the others start;
+  numbers that are not valid or given twice and inputs the automation does not take refuse the
+  call).
+  **[Stopping many runs built; its database tests run only in CI]** (ADR-162:
+  `POST /automation-runs/stop-many` stops up to 100 runs keys started, each as one stop does, all of
+  them or none: an id that names no run a key of the company started refuses the call, naming its
+  place; the conversations are locked in id order).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   choosing conversations to change by a filter, media downloads, a contact card's contacts (Meta's
-  contact object is not confirmed), starting or stopping runs for many
-  contacts in one call, bulk sends in one call, changing a field's type, changing numbers, choosing
+  contact object is not confirmed), bulk sends in one call, changing a field's type, changing
+  numbers, choosing
   contacts to change by a filter, groups of conditions,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
   resuming, approving, scheduling, creating and editing campaigns through the API, campaign
@@ -646,12 +656,18 @@ verification, app review, Embedded Signup configuration).
   the API, or every end as before; applied where events are captured, with the automations it
   names). **[Replays by event type built; their database tests run only in CI]** (ADR-156: an
   endpoint's failed deliveries replayed for the events chosen only, `events` through the API or one
-  of the endpoint's events in Settings, audited with them). Remaining: filters for other event types
-  and on a message's or contact's values (such as by campaign, template, tag or field key, or a
-  run's trigger or end reason), which tags were added or removed, other authentication (OAuth client
-  credentials, headers computed per delivery), mutual TLS, fixed egress addresses, events for store
-  orders, Payment Links and each step of a run, `createdAt` finer than the millisecond, replays
-  across endpoints, load tests.
+  of the endpoint's events in Settings, audited with them). **[Replays by how deliveries failed
+  built; their database tests run only in CI]** (ADR-159: only the events whose latest failed
+  delivery was answered with a server error, refused, answered otherwise, not validly answered or
+  not attempted, as chosen, `failures` through the API or one kind in Settings, audited with them).
+  **[Replays of every endpoint built; their database tests run only in CI]** (ADR-160: one replay
+  for every endpoint that is on, 500 across them in the order they were added, in Settings or
+  `POST /webhook-endpoints/replay-failed` for the endpoints keys added, audited once per endpoint).
+  Remaining: filters for other event types and on a message's or contact's values (such as by
+  campaign, template, tag or field key, or a run's trigger or end reason), which tags were added or
+  removed, other authentication (OAuth client credentials, headers computed per delivery), mutual
+  TLS, fixed egress addresses, events for store orders, Payment Links and each step of a run,
+  `createdAt` finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,
@@ -691,10 +707,13 @@ verification, app review, Embedded Signup configuration).
   CSV" on the Overview for every company's health, worst first, and on the Signals tab, through one
   audited export for the console's lists). **[The window before on the Usage tab built; its database
   tests run only in CI]** (ADR-157: each company's sending and receipts in the 7 or 30 days before,
-  with the change, on screen and in the CSV; read in one snapshot). Remaining: other alert channels,
-  longer trends and charts, Meta's quality webhook (unconfirmed), exports of the action lists
-  (onboarding, integrations, queues), assigning failures and acknowledging the console's other
-  lists, paging and rollups for many companies.
+  with the change, on screen and in the CSV; read in one snapshot). **[Exports of the action lists
+  built; their database tests run only in CI]** (ADR-158: "Download CSV" on each list of the
+  Onboarding, Integrations and Queues tabs, as the tab reads it, each export audited and refused to
+  anyone but a platform administrator before any read; who acknowledged or retried and the notes
+  left out). Remaining: other alert channels, longer trends and charts, Meta's quality webhook
+  (unconfirmed), exports beyond the rows a tab lists, assigning failures and acknowledging the
+  console's other lists, paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

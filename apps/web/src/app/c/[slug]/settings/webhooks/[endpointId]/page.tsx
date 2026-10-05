@@ -64,7 +64,7 @@ export default async function WebhookEndpointPage({
             The latest 100{failedOnly ? ' failed' : ''} deliveries, newest first. A replay sends the
             same event again as a new delivery, with the same event id. Replaying failed deliveries
             sends every event whose deliveries all failed in the period again, or only those of one
-            event, 500 at a time.
+            event or whose last failure was of one kind, 500 at a time.
             {active ? '' : ' Turn the endpoint on to replay deliveries.'}
           </CardDescription>
         </CardHeader>

@@ -7,7 +7,6 @@ import {
   CardContent,
   CardDescription,
   CardHeader,
-  CardTitle,
   EmptyState,
   TBody,
   TD,
@@ -16,7 +15,7 @@ import {
   TR,
   Table,
 } from '@w360/ui';
-import { CompanyLink, Utc } from '@/components/platform/ops';
+import { CompanyLink, ListTitle, Utc } from '@/components/platform/ops';
 import { RetryDeadLetterForm } from '@/components/platform/ops-forms';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
@@ -55,7 +54,7 @@ export default async function OpsQueuesPage() {
     <div className="grid grid-cols-1 gap-6">
       <Card>
         <CardHeader>
-          <CardTitle>Job queues</CardTitle>
+          <ListTitle title="Job queues" list="queues" />
           <CardDescription>
             pg-boss&apos;s counts, which the worker refreshes about once a minute. Failed counts
             only the failed jobs pg-boss still keeps. Each queue&apos;s work is a row that the
@@ -139,7 +138,7 @@ export default async function OpsQueuesPage() {
       </Card>
       <Card>
         <CardHeader>
-          <CardTitle>Recent dead letters</CardTitle>
+          <ListTitle title="Recent dead letters" list="dead-letters" />
           <CardDescription>
             Jobs that failed all their retries. The company and reference show only when the
             job&apos;s signature verified; errors show only their name and code. pg-boss keeps the
@@ -152,7 +151,7 @@ export default async function OpsQueuesPage() {
             company starts it again (ADR-111). Until then, and for other queues such as
             template.submit, Retry sends a job back to its queue once, for one more attempt, with
             your reason in the platform audit log (ADR-108, RUNBOOKS §10P). If it fails again, it is
-            listed again.
+            listed again. The CSV gives when a job was retried, not by whom.
           </CardDescription>
         </CardHeader>
         <CardContent>

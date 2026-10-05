@@ -32,12 +32,14 @@ import {
   WEBHOOK_CONTACT_PARTS,
   WEBHOOK_CONVERSATION_STATUSES,
   WEBHOOK_EVENT_KEYS,
+  WEBHOOK_FAILURE_KINDS,
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_TEMPLATE_STATUSES,
+  WEBHOOK_UNATTEMPTED_ERRORS,
   webhookHost,
   webhookTakesAutomationRuns,
   type WebhookAutomationChoice,
@@ -45,6 +47,7 @@ import {
   type WebhookContactPart,
   type WebhookConversationStatus,
   type WebhookEndpointAutomation,
+  type WebhookFailureKind,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookRunEndStatus,
@@ -447,6 +450,12 @@ export const webhookEventTypesSchema = z
   .min(1, 'Choose at least one event')
   .transform((chosen) => WEBHOOK_EVENT_KEYS.filter((e) => chosen.includes(e)));
 
+/** How the failures to replay went (ADR-159): known kinds, at least one, once each in order. */
+export const webhookFailureKindsSchema = z
+  .array(z.enum(WEBHOOK_FAILURE_KINDS, { error: 'Choose failures from the list' }))
+  .min(1, 'Choose at least one kind of failure')
+  .transform((chosen) => WEBHOOK_FAILURE_KINDS.filter((k) => chosen.includes(k)));
+
 const endpointFields = z.object({
   url: z
     .string({ error: 'Enter the endpoint URL' })
@@ -562,13 +571,15 @@ const updateSchema = endpointFields
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
-const replayFailedSchema = endpointIdSchema.extend({
+const replayAllFailedSchema = z.object({
   period: z.enum(
     WEBHOOK_REPLAY_PERIODS.map((p) => p.key),
     { error: 'Choose a period from the list' },
   ),
   events: webhookEventTypesSchema.optional(),
+  failures: webhookFailureKindsSchema.optional(),
 });
+const replayFailedSchema = replayAllFailedSchema.extend(endpointIdSchema.shape);
 
 export interface WebhookEndpointView {
   id: string;
@@ -959,23 +970,114 @@ export interface WebhookFailedReplay {
  * queued included), deliveries that failed because what the event names no longer exists
  * (`event_gone`, which would fail again at once) and test events. The endpoint is locked first, so
  * calls at the same time queue each event once. With `keysOnly`, only endpoints keys added are found
- * (ADR-083); with `events`, only the failed deliveries of those events are replayed (ADR-156).
+ * (ADR-083); with `events`, only the failed deliveries of those events are replayed (ADR-156); with
+ * `failures`, only events whose latest failed delivery failed in one of those ways (ADR-159).
  */
 export async function replayFailedWebhookDeliveries(
   tx: Tx,
   tenantId: string,
   endpointId: string,
   since: Date,
-  options: { keysOnly?: boolean; events?: readonly WebhookEventType[] } = {},
+  options: {
+    keysOnly?: boolean;
+    events?: readonly WebhookEventType[];
+    failures?: readonly WebhookFailureKind[];
+  } = {},
 ): Promise<WebhookFailedReplay & { endpoint: LockedWebhookEndpoint }> {
   const endpoint = await lockWebhookEndpoint(tx, tenantId, endpointId, 'no key update', options);
   if (endpoint.state !== 'active') {
     throw new AppError('precondition_failed', 'Turn the endpoint on to replay deliveries.');
   }
+  const replayed = await replayLockedEndpoint(
+    tx,
+    tenantId,
+    endpointId,
+    since,
+    options,
+    WEBHOOK_LIMITS.replayBatch,
+  );
+  return { endpoint, ...replayed };
+}
+
+/** What a replay of every endpoint's failed deliveries queued (ADR-160). */
+export interface WebhookFailedReplayAcross extends WebhookFailedReplay {
+  /** Each endpoint that is on, in the order they were added, with what it queued. */
+  endpoints: (WebhookFailedReplay & { id: string; url: string })[];
+}
+
+/**
+ * Delivers again the failed deliveries of every endpoint that is on, each endpoint's chosen as its
+ * own replay chooses them (`replayFailedWebhookDeliveries`), at most `WEBHOOK_LIMITS.replayBatch`
+ * across them: endpoint by endpoint in the order they were added, each one's oldest event first
+ * (ADR-160). `more` says whether any endpoint has more. Every endpoint is locked, in that order,
+ * before any is read, so an endpoint's own replay at the same time queues each event once. Refused
+ * when no endpoint is on; with `keysOnly`, only the endpoints keys added are replayed (ADR-083).
+ */
+export async function replayFailedAcrossEndpoints(
+  tx: Tx,
+  tenantId: string,
+  since: Date,
+  options: {
+    keysOnly?: boolean;
+    events?: readonly WebhookEventType[];
+    failures?: readonly WebhookFailureKind[];
+  } = {},
+): Promise<WebhookFailedReplayAcross> {
+  const endpoints = await tx
+    .select({ id: webhookEndpoints.id, url: webhookEndpoints.url, state: webhookEndpoints.state })
+    .from(webhookEndpoints)
+    .where(
+      and(
+        eq(webhookEndpoints.tenantId, tenantId),
+        options.keysOnly ? isNotNull(webhookEndpoints.createdByApiKeyId) : undefined,
+      ),
+    )
+    .orderBy(asc(webhookEndpoints.createdAt), asc(webhookEndpoints.id))
+    .for('no key update');
+  const on = endpoints.filter((e) => e.state === 'active');
+  if (on.length === 0) {
+    throw new AppError('precondition_failed', 'Turn an endpoint on to replay deliveries.');
+  }
+  let left: number = WEBHOOK_LIMITS.replayBatch;
+  const replayed: WebhookFailedReplayAcross['endpoints'] = [];
+  for (const endpoint of on) {
+    // Once the batch is used up, a limit of 0 only finds whether this endpoint has more.
+    const result = await replayLockedEndpoint(tx, tenantId, endpoint.id, since, options, left);
+    left -= result.queued;
+    replayed.push({ id: endpoint.id, url: endpoint.url, ...result });
+  }
+  return {
+    queued: WEBHOOK_LIMITS.replayBatch - left,
+    more: replayed.some((e) => e.more),
+    endpoints: replayed,
+  };
+}
+
+/**
+ * The failed deliveries of an endpoint the caller locked, replayed as `replayFailedWebhookDeliveries`
+ * describes, at most `limit` of them; with a limit of 0 nothing is queued and `more` says whether
+ * any remain.
+ */
+async function replayLockedEndpoint(
+  tx: Tx,
+  tenantId: string,
+  endpointId: string,
+  since: Date,
+  options: { events?: readonly WebhookEventType[]; failures?: readonly WebhookFailureKind[] },
+  limit: number,
+): Promise<WebhookFailedReplay> {
+  // How the latest failed delivery's last attempt went (WEBHOOK_FAILURE_KINDS): a code says more
+  // than a status an earlier attempt left. A failed delivery has one or the other; a 2xx succeeds.
+  const failureKind = sql`case
+    when f.last_error = any(${sql.param([...WEBHOOK_UNATTEMPTED_ERRORS])}::text[]) then 'not_attempted'
+    when f.last_error is not null then 'no_answer'
+    when f.last_status_code between 500 and 599 then 'server_error'
+    when f.last_status_code between 400 and 499 then 'client_error'
+    when f.last_status_code is not null then 'other_answer' end`;
   const failed = await tx.execute<{ id: string; event_id: string }>(sql`
     select f.id, f.event_id
       from (
-        select distinct on (d.event_id) d.id, d.event_id, d.last_error
+        select distinct on (d.event_id) d.id, d.event_id, d.last_error, d.last_status_code
           from app.webhook_deliveries d
          where d.tenant_id = ${tenantId} and d.endpoint_id = ${endpointId}
            and d.state = 'failed' and d.created_at >= ${since.toISOString()}::timestamptz
@@ -985,13 +1087,14 @@ export async function replayFailedWebhookDeliveries(
      where f.last_error is distinct from 'event_gone'
        and e.type <> 'ping'
        and ${options.events ? sql`e.type = any(${sql.param([...options.events])}::text[])` : sql`true`}
+       and ${options.failures ? sql`${failureKind} = any(${sql.param([...options.failures])}::text[])` : sql`true`}
        and not exists (
          select 1 from app.webhook_deliveries o
           where o.tenant_id = ${tenantId} and o.event_id = f.event_id
             and o.endpoint_id = ${endpointId} and o.state <> 'failed')
      order by e.created_at, e.id
-     limit ${WEBHOOK_LIMITS.replayBatch + 1}`);
-  const replayed = failed.rows.slice(0, WEBHOOK_LIMITS.replayBatch);
+     limit ${limit + 1}`);
+  const replayed = failed.rows.slice(0, limit);
   if (replayed.length > 0) {
     await tx.insert(webhookDeliveries).values(
       replayed.map((row) => ({
@@ -1003,11 +1106,7 @@ export async function replayFailedWebhookDeliveries(
       })),
     );
   }
-  return {
-    endpoint,
-    queued: replayed.length,
-    more: failed.rows.length > WEBHOOK_LIMITS.replayBatch,
-  };
+  return { queued: replayed.length, more: failed.rows.length > limit };
 }
 
 /**
@@ -1501,12 +1600,13 @@ export function createWebhooksService(deps: {
       meta: RequestMeta = {},
     ): Promise<WebhookFailedReplay> {
       assertCan(ctx, 'developer.manage');
-      const { endpointId, period, events } = parseInput(replayFailedSchema, input);
+      const { endpointId, period, events, failures } = parseInput(replayFailedSchema, input);
       const hours = WEBHOOK_REPLAY_PERIODS.find((p) => p.key === period)?.hours ?? 1;
       const since = new Date(clock.now().getTime() - hours * 3_600_000);
       return db.run(ctx.scope, async (tx) => {
         const replayed = await replayFailedWebhookDeliveries(tx, ctx.tenant.id, endpointId, since, {
           events,
+          failures,
         });
         await recordAudit(
           tx,
@@ -1519,6 +1619,7 @@ export function createWebhooksService(deps: {
               host: webhookHost(replayed.endpoint.url),
               since: since.toISOString(),
               ...(events ? { events } : {}),
+              ...(failures ? { failures } : {}),
               queued: replayed.queued,
               more: replayed.more,
             },
@@ -1526,6 +1627,50 @@ export function createWebhooksService(deps: {
           meta,
         );
         return { queued: replayed.queued, more: replayed.more };
+      });
+    },
+
+    /**
+     * Delivers again the failed deliveries of every endpoint that is on from the chosen period, of
+     * the chosen events and failures, 500 at most per call across them (ADR-160). Audited once per
+     * endpoint replayed, as an endpoint's own replay is, marked as part of a replay of every one.
+     */
+    async replayAllFailed(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta = {},
+    ): Promise<WebhookFailedReplayAcross> {
+      assertCan(ctx, 'developer.manage');
+      const { period, events, failures } = parseInput(replayAllFailedSchema, input);
+      const hours = WEBHOOK_REPLAY_PERIODS.find((p) => p.key === period)?.hours ?? 1;
+      const since = new Date(clock.now().getTime() - hours * 3_600_000);
+      return db.run(ctx.scope, async (tx) => {
+        const replayed = await replayFailedAcrossEndpoints(tx, ctx.tenant.id, since, {
+          events,
+          failures,
+        });
+        for (const endpoint of replayed.endpoints) {
+          await recordAudit(
+            tx,
+            ctx,
+            {
+              action: 'webhook.deliveries_replayed',
+              subjectType: 'webhook_endpoint',
+              subjectId: endpoint.id,
+              metadata: {
+                host: webhookHost(endpoint.url),
+                since: since.toISOString(),
+                ...(events ? { events } : {}),
+                ...(failures ? { failures } : {}),
+                queued: endpoint.queued,
+                more: endpoint.more,
+                allEndpoints: true,
+              },
+            },
+            meta,
+          );
+        }
+        return replayed;
       });
     },
   };

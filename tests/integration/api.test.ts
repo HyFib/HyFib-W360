@@ -34,7 +34,9 @@ import {
   apiUpdateConversation,
   apiUpdateManyConversations,
   apiStartAutomationRun,
+  apiStartManyAutomationRuns,
   apiStopAutomationRun,
+  apiStopManyAutomationRuns,
   authenticateApiRequest,
   authenticateApiToken,
   botButtonId,
@@ -66,6 +68,7 @@ import {
   routeDueConversations,
   syncTemplates,
   type ApiAutomationRun,
+  type ApiAutomationRunStart,
   type ApiContext,
   type ApiConversation,
   type ApiKeyReminderDeps,
@@ -5461,6 +5464,222 @@ describe('automations started through the API (ADR-077)', () => {
     );
   });
 
+  it('start an automation for many contacts in one call, each start answered in its place and a refused one changing nothing (ADR-161)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const template = await approvedTemplate(c, appointmentReminder);
+    const flow = await publish(
+      owner,
+      'Reminder',
+      apiTrigger,
+      reminderFlow(template.id),
+      c.channelAccountId,
+    );
+    const { ctx } = await apiKey(c, ['automations.start', 'contacts.write']);
+    let n = 0;
+    const startMany = (runs: unknown[]) => {
+      n += 1;
+      return apiStartManyAutomationRuns(deps(), ctx, flow.id, { runs }, idem(`m-${n}`, `m-${n}`));
+    };
+    const runRows = () =>
+      fx.query<{ contact_id: string; variables: Record<string, string> }>(
+        `SELECT contact_id, variables FROM app.automation_runs
+          WHERE tenant_id = $1 ORDER BY started_at, id`,
+        [c.tenant.id],
+      );
+    const contactOf = async (phone: string) =>
+      (
+        await fx.query<{ id: string }>(
+          'SELECT id FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2',
+          [c.tenant.id, phone],
+        )
+      )[0]?.id ?? null;
+
+    // A contact on the suppression list, one who opted out, one another run handles and one whose
+    // conversation a member holds.
+    const consent = createConsentService({ db: fx.dbs.app, clock: systemClock });
+    await consent.addSuppression(owner, { phone: '+919811100091', reason: 'legal' });
+    const optedOut = await apiCreateContact(deps(), ctx, { phone: '+919811100092' }, null);
+    await apiRecordConsent(deps(), ctx, (optedOut.body.data as { id: string }).id, {
+      purpose: 'utility',
+      action: 'opt_out',
+      evidence: 'Asked us by email to stop reminders',
+    });
+    await apiStartAutomationRun(
+      deps(),
+      ctx,
+      flow.id,
+      { to: '+919811100093', inputs },
+      idem('busy', 'busy'),
+    );
+    await inbound(c, '919811100094', [{ text: 'Hello' }]);
+    const assigned = await conversationOf(c, '919811100094');
+    const agent = await fx.ctx(c, c.agent);
+    await inbox().assign(owner, {
+      conversationId: assigned.id,
+      membershipId: agent.membership.id,
+      expectedVersion: assigned.version,
+    });
+    const before = (await runRows()).length;
+
+    const patient = (name: string) => ({ patient: name, appointment_time: '5 pm today' });
+    const body = {
+      runs: [
+        { to: '+91 98111 00090', inputs: patient('Asha') },
+        { to: '+919811100091', inputs: patient('Ravi') },
+        { to: '+919811100092', inputs: patient('Meena') },
+        { to: '+919811100093', inputs: patient('Kiran') },
+        { to: '+919811100094', inputs: patient('Joseph') },
+        { to: '+919811100095', inputs: patient('Fatima') },
+      ],
+    };
+    const call = () =>
+      apiStartManyAutomationRuns(deps(), ctx, flow.id, body, idem('m-0', JSON.stringify(body)));
+    const answer = await call();
+    expect(answer.status).toBe(200);
+    const starts = (answer.body as { data: ApiAutomationRunStart[] }).data;
+    const started = (to: string) => ({
+      to,
+      run: expect.objectContaining({
+        automationId: flow.id,
+        channelId: c.channelAccountId,
+        status: 'running',
+        endReason: null,
+      }),
+      error: null,
+    });
+    expect(starts).toEqual([
+      started('+919811100090'),
+      {
+        to: '+919811100091',
+        run: null,
+        error: { code: 'precondition_failed', message: expect.stringMatching(/suppression list/) },
+      },
+      {
+        to: '+919811100092',
+        run: null,
+        error: { code: 'precondition_failed', message: expect.any(String) },
+      },
+      {
+        to: '+919811100093',
+        run: null,
+        error: { code: 'conflict', reason: 'automation_busy', message: expect.any(String) },
+      },
+      {
+        to: '+919811100094',
+        run: null,
+        error: { code: 'conflict', reason: 'conversation_assigned', message: expect.any(String) },
+      },
+      started('+919811100095'),
+    ]);
+    // Each run started is its contact's, with its own inputs; a refused start left no contact.
+    const rows = (await runRows()).slice(before);
+    expect(rows.map((r) => r.variables['input.patient'])).toEqual(['Asha', 'Fatima']);
+    expect(rows.map((r) => r.contact_id)).toEqual([
+      await contactOf('+919811100090'),
+      await contactOf('+919811100095'),
+    ]);
+    expect(starts[0]?.run?.contactId).toBe(await contactOf('+919811100090'));
+    expect(await contactOf('+919811100091')).toBeNull();
+    // A retry answers as the first call did and starts nothing more.
+    expect(await call()).toEqual({ ...answer, replayed: true });
+    expect(await runRows()).toHaveLength(before + 2);
+
+    // Refused as a whole, starting nothing: a number twice, inputs the automation does not take,
+    // and a paused automation.
+    await expectAppError(
+      startMany([
+        { to: '+919811100096', inputs },
+        { to: '+91 98111 00096', inputs },
+      ]),
+      'validation_failed',
+      /Give each number once/,
+    );
+    const badInputs = await expectAppError(
+      startMany([
+        { to: '+919811100096', inputs },
+        { to: '+919811100097', inputs: { patient: 'Ravi' } },
+      ]),
+      'validation_failed',
+      /appointment_time/,
+    );
+    expect(isAppError(badInputs) && badInputs.issues?.map((i) => i.path)).toEqual([
+      'runs.1.inputs',
+    ]);
+    await automationService().setAutomationStatus(owner, {
+      id: flow.id,
+      expectedVersion: flow.version,
+      status: 'paused',
+    });
+    await refusedWith(
+      startMany([{ to: '+919811100096', inputs }]),
+      'precondition_failed',
+      'automation_paused',
+    );
+    expect(await runRows()).toHaveLength(before + 2);
+    expect(await contactOf('+919811100096')).toBeNull();
+  });
+
+  it('start many until the plan has no runs left, refuse the rest without a trace, and refuse them all when the plan has no automations (ADR-161)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const template = await approvedTemplate(c, appointmentReminder);
+    const flow = await publish(
+      owner,
+      'Reminder',
+      apiTrigger,
+      reminderFlow(template.id),
+      c.channelAccountId,
+    );
+    const { ctx } = await apiKey(c, ['automations.start']);
+    await onPlan(c, { automationRunsMonthly: '2' });
+    const runs = ['+919811100180', '+919811100181', '+919811100182'].map((to) => ({
+      to,
+      inputs,
+    }));
+    const answer = await apiStartManyAutomationRuns(
+      deps(),
+      ctx,
+      flow.id,
+      { runs },
+      idem('pq-1', 'pq-1'),
+    );
+    const starts = (answer.body as { data: ApiAutomationRunStart[] }).data;
+    expect(starts.map((s) => (s.run ? 'started' : s.error?.reason))).toEqual([
+      'started',
+      'started',
+      'automation_quota',
+    ]);
+    expect(starts[2]).toEqual({
+      to: '+919811100182',
+      run: null,
+      error: {
+        code: 'precondition_failed',
+        reason: 'automation_quota',
+        message: "Your company's plan has no automation runs left this month.",
+      },
+    });
+    expect(
+      await fx.query('SELECT 1 FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2', [
+        c.tenant.id,
+        '+919811100182',
+      ]),
+    ).toHaveLength(0);
+    await onPlan(c, { modules: [] });
+    await refusedWith(
+      apiStartManyAutomationRuns(
+        deps(),
+        ctx,
+        flow.id,
+        { runs: [{ to: '+919811100183', inputs }] },
+        idem('pq-2', 'pq-2'),
+      ),
+      'forbidden',
+      'not_in_plan',
+      /does not include automations/,
+    );
+  });
+
   it('keep the key that started a run fixed, and clear the inputs when the contact is erased', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
@@ -5786,6 +6005,83 @@ describe('automations started through the API (ADR-077)', () => {
     );
     await expectAppError(apiStopAutomationRun(deps(), ctx, keywordRun!.id), 'not_found');
     expect((await runRow(keywordRun!.id)).status).toBe('running');
+  });
+
+  it('stop many runs keys started in one call, all of them or none, each as one stop does (ADR-162)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const template = await approvedTemplate(c, appointmentReminder);
+    const flow = await publish(
+      owner,
+      'Reminder',
+      apiTrigger,
+      reminderFlow(template.id),
+      c.channelAccountId,
+    );
+    const { ctx, id: keyId } = await apiKey(c, ['automations.start'], 'Booking system');
+    const start = async (to: string, key: string) =>
+      (await apiStartAutomationRun(deps(), ctx, flow.id, { to, inputs }, idem(key, key))).body
+        .data as ApiAutomationRun;
+    const stops = () =>
+      fx.query<{ subject_id: string; actor_id: string }>(
+        `SELECT subject_id, actor_id FROM app.audit_events
+          WHERE tenant_id = $1 AND action = 'automation.run_stopped' ORDER BY occurred_at, id`,
+        [c.tenant.id],
+      );
+    const lastStep = async (runId: string) =>
+      (
+        await fx.query<{ outcome: string; detail: string | null }>(
+          'SELECT outcome, detail FROM app.automation_run_steps WHERE run_id = $1 ORDER BY seq',
+          [runId],
+        )
+      ).at(-1);
+
+    // A run waiting for its template's answer, one still running, one stopped before, and a newer
+    // run in the stopped one's conversation.
+    const waiting = await start('+91 98111 00191', 'sm-1');
+    expect(await driveRun(c, waiting.id)).toBe('waiting');
+    const running = await start('+91 98111 00192', 'sm-2');
+    const ended = await start('+91 98111 00193', 'sm-3');
+    const endedAnswer = await apiStopAutomationRun(deps(), ctx, ended.id);
+    const newer = await start('+91 98111 00193', 'sm-4');
+    expect(newer.conversationId).toBe(ended.conversationId);
+
+    // All of them or none: an id that names no run a key of the company started refuses the call,
+    // naming its place, and nothing is stopped.
+    const refusedAt = async (promise: Promise<unknown>, path: string) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      expect(isAppError(error) && error.issues?.map((i) => i.path)).toEqual([path]);
+    };
+    await refusedAt(
+      apiStopManyAutomationRuns(deps(), ctx, { runIds: [waiting.id, uuidv7()] }),
+      'runIds.1',
+    );
+    const theirs = await apiKey(await fx.company(), ['automations.start']);
+    await refusedAt(
+      apiStopManyAutomationRuns(deps(), theirs.ctx, { runIds: [running.id] }),
+      'runIds.0',
+    );
+    expect((await runRow(waiting.id)).status).toBe('waiting');
+    expect((await runRow(running.id)).status).toBe('running');
+    const before = (await stops()).length;
+
+    const ids = [running.id, ended.id, newer.id, waiting.id];
+    const stopped = await apiStopManyAutomationRuns(deps(), ctx, { runIds: ids });
+    expect(stopped.map((r) => [r.id, r.status, r.endReason])).toEqual(
+      ids.map((id) => [id, 'stopped', 'stopped_by_api']),
+    );
+    // The run stopped before is answered as it was; the others are stopped by this call, in the
+    // order given, each with its step and an audit entry as the key.
+    expect(stopped[1]).toEqual(endedAnswer);
+    expect((await stops()).slice(before).map((e) => [e.subject_id, e.actor_id])).toEqual(
+      [running.id, newer.id, waiting.id].map((id) => [id, keyId]),
+    );
+    for (const id of [running.id, newer.id, waiting.id]) {
+      expect(await lastStep(id)).toEqual({ outcome: 'stopped', detail: 'stopped_by_api' });
+    }
+    // A retry answers the same and records nothing more.
+    expect(await apiStopManyAutomationRuns(deps(), ctx, { runIds: ids })).toEqual(stopped);
+    expect(await stops()).toHaveLength(before + 3);
   });
 });
 

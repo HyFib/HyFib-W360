@@ -1,25 +1,47 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEAD_LETTERS_CSV_COLUMNS,
+  EMAILS_CSV_COLUMNS,
+  FAILURES_CSV_COLUMNS,
   HEALTH_CSV_COLUMNS,
+  NEW_COMPANIES_CSV_COLUMNS,
+  NUMBER_SETUPS_CSV_COLUMNS,
+  OPS_EXPORT_LISTS,
   OPS_SIGNAL_RULES,
+  QUARANTINE_CSV_COLUMNS,
+  QUEUES_CSV_COLUMNS,
+  RECEIPTS_CSV_COLUMNS,
   SIGNALS_CSV_COLUMNS,
+  SIGNUPS_CSV_COLUMNS,
   USAGE_CSV_COLUMNS,
   byHealth,
+  deadLettersCsv,
+  emailsCsv,
+  failuresCsv,
   healthCsv,
   healthIssues,
   healthLevel,
   isOpsExportList,
+  newCompaniesCsv,
+  numberSetupsCsv,
   opsCsvFilename,
+  opsExportAction,
   qualityRank,
+  quarantineCsv,
   quarantineExternalIds,
+  queuesCsv,
+  receiptsCsv,
   signalFlags,
   signalsCsv,
+  signupsCsv,
   usageChange,
   usageCsv,
   type CompanyActivity,
   type CompanyHealth,
   type CompanyHealthFacts,
   type CompanyUsage,
+  type DeadLetterLine,
+  type QueueRow,
 } from './ops-model';
 
 const healthy: CompanyHealthFacts = {
@@ -371,6 +393,452 @@ describe('the health and signals lists as CSV (ADR-155)', () => {
     );
     expect(opsCsvFilename('signals', new Date('2026-10-05T00:00:00Z'), 7)).toBe(
       'hyfib-signals-7-days-2026-10-05.csv',
+    );
+  });
+});
+
+describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () => {
+  const at = (iso: string) => new Date(iso);
+  const lines = (csv: string) => {
+    expect(csv.startsWith('\uFEFF')).toBe(true);
+    return csv.slice(1).split('\r\n');
+  };
+
+  it('writes the Onboarding tab’s three lists as the tab shows them', () => {
+    expect(
+      lines(
+        signupsCsv([
+          {
+            sessionId: 's1',
+            tenantId: 't1',
+            tenantName: '=Acme',
+            tenantSlug: 'acme',
+            outcome: 'failed',
+            failureReason: 'Meta did not return a WhatsApp Business Account, try again.',
+            startedAt: at('2026-10-05T06:30:59Z'),
+            hasActiveNumber: false,
+          },
+          {
+            sessionId: 's2',
+            tenantId: 't2',
+            tenantName: 'Beta',
+            tenantSlug: 'beta',
+            outcome: 'abandoned',
+            failureReason: null,
+            startedAt: at('2026-10-04T23:05:00Z'),
+            hasActiveNumber: true,
+          },
+        ]),
+      ),
+    ).toEqual([
+      SIGNUPS_CSV_COLUMNS.join(','),
+      `'=Acme,acme,Failed,"Meta did not return a WhatsApp Business Account, try again.",2026-10-05 06:30,No`,
+      'Beta,beta,Abandoned,,2026-10-04 23:05,Yes',
+      '',
+    ]);
+    const setup = {
+      id: 'n1',
+      tenantId: 't1',
+      tenantName: 'Acme',
+      tenantSlug: 'acme',
+      phone: '+91 90000 22222',
+      phoneNumberId: '123',
+      status: 'failed',
+      step: 'register_number',
+      error: 'Meta refused the PIN.',
+      createdAt: at('2026-10-05T06:00:00Z'),
+      updatedAt: at('2026-10-05T07:00:00Z'),
+      stuck: false,
+    };
+    expect(
+      lines(
+        numberSetupsCsv([
+          setup,
+          {
+            ...setup,
+            tenantName: 'Beta',
+            tenantSlug: 'beta',
+            phone: null,
+            phoneNumberId: '1098765432',
+            status: 'onboarding',
+            step: 'mystery_step',
+            error: null,
+            updatedAt: at('2026-10-05T06:00:00Z'),
+            stuck: true,
+          },
+          { ...setup, phone: '+919000033333', step: null, error: 'Gone' },
+        ]),
+      ),
+    ).toEqual([
+      NUMBER_SETUPS_CSV_COLUMNS.join(','),
+      // A display number with spaces is not a plain E.164 number, so it is neutralised.
+      "Acme,acme,'+91 90000 22222,Failed,Registering the number,Meta refused the PIN.,2026-10-05 07:00",
+      'Beta,beta,1098765432,Stuck,mystery_step,,2026-10-05 06:00',
+      'Acme,acme,+919000033333,Failed,,Gone,2026-10-05 07:00',
+      '',
+    ]);
+    expect(
+      lines(
+        newCompaniesCsv([
+          {
+            id: 'c1',
+            name: 'New, Ltd',
+            slug: 'new',
+            status: 'active',
+            createdAt: at('2026-10-01T10:20:30Z'),
+            inProgress: true,
+          },
+          {
+            id: 'c2',
+            name: 'Quiet',
+            slug: 'quiet',
+            status: 'suspended',
+            createdAt: at('2026-09-30T00:00:00Z'),
+            inProgress: false,
+          },
+        ]),
+      ),
+    ).toEqual([
+      NEW_COMPANIES_CSV_COLUMNS.join(','),
+      '"New, Ltd",new,active,2026-10-01 10:20,Yes',
+      'Quiet,quiet,suspended,2026-09-30 00:00,No',
+      '',
+    ]);
+  });
+
+  it('writes current failures with an acknowledgement’s time but neither who made it nor the note', () => {
+    const failure = {
+      tenantId: 't1',
+      tenantName: 'Acme',
+      tenantSlug: 'acme',
+      source: 'webhook_endpoint',
+      subjectId: 'f1',
+      label: 'hooks.example.com',
+      state: 'failing',
+      error: null,
+      since: at('2026-10-05T05:00:00Z'),
+      acknowledgement: {
+        at: at('2026-10-05T06:15:00Z'),
+        byName: 'Priya Admin',
+        note: 'Called the shop; their server is down until noon.',
+      },
+    };
+    const csv = failuresCsv([
+      failure,
+      {
+        ...failure,
+        tenantName: 'Beta',
+        tenantSlug: 'beta',
+        source: 'whatsapp_number',
+        label: '+91 90000 11111',
+        state: 'needs_reconnect',
+        error: '-Meta rejected the stored token.',
+        since: null,
+        acknowledgement: null,
+      },
+      { ...failure, source: 'fax_line', label: null, state: 'jammed', error: 'Out of paper' },
+    ]);
+    expect(lines(csv)).toEqual([
+      FAILURES_CSV_COLUMNS.join(','),
+      'Acme,acme,Webhook endpoint,hooks.example.com,Failing,,2026-10-05 05:00,2026-10-05 06:15',
+      "Beta,beta,WhatsApp number,'+91 90000 11111,Needs reconnecting,'-Meta rejected the stored token.,,",
+      // A source or state without a label is written as stored.
+      'Acme,acme,fax_line,,jammed,Out of paper,2026-10-05 05:00,2026-10-05 06:15',
+      '',
+    ]);
+    expect(csv).not.toContain('Priya');
+    expect(csv).not.toContain('server is down');
+  });
+
+  it('writes receipts, quarantine entries and email counts as the Integrations tab words them', () => {
+    const receipt = {
+      id: 'r1',
+      provider: 'meta_whatsapp',
+      receivedAt: at('2026-10-05T01:02:03Z'),
+      status: 'failed',
+      attempts: 12,
+      lastError: 'boom, again',
+      problem: 'exhausted' as const,
+      retryable: true,
+      alertedAt: at('2026-10-05T01:30:00Z'),
+    };
+    expect(
+      lines(
+        receiptsCsv([
+          receipt,
+          {
+            ...receipt,
+            id: 'r2',
+            provider: 'razorpay',
+            receivedAt: at('2026-09-20T00:00:00Z'),
+            status: 'processing',
+            lastError: null,
+            retryable: false,
+            alertedAt: null,
+          },
+          {
+            ...receipt,
+            id: 'r3',
+            provider: 'shopify',
+            receivedAt: at('2026-10-05T07:00:00Z'),
+            status: 'processing',
+            attempts: 3,
+            lastError: null,
+            problem: 'waiting',
+            retryable: false,
+            alertedAt: null,
+          },
+        ]),
+      ),
+    ).toEqual([
+      RECEIPTS_CSV_COLUMNS.join(','),
+      '2026-10-05 01:02,r1,Meta (WhatsApp),Failed all attempts,12,"boom, again",2026-10-05 01:30,Can be retried',
+      '2026-09-20 00:00,r2,Razorpay,Failed all attempts: its worker stopped during the last one,12,,,Body erased',
+      '2026-10-05 07:00,r3,shopify,Still waiting,3,,,Retried by the sweep',
+      '',
+    ]);
+    expect(
+      lines(
+        quarantineCsv([
+          {
+            id: 'q1',
+            receiptId: 'r9',
+            provider: 'meta_whatsapp',
+            reason: 'unknown_asset',
+            externalIds: [
+              { key: 'waba', value: '8123' },
+              { key: 'phoneNumberId', value: '8456' },
+            ],
+            createdAt: at('2026-10-05T02:00:00Z'),
+            alertedAt: at('2026-10-05T02:15:00Z'),
+            retryable: true,
+          },
+          {
+            id: 'q2',
+            receiptId: 'r10',
+            provider: 'razorpay',
+            reason: 'mystery',
+            externalIds: [],
+            createdAt: at('2026-09-01T00:00:00Z'),
+            alertedAt: null,
+            retryable: false,
+          },
+        ]),
+      ),
+    ).toEqual([
+      QUARANTINE_CSV_COLUMNS.join(','),
+      '2026-10-05 02:00,r9,Meta (WhatsApp),Unknown account or number,waba: 8123; phoneNumberId: 8456,2026-10-05 02:15,Yes',
+      '2026-09-01 00:00,r10,Razorpay,mystery,,,No',
+      '',
+    ]);
+    expect(
+      lines(
+        emailsCsv([
+          { kind: 'invitation', failed: 2, stuck: 0 },
+          { kind: 'password_reset', failed: 0, stuck: 3 },
+        ]),
+      ),
+    ).toEqual([EMAILS_CSV_COLUMNS.join(','), 'invitation,2,0', 'password_reset,0,3', '']);
+  });
+
+  it('writes each queue’s policy, counts, wait in whole minutes and dead letters', () => {
+    const checkedAt = at('2026-10-05T07:05:30Z');
+    const store: QueueRow = {
+      name: 'commerce.store',
+      policy: { retryLimit: 5, hasDeadLetter: true, maxWaitMinutes: 60 },
+      counts: { name: 'commerce.store', ready: 4, deferred: 1, active: 2, failed: 3, total: 10 },
+      deadLetters: { last24h: 1, last7d: 2 },
+      wait: {
+        waiting: 4,
+        oldestWaitingSince: at('2026-10-05T05:00:00Z'),
+        oldestWaitMs: 125 * 60_000 + 59_999,
+        limitMinutes: 60,
+        lateSince: at('2026-10-05T06:00:00Z'),
+        alertedAt: at('2026-10-05T06:01:00Z'),
+        checkedAt,
+      },
+    };
+    const quiet: QueueRow = {
+      name: 'billing.auto-recharge',
+      policy: { retryLimit: 0, hasDeadLetter: false, maxWaitMinutes: 15 },
+      counts: {
+        name: 'billing.auto-recharge',
+        ready: 0,
+        deferred: 0,
+        active: 0,
+        failed: 0,
+        total: 0,
+      },
+      deadLetters: { last24h: 0, last7d: 0 },
+      wait: {
+        waiting: 0,
+        oldestWaitingSince: null,
+        oldestWaitMs: null,
+        limitMinutes: 15,
+        lateSince: null,
+        alertedAt: null,
+        checkedAt,
+      },
+    };
+    const gone: QueueRow = {
+      name: 'it.gone',
+      policy: null,
+      counts: null,
+      deadLetters: { last24h: 0, last7d: 1 },
+      wait: null,
+    };
+    // A wait the worker's clock put a few seconds in the future reads as none.
+    const skewed: QueueRow = {
+      ...store,
+      name: 'commerce.sync',
+      wait: { ...store.wait!, oldestWaitMs: -5_000, lateSince: null, alertedAt: null },
+    };
+    expect(lines(queuesCsv([store, quiet, gone, skewed]))).toEqual([
+      QUEUES_CSV_COLUMNS.join(','),
+      'commerce.store,Yes,5,Yes,60,Yes,4,1,2,3,125,2026-10-05 06:00,2026-10-05 06:01,2026-10-05 07:05,1,2',
+      'billing.auto-recharge,Yes,0,No,15,Yes,0,0,0,0,,,,2026-10-05 07:05,0,0',
+      'it.gone,No,,,,No,,,,,,,,,0,1',
+      'commerce.sync,Yes,5,Yes,60,Yes,4,1,2,3,0,,,2026-10-05 07:05,1,2',
+      '',
+    ]);
+  });
+
+  it('writes dead letters with what became of each job, and never who retried it', () => {
+    const letter: DeadLetterLine = {
+      id: 'd1',
+      sourceQueue: 'template.submit',
+      failedAt: at('2026-10-05T03:00:00Z'),
+      verified: true,
+      tenantId: 't1',
+      tenantName: 'Acme',
+      tenantSlug: 'acme',
+      ref: 'tpl-1',
+      errorName: 'AppError',
+      errorCode: 'provider_rejected',
+      retries: 5,
+      alertedAt: at('2026-10-05T03:10:00Z'),
+      retriedAt: at('2026-10-05T04:00:00Z'),
+      retriedByName: 'Priya Admin',
+      settledAt: null,
+      settledEnded: null,
+      retryable: false,
+      retryableUntil: at('2026-10-08T03:00:00Z'),
+      retryBlock: 'retried',
+    };
+    const fresh = {
+      ...letter,
+      retriedAt: null,
+      retriedByName: null,
+      alertedAt: null,
+    };
+    const csv = deadLettersCsv([
+      letter,
+      {
+        ...fresh,
+        id: 'd2',
+        settledAt: at('2026-10-05T03:01:00Z'),
+        settledEnded: true,
+        retryBlock: 'settled',
+      },
+      {
+        ...fresh,
+        id: 'd3',
+        settledAt: at('2026-10-05T03:01:00Z'),
+        settledEnded: false,
+        retryBlock: 'settled',
+      },
+      {
+        ...fresh,
+        id: 'd4',
+        retryable: true,
+        retryBlock: null,
+        retryableUntil: at('2026-10-06T03:00:00Z'),
+      },
+      {
+        ...fresh,
+        id: 'd5',
+        verified: false,
+        tenantId: null,
+        tenantName: null,
+        tenantSlug: null,
+        ref: null,
+        errorName: null,
+        errorCode: null,
+        retries: null,
+        retryBlock: 'unverified',
+      },
+      { ...fresh, id: 'd6', tenantId: null, tenantName: null, tenantSlug: null, retryBlock: null },
+    ]);
+    expect(lines(csv)).toEqual([
+      DEAD_LETTERS_CSV_COLUMNS.join(','),
+      '2026-10-05 03:00,d1,template.submit,Yes,Acme,acme,tpl-1,AppError,provider_rejected,5,2026-10-05 03:10,2026-10-05 04:00,,Retried,',
+      '2026-10-05 03:00,d2,template.submit,Yes,Acme,acme,tpl-1,AppError,provider_rejected,5,,,2026-10-05 03:01,"Work ended for its company, which can start it again",',
+      '2026-10-05 03:00,d3,template.submit,Yes,Acme,acme,tpl-1,AppError,provider_rejected,5,,,2026-10-05 03:01,Nothing left to end: the work had finished or was started again,',
+      '2026-10-05 03:00,d4,template.submit,Yes,Acme,acme,tpl-1,AppError,provider_rejected,5,,,,Can be retried,2026-10-06 03:00',
+      '2026-10-05 03:00,d5,template.submit,No,,,,,,,,,,"Its signature did not verify, so the worker would refuse it again",',
+      // A platform job without a company, and nothing the console says about its retry.
+      '2026-10-05 03:00,d6,template.submit,Yes,,,tpl-1,AppError,provider_rejected,5,,,,,',
+      '',
+    ]);
+    expect(csv).not.toContain('Priya');
+  });
+
+  it('heads each file with its columns, one for each value of a line', () => {
+    expect(
+      [
+        SIGNUPS_CSV_COLUMNS,
+        NUMBER_SETUPS_CSV_COLUMNS,
+        NEW_COMPANIES_CSV_COLUMNS,
+        FAILURES_CSV_COLUMNS,
+        RECEIPTS_CSV_COLUMNS,
+        QUARANTINE_CSV_COLUMNS,
+        EMAILS_CSV_COLUMNS,
+        QUEUES_CSV_COLUMNS,
+        DEAD_LETTERS_CSV_COLUMNS,
+      ].map((columns) => columns.join(',')),
+    ).toEqual([
+      'Company,Address,Outcome,Reason,Started (UTC),Active number now',
+      'Company,Address,Number,State,Step,Error,Since (UTC)',
+      'Company,Address,Status,Created (UTC),Number being set up',
+      'Company,Address,What,Label,State,Error,Since (UTC),Acknowledged (UTC)',
+      'Received (UTC),Receipt,From,Problem,Attempts,Last error,Staff emailed (UTC),Retry',
+      'Quarantined (UTC),Receipt,From,Reason,Provider ids,Staff emailed (UTC),Receipt can be retried',
+      'Kind,Failed,Waiting',
+      'Queue,Declared by this release,Retries,Dead-lettered after its retries,Wait limit (minutes),' +
+        'In the database,Ready,Deferred,Active,Failed,Oldest wait (minutes),Late since (UTC),' +
+        'Staff emailed (UTC),Waits checked (UTC),Dead letters (24 hours),Dead letters (7 days)',
+      'Failed (UTC),Dead letter,Queue,Signature verified,Company,Address,Reference,Error,' +
+        'Error code,Retries,Staff emailed (UTC),Retried (UTC),Work settled (UTC),Retry,' +
+        'Can be retried until (UTC)',
+    ]);
+  });
+
+  it('names each list’s audit action and file, all within the audit log’s action pattern', () => {
+    expect(OPS_EXPORT_LISTS.every(isOpsExportList)).toBe(true);
+    expect(['dead_letters', 'onboarding', 'keys'].some(isOpsExportList)).toBe(false);
+    expect(OPS_EXPORT_LISTS.map(opsExportAction)).toEqual([
+      'platform.ops_usage_exported',
+      'platform.ops_health_exported',
+      'platform.ops_signals_exported',
+      'platform.ops_signups_exported',
+      'platform.ops_number_setups_exported',
+      'platform.ops_new_companies_exported',
+      'platform.ops_failures_exported',
+      'platform.ops_receipts_exported',
+      'platform.ops_quarantine_exported',
+      'platform.ops_emails_exported',
+      'platform.ops_queues_exported',
+      'platform.ops_dead_letters_exported',
+    ]);
+    // ops.platform_audit_events checks every action against this pattern.
+    for (const list of OPS_EXPORT_LISTS) {
+      expect(opsExportAction(list)).toMatch(/^[a-z][a-z0-9_.]{2,99}$/);
+    }
+    expect(opsCsvFilename('dead-letters', at('2026-10-05T23:59:59Z'))).toBe(
+      'hyfib-dead-letters-2026-10-05.csv',
+    );
+    expect(opsCsvFilename('signups', at('2026-10-05T00:00:00Z'), 30)).toBe(
+      'hyfib-signups-30-days-2026-10-05.csv',
     );
   });
 });
