@@ -278,6 +278,18 @@ export const contactUpdatedPayloadSchema = envelope(
       .describe(
         'What the change changed, sorted, once each: `name`, `phone`, `email`, `tags` (a tag added or removed), and `fields.<key>` for each custom field whose value changed (GET /contact-fields). Names only: the contact carries the values as they are now. Null for an event captured before HyFib recorded what changed.',
       ),
+    tagsAdded: z
+      .array(z.string())
+      .nullable()
+      .describe(
+        'The tags the change added, sorted, as the contact lists them; empty when it added none. A tag added and removed again in the same change is in neither list. Null for an event captured before HyFib recorded tags, and once the contact is erased.',
+      ),
+    tagsRemoved: z
+      .array(z.string())
+      .nullable()
+      .describe(
+        'The tags the change removed, sorted, as the contact listed them; empty when it removed none. Null for an event captured before HyFib recorded tags, and once the contact is erased.',
+      ),
   }),
 );
 export const contactErasedPayloadSchema = envelope(
@@ -466,7 +478,10 @@ export const pingPayloadSchema = envelope(
 
 export type WebhookPayload = { id: string; type: string; createdAt: string; data: unknown };
 
-/** The event as stored (ids and non-personal facts). */
+/**
+ * The event as stored: ids and non-personal facts, and the tags a contact change added and removed,
+ * which erasing the contact clears (ADR-182).
+ */
 export interface StoredWebhookEvent {
   id: string;
   tenantId: string;
@@ -479,6 +494,9 @@ export interface StoredWebhookEvent {
   detail: Record<string, unknown>;
   /** What a contact.updated event's transaction changed (ADR-121); null for other events. */
   contactChanges: string[] | null;
+  /** The tags a contact.updated event's transaction added and removed (ADR-182). */
+  tagsAdded: string[] | null;
+  tagsRemoved: string[] | null;
   occurredAt: Date;
 }
 
@@ -904,9 +922,18 @@ export async function buildWebhookPayload(
     case 'contact.erased': {
       const contact = await webhookContactOf(tx, tenantId, event.contactId);
       if (!contact) throw new WebhookEventGoneError();
-      // What changed as captured (ADR-121); the contact as it is now.
+      // What changed and the tags as captured (ADR-121, ADR-182), none of an erased contact; the
+      // contact as it is now.
       return event.type === 'contact.updated'
-        ? { ...base, data: { contact, changes: event.contactChanges } }
+        ? {
+            ...base,
+            data: {
+              contact,
+              changes: event.contactChanges,
+              tagsAdded: contact.erased ? null : event.tagsAdded,
+              tagsRemoved: contact.erased ? null : event.tagsRemoved,
+            },
+          }
         : { ...base, data: { contact } };
     }
     case 'automation.run_started':

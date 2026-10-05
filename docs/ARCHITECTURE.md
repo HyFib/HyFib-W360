@@ -1325,10 +1325,10 @@ true`); the same key with another request (method, path and body hashed) answers
   `app.conversations` (`conversation.status_changed` with the status before;
   `conversation.assignment_changed` for every change of the member and, since 0070 (ADR-094),
   `conversation.team_changed` for every change of the team, each with the ids before and after and
-  stamped with the time it is captured), `app.contacts` (`contact.created`; `contact.updated` for the name, number or email,
-  and since 0090 (ADR-112) for a value of one of the company's custom fields, compared by key so
-  that a field's deletion captures nothing; `contact.erased`) and `app.contact_tags`
-  (`contact.updated`). Contact events go through
+  stamped with the time it is captured), `app.contacts` (`contact.created`; `contact.updated` for
+  the name, number or email, and since 0090 (ADR-112) for a value of one of the company's custom
+  fields, compared by key so that a field's deletion captures nothing; `contact.erased`) and
+  `app.contact_tags` (`contact.updated`). Contact events go through
   `app.capture_contact_webhook_event`: `contact.created` and `contact.updated` are captured when an
   active endpoint takes either, once per contact and top-level transaction (`captured_xact`, found
   by a partial index built concurrently), and `contact.erased` first deletes what its own
@@ -1339,11 +1339,15 @@ true`); the same key with another request (method, path and body hashed) answers
   updates only an event its caller's transaction captured. Since 0098 (ADR-123) a `contact.updated`
   delivery is created only for an endpoint whose `contact_parts` is null or holds a part the change
   names (`fields` for any `fields.<key>`), and a later change in the transaction queues the
-  endpoints it newly concerns. Their payloads are built when
-  delivered: conversation events as the message events are, contact events with the API's contact
-  (`api/contact-view.ts`, shared with the public API) and `erased`, an erased contact keeping its
-  id, source and creation time only, and `contact.updated` with `changes` (null for events captured
-  before 0096).
+  endpoints it newly concerns. Since 0129 (ADR-182) the event also keeps `tags_added` and
+  `tags_removed`, noted by the tag trigger through `app.note_contact_webhook_tag`, a definer
+  function that changes only its caller's transaction's event and nets a tag added and removed
+  again, and `contact.erased` clears both from the contact's other events. Their payloads are built
+  when delivered: conversation events as the message events are, contact events with the API's
+  contact (`api/contact-view.ts`, shared with the public API) and `erased`, an erased contact
+  keeping its id, source and creation time only, and `contact.updated` with `changes` (null for
+  events captured before 0096) and `tagsAdded` and `tagsRemoved` (null before 0129 and for an erased
+  contact).
 - **Automation run events** (migrations 0055–0056, ADR-078): triggers on `app.automation_runs`
   capture `automation.run_started` when a live run is inserted and `automation.run_ended` when one
   moves from running or waiting to an ended status, through `app.capture_webhook_event` (the run and

@@ -288,6 +288,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    neither show nor change the column: until the web rollout ends, an old server's change that drops
    every message and conversation event from an endpoint with a list fails on the check, and its
    other changes keep it.
+   Migration 0129 (ADR-182) adds two nullable columns to `app.webhook_events` with a check added
+   `NOT VALID` (no rewrite and no table read, so captures wait for its lock only briefly) and a
+   definer function, and replaces the contact capture and tag trigger functions, which record the
+   tags from then on; 0130 validates the check while captures go on. Workers from before it deliver
+   `contact.updated` without the tag lists until the worker rollout ends; rolling workers back to an
+   image from before it does the same, and the recorded lists stay for later deliveries and replays
+   (an erasure clears them whatever the image).
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

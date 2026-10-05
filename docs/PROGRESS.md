@@ -1,5 +1,52 @@
 # Progress
 
+## 2026-10-05 — Phase 5: naming the tags a contact.updated added and removed (P5-09, ADR-182)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers only).** A
+`contact.updated` said that tags changed, not which. The local PostgreSQL is unavailable (its Docker
+daemon stopped), so migrations 0129 and 0130, the integration tests and the changed e2e test below
+were written but not run here.
+
+### Completed
+
+- **Design (ADR-182):** `tagsAdded` and `tagsRemoved` on `contact.updated`, sorted and net within
+  the change, empty when no tag changed, null for older events and an erased contact; the one
+  exception to events holding no personal data, cleared when the contact is erased.
+- **Database:** migration 0129 (the two columns and their check, `app.note_contact_webhook_tag`, the
+  capture and tag trigger functions) and 0130 (validating the check); the schema's columns
+  (`packages/db`).
+- **Domain:** the stored event and its read in delivery; the payload schema and builder (none for an
+  erased contact); the event description; the OpenAPI document follows the schema.
+- **Tests:**
+  - Unit (2 new, 3 changed in `webhooks.test.ts`): the payload schema and the OpenAPI entries.
+  - Integration (3 new in `webhook-events.test.ts`): netting, delivery, erasure, the company role
+    and the check. Written for CI; not run here.
+  - E2E (1 changed in `webhook-events.spec.ts`): a member's tags named, and none for a change of
+    name and email. Written for CI; not run here.
+- **Docs:** ADR-182 (and ADR-053's and ADR-121's text annotated); SECURITY; ARCHITECTURE;
+  THREAT-MODEL T176; DEPLOYMENT and RUNBOOKS (migrations 0129 and 0130, which tags a change named);
+  DATA-RETENTION; BACKLOG P5-09; feature matrix H-014 and W-138.
+- **Mutation checks:** 8 deliberate regressions tried, all caught on the unit-tested parts (null
+  refused, any value taken, either list left out, the netting and the erasure unsaid, the event
+  description). The capture, the netting and erasure need the database, so their regressions are
+  left to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                                | Result                                                              |
+| ------------------------------------------------------ | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`     | clean                                                               |
+| `pnpm test` (unit)                                     | 815 passed (82 files)                                               |
+| `pnpm test:integration`, e2e, migrations 0129 and 0130 | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                           | passed                                                              |
+| Mutation checks                                        | 8 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes                  | no leaks found                                                      |
+
+### Known gaps
+
+- The tags in `GET /contact-changes`; the values other parts had before a change; endpoints for
+  chosen tags.
+
 ## 2026-10-05 — Phase 5: choosing the members whose assigned conversations' events a webhook endpoint receives (P5-09, ADR-181)
 
 Status: **Implemented; its database and browser tests run in CI only (test receivers only).** An

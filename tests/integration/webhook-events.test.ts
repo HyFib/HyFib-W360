@@ -1251,6 +1251,198 @@ describe('contact part filters (ADR-123)', () => {
   });
 });
 
+describe('contact tag changes (ADR-182)', () => {
+  /** The company's contact events, oldest first: type, what changed and the tags it listed. */
+  const tagsOf = async (c: Company) =>
+    (
+      await fx.query<{
+        id: string;
+        type: string;
+        changes: string[] | null;
+        added: string[] | null;
+        removed: string[] | null;
+      }>(
+        `SELECT id, type, contact_changes AS changes, tags_added AS added, tags_removed AS removed
+           FROM app.webhook_events
+          WHERE tenant_id = $1 AND type LIKE 'contact.%' ORDER BY created_at, id`,
+        [c.tenant.id],
+      )
+    ).map((e) => ({ ...e, row: [e.type, e.changes, e.added, e.removed] }));
+
+  it('keep the tags each change added and removed, sorted and net within its transaction, empty for a change of no tag, and none for a contact added with its tags', async () => {
+    const c = await fx.company();
+    const endpoint = await addEndpoint(c, ['contact.created', 'contact.updated']);
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    // Added with a tag: one contact.created, which lists no tags.
+    const { id: contactId } = await service.createContact(owner, {
+      displayName: 'Hema',
+      phone: '+919811100091',
+      tags: ['trial'],
+    });
+    await service.addTags(owner, contactId, ['vip', 'north']);
+    await service.removeTag(owner, contactId, 'trial');
+    await service.updateContact(owner, contactId, { displayName: 'Hema K' });
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    const addTag = (tag: string) =>
+      sql`insert into app.contact_tags (id, tenant_id, contact_id, tag)
+        values (gen_random_uuid(), ${c.tenant.id}::uuid, ${contactId}::uuid, ${tag})`;
+    const removeTag = (tag: string) =>
+      sql`delete from app.contact_tags where contact_id = ${contactId}::uuid and tag = ${tag}`;
+    // One transaction: a tag added and removed again, one removed and added back, one removed and
+    // one added. Only the last two are listed.
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(addTag('gold'));
+      await tx.execute(removeTag('gold'));
+      await tx.execute(removeTag('vip'));
+      await tx.execute(addTag('vip'));
+      await tx.execute(removeTag('north'));
+      await tx.execute(addTag('south'));
+    });
+    // A change of tags that undoes itself is still a change of tags, with both lists empty.
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(addTag('gold'));
+      await tx.execute(removeTag('gold'));
+    });
+    const events = await tagsOf(c);
+    expect(events.map((e) => e.row)).toEqual([
+      ['contact.created', null, null, null],
+      ['contact.updated', ['tags'], ['north', 'vip'], []],
+      ['contact.updated', ['tags'], [], ['trial']],
+      ['contact.updated', ['name'], [], []],
+      ['contact.updated', ['tags'], ['south'], ['north']],
+      ['contact.updated', ['tags'], [], []],
+    ]);
+
+    // Each update is delivered with its lists; the created event has none.
+    await deliverDue(c);
+    const bodies = bodiesAt(endpoint.path);
+    expect(bodies).toHaveLength(6);
+    const byId = new Map(events.map((e) => [e.id, e]));
+    for (const body of bodies) {
+      const event = byId.get(body.id)!;
+      if (body.type === 'contact.created') {
+        expect(Object.keys(body.data)).toEqual(['contact']);
+        continue;
+      }
+      expect(contactUpdatedPayloadSchema.safeParse(body).success).toBe(true);
+      expect([body.data.changes, body.data.tagsAdded, body.data.tagsRemoved]).toEqual([
+        event.changes,
+        event.added,
+        event.removed,
+      ]);
+      expect(body.data.contact).toMatchObject({ tags: ['south', 'vip'], erased: false });
+    }
+  });
+
+  it('erasing a contact clears the tags its events listed and sends none, and nothing else changes the lists', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const endpoint = await addEndpoint(c, ['contact.updated', 'contact.erased']);
+    await addEndpoint(other, ['contact.updated']);
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const { id: contactId } = await service.createContact(owner, { phone: '+919811100093' });
+    await service.addTags(owner, contactId, ['diabetic', 'vip']);
+    await service.removeTag(owner, contactId, 'vip');
+    // Another company's contact, tagged too.
+    const otherOwner = await fx.ctx(other, other.owner);
+    const { id: otherContact } = await service.createContact(otherOwner, {
+      phone: '+919811100094',
+    });
+    await service.addTags(otherOwner, otherContact, ['vip']);
+    const listsOf = async (company: Company) =>
+      (await tagsOf(company)).filter((e) => e.type === 'contact.updated').map((e) => e.row);
+
+    // The company role cannot write the lists, and the function that notes a tag changes only an
+    // event its own transaction captured.
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    const [first] = (await tagsOf(c)).filter((e) => e.type === 'contact.updated');
+    await expectRefusedBy(
+      fx.dbs.app.run(scope, (tx) =>
+        tx.execute(sql`update app.webhook_events set tags_added = '{}'
+          where id = ${first!.id}::uuid`),
+      ),
+      /permission denied for table webhook_events/,
+    );
+    await fx.dbs.app.run(scope, (tx) =>
+      tx.execute(sql`select app.note_contact_webhook_tag(${c.tenant.id}::uuid, ${contactId}::uuid,
+        'gold', true)`),
+    );
+    expect(await listsOf(c)).toEqual([
+      ['contact.updated', ['tags'], ['diabetic', 'vip'], []],
+      ['contact.updated', ['tags'], [], ['vip']],
+    ]);
+
+    // Erased: the lists are cleared from every event of the contact; the other company's stay.
+    await service.eraseContact(owner, { contactId, suppress: false });
+    expect(await listsOf(c)).toEqual([
+      ['contact.updated', ['tags'], null, null],
+      ['contact.updated', ['tags'], null, null],
+    ]);
+    expect(await listsOf(other)).toEqual([['contact.updated', ['tags'], ['vip'], []]]);
+
+    // Delivered after the erasure, the updates say what changed and name no tag.
+    await deliverDue(c);
+    const bodies = bodiesAt(endpoint.path);
+    expect(bodies.map((b) => b.type).sort()).toEqual([
+      'contact.erased',
+      'contact.updated',
+      'contact.updated',
+    ]);
+    for (const body of bodies.filter((b) => b.type === 'contact.updated')) {
+      expect(body.data).toMatchObject({ changes: ['tags'], tagsAdded: null, tagsRemoved: null });
+      expect(JSON.stringify(body)).not.toMatch(/diabetic|vip/);
+    }
+  });
+
+  it('stores tag lists on updates only, both or neither, without a null entry or a tag in both', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { id: contactId } = await contactsService().createContact(owner, {
+      phone: '+919811100095',
+    });
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    const store = (
+      type: string,
+      added: readonly (string | null)[] | null,
+      removed: readonly (string | null)[] | null,
+    ) =>
+      fx.dbs.app.run(scope, (tx) =>
+        tx.execute(sql`insert into app.webhook_events
+            (id, tenant_id, type, contact_id, contact_changes, tags_added, tags_removed)
+          values (gen_random_uuid(), ${c.tenant.id}::uuid, ${type}, ${contactId}::uuid,
+            ${type === 'contact.updated' ? '{tags}' : null}::text[], ${textArray(added)}::text[],
+            ${textArray(removed)}::text[])`),
+      );
+    await store('contact.updated', ['repeat', 'vip'], ['trial']);
+    await store('contact.updated', [], []);
+    await store('contact.updated', null, null);
+    await store('contact.created', null, null);
+    const check = /webhook_events_tag_changes_check/;
+    for (const [added, removed] of [
+      [['vip'], null],
+      [null, []],
+      [['vip', null], []],
+      [[], [null]],
+      [['vip'], ['trial', 'vip']],
+    ] as const) {
+      await expectRefusedBy(store('contact.updated', added, removed), check);
+    }
+    await expectRefusedBy(store('contact.created', [], []), check);
+    await expectRefusedBy(store('contact.erased', ['vip'], []), check);
+    await expectRefusedBy(
+      fx.dbs.app.run(scope, (tx) =>
+        tx.execute(sql`insert into app.webhook_events
+            (id, tenant_id, type, contact_id, contact_changes, tags_added, tags_removed)
+          values (gen_random_uuid(), ${c.tenant.id}::uuid, 'contact.updated', ${contactId}::uuid,
+            '{tags}', array[array['a'], array['b']], '{}')`),
+      ),
+      check,
+    );
+  });
+});
+
 describe('message events (ADR-082)', () => {
   it('name the message a customer quotes or reacts to, when it is in the conversation', async () => {
     const c = await fx.company();

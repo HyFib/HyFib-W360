@@ -2409,6 +2409,14 @@ changed". A name changed and changed back in one transaction is still named. To 
 holds: `SELECT type, contact_changes, captured_xact FROM app.webhook_events WHERE tenant_id = $1 AND
 id = $2`. An event's list cannot be changed after its transaction commits, by design.
 
+**Which tags a `contact.updated` added or removed (ADR-182).** Since migration 0129 the event's
+`tagsAdded` and `tagsRemoved` list them, sorted, net within the change: a tag added and removed
+again in one change is in neither, so both can be empty while `changes` names `tags`. Both are null
+for events captured before the migration and for an erased contact, whose stored events lose them
+when it is erased. To see what an event holds:
+`SELECT type, contact_changes, tags_added, tags_removed FROM app.webhook_events WHERE tenant_id = $1
+AND id = $2`.
+
 **Migration 0096 or 0097 failed.** 0096 runs in one transaction, so a failure applies nothing: it
 adds `contact_changes` with its check (`NOT VALID`), the definer function
 `app.add_contact_webhook_changes`, the four-argument `app.capture_contact_webhook_event` (dropping
@@ -2773,6 +2781,15 @@ roles, or a lock held on the table: fix it and run the migrations again). Web se
 release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
 endpoints name the column); workers of either release and web servers of the previous release work
 with it.
+
+**Migration 0129 or 0130 failed.** 0129 runs in one transaction, so a failure applies nothing: it
+adds `tags_added` and `tags_removed` to `app.webhook_events` with their check (`NOT VALID`), the
+definer function `app.note_contact_webhook_tag`, and replaces `app.capture_contact_webhook_event`
+and `app.webhook_capture_contact_tag`. A failure usually means the bootstrap roles (`w360_definer`
+must exist to own the function) or a function of that name created by hand. 0130 validates the check
+without blocking captures; it fails only if a stored event has a list, which nothing wrote before
+0129: look for rows with `tags_added IS NOT NULL OR tags_removed IS NOT NULL` before running it
+again.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

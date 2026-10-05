@@ -1150,8 +1150,9 @@ message, contact, conversation or template id, the status reached, an error code
 purpose, action and source). The worker builds the JSON when it delivers, in the company's scope:
 the contact's number and name, the message's text or reply, the template's name. Nothing personal
 is stored twice, a contact erased before delivery is sent without their details, and no erasure
-hook is needed. A retry is built again, so it may carry newer data than the first attempt; the
-event id, type and the status it reports never change.
+hook is needed (except for the tags a contact change lists, ADR-182). A retry is built again, so it
+may carry newer data than the first attempt; the event id, type and the status it reports never
+change.
 
 **Delivery.** A per-company `webhook.deliver` job (pg-boss policy `stately`: one queued and one
 active per company) is enqueued after that lookup, which the worker's LISTEN connection runs when
@@ -4606,10 +4607,10 @@ Decision:
 
 Not built: what changed in `GET /contact-changes` (an item there stands for every change since the
 reader's cursor and compaction merges a contact's changes, ADR-114, so it could name only parts a
-reader may already have read; a reader keeping a copy compares), which tags were added or removed,
-the values before a change (personal data stays out of events), consent and source (consent has its
-own event; the source is not part of `contact.updated`), and endpoints taking `contact.updated` only
-for chosen parts.
+reader may already have read; a reader keeping a copy compares), which tags were added or removed
+(built by ADR-182), the values before a change (personal data stays out of events), consent and
+source (consent has its own event; the source is not part of `contact.updated`), and endpoints
+taking `contact.updated` only for chosen parts.
 
 ## ADR-122 Changing many contacts in one call through the public API (2026-10-03)
 
@@ -7300,3 +7301,45 @@ Decision:
 
 Not built: members for automation run and order events, filters by who sent a message (a list names
 whom a conversation is assigned to, not who wrote in it), and members chosen per event type.
+
+## ADR-182 Naming the tags a `contact.updated` added and removed (P5-09) (2026-10-05)
+
+Context: since ADR-121 a `contact.updated` names the parts its change changed, `tags` among them,
+but not which tags. A receiver that keeps a list in step with a tag (a CRM segment for `vip`, a flow
+it starts when `refund` is added) still had to keep a copy of every contact's tags to compare;
+ADR-121 left it unbuilt. Unlike the parts, the tags cannot be told when the event is delivered: by
+then the contact's tags may have changed again.
+
+Decision:
+
+- **`tagsAdded` and `tagsRemoved` on `contact.updated`:** the tags the change added and those it
+  removed, as the contact lists them, sorted. Always given: both empty when the change touched no
+  tag, or when it undid itself (a tag added and removed again in one transaction is in neither list,
+  and so is one removed and added back). Null for an event captured before migration 0129, which a
+  replay within the 30 days kept can send, and once the contact is erased. `contact.created` lists
+  none: its contact carries its tags.
+- **Net within the transaction:** still one event per contact and transaction. The tag trigger notes
+  each tag on the event its transaction captured through `app.note_contact_webhook_tag`, a definer
+  function that, like `app.add_contact_webhook_changes` (ADR-121), changes only an event the calling
+  transaction captured, which no delivery can have read yet: adding a tag the transaction removed
+  takes it off the removed list and otherwise puts it on the added list, and removing one likewise.
+  A savepoint that rolls back takes back what it noted.
+- **Stored, so erasure clears them:** ADR-053 keeps events to ids and non-personal facts and builds
+  personal data when it delivers. Tags cannot be built then, and a tag can say something about a
+  person, so they are the one exception: kept no longer than the event (30 days), sent only to the
+  company's own endpoints, and cleared from every event of a contact when it is erased (in
+  `app.capture_contact_webhook_event`'s erasure branch, as the definer role erasure runs as, through
+  the contact events' index), so a delivery or replay after an erasure names no tag. The payload of
+  an erased contact carries none either.
+- **Events stay history:** the runtime role still only inserts and reads events; the definer role
+  gains the update of the two columns, for the function and for erasure. A database check keeps the
+  lists together, on `contact.updated` only, without a null entry or a tag in both.
+- **Migrations 0129 and 0130:** 0129 adds `tags_added` and `tags_removed` with the check, added NOT
+  VALID so that captures wait for its lock only briefly, the definer function, and replaces
+  `app.capture_contact_webhook_event` and the tag trigger function with the same signatures, so
+  their triggers and grants stay; 0130 validates the check while captures go on. Existing events
+  keep null.
+
+Not built: the tags in `GET /contact-changes` (ADR-114 merges a contact's changes), the values a
+change replaced for other parts (they stay out of events), and endpoints taking the changes of
+chosen tags only.

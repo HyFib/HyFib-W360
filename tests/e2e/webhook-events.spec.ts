@@ -145,9 +145,15 @@ test('conversation and contact events reach an endpoint: a customer writes, a me
   await page.getByLabel('Add tags').fill('vip, repeat');
   await page.getByRole('button', { name: 'Add', exact: true }).click();
   await expect(async () => expect(forUs()).toHaveLength(3)).toPass({ timeout: 30_000 });
+  // It names the tags it added, sorted (ADR-182).
   expect(forUs()[2]!.json).toMatchObject({
     type: 'contact.updated',
-    data: { contact: { id: contactId, tags: ['repeat', 'vip'], erased: false }, changes: ['tags'] },
+    data: {
+      contact: { id: contactId, tags: ['repeat', 'vip'], erased: false },
+      changes: ['tags'],
+      tagsAdded: ['repeat', 'vip'],
+      tagsRemoved: [],
+    },
   });
 
   // A member changes the name and the email in one save: one change, naming both (ADR-121).
@@ -160,6 +166,8 @@ test('conversation and contact events reach an endpoint: a customer writes, a me
     data: {
       contact: { id: contactId, name: 'Priya Sharma', email: 'priya@example.test' },
       changes: ['email', 'name'],
+      tagsAdded: [],
+      tagsRemoved: [],
     },
   });
   await expect(page.getByRole('heading', { name: 'Priya Sharma', level: 1 })).toBeVisible();

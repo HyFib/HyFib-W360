@@ -212,6 +212,12 @@ export const webhookEvents = appSchema.table('webhook_events', {
   detail: jsonb('detail').notNull().$type<Record<string, unknown>>(),
   /** What a contact.updated event's transaction changed (ADR-121); null for other events. */
   contactChanges: text('contact_changes').array(),
+  /**
+   * The tags a contact.updated event's transaction added and removed (ADR-182), both null for other
+   * events, for those captured before migration 0129 and once the contact is erased.
+   */
+  tagsAdded: text('tags_added').array(),
+  tagsRemoved: text('tags_removed').array(),
   occurredAt: tz('occurred_at').notNull().defaultNow(),
   createdAt: tz('created_at').notNull().defaultNow(),
 });

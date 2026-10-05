@@ -488,6 +488,7 @@ describe('webhook payload schemas', () => {
       erased: true,
     };
     // An update also names what it changed (ADR-121), even once the contact is erased: names only.
+    // Its tags are given while the contact is not erased (ADR-182).
     const changes = { 'contact.updated': ['email', 'fields.city', 'tags'] };
     for (const [schema, type] of [
       [contactCreatedPayloadSchema, 'contact.created'],
@@ -496,7 +497,13 @@ describe('webhook payload schemas', () => {
     ] as const) {
       const data = (shown: unknown) =>
         type === 'contact.updated'
-          ? { contact: shown, changes: changes[type] }
+          ? {
+              contact: shown,
+              changes: changes[type],
+              ...(shown === erased
+                ? { tagsAdded: null, tagsRemoved: null }
+                : { tagsAdded: ['vip'], tagsRemoved: ['new'] }),
+            }
           : { contact: shown };
       for (const shown of [person, erased]) {
         expect(schema.safeParse({ ...base, type, data: data(shown) }).success, type).toBe(true);
@@ -546,7 +553,11 @@ describe('webhook payload schemas', () => {
       erased: false,
     };
     const parse = (data: Record<string, unknown>) =>
-      contactUpdatedPayloadSchema.safeParse({ ...base, type: 'contact.updated', data }).success;
+      contactUpdatedPayloadSchema.safeParse({
+        ...base,
+        type: 'contact.updated',
+        data: { tagsAdded: [], tagsRemoved: [], ...data },
+      }).success;
     for (const changes of [
       ['name'],
       ['email', 'fields.city', 'name', 'phone', 'tags'],
@@ -573,6 +584,47 @@ describe('webhook payload schemas', () => {
       expect(parse({ contact: person, changes: [part] }), part).toBe(false);
     }
     expect(parse({ contact: person, changes: 'name' })).toBe(false);
+  });
+
+  it('say which tags a contact.updated added and removed: lists of tags, or null for an older event or an erased contact (ADR-182)', () => {
+    const person = {
+      id: contact.id,
+      name: 'Priya',
+      phone: '+919876543210',
+      email: null,
+      tags: ['repeat', 'vip'],
+      fields: {},
+      consent: { marketing: null, utility: null },
+      source: 'manual',
+      createdAt: base.createdAt,
+      erased: false,
+    };
+    const parse = (tags: Record<string, unknown>) =>
+      contactUpdatedPayloadSchema.safeParse({
+        ...base,
+        type: 'contact.updated',
+        data: { contact: person, changes: ['tags'], ...tags },
+      }).success;
+    for (const tags of [
+      { tagsAdded: ['vip'], tagsRemoved: [] },
+      { tagsAdded: [], tagsRemoved: ['new'] },
+      { tagsAdded: ['repeat', 'vip'], tagsRemoved: ['new', 'trial'] },
+      { tagsAdded: [], tagsRemoved: [] },
+      { tagsAdded: null, tagsRemoved: null },
+    ]) {
+      expect(parse(tags), JSON.stringify(tags)).toBe(true);
+    }
+    // Always given, as lists of tags or null.
+    for (const tags of [
+      {},
+      { tagsAdded: ['vip'] },
+      { tagsRemoved: [] },
+      { tagsAdded: 'vip', tagsRemoved: [] },
+      { tagsAdded: [42], tagsRemoved: [] },
+      { tagsAdded: [], tagsRemoved: [null] },
+    ]) {
+      expect(parse(tags), JSON.stringify(tags)).toBe(false);
+    }
   });
 
   it('describe the automation run events (ADR-078)', () => {
@@ -1016,12 +1068,33 @@ describe('the OpenAPI document', () => {
       };
     };
     const data = updated.properties.data;
-    expect(data.required).toEqual(['contact', 'changes']);
+    expect(data.required).toEqual(['contact', 'changes', 'tagsAdded', 'tagsRemoved']);
     const list = data.properties.changes?.anyOf?.find((s) => s.items);
     expect(list?.items?.pattern).toBe(CONTACT_CHANGE_PART_RE.source);
     expect(data.properties.changes?.anyOf).toContainEqual({ type: 'null' });
     const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
-    expect(webhooks['contact.updated']?.post?.description).toContain('The event says which.');
+    expect(webhooks['contact.updated']?.post?.description).toContain('The event says which');
+  });
+
+  it('gives the tags a contact.updated added and removed, as lists or null (ADR-182)', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = doc.components.schemas as Record<string, unknown>;
+    type Tags = { anyOf?: { type?: unknown; items?: { type?: unknown } }[]; description?: string };
+    const updated = schemas.WebhookContactUpdated as {
+      properties: { data: { properties: { tagsAdded?: Tags; tagsRemoved?: Tags } } };
+    };
+    const { tagsAdded, tagsRemoved } = updated.properties.data.properties;
+    for (const tags of [tagsAdded, tagsRemoved]) {
+      expect(tags?.anyOf).toEqual([{ type: 'array', items: { type: 'string' } }, { type: 'null' }]);
+      expect(tags?.description).toContain('once the contact is erased');
+    }
+    expect(tagsAdded?.description).toContain(
+      'A tag added and removed again in the same change is in neither list.',
+    );
+    const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
+    expect(webhooks['contact.updated']?.post?.description).toContain(
+      'and which tags were added or removed.',
+    );
   });
 
   it('carry a campaign’s results as the API answers them, without the cost estimate members see (ADR-150)', () => {
