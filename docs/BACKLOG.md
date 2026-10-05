@@ -689,9 +689,12 @@ verification, app review, Embedded Signup configuration).
   formula-safe, each export in the platform audit log before the file is returned). **[Exports of
   the health and signals lists built; their database tests run only in CI]** (ADR-155: "Download
   CSV" on the Overview for every company's health, worst first, and on the Signals tab, through one
-  audited export for the console's lists). Remaining: other alert channels, trends, Meta's quality
-  webhook (unconfirmed), exports of the action lists (onboarding, integrations, queues), assigning
-  failures and acknowledging the console's other lists, paging and rollups for many companies.
+  audited export for the console's lists). **[The window before on the Usage tab built; its database
+  tests run only in CI]** (ADR-157: each company's sending and receipts in the 7 or 30 days before,
+  with the change, on screen and in the CSV; read in one snapshot). Remaining: other alert channels,
+  longer trends and charts, Meta's quality webhook (unconfirmed), exports of the action lists
+  (onboarding, integrations, queues), assigning failures and acknowledging the console's other
+  lists, paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

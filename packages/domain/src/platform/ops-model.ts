@@ -203,13 +203,33 @@ export interface CompanyActivity {
 }
 
 /**
+ * A company's sending and receipts in the window before the Usage tab's (ADR-157): the 7 or 30 days
+ * before. The 90-day window has none: the activity function reads at most 93 days back.
+ */
+export interface UsagePrevious {
+  outbound: number;
+  inbound: number;
+}
+
+/**
  * A company's line on the console's Usage tab (ADR-153): its activity and the plan's counter of its
  * API requests, the latest period's (as `automationRuns`), with the period's start; 0 and null when
- * its keys have made no request.
+ * its keys have made no request. `previous` is the window before (ADR-157), null for 90 days.
  */
 export interface CompanyUsage extends CompanyActivity {
   apiRequests: number;
   apiPeriodStart: Date | null;
+  previous: UsagePrevious | null;
+}
+
+/**
+ * How a count moved from the window before (ADR-157): `+25%`, `-40%`, `0%`, `none before` when it
+ * was 0, and null when it is 0 in both.
+ */
+export function usageChange(current: number, previous: number): string | null {
+  if (previous === 0) return current === 0 ? null : 'none before';
+  const percent = Math.round(((current - previous) / previous) * 100);
+  return `${percent > 0 ? '+' : ''}${percent}%`;
 }
 
 /** The console's lists staff can download as CSV (ADR-154, ADR-155). */
@@ -240,6 +260,8 @@ export const USAGE_CSV_COLUMNS = [
   'API requests from',
   'Members',
   'Numbers',
+  'Sent in the window before',
+  'Received in the window before',
 ] as const;
 
 const csvDay = (at: Date | null) => (at ? at.toISOString().slice(0, 10) : '');
@@ -253,7 +275,8 @@ const csvFile = (
 
 /**
  * The Usage tab as CSV (ADR-154): a line per company in the tab's order, formula-safe (a company
- * name starting with `=`, `+`, `-` or `@` is neutralised), the counters' periods as UTC days.
+ * name starting with `=`, `+`, `-` or `@` is neutralised), the counters' periods as UTC days, and
+ * the window before's sending and receipts, empty for 90 days (ADR-157).
  */
 export function usageCsv(rows: readonly CompanyUsage[]): string {
   return csvFile(
@@ -277,6 +300,8 @@ export function usageCsv(rows: readonly CompanyUsage[]): string {
       csvDay(r.apiPeriodStart),
       r.members,
       r.numbers,
+      r.previous?.outbound ?? null,
+      r.previous?.inbound ?? null,
     ]),
   );
 }

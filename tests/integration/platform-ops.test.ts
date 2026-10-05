@@ -291,6 +291,49 @@ describe('company health and signals', () => {
     expect(line(quiet.tenant.id)).toEqual([0, null, 3]);
   });
 
+  it('compares each company with the window before, in one snapshot, for 7 and 30 days only (ADR-157)', async () => {
+    const trend = await fx.company();
+    await fx.deliver(
+      fx.messagesBody(trend, { messages: [{ waId: '919876500009', text: 'Hello again' }] }),
+    );
+    const [conversation] = await fx.query<{ id: string }>(
+      `SELECT id FROM app.conversations WHERE tenant_id = $1`,
+      [trend.tenant.id],
+    );
+    // Three replies 10 days ago (in the 7 days before the last 7) and two now.
+    for (const age of ['10 days', '10 days', '10 days', '0 days', '0 days']) {
+      await fx.query(
+        `INSERT INTO app.messages (id, tenant_id, conversation_id, channel_account_id, direction,
+           type, status, sender_type, created_at)
+         VALUES ($1, $2, $3, $4, 'outbound', 'text', 'delivered', 'agent', now() - $5::interval)`,
+        [uuidv7(), trend.tenant.id, conversation!.id, trend.channelAccountId, age],
+      );
+    }
+    const line = async (days: number) => {
+      const usage = await ops().usage(staff, days);
+      const r = usage.rows.find((row) => row.tenantId === trend.tenant.id);
+      return { usage, r: r && [r.outbound, r.inbound, r.previous] };
+    };
+    const week = await line(7);
+    expect(week.r).toEqual([2, 1, { outbound: 3, inbound: 0 }]);
+    expect(week.usage.previous?.outbound).toBeGreaterThanOrEqual(3);
+    // Over 30 days the replies of 10 days ago are in the window, and nothing came before.
+    const month = await line(30);
+    expect(month.r).toEqual([5, 1, { outbound: 0, inbound: 0 }]);
+    const quarter = await line(90);
+    expect(quarter.r).toEqual([5, 1, null]);
+    expect(quarter.usage.previous).toBeNull();
+    // The CSV's last two columns are the window before, empty for 90 days (exported by another
+    // administrator, so the ADR-154 test's audit entries stay its own).
+    const exporter = await platformStaff();
+    const csvLine = async (days: number) =>
+      (await ops().exportList(exporter, 'usage', days)).body
+        .split('\r\n')
+        .find((l) => l.includes(`,${trend.tenant.slug},`));
+    expect(await csvLine(7)).toMatch(/,3,0$/);
+    expect(await csvLine(90)).toMatch(/,,$/);
+  });
+
   it('exports the Usage tab as CSV only after writing the export to the platform audit log (ADR-154)', async () => {
     const file = await ops().exportList(staff, 'usage', 7);
     expect(file.filename).toMatch(/^hyfib-usage-7-days-\d{4}-\d{2}-\d{2}\.csv$/);

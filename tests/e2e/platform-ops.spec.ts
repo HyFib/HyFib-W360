@@ -176,11 +176,20 @@ test('staff read the operations console and repair a quarantined webhook event',
   expect(usageCsv.text).toContain('Company,Address,Status,Sent,');
   expect(usageCsv.text).toMatch(
     new RegExp(
-      `\\r\\n${companyName},ops-${suffix},[a-z_]+,(?:\\d+,){10}(?:\\d{4}-\\d{2}-\\d{2})?,2,\\d{4}-\\d{2}-\\d{2},\\d+,\\d+\\r\\n`,
+      `\\r\\n${companyName},ops-${suffix},[a-z_]+,(?:\\d+,){10}(?:\\d{4}-\\d{2}-\\d{2})?,2,\\d{4}-\\d{2}-\\d{2},\\d+,\\d+,0,0\\r\\n`,
     ),
   );
+  // Compared with the window before (ADR-157): 30 and 7 days are, 90 days are not.
+  await expect(
+    page.getByText('Under Sent and Received, the 30 days before and the change.'),
+  ).toBeVisible();
+  await page.getByRole('link', { name: '90 days' }).click();
+  await expect(page.getByText('The 90 days before are not compared')).toBeVisible();
   await page.getByRole('link', { name: '7 days' }).click();
   await expect(page.getByText('By company (7 days)')).toBeVisible();
+  await expect(
+    page.getByText('Under Sent and Received, the 7 days before and the change.'),
+  ).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
   // Keys: the encryption keyring's key ids and how many stored values each sealed, never a key or a

@@ -85,6 +85,11 @@ const MINUTE_MS = 60_000;
 const RECEIPT_BODY_DAYS = 7;
 export const USAGE_WINDOWS = [7, 30, 90] as const;
 export type UsageWindow = (typeof USAGE_WINDOWS)[number];
+/**
+ * The windows the Usage tab compares with the window before (ADR-157): twice 90 days is beyond the
+ * 93 days the activity function reads back.
+ */
+export const USAGE_COMPARED_WINDOWS: readonly UsageWindow[] = [7, 30];
 
 type Row = Record<string, unknown>;
 const num = (value: unknown) => Number(value ?? 0);
@@ -190,15 +195,38 @@ async function latestApiRequests(
   return new Map(counters.map((c) => [c.tenantId, { used: c.used, periodStart: c.periodStart }]));
 }
 
-/** Each company's activity since a time with its plan's API request counter (ADR-153). */
-async function usageRows(tx: Tx, since: Date): Promise<CompanyUsage[]> {
-  const activity = await activitySince(tx, since, null);
+/**
+ * Each company's activity over a window with its plan's API request counter (ADR-153) and, for the
+ * 7- and 30-day windows, its sending and receipts in the window before (ADR-157). The window before
+ * is the activity since twice as far back less the window's, both read in one statement: the
+ * function is STABLE, so both calls see the statement's snapshot and the difference is exact.
+ */
+async function usageRows(tx: Tx, window: UsageWindow, now: Date): Promise<CompanyUsage[]> {
+  const since = new Date(now.getTime() - window * DAY_MS);
   const api = await latestApiRequests(tx);
-  return activity.map((a) => ({
+  const withApi = (a: CompanyActivity, previous: CompanyUsage['previous']): CompanyUsage => ({
     ...a,
     apiRequests: api.get(a.tenantId)?.used ?? 0,
     apiPeriodStart: api.get(a.tenantId)?.periodStart ?? null,
-  }));
+    previous,
+  });
+  if (!USAGE_COMPARED_WINDOWS.includes(window)) {
+    return (await activitySince(tx, since, null)).map((a) => withApi(a, null));
+  }
+  const before = new Date(now.getTime() - 2 * window * DAY_MS);
+  const result = await tx.execute<Row>(sql`
+    select w.*, b.outbound as outbound_since_before, b.inbound as inbound_since_before
+      from ops.platform_ops_activity(${since.toISOString()}::timestamptz, null::uuid) w
+      join ops.platform_ops_activity(${before.toISOString()}::timestamptz, null::uuid) b
+        on b.tenant_id = w.tenant_id
+     order by w.outbound desc, w.tenant_name, w.tenant_id`);
+  return result.rows.map((r) => {
+    const a = toActivity(r);
+    return withApi(a, {
+      outbound: num(r.outbound_since_before) - a.outbound,
+      inbound: num(r.inbound_since_before) - a.inbound,
+    });
+  });
 }
 
 const usageWindow = (days: number): UsageWindow =>
@@ -245,7 +273,7 @@ async function exportFile(
   switch (list) {
     case 'usage': {
       const window = usageWindow(days);
-      const rows = await usageRows(tx, new Date(now.getTime() - window * DAY_MS));
+      const rows = await usageRows(tx, window, now);
       return { window, companies: rows.length, body: usageCsv(rows) };
     }
     case 'health': {
@@ -839,15 +867,23 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     /** Usage per company over the last `days` days, busiest first, with totals. */
     async usage(actor: PlatformActor, days: number) {
       const window = usageWindow(days);
-      const since = new Date(clock.now().getTime() - window * DAY_MS);
+      const now = clock.now();
+      const since = new Date(now.getTime() - window * DAY_MS);
       return platformDb.run(actor.userId, async (tx) => {
-        const rows = await usageRows(tx, since);
-        const sum = (pick: (a: CompanyActivity) => number) =>
+        const rows = await usageRows(tx, window, now);
+        const sum = (pick: (a: CompanyUsage) => number) =>
           rows.reduce((total, a) => total + pick(a), 0);
         return {
           days: window,
           since,
           rows,
+          /** The window before's sending and receipts (ADR-157), null for 90 days. */
+          previous: USAGE_COMPARED_WINDOWS.includes(window)
+            ? {
+                outbound: sum((a) => a.previous?.outbound ?? 0),
+                inbound: sum((a) => a.previous?.inbound ?? 0),
+              }
+            : null,
           totals: {
             outbound: sum((a) => a.outbound),
             inbound: sum((a) => a.inbound),

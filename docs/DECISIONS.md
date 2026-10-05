@@ -6242,3 +6242,26 @@ Decision:
   the deliveries.
 
 Not built: replays across endpoints, replays by a delivery's error or HTTP status.
+
+## ADR-157 Each company's usage against the window before (P5-10) (2026-10-05)
+
+Context: the console's Usage tab (ADR-054, ADR-153) shows each company's sending and receipts over
+7, 30 or 90 days, with nothing to compare them with: staff could not tell a company whose sending
+had halved, which often comes before it leaves, from one that always sent little. P5-10's Remaining
+listed trends.
+
+Decision:
+
+- **The window before, for 7 and 30 days:** under Sent and Received, each company's count in the 7
+  or 30 days before the window and how it moved (`+25%`, `-40%`, "none before" when it was 0;
+  nothing when it is 0 in both), and the same for the totals. The CSV (ADR-154) gains "Sent in the
+  window before" and "Received in the window before" as its last two columns.
+- **Not for 90 days:** the activity function reads at most 93 days back (ADR-054), so 180 days
+  cannot be read; the tab says so and the CSV leaves the two columns empty.
+- **Exact, in one snapshot:** the window before is the activity since twice as far back less the
+  window's own. Both are calls of `ops.platform_ops_activity`, which is STABLE, in one statement, so
+  they see the same snapshot and a message written between them cannot be counted in one and not the
+  other. No migration: the definer function is unchanged.
+
+Not built: comparisons of the other figures (failures, webhook deliveries, the plans' counters,
+which are per period), trends over more than two windows, charts, alerts on a fall.

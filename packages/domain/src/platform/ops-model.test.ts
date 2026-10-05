@@ -14,6 +14,7 @@ import {
   quarantineExternalIds,
   signalFlags,
   signalsCsv,
+  usageChange,
   usageCsv,
   type CompanyActivity,
   type CompanyHealth,
@@ -212,6 +213,7 @@ describe('the Usage tab as CSV (ADR-154)', () => {
     members: 2,
     apiRequests: 42,
     apiPeriodStart: new Date('2026-09-15T05:30:00Z'),
+    previous: { outbound: 9, inbound: 0 },
   };
   const idle: CompanyUsage = {
     ...quiet,
@@ -220,6 +222,7 @@ describe('the Usage tab as CSV (ADR-154)', () => {
     status: 'suspended',
     apiRequests: 0,
     apiPeriodStart: null,
+    previous: null,
   };
 
   it('writes the tab’s columns and a line per company, formula-safe, periods as UTC days', () => {
@@ -227,11 +230,12 @@ describe('the Usage tab as CSV (ADR-154)', () => {
     expect(csv.startsWith('\uFEFF')).toBe(true);
     expect(csv.slice(1).split('\r\n')).toEqual([
       USAGE_CSV_COLUMNS.join(','),
-      `"'=HYPERLINK(""https://example.com"")",acme,active,5,1,1,2,1,0,1,3,4,7,2026-09-01,42,2026-09-15,2,1`,
-      '"Quiet, Ltd",quiet,suspended,0,0,0,0,0,0,0,0,0,0,,0,,1,1',
+      `"'=HYPERLINK(""https://example.com"")",acme,active,5,1,1,2,1,0,1,3,4,7,2026-09-01,42,2026-09-15,2,1,9,0`,
+      // No window before (90 days): its two columns stay empty.
+      '"Quiet, Ltd",quiet,suspended,0,0,0,0,0,0,0,0,0,0,,0,,1,1,,',
       '',
     ]);
-    expect(USAGE_CSV_COLUMNS).toHaveLength(18);
+    expect(USAGE_CSV_COLUMNS).toHaveLength(20);
     expect(usageCsv([])).toBe(`\uFEFF${USAGE_CSV_COLUMNS.join(',')}\r\n`);
   });
 
@@ -242,6 +246,19 @@ describe('the Usage tab as CSV (ADR-154)', () => {
     expect(opsCsvFilename('usage', new Date('2026-10-06T00:00:00Z'), 7)).toBe(
       'hyfib-usage-7-days-2026-10-06.csv',
     );
+  });
+});
+
+describe('usage against the window before (ADR-157)', () => {
+  it('says how a count moved, rounded, and nothing when it is 0 in both', () => {
+    expect(usageChange(125, 100)).toBe('+25%');
+    expect(usageChange(60, 100)).toBe('-40%');
+    expect(usageChange(0, 3)).toBe('-100%');
+    expect(usageChange(1001, 1000)).toBe('0%');
+    expect(usageChange(999, 1000)).toBe('0%');
+    expect(usageChange(2, 3)).toBe('-33%');
+    expect(usageChange(5, 0)).toBe('none before');
+    expect(usageChange(0, 0)).toBeNull();
   });
 });
 

@@ -1518,6 +1518,10 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `api_requests` row of `app.usage_counters` through the platform role (0023's policy), in the same
   transaction, and joins it to the companies the activity function returns; the tab shows it, with
   the period's start, beside automation runs.
+- **The window before (ADR-157):** for the 7- and 30-day windows, `usageRows` reads the activity
+  since the window's start and since twice as far back in one statement (two calls of the STABLE
+  definer function, so one snapshot) and gives each company the difference, the window before's
+  sending and receipts; 90 days has none (the function reads at most 93 days back).
 - **Exports (ADR-154, ADR-155):** `/platform/ops/export/[list]` (a route handler behind the pages'
   platform actor check; `usage`, `health` or `signals`, any other name not found) calls
   `exportList`, which reads the list's rows with the tab's own reads (`usageRows`, `healthFacts`

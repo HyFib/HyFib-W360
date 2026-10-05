@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-05 — Phase 5: each company's usage against the window before (P5-10, ADR-157)
+
+Status: **Implemented; its database tests run in CI only (test data only).** The console's Usage tab
+had nothing to compare a company's sending with. The local PostgreSQL is unavailable (its Docker
+daemon stopped), so the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-157):** for 7 and 30 days, each company's sending and receipts in the window before,
+  with the change, under Sent and Received, in the totals and in the CSV; none for 90 days; read in
+  one statement, so in one snapshot.
+- **Domain:** `platform/ops.ts` (`usageRows` takes the window and reads both windows in one
+  statement; `USAGE_COMPARED_WINDOWS`; the totals' `previous`); `platform/ops-model.ts`
+  (`UsagePrevious`, `usageChange`, the CSV's two columns).
+- **Web:** the Usage tab's Sent and Received cells and totals, and its description for each window.
+- **Tests:**
+  - Unit (1 new and 1 changed in `ops-model.test.ts`): the change rounded with its sign, "none
+    before", nothing when 0 in both; the CSV's two columns, empty for 90 days.
+  - Integration (1 new in `platform-ops.test.ts`): a company's three replies of 10 days ago are the
+    7 days before its two of today, are inside the 30 days with nothing before, and 90 days has no
+    window before; the CSV's last two columns. Written for CI; not run here.
+  - E2E (`platform-ops.spec.ts` extended): the tab's wording for 30, 90 and 7 days and the CSV
+    line's two new columns. Written for CI; not run here.
+- **Docs:** ADR-157; ARCHITECTURE; BACKLOG P5-10; feature matrix H-034. SECURITY is unchanged: the
+  window before is read through the same definer function, counts only.
+- **Mutation checks:** 10 deliberate regressions of the change and the CSV tried, all caught by the
+  unit tests; the statement that reads both windows needs the database, so none were tried there.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 713 passed (75 files; 1 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 10 tried, all caught (unit tests)                               |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Comparisons of the other figures, trends over more than two windows, charts, alerts on a fall.
+
 ## 2026-10-05 — Phase 5: replaying an endpoint's failed deliveries by event type (P5-09, ADR-156)
 
 Status: **Implemented; its database tests run in CI only (test data only).** A replay of an
