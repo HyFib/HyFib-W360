@@ -119,6 +119,7 @@ import {
 import {
   WEBHOOK_FIELDS_NEED_THE_PART,
   WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
+  WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT,
   WEBHOOK_ASSIGNEES_NEED_THE_EVENTS,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS,
@@ -1375,6 +1376,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'campaignIds',
       'campaignStatuses',
       'channelIds',
+      'consentChanges',
       'contactFieldKeys',
       'contactParts',
       'conversationStatuses',
@@ -1814,6 +1816,61 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(
       Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
     ).toContain('runTriggers');
+  });
+
+  it('take consent changes only with consent.changed, each once, and a list of them alone is a change (ADR-189)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['consent.changed'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        consentChanges: ['utility_opt_in', 'marketing_opt_out', 'utility_opt_in'],
+      }).consentChanges,
+    ).toEqual(['marketing_opt_out', 'utility_opt_in']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['contact.created', 'contact.updated'],
+      consentChanges: ['marketing_opt_out'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['consentChanges', WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, consentChanges: [] },
+      { ...base, consentChanges: ['opt_out'] },
+      { ...base, consentChanges: ['marketing'] },
+      { ...base, consentChanges: ['Marketing_opt_out'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, consentChanges: null }).consentChanges,
+    ).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ consentChanges: null })).toEqual({
+      consentChanges: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ consentChanges: ['utility_opt_out'] })).toEqual({
+      consentChanges: ['utility_opt_out'],
+    });
+    // Answered as a list of the changes, or null.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: unknown } }[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.consentChanges?.anyOf?.find((c) => c.items)?.items?.enum).toEqual([
+      'marketing_opt_in',
+      'marketing_opt_out',
+      'utility_opt_in',
+      'utility_opt_out',
+    ]);
+    expect(answered.required).toContain('consentChanges');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('consentChanges');
   });
 
   it('take members only with an event of a conversation, each once, and a list of them alone is a change (ADR-181)', () => {

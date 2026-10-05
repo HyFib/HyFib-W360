@@ -45,6 +45,7 @@ import {
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_RUN_TRIGGERS,
+  WEBHOOK_CONSENT_CHANGES,
   WEBHOOK_MESSAGE_SENDERS,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
@@ -78,6 +79,7 @@ import {
   type WebhookOrderStatus,
   type WebhookRunEndStatus,
   type WebhookRunTrigger,
+  type WebhookConsentChange,
   type WebhookTeamChoice,
   type WebhookTemplateChoice,
   type WebhookTemplateStatus,
@@ -494,6 +496,34 @@ export function webhookRunTriggersFor(
   current: readonly WebhookRunTrigger[] | null,
 ): WebhookRunTrigger[] | null {
   if (!webhookTakesAutomationRuns(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * The consent changes an endpoint takes as `consent.changed` (ADR-189), by purpose and action, in
+ * the order Settings lists them; null takes every change.
+ */
+export const webhookConsentChangesSchema = z
+  .array(z.enum(WEBHOOK_CONSENT_CHANGES, { error: 'Choose consent changes from the list.' }))
+  .min(1, 'Choose at least one consent change, or take every change.')
+  .max(WEBHOOK_CONSENT_CHANGES.length, 'Give each consent change once.')
+  .transform((chosen) => WEBHOOK_CONSENT_CHANGES.filter((change) => chosen.includes(change)))
+  .nullable();
+
+export const WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT =
+  'Choose consent changes only for an endpoint that receives Consent changed.';
+
+/**
+ * The consent changes an endpoint keeps after it is added or changed: every change (null) unless
+ * it takes `consent.changed`; then those given, or else the ones it had.
+ */
+export function webhookConsentChangesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookConsentChange[] | null | undefined,
+  current: readonly WebhookConsentChange[] | null,
+): WebhookConsentChange[] | null {
+  if (!eventTypes.includes('consent.changed')) return null;
   const kept = given === undefined ? current : given;
   return kept ? [...kept] : null;
 }
@@ -1037,6 +1067,8 @@ const endpointFields = z.object({
   runEndStatuses: webhookRunEndStatusesSchema.optional(),
   /** Given, what started the runs it takes (null: every run, ADR-183); left out, they stay. */
   runTriggers: webhookRunTriggersSchema.optional(),
+  /** Given, the consent changes it takes (null: every change, ADR-189); left out, they stay. */
+  consentChanges: webhookConsentChangesSchema.optional(),
   /**
    * Given, the numbers whose events it takes (null: every number, ADR-170); left out, they stay.
    */
@@ -1127,6 +1159,12 @@ const runTriggersNeedTheEvents = {
     !data.runTriggers || webhookTakesAutomationRuns(data.eventTypes),
   options: { path: ['runTriggers'], message: WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS },
 };
+/** Consent changes are chosen only for an endpoint that takes `consent.changed` (ADR-189). */
+const consentChangesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; consentChanges?: unknown }) =>
+    !data.consentChanges || data.eventTypes.includes('consent.changed'),
+  options: { path: ['consentChanges'], message: WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT },
+};
 /** Numbers are chosen only for an endpoint that takes events of numbers (ADR-170). */
 const channelsNeedTheEvents = {
   check: (data: { eventTypes: WebhookEventType[]; channelIds?: unknown }) =>
@@ -1168,6 +1206,7 @@ const endpointSchema = endpointFields
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
   .refine(runTriggersNeedTheEvents.check, runTriggersNeedTheEvents.options)
+  .refine(consentChangesNeedTheEvent.check, consentChangesNeedTheEvent.options)
   .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
   .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
   .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options)
@@ -1186,6 +1225,7 @@ const updateSchema = endpointFields
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
   .refine(runTriggersNeedTheEvents.check, runTriggersNeedTheEvents.options)
+  .refine(consentChangesNeedTheEvent.check, consentChangesNeedTheEvent.options)
   .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
   .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
   .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options)
@@ -1247,6 +1287,8 @@ export interface WebhookEndpointView {
   runEndStatuses: WebhookRunEndStatus[] | null;
   /** What started the runs whose events it takes (ADR-183); null takes every run's. */
   runTriggers: WebhookRunTrigger[] | null;
+  /** The consent changes it takes as `consent.changed` (ADR-189); null takes every change. */
+  consentChanges: WebhookConsentChange[] | null;
   /** The numbers whose events it takes (ADR-170), as stored, named; null takes every number. */
   channels: WebhookEndpointChannel[] | null;
   /**
@@ -1496,6 +1538,7 @@ export async function lockWebhookEndpoint(
       conversationStatuses: webhookEndpoints.conversationStatuses,
       runEndStatuses: webhookEndpoints.runEndStatuses,
       runTriggers: webhookEndpoints.runTriggers,
+      consentChanges: webhookEndpoints.consentChanges,
       channelAccountIds: webhookEndpoints.channelAccountIds,
       teamIds: webhookEndpoints.teamIds,
       templateIds: webhookEndpoints.templateIds,
@@ -1549,6 +1592,7 @@ export async function insertWebhookEndpoint(
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
     runTriggers: WebhookRunTrigger[] | null;
+    consentChanges: WebhookConsentChange[] | null;
     channelAccountIds: string[] | null;
     teamIds: string[] | null;
     templateIds: string[] | null;
@@ -1591,6 +1635,7 @@ export async function insertWebhookEndpoint(
     conversationStatuses: input.conversationStatuses,
     runEndStatuses: input.runEndStatuses,
     runTriggers: input.runTriggers,
+    consentChanges: input.consentChanges,
     channelAccountIds: input.channelAccountIds,
     teamIds: input.teamIds,
     templateIds: input.templateIds,
@@ -1982,6 +2027,7 @@ export function createWebhooksService(deps: {
               conversationStatuses: webhookEndpoints.conversationStatuses,
               runEndStatuses: webhookEndpoints.runEndStatuses,
               runTriggers: webhookEndpoints.runTriggers,
+              consentChanges: webhookEndpoints.consentChanges,
               channelAccountIds: webhookEndpoints.channelAccountIds,
               teamIds: webhookEndpoints.teamIds,
               templateIds: webhookEndpoints.templateIds,
@@ -2412,6 +2458,7 @@ export function createWebhooksService(deps: {
         );
         const runEndStatuses = webhookRunEndStatusesFor(data.eventTypes, data.runEndStatuses, null);
         const runTriggers = webhookRunTriggersFor(data.eventTypes, data.runTriggers, null);
+        const consentChanges = webhookConsentChangesFor(data.eventTypes, data.consentChanges, null);
         const channelIds = webhookChannelIdsFor(data.eventTypes, data.channelIds, null);
         await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
         const teamIds = webhookTeamIdsFor(data.eventTypes, data.teamIds, null);
@@ -2446,6 +2493,7 @@ export function createWebhooksService(deps: {
           conversationStatuses,
           runEndStatuses,
           runTriggers,
+          consentChanges,
           channelAccountIds: channelIds,
           teamIds,
           templateIds,
@@ -2476,6 +2524,7 @@ export function createWebhooksService(deps: {
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
               ...(runTriggers ? { runTriggers } : {}),
+              ...(consentChanges ? { consentChanges } : {}),
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),
@@ -2570,6 +2619,11 @@ export function createWebhooksService(deps: {
           data.runTriggers,
           endpoint.runTriggers,
         );
+        const consentChanges = webhookConsentChangesFor(
+          data.eventTypes,
+          data.consentChanges,
+          endpoint.consentChanges,
+        );
         const channelIds = webhookChannelIdsFor(
           data.eventTypes,
           data.channelIds,
@@ -2637,6 +2691,7 @@ export function createWebhooksService(deps: {
             conversationStatuses,
             runEndStatuses,
             runTriggers,
+            consentChanges,
             channelAccountIds: channelIds,
             teamIds,
             templateIds,
@@ -2678,6 +2733,7 @@ export function createWebhooksService(deps: {
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
               ...(runTriggers ? { runTriggers } : {}),
+              ...(consentChanges ? { consentChanges } : {}),
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),

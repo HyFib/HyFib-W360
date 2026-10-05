@@ -3620,6 +3620,143 @@ describe('campaign filters (ADR-185)', () => {
   });
 });
 
+describe('consent change filters (ADR-189)', () => {
+  it('are refused without consent.changed, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to the event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], consentChanges: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, consentChanges }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvent = /only for an endpoint that receives Consent changed/;
+    await refused(['contact.created', 'contact.updated'], ['marketing_opt_out'], needsTheEvent);
+    await refused(['consent.changed'], [], /at least one consent change/);
+    await refused(['consent.changed'], ['opt_out'], /from the list/);
+    await refused(['consent.changed'], ['marketing'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['consent.changed', 'contact.created'],
+      consentChanges: ['utility_opt_out', 'marketing_opt_out', 'utility_opt_out'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({
+      consentChanges: ['marketing_opt_out', 'utility_opt_out'],
+    });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['consent.changed', 'contact.created'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.consentChanges;
+    expect(await current()).toEqual(['marketing_opt_out', 'utility_opt_out']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['marketing_opt_out', 'utility_opt_out']);
+    await change({ consentChanges: ['marketing_opt_in'] });
+    expect(await current()).toEqual(['marketing_opt_in']);
+    const updates = await fx.query<{ metadata: { consentChanges?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.consentChanges)).toEqual([
+      ['marketing_opt_out', 'utility_opt_out'],
+      ['marketing_opt_in'],
+    ]);
+    await change({ consentChanges: null });
+    expect(await current()).toBeNull();
+    await change({ consentChanges: ['utility_opt_in'] });
+    // The database refuses an empty list, more than four entries, an unknown change or a missing
+    // one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET consent_changes = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{marketing_opt_in,marketing_opt_out,utility_opt_in,utility_opt_out,utility_opt_out}'`,
+      `'{marketing_opt_in,opt_out}'`,
+      `'{marketing}'`,
+      `ARRAY['utility_opt_in', NULL]::text[]`,
+      `ARRAY[['utility_opt_in']]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_consent_changes/);
+    }
+    await change({ eventTypes: ['contact.created'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['contact.created'], consentChanges: ['utility_opt_in'] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // …and any list for an endpoint that does not take it.
+    await expect(setInDatabase(`'{utility_opt_in}'`)).rejects.toThrow(
+      /webhook_endpoints_consent_changes/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'consent_changes', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('sends an endpoint that names consent changes only those, others every change, and captures none nobody takes (ADR-189)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const path = `/ok/${randomBytes(6).toString('hex')}`;
+    const optOuts = await webhooks().create(owner, {
+      url: `http://${HOST}:${port}${path}`,
+      eventTypes: ['consent.changed'],
+      consentChanges: ['marketing_opt_out', 'utility_opt_out'],
+    });
+    const consent = createConsentService({ db: fx.dbs.app, clock: systemClock });
+    const { contact_id: contactId } = await inbound(c, waId(), 'Hello');
+    const record = (purpose: 'marketing' | 'utility', action: 'opt_in' | 'opt_out') =>
+      consent.recordConsent(owner, { contactId, purpose, action });
+    // Only the opt-outs are taken, so the opt-in is not captured at all.
+    await record('marketing', 'opt_in');
+    await record('marketing', 'opt_out');
+    expect((await eventsOf(c)).filter((e) => e.type === 'consent.changed')).toEqual([
+      expect.objectContaining({
+        detail: { purpose: 'marketing', action: 'opt_out', source: 'agent' },
+      }),
+    ]);
+    // An endpoint taking every change gets the rest; the opt-out endpoint the utility opt-out.
+    const every = await addEndpoint(c, 'ok', ['consent.changed']);
+    await record('utility', 'opt_in');
+    await record('utility', 'opt_out');
+    const changes = (await eventsOf(c))
+      .filter((e) => e.type === 'consent.changed')
+      .map((e) => `${String(e.detail.purpose)}_${String(e.detail.action)}`);
+    expect(changes).toEqual(['marketing_opt_out', 'utility_opt_in', 'utility_opt_out']);
+    const takenBy = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).map((d) => d.type);
+    expect(await takenBy(optOuts.id)).toEqual(['consent.changed', 'consent.changed']);
+    expect(await takenBy(every.id)).toEqual(['consent.changed', 'consent.changed']);
+
+    await deliverDue(c);
+    const sentTo = (to: string) =>
+      requestsTo(to).map((r) => {
+        const { purpose, action } = consentChangedPayloadSchema.parse(JSON.parse(r.body)).data;
+        return `${purpose}_${action}`;
+      });
+    expect(sentTo(path).sort()).toEqual(['marketing_opt_out', 'utility_opt_out']);
+    expect(sentTo(every.path).sort()).toEqual(['utility_opt_in', 'utility_opt_out']);
+  });
+});
+
 describe('event capture', () => {
   it('records an event only for subscribed types, with one delivery per active subscribed endpoint, and none from a rolled-back change', async () => {
     const c = await fx.company();

@@ -7603,3 +7603,45 @@ Decision:
 
 Not built: swapping numbers in one call (a contact needs a free number first), numbers in the same
 change for many contacts, clearing a number, and moving a WhatsApp identity to another contact.
+
+## ADR-189 Choosing the consent changes a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint that takes `consent.changed` receives every opt-in and opt-out the company
+records, for both purposes, whatever recorded it (a keyword, a member, an import, Meta, a key, a
+store, an erasure). A receiver often wants some of them only: a mailing tool kept in step with
+marketing opt-outs, a compliance log of utility opt-ins and opt-outs. Each was sent every change and
+had to read `purpose` and `action` and drop the rest. ADR-119 to ADR-185 built such filters for
+other event types; consent changes had none.
+
+Decision:
+
+- **A list of consent changes per endpoint,** for `consent.changed` only: `marketing_opt_in`,
+  `marketing_opt_out`, `utility_opt_in` and `utility_opt_out`, the event's `purpose` and `action`
+  together, so any mix can be chosen. Null receives every change, as before; a list holds 1 to 4 of
+  them, kept marketing first, opt-in before opt-out. It is chosen in Settings → Webhooks under
+  "Consent changed" ("Consent changes sent": all ticked unless some are unticked; saving them all
+  ticked keeps none) and shown on the endpoint as "Consent changes sent: …", and through the API as
+  `consentChanges` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every
+  endpoint the API answers.
+- **Only with the event:** a list given for an endpoint that does not take `consent.changed` is
+  refused (`consentChanges`; 422 through the API). A change that removes the event clears it, and a
+  `PATCH` that leaves it out keeps it; Settings always sends it. A check in the database holds the
+  same rule (null, or 1 to 4 known changes, one dimension, without a null, while `consent.changed`
+  is among the endpoint's events).
+- **Matched as captured:** `app.capture_webhook_event` creates a `consent.changed` delivery only for
+  the active endpoints whose list is null or holds the change, read from the purpose and the action
+  the consent trigger has always stored in the event's detail (ADR-053), and writes no event when no
+  endpoint takes it. An erasure's opt-outs (both purposes) go through the same filter. Other events
+  are not narrowed; replays and test events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `consentChanges` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0135:** `consent_changes text[]` on `app.webhook_endpoints` with the check, validated
+  at once (a company has at most 10 endpoints), an update grant on the column for the runtime role,
+  and `app.capture_webhook_event` replaced with the same signature, so its owner and grants stay.
+  Existing endpoints keep null; nothing is backfilled.
+
+Not built: filters on what recorded a change (its source: a keyword, a member, an import, Meta, a
+key, a store or an erasure), on the contact's other consent, and for `contact.created`,
+`contact.erased` and `order.received`.

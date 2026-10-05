@@ -36,6 +36,8 @@ import {
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_RUN_TRIGGER_LABELS,
   WEBHOOK_RUN_TRIGGERS,
+  WEBHOOK_CONSENT_CHANGE_LABELS,
+  WEBHOOK_CONSENT_CHANGES,
   WEBHOOK_CAMPAIGN_EVENTS,
   WEBHOOK_TEAM_EVENTS,
   WEBHOOK_TEMPLATE_EVENTS,
@@ -128,6 +130,8 @@ import {
   webhookRunEndStatusesSchema,
   webhookRunTriggersFor,
   webhookRunTriggersSchema,
+  webhookConsentChangesFor,
+  webhookConsentChangesSchema,
   webhookHeadersAad,
   webhookHeadersSchema,
   webhookMessageSendersFor,
@@ -2513,5 +2517,81 @@ describe('custom field filters (ADR-184)', () => {
   it('name a field by its label and key, or say it was deleted', () => {
     expect(webhookFieldText({ key: 'city', label: 'City' })).toBe('City (city)');
     expect(webhookFieldText({ key: 'tier', label: null })).toBe('tier (deleted)');
+  });
+});
+
+describe('consent change filters (ADR-189)', () => {
+  it('take 1 to 4 consent changes, once each in the order Settings lists them; null takes every change', () => {
+    expect(WEBHOOK_CONSENT_CHANGES).toEqual([
+      'marketing_opt_in',
+      'marketing_opt_out',
+      'utility_opt_in',
+      'utility_opt_out',
+    ]);
+    expect(webhookConsentChangesSchema.parse(['utility_opt_out', 'marketing_opt_out'])).toEqual([
+      'marketing_opt_out',
+      'utility_opt_out',
+    ]);
+    expect(webhookConsentChangesSchema.parse([...WEBHOOK_CONSENT_CHANGES].reverse())).toEqual([
+      ...WEBHOOK_CONSENT_CHANGES,
+    ]);
+    expect(webhookConsentChangesSchema.parse(null)).toBeNull();
+    for (const refused of [
+      [],
+      ['opt_in'],
+      ['marketing'],
+      ['marketing_opt_in', null],
+      'marketing_opt_in',
+      [...WEBHOOK_CONSENT_CHANGES, 'utility_opt_out'],
+    ]) {
+      expect(webhookConsentChangesSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookConsentChangesSchema.safeParse(['opt_in']).error?.issues[0]?.message).toBe(
+      'Choose consent changes from the list.',
+    );
+    expect(webhookConsentChangesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one consent change, or take every change.',
+    );
+    expect(
+      webhookConsentChangesSchema.safeParse([...WEBHOOK_CONSENT_CHANGES, 'utility_opt_out']).error
+        ?.issues[0]?.message,
+    ).toBe('Give each consent change once.');
+  });
+
+  it('are every purpose and action consent.changed reports, each named', () => {
+    const data = consentChangedPayloadSchema.shape.data.shape;
+    expect(
+      data.purpose.options.flatMap((purpose) =>
+        data.action.options.map((action) => `${purpose}_${action}`),
+      ),
+    ).toEqual([...WEBHOOK_CONSENT_CHANGES]);
+    expect(WEBHOOK_CONSENT_CHANGE_LABELS).toEqual({
+      marketing_opt_in: 'Marketing opt-ins',
+      marketing_opt_out: 'Marketing opt-outs',
+      utility_opt_in: 'Utility opt-ins',
+      utility_opt_out: 'Utility opt-outs',
+    });
+  });
+
+  it('are kept only while the endpoint takes consent.changed: given, kept, or cleared', () => {
+    expect(webhookConsentChangesFor(['consent.changed'], ['utility_opt_in'], null)).toEqual([
+      'utility_opt_in',
+    ]);
+    expect(
+      webhookConsentChangesFor(['consent.changed', 'contact.updated'], undefined, [
+        'marketing_opt_out',
+      ]),
+    ).toEqual(['marketing_opt_out']);
+    expect(webhookConsentChangesFor(['consent.changed'], null, ['marketing_opt_out'])).toBeNull();
+    expect(webhookConsentChangesFor(['consent.changed'], undefined, null)).toBeNull();
+    expect(
+      webhookConsentChangesFor(
+        ['contact.updated', 'message.received'],
+        ['utility_opt_in'],
+        ['utility_opt_in'],
+      ),
+    ).toBeNull();
   });
 });

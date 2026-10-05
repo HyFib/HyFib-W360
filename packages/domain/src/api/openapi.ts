@@ -24,6 +24,7 @@ import {
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_RUN_TRIGGERS,
+  WEBHOOK_CONSENT_CHANGES,
   WEBHOOK_RETRY_SECONDS,
   WEBHOOK_TEMPLATE_STATUSES,
 } from '../webhooks/model';
@@ -538,6 +539,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'What started the runs whose events (automation.run_started and automation.run_ended) the endpoint receives, as run.trigger names it; null receives every run.',
+    ),
+  consentChanges: z
+    .array(z.enum(WEBHOOK_CONSENT_CHANGES))
+    .nullable()
+    .describe(
+      'The consent changes the endpoint receives as consent.changed, by the event’s purpose and action; null receives every change.',
     ),
   channelIds: z
     .array(z.uuid())

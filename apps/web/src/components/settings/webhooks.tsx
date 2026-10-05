@@ -25,6 +25,8 @@ import {
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_RUN_TRIGGER_LABELS,
   WEBHOOK_RUN_TRIGGERS,
+  WEBHOOK_CONSENT_CHANGE_LABELS,
+  WEBHOOK_CONSENT_CHANGES,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUSES,
   webhookAssigneeText,
@@ -63,6 +65,7 @@ import {
   type WebhookReplayPeriod,
   type WebhookRunEndStatus,
   type WebhookRunTrigger,
+  type WebhookConsentChange,
   type WebhookTeamChoice,
   type WebhookTemplateChoice,
   type WebhookTemplateStatus,
@@ -333,6 +336,50 @@ function PartChoices({
             <Label htmlFor={id} className="font-normal">
               {WEBHOOK_CONTACT_PART_LABELS[part]}{' '}
               <span className="font-mono text-xs">({part})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * The consent changes an endpoint takes as `consent.changed` (ADR-189), by purpose and action, shown
+ * while it takes the event.
+ */
+function ConsentChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: WebhookConsentChange[];
+  onChange: (next: WebhookConsentChange[]) => void;
+}) {
+  return (
+    <fieldset className="ml-6 grid gap-1">
+      <legend className="mb-1 text-xs text-muted-foreground">
+        Consent changes sent (all of them unless you untick some)
+      </legend>
+      {WEBHOOK_CONSENT_CHANGES.map((change) => {
+        const id = `${prefix}-consent-${change}`;
+        return (
+          <div key={change} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(change)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_CONSENT_CHANGES.filter((c) => c === change || chosen.includes(c))
+                    : chosen.filter((c) => c !== change),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {WEBHOOK_CONSENT_CHANGE_LABELS[change]}{' '}
+              <span className="font-mono text-xs">({change})</span>
             </Label>
           </div>
         );
@@ -1045,6 +1092,8 @@ function EventChoices({
   onConversationStatusesChange,
   runEndStatuses,
   onRunEndStatusesChange,
+  consentChanges,
+  onConsentChangesChange,
 }: {
   prefix: string;
   chosen: WebhookEventType[];
@@ -1065,6 +1114,8 @@ function EventChoices({
   onConversationStatusesChange: (next: WebhookConversationStatus[]) => void;
   runEndStatuses: WebhookRunEndStatus[];
   onRunEndStatusesChange: (next: WebhookRunEndStatus[]) => void;
+  consentChanges: WebhookConsentChange[];
+  onConsentChangesChange: (next: WebhookConsentChange[]) => void;
 }) {
   return (
     <fieldset className="grid gap-2">
@@ -1124,6 +1175,13 @@ function EventChoices({
                 labels={WEBHOOK_RUN_END_STATUS_LABELS}
                 chosen={runEndStatuses}
                 onChange={onRunEndStatusesChange}
+              />
+            ) : null}
+            {type === 'consent.changed' && chosen.includes(type) ? (
+              <ConsentChoices
+                prefix={prefix}
+                chosen={consentChanges}
+                onChange={onConsentChangesChange}
               />
             ) : null}
             {type === 'contact.updated' && chosen.includes(type) ? (
@@ -1422,6 +1480,8 @@ export function WebhookEndpointForm({
     runEndStatuses: WebhookRunEndStatus[] | null;
     /** What started the runs it takes (ADR-183); null for every run. */
     runTriggers: WebhookRunTrigger[] | null;
+    /** The consent changes it takes (ADR-189); null for every change. */
+    consentChanges: WebhookConsentChange[] | null;
     channelIds: string[] | null;
     /** The teams it names (ADR-174), deleted ones without a name; null for every team. */
     teams: WebhookEndpointTeam[] | null;
@@ -1479,6 +1539,9 @@ export function WebhookEndpointForm({
   );
   const [runTriggers, setRunTriggers] = useState<WebhookRunTrigger[]>(
     endpoint?.runTriggers ?? [...WEBHOOK_RUN_TRIGGERS],
+  );
+  const [consentChanges, setConsentChanges] = useState<WebhookConsentChange[]>(
+    endpoint?.consentChanges ?? [...WEBHOOK_CONSENT_CHANGES],
   );
   const [everyAutomation, setEveryAutomation] = useState(!endpoint?.automationIds);
   const [automationIds, setAutomationIds] = useState<string[]>(endpoint?.automationIds ?? []);
@@ -1586,6 +1649,12 @@ export function WebhookEndpointForm({
           webhookTakesAutomationRuns(eventTypes) && runTriggers.length < WEBHOOK_RUN_TRIGGERS.length
             ? runTriggers
             : null;
+        // Every consent change ticked takes every change (null, ADR-189).
+        const chosenConsentChanges =
+          eventTypes.includes('consent.changed') &&
+          consentChanges.length < WEBHOOK_CONSENT_CHANGES.length
+            ? consentChanges
+            : null;
         // Every number's events unless the numbers ticked are chosen (ADR-170).
         const chosenChannels =
           webhookTakesChannelEvents(eventTypes) && !everyChannel ? channelIds : null;
@@ -1615,6 +1684,7 @@ export function WebhookEndpointForm({
           conversationStatuses: chosenConversationStatuses,
           runEndStatuses: chosenRunEndStatuses,
           runTriggers: chosenRunTriggers,
+          consentChanges: chosenConsentChanges,
           channelIds: chosenChannels,
           teamIds: chosenTeams,
           templateIds: chosenTemplates,
@@ -1673,6 +1743,7 @@ export function WebhookEndpointForm({
               setConversationStatuses([...WEBHOOK_CONVERSATION_STATUSES]);
               setRunEndStatuses([...WEBHOOK_RUN_END_STATUSES]);
               setRunTriggers([...WEBHOOK_RUN_TRIGGERS]);
+              setConsentChanges([...WEBHOOK_CONSENT_CHANGES]);
               setEveryAutomation(true);
               setAutomationIds([]);
               setEveryChannel(true);
@@ -1753,6 +1824,8 @@ export function WebhookEndpointForm({
         onConversationStatusesChange={setConversationStatuses}
         runEndStatuses={runEndStatuses}
         onRunEndStatusesChange={setRunEndStatuses}
+        consentChanges={consentChanges}
+        onConsentChangesChange={setConsentChanges}
       />
       {webhookTakesFieldChanges(eventTypes, parts) ? (
         <FieldChoices

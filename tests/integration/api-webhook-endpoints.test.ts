@@ -264,6 +264,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       conversationStatuses: null,
       runEndStatuses: null,
       runTriggers: null,
+      consentChanges: null,
       channelIds: null,
       teamIds: null,
       templateIds: null,
@@ -1627,6 +1628,92 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { runTriggers: [] }))).toMatchObject({
       path: 'runTriggers',
+    });
+  });
+
+  it('choose the consent changes an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-189)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The changes need consent.changed, at least one, and each from the list, by place.
+    const refusals = [
+      [['contact.updated'], ['marketing_opt_out'], 'consentChanges'],
+      [['consent.changed'], [], 'consentChanges'],
+      [['consent.changed'], ['marketing_opt_out', 'opt_in'], 'consentChanges.1'],
+      [['consent.changed'], ['marketing'], 'consentChanges.0'],
+    ] as const;
+    for (const [index, [events, consentChanges, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, consentChanges },
+            idem(`consent-changes-bad-${index}`, JSON.stringify(consentChanges)),
+          ),
+        ),
+        JSON.stringify(consentChanges),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'consent-changes-1', {
+      url: receiverUrl(),
+      events: ['consent.changed', 'contact.created'],
+      consentChanges: ['utility_opt_out', 'marketing_opt_out'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.consentChanges).toEqual(['marketing_opt_out', 'utility_opt_out']);
+    expect((await api().get(key.ctx, id)).consentChanges).toEqual([
+      'marketing_opt_out',
+      'utility_opt_out',
+    ]);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({
+      consentChanges: ['marketing_opt_out', 'utility_opt_out'],
+    });
+
+    expect(await api().update(key.ctx, id, { description: 'Mailing list' })).toMatchObject({
+      consentChanges: ['marketing_opt_out', 'utility_opt_out'],
+    });
+    expect(
+      await api().update(key.ctx, id, { consentChanges: ['marketing_opt_out'] }),
+    ).toMatchObject({ consentChanges: ['marketing_opt_out'] });
+    const updates = await fx.query<{ metadata: { consentChanges?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.consentChanges)).toEqual([
+      ['marketing_opt_out', 'utility_opt_out'],
+      ['marketing_opt_out'],
+    ]);
+    // Dropping the event clears the list.
+    expect(await api().update(key.ctx, id, { events: ['contact.created'] })).toMatchObject({
+      events: ['contact.created'],
+      consentChanges: null,
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { consentChanges: ['utility_opt_in'] })),
+    ).toMatchObject({ path: 'consentChanges' });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['consent.changed'],
+        consentChanges: ['utility_opt_in'],
+      }),
+    ).toMatchObject({ consentChanges: ['utility_opt_in'] });
+    expect(await api().update(key.ctx, id, { consentChanges: null })).toMatchObject({
+      consentChanges: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { consentChanges: [] }))).toMatchObject({
+      path: 'consentChanges',
     });
   });
 

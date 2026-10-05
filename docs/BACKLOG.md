@@ -746,7 +746,10 @@ verification, app review, Embedded Signup configuration).
   it takes, or every field's as before). **[Campaign filters built; their database tests run only in
   CI]** (ADR-185: `message.status` names the campaign that sent the message, and an endpoint takes
   the statuses of the messages of the campaigns it chooses and their changes, 1 to 50 of the
-  company's campaigns, in Settings or through the API, or every campaign's as before). Remaining:
+  company's campaigns, in Settings or through the API, or every campaign's as before). **[Consent
+  change filters built; their database tests run only in CI]** (ADR-189: an endpoint takes the
+  consent changes it chooses, by purpose and action, in Settings or through the API, or every change
+  as before). Remaining:
   filters for other event types and on a message's or contact's values (such as by tag or a field's
   value, or a run's end reason or key), other authentication (headers computed
   per delivery, other OAuth grants),

@@ -12,6 +12,7 @@ import {
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_RUN_END_STATUS_LABELS,
   WEBHOOK_RUN_TRIGGER_LABELS,
+  WEBHOOK_CONSENT_CHANGE_LABELS,
   WEBHOOK_MESSAGE_SENDER_LABELS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
@@ -217,6 +218,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Automation runs started by:{' '}
                         {e.runTriggers.map((t) => WEBHOOK_RUN_TRIGGER_LABELS[t]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.consentChanges ? (
+                      <p className="text-xs text-muted-foreground">
+                        Consent changes sent:{' '}
+                        {e.consentChanges.map((c) => WEBHOOK_CONSENT_CHANGE_LABELS[c]).join(', ')}
                       </p>
                     ) : null}
                     {e.channels ? (

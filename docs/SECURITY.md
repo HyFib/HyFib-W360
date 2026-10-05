@@ -1021,6 +1021,12 @@ Phase 5 rules (outgoing webhooks, P5-09):
   stored with the event; the payload's `campaignId` is read from the message in the company's scope
   when the delivery is prepared, an id without personal data. Audited with the list (unit tests;
   integration and e2e tests, run in CI only).
+- An endpoint can take chosen consent changes only (ADR-189), chosen the same way. A list holds only
+  the four known changes, is kept only while the endpoint takes `consent.changed` (a database check
+  too, which also refuses a null entry), and is applied in `app.capture_webhook_event` to the
+  purpose and action the consent trigger stores: it narrows what one endpoint receives and never
+  adds an event or a delivery for another endpoint or company, and an event still holds no personal
+  data. Audited with the list (unit tests; integration and e2e tests, run in CI only).
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

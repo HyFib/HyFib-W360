@@ -1,5 +1,57 @@
 # Progress
 
+## 2026-10-05 — Phase 5: choosing the consent changes a webhook endpoint receives (P5-09, ADR-189)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every
+endpoint taking `consent.changed` received every opt-in and opt-out. The local PostgreSQL is
+unavailable (its Docker daemon stopped), so migration 0135, the integration tests and the changed
+e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-189):** `consentChanges`, null for every change or 1 to 4 of `marketing_opt_in`,
+  `marketing_opt_out`, `utility_opt_in` and `utility_opt_out`, only with `consent.changed`, matched
+  to the purpose and action the consent trigger stores.
+- **Database:** migration 0135 (the column and its check, the column grant,
+  `app.capture_webhook_event`); the schema's column and type (`packages/db`).
+- **Domain:** the list's schema, keeping and refining (`webhookConsentChangesSchema`,
+  `webhookConsentChangesFor`); the changes and their labels in the model; `consentChanges` in the
+  settings service, the API (create, update, answers) and the OpenAPI document; the export column.
+- **Web:** "Consent changes sent" under Consent changed in the endpoint form (all ticked unless some
+  are unticked) and "Consent changes sent: …" on the endpoints list.
+- **Tests:**
+  - Unit (3 new in `webhooks.test.ts`, 1 new and 1 changed in `api.test.ts`): the list's rules, its
+    changes and labels, keeping and clearing, the API schemas and the OpenAPI entries.
+  - Integration (2 new in `webhooks.test.ts`, 1 new and 1 changed in
+    `api-webhook-endpoints.test.ts`): refusals, keeping and clearing, audits, the check and the
+    grant, capture by change, the API. Written for CI; not run here.
+  - E2E (1 changed in `webhook-events.spec.ts`): an endpoint for marketing opt-outs hears a member's
+    opt-out and an erasure's, not the opt-in or the utility opt-out. Written for CI; not run here.
+- **Docs:** ADR-189; SECURITY; ARCHITECTURE; THREAT-MODEL T183; DEPLOYMENT and RUNBOOKS (migration
+  0135, a receiver missing consent changes); DATA-RETENTION; BACKLOG P5-09; feature matrix H-014,
+  W-138 and W-139.
+- **Mutation checks:** 11 deliberate regressions tried, all caught on the unit-tested parts (the
+  order or repeats kept, an empty list, a list kept without the event or by a null, another order, a
+  label, the API's refinement, change rule and field, the OpenAPI field). The services' checks, the
+  capture and the form need the database or a browser, so their regressions are left to the
+  integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 841 passed (82 files)                                                |
+| `pnpm test:integration`, e2e, migration 0135       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 11 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Filters on what recorded a change; filters for `contact.created`, `contact.erased` and
+  `order.received`.
+
 ## 2026-10-05 — Phase 5: typed numbers in calls that change many contacts (P5-08, ADR-188)
 
 Status: **Implemented; its database and browser tests run in CI only.** A CRM fixing many mistyped

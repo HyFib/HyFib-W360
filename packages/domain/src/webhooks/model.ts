@@ -1,6 +1,7 @@
 import type {
   ChannelStatus,
   WebhookCampaignStatus,
+  WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
   WebhookEventType,
@@ -14,6 +15,7 @@ import type {
 
 export type {
   WebhookCampaignStatus,
+  WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
   WebhookEventType,
@@ -353,6 +355,25 @@ export const WEBHOOK_RUN_TRIGGER_LABELS: Record<WebhookRunTrigger, string> = {
   any_message: 'Any message',
   store_event: 'Order messages',
   api: 'API',
+};
+
+/**
+ * The consent changes an endpoint taking `consent.changed` can choose (ADR-189): the event's
+ * purpose and action, marketing first, as the contact page lists consent.
+ */
+export const WEBHOOK_CONSENT_CHANGES = [
+  'marketing_opt_in',
+  'marketing_opt_out',
+  'utility_opt_in',
+  'utility_opt_out',
+] as const satisfies readonly WebhookConsentChange[];
+
+/** How Settings names a consent change (ADR-189). */
+export const WEBHOOK_CONSENT_CHANGE_LABELS: Record<WebhookConsentChange, string> = {
+  marketing_opt_in: 'Marketing opt-ins',
+  marketing_opt_out: 'Marketing opt-outs',
+  utility_opt_in: 'Utility opt-ins',
+  utility_opt_out: 'Utility opt-outs',
 };
 
 export const WEBHOOK_LIMITS = {

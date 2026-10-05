@@ -68,7 +68,7 @@ function signatureValid(headers: IncomingHttpHeaders, body: string, secret: stri
     });
 }
 
-test('conversation and contact events reach an endpoint: a customer writes, a member resolves, tags, renames and erases', async ({
+test('conversation and contact events reach an endpoint: a customer writes, a member resolves, tags, renames and erases; an endpoint can take chosen consent changes only (ADR-189)', async ({
   page,
   request,
 }) => {
@@ -103,6 +103,29 @@ test('conversation and contact events reach an endpoint: a customer writes, a me
   await expect(secretField).toBeVisible();
   const secret = await secretField.inputValue();
   await page.getByRole('button', { name: 'I have stored the secret' }).click();
+
+  // A second endpoint takes marketing opt-outs only (ADR-189).
+  const optOutPath = `${path}/opt-outs`;
+  const optOuts = () =>
+    received
+      .filter((r) => r.path === optOutPath)
+      .map((r) => JSON.parse(r.body) as { type: string; data: Record<string, unknown> });
+  const consentBox = (name: string) => page.getByRole('checkbox', { name, exact: true });
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${optOutPath}`);
+  await page.getByRole('checkbox', { name: /Consent changed/ }).check();
+  for (const name of [
+    'Marketing opt-ins (marketing_opt_in)',
+    'Utility opt-ins (utility_opt_in)',
+    'Utility opt-outs (utility_opt_out)',
+  ]) {
+    await consentBox(name).uncheck();
+  }
+  await expect(consentBox('Marketing opt-outs (marketing_opt_out)')).toBeChecked();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await expect(secretField).toBeVisible();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  await page.reload();
+  await expect(page.getByText('Consent changes sent: Marketing opt-outs')).toBeVisible();
 
   // A customer writes for the first time: the contact is added.
   const waId = randomWaId();
@@ -172,6 +195,21 @@ test('conversation and contact events reach an endpoint: a customer writes, a me
   });
   await expect(page.getByRole('heading', { name: 'Priya Sharma', level: 1 })).toBeVisible();
 
+  // A member records a marketing opt-in, then an opt-out: only the opt-out reaches the second
+  // endpoint (ADR-189), and the first, which takes no consent changes, hears neither.
+  await page.getByLabel('How and when did they tell you?').fill('Agreed at the counter');
+  await page.getByRole('button', { name: 'Record consent' }).click();
+  await expect(page.getByText('Consent recorded.')).toBeVisible();
+  await page.getByLabel('Customer said').selectOption('opt_out');
+  await page.getByLabel('How and when did they tell you?').fill('Asked us to stop offers');
+  await page.getByRole('button', { name: 'Record consent' }).click();
+  await expect(page.getByText('Marketing: opted out').first()).toBeVisible();
+  await expect(async () => expect(optOuts()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(optOuts()[0]).toMatchObject({
+    type: 'consent.changed',
+    data: { purpose: 'marketing', action: 'opt_out', source: 'agent' },
+  });
+
   // Erasing sends one event, without personal data (the tags it removes send nothing).
   await page.getByRole('button', { name: 'Erase contact' }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: 'Erase contact' }).click();
@@ -191,6 +229,23 @@ test('conversation and contact events reach an endpoint: a customer writes, a me
   // Nothing else arrives for these changes.
   await page.goto(`/c/${slug}/settings/webhooks`);
   expect(forUs()).toHaveLength(5);
+  // Erasure ends both purposes with opt-outs: the second endpoint hears the marketing one only.
+  await expect(async () => expect(optOuts()).toHaveLength(2)).toPass({ timeout: 30_000 });
+  expect(optOuts()[1]).toMatchObject({
+    type: 'consent.changed',
+    data: { purpose: 'marketing', action: 'opt_out', source: 'erasure' },
+  });
+  await page
+    .getByRole('list', { name: 'Endpoints' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Consent changes sent: Marketing opt-outs' })
+    .getByRole('link', { name: /Deliveries and settings/ })
+    .click();
+  await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Deliveries' }).getByRole('listitem')).toHaveCount(2);
+  await expect(consentBox('Marketing opt-outs (marketing_opt_out)')).toBeChecked();
+  await expect(consentBox('Marketing opt-ins (marketing_opt_in)')).not.toBeChecked();
+  expect(optOuts()).toHaveLength(2);
 });
 
 test('conversation team and assignment events name the team and the member: a member moves and assigns a conversation, and deleting the team sends its change', async ({

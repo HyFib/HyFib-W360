@@ -2265,6 +2265,15 @@ to replay. To take more, tick the templates under "Templates" on the endpoint's 
 `templateIds` (null for every template). Removing both Message status and Template status clears the
 list.
 
+**A receiver misses consent changes (ADR-189).** An endpoint can take chosen consent changes only.
+The endpoints list shows them ("Consent changes sent: …"), and the API answers `consentChanges`
+(null takes every change). A change goes by its purpose and action (`marketing_opt_out`): the others
+are never queued for the endpoint, and when no endpoint of the company takes a change, it is not
+recorded at all, so there is nothing to replay. An erasure records opt-outs for both purposes, which
+the same list narrows. To take more, tick the changes under "Consent changed" on the endpoint's
+page, or `PATCH /webhook-endpoints/{id}` with `consentChanges` (null for every change). Removing
+Consent changed clears the list.
+
 **A receiver misses a campaign's message statuses or changes (ADR-185).** An endpoint can take the
 statuses and changes of chosen campaigns only. The endpoints list shows them ("Campaigns whose
 statuses and changes are sent: …"), and the API answers `campaignIds` (null takes every campaign's).
@@ -2871,6 +2880,14 @@ servers of the previous release work with it.
 transaction; a failure rolls it all back (usually a lock held on one of the tables: run the
 migrations again). Web servers of this release need it before a key or plan version holds the new
 scope; those of the previous release work with it.
+
+**Migration 0135 failed.** It adds `consent_changes` to `app.webhook_endpoints` with the check
+`webhook_endpoints_consent_changes`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event`, in one transaction; a failure rolls it all back (usually the bootstrap
+roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
+release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
+endpoints name the column); workers of either release and web servers of the previous release work
+with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates
