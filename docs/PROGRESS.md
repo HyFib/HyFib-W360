@@ -89,6 +89,12 @@ did not match the database or what an earlier slice changed.
   `ops.template_sync_due`'s list, which holds at most 500 accounts, those never synced first; the
   suite's shared database now holds more connected accounts that never synced, so the account was
   left out. The test now reads the account's sync request itself, as the sweep does.
+- **ADR-167 (the test), found by the second run:** on PostgreSQL 17 the run of the fixes above
+  reported an unhandled error: the test started both reads refused for a plan without Commerce
+  before awaiting the first, and the second was refused while nothing waited for it (whether that
+  happens depends on timing; the PostgreSQL 18 run did not report it). Each read now starts when it
+  is awaited; a scan of the integration tests found no other list of calls started before they are
+  awaited that touch the database.
 
 ### Test commands and results (local, 2026-10-05)
 

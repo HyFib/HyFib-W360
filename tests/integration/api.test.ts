@@ -2940,13 +2940,14 @@ describe('WhatsApp orders (ADR-167)', () => {
     };
     expect((await apiListOrders(deps(), suspended, {})).data).toHaveLength(1);
 
-    // A plan without Commerce reads no orders; with it again, it does.
+    // A plan without Commerce reads no orders; with it again, it does. Each read starts when it is
+    // awaited, so neither is refused while nothing waits for it.
     await onPlan(c, []);
     for (const read of [
-      apiListOrders(deps(), reader.ctx, {}),
-      apiGetOrder(deps(), reader.ctx, order.id),
+      () => apiListOrders(deps(), reader.ctx, {}),
+      () => apiGetOrder(deps(), reader.ctx, order.id),
     ]) {
-      const error = await expectAppError(read, 'forbidden', /does not include Commerce/);
+      const error = await expectAppError(read(), 'forbidden', /does not include Commerce/);
       expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
     }
     await onPlan(c, ['commerce']);
