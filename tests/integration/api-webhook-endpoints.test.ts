@@ -264,6 +264,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       runEndStatuses: null,
       channelIds: null,
       teamIds: null,
+      templateIds: null,
       oauth: null,
       apiKeyId: key.id,
       createdAt: expect.any(String),
@@ -1639,6 +1640,106 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(await api().update(key.ctx, id, { teamIds: null })).toMatchObject({ teamIds: null });
     expect(await issueOf(api().update(key.ctx, id, { teamIds: [] }))).toMatchObject({
       path: 'teamIds',
+    });
+  });
+
+  it("choose the templates whose messages' statuses and changes an endpoint receives, kept by changes that leave them out and cleared with the events (ADR-175)", async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const templateOf = async (company: Company, name: string, language: string) => {
+      const id = uuidv7();
+      await fx.query(
+        `INSERT INTO app.message_templates (id, tenant_id, whatsapp_account_id, name, language,
+           category, components, status)
+         VALUES ($1, $2, $3, $4, $5, 'UTILITY', '[]'::jsonb, 'approved')`,
+        [id, company.tenant.id, company.whatsappAccountId, name, language],
+      );
+      return id;
+    };
+    const orders = await templateOf(c, 'order_update', 'en_US');
+    const otp = await templateOf(c, 'login_code', 'en');
+    const elsewhere = await templateOf(await fx.company(), 'order_update', 'en_US');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Templates need message.status or template.status_changed, at least one, each an id of the
+    // company's templates (named by place).
+    const refusals = [
+      [['message.received', 'campaign.status_changed'], [orders], 'templateIds'],
+      [['message.status'], [], 'templateIds'],
+      [['message.status'], [orders, 'login_code'], 'templateIds.1'],
+      [['template.status_changed'], [orders, elsewhere], 'templateIds.1'],
+      [['message.status'], [uuidv7()], 'templateIds.0'],
+    ] as const;
+    for (const [index, [events, templateIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, templateIds },
+            idem(`templates-bad-${index}`, JSON.stringify(templateIds)),
+          ),
+        ),
+        JSON.stringify(templateIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'templates-1', {
+      url: receiverUrl(),
+      events: ['message.status', 'contact.created'],
+      templateIds: [otp, orders.toUpperCase(), otp],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.templateIds).toEqual([otp, orders]);
+    expect((await api().get(key.ctx, id)).templateIds).toEqual([otp, orders]);
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { templateIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => a.metadata.templateIds);
+    expect(await audits('webhook.endpoint_created')).toEqual([[otp, orders]]);
+    // Settings names them by name and language.
+    const owner = await fx.ctx(c, c.owner);
+    expect((await settings().list(owner)).find((e) => e.id === id)?.templates).toEqual([
+      { id: otp, name: 'login_code', language: 'en' },
+      { id: orders, name: 'order_update', language: 'en_US' },
+    ]);
+    expect(await api().update(key.ctx, id, { description: 'Order updates' })).toMatchObject({
+      templateIds: [otp, orders],
+    });
+    expect(await api().update(key.ctx, id, { templateIds: [orders] })).toMatchObject({
+      templateIds: [orders],
+    });
+    expect(await audits('webhook.endpoint_updated')).toEqual([[otp, orders], [orders]]);
+    // Either event of a template keeps the list; events of neither clear it.
+    expect(await api().update(key.ctx, id, { events: ['template.status_changed'] })).toMatchObject({
+      templateIds: [orders],
+    });
+    expect(await api().update(key.ctx, id, { events: ['contact.created'] })).toMatchObject({
+      events: ['contact.created'],
+      templateIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { templateIds: [orders] }))).toMatchObject({
+      path: 'templateIds',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['message.status'], templateIds: [otp] }),
+    ).toMatchObject({ templateIds: [otp] });
+    // A list given again is checked again, changing nothing when it is refused.
+    expect(await issueOf(api().update(key.ctx, id, { templateIds: [elsewhere] }))).toMatchObject({
+      path: 'templateIds.0',
+    });
+    expect((await api().get(key.ctx, id)).templateIds).toEqual([otp]);
+    expect(await api().update(key.ctx, id, { templateIds: null })).toMatchObject({
+      templateIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { templateIds: [] }))).toMatchObject({
+      path: 'templateIds',
     });
   });
 

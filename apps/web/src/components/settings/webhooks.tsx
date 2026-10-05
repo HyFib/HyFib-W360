@@ -32,7 +32,9 @@ import {
   webhookTakesAutomationRuns,
   webhookTakesChannelEvents,
   webhookTakesTeamEvents,
+  webhookTakesTemplateEvents,
   webhookTeamText,
+  webhookTemplateText,
   type WebhookAutomationChoice,
   type WebhookCampaignStatus,
   type WebhookChannelChoice,
@@ -48,6 +50,7 @@ import {
   type WebhookReplayPeriod,
   type WebhookRunEndStatus,
   type WebhookTeamChoice,
+  type WebhookTemplateChoice,
   type WebhookTemplateStatus,
 } from '@w360/domain/webhook-model';
 import {
@@ -564,6 +567,96 @@ function TeamChoices({
   );
 }
 
+/**
+ * The templates whose messages' statuses and changes an endpoint takes (ADR-175): every
+ * template's, or those of the templates ticked.
+ */
+function TemplateChoices({
+  prefix,
+  choices,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  choices: WebhookTemplateChoice[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Templates</legend>
+      <p className="text-xs text-muted-foreground">
+        Message statuses and template changes belong to a template; a message sent without one, such
+        as a member’s reply, belongs to none. Other events are sent whichever templates are chosen.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-templates`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every message’s statuses and every template’s changes
+          <span className="block text-xs text-muted-foreground">
+            Including templates added later.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-templates`}
+          className="mt-1"
+          checked={!every}
+          disabled={choices.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only those of the templates ticked
+          {choices.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">
+              The company has no template yet.
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid max-h-64 gap-1 overflow-y-auto">
+          {choices.map((t) => {
+            const id = `${prefix}-template-${t.id}`;
+            return (
+              <div key={t.id} className="flex items-center gap-2">
+                <Checkbox
+                  id={id}
+                  checked={chosen.includes(t.id)}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? choices
+                            .filter((l) => l.id === t.id || chosen.includes(l.id))
+                            .map((l) => l.id)
+                        : chosen.filter((x) => x !== t.id),
+                    )
+                  }
+                />
+                <Label htmlFor={id} className="font-normal break-all">
+                  {webhookTemplateText(t)}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
 function EventChoices({
   prefix,
   chosen,
@@ -935,6 +1028,7 @@ export function WebhookEndpointForm({
   automationChoices,
   channelChoices,
   teamChoices,
+  templateChoices,
   atLimit = false,
 }: {
   slug: string;
@@ -956,6 +1050,8 @@ export function WebhookEndpointForm({
     channelIds: string[] | null;
     /** The teams it names (ADR-174), deleted ones without a name; null for every team. */
     teams: WebhookEndpointTeam[] | null;
+    /** The templates it names (ADR-175); null for every template. */
+    templateIds: string[] | null;
     oauth: WebhookEndpointOAuth | null;
   };
   /** The company's published automations, which an endpoint can choose (ADR-145). */
@@ -964,6 +1060,8 @@ export function WebhookEndpointForm({
   channelChoices: WebhookChannelChoice[];
   /** The company's teams, which an endpoint can choose (ADR-174). */
   teamChoices: WebhookTeamChoice[];
+  /** The company's templates, which an endpoint can choose (ADR-175). */
+  templateChoices: WebhookTemplateChoice[];
   atLimit?: boolean;
 }) {
   const prefix = useId();
@@ -1000,6 +1098,8 @@ export function WebhookEndpointForm({
   const [channelIds, setChannelIds] = useState<string[]>(endpoint?.channelIds ?? []);
   const [everyTeam, setEveryTeam] = useState(!endpoint?.teams);
   const [teamIds, setTeamIds] = useState<string[]>(endpoint?.teams?.map((t) => t.id) ?? []);
+  const [everyTemplate, setEveryTemplate] = useState(!endpoint?.templateIds);
+  const [templateIds, setTemplateIds] = useState<string[]>(endpoint?.templateIds ?? []);
   const [headers, setHeaders] = useState<HeaderRow[]>([]);
   // Changing an endpoint keeps its headers unless they are given again.
   const [replaceHeaders, setReplaceHeaders] = useState(false);
@@ -1083,6 +1183,9 @@ export function WebhookEndpointForm({
           webhookTakesChannelEvents(eventTypes) && !everyChannel ? channelIds : null;
         // Every conversation's events unless the teams ticked are chosen (ADR-174).
         const chosenTeams = webhookTakesTeamEvents(eventTypes) && !everyTeam ? teamIds : null;
+        // Every template's statuses and changes unless the templates ticked are chosen (ADR-175).
+        const chosenTemplates =
+          webhookTakesTemplateEvents(eventTypes) && !everyTemplate ? templateIds : null;
         const input = {
           url,
           description,
@@ -1098,6 +1201,7 @@ export function WebhookEndpointForm({
           runEndStatuses: chosenRunEndStatuses,
           channelIds: chosenChannels,
           teamIds: chosenTeams,
+          templateIds: chosenTemplates,
         };
         const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
           setBusy(false);
@@ -1156,6 +1260,8 @@ export function WebhookEndpointForm({
               setChannelIds([]);
               setEveryTeam(true);
               setTeamIds([]);
+              setEveryTemplate(true);
+              setTemplateIds([]);
               setHeaders([]);
               setOAuthChange('keep');
               setOAuthFields(oauthFieldsOf(null));
@@ -1242,6 +1348,16 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryChannel}
           chosen={channelIds}
           onChange={setChannelIds}
+        />
+      ) : null}
+      {webhookTakesTemplateEvents(eventTypes) ? (
+        <TemplateChoices
+          prefix={prefix}
+          choices={templateChoices}
+          every={everyTemplate}
+          onEveryChange={setEveryTemplate}
+          chosen={templateIds}
+          onChange={setTemplateIds}
         />
       ) : null}
       {webhookTakesTeamEvents(eventTypes) ? (

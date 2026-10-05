@@ -35,6 +35,7 @@ import {
   WEBHOOK_RUN_END_STATUS_LABELS,
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_TEAM_EVENTS,
+  WEBHOOK_TEMPLATE_EVENTS,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
@@ -58,7 +59,9 @@ import {
   webhookTakesAutomationRuns,
   webhookTakesChannelEvents,
   webhookTakesTeamEvents,
+  webhookTakesTemplateEvents,
   webhookTeamText,
+  webhookTemplateText,
 } from './model';
 import {
   automationRunEndedPayloadSchema,
@@ -121,6 +124,8 @@ import {
   webhookOrderStatusesSchema,
   webhookTeamIdsFor,
   webhookTeamIdsSchema,
+  webhookTemplateIdsFor,
+  webhookTemplateIdsSchema,
   webhookTemplateStatusesFor,
   webhookTemplateStatusesSchema,
 } from './service';
@@ -2074,5 +2079,62 @@ describe('team filters (ADR-174)', () => {
   it('name a team, or say it was deleted', () => {
     expect(webhookTeamText({ id: support, name: 'Support' })).toBe('Support');
     expect(webhookTeamText({ id: sales, name: null })).toBe('A deleted team');
+  });
+});
+
+describe('template filters (ADR-175)', () => {
+  const orders = '4c5d6e7f-8091-42a3-b4c5-d6e7f8091a2b';
+  const otp = '5d6e7f80-91a2-43b4-85d6-e7f8091a2b3c';
+
+  it('take 1 to 50 templates, once each and in lower case, in the order given; null takes every template', () => {
+    expect(webhookTemplateIdsSchema.parse([otp, orders.toUpperCase(), otp, orders])).toEqual([
+      otp,
+      orders,
+    ]);
+    expect(webhookTemplateIdsSchema.parse(null)).toBeNull();
+    const ids = Array.from(
+      { length: WEBHOOK_LIMITS.templates + 1 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(WEBHOOK_LIMITS.templates).toBe(50);
+    expect(webhookTemplateIdsSchema.parse(ids.slice(1))).toEqual(ids.slice(1));
+    for (const refused of [[], ids, ['order_update'], [orders, null], orders, [42]]) {
+      expect(webhookTemplateIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookTemplateIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one template, or take every template.',
+    );
+    expect(webhookTemplateIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 50 templates.',
+    );
+  });
+
+  it('apply to message statuses and template changes, whose payloads name the template, and no other event', () => {
+    expect(WEBHOOK_TEMPLATE_EVENTS).toEqual(['message.status', 'template.status_changed']);
+    for (const type of WEBHOOK_EVENT_KEYS) {
+      const ofATemplate = WEBHOOK_TEMPLATE_EVENTS.some((t) => t === type);
+      expect(webhookTakesTemplateEvents([type]), type).toBe(ofATemplate);
+    }
+    // Each names its template, so a receiver can tell them apart.
+    expect('templateId' in messageStatusPayloadSchema.shape.data.shape.message.shape).toBe(true);
+    expect('id' in templateStatusPayloadSchema.shape.data.shape.template.shape).toBe(true);
+    expect(webhookTakesTemplateEvents(['message.received', 'template.status_changed'])).toBe(true);
+    expect(webhookTakesTemplateEvents(['message.received', 'campaign.status_changed'])).toBe(false);
+  });
+
+  it('are kept only while the endpoint takes an event of a template: given, kept, or cleared', () => {
+    expect(webhookTemplateIdsFor(['message.status'], [orders], null)).toEqual([orders]);
+    expect(webhookTemplateIdsFor(['template.status_changed'], undefined, [otp])).toEqual([otp]);
+    expect(webhookTemplateIdsFor(['message.status'], null, [otp])).toBeNull();
+    expect(webhookTemplateIdsFor(['message.status'], undefined, null)).toBeNull();
+    expect(webhookTemplateIdsFor(['message.received'], [orders], [otp])).toBeNull();
+  });
+
+  it('name a template by its name and language', () => {
+    expect(webhookTemplateText({ name: 'order_update', language: 'en_US' })).toBe(
+      'order_update (en_US)',
+    );
   });
 });

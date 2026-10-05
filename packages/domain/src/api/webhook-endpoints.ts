@@ -39,6 +39,7 @@ import {
   webhookTakesAutomationRuns,
   webhookTakesChannelEvents,
   webhookTakesTeamEvents,
+  webhookTakesTemplateEvents,
   type WebhookEndpointOAuth,
 } from '../webhooks/model';
 import {
@@ -46,6 +47,7 @@ import {
   assertWebhookAutomations,
   assertWebhookChannels,
   assertWebhookTeams,
+  assertWebhookTemplates,
   checkedWebhookOAuth,
   checkedWebhookUrl,
   deliveryEventJoin,
@@ -67,6 +69,7 @@ import {
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
   WEBHOOK_SENDERS_NEED_THE_EVENT,
   WEBHOOK_TEAMS_NEED_THE_EVENTS,
+  WEBHOOK_TEMPLATES_NEED_THE_EVENTS,
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
   webhookAutomationIdsFor,
   webhookAutomationIdsSchema,
@@ -81,6 +84,8 @@ import {
   webhookRunEndStatusesSchema,
   webhookTeamIdsFor,
   webhookTeamIdsSchema,
+  webhookTemplateIdsFor,
+  webhookTemplateIdsSchema,
   webhookContactPartsSchema,
   webhookDeliveryColumns,
   WEBHOOK_PARTS_NEED_THE_EVENT,
@@ -236,6 +241,16 @@ const invalidTeams = () =>
     issues: [{ path: 'teamIds', message: WEBHOOK_TEAMS_NEED_THE_EVENTS }],
   });
 
+const templateIdsField = webhookTemplateIdsSchema.describe(
+  `The templates whose messages' statuses and changes the endpoint receives: 1 to ${WEBHOOK_LIMITS.templates} ids of the company's templates (as \`message.status\` and \`template.status_changed\` events name them), only with one of those two events. message.status is then sent only for messages sent with one of them, so a message sent without a template, such as a member's reply, is left out; template.status_changed only for their changes. Other events are not narrowed. null receives every template's, including templates added later.`,
+);
+
+/** Templates are chosen only for an endpoint that receives events of templates (ADR-175). */
+const invalidTemplates = () =>
+  new AppError('validation_failed', WEBHOOK_TEMPLATES_NEED_THE_EVENTS, {
+    issues: [{ path: 'templateIds', message: WEBHOOK_TEMPLATES_NEED_THE_EVENTS }],
+  });
+
 const oauthField = webhookOAuthSchema.describe(
   `An OAuth 2.0 client of the receiver's authorization server (the client credentials grant): before delivering, HyFib asks the token URL (an https address on the public internet, held to the endpoint URL's rules) for an access token, authenticating with the client ID and secret (HTTP Basic) and asking for the scope if one is given, and sends the token as \`Authorization: Bearer <token>\`. A token is used until a minute before it expires, for at most a day; one without a lifetime of more than two minutes serves only the deliveries sent with it, and one the endpoint answers 401 to is replaced at the next attempt. A delivery that gets no token fails its attempt (\`lastError\` \`oauth_token_…\`) and is retried. The client ID and secret use printable ASCII characters (up to ${WEBHOOK_LIMITS.oauthClientIdLength} and ${WEBHOOK_LIMITS.oauthClientSecretLength}); the secret is stored encrypted and never shown again. An endpoint with an OAuth client cannot send an Authorization header of its own.`,
 );
@@ -264,6 +279,7 @@ export const apiCreateWebhookEndpointSchema = z
     runEndStatuses: runEndStatusesField.optional(),
     channelIds: channelIdsField.optional(),
     teamIds: teamIdsField.optional(),
+    templateIds: templateIdsField.optional(),
     oauth: oauthField.nullable().optional(),
   })
   .strict()
@@ -310,6 +326,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.teamIds || webhookTakesTeamEvents(data.events), {
     path: ['teamIds'],
     message: WEBHOOK_TEAMS_NEED_THE_EVENTS,
+  })
+  .refine((data) => !data.templateIds || webhookTakesTemplateEvents(data.events), {
+    path: ['templateIds'],
+    message: WEBHOOK_TEMPLATES_NEED_THE_EVENTS,
   });
 
 export const apiUpdateWebhookEndpointSchema = z
@@ -384,6 +404,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         "The teams whose conversations' events the endpoint receives (the company's teams; one the endpoint already names may have been deleted since and stays); null receives every conversation's. Left out, they stay, unless the events no longer include an event of a conversation, which clears them.",
       ),
+    templateIds: templateIdsField
+      .optional()
+      .describe(
+        "The templates whose messages' statuses and changes the endpoint receives (the company's templates); null receives every template's. Left out, they stay, unless the events no longer include message.status or template.status_changed, which clears them.",
+      ),
     oauth: oauthField
       .nullable()
       .optional()
@@ -409,8 +434,9 @@ export const apiUpdateWebhookEndpointSchema = z
       data.runEndStatuses !== undefined ||
       data.channelIds !== undefined ||
       data.teamIds !== undefined ||
+      data.templateIds !== undefined ||
       data.oauth !== undefined,
-    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the automations, the campaign statuses, the order statuses, the template statuses, the conversation statuses, the run end statuses, the numbers, the teams, the OAuth client or whether the endpoint is enabled',
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the automations, the campaign statuses, the order statuses, the template statuses, the conversation statuses, the run end statuses, the numbers, the teams, the templates, the OAuth client or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -451,6 +477,8 @@ export interface ApiWebhookEndpoint {
   channelIds: string[] | null;
   /** The teams whose conversations' events it receives (ADR-174); null receives every one's. */
   teamIds: string[] | null;
+  /** The templates whose statuses and changes it receives (ADR-175); null receives every one's. */
+  templateIds: string[] | null;
   /** Where it gets OAuth tokens and as which client (ADR-173); the secret is never shown. */
   oauth: WebhookEndpointOAuth | null;
   /** The key that added the endpoint. */
@@ -555,6 +583,7 @@ const columns = {
   runEndStatuses: webhookEndpoints.runEndStatuses,
   channelAccountIds: webhookEndpoints.channelAccountIds,
   teamIds: webhookEndpoints.teamIds,
+  templateIds: webhookEndpoints.templateIds,
   oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
   oauthClientId: webhookEndpoints.oauthClientId,
   oauthScope: webhookEndpoints.oauthScope,
@@ -588,6 +617,7 @@ type EndpointRow = Pick<
   | 'runEndStatuses'
   | 'channelAccountIds'
   | 'teamIds'
+  | 'templateIds'
   | 'oauthTokenUrl'
   | 'oauthClientId'
   | 'oauthScope'
@@ -626,6 +656,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     runEndStatuses: row.runEndStatuses,
     channelIds: row.channelAccountIds,
     teamIds: row.teamIds,
+    templateIds: row.templateIds,
     oauth:
       row.oauthTokenUrl && row.oauthClientId
         ? { tokenUrl: row.oauthTokenUrl, clientId: row.oauthClientId, scope: row.oauthScope }
@@ -860,6 +891,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
             const teamIds = webhookTeamIdsFor(data.events, data.teamIds, null);
             await assertWebhookTeams(tx, ctx.tenant.id, teamIds);
+            const templateIds = webhookTemplateIdsFor(data.events, data.templateIds, null);
+            await assertWebhookTemplates(tx, ctx.tenant.id, templateIds);
             const { id, secret } = await insertWebhookEndpoint(tx, deps.keyring, ctx.tenant.id, {
               url,
               description: data.description || null,
@@ -876,6 +909,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               runEndStatuses,
               channelAccountIds: channelIds,
               teamIds,
+              templateIds,
               oauth,
               creator: { apiKeyId: ctx.key.id },
             });
@@ -894,6 +928,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(runEndStatuses ? { runEndStatuses } : {}),
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
+              ...(templateIds ? { templateIds } : {}),
               ...(oauth ? { oauthTokenHost: oauth.host } : {}),
             });
             await announce(tx, ctx, { host, events: data.events, at: now });
@@ -941,6 +976,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         }
         if (data.channelIds && !webhookTakesChannelEvents(events)) throw invalidChannels();
         if (data.teamIds && !webhookTakesTeamEvents(events)) throw invalidTeams();
+        if (data.templateIds && !webhookTakesTemplateEvents(events)) throw invalidTemplates();
         // Only a list given now is checked: the automations kept were checked when chosen.
         if (data.automationIds !== undefined) {
           await assertWebhookAutomations(tx, ctx.tenant.id, data.automationIds);
@@ -952,6 +988,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         // And the teams it adds: those it held may have been deleted since (ADR-174).
         if (data.teamIds !== undefined) {
           await assertWebhookTeams(tx, ctx.tenant.id, data.teamIds, endpoint.teamIds);
+        }
+        // And the templates given now (ADR-175).
+        if (data.templateIds !== undefined) {
+          await assertWebhookTemplates(tx, ctx.tenant.id, data.templateIds);
         }
         // Left out, the OAuth client stays as it is (ADR-173).
         const oauth = data.oauth
@@ -977,6 +1017,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.runEndStatuses !== undefined ||
           data.channelIds !== undefined ||
           data.teamIds !== undefined ||
+          data.templateIds !== undefined ||
           oauth !== undefined
         ) {
           const [changed] = await tx
@@ -1041,6 +1082,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 endpoint.channelAccountIds,
               ),
               teamIds: webhookTeamIdsFor(events, data.teamIds, endpoint.teamIds),
+              templateIds: webhookTemplateIdsFor(events, data.templateIds, endpoint.templateIds),
               updatedAt: now,
             })
             .where(and(eq(webhookEndpoints.tenantId, ctx.tenant.id), eq(webhookEndpoints.id, id)))
@@ -1057,6 +1099,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               runEndStatuses: webhookEndpoints.runEndStatuses,
               channelAccountIds: webhookEndpoints.channelAccountIds,
               teamIds: webhookEndpoints.teamIds,
+              templateIds: webhookEndpoints.templateIds,
             });
           if (!changed) throw new Error('A locked endpoint was not updated');
           await audit(tx, ctx, 'webhook.endpoint_updated', id, {
@@ -1076,6 +1119,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(changed.runEndStatuses ? { runEndStatuses: changed.runEndStatuses } : {}),
             ...(changed.channelAccountIds ? { channelIds: changed.channelAccountIds } : {}),
             ...(changed.teamIds ? { teamIds: changed.teamIds } : {}),
+            ...(changed.templateIds ? { templateIds: changed.templateIds } : {}),
             ...webhookOAuthAudit(oauth, endpoint),
           });
         }

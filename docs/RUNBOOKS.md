@@ -2208,6 +2208,17 @@ and matches nothing. To take more, tick the teams under "Teams" on the endpoint'
 "Every conversation’s events", or `PATCH /webhook-endpoints/{id}` with `teamIds` (null for every
 conversation). Removing every message and conversation event clears the list.
 
+**A receiver misses a message's statuses or a template's changes (ADR-175).** An endpoint can take
+the statuses and changes of chosen templates only. The endpoints list shows them ("Templates whose
+statuses and changes are sent: …"), and the API answers `templateIds` (null takes every template's).
+A message's statuses go by the template it was sent with: those of a message sent without one (a
+member's reply, an automation's text) or with another template are never queued for the endpoint,
+and when no endpoint of the company takes an event, it is not recorded at all, so there is nothing
+to replay. To take more, tick the templates under "Templates" on the endpoint's page or choose
+"Every message’s statuses and every template’s changes", or `PATCH /webhook-endpoints/{id}` with
+`templateIds` (null for every template). Removing both Message status and Template status clears the
+list.
+
 **A campaign event's results differ from the campaign page (ADR-150).** `campaign.results` are
 counted when the request is built (the `t` of its `W360-Signature`), as `GET /campaigns/{id}` counts
 them, and a retry or a replay counts again: an event delivered while the campaign's messages were on
@@ -2660,6 +2671,14 @@ work with it.
 
 **Migration 0122 failed.** It adds `team_ids` to `app.webhook_endpoints` with the check
 `webhook_endpoints_team_ids`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event`, in one transaction; a failure rolls it all back (usually the bootstrap
+roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
+release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
+endpoints name the column); workers of either release and web servers of the previous release work
+with it.
+
+**Migration 0123 failed.** It adds `template_ids` to `app.webhook_endpoints` with the check
+`webhook_endpoints_template_ids`, grants its update to the runtime role, and replaces
 `app.capture_webhook_event`, in one transaction; a failure rolls it all back (usually the bootstrap
 roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
 release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of

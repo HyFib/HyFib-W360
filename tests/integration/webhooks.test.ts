@@ -2623,6 +2623,233 @@ describe('team filters (ADR-174)', () => {
   });
 });
 
+describe('template filters (ADR-175)', () => {
+  /** A template of the company's WhatsApp account, written as the templates service keeps one. */
+  async function templateOf(c: Company, name: string, language = 'en') {
+    const id = uuidv7();
+    await fx.query(
+      `INSERT INTO app.message_templates (id, tenant_id, whatsapp_account_id, name, language,
+         category, components, status)
+       VALUES ($1, $2, $3, $4, $5, 'UTILITY', '[]'::jsonb, 'approved')`,
+      [id, c.tenant.id, c.whatsappAccountId, `${name}_${randomBytes(3).toString('hex')}`, language],
+    );
+    const [row] = await fx.query<{ name: string }>(
+      'SELECT name FROM app.message_templates WHERE id = $1',
+      [id],
+    );
+    return { id, name: row!.name, language };
+  }
+  /** Meta's report of a template's status, recorded as a sync records it. */
+  const reported = (c: Company, templateId: string, status: string) =>
+    fx.query(
+      `INSERT INTO app.template_status_events (id, tenant_id, template_id, status, source)
+       VALUES ($1, $2, $3, $4, 'sync')`,
+      [uuidv7(), c.tenant.id, templateId, status],
+    );
+
+  it("are refused without message.status or template.status_changed, empty, over 50 or naming another company's template; kept by a change that leaves them out and cleared with the events; the database keeps them to those events", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const orders = await templateOf(c, 'order_update', 'en_US');
+    const otp = await templateOf(c, 'login_code');
+    const elsewhere = await templateOf(await fx.company(), 'order_update');
+    const url = 'https://hooks.example.com/in';
+    const refused = async (
+      eventTypes: string[],
+      templateIds: unknown,
+      message: RegExp,
+      path = 'templateIds',
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes, templateIds }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(templateIds)).toBe(path);
+    };
+    const needsTheEvents = /only for an endpoint that receives Message status or Template status/;
+    await refused(['message.received', 'campaign.status_changed'], [orders.id], needsTheEvents);
+    await refused(['message.status'], [], /at least one template/);
+    await refused(['message.status'], ['order_update'], /from the list/, 'templateIds.0');
+    await refused(
+      ['message.status'],
+      Array.from({ length: 51 }, () => uuidv7()),
+      /at most 50/,
+    );
+    await refused(
+      ['template.status_changed'],
+      [orders.id, elsewhere.id],
+      /of this company/,
+      'templateIds.1',
+    );
+    await refused(['message.status'], [uuidv7()], /of this company/, 'templateIds.0');
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['message.status', 'consent.changed'],
+      templateIds: [otp.id, orders.id.toUpperCase(), otp.id],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { templateIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => a.metadata.templateIds);
+    expect(await audits('webhook.endpoint_created')).toEqual([[otp.id, orders.id]]);
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['message.status', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.templates;
+    expect(await current()).toEqual([
+      { id: otp.id, name: otp.name, language: 'en' },
+      { id: orders.id, name: orders.name, language: 'en_US' },
+    ]);
+    await change({ description: 'kept' });
+    expect((await current())?.map((t) => t.id)).toEqual([otp.id, orders.id]);
+    await change({ templateIds: [orders.id] });
+    expect(await audits('webhook.endpoint_updated')).toEqual([[otp.id, orders.id], [orders.id]]);
+    // A list given again is checked again, changing nothing when it is refused.
+    await expectAppError(
+      change({ templateIds: [orders.id, elsewhere.id] }),
+      'validation_failed',
+      /of this company/,
+    );
+    expect((await current())?.map((t) => t.id)).toEqual([orders.id]);
+    await change({ templateIds: null });
+    expect(await current()).toBeNull();
+    await change({ templateIds: [otp.id] });
+    // Either event of a template keeps the list.
+    await change({ eventTypes: ['template.status_changed', 'contact.created'] });
+    expect((await current())?.map((t) => t.id)).toEqual([otp.id]);
+    // The database refuses an empty list, more than 50 or a missing id from an endpoint taking
+    // such an event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET template_ids = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    const many = `ARRAY[${Array.from({ length: 51 }, () => `'${uuidv7()}'`).join(',')}]::uuid[]`;
+    for (const bad of [`'{}'`, many, `ARRAY['${otp.id}', NULL]::uuid[]`]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_template_ids/);
+    }
+    await change({ eventTypes: ['message.received', 'consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['message.received'], templateIds: [otp.id] }),
+      'validation_failed',
+      needsTheEvents,
+    );
+    // …and any list for an endpoint that takes neither.
+    await expect(setInDatabase(`ARRAY['${otp.id}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_template_ids/,
+    );
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'template_ids', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it("offer the company's templates by name and language, whatever their status, to developers only", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const b = await templateOf(c, 'b_template');
+    const a = await templateOf(c, 'a_template', 'hi');
+    await fx.query(`UPDATE app.message_templates SET status = 'deleted' WHERE id = $1`, [a.id]);
+    await templateOf(await fx.company(), 'a_template');
+    expect(await webhooks().templateChoices(owner)).toEqual([
+      { id: a.id, name: a.name, language: 'hi' },
+      { id: b.id, name: b.name, language: 'en' },
+    ]);
+    for (const user of [c.agent, c.marketer]) {
+      await expectAppError(webhooks().templateChoices(await fx.ctx(c, user)), 'forbidden');
+    }
+  });
+
+  it("send an endpoint that names templates only their messages' statuses and their changes, another every template's, other events to both, and capture none nobody takes", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const orders = await templateOf(c, 'order_update');
+    const promo = await templateOf(c, 'weekly_offer');
+    const add = async (eventTypes: WebhookEventType[], templateIds: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        templateIds,
+      });
+      return { ...created, path };
+    };
+    const ordersOnly = await add(
+      ['message.status', 'template.status_changed', 'message.received'],
+      [orders.id],
+    );
+    const from = waId();
+    const first = await inbound(c, from, 'Where is my order?');
+    // A member's reply has no template: its status is not captured.
+    const reply = await sendReply(c, first.conversation_id, 'Let me check.');
+    const typesOf = async () => (await eventsOf(c)).map((e) => [e.type, e.status]);
+    expect(await typesOf()).toEqual([['message.received', null]]);
+    /** A message of a template reaching a status, as a template send's status updates do. */
+    const statusOf = async (messageId: string, templateId: string, status: string) => {
+      await fx.query('UPDATE app.messages SET template_id = $2 WHERE id = $1', [
+        messageId,
+        templateId,
+      ]);
+      await fx.query('UPDATE app.messages SET status = $2 WHERE id = $1', [messageId, status]);
+    };
+    await statusOf(reply.messageId, orders.id, 'delivered');
+    const second = await sendReply(c, first.conversation_id, 'Here is an offer.');
+    await statusOf(second.messageId, promo.id, 'delivered');
+    // Template changes: the order update's is captured, the offer's is not.
+    await reported(c, orders.id, 'paused');
+    await reported(c, promo.id, 'paused');
+    expect(await typesOf()).toEqual([
+      ['message.received', null],
+      ['message.status', 'delivered'],
+      ['template.status_changed', 'paused'],
+    ]);
+    // An endpoint for every template hears both from now on.
+    const every = await add(['message.status', 'template.status_changed'], null);
+    await reported(c, orders.id, 'approved');
+    await reported(c, promo.id, 'approved');
+    const typesTo = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).map((d) => [d.type, d.status]);
+    expect(await typesTo(ordersOnly.id)).toEqual([
+      ['message.received', null],
+      ['message.status', 'delivered'],
+      ['template.status_changed', 'paused'],
+      ['template.status_changed', 'approved'],
+    ]);
+    expect(await typesTo(every.id)).toEqual([
+      ['template.status_changed', 'approved'],
+      ['template.status_changed', 'approved'],
+    ]);
+    // Each delivery names the template.
+    expect(await deliverDue(c)).toMatchObject({ attempted: 6, succeeded: 6 });
+    const templatesAt = (path: string) =>
+      requestsTo(path)
+        .map((r) => JSON.parse(r.body) as { type: string; data: Record<string, unknown> })
+        .filter((b) => b.type !== 'message.received')
+        .map((b) =>
+          b.type === 'message.status'
+            ? (b.data.message as { templateId: string }).templateId
+            : (b.data.template as { id: string }).id,
+        )
+        .sort();
+    expect(templatesAt(ordersOnly.path)).toEqual([orders.id, orders.id, orders.id]);
+    expect(templatesAt(every.path)).toEqual([orders.id, promo.id].sort());
+  });
+});
+
 describe('event capture', () => {
   it('records an event only for subscribed types, with one delivery per active subscribed endpoint, and none from a rolled-back change', async () => {
     const c = await fx.company();

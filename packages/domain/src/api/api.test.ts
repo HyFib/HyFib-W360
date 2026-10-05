@@ -113,11 +113,13 @@ import {
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
   WEBHOOK_SENDERS_NEED_THE_EVENT,
   WEBHOOK_TEAMS_NEED_THE_EVENTS,
+  WEBHOOK_TEMPLATES_NEED_THE_EVENTS,
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
 } from '../webhooks/service';
 import {
   WEBHOOK_CHANNEL_EVENTS,
   WEBHOOK_TEAM_EVENTS,
+  WEBHOOK_TEMPLATE_EVENTS,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_FAILURE_KINDS,
   WEBHOOK_LIMITS,
@@ -1360,6 +1362,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'orderStatuses',
       'runEndStatuses',
       'teamIds',
+      'templateIds',
       'templateStatuses',
     ]);
     expect(update.additionalProperties).toBe(false);
@@ -1544,6 +1547,70 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(keys(answered.properties.oauth)).toEqual(['clientId', 'scope', 'tokenUrl']);
     expect(answered.required).toContain('oauth');
     expect(doc.info.description).toContain('send it as `Authorization: Bearer <token>`');
+  });
+
+  it('take templates only with message.status or template.status_changed, each once, and a list of them alone is a change (ADR-175)', () => {
+    const a = '0190e9a1-0000-7000-8000-00000000002a';
+    const b = '0190e9a1-0000-7000-8000-00000000002b';
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    for (const event of WEBHOOK_TEMPLATE_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          templateIds: [b, a.toUpperCase(), b],
+        }).templateIds,
+        event,
+      ).toEqual([b, a]);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.received', 'campaign.status_changed'],
+      templateIds: [a],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['templateIds', WEBHOOK_TEMPLATES_NEED_THE_EVENTS],
+    ]);
+    const statuses = { ...base, events: ['message.status'] };
+    for (const body of [
+      { ...statuses, templateIds: [] },
+      { ...statuses, templateIds: ['order_update'] },
+      {
+        ...statuses,
+        templateIds: Array.from(
+          { length: WEBHOOK_LIMITS.templates + 1 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...statuses, templateIds: null }).templateIds,
+    ).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ templateIds: null })).toEqual({
+      templateIds: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ templateIds: [a] })).toEqual({
+      templateIds: [a],
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.templateIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('templateIds');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('templateIds');
+    expect(doc.info.description).toContain(
+      'And it can name templates (its `templateIds`): then it receives the statuses of the messages sent with them and their changes only.',
+    );
   });
 
   it('take teams only with an event of a conversation, each once, and a list of them alone is a change (ADR-174)', () => {

@@ -1,5 +1,61 @@
 # Progress
 
+## 2026-10-05 — Phase 5: choosing the templates whose message statuses and changes a webhook endpoint receives (P5-09, ADR-175)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every
+endpoint received the statuses of every message and the changes of every template. The local
+PostgreSQL is unavailable (its Docker daemon stopped), so migration 0123, the integration tests and
+the e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-175):** `templateIds`, null for every template or 1 to 50 of the company's templates
+  in any status, only with `message.status` or `template.status_changed`; a message's statuses go by
+  the template it was sent with, so a message without one is on no list.
+- **Database:** migration 0123 (the column and its check, the column grant,
+  `app.capture_webhook_event` matching the template the triggers pass); the schema's column
+  (`packages/db`).
+- **Domain:** the list's schema, keeping and checking (`webhookTemplateIdsSchema`,
+  `webhookTemplateIdsFor`, `assertWebhookTemplates`), the endpoint view naming the templates,
+  `templateChoices`, create and update with the audit; `WEBHOOK_TEMPLATE_EVENTS` and the label in
+  the model; `templateIds` in the API (create, update, answers) and the OpenAPI document; the export
+  column.
+- **Web:** "Templates" in the endpoint form (every template's, or the templates ticked, by name and
+  language) and "Templates whose statuses and changes are sent: …" on the endpoints list.
+- **Tests:**
+  - Unit (4 new in `webhooks.test.ts`, 1 new and 1 changed in `api.test.ts`): the list's rules, the
+    events it narrows, keeping and clearing, the label, the API schemas and the OpenAPI entries.
+  - Integration (3 new in `webhooks.test.ts`, 1 new and 1 changed in
+    `api-webhook-endpoints.test.ts`): refusals, keeping and clearing, audits, the check and the
+    grant, the choices, and capture by template. Written for CI; not run here.
+  - E2E (1 new in `webhook-events.spec.ts`): an endpoint for one template of two. Written for CI;
+    not run here.
+- **Docs:** ADR-175 (and ADR-148's and ADR-172's "Not built" annotated); SECURITY; ARCHITECTURE;
+  THREAT-MODEL T170; DEPLOYMENT and RUNBOOKS (migration 0123, a receiver missing a message's
+  statuses or a template's changes); DATA-RETENTION; BACKLOG P5-09; feature matrix H-014, W-138 and
+  W-139.
+- **Mutation checks:** 16 deliberate regressions tried, all caught on the unit-tested parts (an
+  empty or long list, repeats or case kept, any text taken, a list kept without its events or by a
+  null, the events narrowed, the limit, the label, the API's refinement, change rule and fields, the
+  OpenAPI field and overview). The services' checks, the capture and the form need the database or a
+  browser, so their regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 799 passed (80 files)                                                |
+| `pnpm test:integration`, e2e, migration 0123       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 16 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Filters by a template's category or language, or by campaign or automation; templates per event
+  type.
+
 ## 2026-10-05 — Phase 5: choosing the teams whose conversations' events a webhook endpoint receives (P5-09, ADR-174)
 
 Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every

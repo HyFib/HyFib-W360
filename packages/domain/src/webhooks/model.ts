@@ -326,6 +326,8 @@ export const WEBHOOK_LIMITS = {
   channels: 100,
   /** The teams an endpoint can choose to take the conversations' events of (ADR-174). */
   teams: 50,
+  /** The templates an endpoint can choose to take the statuses and changes of (ADR-175). */
+  templates: 50,
   /**
    * An endpoint's OAuth client (ADR-173): its identifier, secret and scope, short enough that the
    * Basic header stays within what the egress client sends, and the longest token kept.
@@ -430,6 +432,34 @@ export const webhookTeamText = (team: WebhookEndpointTeam): string => team.name 
 /** Whether an endpoint with these events takes events of conversations, and can choose teams. */
 export function webhookTakesTeamEvents(eventTypes: readonly WebhookEventType[]): boolean {
   return WEBHOOK_TEAM_EVENTS.some((type) => eventTypes.includes(type));
+}
+
+/**
+ * The events of a template, which an endpoint can take for chosen templates (ADR-175): the statuses
+ * of the messages sent with it, and its own changes.
+ */
+export const WEBHOOK_TEMPLATE_EVENTS = [
+  'message.status',
+  'template.status_changed',
+] as const satisfies readonly WebhookEventType[];
+
+/**
+ * A template of the company, which an endpoint can choose to take the statuses and changes of
+ * (ADR-175). Templates are never deleted, so a list never names one that is gone.
+ */
+export interface WebhookTemplateChoice {
+  id: string;
+  name: string;
+  language: string;
+}
+
+/** A template as Settings → Webhooks names it: its name and language. */
+export const webhookTemplateText = (template: { name: string; language: string }): string =>
+  `${template.name} (${template.language})`;
+
+/** Whether an endpoint with these events takes events of templates, and can choose templates. */
+export function webhookTakesTemplateEvents(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_TEMPLATE_EVENTS.some((type) => eventTypes.includes(type));
 }
 
 /**

@@ -1505,6 +1505,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   writes no event when none does. Settings (radio buttons and checkboxes under "Teams") and the API
   (`teamIds`) set it; the services check the teams a list adds; a change that drops the events
   clears it.
+- **Template filters** (migration 0123, ADR-175): `template_ids` on an endpoint lists the templates
+  whose messages' statuses and changes it takes, null for every template's; a check keeps it to 1 to
+  50 ids and to endpoints that take `message.status` or `template.status_changed`.
+  `app.capture_webhook_event` (replaced with the same signature) creates a delivery of those events
+  only for endpoints whose list is null or holds the event's template (the message's, which the
+  message trigger passes and which is null for a message sent without one, or the template that
+  changed), and writes no event when none does. Settings (radio buttons and checkboxes under
+  "Templates") and the API (`templateIds`) set it; the services check the templates a list gives; a
+  change that drops both events clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and

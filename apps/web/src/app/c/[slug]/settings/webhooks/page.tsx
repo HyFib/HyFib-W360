@@ -18,6 +18,7 @@ import {
   webhookOAuthText,
   webhookHost,
   webhookTeamText,
+  webhookTemplateText,
   type WebhookEndpointView,
 } from '@w360/domain';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
@@ -47,12 +48,14 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'developer.manage')) notFound();
   const { webhooks } = await getRuntime();
-  const [endpoints, automationChoices, channelChoices, teamChoices] = await Promise.all([
-    webhooks.list(ctx),
-    webhooks.automationChoices(ctx),
-    webhooks.channelChoices(ctx),
-    webhooks.teamChoices(ctx),
-  ]);
+  const [endpoints, automationChoices, channelChoices, teamChoices, templateChoices] =
+    await Promise.all([
+      webhooks.list(ctx),
+      webhooks.automationChoices(ctx),
+      webhooks.channelChoices(ctx),
+      webhooks.teamChoices(ctx),
+      webhooks.templateChoices(ctx),
+    ]);
   const tz = ctx.tenant.timezone;
   const base = `/c/${ctx.tenant.slug}/settings/webhooks`;
   // A replay of every endpoint (ADR-160) offers the events the endpoints that are on receive.
@@ -195,6 +198,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.channels.map(webhookChannelText).join(', ')}
                       </p>
                     ) : null}
+                    {e.templates ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Templates whose statuses and changes are sent:{' '}
+                        {e.templates.map(webhookTemplateText).join(', ')}
+                      </p>
+                    ) : null}
                     {e.teams ? (
                       <p className="text-xs text-muted-foreground">
                         Teams whose conversations’ events are sent:{' '}
@@ -322,6 +331,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
             automationChoices={automationChoices}
             channelChoices={channelChoices}
             teamChoices={teamChoices}
+            templateChoices={templateChoices}
             atLimit={endpoints.length >= WEBHOOK_LIMITS.endpoints}
           />
         </CardContent>

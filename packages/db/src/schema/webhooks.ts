@@ -162,6 +162,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   teamIds: uuid('team_ids').array(),
   /**
+   * The templates whose messages' statuses and changes it takes (ADR-175); null takes every
+   * template's. Set only while `message.status` or `template.status_changed` is among its events.
+   */
+  templateIds: uuid('template_ids').array(),
+  /**
    * The endpoint's OAuth client (ADR-173): its authorization server's token endpoint, the client
    * identifier, the secret encrypted by the keyring and the scope to ask for (null: none). All
    * null without OAuth; the scope alone is optional.

@@ -14,6 +14,7 @@ import {
   gt,
   inArray,
   isNotNull,
+  messageTemplates,
   sql,
   teams,
   users,
@@ -47,6 +48,7 @@ import {
   webhookTakesAutomationRuns,
   webhookTakesChannelEvents,
   webhookTakesTeamEvents,
+  webhookTakesTemplateEvents,
   type WebhookAutomationChoice,
   type WebhookCampaignStatus,
   type WebhookChannelChoice,
@@ -62,6 +64,7 @@ import {
   type WebhookOrderStatus,
   type WebhookRunEndStatus,
   type WebhookTeamChoice,
+  type WebhookTemplateChoice,
   type WebhookTemplateStatus,
 } from './model';
 import {
@@ -608,6 +611,13 @@ export function webhookChannelLabel(channel: {
   return phone ?? name ?? `Phone number ID ${channel.phoneNumberId}`;
 }
 
+/** A template as Settings → Webhooks names it (ADR-175). */
+const templateChoiceColumns = {
+  id: messageTemplates.id,
+  name: messageTemplates.name,
+  language: messageTemplates.language,
+};
+
 /** The columns `webhookChannelLabel` reads, with the number's id and status. */
 const channelChoiceColumns = {
   id: channelAccounts.id,
@@ -616,6 +626,59 @@ const channelChoiceColumns = {
   phoneNumberId: channelAccounts.phoneNumberId,
   status: channelAccounts.status,
 };
+
+/**
+ * The templates whose messages' statuses and changes an endpoint takes (ADR-175), each once; null
+ * takes every template's, including templates added later.
+ */
+export const webhookTemplateIdsSchema = z
+  .array(z.uuid({ error: 'Choose templates from the list.' }))
+  .min(1, 'Choose at least one template, or take every template.')
+  .max(WEBHOOK_LIMITS.templates, `Choose at most ${WEBHOOK_LIMITS.templates} templates.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_TEMPLATES_NEED_THE_EVENTS =
+  'Choose templates only for an endpoint that receives Message status or Template status.';
+
+export const WEBHOOK_TEMPLATES_NOT_FOUND = 'Choose templates of this company.';
+
+/**
+ * The templates an endpoint keeps after it is added or changed: every template (null) unless it
+ * takes an event of a template; then those given, or else the ones it had.
+ */
+export function webhookTemplateIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesTemplateEvents(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses templates given for an endpoint unless each is the company's (ADR-175). A company's
+ * templates are never deleted (one deleted at Meta keeps its row), so a list never names one that is
+ * gone. `tx` is in the company's scope.
+ */
+export async function assertWebhookTemplates(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+): Promise<void> {
+  if (!ids || ids.length === 0) return;
+  const rows = await tx
+    .select({ id: messageTemplates.id })
+    .from(messageTemplates)
+    .where(and(eq(messageTemplates.tenantId, tenantId), inArray(messageTemplates.id, [...ids])));
+  const found = new Set(rows.map((r) => r.id));
+  const index = ids.findIndex((id) => !found.has(id));
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_TEMPLATES_NOT_FOUND, {
+    issues: [{ path: `templateIds.${index}`, message: WEBHOOK_TEMPLATES_NOT_FOUND }],
+  });
+}
 
 /**
  * The teams whose conversations' message and conversation events an endpoint takes (ADR-174), each
@@ -743,6 +806,11 @@ const endpointFields = z.object({
    * left out, they stay.
    */
   teamIds: webhookTeamIdsSchema.optional(),
+  /**
+   * Given, the templates whose messages' statuses and changes it takes (null: every template's,
+   * ADR-175); left out, they stay.
+   */
+  templateIds: webhookTemplateIdsSchema.optional(),
   /** Given, its OAuth client (null: none, ADR-173); left out, it stays. */
   oauth: webhookOAuthSchema.nullable().optional(),
 });
@@ -815,6 +883,12 @@ const teamsNeedTheEvents = {
     !data.teamIds || webhookTakesTeamEvents(data.eventTypes),
   options: { path: ['teamIds'], message: WEBHOOK_TEAMS_NEED_THE_EVENTS },
 };
+/** Templates are chosen only for an endpoint that takes events of templates (ADR-175). */
+const templatesNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; templateIds?: unknown }) =>
+    !data.templateIds || webhookTakesTemplateEvents(data.eventTypes),
+  options: { path: ['templateIds'], message: WEBHOOK_TEMPLATES_NEED_THE_EVENTS },
+};
 const endpointSchema = endpointFields
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
   .refine(sendersNeedTheEvent.check, sendersNeedTheEvent.options)
@@ -826,7 +900,8 @@ const endpointSchema = endpointFields
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
   .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
-  .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options);
+  .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
+  .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options);
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointFields
   .extend({ endpointId: z.uuid() })
@@ -840,7 +915,8 @@ const updateSchema = endpointFields
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
   .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
-  .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options);
+  .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
+  .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
 const replayAllFailedSchema = z.object({
@@ -897,6 +973,11 @@ export interface WebhookEndpointView {
    * conversation's.
    */
   teams: WebhookEndpointTeam[] | null;
+  /**
+   * The templates whose messages' statuses and changes it takes (ADR-175), as stored, named; null
+   * takes every template's.
+   */
+  templates: WebhookTemplateChoice[] | null;
   /** Where it gets OAuth tokens and as which client (ADR-173); the secret is never shown. */
   oauth: WebhookEndpointOAuth | null;
   createdAt: Date;
@@ -1124,6 +1205,7 @@ export async function lockWebhookEndpoint(
       runEndStatuses: webhookEndpoints.runEndStatuses,
       channelAccountIds: webhookEndpoints.channelAccountIds,
       teamIds: webhookEndpoints.teamIds,
+      templateIds: webhookEndpoints.templateIds,
       headerNames: webhookEndpoints.headerNames,
       oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
       oauthClientId: webhookEndpoints.oauthClientId,
@@ -1172,6 +1254,7 @@ export async function insertWebhookEndpoint(
     runEndStatuses: WebhookRunEndStatus[] | null;
     channelAccountIds: string[] | null;
     teamIds: string[] | null;
+    templateIds: string[] | null;
     /** Its OAuth client (ADR-173), checked by `checkedWebhookOAuth` with nothing stored. */
     oauth: CheckedWebhookOAuth | null;
     creator: WebhookEndpointCreator;
@@ -1209,6 +1292,7 @@ export async function insertWebhookEndpoint(
     runEndStatuses: input.runEndStatuses,
     channelAccountIds: input.channelAccountIds,
     teamIds: input.teamIds,
+    templateIds: input.templateIds,
     ...webhookOAuthColumns(keyring, tenantId, id, input.oauth, NO_WEBHOOK_OAUTH),
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
@@ -1595,6 +1679,7 @@ export function createWebhooksService(deps: {
               runEndStatuses: webhookEndpoints.runEndStatuses,
               channelAccountIds: webhookEndpoints.channelAccountIds,
               teamIds: webhookEndpoints.teamIds,
+              templateIds: webhookEndpoints.templateIds,
               oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
               oauthClientId: webhookEndpoints.oauthClientId,
               oauthScope: webhookEndpoints.oauthScope,
@@ -1669,6 +1754,21 @@ export function createWebhooksService(deps: {
                   .from(teams)
                   .where(and(eq(teams.tenantId, ctx.tenant.id), inArray(teams.id, teamIds)));
           const teamNameById = new Map(namedTeams.map((t) => [t.id, t.name]));
+          // The templates endpoints chose (ADR-175).
+          const templateIds = [...new Set(rows.flatMap((r) => r.templateIds ?? []))];
+          const namedTemplates =
+            templateIds.length === 0
+              ? []
+              : await tx
+                  .select(templateChoiceColumns)
+                  .from(messageTemplates)
+                  .where(
+                    and(
+                      eq(messageTemplates.tenantId, ctx.tenant.id),
+                      inArray(messageTemplates.id, templateIds),
+                    ),
+                  );
+          const templateById = new Map(namedTemplates.map((t) => [t.id, t]));
           return rows.map((r) => {
             const recent: Record<WebhookDeliveryState, number> = {
               pending: 0,
@@ -1684,6 +1784,7 @@ export function createWebhooksService(deps: {
               automationIds,
               channelAccountIds,
               teamIds: chosenTeams,
+              templateIds: chosenTemplates,
               oauthTokenUrl,
               oauthClientId,
               oauthScope,
@@ -1705,6 +1806,11 @@ export function createWebhooksService(deps: {
                 : null,
               teams: chosenTeams
                 ? chosenTeams.map((id) => ({ id, name: teamNameById.get(id) ?? null }))
+                : null,
+              templates: chosenTemplates
+                ? chosenTemplates.map(
+                    (id) => templateById.get(id) ?? { id, name: 'Unknown template', language: '-' },
+                  )
                 : null,
               automations: automationIds
                 ? automationIds.map((id) => {
@@ -1782,6 +1888,28 @@ export function createWebhooksService(deps: {
     },
 
     /**
+     * The templates an endpoint can choose to take the statuses and changes of (ADR-175): every
+     * template of the company, whatever its status, by name and language.
+     */
+    async templateChoices(ctx: TenantContext): Promise<WebhookTemplateChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      return db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select(templateChoiceColumns)
+            .from(messageTemplates)
+            .where(eq(messageTemplates.tenantId, ctx.tenant.id))
+            .orderBy(
+              asc(messageTemplates.name),
+              asc(messageTemplates.language),
+              asc(messageTemplates.id),
+            ),
+        { accessMode: 'read only' },
+      );
+    },
+
+    /**
      * The teams an endpoint can choose to take the conversations' events of (ADR-174): every team
      * of the company, by name.
      */
@@ -1837,6 +1965,8 @@ export function createWebhooksService(deps: {
         await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
         const teamIds = webhookTeamIdsFor(data.eventTypes, data.teamIds, null);
         await assertWebhookTeams(tx, ctx.tenant.id, teamIds);
+        const templateIds = webhookTemplateIdsFor(data.eventTypes, data.templateIds, null);
+        await assertWebhookTemplates(tx, ctx.tenant.id, templateIds);
         const oauth = data.oauth
           ? checkedWebhookOAuth(data.oauth, NO_WEBHOOK_OAUTH, deps.egressPolicy)
           : null;
@@ -1861,6 +1991,7 @@ export function createWebhooksService(deps: {
           runEndStatuses,
           channelAccountIds: channelIds,
           teamIds,
+          templateIds,
           oauth,
           creator: { userId: ctx.user.id },
         });
@@ -1886,6 +2017,7 @@ export function createWebhooksService(deps: {
               ...(runEndStatuses ? { runEndStatuses } : {}),
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
+              ...(templateIds ? { templateIds } : {}),
               ...(oauth ? { oauthTokenHost: oauth.host } : {}),
             },
           },
@@ -1965,6 +2097,15 @@ export function createWebhooksService(deps: {
         if (data.teamIds !== undefined) {
           await assertWebhookTeams(tx, ctx.tenant.id, teamIds, endpoint.teamIds);
         }
+        const templateIds = webhookTemplateIdsFor(
+          data.eventTypes,
+          data.templateIds,
+          endpoint.templateIds,
+        );
+        // Only a list given now is checked: the templates kept were checked when chosen.
+        if (data.templateIds !== undefined) {
+          await assertWebhookTemplates(tx, ctx.tenant.id, templateIds);
+        }
         // Left out, the OAuth client stays as it is (ADR-173).
         const oauth = data.oauth
           ? checkedWebhookOAuth(data.oauth, endpoint, deps.egressPolicy)
@@ -1991,6 +2132,7 @@ export function createWebhooksService(deps: {
             runEndStatuses,
             channelAccountIds: channelIds,
             teamIds,
+            templateIds,
             ...(data.headers
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
               : {}),
@@ -2027,6 +2169,7 @@ export function createWebhooksService(deps: {
               ...(runEndStatuses ? { runEndStatuses } : {}),
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
+              ...(templateIds ? { templateIds } : {}),
               ...webhookOAuthAudit(oauth, endpoint),
             },
           },

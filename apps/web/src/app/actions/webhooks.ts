@@ -48,6 +48,8 @@ export async function createWebhookEndpointAction(
     channelIds: string[] | null;
     /** The teams whose conversations' events it takes (ADR-174); null takes every one's. */
     teamIds: string[] | null;
+    /** The templates whose statuses and changes it takes (ADR-175); null takes every one's. */
+    templateIds: string[] | null;
     /** Its OAuth client (ADR-173); null: none. */
     oauth: WebhookOAuthActionInput | null;
   },
@@ -92,6 +94,8 @@ export async function updateWebhookEndpointAction(
     channelIds: string[] | null;
     /** The teams whose conversations' events it takes (ADR-174); null takes every one's. */
     teamIds: string[] | null;
+    /** The templates whose statuses and changes it takes (ADR-175); null takes every one's. */
+    templateIds: string[] | null;
     /**
      * Given, its OAuth client (null removes it, ADR-173): a secret left out keeps the stored one
      * while the token URL stays the same. Left out, it stays.

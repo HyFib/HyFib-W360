@@ -5952,8 +5952,9 @@ Decision:
   endpoints keep null; nothing is backfilled. An integration test holds the domain's list, the
   trigger's and the check's to the same statuses.
 
-Not built: filters by template, category, language or WhatsApp account, by the status before a
-change or by Meta's reason, and filters for conversation statuses (built by ADR-149).
+Not built: filters by template (built by ADR-175), category, language or WhatsApp account, by the
+status before a change or by Meta's reason, and filters for conversation statuses (built by
+ADR-149).
 
 ## ADR-149 Choosing the conversation statuses a webhook endpoint receives (P5-09) (2026-10-04)
 
@@ -6884,9 +6885,9 @@ Decision:
   and the message trigger function with the same name, so owners, grants and triggers stay. Existing
   endpoints keep null; nothing is backfilled.
 
-Not built: statuses of the messages one API key, campaign, automation or template sent (an endpoint
-chooses kinds of senders only), and a sender filter for received messages (a contact sends them
-all).
+Not built: statuses of the messages one API key, campaign, automation or template (built by ADR-175)
+sent (an endpoint chooses kinds of senders only), and a sender filter for received messages (a
+contact sends them all).
 
 ## ADR-173 OAuth 2.0 client credentials for webhook endpoints (P5-09) (2026-10-05)
 
@@ -7008,3 +7009,51 @@ Decision:
 
 Not built: filters by the member a conversation is assigned to, teams for automation run and order
 events (which can belong to a conversation too), and teams chosen per event type.
+
+## ADR-175 Choosing the templates whose message statuses and changes a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint that takes `message.status` receives the statuses of every message its company
+sends, and one that takes `template.status_changed` the changes of every template. A receiver often
+follows a few notifications only: an order system the delivery and read statuses of its order and
+shipping updates, a login service those of its one-time passwords, a team that looks after some
+templates their reviews. Each was sent every status and had to look the template up and drop the
+rest. ADR-148 left filters by template unbuilt, and ADR-172 narrows statuses by kind of sender only.
+
+Decision:
+
+- **A list of templates per endpoint,** for `message.status` and `template.status_changed` only.
+  Null receives every template's, as before; a list holds 1 to 50 of the company's templates, in the
+  order given with repeats merged. It is chosen in Settings → Webhooks ("Templates": every message's
+  statuses and every template's changes, or only those of the templates ticked, named by name and
+  language) and shown on the endpoint as "Templates whose statuses and changes are sent: …", and
+  through the API as `templateIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}`
+  and in every endpoint the API answers.
+- **Only with those events:** a list given for an endpoint that takes neither is refused
+  (`templateIds`; 422 through the API). A change that removes both clears it, and a `PATCH` that
+  leaves it out keeps it; Settings always sends it. A check in the database holds the same rule
+  (null, or 1 to 50 ids without a null while one of the two events is among the endpoint's).
+- **A message's template is the one it was sent with** (its `template_id`, written with the message
+  and never changed), so the statuses of a message sent without one, such as a member's reply or an
+  automation's text, are on no list; a template's change goes by the template that changed. Applied
+  in `app.capture_webhook_event` with the endpoints' other filters, to the template both triggers
+  already passed; no event is written when no endpoint takes it. Stored events and payloads are
+  unchanged; replays and test events too. Other events are not narrowed: an endpoint that names
+  templates still receives every other event it takes.
+- **The company's templates, in any status:** a list may name only templates of the endpoint's
+  company, a draft or a rejected one included, so their statuses and changes can be chosen before
+  approval. A template is never deleted while its company exists (one deleted at Meta or from HyFib
+  keeps its row, and the messages sent with it keep referring to it), so a list never names one that
+  is gone; a list given again is checked again.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `templateIds` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The choices list the company's templates by name and language
+  to members with `developer.manage` (owners and administrators, who can read templates anyway).
+- **Migration 0123:** `template_ids uuid[]` on `app.webhook_endpoints` with the check, validated at
+  once (a company has at most 10 endpoints), an update grant on the column for the runtime role, and
+  `app.capture_webhook_event` replaced with the same signature (0122's, with the template
+  condition), so its owner and grants stay. The triggers are unchanged. Existing endpoints keep
+  null; nothing is backfilled.
+
+Not built: filters by a template's category or language, by campaign or automation (a list names
+templates, not who sent them), and templates chosen per event type (one list serves both events).

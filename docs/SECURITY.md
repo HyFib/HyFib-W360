@@ -934,6 +934,15 @@ Phase 5 rules (outgoing webhooks, P5-09):
   what one endpoint receives and never adds an event or a delivery for another endpoint or company.
   A team deleted later stays on the list and matches nothing, so a list never widens by itself.
   Audited with the list (unit tests; integration and e2e tests, run in CI only).
+- An endpoint can take the statuses and changes of chosen templates only (ADR-175), chosen the same
+  way. A list may name only templates of the endpoint's company (checked in its scope whenever a
+  list is given; templates are never deleted), is kept only while the endpoint takes
+  `message.status` or `template.status_changed` (a database check too, which also refuses a null
+  entry), and is applied in `app.capture_webhook_event` to the template the triggers pass: it
+  narrows what one endpoint receives and never adds an event or a delivery for another endpoint or
+  company. A refusal tells a key with `webhooks.manage` only whether an id it gives is one of its
+  company's templates. Audited with the list (unit tests; integration and e2e tests, run in CI
+  only).
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or
