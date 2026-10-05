@@ -530,10 +530,12 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         slug: tenants.slug,
         status: tenants.status,
         createdAt: tenants.createdAt,
+        // The company by its table's name: in a select from one table, drizzle writes the columns
+        // of SQL fields without their table, so `${tenants.id}` here would read the number's own id.
         active: sql<boolean>`exists (select 1 from ${channelAccounts} c
-          where c.tenant_id = ${tenants.id} and c.status = 'active')`,
+          where c.tenant_id = ${tenants}.id and c.status = 'active')`,
         inProgress: sql<boolean>`exists (select 1 from ${channelAccounts} c
-          where c.tenant_id = ${tenants.id} and c.status = 'onboarding')`,
+          where c.tenant_id = ${tenants}.id and c.status = 'onboarding')`,
       })
       .from(tenants)
       .where(and(gte(tenants.createdAt, since), sql`${tenants.status} <> 'deleted'`))

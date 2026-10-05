@@ -1,5 +1,50 @@
 # Progress
 
+## 2026-10-05 — Fix: the Onboarding tab's new companies without a number, and three new integration tests
+
+Status: **Fixed; the integration tests run in CI only (the local PostgreSQL is unavailable).** PR
+#31's first CI run (head `7b4e105`) failed three integration tests that were written for CI and had
+not run anywhere before: two of ADR-158 in `platform-ops.test.ts` and one of ADR-160 in
+`api-webhook-endpoints.test.ts`. One of them found a bug in the operations console that predates
+these slices.
+
+### Cause
+
+- **The Onboarding tab (ADR-054):** `companiesCreatedSince` decides whether each new company has an
+  active number, or one being set up, with a subquery in its select list. In a select from one
+  table, drizzle writes the columns inside SQL fields without their table, so
+  `c.tenant_id = ${tenants.id}` became `c.tenant_id = "id"`, which PostgreSQL reads as the number's
+  own id: no company ever had a number. The tab listed every company created in its window as
+  without a number, counted none as connected and never said a number was being set up, and its
+  export (ADR-158) copied the list. Confirmed by rendering the query with drizzle's `toSQL()` before
+  and after the fix.
+- **The Integrations export test (ADR-158)** checked that the shared `SECRET_TOKEN` appeared in none
+  of the tab's files, but other tests leave failed receipts whose last error names it, and the
+  receipts list shows each receipt's last error, as the tab does.
+- **The test of the API's replay of every endpoint (ADR-160)** compared the first answer without
+  `replayed: false`, which every idempotent answer carries.
+
+### Completed
+
+- `platform/ops.ts`: the subqueries name the company by its table (`${tenants}.id`), with a comment
+  saying why. No other select from one table puts a column of that table in a subquery of its select
+  list (a scan of `packages/domain`).
+- `platform-ops.test.ts`: the Onboarding export test adds a company whose only number is being set
+  up (listed, "Number being set up" Yes) and checks that the tab leaves out the company with an
+  active number; the Integrations export test uses markers of its own for the endpoint's URL token,
+  the message and the email address, and still checks that no endpoint URL's token, its own or
+  another test's, reaches the failures file.
+- `api-webhook-endpoints.test.ts`: the first answer is compared with `replayed: false`.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                                       | Result                                                        |
+| ------------------------------------------------------------- | ------------------------------------------------------------- |
+| The query rendered with drizzle's `toSQL()`, before and after | `c.tenant_id = "id"`, then `c.tenant_id = "app"."tenants".id` |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`            | clean                                                         |
+| `pnpm test` (unit)                                            | 727 passed (75 files)                                         |
+| `pnpm test:integration`                                       | not run here: the local PostgreSQL is unavailable; CI runs it |
+
 ## 2026-10-05 — Phase 5: starting an automation for many contacts in one call (P5-08, ADR-161)
 
 Status: **Implemented; its database tests run in CI only (test data only).** A key started an

@@ -1787,6 +1787,7 @@ describe('replaying failed deliveries through the API (ADR-095)', () => {
     const answer = await api().replayAllFailed(key.ctx, { since }, idem('ra-1', since));
     expect(answer).toEqual({
       status: 200,
+      replayed: false,
       body: {
         data: {
           queued: 3,

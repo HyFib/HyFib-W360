@@ -1880,8 +1880,12 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
          'Meta refused the PIN.')`,
       [uuidv7(), acme.tenant.id, acme.whatsappAccountId, nextExternalId()],
     );
-    // A company created without any number.
+    // A company created without any number, and one whose only number is being set up.
     const bare = await createTenant(fx.dbs, await createUser(fx.dbs));
+    const setting = await fx.company();
+    await fx.query(`UPDATE app.channel_accounts SET status = 'onboarding' WHERE id = $1`, [
+      setting.channelAccountId,
+    ]);
 
     const tab = await ops().onboarding(exporter);
     const signups = await ops().exportList(exporter, 'signups', 30);
@@ -1919,8 +1923,15 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
     expect(freshLines.filter((l) => l.includes(`,${bare.slug},`))).toEqual([
       expect.stringMatching(new RegExp(`^Company ${bare.slug},${bare.slug},active,${MINUTE},No$`)),
     ]);
+    const settingSlug = setting.tenant.slug;
+    expect(freshLines.filter((l) => l.includes(`,${settingSlug},`))).toEqual([
+      expect.stringMatching(
+        new RegExp(`^Company ${settingSlug},${settingSlug},active,${MINUTE},Yes$`),
+      ),
+    ]);
     // A company with an active number is not a new company without one.
     expect(freshLines.some((l) => l.includes(`,${slug},`))).toBe(false);
+    expect(tab.stalled.some((c) => c.slug === slug)).toBe(false);
 
     expect(await exports(exporter)).toEqual([
       {
@@ -1939,6 +1950,11 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
     const exporter = await platformStaff();
     const beta = await fx.company();
     const slug = beta.tenant.slug;
+    // This test's own markers: other tests leave receipts whose last error names SECRET_TOKEN,
+    // and the receipts list shows each receipt's last error, as the tab does.
+    const urlToken = `tok_${randomBytes(8).toString('hex')}`;
+    const messageText = `Export test message ${randomBytes(4).toString('hex')}`;
+    const address = `nobody-${randomBytes(4).toString('hex')}@export.test`;
     const endpointId = uuidv7();
     await fx.query(
       `INSERT INTO app.webhook_endpoints (id, tenant_id, url, event_types, secret_ciphertext,
@@ -1948,7 +1964,7 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
       [
         endpointId,
         beta.tenant.id,
-        `https://${slug}.example.com/hook?token=${SECRET_TOKEN}`,
+        `https://${slug}.example.com/hook?token=${urlToken}`,
         beta.owner.id,
       ],
     );
@@ -1968,14 +1984,13 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
     );
     const stranger = { ...beta, wabaId: nextExternalId(), phoneNumberId: nextExternalId() };
     const { receiptId: quarantined } = await fx.deliver(
-      fx.messagesBody(stranger, { messages: [{ waId: '919876500004', text: MESSAGE_TEXT }] }),
+      fx.messagesBody(stranger, { messages: [{ waId: '919876500004', text: messageText }] }),
     );
     // A refused email: the console counts it by kind and never shows the address.
     await fx.query(
       `INSERT INTO ops.email_outbox (id, kind, to_address, status, attempts, last_error)
-       VALUES ($1, 'it.export.refused', 'nobody@export.test', 'failed', 5,
-         'refused nobody@export.test')`,
-      [uuidv7()],
+       VALUES ($1, 'it.export.refused', $2, 'failed', 5, $3)`,
+      [uuidv7(), address, `refused ${address}`],
     );
 
     const tab = await ops().integrations(exporter);
@@ -2028,8 +2043,10 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
     expect(emailLines[0]).toBe(EMAILS_CSV_COLUMNS.join(','));
     expect(emailLines).toContain('it.export.refused,1,0');
 
+    // Endpoints are shown by their host: no URL's token, this test's or another's, is exported.
+    expect(failures.body).not.toContain(SECRET_TOKEN);
     const everything = failures.body + receipts.body + quarantine.body + emails.body;
-    for (const secret of [SECRET_TOKEN, MESSAGE_TEXT, 'nobody@export.test']) {
+    for (const secret of [urlToken, messageText, address]) {
       expect(everything).not.toContain(secret);
     }
     expect(await exports(exporter)).toEqual([
