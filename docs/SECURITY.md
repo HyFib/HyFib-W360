@@ -905,6 +905,14 @@ Phase 5 rules (outgoing webhooks, P5-09):
   endpoint or company. Consent, contact and template events are not narrowed, and the number passed
   is not stored with the event. Audited with the list (unit tests; integration and e2e tests, run in
   CI only).
+- An endpoint can take `message.status` only for the messages some kinds of senders sent (ADR-172),
+  chosen the same way: members, automations, campaigns, the API or HyFib. The list is checked
+  against those five (a contact sends no status), kept only while the endpoint takes
+  `message.status` (a database check too, which also refuses a null entry), and applied in
+  `app.capture_webhook_event` with the sender of the message the change itself updated, passed by
+  its trigger in the same transaction: it narrows what one endpoint receives and never adds an event
+  or a delivery for another endpoint or company. The sender passed is not stored with the event.
+  Audited with the list (unit tests; integration and e2e tests, run in CI only).
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

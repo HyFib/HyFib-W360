@@ -37,6 +37,8 @@ import {
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
+  WEBHOOK_MESSAGE_SENDER_LABELS,
+  WEBHOOK_MESSAGE_SENDERS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUS_LABELS,
@@ -96,6 +98,8 @@ import {
   webhookRunEndStatusesSchema,
   webhookHeadersAad,
   webhookHeadersSchema,
+  webhookMessageSendersFor,
+  webhookMessageSendersSchema,
   webhookMessageStatusesFor,
   webhookMessageStatusesSchema,
   webhookOrderStatusesFor,
@@ -1665,5 +1669,57 @@ describe('number filters (ADR-170)', () => {
     ]);
     expect(CHANNEL_STATUSES).toEqual(Object.keys(WEBHOOK_CHANNEL_STATUS_NOTES));
     expect(text(null)).toBe('+91 90000 54321');
+  });
+});
+
+describe('message sender filters (ADR-172)', () => {
+  it('take 1 to 5 of the senders message.sentBy names, once each, in the order Settings lists them; null takes every sender', () => {
+    expect(webhookMessageSendersSchema.parse(['api', 'agent', 'api'])).toEqual(['agent', 'api']);
+    expect(webhookMessageSendersSchema.parse(null)).toBeNull();
+    // Exactly the senders a message.status event reports.
+    expect([...WEBHOOK_MESSAGE_SENDERS]).toEqual(
+      messageStatusPayloadSchema.shape.data.shape.message.shape.sentBy.options,
+    );
+    expect(webhookMessageSendersSchema.parse([...WEBHOOK_MESSAGE_SENDERS].reverse())).toEqual([
+      'agent',
+      'bot',
+      'campaign',
+      'api',
+      'system',
+    ]);
+    for (const refused of [
+      [],
+      ['contact'],
+      ['Agent'],
+      ['member'],
+      'api',
+      [null],
+      Array(6).fill('api'),
+    ]) {
+      expect(webhookMessageSendersSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookMessageSendersSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one sender, or take the statuses of every message.',
+    );
+    expect(WEBHOOK_MESSAGE_SENDER_LABELS).toEqual({
+      agent: 'Members',
+      bot: 'Automations',
+      campaign: 'Campaigns',
+      api: 'The API',
+      system: 'HyFib (store order updates and satisfaction surveys)',
+    });
+  });
+
+  it('are kept only while the endpoint takes message.status: given, kept, or cleared', () => {
+    expect(webhookMessageSendersFor(['message.status'], ['api'], null)).toEqual(['api']);
+    expect(webhookMessageSendersFor(['message.status'], undefined, ['campaign'])).toEqual([
+      'campaign',
+    ]);
+    expect(webhookMessageSendersFor(['message.status'], null, ['campaign'])).toBeNull();
+    expect(webhookMessageSendersFor(['message.status'], undefined, null)).toBeNull();
+    expect(webhookMessageSendersFor(['message.received'], ['api'], ['campaign'])).toBeNull();
+    expect(webhookMessageSendersFor(['campaign.status_changed'], undefined, ['api'])).toBeNull();
   });
 });

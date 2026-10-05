@@ -228,6 +228,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    answers Settings → API keys with an error for a company with a key holding it (and the platform
    plan pages for a plan version including it), and `/api/v1/channels` with 404; rolling web servers
    back to an image from before it does the same.
+   Migration 0120 (ADR-172) adds `message_senders` to `app.webhook_endpoints` with a check validated
+   by reading the table, and replaces `app.capture_webhook_event` (keeping 0109's to 0118's filters)
+   and the message trigger function with the same signatures; every endpoint starts with none. Web
+   servers of this release need it, as their reads of endpoints name the column; workers do not read
+   it. Web servers from before it neither show nor change the column: until the web rollout ends, an
+   old server's change that drops `message.status` from an endpoint with a list fails on the check,
+   and its other changes keep it.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

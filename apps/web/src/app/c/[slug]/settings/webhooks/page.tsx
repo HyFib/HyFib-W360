@@ -11,6 +11,7 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_RUN_END_STATUS_LABELS,
+  WEBHOOK_MESSAGE_SENDER_LABELS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   webhookChannelText,
@@ -127,6 +128,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Message statuses sent:{' '}
                         {e.messageStatuses.map((s) => WEBHOOK_MESSAGE_STATUS_LABELS[s]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.messageSenders ? (
+                      <p className="text-xs text-muted-foreground">
+                        Statuses of messages sent by:{' '}
+                        {e.messageSenders.map((s) => WEBHOOK_MESSAGE_SENDER_LABELS[s]).join(', ')}
                       </p>
                     ) : null}
                     {e.templateStatuses ? (

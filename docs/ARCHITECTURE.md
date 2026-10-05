@@ -1477,6 +1477,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   test events are unchanged. Settings (a choice between every number and the numbers ticked, from
   `channelChoices`) and the API (`channelIds`) set it, the services checking that each id is a
   number of the company (`assertWebhookChannels`); a change that drops every such event clears it.
+- **Message sender filters** (migration 0120, ADR-172): `message_senders` on an endpoint lists who
+  sent the messages whose `message.status` it takes (`agent`, `bot`, `campaign`, `api`, `system`, as
+  the payload's `message.sentBy`), null for every sender; a check keeps it to 1 to 5 known senders
+  and to endpoints that take the event. The message trigger passes the sender as `sentBy` in the
+  detail, mapped as the payload maps it; `app.capture_webhook_event` (replaced with the same
+  signature) takes it out with the number before storing the event, creates a status's delivery only
+  for endpoints whose list is null or holds the sender, and writes no event when none does. Settings
+  (checkboxes under "Message status") and the API (`messageSenders`) set it; a change that drops the
+  event clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and

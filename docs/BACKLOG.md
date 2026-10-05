@@ -697,7 +697,11 @@ verification, app review, Embedded Signup configuration).
   message, conversation, automation run, order and campaign events of the WhatsApp numbers it
   chooses, 1 to 100 of the company's numbers, in Settings or through the API, or every number's as
   before; applied where events are captured, with the number the changed row has; consent, contact
-  and template events are not narrowed). Remaining: filters for other event types and on a message's
+  and template events are not narrowed). **[Message sender filters built; their database tests run
+  only in CI]** (ADR-172: an endpoint takes `message.status` only for the messages members,
+  automations, campaigns, the API or HyFib sent, as it chooses, in Settings or through the API, or
+  every message's as before; applied where events are captured, with the statuses and numbers it
+  names). Remaining: filters for other event types and on a message's
   or contact's values (such as by campaign, template, team, assigned member, tag or field key, or a
   run's trigger or end reason), which tags were added or removed, other authentication (OAuth client
   credentials, headers computed per delivery), mutual TLS, fixed egress addresses, events for store

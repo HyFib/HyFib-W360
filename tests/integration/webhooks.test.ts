@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
+import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
 import {
   DEFAULT_EGRESS_POLICY,
   createEgressClient,
@@ -18,7 +18,10 @@ import {
   webhookEvents,
 } from '@w360/db';
 import {
+  apiSendMessage,
+  authenticateApiToken,
   consentChangedPayloadSchema,
+  createApiKeysService,
   createAutomationService,
   createConsentService,
   createContactsService,
@@ -1324,6 +1327,206 @@ describe('conversation status filters (ADR-149)', () => {
                 'UPDATE') AS can_update`,
     );
     expect(grant?.can_update).toBe(true);
+  });
+});
+
+describe('message sender filters (ADR-172)', () => {
+  it('are refused without message.status, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], messageSenders: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, messageSenders }),
+        'validation_failed',
+        message,
+      );
+    // A received message has no sender to choose, and a contact sends no status.
+    await refused(
+      ['message.received'],
+      ['api'],
+      /only for an endpoint that receives Message status/,
+    );
+    await refused(['message.status'], [], /at least one sender/);
+    await refused(['message.status'], ['contact'], /from the list/);
+    await refused(['message.status'], ['member'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['message.status', 'consent.changed'],
+      messageSenders: ['api', 'campaign', 'api'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ messageSenders: ['campaign', 'api'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['message.status', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.messageSenders;
+    expect(await current()).toEqual(['campaign', 'api']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['campaign', 'api']);
+    await change({ messageSenders: ['api'] });
+    expect(await current()).toEqual(['api']);
+    const updates = await fx.query<{ metadata: { messageSenders?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.messageSenders)).toEqual([['campaign', 'api'], ['api']]);
+    await change({ messageSenders: null });
+    expect(await current()).toBeNull();
+    await change({ messageSenders: ['system'] });
+    // The database refuses an empty list, more than five entries, a contact, an unknown sender or a
+    // missing one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET message_senders = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{agent,bot,campaign,api,system,api}'`,
+      `'{api,contact}'`,
+      `'{api,member}'`,
+      `ARRAY['api', NULL]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_message_senders/);
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], messageSenders: ['api'] }),
+      'validation_failed',
+      /only for an endpoint that receives Message status/,
+    );
+    // …and any list for an endpoint that does not take it, received messages included.
+    await change({ eventTypes: ['message.received'] });
+    await expect(setInDatabase(`'{api}'`)).rejects.toThrow(/webhook_endpoints_message_senders/);
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'message_senders',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  /** A text reply sent through the API by a key of the company and accepted by the stand-in. */
+  async function apiReply(c: Company, to: string, text: string) {
+    const owner = await fx.ctx(c, c.owner);
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      {
+        name: `Helpdesk ${randomBytes(3).toString('hex')}`,
+        scopes: ['messages.reply'],
+        expiresInDays: 0,
+      },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    const deps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock: systemClock };
+    const sent = await apiSendMessage(
+      deps,
+      key,
+      { type: 'text', to: `+${to}`, text },
+      { key: `reply-${randomBytes(6).toString('hex')}`, requestHash: sha256Hex(text) },
+    );
+    expect(sent.status).toBe(201);
+    const messageId = (sent.body as { data: { id: string } }).data.id;
+    fx.standIn.state.sendQueue.push({
+      kind: 'accept',
+      wamid: `wamid.api.${randomBytes(8).toString('hex')}`,
+    });
+    const [intent] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.send_intents WHERE message_id = $1',
+      [messageId],
+    );
+    const result = await processSendIntent(
+      {
+        ...deps,
+        keyring: fx.keyring,
+        graph: fx.graph,
+        rate: { capacity: 100, refillPerSecond: 100 },
+      },
+      authorizedTenantScope(c.tenant.id, null),
+      intent!.id,
+    );
+    expect(result.outcome).toBe('accepted');
+    return messageId;
+  }
+
+  it('send an endpoint only the statuses of messages the senders it names sent, another every status, and capture none nobody takes', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const from = waId();
+    const msg = await inbound(c, from, 'Hi');
+    const add = async (messageSenders: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: ['message.status', 'message.received'],
+        messageSenders,
+      });
+      return { ...created, path };
+    };
+    const statusEvents = async () =>
+      (await eventsOf(c))
+        .filter((e) => e.type === 'message.status')
+        .map((e) => [e.status, e.detail]);
+
+    // Only the API's messages: a member's reply is accepted with nothing captured.
+    const apiOnly = await add(['api']);
+    expect((await webhooks().list(owner))[0]?.messageSenders).toEqual(['api']);
+    await sendReply(c, msg.conversation_id, 'A member replies.');
+    expect(await statusEvents()).toEqual([]);
+    const fromApi = await apiReply(c, from, 'The API replies.');
+    // Stored as events always were: who sent it is not kept with the event.
+    expect(await statusEvents()).toEqual([['accepted', {}]]);
+    // Its other events are not filtered: the customer's next message is captured for it.
+    await inbound(c, from, 'Thanks');
+
+    // An endpoint for every sender hears both from now on.
+    const every = await add(null);
+    await sendReply(c, msg.conversation_id, 'Another member reply.');
+    await apiReply(c, from, 'Another API reply.');
+    const typesTo = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).map((d) => [d.type, d.status]);
+    expect(await typesTo(apiOnly.id)).toEqual([
+      ['message.status', 'accepted'],
+      ['message.received', null],
+      ['message.status', 'accepted'],
+    ]);
+    expect(await typesTo(every.id)).toEqual([
+      ['message.status', 'accepted'],
+      ['message.status', 'accepted'],
+    ]);
+
+    // Each status names who sent its message.
+    expect(await deliverDue(c)).toMatchObject({ attempted: 5, succeeded: 5 });
+    const sentByAt = (path: string) =>
+      requestsTo(path)
+        .filter((r) => r.headers['w360-event-type'] === 'message.status')
+        .map((r) => {
+          const { message } = messageStatusPayloadSchema.parse(JSON.parse(r.body)).data;
+          return [message.sentBy, message.id === fromApi ? 'first API reply' : 'later'];
+        })
+        .sort();
+    expect(sentByAt(apiOnly.path)).toEqual([
+      ['api', 'first API reply'],
+      ['api', 'later'],
+    ]);
+    expect(sentByAt(every.path)).toEqual([
+      ['agent', 'later'],
+      ['api', 'later'],
+    ]);
   });
 });
 

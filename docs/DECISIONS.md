@@ -4522,7 +4522,7 @@ Decision:
   nothing is backfilled.
 
 Not built: filters for other event types (conversation statuses (built by ADR-149), automations
-(built by ADR-145), campaigns (built by ADR-146)), filters on a message's fields (its template, number or sender), and retry settings per
+(built by ADR-145), campaigns (built by ADR-146)), filters on a message's fields (its template; its number, built by ADR-170, and its sender, built by ADR-172), and retry settings per
 status.
 
 ## ADR-120 Changing many conversations in one call through the public API (2026-10-03)
@@ -6840,3 +6840,50 @@ Decision:
 
 Not built: a number by id (`GET /channels/{id}`), the number's WhatsApp account, Meta's quality
 rating, and connecting or disconnecting numbers through the API.
+
+## ADR-172 Choosing who sent the messages whose statuses a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint that takes `message.status` receives the statuses of every message the company
+sends: members' replies, automations' messages, campaigns, the API's sends and HyFib's own (store
+order updates, satisfaction surveys). ADR-119 lets it choose the statuses, and left filters on a
+message's sender unbuilt. A system that sends through the API usually wants the statuses of its own
+messages only, and was sent every campaign's (thousands at a time) to read the event's
+`message.sentBy` and drop.
+
+Decision:
+
+- **A list of senders per endpoint,** for `message.status` only: null receives the statuses of every
+  message, as before; a list holds 1 to 5 of `agent` (a member), `bot` (an automation), `campaign`,
+  `api` and `system` (HyFib itself), the senders the event reports as `message.sentBy`, in that
+  order with repeats merged. It is chosen in Settings → Webhooks under "Message status" ("Messages
+  sent by", every sender ticked to begin with; saving them all ticked keeps none) and shown on the
+  endpoint as "Statuses of messages sent by: …", and through the API as `messageSenders` on
+  `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every endpoint the API
+  answers.
+- **Only with the event:** a list given for an endpoint that does not receive `message.status` is
+  refused (`messageSenders`; 422 through the API), received messages included. A change that removes
+  the event clears it, and a `PATCH` that leaves it out keeps it; Settings always sends it. A check
+  in the database holds the same rule (null, or 1 to 5 known senders while the event is among the
+  endpoint's; a contact, which sends no status, cannot be named).
+- **Applied when the event is captured,** with the statuses an endpoint names (ADR-119) and its
+  numbers (ADR-170): the trigger of message statuses (0025's, as 0118 left it) passes the message's
+  sender as `sentBy` in the event's detail, named as the payload names it (anything other than a
+  member, an automation, a campaign or the API is `system`), and `app.capture_webhook_event` takes
+  it out with the number before the event is stored, so stored events and payloads are unchanged. A
+  status's delivery is created only for the active endpoints whose list is null or holds the sender,
+  and no event is written when none takes it. A change of the list applies to statuses captured
+  after it; deliveries already created are still sent. Replays and test events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `messageSenders` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The list names kinds of senders only, never a member, an
+  automation, a campaign or a key.
+- **Migration 0120:** `message_senders text[]` on `app.webhook_endpoints` with the check, validated
+  at once (a company has at most 10 endpoints), an update grant on the column for the runtime role,
+  `app.capture_webhook_event` replaced with the same signature (0118's, with the sender condition)
+  and the message trigger function with the same name, so owners, grants and triggers stay. Existing
+  endpoints keep null; nothing is backfilled.
+
+Not built: statuses of the messages one API key, campaign, automation or template sent (an endpoint
+chooses kinds of senders only), and a sender filter for received messages (a contact sends them
+all).

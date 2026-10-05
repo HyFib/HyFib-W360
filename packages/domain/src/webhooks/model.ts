@@ -4,6 +4,7 @@ import type {
   WebhookContactPart,
   WebhookConversationStatus,
   WebhookEventType,
+  WebhookMessageSender,
   WebhookMessageStatus,
   WebhookOrderStatus,
   WebhookRunEndStatus,
@@ -15,6 +16,7 @@ export type {
   WebhookContactPart,
   WebhookConversationStatus,
   WebhookEventType,
+  WebhookMessageSender,
   WebhookMessageStatus,
   WebhookOrderStatus,
   WebhookRunEndStatus,
@@ -143,6 +145,27 @@ export const WEBHOOK_MESSAGE_STATUS_LABELS: Record<WebhookMessageStatus, string>
   failed: 'Failed',
   canceled: 'Canceled',
   unknown_outcome: 'Outcome unknown',
+};
+
+/**
+ * Who sent a message, as a `message.status` event's `message.sentBy` says (ADR-172): a member, an
+ * automation, a campaign, the API, or HyFib itself (store order updates and satisfaction surveys).
+ */
+export const WEBHOOK_MESSAGE_SENDERS = [
+  'agent',
+  'bot',
+  'campaign',
+  'api',
+  'system',
+] as const satisfies readonly WebhookMessageSender[];
+
+/** How Settings names each sender an endpoint can choose (ADR-172). */
+export const WEBHOOK_MESSAGE_SENDER_LABELS: Record<WebhookMessageSender, string> = {
+  agent: 'Members',
+  bot: 'Automations',
+  campaign: 'Campaigns',
+  api: 'The API',
+  system: 'HyFib (store order updates and satisfaction surveys)',
 };
 
 /**

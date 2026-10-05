@@ -1249,6 +1249,81 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
   });
 
+  it('choose who sent the messages whose statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-172)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The senders need message.status, at least one, and each from the list (a contact, or an
+    // unknown sender, by place).
+    const refusals = [
+      [['message.received'], ['api'], 'messageSenders'],
+      [['message.status'], [], 'messageSenders'],
+      [['message.status'], ['api', 'contact'], 'messageSenders.1'],
+      [['message.status'], ['member'], 'messageSenders.0'],
+    ] as const;
+    for (const [index, [events, messageSenders, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, messageSenders },
+            idem(`message-senders-bad-${index}`, JSON.stringify(messageSenders)),
+          ),
+        ),
+        JSON.stringify(messageSenders),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'message-senders-1', {
+      url: receiverUrl(),
+      events: ['message.status', 'message.received'],
+      messageSenders: ['api', 'bot'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.messageSenders).toEqual(['bot', 'api']);
+    expect((await api().get(key.ctx, id)).messageSenders).toEqual(['bot', 'api']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ messageSenders: ['bot', 'api'] });
+
+    expect(await api().update(key.ctx, id, { description: 'API statuses' })).toMatchObject({
+      messageSenders: ['bot', 'api'],
+    });
+    expect(await api().update(key.ctx, id, { messageSenders: ['api'] })).toMatchObject({
+      messageSenders: ['api'],
+    });
+    const updates = await fx.query<{ metadata: { messageSenders?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.messageSenders)).toEqual([['bot', 'api'], ['api']]);
+    expect(await api().update(key.ctx, id, { events: ['message.received'] })).toMatchObject({
+      events: ['message.received'],
+      messageSenders: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { messageSenders: ['api'] }))).toMatchObject({
+      path: 'messageSenders',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['message.status'], messageSenders: ['system'] }),
+    ).toMatchObject({ messageSenders: ['system'] });
+    expect(await api().update(key.ctx, id, { messageSenders: null })).toMatchObject({
+      messageSenders: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { messageSenders: [] }))).toMatchObject({
+      path: 'messageSenders',
+    });
+  });
+
   it('choose the WhatsApp numbers whose events an endpoint receives, kept by changes that leave them out and cleared with the events (ADR-170)', async () => {
     const c = await fx.company();
     const key = await apiKey(c, ['webhooks.manage']);

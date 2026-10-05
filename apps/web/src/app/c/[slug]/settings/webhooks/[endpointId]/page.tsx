@@ -183,6 +183,7 @@ export default async function WebhookEndpointPage({
               eventTypes: endpoint.eventTypes,
               headerNames: endpoint.headerNames,
               messageStatuses: endpoint.messageStatuses,
+              messageSenders: endpoint.messageSenders,
               contactParts: endpoint.contactParts,
               automationIds: endpoint.automations?.map((a) => a.id) ?? null,
               campaignStatuses: endpoint.campaignStatuses,

@@ -2172,6 +2172,17 @@ endpoint's page or choose "Every number’s events" (which also takes numbers co
 `PATCH /webhook-endpoints/{id}` with `channelIds` (null for every number). Removing every event of a
 number clears the list.
 
+**A receiver gets the statuses of only some messages (ADR-172).** An endpoint can take
+`message.status` only for the messages some senders sent: members, automations, campaigns, the API
+or HyFib (store order updates and satisfaction surveys). The endpoints list shows them ("Statuses of
+messages sent by: …"), and the API answers `messageSenders` (null takes every message's); each
+status names its sender in `message.sentBy`. A status of another sender's message is never queued
+for it, and when no endpoint of the company takes a status, no event is recorded at all, so there is
+nothing to replay: statuses from before an edit are not sent afterwards. To take more, tick the
+senders under "Message status" on the endpoint's page (every sender ticked takes every message's),
+or `PATCH /webhook-endpoints/{id}` with `messageSenders` (null for every sender). Removing the
+`message.status` event clears the list.
+
 **A campaign event's results differ from the campaign page (ADR-150).** `campaign.results` are
 counted when the request is built (the `t` of its `W360-Signature`), as `GET /campaigns/{id}` counts
 them, and a retry or a replay counts again: an event delivered while the campaign's messages were on
@@ -2605,6 +2616,14 @@ with it.
 transaction; a failure rolls it all back (usually a lock held on one of the tables: run the
 migrations again). Web servers of this release need it before a key or plan version holds the new
 scope; those of the previous release work with it.
+
+**Migration 0120 failed.** It adds `message_senders` to `app.webhook_endpoints` with the check
+`webhook_endpoints_message_senders`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event` and the message trigger function, in one transaction; a failure rolls it
+all back (usually the bootstrap roles, or a lock held on the table: fix it and run the migrations
+again). Web servers of this release need it before they start, or Settings → Webhooks and the
+endpoints API fail (their reads of endpoints name the column); workers of either release and web
+servers of the previous release work with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

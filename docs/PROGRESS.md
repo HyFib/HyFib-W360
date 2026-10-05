@@ -1,5 +1,57 @@
 # Progress
 
+## 2026-10-05 — Phase 5: choosing who sent the messages whose statuses a webhook endpoint receives (P5-09, ADR-172)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every
+endpoint taking message statuses received every message's. The local PostgreSQL is unavailable (its
+Docker daemon stopped), so migration 0120, the integration tests and the e2e step below were written
+but not run here.
+
+### Completed
+
+- **Design (ADR-172):** `messageSenders`, null for every message or 1 to 5 of `agent`, `bot`,
+  `campaign`, `api` and `system`, only with `message.status`; applied where events are captured.
+- **Database:** migration 0120 (the column and its check, the column grant,
+  `app.capture_webhook_event` and the message trigger passing the sender, which is not stored); the
+  schema's column (`packages/db`).
+- **Domain:** the list's schema and keeping (`webhookMessageSendersSchema`,
+  `webhookMessageSendersFor`), create and update with the audit, the endpoint view;
+  `WEBHOOK_MESSAGE_SENDERS` and their labels in the model; `messageSenders` in the API and the
+  OpenAPI document; the export column.
+- **Web:** "Messages sent by" under "Message status" in the endpoint form and "Statuses of messages
+  sent by: …" on the endpoints list.
+- **Tests:**
+  - Unit (2 new in `webhooks.test.ts`, 1 new and 1 changed in `api.test.ts`): the list's rules,
+    keeping and clearing, the labels, the API schemas and the OpenAPI entries.
+  - Integration (2 new in `webhooks.test.ts`, 1 new in `api-webhook-endpoints.test.ts`): refusals,
+    keeping and clearing, audits, the check and the grant, and capture of a member's and the API's
+    replies. Written for CI; not run here.
+  - E2E (`webhooks.spec.ts`, the message status test extended): an endpoint narrowed to the API's
+    messages. Written for CI; not run here.
+- **Docs:** ADR-172 (and ADR-119's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T167; DEPLOYMENT and RUNBOOKS (migration 0120, a receiver missing some statuses); BACKLOG P5-09;
+  feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 13 deliberate regressions tried, all caught on the unit-tested parts (an
+  empty or long list, order and repeats kept, any sender taken, a list kept without its event or by
+  a null, a sender not offered, a label, the API's refinement, change rule and field, the OpenAPI
+  field and the event's description). The capture and the form need the database or a browser, so
+  their regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 772 passed (79 files)                                                |
+| `pnpm test:integration`, e2e, migration 0120       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 13 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Statuses of the messages one key, campaign, automation or template sent.
+
 ## 2026-10-05 — Phase 5: reading the company's WhatsApp numbers through the public API (P5-08, ADR-171)
 
 Status: **Implemented; its database and browser tests run in CI only.** Keys named numbers by id

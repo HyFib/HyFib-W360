@@ -14,6 +14,8 @@ import {
   WEBHOOK_FAILURE_KINDS,
   WEBHOOK_FAILURE_LABELS,
   WEBHOOK_LIMITS,
+  WEBHOOK_MESSAGE_SENDER_LABELS,
+  WEBHOOK_MESSAGE_SENDERS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUS_LABELS,
@@ -35,6 +37,7 @@ import {
   type WebhookConversationStatus,
   type WebhookEventType,
   type WebhookFailureKind,
+  type WebhookMessageSender,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookReplayPeriod,
@@ -120,6 +123,50 @@ function StatusChoices({
             <Label htmlFor={id} className="font-normal">
               {WEBHOOK_MESSAGE_STATUS_LABELS[status]}{' '}
               <span className="font-mono text-xs">({status})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * Who sent the messages whose `message.status` an endpoint takes (ADR-172), shown while it takes the
+ * event, as the event's `message.sentBy` names them.
+ */
+function SenderChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: WebhookMessageSender[];
+  onChange: (next: WebhookMessageSender[]) => void;
+}) {
+  return (
+    <fieldset className="ml-6 grid gap-1">
+      <legend className="mb-1 text-xs text-muted-foreground">
+        Messages sent by (all of them unless you untick some)
+      </legend>
+      {WEBHOOK_MESSAGE_SENDERS.map((sender) => {
+        const id = `${prefix}-sender-${sender}`;
+        return (
+          <div key={sender} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(sender)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_MESSAGE_SENDERS.filter((s) => s === sender || chosen.includes(s))
+                    : chosen.filter((s) => s !== sender),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {WEBHOOK_MESSAGE_SENDER_LABELS[sender]}{' '}
+              <span className="font-mono text-xs">({sender})</span>
             </Label>
           </div>
         );
@@ -418,6 +465,8 @@ function EventChoices({
   onChange,
   statuses,
   onStatusesChange,
+  senders,
+  onSendersChange,
   parts,
   onPartsChange,
   campaignStatuses,
@@ -436,6 +485,8 @@ function EventChoices({
   onChange: (next: WebhookEventType[]) => void;
   statuses: WebhookMessageStatus[];
   onStatusesChange: (next: WebhookMessageStatus[]) => void;
+  senders: WebhookMessageSender[];
+  onSendersChange: (next: WebhookMessageSender[]) => void;
   parts: WebhookContactPart[];
   onPartsChange: (next: WebhookContactPart[]) => void;
   campaignStatuses: WebhookCampaignStatus[];
@@ -474,7 +525,10 @@ function EventChoices({
               </Label>
             </div>
             {type === 'message.status' && chosen.includes(type) ? (
-              <StatusChoices prefix={prefix} chosen={statuses} onChange={onStatusesChange} />
+              <>
+                <StatusChoices prefix={prefix} chosen={statuses} onChange={onStatusesChange} />
+                <SenderChoices prefix={prefix} chosen={senders} onChange={onSendersChange} />
+              </>
             ) : null}
             {type === 'template.status_changed' && chosen.includes(type) ? (
               <ReachedStatusChoices
@@ -627,6 +681,7 @@ export function WebhookEndpointForm({
     eventTypes: WebhookEventType[];
     headerNames: string[];
     messageStatuses: WebhookMessageStatus[] | null;
+    messageSenders: WebhookMessageSender[] | null;
     contactParts: WebhookContactPart[] | null;
     automationIds: string[] | null;
     campaignStatuses: WebhookCampaignStatus[] | null;
@@ -648,6 +703,9 @@ export function WebhookEndpointForm({
   const [eventTypes, setEventTypes] = useState<WebhookEventType[]>(endpoint?.eventTypes ?? []);
   const [statuses, setStatuses] = useState<WebhookMessageStatus[]>(
     endpoint?.messageStatuses ?? [...WEBHOOK_MESSAGE_STATUSES],
+  );
+  const [senders, setSenders] = useState<WebhookMessageSender[]>(
+    endpoint?.messageSenders ?? [...WEBHOOK_MESSAGE_SENDERS],
   );
   const [parts, setParts] = useState<WebhookContactPart[]>(
     endpoint?.contactParts ?? [...WEBHOOK_CONTACT_PARTS],
@@ -703,6 +761,11 @@ export function WebhookEndpointForm({
           eventTypes.includes('message.status') && statuses.length < WEBHOOK_MESSAGE_STATUSES.length
             ? statuses
             : null;
+        // Every sender ticked takes the statuses of every message (null, ADR-172).
+        const messageSenders =
+          eventTypes.includes('message.status') && senders.length < WEBHOOK_MESSAGE_SENDERS.length
+            ? senders
+            : null;
         // Every part ticked takes every change, including parts added later (null).
         const contactParts =
           eventTypes.includes('contact.updated') && parts.length < WEBHOOK_CONTACT_PARTS.length
@@ -749,6 +812,7 @@ export function WebhookEndpointForm({
           description,
           eventTypes,
           messageStatuses,
+          messageSenders,
           contactParts,
           automationIds: chosenAutomations,
           campaignStatuses: chosenCampaignStatuses,
@@ -784,6 +848,7 @@ export function WebhookEndpointForm({
               setDescription('');
               setEventTypes([]);
               setStatuses([...WEBHOOK_MESSAGE_STATUSES]);
+              setSenders([...WEBHOOK_MESSAGE_SENDERS]);
               setParts([...WEBHOOK_CONTACT_PARTS]);
               setCampaignStatuses([...WEBHOOK_CAMPAIGN_STATUSES]);
               setOrderStatuses([...WEBHOOK_ORDER_STATUSES]);
@@ -844,6 +909,8 @@ export function WebhookEndpointForm({
         onChange={setEventTypes}
         statuses={statuses}
         onStatusesChange={setStatuses}
+        senders={senders}
+        onSendersChange={setSenders}
         parts={parts}
         onPartsChange={setParts}
         campaignStatuses={campaignStatuses}

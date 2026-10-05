@@ -663,12 +663,24 @@ test('an endpoint receives only the message statuses it takes: chosen in setting
   await expect(status('Failed', 'failed')).toBeChecked();
   await expect(status('Delivered', 'delivered')).not.toBeChecked();
   await status('Delivered', 'delivered').check();
+  // …only for the messages the API sends (ADR-172).
+  const notTheApi = [
+    ['Members', 'agent'],
+    ['Automations', 'bot'],
+    ['Campaigns', 'campaign'],
+    ['HyFib (store order updates and satisfaction surveys)', 'system'],
+  ] as const;
+  for (const [label, value] of notTheApi) await status(label, value).uncheck();
+  await expect(status('The API', 'api')).toBeChecked();
   await expectNoHorizontalOverflow(page);
   await page.getByRole('button', { name: 'Save endpoint' }).click();
   await expect(page.getByText('Endpoint saved.')).toBeVisible();
   await page.goto(`/c/${slug}/settings/webhooks`);
   await expect(
     page.getByText('Message statuses sent: Delivered, Failed', { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText('Statuses of messages sent by: The API', { exact: true }),
   ).toBeVisible();
 
   // An API key adds an endpoint for read statuses only; statuses need the message.status event.
@@ -773,14 +785,18 @@ test('an endpoint receives only the message statuses it takes: chosen in setting
     page.getByText('Message statuses sent: Delivered, Failed', { exact: true }),
   ).toBeVisible();
 
-  // Every status ticked in settings takes every status, including statuses added later.
+  // Every status and sender ticked in settings takes every status of every message.
   await page.goto(endpointPage);
+  await expect(status('The API', 'api')).toBeChecked();
+  await expect(status('Members', 'agent')).not.toBeChecked();
   for (const [label, value] of allButFailed) await status(label, value).check();
+  for (const [label, value] of notTheApi) await status(label, value).check();
   await page.getByRole('button', { name: 'Save endpoint' }).click();
   await expect(page.getByText('Endpoint saved.')).toBeVisible();
   await page.goto(`/c/${slug}/settings/webhooks`);
   await expect(page.getByText(`http://${HOST}:${port}${path}`)).toBeVisible();
   await expect(page.getByText(/^Message statuses sent:/)).toHaveCount(0);
+  await expect(page.getByText(/^Statuses of messages sent by:/)).toHaveCount(0);
 });
 
 test('an endpoint receives only the contact changes it takes: chosen in settings and on its page (ADR-123)', async ({

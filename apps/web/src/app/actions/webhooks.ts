@@ -19,6 +19,8 @@ export async function createWebhookEndpointAction(
     headers: { name: string; value: string }[];
     /** The message.status statuses the endpoint takes; null takes every status. */
     messageStatuses: string[] | null;
+    /** Who sent the messages whose statuses it takes (ADR-172); null takes every sender. */
+    messageSenders: string[] | null;
     /** The contact parts it takes as contact.updated; null takes every change. */
     contactParts: string[] | null;
     /** The automations whose runs it takes (ADR-145); null takes every automation. */
@@ -57,6 +59,8 @@ export async function updateWebhookEndpointAction(
     headers?: { name: string; value: string }[];
     /** The message.status statuses the endpoint takes; null takes every status. */
     messageStatuses: string[] | null;
+    /** Who sent the messages whose statuses it takes (ADR-172); null takes every sender. */
+    messageSenders: string[] | null;
     /** The contact parts it takes as contact.updated; null takes every change. */
     contactParts: string[] | null;
     /** The automations whose runs it takes (ADR-145); null takes every automation. */

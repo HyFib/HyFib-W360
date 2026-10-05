@@ -19,6 +19,7 @@ import {
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
+  WEBHOOK_MESSAGE_SENDERS,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
@@ -474,6 +475,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The message.status statuses the endpoint receives; null receives every status, including statuses added later.',
+    ),
+  messageSenders: z
+    .array(z.enum(WEBHOOK_MESSAGE_SENDERS))
+    .nullable()
+    .describe(
+      'Who sent the messages whose message.status the endpoint receives, as message.sentBy names them; null receives the statuses of every message.',
     ),
   contactParts: z
     .array(z.enum(WEBHOOK_CONTACT_PARTS))
@@ -1885,7 +1892,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'message.status': webhook(
         'webhookMessageStatus',
         WEBHOOK_EVENT_INFO['message.status'].label,
-        `${WEBHOOK_EVENT_INFO['message.status'].description} An endpoint receives every status unless it names the ones it takes (its \`messageStatuses\`, or the statuses ticked in Settings → Webhooks); a status no endpoint takes is not recorded.`,
+        `${WEBHOOK_EVENT_INFO['message.status'].description} An endpoint receives every status unless it names the ones it takes (its \`messageStatuses\`, or the statuses ticked in Settings → Webhooks), and the statuses of every message unless it names who sent them (its \`messageSenders\`, as message.sentBy names them, or the senders ticked in Settings → Webhooks); a status no endpoint takes is not recorded.`,
         'WebhookMessageStatus',
       ),
       'consent.changed': webhook(

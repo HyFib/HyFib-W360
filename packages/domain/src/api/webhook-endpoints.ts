@@ -22,6 +22,7 @@ import {
   type WebhookContactPart,
   type WebhookConversationStatus,
   type WebhookEventType,
+  type WebhookMessageSender,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookRunEndStatus,
@@ -58,6 +59,7 @@ import {
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_SENDERS_NEED_THE_EVENT,
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
   webhookAutomationIdsFor,
   webhookAutomationIdsSchema,
@@ -77,6 +79,8 @@ import {
   webhookEventTypesSchema,
   webhookFailureKindsSchema,
   webhookHeadersSchema,
+  webhookMessageSendersFor,
+  webhookMessageSendersSchema,
   webhookMessageStatusesFor,
   webhookMessageStatusesSchema,
   webhookOrderStatusesFor,
@@ -116,6 +120,16 @@ const messageStatusesField = webhookMessageStatusesSchema.describe(
 const invalidStatuses = () =>
   new AppError('validation_failed', WEBHOOK_STATUSES_NEED_THE_EVENT, {
     issues: [{ path: 'messageStatuses', message: WEBHOOK_STATUSES_NEED_THE_EVENT }],
+  });
+
+const messageSendersField = webhookMessageSendersSchema.describe(
+  'Who sent the messages whose message.status the endpoint receives, as the event names them in message.sentBy (agent: a member, bot: an automation, campaign, api, system: HyFib itself, such as store order updates and satisfaction surveys), only with the message.status event; null receives the statuses of every message.',
+);
+
+/** Senders are chosen only for an endpoint that receives `message.status` (ADR-172). */
+const invalidSenders = () =>
+  new AppError('validation_failed', WEBHOOK_SENDERS_NEED_THE_EVENT, {
+    issues: [{ path: 'messageSenders', message: WEBHOOK_SENDERS_NEED_THE_EVENT }],
   });
 
 const contactPartsField = webhookContactPartsSchema.describe(
@@ -214,6 +228,7 @@ export const apiCreateWebhookEndpointSchema = z
     description: descriptionField.optional().describe('A note for members, up to 200 characters.'),
     headers: headersField.optional(),
     messageStatuses: messageStatusesField.optional(),
+    messageSenders: messageSendersField.optional(),
     contactParts: contactPartsField.optional(),
     automationIds: automationIdsField.optional(),
     campaignStatuses: campaignStatusesField.optional(),
@@ -227,6 +242,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.messageStatuses || data.events.includes('message.status'), {
     path: ['messageStatuses'],
     message: WEBHOOK_STATUSES_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.messageSenders || data.events.includes('message.status'), {
+    path: ['messageSenders'],
+    message: WEBHOOK_SENDERS_NEED_THE_EVENT,
   })
   .refine((data) => !data.contactParts || data.events.includes('contact.updated'), {
     path: ['contactParts'],
@@ -283,6 +302,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'The message.status statuses the endpoint receives; null receives every status. Left out, they stay, unless the events no longer include message.status, which clears them.',
       ),
+    messageSenders: messageSendersField
+      .optional()
+      .describe(
+        'Who sent the messages whose message.status the endpoint receives; null receives the statuses of every message. Left out, they stay, unless the events no longer include message.status, which clears them.',
+      ),
     contactParts: contactPartsField
       .optional()
       .describe(
@@ -332,6 +356,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.enabled !== undefined ||
       data.headers !== undefined ||
       data.messageStatuses !== undefined ||
+      data.messageSenders !== undefined ||
       data.contactParts !== undefined ||
       data.automationIds !== undefined ||
       data.campaignStatuses !== undefined ||
@@ -340,7 +365,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.conversationStatuses !== undefined ||
       data.runEndStatuses !== undefined ||
       data.channelIds !== undefined,
-    'Give the events, the description, the headers, the message statuses, the contact parts, the automations, the campaign statuses, the order statuses, the template statuses, the conversation statuses, the run end statuses, the numbers or whether the endpoint is enabled',
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the automations, the campaign statuses, the order statuses, the template statuses, the conversation statuses, the run end statuses, the numbers or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -361,6 +386,8 @@ export interface ApiWebhookEndpoint {
   headers: { name: string }[];
   /** The `message.status` statuses it receives (ADR-119); null receives every status. */
   messageStatuses: WebhookMessageStatus[] | null;
+  /** Who sent the messages whose statuses it receives (ADR-172); null receives every sender's. */
+  messageSenders: WebhookMessageSender[] | null;
   /** The contact parts it receives as `contact.updated` (ADR-123); null receives every change. */
   contactParts: WebhookContactPart[] | null;
   /** The automations whose runs it receives (ADR-145); null receives every automation's runs. */
@@ -469,6 +496,7 @@ const columns = {
   previousSecretExpiresAt: webhookEndpoints.previousSecretExpiresAt,
   headerNames: webhookEndpoints.headerNames,
   messageStatuses: webhookEndpoints.messageStatuses,
+  messageSenders: webhookEndpoints.messageSenders,
   contactParts: webhookEndpoints.contactParts,
   automationIds: webhookEndpoints.automationIds,
   campaignStatuses: webhookEndpoints.campaignStatuses,
@@ -497,6 +525,7 @@ type EndpointRow = Pick<
   | 'previousSecretExpiresAt'
   | 'headerNames'
   | 'messageStatuses'
+  | 'messageSenders'
   | 'contactParts'
   | 'automationIds'
   | 'campaignStatuses'
@@ -530,6 +559,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
         : null,
     headers: row.headerNames.map((name) => ({ name })),
     messageStatuses: row.messageStatuses,
+    messageSenders: row.messageSenders,
     contactParts: row.contactParts,
     automationIds: row.automationIds,
     campaignStatuses: row.campaignStatuses,
@@ -735,6 +765,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               data.messageStatuses,
               null,
             );
+            const messageSenders = webhookMessageSendersFor(data.events, data.messageSenders, null);
             const contactParts = webhookContactPartsFor(data.events, data.contactParts, null);
             const automationIds = webhookAutomationIdsFor(data.events, data.automationIds, null);
             await assertWebhookAutomations(tx, ctx.tenant.id, automationIds);
@@ -763,6 +794,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               eventTypes: data.events,
               headers,
               messageStatuses,
+              messageSenders,
               contactParts,
               automationIds,
               campaignStatuses,
@@ -778,6 +810,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               eventTypes: data.events,
               ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
               ...(messageStatuses ? { messageStatuses } : {}),
+              ...(messageSenders ? { messageSenders } : {}),
               ...(contactParts ? { contactParts } : {}),
               ...(automationIds ? { automationIds } : {}),
               ...(campaignStatuses ? { campaignStatuses } : {}),
@@ -812,6 +845,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         const host = webhookHost(endpoint.url);
         const events = data.events ?? endpoint.eventTypes;
         if (data.messageStatuses && !events.includes('message.status')) throw invalidStatuses();
+        if (data.messageSenders && !events.includes('message.status')) throw invalidSenders();
         if (data.contactParts && !events.includes('contact.updated')) throw invalidParts();
         if (data.automationIds && !webhookTakesAutomationRuns(events)) throw invalidAutomations();
         if (data.campaignStatuses && !events.includes('campaign.status_changed')) {
@@ -843,6 +877,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.description !== undefined ||
           data.headers !== undefined ||
           data.messageStatuses !== undefined ||
+          data.messageSenders !== undefined ||
           data.contactParts !== undefined ||
           data.automationIds !== undefined ||
           data.campaignStatuses !== undefined ||
@@ -864,6 +899,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 events,
                 data.messageStatuses,
                 endpoint.messageStatuses,
+              ),
+              messageSenders: webhookMessageSendersFor(
+                events,
+                data.messageSenders,
+                endpoint.messageSenders,
               ),
               contactParts: webhookContactPartsFor(
                 events,
@@ -911,6 +951,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             .returning({
               eventTypes: webhookEndpoints.eventTypes,
               messageStatuses: webhookEndpoints.messageStatuses,
+              messageSenders: webhookEndpoints.messageSenders,
               contactParts: webhookEndpoints.contactParts,
               automationIds: webhookEndpoints.automationIds,
               campaignStatuses: webhookEndpoints.campaignStatuses,
@@ -926,6 +967,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             eventTypes: changed.eventTypes,
             ...(data.headers !== undefined ? { headers: data.headers.map((h) => h.name) } : {}),
             ...(changed.messageStatuses ? { messageStatuses: changed.messageStatuses } : {}),
+            ...(changed.messageSenders ? { messageSenders: changed.messageSenders } : {}),
             ...(changed.contactParts ? { contactParts: changed.contactParts } : {}),
             ...(changed.automationIds ? { automationIds: changed.automationIds } : {}),
             ...(changed.campaignStatuses ? { campaignStatuses: changed.campaignStatuses } : {}),

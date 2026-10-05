@@ -111,6 +111,7 @@ import {
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_SENDERS_NEED_THE_EVENT,
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
 } from '../webhooks/service';
 import {
@@ -1351,6 +1352,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'enabled',
       'events',
       'headers',
+      'messageSenders',
       'messageStatuses',
       'orderStatuses',
       'runEndStatuses',
@@ -1379,6 +1381,13 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
     expect(webhooks['message.status']?.post?.description).toContain(
       'An endpoint receives every status unless it names the ones it takes',
+    );
+    // Who sent the messages whose statuses an endpoint receives (ADR-172): a list, or null.
+    const senders = (answered.properties as Record<string, { anyOf?: unknown[] }>).messageSenders;
+    expect(senders?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('messageSenders');
+    expect(webhooks['message.status']?.post?.description).toContain(
+      'and the statuses of every message unless it names who sent them (its `messageSenders`',
     );
     // The contact parts an endpoint receives as contact.updated (ADR-123): a list, or null.
     const parts = (answered.properties as Record<string, { anyOf?: unknown[] }>).contactParts;
@@ -1453,6 +1462,42 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(doc.info.description).toContain(
       'An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its `channelIds`',
     );
+  });
+
+  it('take senders only with message.status, in their order once each, and a list of them alone is a change (ADR-172)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['message.status'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, messageSenders: ['api', 'campaign', 'api'] })
+        .messageSenders,
+    ).toEqual(['campaign', 'api']);
+    const createBody = (
+      buildOpenApiDocument('https://app.example.com/api/v1').components as unknown as {
+        schemas: Record<string, { properties: Record<string, unknown> }>;
+      }
+    ).schemas.CreateWebhookEndpoint;
+    expect(Object.keys(createBody?.properties ?? {})).toContain('messageSenders');
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.received'],
+      messageSenders: ['api'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['messageSenders', WEBHOOK_SENDERS_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, messageSenders: [] },
+      { ...base, messageSenders: ['contact'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ messageSenders: null })).toEqual({
+      messageSenders: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ messageSenders: ['bot'] })).toEqual({
+      messageSenders: ['bot'],
+    });
   });
 
   it('take numbers only with an event that happens on one, each once, and a list of them alone is a change (ADR-170)', () => {

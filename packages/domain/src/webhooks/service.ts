@@ -37,6 +37,7 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
+  WEBHOOK_MESSAGE_SENDERS,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_TEMPLATE_STATUSES,
@@ -52,6 +53,7 @@ import {
   type WebhookEndpointAutomation,
   type WebhookEndpointChannel,
   type WebhookFailureKind,
+  type WebhookMessageSender,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookRunEndStatus,
@@ -208,6 +210,34 @@ export function webhookMessageStatusesFor(
   given: readonly WebhookMessageStatus[] | null | undefined,
   current: readonly WebhookMessageStatus[] | null,
 ): WebhookMessageStatus[] | null {
+  if (!eventTypes.includes('message.status')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Who sent the messages whose `message.status` an endpoint takes (ADR-172), in the order Settings
+ * lists them; null takes every sender.
+ */
+export const webhookMessageSendersSchema = z
+  .array(z.enum(WEBHOOK_MESSAGE_SENDERS, { error: 'Choose who sent the messages from the list.' }))
+  .min(1, 'Choose at least one sender, or take the statuses of every message.')
+  .max(WEBHOOK_MESSAGE_SENDERS.length, 'Give each sender once.')
+  .transform((chosen) => WEBHOOK_MESSAGE_SENDERS.filter((sender) => chosen.includes(sender)))
+  .nullable();
+
+export const WEBHOOK_SENDERS_NEED_THE_EVENT =
+  'Choose who sent the messages only for an endpoint that receives Message status.';
+
+/**
+ * The senders an endpoint keeps after it is added or changed: every sender (null) unless it takes
+ * `message.status`; then those given, or else the ones it had.
+ */
+export function webhookMessageSendersFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookMessageSender[] | null | undefined,
+  current: readonly WebhookMessageSender[] | null,
+): WebhookMessageSender[] | null {
   if (!eventTypes.includes('message.status')) return null;
   const kept = given === undefined ? current : given;
   return kept ? [...kept] : null;
@@ -554,6 +584,11 @@ const endpointFields = z.object({
   /** Given, the `message.status` statuses it takes (null: every status); left out, they stay. */
   messageStatuses: webhookMessageStatusesSchema.optional(),
   /**
+   * Given, who sent the messages whose statuses it takes (null: every sender, ADR-172); left out,
+   * they stay.
+   */
+  messageSenders: webhookMessageSendersSchema.optional(),
+  /**
    * Given, the contact parts it takes as `contact.updated` (null: every change); left out, they
    * stay.
    */
@@ -587,6 +622,12 @@ const statusesNeedTheEvent = {
   check: (data: { eventTypes: WebhookEventType[]; messageStatuses?: unknown }) =>
     !data.messageStatuses || data.eventTypes.includes('message.status'),
   options: { path: ['messageStatuses'], message: WEBHOOK_STATUSES_NEED_THE_EVENT },
+};
+/** Senders are chosen only for an endpoint that takes `message.status` (ADR-172). */
+const sendersNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; messageSenders?: unknown }) =>
+    !data.messageSenders || data.eventTypes.includes('message.status'),
+  options: { path: ['messageSenders'], message: WEBHOOK_SENDERS_NEED_THE_EVENT },
 };
 /** Contact parts are chosen only for an endpoint that takes `contact.updated` (ADR-123). */
 const partsNeedTheEvent = {
@@ -641,6 +682,7 @@ const channelsNeedTheEvents = {
 };
 const endpointSchema = endpointFields
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
+  .refine(sendersNeedTheEvent.check, sendersNeedTheEvent.options)
   .refine(partsNeedTheEvent.check, partsNeedTheEvent.options)
   .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options)
   .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
@@ -653,6 +695,7 @@ const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointFields
   .extend({ endpointId: z.uuid() })
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
+  .refine(sendersNeedTheEvent.check, sendersNeedTheEvent.options)
   .refine(partsNeedTheEvent.check, partsNeedTheEvent.options)
   .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options)
   .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
@@ -691,6 +734,8 @@ export interface WebhookEndpointView {
   headerNames: string[];
   /** The `message.status` statuses it takes (ADR-119); null takes every status. */
   messageStatuses: WebhookMessageStatus[] | null;
+  /** Who sent the messages whose statuses it takes (ADR-172); null takes every sender. */
+  messageSenders: WebhookMessageSender[] | null;
   /** The contact parts it takes as `contact.updated` (ADR-123); null takes every change. */
   contactParts: WebhookContactPart[] | null;
   /**
@@ -786,6 +831,7 @@ export async function lockWebhookEndpoint(
       secretCiphertext: webhookEndpoints.secretCiphertext,
       eventTypes: webhookEndpoints.eventTypes,
       messageStatuses: webhookEndpoints.messageStatuses,
+      messageSenders: webhookEndpoints.messageSenders,
       contactParts: webhookEndpoints.contactParts,
       automationIds: webhookEndpoints.automationIds,
       campaignStatuses: webhookEndpoints.campaignStatuses,
@@ -827,6 +873,7 @@ export async function insertWebhookEndpoint(
     eventTypes: WebhookEventType[];
     headers: readonly WebhookHeader[];
     messageStatuses: WebhookMessageStatus[] | null;
+    messageSenders: WebhookMessageSender[] | null;
     contactParts: WebhookContactPart[] | null;
     automationIds: string[] | null;
     campaignStatuses: WebhookCampaignStatus[] | null;
@@ -860,6 +907,7 @@ export async function insertWebhookEndpoint(
     secretCiphertext: keyring.encrypt(secret, webhookSecretAad(tenantId, id, 1)),
     ...sealWebhookHeaders(keyring, tenantId, id, input.headers),
     messageStatuses: input.messageStatuses,
+    messageSenders: input.messageSenders,
     contactParts: input.contactParts,
     automationIds: input.automationIds,
     campaignStatuses: input.campaignStatuses,
@@ -1243,6 +1291,7 @@ export function createWebhooksService(deps: {
               previousSecretExpiresAt: webhookEndpoints.previousSecretExpiresAt,
               headerNames: webhookEndpoints.headerNames,
               messageStatuses: webhookEndpoints.messageStatuses,
+              messageSenders: webhookEndpoints.messageSenders,
               contactParts: webhookEndpoints.contactParts,
               automationIds: webhookEndpoints.automationIds,
               campaignStatuses: webhookEndpoints.campaignStatuses,
@@ -1420,6 +1469,7 @@ export function createWebhooksService(deps: {
           data.messageStatuses,
           null,
         );
+        const messageSenders = webhookMessageSendersFor(data.eventTypes, data.messageSenders, null);
         const contactParts = webhookContactPartsFor(data.eventTypes, data.contactParts, null);
         const automationIds = webhookAutomationIdsFor(data.eventTypes, data.automationIds, null);
         await assertWebhookAutomations(tx, ctx.tenant.id, automationIds);
@@ -1448,6 +1498,7 @@ export function createWebhooksService(deps: {
           eventTypes: data.eventTypes,
           headers,
           messageStatuses,
+          messageSenders,
           contactParts,
           automationIds,
           campaignStatuses,
@@ -1470,6 +1521,7 @@ export function createWebhooksService(deps: {
               eventTypes: data.eventTypes,
               ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
               ...(messageStatuses ? { messageStatuses } : {}),
+              ...(messageSenders ? { messageSenders } : {}),
               ...(contactParts ? { contactParts } : {}),
               ...(automationIds ? { automationIds } : {}),
               ...(campaignStatuses ? { campaignStatuses } : {}),
@@ -1497,6 +1549,11 @@ export function createWebhooksService(deps: {
           data.eventTypes,
           data.messageStatuses,
           endpoint.messageStatuses,
+        );
+        const messageSenders = webhookMessageSendersFor(
+          data.eventTypes,
+          data.messageSenders,
+          endpoint.messageSenders,
         );
         const contactParts = webhookContactPartsFor(
           data.eventTypes,
@@ -1553,6 +1610,7 @@ export function createWebhooksService(deps: {
             description: data.description || null,
             eventTypes: data.eventTypes,
             messageStatuses,
+            messageSenders,
             contactParts,
             automationIds,
             campaignStatuses,
@@ -1584,6 +1642,7 @@ export function createWebhooksService(deps: {
               eventTypes: data.eventTypes,
               ...(data.headers ? { headers: data.headers.map((h) => h.name) } : {}),
               ...(messageStatuses ? { messageStatuses } : {}),
+              ...(messageSenders ? { messageSenders } : {}),
               ...(contactParts ? { contactParts } : {}),
               ...(automationIds ? { automationIds } : {}),
               ...(campaignStatuses ? { campaignStatuses } : {}),

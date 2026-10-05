@@ -32,6 +32,12 @@ export type WebhookMessageStatus =
   'accepted' | 'sent' | 'delivered' | 'read' | 'played' | 'failed' | 'canceled' | 'unknown_outcome';
 
 /**
+ * Who sent a message whose `message.status` an endpoint can choose to take (ADR-172), as the event's
+ * `message.sentBy` says: a member, an automation, a campaign, the API, or HyFib itself.
+ */
+export type WebhookMessageSender = 'agent' | 'bot' | 'campaign' | 'api' | 'system';
+
+/**
  * The parts of a contact whose change a `contact.updated` endpoint can choose (ADR-123); `fields`
  * is a change of any custom field.
  */
@@ -101,6 +107,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * while `message.status` is among its events.
    */
   messageStatuses: text('message_statuses').array().$type<WebhookMessageStatus[]>(),
+  /**
+   * Who sent the messages whose `message.status` it takes (ADR-172); null takes every sender. Set
+   * only while `message.status` is among its events.
+   */
+  messageSenders: text('message_senders').array().$type<WebhookMessageSender[]>(),
   /**
    * The parts of a contact whose change it takes as `contact.updated` (ADR-123); null takes every
    * change. Set only while `contact.updated` is among its events.
