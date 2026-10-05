@@ -40,6 +40,21 @@ test('staff read the operations console and repair a quarantined webhook event',
   await turnOnTwoFactor(page, PASSWORD);
   await makePlatformOwner(email);
 
+  // Two requests with one of the company's API keys: its plan counts them (ADR-061), and the
+  // console's Usage tab shows the count (ADR-153).
+  await page.goto(`/c/ops-${suffix}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Ops check');
+  await page.getByRole('checkbox', { name: /Read contacts/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  for (const attempt of [1, 2]) {
+    const listed = await request.get('/api/v1/contacts', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(listed.status(), `request ${attempt}`).toBe(200);
+  }
+
   // A signed event from a WhatsApp account no company connected: it is quarantined.
   const wabaId = unknownId();
   await sendSignedWebhook(request, inboundMessage(wabaId, unknownId(), randomWaId(), 'Hello?'));
@@ -120,7 +135,14 @@ test('staff read the operations console and repair a quarantined webhook event',
   await expect(page.getByText('Sending signals (7 days)')).toBeVisible();
   await sections.getByRole('link', { name: 'Usage' }).click();
   const usage = page.getByRole('table', { name: 'Usage by company' });
-  await expect(usage.getByRole('row').filter({ hasText: companyName })).toBeVisible();
+  const usageRow = usage.getByRole('row').filter({ hasText: companyName });
+  await expect(usageRow).toBeVisible();
+  const usageColumns = await usage.getByRole('columnheader').allTextContents();
+  const apiColumn = usageColumns.indexOf('API requests');
+  expect(apiColumn).toBeGreaterThan(0);
+  await expect(usageRow.getByRole('cell').nth(apiColumn)).toHaveText(
+    /^2\s*from \d{4}-\d{2}-\d{2}$/,
+  );
   await page.getByRole('link', { name: '7 days' }).click();
   await expect(page.getByText('By company (7 days)')).toBeVisible();
   await expectNoHorizontalOverflow(page);

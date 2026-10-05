@@ -1321,7 +1321,7 @@ precomputed rollups and paging come with growth.
 
 **Not built.** Alerts (email or pager) on these conditions, trends over time, number quality
 updates from Meta's `phone_number_quality_update` webhook (quality is as of the last health
-check), API request counts (not recorded), exports, the age of the oldest waiting job, and
+check), API request counts (not recorded; the plan's counter is shown since ADR-153), exports, the age of the oldest waiting job, and
 acknowledging or snoozing an issue.
 
 **Migrations 0026 and 0027.** 0026 adds `ops.dead_letters`, `ops.purge_dead_letters`, the four read
@@ -6137,3 +6137,29 @@ Decision:
 
 Not built: a changelog, code samples, a console for trying requests, search, and references for
 other versions (there is one, `v1`).
+
+## ADR-153 API requests on the operations console (P5-10) (2026-10-05)
+
+Context: the console's Usage tab (ADR-054) lists each company's sending, receipts, webhook
+deliveries, automation runs, members and numbers, and said that API request counts were not
+recorded. Since ADR-061 a company's plan counts every request its API keys make, one counter per
+usage period, which Billing and the company's platform page show against the plan's limit; staff
+watching the platform had no list of which companies use the API, or how much.
+
+Decision:
+
+- **The plan's counter on the Usage tab:** an "API requests" column beside "Automation runs", read
+  the same way: each company's latest API request counter with the day its period started ("from
+  …"), 0 and no date when its keys have made no request. It is the count the plan's limit applies to
+  (requests a key's or the company's monthly limit refused are not in it), for the plan's period,
+  not for the 7, 30 or 90 days the tab's other columns cover, as the tab says.
+- **Read by the platform role, without a migration:** 0023's policy already lets the platform role
+  read every company's `app.usage_counters`, as the platform company page does. The service reads
+  each company's latest `api_requests` row in the transaction that reads the activity and joins it
+  to the companies `ops.platform_ops_activity` returns, so deleted companies stay out; company ids,
+  periods and counts only. The definer function is unchanged.
+- **The tab's text** no longer says API requests are not recorded; messages sent through the API
+  still count under Sent.
+
+Not built: each key's count (ADR-097 shows it to the company in Settings → API keys), requests over
+the tab's window, refused requests, trends.

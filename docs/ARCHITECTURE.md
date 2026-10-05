@@ -1513,8 +1513,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   90 days) and a health card on each company's platform page. Every page re-checks the platform
   actor. The functions read every company on each view, which suits the test envelope; paging and
   precomputed rollups come with growth.
+- **API requests on the Usage tab (ADR-153):** `usage()` also reads each company's latest
+  `api_requests` row of `app.usage_counters` through the platform role (0023's policy), in the same
+  transaction, and joins it to the companies the activity function returns; the tab shows it, with
+  the period's start, beside automation runs.
 - **Not built yet:** other alert channels, trends,
-  quality updates from Meta's quality webhook, API request counts, exports, sweeps for the work of
+  quality updates from Meta's quality webhook, exports, sweeps for the work of
   `channel.onboard`, `commerce.account` and `template.delete`, retrying several dead letters at
   once, and acknowledging the console's other lists (dead letters, receipts, late queues).
 

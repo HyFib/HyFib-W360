@@ -200,6 +200,16 @@ export interface CompanyActivity {
   numbers: number;
 }
 
+/**
+ * A company's line on the console's Usage tab (ADR-153): its activity and the plan's counter of its
+ * API requests, the latest period's (as `automationRuns`), with the period's start; 0 and null when
+ * its keys have made no request.
+ */
+export interface CompanyUsage extends CompanyActivity {
+  apiRequests: number;
+  apiPeriodStart: Date | null;
+}
+
 export type SignalKey =
   | 'send_failures'
   | 'marketing_opt_outs'

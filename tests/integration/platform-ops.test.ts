@@ -263,6 +263,30 @@ describe('company health and signals', () => {
     expect((await ops().usage(staff, 12345)).days).toBe(30);
     expect(JSON.stringify([overview, signals, usage])).not.toContain(MESSAGE_TEXT);
   });
+
+  it("gives each company's latest API request count on the Usage tab, as its automation runs (ADR-153)", async () => {
+    const quiet = await fx.company();
+    const august = new Date('2026-08-01T00:00:00.000Z');
+    const september = new Date('2026-09-01T00:00:00.000Z');
+    const counter = (tenantId: string, metric: string, periodStart: Date, used: number) =>
+      fx.query(
+        `INSERT INTO app.usage_counters (id, tenant_id, metric, period_start, used)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [uuidv7(), tenantId, metric, periodStart, used],
+      );
+    await counter(company.tenant.id, 'api_requests', august, 900);
+    await counter(company.tenant.id, 'api_requests', september, 42);
+    await counter(company.tenant.id, 'automation_runs', september, 7);
+    // Another company's requests are its own.
+    await counter(quiet.tenant.id, 'automation_runs', september, 3);
+    const rows = (await ops().usage(staff, 30)).rows;
+    const line = (tenantId: string) => {
+      const r = rows.find((row) => row.tenantId === tenantId);
+      return r && [r.apiRequests, r.apiPeriodStart?.toISOString() ?? null, r.automationRuns];
+    };
+    expect(line(company.tenant.id)).toEqual([42, september.toISOString(), 7]);
+    expect(line(quiet.tenant.id)).toEqual([0, null, 3]);
+  });
 });
 
 describe('onboarding and integration failures', () => {

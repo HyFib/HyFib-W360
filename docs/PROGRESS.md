@@ -1,5 +1,46 @@
 # Progress
 
+## 2026-10-05 — Phase 5: API requests on the operations console (P5-10, ADR-153)
+
+Status: **Implemented; its database tests run in CI only (test data only).** The console's Usage tab
+said that API request counts were not recorded, although since ADR-061 each company's plan counts
+every request its keys make. The local PostgreSQL is unavailable (its Docker daemon stopped), so the
+integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-153):** an "API requests" column on the Usage tab, beside automation runs and read
+  the same way: each company's latest API request counter, the plan's, with its period's start; 0
+  when its keys made no request. No migration: the platform role reads the counters under 0023's
+  policy, as the platform company page does.
+- **Domain:** `platform/ops.ts` (`latestApiRequests`, and `usage()` rows as `CompanyUsage`, the
+  activity with `apiRequests` and `apiPeriodStart`); `platform/ops-model.ts` (`CompanyUsage`).
+- **Web:** `/platform/ops/usage`: the column, and the tab's text no longer says API requests are not
+  recorded.
+- **Tests:**
+  - Integration (1 new in `platform-ops.test.ts`): a company's latest API request counter and its
+    period, an earlier period's ignored, beside its automation runs; a company without requests at 0
+    and no period. Written for CI; not run here.
+  - E2E (`platform-ops.spec.ts` extended): an owner creates an API key, makes two requests, and the
+    Usage tab shows 2 for the company with the period's start. Written for CI; not run here.
+- **Docs:** ADR-153 (and ADR-054's "Not built" annotated); SECURITY (the console's row);
+  THREAT-MODEL T75; ARCHITECTURE; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** none: every check of this slice needs the database.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 705 passed (75 files; none new)                                 |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Each key's count on the console, requests over the tab's window, refused requests, trends.
+
 ## 2026-10-05 — Phase 5: an API reference page made from the OpenAPI document (P5-08, ADR-152)
 
 Status: **Implemented; the page is locally verified (test data only).** Since ADR-052 the public API

@@ -19,6 +19,7 @@ import {
   securityEvents,
   sql,
   tenants,
+  usageCounters,
   users,
   webhookQuarantine,
   webhookReceipts,
@@ -44,6 +45,7 @@ import {
   quarantineExternalIds,
   signalFlags,
   type CompanyActivity,
+  type CompanyUsage,
   type CompanyHealthFacts,
   type HealthIssue,
   type HealthLevel,
@@ -162,6 +164,25 @@ async function activitySince(
     sql`select * from ops.platform_ops_activity(${since.toISOString()}::timestamptz, ${tenantId}::uuid)`,
   );
   return result.rows.map(toActivity);
+}
+
+/**
+ * Each company's latest API request counter (ADR-153): the plan counts every request its keys make
+ * (ADR-061), one row per company and usage period, which the platform role reads (0023's policy).
+ */
+async function latestApiRequests(
+  tx: Tx,
+): Promise<Map<string, { used: number; periodStart: Date }>> {
+  const counters = await tx
+    .selectDistinctOn([usageCounters.tenantId], {
+      tenantId: usageCounters.tenantId,
+      used: usageCounters.used,
+      periodStart: usageCounters.periodStart,
+    })
+    .from(usageCounters)
+    .where(eq(usageCounters.metric, 'api_requests'))
+    .orderBy(usageCounters.tenantId, desc(usageCounters.periodStart));
+  return new Map(counters.map((c) => [c.tenantId, { used: c.used, periodStart: c.periodStart }]));
 }
 
 export interface CompanyHealth {
@@ -785,7 +806,13 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         : 30;
       const since = new Date(clock.now().getTime() - window * DAY_MS);
       return platformDb.run(actor.userId, async (tx) => {
-        const rows = await activitySince(tx, since, null);
+        const activity = await activitySince(tx, since, null);
+        const api = await latestApiRequests(tx);
+        const rows: CompanyUsage[] = activity.map((a) => ({
+          ...a,
+          apiRequests: api.get(a.tenantId)?.used ?? 0,
+          apiPeriodStart: api.get(a.tenantId)?.periodStart ?? null,
+        }));
         const sum = (pick: (a: CompanyActivity) => number) =>
           rows.reduce((total, a) => total + pick(a), 0);
         return {

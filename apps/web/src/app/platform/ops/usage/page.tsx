@@ -68,8 +68,9 @@ export default async function OpsUsagePage({
         <CardHeader>
           <CardTitle>By company ({o.days} days)</CardTitle>
           <CardDescription>
-            Busiest first. Automation runs are the plan&apos;s counter for its current period (from
-            the date shown). API request counts are not recorded; messages sent through the API are.
+            Busiest first. Automation runs and API requests are the plan&apos;s counters for its
+            current period (from the date shown); messages sent through the API also count under
+            Sent.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -85,6 +86,7 @@ export default async function OpsUsagePage({
                   <TH>Received</TH>
                   <TH>Webhook deliveries</TH>
                   <TH>Automation runs</TH>
+                  <TH>API requests</TH>
                   <TH>Members</TH>
                   <TH>Numbers</TH>
                 </TR>
@@ -117,6 +119,14 @@ export default async function OpsUsagePage({
                       {a.runsPeriodStart ? (
                         <div className="text-xs text-muted-foreground">
                           from {a.runsPeriodStart.toISOString().slice(0, 10)}
+                        </div>
+                      ) : null}
+                    </TD>
+                    <TD className="tabular-nums">
+                      {a.apiRequests}
+                      {a.apiPeriodStart ? (
+                        <div className="text-xs text-muted-foreground">
+                          from {a.apiPeriodStart.toISOString().slice(0, 10)}
                         </div>
                       ) : null}
                     </TD>
