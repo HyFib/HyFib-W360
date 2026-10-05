@@ -639,6 +639,12 @@ function resolveSchedule(
   return { ok: true, at: instant, adjustment };
 }
 
+/** The company a draft is checked for: its id, and the time zone its conditions on dates read in. */
+export interface CampaignCompany {
+  id: string;
+  timezone: string;
+}
+
 interface Readiness {
   problems: string[];
   template: TemplateInfo | null;
@@ -651,16 +657,16 @@ interface Readiness {
 
 async function evaluateReadiness(
   tx: Tx,
-  ctx: TenantContext,
+  company: CampaignCompany,
   c: CampaignRow,
   now: Date,
 ): Promise<Readiness> {
   const problems: string[] = [];
-  const channel = await loadChannel(tx, ctx.tenant.id, c.channelAccountId);
+  const channel = await loadChannel(tx, company.id, c.channelAccountId);
   if (!channel) problems.push('Choose the WhatsApp number to send from.');
   else if (channel.status !== 'active')
     problems.push('The chosen WhatsApp number is not active. Reconnect it in Settings → Channels.');
-  const template = await loadTemplate(tx, ctx.tenant.id, c.templateId);
+  const template = await loadTemplate(tx, company.id, c.templateId);
   if (!template) problems.push('Choose an approved template.');
   else {
     if (template.status !== 'approved') problems.push('The template is not approved by Meta.');
@@ -668,7 +674,7 @@ async function evaluateReadiness(
       problems.push('The template belongs to another WhatsApp account than the chosen number.');
     if (!template.spec.supported) problems.push(template.spec.reason);
     else {
-      const fields = await loadFieldTypes(tx, ctx.tenant.id);
+      const fields = await loadFieldTypes(tx, company.id);
       const problem = checkVariables(
         readCampaignVariables(c.variables),
         template.spec,
@@ -677,7 +683,7 @@ async function evaluateReadiness(
       if (problem) problems.push(problem);
     }
   }
-  const def = await currentDefinition(tx, ctx.tenant.id, c);
+  const def = await currentDefinition(tx, company.id, c);
   if (!def.ok) problems.push(def.problem);
   const schedule = resolveSchedule(c, now);
   if (!schedule.ok) problems.push(schedule.problem);
@@ -696,19 +702,19 @@ async function evaluateReadiness(
   let rules: AudienceRules | null = null;
   let where: SQL | null = null;
   if (def.ok && channel && template) {
-    const settings = await loadMessagingSettings(tx, ctx.tenant.id);
+    const settings = await loadMessagingSettings(tx, company.id);
     rules = {
-      tenantId: ctx.tenant.id,
+      tenantId: company.id,
       whatsappAccountId: channel.whatsappAccountId,
       purpose: consentPurposeFor(template.category),
       requireMarketingOptIn: settings.requireMarketingOptIn,
       requiredFields: fieldsWithoutFallback(readCampaignVariables(c.variables)),
     };
     where = segmentWhere(
-      ctx.tenant.id,
+      company.id,
       def.definition,
-      ctx.tenant.timezone,
-      await loadFieldTypes(tx, ctx.tenant.id),
+      company.timezone,
+      await loadFieldTypes(tx, company.id),
     );
   }
   return {
@@ -764,6 +770,74 @@ async function estimateCost(
     byMarket: [...markets.entries()]
       .map(([market, v]) => ({ market, ...v }))
       .sort((a, b) => b.micros - a.micros),
+  };
+}
+
+/** What submitting a draft would do now (ADR-193), as members' review and the API show it. */
+export interface CampaignDraftReview {
+  /** What blocks submitting it, in the order members' review lists them; empty when nothing does. */
+  problems: string[];
+  /** The audience by skip reason; null until it is complete, or when it is too large. */
+  audience: AudienceBreakdown | null;
+  /** An upper bound of Meta's charges for the contacts that can receive it now; null without one. */
+  estimate: CostEstimate | null;
+  costCurrency: string | null;
+  scheduledAt: Date | null;
+  adjustment: ScheduleAdjustment | null;
+  approvalRequired: boolean;
+  frequencyCap: { count: number; days: number } | null;
+}
+
+/**
+ * What submitting a draft would do now: problems that block it, the audience broken down by skip
+ * reason, and the estimated cost (an upper bound; see costs.ts). Members' review and keys' through
+ * the API (ADR-193) both read it here, so they never differ; it changes nothing.
+ */
+export async function reviewCampaignDraft(
+  tx: Tx,
+  company: CampaignCompany,
+  c: CampaignRow,
+  now: Date,
+): Promise<CampaignDraftReview> {
+  const r = await evaluateReadiness(tx, company, c, now);
+  const settings = await loadCampaignSettings(tx, company.id);
+  let audience: AudienceBreakdown | null = null;
+  let estimate: CostEstimate | null = null;
+  const problems = [...r.problems];
+  if (r.rules && r.where) {
+    const total = await countAudience(tx, r.where);
+    if (total > MAX_AUDIENCE) {
+      problems.push(
+        `This audience has ${total} contacts; campaigns are limited to ${MAX_AUDIENCE}. Narrow the conditions.`,
+      );
+    } else {
+      audience = await classifyAudience(tx, r.rules, r.where);
+      if (audience.eligible === 0)
+        problems.push('No contact in this audience can receive the campaign now.');
+      const currency = c.budgetCurrency ?? settings.costCurrency;
+      if (currency && r.template && audience.eligible > 0) {
+        estimate = await estimateCost(
+          tx,
+          currency,
+          r.schedule?.at ?? now,
+          r.template.category,
+          await eligiblePhones(tx, r.rules, r.where),
+        );
+      }
+    }
+  }
+  return {
+    problems,
+    audience,
+    estimate,
+    costCurrency: c.budgetCurrency ?? settings.costCurrency,
+    scheduledAt: r.schedule?.at ?? null,
+    adjustment: r.schedule?.adjustment ?? null,
+    approvalRequired: settings.approvalRequired,
+    frequencyCap:
+      settings.capCount && settings.capDays && r.template?.category === 'MARKETING'
+        ? { count: settings.capCount, days: settings.capDays }
+        : null,
   };
 }
 
@@ -1223,10 +1297,7 @@ export function createCampaignsService(deps: CampaignDeps) {
       });
     },
 
-    /**
-     * What submitting would do now: problems that block it, the audience broken down by skip
-     * reason, and the estimated cost (an upper bound; see costs.ts).
-     */
+    /** What submitting would do now, as `reviewCampaignDraft` reads it for keys too (ADR-193). */
     async reviewDraft(ctx: TenantContext, campaignId: string) {
       assertCan(ctx, 'campaigns.read');
       if (!z.uuid().safeParse(campaignId).success) throw notFound('Campaign');
@@ -1239,46 +1310,7 @@ export function createCampaignsService(deps: CampaignDeps) {
             .from(campaigns)
             .where(and(eq(campaigns.tenantId, ctx.tenant.id), eq(campaigns.id, campaignId)));
           if (!c) throw notFound('Campaign');
-          const r = await evaluateReadiness(tx, ctx, c, now);
-          const settings = await loadCampaignSettings(tx, ctx.tenant.id);
-          let audience: AudienceBreakdown | null = null;
-          let estimate: CostEstimate | null = null;
-          const problems = [...r.problems];
-          if (r.rules && r.where) {
-            const total = await countAudience(tx, r.where);
-            if (total > MAX_AUDIENCE) {
-              problems.push(
-                `This audience has ${total} contacts; campaigns are limited to ${MAX_AUDIENCE}. Narrow the conditions.`,
-              );
-            } else {
-              audience = await classifyAudience(tx, r.rules, r.where);
-              if (audience.eligible === 0)
-                problems.push('No contact in this audience can receive the campaign now.');
-              const currency = c.budgetCurrency ?? settings.costCurrency;
-              if (currency && r.template && audience.eligible > 0) {
-                estimate = await estimateCost(
-                  tx,
-                  currency,
-                  r.schedule?.at ?? now,
-                  r.template.category,
-                  await eligiblePhones(tx, r.rules, r.where),
-                );
-              }
-            }
-          }
-          return {
-            problems,
-            audience,
-            estimate,
-            costCurrency: c.budgetCurrency ?? settings.costCurrency,
-            scheduledAt: r.schedule?.at ?? null,
-            adjustment: r.schedule?.adjustment ?? null,
-            approvalRequired: settings.approvalRequired,
-            frequencyCap:
-              settings.capCount && settings.capDays && r.template?.category === 'MARKETING'
-                ? { count: settings.capCount, days: settings.capDays }
-                : null,
-          };
+          return reviewCampaignDraft(tx, ctx.tenant, c, now);
         },
         { accessMode: 'read only' },
       );
@@ -1308,7 +1340,7 @@ export function createCampaignsService(deps: CampaignDeps) {
             'conflict',
             'Someone else changed this campaign. Reload the page to see their version.',
           );
-        const r = await evaluateReadiness(tx, ctx, c, now);
+        const r = await evaluateReadiness(tx, ctx.tenant, c, now);
         const first = r.problems[0];
         if (first) throw new AppError('precondition_failed', first);
         if (!r.rules || !r.where || !r.schedule || !r.definition || !r.template)

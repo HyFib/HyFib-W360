@@ -622,6 +622,10 @@ verification, app review, Embedded Signup configuration).
   CI]** (ADR-188: `POST /contacts/update-many` takes `phone` for each contact, as `PATCH` does;
   every number must be free before the call and is given once, so a call never swaps or moves
   numbers, and a refusal names its place; no migration).
+  **[Reviewing campaign drafts built; its database tests run only in CI]** (ADR-193:
+  `GET /campaigns/{id}/review` answers a draft's review as members see it, for a key holding
+  `campaigns.write`: what blocks it, who it would reach and an upper bound of its cost; no
+  migration).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   media downloads, a contact card's contacts (Meta's
   contact object is not confirmed), changing a field's type,

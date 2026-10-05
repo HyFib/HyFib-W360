@@ -39,18 +39,21 @@ import {
   campaignLauncherStanding,
   cancelLockedCampaign,
   lockCampaign,
+  microsToAmount,
   pauseLockedCampaign,
   prepareCampaignDraft,
   recordCampaignEvent,
   resumeLockedCampaign,
+  reviewCampaignDraft,
   writeLockedCampaignDraft,
   type CampaignDraftInput,
+  type CampaignDraftReview,
 } from '../campaigns/service';
 import { campaignVariablesSchema, readCampaignVariables } from '../campaigns/variables';
 import type { OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import { apiSearchConditionSchema } from './contact-search';
-import { apiActor, assertScope, hasScope, type ApiContext } from './context';
+import { apiActor, assertAnyScope, assertScope, hasScope, type ApiContext } from './context';
 import type { ApiResponse, IdempotencyInput } from './idempotency';
 import { API_LIMITS } from './model';
 import { idempotent } from './resources';
@@ -62,8 +65,8 @@ import { idempotent } from './resources';
  * also reads contacts lists a campaign's recipients, each with what happened to it (ADR-127).
  * Never members or costs. A key with `campaigns.stop` pauses and cancels campaigns as members do
  * (ADR-128), one with `campaigns.resume` resumes what keys paused (ADR-176), and one with
- * `campaigns.write` creates and edits drafts (ADR-186); submitting, approving and starting stay with
- * members.
+ * `campaigns.write` creates, edits and reviews drafts (ADR-186, ADR-193); submitting, approving and
+ * starting stay with members.
  */
 
 export const apiCampaignListQuerySchema = z
@@ -981,4 +984,183 @@ export async function apiUpdateCampaign(
     );
     return readApiCampaignDetail(tx, ctx.tenant.id, campaignId, true);
   });
+}
+
+const reviewCount = (description: string) => z.number().int().min(0).describe(description);
+
+/** A draft's review through the API (ADR-193), as members' review reads it. */
+export const apiCampaignReviewSchema = z.object({
+  campaignId: z.uuid(),
+  version: z
+    .number()
+    .int()
+    .min(0)
+    .describe(
+      'The version of the draft reviewed: give it as expectedVersion to PATCH /campaigns/{id} to change the draft only as it was reviewed.',
+    ),
+  problems: z
+    .array(z.string())
+    .describe(
+      "What must change before a member can submit the draft, in the words and order of members' review: a number that is active, an approved template of its WhatsApp account, every variable, an audience of at most 50,000 contacts of whom one can receive the campaign now, a valid schedule and sending window, and a published rate card for a spending cap. Empty when nothing blocks it; a member's submission checks again.",
+    ),
+  audience: z
+    .object({
+      total: reviewCount('The contacts the segment or conditions match now.'),
+      eligible: reviewCount('Those who can receive the campaign now.'),
+      skipReasons: z
+        .array(z.object({ reason: z.enum(SKIP_REASONS), count: z.number().int().min(1) }))
+        .describe(
+          'Why the others would be skipped, the commonest first, ties in alphabetical order.',
+        ),
+    })
+    .nullable()
+    .describe(
+      'Who the draft would be sent to if it were submitted now, counts only (never contacts); null until it has a number, a template and an audience, or when the audience has more than 50,000 contacts.',
+    ),
+  estimate: z
+    .object({
+      currency: z.string().regex(/^[A-Z]{3}$/),
+      total: z
+        .string()
+        .describe(
+          'In major units without trailing zeros, to the millionth, like 2500 or 1234.5625.',
+        ),
+      pricedCount: reviewCount('The messages the total counts.'),
+      unpricedCount: reviewCount(
+        'Recipients in markets the rate card has no price for, left out of the total.',
+      ),
+      byMarket: z
+        .array(
+          z.object({
+            market: z.string(),
+            count: z.number().int().min(1),
+            amount: z.string().describe('In major units, as total gives them.'),
+          }),
+        )
+        .describe('The total by market, the costliest first.'),
+    })
+    .nullable()
+    .describe(
+      "An upper bound of Meta's charges for the contacts who can receive the campaign now, from the rate card HyFib publishes from Meta's rates for when it would start: every message counted at its market's list price, without free windows or volume tiers. null without a currency (costCurrency), without a rate card in it, or when no contact can receive the campaign.",
+    ),
+  costCurrency: z
+    .string()
+    .nullable()
+    .describe(
+      "The currency of the estimate: the spending cap's, or else the company's (Settings → Messaging); null when neither is set.",
+    ),
+  scheduledAt: z.iso
+    .datetime()
+    .nullable()
+    .describe(
+      'When the campaign would start if it were submitted now (now, for one that starts once submitted); null while its date and time are not valid.',
+    ),
+  scheduleAdjustment: z
+    .enum(['gap_shifted', 'ambiguous_earlier'])
+    .nullable()
+    .describe(
+      'How a date and time the clocks skip or repeat in the time zone is read: gap_shifted moves it past the jump, ambiguous_earlier takes the earlier of the two; null otherwise.',
+    ),
+  approvalRequired: z
+    .boolean()
+    .describe(
+      "Whether the company's settings make a submitted campaign wait for a member's approval.",
+    ),
+  frequencyCap: z
+    .object({ count: z.number().int().min(1), days: z.number().int().min(1) })
+    .nullable()
+    .describe(
+      "The company's cap on marketing campaign messages per contact (at most count in days), which a marketing template's campaign keeps to when it sends; null when none applies.",
+    ),
+});
+
+export type ApiCampaignReview = z.infer<typeof apiCampaignReviewSchema>;
+
+/** Keys' refusal to review a campaign that is no longer a draft (ADR-193). */
+export const REVIEW_DRAFTS_ONLY = 'Only draft campaigns are reviewed.';
+
+/**
+ * A draft's review in the API's words (ADR-193): the skip reasons the commonest first (ties in
+ * alphabetical order), amounts in major units as members type them, times as ISO 8601.
+ */
+export function toApiCampaignReview(
+  c: { id: string; version: number },
+  review: CampaignDraftReview,
+): ApiCampaignReview {
+  const skipped = review.audience?.skipped ?? {};
+  return {
+    campaignId: c.id,
+    version: c.version,
+    problems: review.problems,
+    audience: review.audience
+      ? {
+          total: review.audience.total,
+          eligible: review.audience.eligible,
+          skipReasons: SKIP_REASONS.flatMap((reason) => {
+            const count = skipped[reason] ?? 0;
+            return count > 0 ? [{ reason, count }] : [];
+          }).sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason)),
+        }
+      : null,
+    estimate: review.estimate
+      ? {
+          currency: review.estimate.currency,
+          total: microsToAmount(review.estimate.totalMicros),
+          pricedCount: review.estimate.pricedCount,
+          unpricedCount: review.estimate.unpricedCount,
+          byMarket: review.estimate.byMarket.map((m) => ({
+            market: m.market,
+            count: m.count,
+            amount: microsToAmount(m.micros),
+          })),
+        }
+      : null,
+    costCurrency: review.costCurrency,
+    scheduledAt: review.scheduledAt?.toISOString() ?? null,
+    scheduleAdjustment: review.adjustment,
+    approvalRequired: review.approvalRequired,
+    frequencyCap: review.frequencyCap,
+  };
+}
+
+/**
+ * What submitting one of the company's drafts would do now (ADR-193), as members' review reads it
+ * (`reviewCampaignDraft`), for a key that edits drafts: what blocks a submission, who it would
+ * reach and an upper bound of what it would cost, before a member submits it. A read in one
+ * snapshot that changes nothing, so the company's status does not matter; a campaign that is no
+ * longer a draft is refused with 409, naming its status.
+ */
+export async function apiReviewCampaign(
+  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+  ctx: ApiContext,
+  campaignId: string,
+): Promise<ApiCampaignReview> {
+  assertAnyScope(ctx, ['campaigns.write']);
+  if (!z.uuid().safeParse(campaignId).success) throw notFound('Campaign');
+  const now = deps.clock.now();
+  return deps.db.run(
+    ctx.scope,
+    async (tx) => {
+      const [c] = await tx
+        .select()
+        .from(campaigns)
+        .where(and(eq(campaigns.tenantId, ctx.tenant.id), eq(campaigns.id, campaignId)));
+      if (!c) throw notFound('Campaign');
+      if (c.status !== 'draft') throw statusRefusal(REVIEW_DRAFTS_ONLY, c.status);
+      // Conditions on dates read in the company's time zone, as members' review reads them.
+      const [company] = await tx
+        .select({ timezone: tenants.timezone })
+        .from(tenants)
+        .where(eq(tenants.id, ctx.tenant.id));
+      if (!company) throw notFound('Company');
+      const review = await reviewCampaignDraft(
+        tx,
+        { id: ctx.tenant.id, timezone: company.timezone },
+        c,
+        now,
+      );
+      return toApiCampaignReview(c, review);
+    },
+    { isolationLevel: 'repeatable read', accessMode: 'read only' },
+  );
 }

@@ -449,6 +449,31 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
   await expect(
     page.getByRole('listitem').filter({ hasText: 'Created' }).filter({ hasText: byDrafts }),
   ).toHaveCount(1);
+  // The key reviews its draft as members see it (ADR-193): the page counts the same audience. A key
+  // that only reads campaigns gets no review, and a completed campaign is not reviewed.
+  const reviewed = await request.get(`/api/v1/campaigns/${winter.id}/review`, {
+    headers: draftAuth,
+  });
+  expect(reviewed.status()).toBe(200);
+  const review = (
+    (await reviewed.json()) as {
+      data: { campaignId: string; version: number; audience: { total: number; eligible: number } };
+    }
+  ).data;
+  expect(review).toMatchObject({ campaignId: winter.id, version: 2 });
+  await expect(
+    page.getByText(
+      `${review.audience.eligible} of ${review.audience.total} contacts can receive it now.`,
+    ),
+  ).toBeVisible();
+  const readerReviews = await request.get(`/api/v1/campaigns/${winter.id}/review`, {
+    headers: auth,
+  });
+  expect(readerReviews.status()).toBe(403);
+  const completedReview = await request.get(`/api/v1/campaigns/${campaignId}/review`, {
+    headers: draftAuth,
+  });
+  expect(completedReview.status()).toBe(409);
   // The key cancels its draft (ADR-187), and a retry answers it as it is.
   for (let i = 0; i < 2; i += 1) {
     const dropped = await request.post(`/api/v1/campaigns/${winter.id}/cancel`, {

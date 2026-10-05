@@ -364,6 +364,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    that drops `automation.run_ended`, or an end the list names reasons of, from an endpoint with a
    list fails on the check, and its other changes keep it.
 
+   ADR-193 has no migration: until the web rollout ends, an old web server has no such route and
+   answers `GET /campaigns/{id}/review` with 404.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -759,6 +759,11 @@ Phase 5 rules (Public API, P5-08):
   writing scopes before anything is read, and the campaign is locked in the key's company. A leaked
   key with `campaigns.write` can cancel the company's drafts until it is revoked; a cancelled draft
   is kept, and its history names the key.
+- Reviewing drafts (ADR-193): `GET /campaigns/{id}/review` answers a draft's review only to a key
+  holding `campaigns.write`, which already reads drafts' settings: it shows counts of the audience
+  and an estimate of Meta's charges, never contacts or members, and keys that only read campaigns
+  get 403. It reads one draft of the key's company in a read-only transaction and changes nothing,
+  so a company that is not active still reads it.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so

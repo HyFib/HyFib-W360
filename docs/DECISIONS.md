@@ -7540,7 +7540,8 @@ Decision:
 
 Not built: submitting, approving, scheduling or starting campaigns through the API (a key is not a
 member), cancelling drafts (built by ADR-187) or deleting them, test sends, a draft's review (the
-audience breakdown and the cost estimate) through the API, and creating many drafts in one call.
+audience breakdown and the cost estimate) through the API (built by ADR-193), and creating many
+drafts in one call.
 
 ## ADR-187 Cancelling campaign drafts through the public API (P5-08) (2026-10-05)
 
@@ -7797,3 +7798,44 @@ Not built: filters on the step a run failed at or on the API key that started or
 reasons for `automation.run_started` (a run starting has none; its trigger is chosen with ADR-183).
 A reason added to automations later needs a migration that adds it to the check and to the capture's
 pairs, as it needs one for the runs' own check.
+
+## ADR-193 Reviewing campaign drafts through the public API (P5-08) (2026-10-05)
+
+Context: since ADR-186 keys create and edit drafts, but only members could see what submitting one
+would do: what still blocks it, how many contacts it would reach and why the others would be
+skipped, and what it would cost. An integration that prepares drafts for members (a store that
+drafts its weekly offer, say) could not tell whether its draft was ready, or warn before a member
+submitted a draft that would reach few contacts or cost more than expected.
+
+Decision:
+
+- **`GET /campaigns/{id}/review`** answers a draft's review as members' review shows it, read now:
+  `problems` (what must change before a member can submit it, in members' words and order, empty
+  when nothing blocks it), `audience` (the contacts the segment or conditions match, those who can
+  receive the campaign now, and why the others would be skipped, the commonest first; null until the
+  draft has a number, a template and an audience, or when the audience is over 50,000), `estimate`
+  (an upper bound of Meta's charges for the contacts who can receive it, from the rate card HyFib
+  publishes from Meta's rates for when it would start, in major units by market, with the recipients
+  in markets without a price counted apart; null without a currency, a rate card in it or a contact
+  who can receive it), `costCurrency`, `scheduledAt` and `scheduleAdjustment`, `approvalRequired`
+  and `frequencyCap`, and the `version` reviewed, which `PATCH` takes as `expectedVersion`. Counts
+  only: never contacts or members.
+- **One implementation:** members' review and the API both call `reviewCampaignDraft`
+  (`campaigns/service.ts`), which checks readiness (now given the company's id and time zone rather
+  than a member's context), counts the audience and estimates the cost; the API maps it to its words
+  (`toApiCampaignReview`). A member's submission checks everything again, so a review is advice, not
+  a promise.
+- **For keys that write drafts:** it needs `campaigns.write`, the scope that already reads a draft's
+  settings (ADR-186), because it shows costs and the audience, which keys that only read campaigns
+  never see (ADR-125). It changes nothing, so it is answered whatever the company's status, as reads
+  are; the key's company decides the campaign (another company's is not found).
+- **Drafts only:** any other status is refused with 409 naming it: a submitted campaign keeps the
+  audience frozen when it was submitted, and `GET /campaigns/{id}` counts its results.
+- **One snapshot, no writes:** a read-only transaction at repeatable read, so the counts, the
+  estimate and the problems agree with one another.
+- **No migration.**
+
+Not built: reviewing a draft's settings before saving them (the review reads the saved draft),
+submitting, approving, scheduling or starting campaigns through the API (a key is not a member), and
+the frequency cap's effect on the audience (applied when the campaign sends, as members' review
+says).

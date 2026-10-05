@@ -11,6 +11,7 @@ import {
   apiListMessages,
   apiPauseCampaign,
   apiResumeCampaign,
+  apiReviewCampaign,
   apiSearchContacts,
   apiUpdateCampaign,
   authenticateApiToken,
@@ -25,6 +26,7 @@ import {
   processTemplateSubmit,
   runCampaignTick,
   syncTemplates,
+  toApiCampaignReview,
   type ApiCampaignRecipient,
   type ApiContext,
   type ApiScope,
@@ -43,8 +45,9 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * contacts.read and campaigns.read (ADR-126), listing a campaign's recipients with what
  * happened to each, by the results' own outcomes, erased contacts left out (ADR-127), and pausing
  * and cancelling campaigns as members do, the key named in the history and the audit (ADR-128),
- * resuming the campaigns keys paused, under their launcher's authority (ADR-176), and creating and
- * editing drafts as members do, which members then submit and start (ADR-186).
+ * resuming the campaigns keys paused, under their launcher's authority (ADR-176), creating and
+ * editing drafts as members do, which members then submit and start (ADR-186), and reviewing them
+ * as members' review reads them (ADR-193).
  */
 let fx: WhatsAppFixture;
 
@@ -1726,5 +1729,153 @@ describe('campaign drafts through the API (ADR-186)', () => {
     expect(await fx.query(`SELECT status FROM app.campaigns WHERE id = $1`, [another])).toEqual([
       { status: 'draft' },
     ]);
+  });
+});
+
+describe('reviewing campaign drafts through the API (ADR-193)', () => {
+  it("answers a draft's review as members' review reads it: what blocks it, who it would reach and what it would cost, changing nothing", async () => {
+    const s = await setup();
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Drafts');
+    const versionOf = async (id: string) =>
+      (
+        await fx.query<{ version: number }>(`SELECT version FROM app.campaigns WHERE id = $1`, [id])
+      )[0]?.version;
+    // A draft the key started has no number, template or audience yet: what blocks it only.
+    const started = await apiCreateCampaign(writeDeps(), writer, { name: 'Weekend offer' }, null);
+    const emptyId = (started.body as { data: { id: string } }).data.id;
+    const empty = await apiReviewCampaign(writeDeps(), writer, emptyId);
+    const emptyVersion = await versionOf(emptyId);
+    expect(empty).toEqual(
+      toApiCampaignReview(
+        { id: emptyId, version: emptyVersion! },
+        {
+          ...(await s.campaigns.reviewDraft(s.owner, emptyId)),
+          scheduledAt: new Date(empty.scheduledAt!),
+        },
+      ),
+    );
+    expect(empty).toMatchObject({
+      campaignId: emptyId,
+      audience: null,
+      estimate: null,
+      costCurrency: null,
+      approvalRequired: false,
+      frequencyCap: null,
+    });
+    expect(empty.problems).toEqual(
+      expect.arrayContaining([
+        'Choose the WhatsApp number to send from.',
+        'Choose an approved template.',
+      ]),
+    );
+
+    // Contacts tagged vip: two opted in to marketing, one who never opted in, one who opted out.
+    await s.contact('+919800000301', 'Asha');
+    await s.contact('+919800000302', 'Ravi');
+    await s.contact('+919800000303', 'Meena', false);
+    const kiran = await s.contact('+919800000304', 'Kiran');
+    await createConsentService({ db: fx.dbs.app, clock: systemClock }).recordConsent(s.owner, {
+      contactId: kiran,
+      purpose: 'marketing',
+      action: 'opt_out',
+      note: 'Asked at the store',
+    });
+    // Test-only rate card in a currency no other test uses: 1.25 per marketing message to +91
+    // numbers (not a Meta price).
+    const [card] = await fx.query<{ id: string }>(
+      `INSERT INTO ops.rate_cards (id, currency, effective_from, source_url, created_by_user_id)
+       VALUES (gen_random_uuid(), 'CHF', now() - interval '1 day', 'https://example.test/rates/chf', $1)
+       RETURNING id`,
+      [s.c.owner.id],
+    );
+    await fx.query(
+      `INSERT INTO ops.rate_card_prefixes (rate_card_id, prefix, market) VALUES ($1, '91', 'India')`,
+      [card!.id],
+    );
+    await fx.query(
+      `INSERT INTO ops.rate_card_prices (rate_card_id, market, category, price_micros)
+       VALUES ($1, 'India', 'marketing', 1250000)`,
+      [card!.id],
+    );
+    await fx.query(`UPDATE ops.rate_cards SET status = 'published' WHERE id = $1`, [card!.id]);
+    await s.campaigns.updateSettings(
+      s.owner,
+      { approvalRequired: true, cap: { count: 2, days: 7 }, costCurrency: 'CHF' },
+      {},
+    );
+    const id = await s.draft('Festive sale');
+    const version = await versionOf(id);
+    const reviewed = await apiReviewCampaign(writeDeps(), writer, id);
+    expect(reviewed).toEqual({
+      campaignId: id,
+      version,
+      problems: [],
+      audience: {
+        total: 4,
+        eligible: 2,
+        skipReasons: [
+          { reason: 'no_marketing_opt_in', count: 1 },
+          { reason: 'opted_out', count: 1 },
+        ],
+      },
+      estimate: {
+        currency: 'CHF',
+        total: '2.5',
+        pricedCount: 2,
+        unpricedCount: 0,
+        byMarket: [{ market: 'India', count: 2, amount: '2.5' }],
+      },
+      costCurrency: 'CHF',
+      scheduledAt: expect.any(String),
+      scheduleAdjustment: null,
+      approvalRequired: true,
+      frequencyCap: { count: 2, days: 7 },
+    });
+    // The same review members read, in the API's words; reading it changed nothing.
+    expect(reviewed).toEqual(
+      toApiCampaignReview(
+        { id, version: version! },
+        {
+          ...(await s.campaigns.reviewDraft(s.owner, id)),
+          scheduledAt: new Date(reviewed.scheduledAt!),
+        },
+      ),
+    );
+    expect(await versionOf(id)).toBe(version);
+    const [{ events } = { events: -1 }] = await fx.query<{ events: number }>(
+      `SELECT count(*)::int AS events FROM app.campaign_events WHERE campaign_id = $1`,
+      [id],
+    );
+    expect(await apiReviewCampaign(writeDeps(), writer, id)).toMatchObject({ version });
+    expect(
+      (
+        await fx.query<{ events: number }>(
+          `SELECT count(*)::int AS events FROM app.campaign_events WHERE campaign_id = $1`,
+          [id],
+        )
+      )[0]?.events,
+    ).toBe(events);
+
+    // A key that only reads campaigns gets no review; a submitted campaign keeps the audience it
+    // was submitted with and is not reviewed; another company's draft is not found.
+    const reader = await apiKey(s.c, ['campaigns.read', 'campaigns.stop'], 'Reader');
+    expect(await refusal(apiReviewCampaign(writeDeps(), reader, id))).toMatchObject({
+      code: 'forbidden',
+    });
+    await s.campaigns.submitCampaign(s.owner, id, { expectedVersion: version! }, {});
+    await expect(apiReviewCampaign(writeDeps(), writer, id)).rejects.toThrow(
+      "Only draft campaigns are reviewed. This campaign's status is pending_approval.",
+    );
+    const other = await fx.company();
+    const otherOwner = await fx.ctx(other, other.owner);
+    const { id: theirs } = await createCampaignsService({
+      db: fx.dbs.app,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      clock: systemClock,
+    }).createDraft(otherOwner, { name: 'Theirs' }, {});
+    expect(await refusal(apiReviewCampaign(writeDeps(), writer, theirs))).toMatchObject({
+      code: 'not_found',
+    });
   });
 });

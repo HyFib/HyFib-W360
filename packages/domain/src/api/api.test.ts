@@ -23,6 +23,9 @@ import {
   apiDraftInputFrom,
   apiUpdateCampaign,
   apiUpdateCampaignSchema,
+  apiCampaignReviewSchema,
+  apiReviewCampaign,
+  toApiCampaignReview,
 } from './campaigns';
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import {
@@ -30,6 +33,7 @@ import {
   microsToAmount,
   prepareCampaignDraft,
   type CampaignDraftInput,
+  type CampaignDraftReview,
 } from '../campaigns/service';
 import { allowedNetworksSchema, bearerToken, generateApiToken, networkEntryProblem } from './keys';
 import {
@@ -4940,5 +4944,174 @@ describe('sending a template to many numbers in one call (ADR-163)', () => {
     expect(Object.keys(queued?.properties ?? {})).toEqual(
       expect.arrayContaining(['id', 'status', 'contactId', 'channelId', 'templateId']),
     );
+  });
+});
+
+describe('reviewing campaign drafts through the API (ADR-193)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const review = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    apiReviewCampaign({} as never, ctx(scopes, status, planScopes), 'not-an-id');
+  const id = '0190a000-0000-7000-8000-000000000193';
+
+  it('take a key that writes drafts, whatever the company’s status, checked before anything is read', async () => {
+    // A review changes nothing: a key that writes drafts passes the checks made before the campaign
+    // is read (a bad id is then not found) even while the company is not active.
+    for (const status of ['active', 'suspended', 'restricted']) {
+      expect(await code(review(['campaigns.write'], status)), status).toBe('not_found');
+    }
+    // It shows costs and the audience, which reading campaigns never does.
+    await expect(review(['campaigns.read', 'campaigns.stop', 'campaigns.resume'])).rejects.toThrow(
+      'This API key does not have the campaigns.write scope.',
+    );
+    await expect(review(['campaigns.write'], 'active', ['campaigns.read'])).rejects.toMatchObject({
+      code: 'forbidden',
+      details: { apiReason: 'not_in_plan' },
+    });
+  });
+
+  it('answer members’ review in the API’s words: skip reasons commonest first, amounts in major units, times in ISO 8601', () => {
+    const members: CampaignDraftReview = {
+      problems: ['The template is not approved by Meta.'],
+      audience: {
+        total: 12,
+        eligible: 5,
+        skipped: { opted_out: 2, suppressed: 2, missing_variable: 3, no_phone: 0 },
+      },
+      estimate: {
+        currency: 'INR',
+        totalMicros: 4_312_500,
+        pricedCount: 4,
+        unpricedCount: 1,
+        byMarket: [
+          { market: 'India', count: 3, micros: 2_587_500 },
+          { market: 'United Arab Emirates', count: 1, micros: 1_725_000 },
+        ],
+      },
+      costCurrency: 'INR',
+      scheduledAt: new Date('2026-11-01T03:30:00Z'),
+      adjustment: null,
+      approvalRequired: true,
+      frequencyCap: { count: 2, days: 7 },
+    };
+    const answered = toApiCampaignReview({ id, version: 4 }, members);
+    expect(answered).toEqual({
+      campaignId: id,
+      version: 4,
+      problems: ['The template is not approved by Meta.'],
+      audience: {
+        total: 12,
+        eligible: 5,
+        // Ties in alphabetical order; a reason no contact has is not listed.
+        skipReasons: [
+          { reason: 'missing_variable', count: 3 },
+          { reason: 'opted_out', count: 2 },
+          { reason: 'suppressed', count: 2 },
+        ],
+      },
+      estimate: {
+        currency: 'INR',
+        total: '4.3125',
+        pricedCount: 4,
+        unpricedCount: 1,
+        byMarket: [
+          { market: 'India', count: 3, amount: '2.5875' },
+          { market: 'United Arab Emirates', count: 1, amount: '1.725' },
+        ],
+      },
+      costCurrency: 'INR',
+      scheduledAt: '2026-11-01T03:30:00.000Z',
+      scheduleAdjustment: null,
+      approvalRequired: true,
+      frequencyCap: { count: 2, days: 7 },
+    });
+    expect(apiCampaignReviewSchema.parse(answered)).toEqual(answered);
+    // A draft without an audience or an estimate yet, at a local time the clocks skip.
+    const incomplete = toApiCampaignReview(
+      { id, version: 0 },
+      {
+        ...members,
+        problems: ['Choose the WhatsApp number to send from.', 'Choose an approved template.'],
+        audience: null,
+        estimate: null,
+        costCurrency: null,
+        scheduledAt: null,
+        adjustment: 'gap_shifted',
+        approvalRequired: false,
+        frequencyCap: null,
+      },
+    );
+    expect(incomplete).toEqual({
+      campaignId: id,
+      version: 0,
+      problems: ['Choose the WhatsApp number to send from.', 'Choose an approved template.'],
+      audience: null,
+      estimate: null,
+      costCurrency: null,
+      scheduledAt: null,
+      scheduleAdjustment: 'gap_shifted',
+      approvalRequired: false,
+      frequencyCap: null,
+    });
+    expect(apiCampaignReviewSchema.parse(incomplete)).toEqual(incomplete);
+  });
+
+  it('are described as a read of drafts for keys that write them, never of contacts', () => {
+    expect(API_SCOPE_INFO['campaigns.write'].description).toContain(
+      'review drafts as members do before they submit them (who they would reach and what they would cost)',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    expect(doc.info.description).toContain(
+      'create, edit and review campaign drafts for members to submit',
+    );
+    const op = (
+      doc.paths as unknown as Record<
+        string,
+        Record<string, { operationId: string; description: string; responses: object }>
+      >
+    )['/campaigns/{id}/review']?.get;
+    expect(op?.operationId).toBe('reviewCampaign');
+    for (const words of [
+      'Scope: `campaigns.write`.',
+      "It changes nothing, and is answered whatever the company's status.",
+      'Counts only: never contacts or members.',
+      'Only a draft is reviewed: any other status is refused with 409, naming it',
+    ]) {
+      expect(op?.description).toContain(words);
+    }
+    // Answered whatever the company's status, so never 423.
+    expect(Object.keys(op?.responses ?? {}).sort()).toEqual(
+      ['200', '401', '403', '404', '409', '429', '500'].sort(),
+    );
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const reviewSchema = schemas.CampaignReview as {
+      properties: Record<string, unknown>;
+      required?: string[];
+    };
+    const fields = [
+      'approvalRequired',
+      'audience',
+      'campaignId',
+      'costCurrency',
+      'estimate',
+      'frequencyCap',
+      'problems',
+      'scheduleAdjustment',
+      'scheduledAt',
+      'version',
+    ];
+    expect(Object.keys(reviewSchema.properties).sort()).toEqual(fields);
+    expect([...(reviewSchema.required ?? [])].sort()).toEqual(fields);
+    expect(API_ROUTES).toEqual(expect.arrayContaining([['get', '/campaigns/{id}/review']]));
   });
 });

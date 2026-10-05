@@ -950,6 +950,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   draft and `campaigns.stop` for any other campaign it cancels; a cancelled or completed campaign is
   answered to either. It calls `cancelLockedCampaign` as members' cancel does, with the key named in
   the event and the audit.
+- **Reviewing drafts (ADR-193):** `apiReviewCampaign` takes `campaigns.write` as a read (whatever
+  the company's status), reads the draft and the company's time zone in one read-only snapshot and
+  calls `reviewCampaignDraft`, as members' review does; `toApiCampaignReview` answers it with the
+  skip reasons commonest first and amounts in major units. Other statuses get 409.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions (`last_message` with `conversations.read` and `campaign` with
   `campaigns.read` since ADR-126, a named campaign checked to be the company's, `name` since

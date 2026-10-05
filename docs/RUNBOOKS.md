@@ -1779,6 +1779,16 @@ they were created with: create a key with both); `not_in_plan` means the plan le
 `outcome` the results do not count, a `cursor` that is not the previous page's `nextCursor`, or an
 unknown parameter.
 
+**A draft's review through the API shows no estimate, or other counts than expected (ADR-193).**
+`GET /campaigns/{id}/review` reads the saved draft as members' review does, now: save the draft
+first. `estimate` is null without a currency (the spending cap's, or else Settings → Messaging),
+without a rate card published in it (platform staff publish one), or when no contact can receive the
+campaign; recipients in markets the card has no price for are in `unpricedCount`, left out of the
+total. The total is an upper bound (every message at its market's list price). `audience` is null
+until the draft has a number, a template and an audience, or when the audience is over 50,000
+contacts. 403 means the key lacks `campaigns.write`; 409, that the campaign was submitted (its
+results are on `GET /campaigns/{id}`).
+
 **A campaign was paused or cancelled through the API, or `POST /api/v1/campaigns/{id}/pause` or
 `/cancel` answers 403, 404, 409 or 423 (ADR-128).** The campaign's page says "Paused through the
 API." and its history names the key ("through the API, key “name”"); Settings → Audit log lists

@@ -1,5 +1,53 @@
 # Progress
 
+## 2026-10-05 — Phase 5: reviewing campaign drafts through the public API (P5-08, ADR-193)
+
+Status: **Implemented; its database and browser tests run in CI only.** Keys created and edited
+drafts but could not see what submitting one would do. The local PostgreSQL is unavailable (its
+Docker daemon stopped), so the integration test and the changed e2e test below were written but not
+run here.
+
+### Completed
+
+- **Design (ADR-193):** `GET /campaigns/{id}/review` for keys holding `campaigns.write`: members'
+  review of a draft (problems, the audience by skip reason, an upper bound of the cost, the
+  schedule, approval and frequency cap) with the version reviewed; drafts only; no migration.
+- **Domain:** `reviewCampaignDraft` shared by members' review and the API (readiness given the
+  company's id and time zone); `apiReviewCampaign`, `toApiCampaignReview` and their schema; the
+  route, the OpenAPI entry, the API's summary and the scope's description.
+- **Tests:**
+  - Unit (3 new in `api.test.ts`): the scope before the read whatever the company's status, the
+    plan's refusal, the mapping, the descriptions and the OpenAPI entries.
+  - Integration (1 new in `api-campaigns.test.ts`): an empty and a complete draft as members' review
+    reads them, the estimate from a test-only rate card, nothing changed, the refusals. Written for
+    CI; not run here.
+  - E2E (1 changed in `campaigns.spec.ts`): the key's review counts what the draft's page counts; a
+    reading key and a completed campaign are refused. Written for CI; not run here.
+- **Docs:** ADR-193 (and the "Not built" of ADR-186 annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T187; DEPLOYMENT and RUNBOOKS; BACKLOG P5-08; feature matrix H-033 and W-134.
+- **Mutation checks:** 18 deliberate regressions tried, all caught on the unit-tested parts (the
+  company's status checked, a reading key let in, the id checked late, reasons no contact has
+  listed, the order of skip reasons, amounts in micros, times not in ISO 8601, the adjustment, cap
+  or version wrong, a field, the OpenAPI entry, route, summary and scope description). The review
+  itself needs the database, so its regressions are left to the integration and e2e tests, which run
+  in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 858 passed (82 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 18 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Reviewing settings before they are saved; submitting, approving and starting campaigns through the
+  API stay with members.
+
 ## 2026-10-05 — Phase 5: choosing why the runs a webhook endpoint receives ended (P5-09, ADR-192)
 
 Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every

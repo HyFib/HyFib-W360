@@ -65,6 +65,7 @@ import {
 import {
   apiCampaignRecipientSchema,
   apiCampaignDetailSchema,
+  apiCampaignReviewSchema,
   apiCampaignSchema,
   apiCreateCampaignSchema,
   apiUpdateCampaignSchema,
@@ -791,7 +792,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, create, edit and review campaign drafts for members to submit, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -1481,6 +1482,24 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('CampaignWithResults'))),
             },
             ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/campaigns/{id}/review': {
+        get: {
+          operationId: 'reviewCampaign',
+          summary: 'What submitting a campaign draft would do now',
+          description: [
+            `${scopeNote('campaigns.write')} The draft's review as members see it in the app before they submit it, read now: what must change before a member can submit it, how many contacts it would reach and why the others would be skipped, an upper bound of Meta's charges from the rate card HyFib publishes, when it would start, and whether it would wait for a member's approval. It changes nothing, and is answered whatever the company's status. Counts only: never contacts or members.`,
+            'Only a draft is reviewed: any other status is refused with 409, naming it (a submitted campaign keeps the audience it was submitted with, and GET /campaigns/{id} counts its results). A member submits the draft in the app, and the submission checks it again.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The review, as read now.',
+              content: json(dataOf(ref('CampaignReview'))),
+            },
+            ...errors(401, 403, 404, 409, 429, 500),
           },
         },
       },
@@ -2232,6 +2251,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         Order: jsonSchema(apiOrderSchema),
         UpdateOrder: jsonSchema(apiUpdateOrderSchema, 'input'),
         CampaignWithResults: jsonSchema(apiCampaignDetailSchema),
+        CampaignReview: jsonSchema(apiCampaignReviewSchema),
         CreateCampaign: jsonSchema(apiCreateCampaignSchema, 'input'),
         UpdateCampaign: jsonSchema(apiUpdateCampaignSchema, 'input'),
         CampaignRecipient: jsonSchema(apiCampaignRecipientSchema),
@@ -2307,6 +2327,7 @@ export const API_ROUTES = [
   ['post', '/campaigns'],
   ['get', '/campaigns/{id}'],
   ['patch', '/campaigns/{id}'],
+  ['get', '/campaigns/{id}/review'],
   ['get', '/campaigns/{id}/recipients'],
   ['post', '/campaigns/{id}/pause'],
   ['post', '/campaigns/{id}/resume'],
