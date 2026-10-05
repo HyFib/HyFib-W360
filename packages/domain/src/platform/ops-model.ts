@@ -212,6 +212,14 @@ export interface CompanyUsage extends CompanyActivity {
   apiPeriodStart: Date | null;
 }
 
+/** The console's lists staff can download as CSV (ADR-154, ADR-155). */
+export const OPS_EXPORT_LISTS = ['usage', 'health', 'signals'] as const;
+export type OpsExportList = (typeof OPS_EXPORT_LISTS)[number];
+
+export function isOpsExportList(value: string): value is OpsExportList {
+  return (OPS_EXPORT_LISTS as readonly string[]).includes(value);
+}
+
 /** The Usage tab's columns in its CSV (ADR-154). */
 export const USAGE_CSV_COLUMNS = [
   'Company',
@@ -235,45 +243,178 @@ export const USAGE_CSV_COLUMNS = [
 ] as const;
 
 const csvDay = (at: Date | null) => (at ? at.toISOString().slice(0, 10) : '');
+/** A time to the minute in UTC, as `2026-10-05 06:30`, which spreadsheets read as a time. */
+const csvMinute = (at: Date | null) => (at ? at.toISOString().slice(0, 16).replace('T', ' ') : '');
+
+const csvFile = (
+  columns: readonly string[],
+  rows: readonly (readonly (string | number | null)[])[],
+): string => CSV_BOM + csvLine(columns) + rows.map((row) => csvLine(row)).join('');
 
 /**
  * The Usage tab as CSV (ADR-154): a line per company in the tab's order, formula-safe (a company
  * name starting with `=`, `+`, `-` or `@` is neutralised), the counters' periods as UTC days.
  */
 export function usageCsv(rows: readonly CompanyUsage[]): string {
-  return (
-    CSV_BOM +
-    csvLine(USAGE_CSV_COLUMNS) +
-    rows
-      .map((r) =>
-        csvLine([
-          r.name,
-          r.slug,
-          r.status,
-          r.outbound,
-          r.outboundBySender.agent,
-          r.outboundBySender.bot,
-          r.outboundBySender.campaign,
-          r.outboundBySender.api,
-          r.outboundBySender.system,
-          r.failed,
-          r.inbound,
-          r.webhookDeliveries,
-          r.automationRuns,
-          csvDay(r.runsPeriodStart),
-          r.apiRequests,
-          csvDay(r.apiPeriodStart),
-          r.members,
-          r.numbers,
-        ]),
-      )
-      .join('')
+  return csvFile(
+    USAGE_CSV_COLUMNS,
+    rows.map((r) => [
+      r.name,
+      r.slug,
+      r.status,
+      r.outbound,
+      r.outboundBySender.agent,
+      r.outboundBySender.bot,
+      r.outboundBySender.campaign,
+      r.outboundBySender.api,
+      r.outboundBySender.system,
+      r.failed,
+      r.inbound,
+      r.webhookDeliveries,
+      r.automationRuns,
+      csvDay(r.runsPeriodStart),
+      r.apiRequests,
+      csvDay(r.apiPeriodStart),
+      r.members,
+      r.numbers,
+    ]),
   );
 }
 
-/** `hyfib-usage-30-days-2026-10-05.csv`: the window and the UTC day of the export. */
-export function usageCsvFilename(days: number, at: Date): string {
-  return `hyfib-usage-${days}-days-${csvDay(at)}.csv`;
+/** A company's health: its facts, the issues they show and the worst issue's level. */
+export interface CompanyHealth {
+  facts: CompanyHealthFacts;
+  issues: HealthIssue[];
+  level: HealthLevel;
+}
+
+const LEVEL_ORDER: Record<HealthLevel, number> = { critical: 0, warning: 1, ok: 2 };
+
+/** Worst first: critical, then warnings, then healthy; more issues first; then by name. */
+export function byHealth(a: CompanyHealth, b: CompanyHealth): number {
+  return (
+    LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level] ||
+    b.issues.length - a.issues.length ||
+    a.facts.name.localeCompare(b.facts.name)
+  );
+}
+
+/** The columns of every company's health in its CSV (ADR-155). */
+export const HEALTH_CSV_COLUMNS = [
+  'Company',
+  'Address',
+  'Status',
+  'Plan status',
+  'Created',
+  'Health',
+  'Issues',
+  'WhatsApp numbers',
+  'Active numbers',
+  'Numbers to reconnect',
+  'Numbers failed',
+  'Worst quality rating',
+  'Quality checked (UTC)',
+  'WhatsApp accounts to reconnect',
+  'Sent in 24 hours',
+  'Failed in 24 hours',
+  'Received in 24 hours',
+  'Last message (UTC)',
+  'Webhook endpoints failing',
+  'Webhook endpoints turned off for failing (7 days)',
+  'Stores failing',
+  'Payment accounts failed',
+  'Catalog syncs failed',
+  'Flow syncs failed',
+  'Dead letters (7 days)',
+] as const;
+
+/**
+ * Every company's health as CSV (ADR-155), in the order given (worst first, `byHealth`): the
+ * facts the Overview and a company's page show, its issues as the console words them, times in UTC.
+ */
+export function healthCsv(rows: readonly CompanyHealth[]): string {
+  return csvFile(
+    HEALTH_CSV_COLUMNS,
+    rows.map(({ facts: f, issues, level }) => [
+      f.name,
+      f.slug,
+      f.status,
+      f.planStatus,
+      csvDay(f.createdAt),
+      level,
+      issues.map((i) => i.detail).join('; '),
+      f.numbersTotal,
+      f.numbersActive,
+      f.numbersReconnect,
+      f.numbersFailed,
+      qualityRank(f.qualityRating),
+      csvMinute(f.qualityCheckedAt),
+      f.accountsReconnect,
+      f.outbound24h,
+      f.failed24h,
+      f.inbound24h,
+      csvMinute(f.lastMessageAt),
+      f.endpointsFailing,
+      f.endpointsAutoDisabled,
+      f.storesFailed,
+      f.paymentAccountsFailed,
+      f.catalogSyncsFailed,
+      f.flowSyncsFailed,
+      f.deadLetters7d,
+    ]),
+  );
+}
+
+/** A company's line on the Signals tab: its activity over the window, quality and signals. */
+export interface CompanySignals {
+  activity: CompanyActivity;
+  quality: string | null;
+  flags: SignalFlag[];
+}
+
+/** The Signals tab's columns in its CSV (ADR-155). */
+export const SIGNALS_CSV_COLUMNS = [
+  'Company',
+  'Address',
+  'Status',
+  'Sent',
+  'Failed',
+  'Marketing delivered',
+  'Marketing opt-outs',
+  'Stopped marketing (131050)',
+  'Per-user marketing limit (131049)',
+  'Complaints',
+  'Worst quality rating',
+  'Signals',
+] as const;
+
+/** The Signals tab as CSV (ADR-155): a line per company in the tab's order, signals as worded. */
+export function signalsCsv(rows: readonly CompanySignals[]): string {
+  return csvFile(
+    SIGNALS_CSV_COLUMNS,
+    rows.map(({ activity: a, quality, flags }) => [
+      a.name,
+      a.slug,
+      a.status,
+      a.outbound,
+      a.failed,
+      a.marketingDelivered,
+      a.marketingOptOuts,
+      a.error131050,
+      a.error131049,
+      a.complaints,
+      qualityRank(quality),
+      flags.map((f) => f.detail).join('; '),
+    ]),
+  );
+}
+
+/**
+ * `hyfib-usage-30-days-2026-10-05.csv`, `hyfib-health-2026-10-05.csv`: the list, its window when it
+ * has one and the UTC day of the export.
+ */
+export function opsCsvFilename(list: OpsExportList, at: Date, days?: number): string {
+  return `hyfib-${list}${days === undefined ? '' : `-${days}-days`}-${csvDay(at)}.csv`;
 }
 
 export type SignalKey =

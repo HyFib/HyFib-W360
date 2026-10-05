@@ -1,5 +1,57 @@
 # Progress
 
+## 2026-10-05 — Phase 5: exporting the console's health and signals lists (P5-10, ADR-155)
+
+Status: **Implemented; its database tests run in CI only (test data only).** Every company's health
+and the Signals tab could be read on screen only. The local PostgreSQL is unavailable (its Docker
+daemon stopped), so the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-155):** "Download CSV" on the Overview (every company's health, worst first) and on
+  the Signals tab, through one audited export for the console's lists; the Usage tab's link moves to
+  it.
+- **Domain:** `platform/ops-model.ts` (`OPS_EXPORT_LISTS`, `byHealth`, `healthCsv`, `signalsCsv`,
+  `opsCsvFilename`; `CompanyHealth` and `CompanySignals` moved here); `platform/ops.ts`
+  (`signalRows`, shared with the tab, and `exportList`, which replaces ADR-154's `exportUsage` and
+  audits `platform.ops_<list>_exported`).
+- **Web:** `platform/ops/export/[list]/route.ts` (replaces ADR-154's
+  `platform/ops/usage/export/route.ts`; any other name is not found) and "Download CSV" on the
+  Overview and Signals tabs.
+- **Tests:**
+  - Unit (4 new in `ops-model.test.ts`): worst first, then by issues, then by name; every health
+    column with a formula neutralised, issues in words and quoted, times to the minute in UTC, an
+    unrated number and no plan left empty; the Signals lines with their signals in words; the list
+    names and filenames.
+  - Integration (1 new in `platform-ops.test.ts`, 1 changed for `exportList`): the company's health
+    line (a warning, its three issues, its numbers, the YELLOW rating, the last day's sending, the
+    failing endpoint) and its Signals line, without message text or the endpoint's token; one audit
+    entry per export with the count of companies and the window; a non-administrator refused with
+    neither. Written for CI; not run here.
+  - E2E (`platform-ops.spec.ts` extended): the Overview's download with the new company healthy and
+    the Signals tab's without it (it has sent nothing). Written for CI; not run here.
+- **Docs:** ADR-155; SECURITY (the console's row); THREAT-MODEL T75; ARCHITECTURE; BACKLOG P5-10;
+  feature matrix H-034.
+- **Mutation checks:** 25 deliberate regressions of the CSV builders tried, all caught by the unit
+  tests (one survived the first run: the order's tie-break on the number of issues, whose test
+  companies were already in name order; the test now orders them the other way). The service and the
+  route need the database, so none were tried there.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 711 passed (75 files; 4 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 25 tried, all caught (unit tests)                               |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Exports of the action lists (onboarding, integrations, queues, keys), other formats, scheduled exports.
+
 ## 2026-10-05 — Phase 5: exporting the console's usage table (P5-10, ADR-154)
 
 Status: **Implemented; its database tests run in CI only (test data only).** The console's Usage tab

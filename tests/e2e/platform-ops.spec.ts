@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import type { Page } from '@playwright/test';
 import pg from 'pg';
 import { expect, test } from './fixtures';
 import {
@@ -21,6 +22,17 @@ const PASSWORD = 'correct horse battery staple 42';
 
 /** A Meta-style numeric id no company has connected. */
 const unknownId = () => `7${Date.now()}${Math.floor(Math.random() * 1e4)}`.slice(0, 16);
+
+/** Clicks the page's "Download CSV" link and returns the file's suggested name and its text. */
+async function downloadCsv(page: Page): Promise<{ name: string; text: string }> {
+  const downloading = page.waitForEvent('download');
+  await page.getByRole('link', { name: 'Download CSV' }).click();
+  const download = await downloading;
+  return {
+    name: download.suggestedFilename(),
+    text: await readFile(await download.path(), 'utf8'),
+  };
+}
 
 test('staff read the operations console and repair a quarantined webhook event', async ({
   page,
@@ -68,6 +80,15 @@ test('staff read the operations console and repair a quarantined webhook event',
   await expect(totals.getByText('Webhook receipts needing attention')).toBeVisible();
   await expect(totals.getByText('Late queues')).toBeVisible();
   await expectNoHorizontalOverflow(page);
+  // Every company's health as CSV (ADR-155): the new company, healthy, with no number yet.
+  const health = await downloadCsv(page);
+  expect(health.name).toMatch(/^hyfib-health-\d{4}-\d{2}-\d{2}\.csv$/);
+  expect(health.text).toContain('Company,Address,Status,Plan status,Created,Health,Issues,');
+  expect(health.text).toMatch(
+    new RegExp(
+      `\\r\\n${companyName},ops-${suffix},active,[a-z_]*,\\d{4}-\\d{2}-\\d{2},ok,,0,0,0,0,,,0,0,0,0,,0,0,0,0,0,0,0\\r\\n`,
+    ),
+  );
 
   // Onboarding: the new company has no WhatsApp number yet.
   const sections = page.getByRole('navigation', { name: 'Operations sections' });
@@ -134,6 +155,11 @@ test('staff read the operations console and repair a quarantined webhook event',
   await expectNoHorizontalOverflow(page);
   await sections.getByRole('link', { name: 'Signals' }).click();
   await expect(page.getByText('Sending signals (7 days)')).toBeVisible();
+  // The tab as CSV (ADR-155): the new company has sent nothing, so it is not listed.
+  const signals = await downloadCsv(page);
+  expect(signals.name).toMatch(/^hyfib-signals-7-days-\d{4}-\d{2}-\d{2}\.csv$/);
+  expect(signals.text).toContain('Company,Address,Status,Sent,Failed,Marketing delivered,');
+  expect(signals.text).not.toContain(companyName);
   await sections.getByRole('link', { name: 'Usage' }).click();
   const usage = page.getByRole('table', { name: 'Usage by company' });
   const usageRow = usage.getByRole('row').filter({ hasText: companyName });
@@ -145,13 +171,10 @@ test('staff read the operations console and repair a quarantined webhook event',
     /^2\s*from \d{4}-\d{2}-\d{2}$/,
   );
   // The same table as CSV (ADR-154): the company's line with its two API requests.
-  const downloading = page.waitForEvent('download');
-  await page.getByRole('link', { name: 'Download CSV' }).click();
-  const download = await downloading;
-  expect(download.suggestedFilename()).toMatch(/^hyfib-usage-30-days-\d{4}-\d{2}-\d{2}\.csv$/);
-  const csv = await readFile(await download.path(), 'utf8');
-  expect(csv).toContain('Company,Address,Status,Sent,');
-  expect(csv).toMatch(
+  const usageCsv = await downloadCsv(page);
+  expect(usageCsv.name).toMatch(/^hyfib-usage-30-days-\d{4}-\d{2}-\d{2}\.csv$/);
+  expect(usageCsv.text).toContain('Company,Address,Status,Sent,');
+  expect(usageCsv.text).toMatch(
     new RegExp(
       `\\r\\n${companyName},ops-${suffix},[a-z_]+,(?:\\d+,){10}(?:\\d{4}-\\d{2}-\\d{2})?,2,\\d{4}-\\d{2}-\\d{2},\\d+,\\d+\\r\\n`,
     ),

@@ -6188,3 +6188,34 @@ Decision:
   message, contact or person. Served as an attachment, `private, no-store` and `nosniff`.
 
 Not built: exports of the console's other lists, other formats, scheduled exports.
+
+## ADR-155 Exporting the console's health and signals lists (P5-10) (2026-10-05)
+
+Context: ADR-154 made the Usage tab downloadable. Every company's health (the facts behind its level
+and issues) and the Signals tab could still be read on screen only, and the Overview lists only the
+companies needing attention. Staff preparing a review of companies at risk, or keeping a record of
+sending signals, copied them by hand.
+
+Decision:
+
+- **"Download CSV" on the Overview,** for every company, healthy ones included: worst first
+  (critical, then warnings, then healthy; more issues first; then by name, as the Overview orders
+  those needing attention), with its address, status, plan status, creation day, level and issues as
+  the console words them, and every fact the Overview and a company's page show: numbers by state,
+  the worst quality rating and when it was checked, the last 24 hours' sending, the last message,
+  failing and turned-off webhook endpoints, failed stores, payment accounts, catalog and Flow syncs,
+  and dead letters in 7 days. Times are to the minute in UTC. Named `hyfib-health-<day>.csv`.
+- **"Download CSV" on the Signals tab,** for the tab's lines over its 7 days, in its order: sending,
+  failures, marketing templates delivered and opt-outs, Meta's errors 131050 and 131049, complaints,
+  the worst quality rating and the signals in words. Named `hyfib-signals-7-days-<day>.csv`.
+- **One export for the console's lists:** `/platform/ops/export/{usage,health,signals}` (the Usage
+  tab's link moves there; any other name is not found). One service call reads the list's rows with
+  the tab's own reads and writes `platform.ops_<list>_exported` to the platform audit log, with how
+  many companies and the window where the list has one, in that transaction, before the file is
+  returned (ADR-154's rules). The same CSV writer: UTF-8 with a byte-order mark, RFC 4180 quoting
+  and formula neutralisation.
+- **Counts, states, codes and labels only,** as on the screens (ADR-054): no message, contact or
+  person.
+
+Not built: exports of the action lists (onboarding, integrations, queues, keys), other formats,
+scheduled exports.

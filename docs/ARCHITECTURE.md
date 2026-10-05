@@ -1517,13 +1517,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `api_requests` row of `app.usage_counters` through the platform role (0023's policy), in the same
   transaction, and joins it to the companies the activity function returns; the tab shows it, with
   the period's start, beside automation runs.
-- **Usage export (ADR-154):** `/platform/ops/usage/export?days=` (a route handler behind the page's
-  platform actor check) calls `exportUsage`, which reads the same rows, inserts
-  `platform.ops_usage_exported` into `ops.platform_audit_events` in that transaction and returns
-  `usageCsv` (`platform/ops-model.ts`, formula-safe through `contacts/csv`); the tab links to it as
-  "Download CSV".
+- **Exports (ADR-154, ADR-155):** `/platform/ops/export/[list]` (a route handler behind the pages'
+  platform actor check; `usage`, `health` or `signals`, any other name not found) calls
+  `exportList`, which reads the list's rows with the tab's own reads (`usageRows`, `healthFacts`
+  sorted by `byHealth`, `signalRows`), inserts `platform.ops_<list>_exported` into
+  `ops.platform_audit_events` in that transaction and returns `usageCsv`, `healthCsv` or
+  `signalsCsv` (`platform/ops-model.ts`, formula-safe through `contacts/csv`); the Overview, Signals
+  and Usage tabs link to it as "Download CSV".
 - **Not built yet:** other alert channels, trends,
-  quality updates from Meta's quality webhook, exports of the other lists, sweeps for the work of
+  quality updates from Meta's quality webhook, exports of the action lists, sweeps for the work of
   `channel.onboard`, `commerce.account` and `template.delete`, retrying several dead letters at
   once, and acknowledging the console's other lists (dead letters, receipts, late queues).
 

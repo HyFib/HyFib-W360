@@ -1,19 +1,24 @@
+import { notFound } from 'next/navigation';
 import { isAppError } from '@w360/core';
+import { isOpsExportList } from '@w360/domain';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
 
 export const dynamic = 'force-dynamic';
 
 /**
- * The operations console's Usage tab as CSV (ADR-154), formula-safe. The page's checks run first,
- * and the service writes the export to the platform audit log before it returns the file.
+ * One of the operations console's lists as CSV, formula-safe: the Usage tab for `days` (ADR-154),
+ * every company's health or the Signals tab (ADR-155). The pages' checks run first, and the service
+ * writes the export to the platform audit log before it returns the file.
  */
-export async function GET(request: Request) {
+export async function GET(request: Request, { params }: { params: Promise<{ list: string }> }) {
   const actor = await requirePlatformActor();
+  const { list } = await params;
+  if (!isOpsExportList(list)) notFound();
   const days = Number(new URL(request.url).searchParams.get('days') ?? 30);
   const { platformOps } = await getRuntime();
   try {
-    const file = await platformOps.exportUsage(actor, days);
+    const file = await platformOps.exportList(actor, list, days);
     return new Response(file.body, {
       headers: {
         'content-type': 'text/csv; charset=utf-8',

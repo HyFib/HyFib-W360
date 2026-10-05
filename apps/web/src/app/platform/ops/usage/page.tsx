@@ -70,7 +70,7 @@ export default async function OpsUsagePage({
           <div className="flex flex-wrap items-center justify-between gap-2">
             <CardTitle>By company ({o.days} days)</CardTitle>
             <Button asChild variant="outline" size="sm">
-              <a href={`/platform/ops/usage/export?days=${o.days}`} download>
+              <a href={`/platform/ops/export/usage?days=${o.days}`} download>
                 Download CSV
               </a>
             </Button>

@@ -17,6 +17,8 @@ import {
   purgeDeadLetters,
   queueWaitLimits,
   recordDeadLetters,
+  HEALTH_CSV_COLUMNS,
+  SIGNALS_CSV_COLUMNS,
   USAGE_CSV_COLUMNS,
   type PlatformActor,
 } from '@w360/domain';
@@ -290,7 +292,7 @@ describe('company health and signals', () => {
   });
 
   it('exports the Usage tab as CSV only after writing the export to the platform audit log (ADR-154)', async () => {
-    const file = await ops().exportUsage(staff, 7);
+    const file = await ops().exportList(staff, 'usage', 7);
     expect(file.filename).toMatch(/^hyfib-usage-7-days-\d{4}-\d{2}-\d{2}\.csv$/);
     const lines = file.body.replace(/^\uFEFF/, '').split('\r\n');
     expect(lines[0]).toBe(USAGE_CSV_COLUMNS.join(','));
@@ -311,7 +313,66 @@ describe('company health and signals', () => {
       role: 'platform_operator',
       correlationId: uuidv7(),
     };
-    await expectCode(ops().exportUsage(actor, 7), 'forbidden');
+    await expectCode(ops().exportList(actor, 'usage', 7), 'forbidden');
+    const [refused] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM ops.platform_audit_events WHERE actor_user_id = $1`,
+      [outsider.id],
+    );
+    expect(refused?.n).toBe(0);
+  });
+
+  it("exports every company's health and the Signals tab, each with its audit entry (ADR-155)", async () => {
+    const csvLines = (body: string) => body.replace(/^\uFEFF/, '').split('\r\n');
+    const slug = company.tenant.slug;
+    const health = await ops().exportList(staff, 'health', 30);
+    expect(health.filename).toMatch(/^hyfib-health-\d{4}-\d{2}-\d{2}\.csv$/);
+    const healthLines = csvLines(health.body);
+    expect(healthLines[0]).toBe(HEALTH_CSV_COLUMNS.join(','));
+    expect(healthLines.at(-1)).toBe('');
+    // The company's facts as the console shows them: a warning, its issues in words, its numbers,
+    // the YELLOW rating, the last day's sending and the failing endpoint.
+    expect(healthLines.filter((l) => l.includes(`,${slug},`))).toEqual([
+      expect.stringMatching(
+        new RegExp(
+          `^Company ${slug},${slug},active,[a-z_]*,\\d{4}-\\d{2}-\\d{2},warning,` +
+            '1 number to reconnect or set up again; A number is rated YELLOW; ' +
+            '1 webhook endpoint failing or turned off for failing,2,1,1,0,YELLOW,' +
+            '\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2},0,5,2,1,\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2},1,0,0,0,0,0,0$',
+        ),
+      ),
+    ]);
+    const signals = await ops().exportList(staff, 'signals', 30);
+    expect(signals.filename).toMatch(/^hyfib-signals-7-days-\d{4}-\d{2}-\d{2}\.csv$/);
+    const signalLines = csvLines(signals.body);
+    expect(signalLines[0]).toBe(SIGNALS_CSV_COLUMNS.join(','));
+    expect(signalLines.filter((l) => l.includes(`,${slug},`))).toEqual([
+      `Company ${slug},${slug},active,5,2,2,1,1,1,1,YELLOW,A number is rated YELLOW`,
+    ]);
+    expect(health.body + signals.body).not.toContain(MESSAGE_TEXT);
+    expect(health.body + signals.body).not.toContain(SECRET_TOKEN);
+    const audits = await fx.query<{ action: string; metadata: Record<string, number> }>(
+      `SELECT action, metadata FROM ops.platform_audit_events
+        WHERE action IN ('platform.ops_health_exported', 'platform.ops_signals_exported')
+          AND actor_user_id = $1
+        ORDER BY occurred_at, id`,
+      [staff.userId],
+    );
+    expect(audits).toEqual([
+      { action: 'platform.ops_health_exported', metadata: { companies: healthLines.length - 2 } },
+      {
+        action: 'platform.ops_signals_exported',
+        metadata: { days: 7, companies: signalLines.length - 2 },
+      },
+    ]);
+    // Someone who is not a platform administrator gets neither a file nor an entry.
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    const actor: PlatformActor = {
+      userId: outsider.id,
+      role: 'platform_operator',
+      correlationId: uuidv7(),
+    };
+    await expectCode(ops().exportList(actor, 'health', 30), 'forbidden');
+    await expectCode(ops().exportList(actor, 'signals', 30), 'forbidden');
     const [refused] = await fx.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM ops.platform_audit_events WHERE actor_user_id = $1`,
       [outsider.id],

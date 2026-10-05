@@ -44,14 +44,17 @@ import {
   healthLevel,
   quarantineExternalIds,
   signalFlags,
-  type CompanyActivity,
-  type CompanyUsage,
+  byHealth,
+  healthCsv,
+  opsCsvFilename,
+  signalsCsv,
   usageCsv,
-  usageCsvFilename,
+  type CompanyActivity,
+  type CompanyHealth,
   type CompanyHealthFacts,
-  type HealthIssue,
-  type HealthLevel,
-  type SignalFlag,
+  type CompanySignals,
+  type CompanyUsage,
+  type OpsExportList,
 } from './ops-model';
 import type { PlatformActor } from './service';
 
@@ -201,18 +204,61 @@ async function usageRows(tx: Tx, since: Date): Promise<CompanyUsage[]> {
 const usageWindow = (days: number): UsageWindow =>
   (USAGE_WINDOWS as readonly number[]).includes(days) ? (days as UsageWindow) : 30;
 
-export interface CompanyHealth {
-  facts: CompanyHealthFacts;
-  issues: HealthIssue[];
-  level: HealthLevel;
-}
-
 function assess(facts: CompanyHealthFacts): CompanyHealth {
   const issues = healthIssues(facts);
   return { facts, issues, level: healthLevel(issues) };
 }
 
-const levelOrder: Record<HealthLevel, number> = { critical: 0, warning: 1, ok: 2 };
+/**
+ * The Signals tab's lines (ADR-054): each company with a signal or sending in the window, the most
+ * signals first, then the most sent, then by name.
+ */
+async function signalRows(tx: Tx, since: Date): Promise<CompanySignals[]> {
+  const activity = await activitySince(tx, since, null);
+  const quality = new Map(
+    (await healthFacts(tx, null)).map((f) => [f.tenantId, f.qualityRating] as const),
+  );
+  return activity
+    .map((a) => {
+      const rating = quality.get(a.tenantId) ?? null;
+      return { activity: a, quality: rating, flags: signalFlags(a, rating) };
+    })
+    .filter((r) => r.flags.length > 0 || r.activity.outbound > 0 || r.activity.marketingOptOuts > 0)
+    .sort(
+      (a, b) =>
+        b.flags.length - a.flags.length ||
+        b.activity.outbound - a.activity.outbound ||
+        a.activity.name.localeCompare(b.activity.name),
+    );
+}
+
+/**
+ * One of the console's lists as a CSV body, read in the caller's transaction: the Usage tab over
+ * its window (ADR-154), every company's health worst first or the Signals tab (ADR-155).
+ */
+async function exportFile(
+  tx: Tx,
+  list: OpsExportList,
+  days: number,
+  now: Date,
+): Promise<{ window?: number; companies: number; body: string }> {
+  switch (list) {
+    case 'usage': {
+      const window = usageWindow(days);
+      const rows = await usageRows(tx, new Date(now.getTime() - window * DAY_MS));
+      return { window, companies: rows.length, body: usageCsv(rows) };
+    }
+    case 'health': {
+      const rows = (await healthFacts(tx, null)).map(assess).sort(byHealth);
+      return { companies: rows.length, body: healthCsv(rows) };
+    }
+    case 'signals': {
+      const window = OPS_SIGNAL_RULES.windowDays;
+      const rows = await signalRows(tx, new Date(now.getTime() - window * DAY_MS));
+      return { window, companies: rows.length, body: signalsCsv(rows) };
+    }
+  }
+}
 
 export interface IntegrationFailure {
   tenantId: string;
@@ -491,14 +537,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           queueWaitCheck,
         };
       });
-      const attention = data.companies
-        .filter((c) => c.level !== 'ok')
-        .sort(
-          (a, b) =>
-            levelOrder[a.level] - levelOrder[b.level] ||
-            b.issues.length - a.issues.length ||
-            a.facts.name.localeCompare(b.facts.name),
-        );
+      const attention = data.companies.filter((c) => c.level !== 'ok').sort(byHealth);
       return {
         companies: data.companies.length,
         activeCompanies: data.companies.filter((c) => c.facts.status === 'active').length,
@@ -790,29 +829,11 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     async signals(actor: PlatformActor) {
       const now = clock.now();
       const since = new Date(now.getTime() - OPS_SIGNAL_RULES.windowDays * DAY_MS);
-      return platformDb.run(actor.userId, async (tx) => {
-        const activity = await activitySince(tx, since, null);
-        const quality = new Map(
-          (await healthFacts(tx, null)).map((f) => [f.tenantId, f.qualityRating] as const),
-        );
-        const rows: { activity: CompanyActivity; quality: string | null; flags: SignalFlag[] }[] =
-          activity
-            .map((a) => {
-              const rating = quality.get(a.tenantId) ?? null;
-              return { activity: a, quality: rating, flags: signalFlags(a, rating) };
-            })
-            .filter(
-              (r) =>
-                r.flags.length > 0 || r.activity.outbound > 0 || r.activity.marketingOptOuts > 0,
-            )
-            .sort(
-              (a, b) =>
-                b.flags.length - a.flags.length ||
-                b.activity.outbound - a.activity.outbound ||
-                a.activity.name.localeCompare(b.activity.name),
-            );
-        return { since, rows, security: await securityEventCounts(tx, now) };
-      });
+      return platformDb.run(actor.userId, async (tx) => ({
+        since,
+        rows: await signalRows(tx, since),
+        security: await securityEventCounts(tx, now),
+      }));
     },
 
     /** Usage per company over the last `days` days, busiest first, with totals. */
@@ -843,28 +864,31 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     },
 
     /**
-     * The Usage tab as CSV (ADR-154). The export is written to the platform audit log (the window
-     * and how many companies) in the transaction that reads the rows, before the file is returned,
-     * so no file leaves without its entry.
+     * One of the console's lists as CSV: the Usage tab for a window (ADR-154), every company's
+     * health or the Signals tab (ADR-155). The export is written to the platform audit log (the
+     * list, its window and how many companies) in the transaction that reads the rows, before the
+     * file is returned, so no file leaves without its entry.
      */
-    async exportUsage(
+    async exportList(
       actor: PlatformActor,
+      list: OpsExportList,
       days: number,
     ): Promise<{ filename: string; body: string }> {
-      const window = usageWindow(days);
       const now = clock.now();
-      const since = new Date(now.getTime() - window * DAY_MS);
       return platformDb.run(actor.userId, async (tx) => {
-        const rows = await usageRows(tx, since);
+        const file = await exportFile(tx, list, days, now);
         await tx.insert(platformAuditEvents).values({
           id: uuidv7(),
           actorUserId: actor.userId,
-          action: 'platform.ops_usage_exported',
+          action: `platform.ops_${list}_exported`,
           result: 'success',
           correlationId: actor.correlationId,
-          metadata: { days: window, companies: rows.length },
+          metadata:
+            file.window === undefined
+              ? { companies: file.companies }
+              : { days: file.window, companies: file.companies },
         });
-        return { filename: usageCsvFilename(window, now), body: usageCsv(rows) };
+        return { filename: opsCsvFilename(list, now, file.window), body: file.body };
       });
     },
 
