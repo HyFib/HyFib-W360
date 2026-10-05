@@ -92,6 +92,7 @@ const SECRET_COLUMNS = [
   'app.invitations.token_hash',
   'app.webhook_endpoints.secret_ciphertext',
   'app.webhook_endpoints.previous_secret_ciphertext',
+  'app.webhook_endpoints.headers_ciphertext',
   'app.whatsapp_accounts.credential_ciphertext',
 ];
 
@@ -486,6 +487,12 @@ async function addPlanSubscription(c: Company) {
   });
   if (!sub.ok) throw new Error('subscription');
   rzp.authorizeSubscription(sub.data.id);
+  // A subscription pays for the plan the company is on (0088's guard), so the company is put on it.
+  await fx.query(
+    `UPDATE app.tenant_plans SET plan_id = $1, status = 'trialing',
+       trial_ends_at = now() + interval '14 days' WHERE tenant_id = $2`,
+    [planId, c.tenant.id],
+  );
   await fx.query(
     `INSERT INTO app.plan_subscriptions (id, tenant_id, plan_id, status, interval_months, extra_seats,
        extra_numbers, run_packs, subtotal_minor, tax_bp, tax_minor, amount_minor, total_count,
@@ -1607,6 +1614,25 @@ describe('running a deletion', () => {
     expect(told!.payload.lines?.join(' ')).toMatch(
       new RegExp(`could not remove itself from: WhatsApp account Main account \\(${c.wabaId}\\)`),
     );
+  });
+
+  it("clips a long account name's clean-up label without splitting an emoji (ADR-131)", async () => {
+    const c = await fx.company();
+    // "WhatsApp account " and 142 letters fill 159 of the label's 160 code units, so its clip
+    // falls between the two halves of the emoji, which jsonb could not store.
+    await fx.query('UPDATE app.whatsapp_accounts SET name = $1 WHERE tenant_id = $2', [
+      `${'n'.repeat(142)}😀 shop`,
+      c.tenant.id,
+    ]);
+    await deletions().request(await fx.ctx(c, c.owner), { confirm: c.tenant.slug });
+    await makeDue(c.tenant.id);
+    const result = await runTenantDeletion(runDeps({ razorpay: null }), c.tenant.id);
+    expect(result.outcome).toBe('finished');
+    if (result.outcome !== 'finished') return;
+    expect(result.cleanup).toEqual([
+      { kind: 'whatsapp_account', label: `WhatsApp account ${'n'.repeat(142)}`, outcome: 'done' },
+    ]);
+    expect(await deletionRow(c.tenant.id)).toMatchObject({ provider_cleanup: result.cleanup });
   });
 
   it('refuses outcomes that are not the known providers, outcomes and codes', async () => {

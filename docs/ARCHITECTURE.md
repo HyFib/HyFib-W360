@@ -52,6 +52,8 @@ Business logic never lives in React components.
 
 - **Identity** (users, sessions, credentials, TOTP) lives in schema `auth`, managed by Better Auth
   through the `w360_auth` role. Tenant code can read only public profile columns of `auth.users`.
+  A HyFib plugin records each completed sign-in as a security event, which the person reads back
+  through `ops.my_sign_ins` (ADR-136).
 - **Tenancy** (companies = `app.tenants`, memberships, invitations, audit) lives in schema `app`.
 - **Platform operations** (platform admins, support grants, platform audit, security events, email
   outbox) live in schema `ops`.
@@ -90,7 +92,11 @@ session-level value. Scopes are branded TypeScript types created only by authori
    session → membership lookup in user scope → tenant status → effective permissions (role union,
    minus suspended-blocked permissions, minus MFA-blocked permissions). Non-members and missing
    companies both get 404.
-3. The domain service asserts a permission, validates input with zod, and runs `db.run(ctx.scope)`.
+3. The domain service asserts a permission, validates input with zod (`parseInput`, which also
+   refuses the NUL character PostgreSQL text cannot hold, naming the field, ADR-130), and runs
+   `db.run(ctx.scope)`. jsonb columns use `@w360/db`'s `jsonb` type, which writes half of an emoji
+   as U+FFFD, as text columns store it (ADR-131); text clipped for a provider or for members is
+   clipped with `clipText`, which never splits a character (ADR-133).
    Audit rows are written in the same transaction. Actions that hand out credentials, move money,
    take or destroy the whole company's data, or weaken account security also assert a recent
    sign-in (`assertRecentSignIn`: the session started within 15 minutes, carried in the context as
@@ -130,13 +136,19 @@ so grants issued after the transfer would silently grant nothing (migration 0002
 - Jobs are **signals for durable rows** (outbox rows, webhook receipts, send intents). Sweepers
   re-signal rows whose job was lost, so correctness never depends on one enqueue.
 - Enqueue can join the business transaction (`PgBossJobQueue.enqueue(tx, …)`).
-- Every job carries a signed envelope `{kind, tenantId, actorUserId, ref, issuedAt, sig}`. Workers
+- Every job carries a signed envelope `{kind, tenantId, actorUserId, ref, issuedAt, kid, sig}`;
+  `kid` names the signing key outside the signature, and verification tries every configured key
+  (the signing key, and during a rotation the next or the previous one, ADR-135). Workers
   call `authorizeJob`: verify HMAC, check company status (defer outbound work while suspended),
   check the actor's membership is still active, then load the referenced row under that company's
   RLS scope.
 - A work job that fails its last retry moves to the `dead-letter` queue (the sweeps, which run
   again within a minute, have none); the worker records it in `ops.dead_letters` without its error
-  message (§6P).
+  message (§6P), and platform administrators can send the failed job back to its queue once
+  (ADR-108). The minute sweep ends, in the company's scope, the work of the three queues whose work
+  no sweep signals again (ADR-111), and while a key other than the primary is configured it seals
+  stored secrets that key sealed again with the primary key (ADR-134); while a previous job
+  signing key is configured it signs the queued jobs that key signed again (ADR-135).
 - Workers stop gracefully on SIGTERM (stop fetching, wait up to 30 s, close pools).
 
 ## 5. Email **[built]**
@@ -194,8 +206,16 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   minutes; clients fall back to polling with the same cursor and resynchronise after reconnects.
 - **Retention:** raw webhook bodies erased after 7 days, receipt rows deleted after 90, live events
   pruned after 7 (definer functions run by the messaging sweep).
-- **Not built yet:** media download to private object storage, templates and template sends,
-  message search, token health checks via `debug_token`, Meta-side deregistration on disconnect.
+- **Access checks (ADR-137):** the minute sweep signals a `whatsapp.access_check` job for each
+  connected account due one (daily, or asked by a send or template sync Meta refused for the token);
+  the job asks `debug_token` and applies onboarding's rules in the company's scope: a loss marks the
+  account and its numbers `needs_reconnect`, audits and emails the owners and administrators once;
+  a failed request changes nothing and is retried after 30 minutes. Once Meta admits the token,
+  the same job lists the account's subscribed apps and subscribes HyFib's app again when it is
+  missing (ADR-138): a restoration is audited and emailed; one that fails is emailed once, shown on
+  every page of the company and tried again after 30 minutes.
+- **Not built yet:** media download to private object storage, message search, Meta-side
+  deregistration on disconnect (templates and template sends: section 6A).
 
 ## 6A. Contacts, consent and templates **[built — templates verified against a local Graph stand-in only]**
 
@@ -227,9 +247,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 ## 6B. Segments and campaigns **[built — sends verified against a local Graph stand-in only]**
 
 - **Segments** (`packages/domain/src/campaigns/segments.ts`): saved, dynamic lists of conditions
-  (tags, consent, typed custom fields, creation date in the company's time zone, source, last
-  inbound message, calling code, response to an earlier campaign) combined with all/any. They
-  compile to parameterised SQL over `app.contacts`; erased contacts never match.
+  (the contact's name, tags, consent, typed custom fields, creation date in the company's time zone,
+  source, last inbound message, calling code, response to an earlier campaign) combined with
+  all/any. They compile to parameterised SQL over `app.contacts`; erased contacts never match. A
+  name condition compares the name with its surrounding spaces removed, a name of spaces only
+  counted as none (ADR-143).
 - **Campaign lifecycle** (`campaigns/service.ts`): draft → (pending_approval →) scheduled → running
   → completed, with paused and canceled. Submitting runs the readiness checks, freezes the audience
   (`campaign_recipients`, one row per contact, pending or skipped with a reason, no personal data)
@@ -820,8 +842,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   grant a scope only when they hold its permission (`templates.read`, `contacts.read`,
   `contacts.write`, `inbox.reply` for `messages.send` and `messages.reply`, `campaigns.send` for
   `messages.send_marketing`, `inbox.read_all` for `conversations.read`, `inbox.supervise` for
-  `conversations.write`, `automations.publish` for `automations.start`); at most 20 active keys
-  per company, counted under an advisory lock.
+  `conversations.write`, `automations.publish` for `automations.start`, `tenant.settings.manage` for
+  `contact_fields.manage`, and `campaigns.read` for itself, ADR-125); at most 20 active keys per
+  company, counted under an advisory lock.
   Rotation creates a key with the same name, scopes, lifetime and networks and lets the old one work
   for 0 to 72 hours (0 revokes it); revocation is immediate. Each change is audited without the
   token. A key may list up to 20 networks it accepts requests from (`allowed_networks cidr[]`, 0051,
@@ -842,7 +865,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   company's bucket); over the limit answers 429 with `Retry-After`. Buckets that are full again are
   deleted by the minute messaging sweep (`ops.purge_rate_limit_buckets`, 0041, ADR-068). Then the
   request is counted against the plan's monthly API requests (below). JSON
-  bodies need `Content-Type: application/json` and at most 64 KB. Writing scopes
+  bodies need `Content-Type: application/json` and at most 64 KB. A query parameter or JSON string
+  holding the NUL character (U+0000), which PostgreSQL text cannot store, is refused with 422 naming
+  where before the handler runs (`assertNoNulCharacter`, `api/request-text.ts`, ADR-124; the body
+  is walked without recursion). Writing scopes
   are refused while the company is suspended or restricted (reading continues). Errors are
   `{"error": {"code", "message", "reason"?, "issues"?}, "requestId"}` with the status of the
   application error; other failures are a generic 500 logged with the request id. Tokens are never
@@ -856,6 +882,87 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the marketing frequency cap under the campaign runner's lock), a conversation created resolved,
   a send intent without a user and the `message.send` job, re-checked before dispatch like every
   template send; the status of messages the API sent, with their type.
+- **Contact custom fields and changes (0090, ADR-112):** every contact the API returns, and the
+  contact in the contact webhooks, carries `fields`: the values of the company's custom fields by
+  key, typed (strings for text and dates, numbers, booleans), read by a subquery over
+  `app.contact_fields` (`apiContactColumns` in `api/contact-view.ts`) so a key no field has is never
+  returned. `GET /contact-fields` (`api/contacts.ts`, `contacts.read`) lists the fields by label.
+  `POST /contacts` takes `fields` (an existing contact gets only those it has no value for, merged
+  under its own values), and `PATCH /contacts/{id}` (`apiUpdateContact`, `contacts.write`) changes
+  the name, email, field values and tags in one transaction: `apiFieldChanges` reads the named
+  fields `FOR SHARE` (the order a field's deletion takes its locks) and checks each value with
+  `apiFieldValue` (`contacts/fields.ts`: JSON types, no coercion), then the contact row is locked
+  `FOR UPDATE`; only what differs is written and audited as `contact.updated` (keys and counts, no
+  values). A refused value names `fields.<key>` in `issues` and nothing is saved. Both writes keep
+  the app's 50-tag limit.
+- **Finding contacts (ADR-113):** `GET /contacts` also takes `email` (compared through the
+  `lower(email)` index), `tag` and up to 5 `fields[<key>]` (`contactListQuery` turns the
+  `deepObject` parameters into one object for the schema). `apiFieldFilters` checks each key against
+  the company's fields and reads each value with its field's type (`apiFieldFilterValue`), then
+  compares as segments' "equals" does. A page filtered by tag or field first finds the 2,000th
+  contact of its range (`API_CONTACT_SEARCH_WINDOW`) and reads only down to it, so its cursor goes on
+  past the window when few contacts match, as the message feed's does; both reads share a repeatable
+  read snapshot.
+- **Finding contacts by name (ADR-124):** `name` on `GET /contacts` (`apiContactListFilters` trims
+  it and refuses it empty) adds `display_name ilike likePattern(name)` to the windowed filters, the
+  comparison members' search makes (`contacts/service.ts`), so a page filtered by name reads at most
+  `API_CONTACT_SEARCH_WINDOW` contacts, as one filtered by tag or field does.
+- **Campaigns (0099, ADR-125):** `campaigns.read` (reading) lists the company's campaigns from their
+  rows (`apiListCampaigns`, `api/campaigns.ts`: keyset pages over `campaigns_list_idx`, an optional
+  status, the template and number joined by the company and id) and reads one with
+  `campaignAnalytics` (`campaigns/service.ts`), the counting members' campaign page uses, in one
+  repeatable-read, read-only transaction, so the row and its counts agree; a draft has no results.
+  The answers hold counts and names only.
+- **A campaign's recipients (ADR-127):** `apiListCampaignRecipients` (`api/campaigns.ts`,
+  `campaigns.read` and `contacts.read`) checks that the campaign is the company's, then reads its
+  recipients with their contacts and messages in id order on keyset pages, erased contacts left out.
+  `outcome` picks one condition of `RECIPIENT_OUTCOME_SQL` (`campaigns/outcomes.ts`), the conditions
+  `campaignAnalytics` counts with, so a list and its count share one definition.
+- **Pausing and cancelling campaigns (0100, ADR-128):** `apiPauseCampaign` and `apiCancelCampaign`
+  (`api/campaigns.ts`, `campaigns.stop`, writing) lock the campaign row (`lockCampaign`), check the
+  statuses each allows and call `pauseLockedCampaign` or `cancelLockedCampaign`
+  (`campaigns/service.ts`), which members' pause and cancel call too, with the key as the one who
+  stopped it: the pause reason `api`, the event's detail naming the key (`apiKeyId`, no member) and
+  `canceled_by_user_id` null. The audit row is the key's (`recordSystemAudit` with `apiActor`), and
+  `campaign.status_changed` comes from the status trigger (0065). Members' campaign history joins
+  the key's name on the event's `apiKeyId`.
+- **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
+  segments' conditions (`last_message` with `conversations.read` and `campaign` with
+  `campaigns.read` since ADR-126, a named campaign checked to be the company's, `name` since
+  ADR-143), checks them against the company's fields with segments' rules (`fieldConditionProblem`
+  and `comparisonTakesValue` in `campaigns/segments.ts`, which `checkSegmentDefinition` uses too,
+  each in its own words), and
+  compiles them with `segmentConditionsSql`, which `segmentWhere` wraps for segments and campaigns.
+  Its pages and `GET /contacts`'s come from one function, `apiContactPage` (`api/contacts.ts`): the
+  window's edge, then the matching rows down to it, in one repeatable read snapshot.
+- **Following contact changes (0091, ADR-114):** triggers on `contacts` (insert, and an update of
+  the columns the API describes), `contact_tags` (insert, delete) and `contact_consents` (set, status
+  changed) call `app.capture_contact_change`, which inserts one `app.contact_changes` row per contact
+  and transaction (`xact` = `pg_current_xact_id()`); its key to the contact takes the key-share
+  lock adding a tag takes, and the automation runner takes it before changing a tag (members and
+  keys take the contact before its tags). `apiContactChanges`
+  (`api/contact-changes.ts`) reads rows above the cursor and below `pg_snapshot_xmin`, each contact
+  at its latest such row, joined to the contact for its current state; the cursor is sealed with the
+  keyring and the company as associated data. `ops.compact_contact_changes` (minute sweep) walks the
+  rows in the same order from `ops.contact_change_compaction` and deletes the rows each change
+  replaced.
+- **Defining contact fields (0092, ADR-115):** `contacts/field-definitions.ts` adds, renames and
+  deletes a company's custom fields for both Settings (`contacts/service.ts`, by id) and the API
+  (`api/contact-fields.ts`, by key, scope `contact_fields.manage`); callers check who may and audit
+  as themselves. Additions take `pg_advisory_xact_lock(hashtextextended('contact-fields:<company>',
+0))` before counting, so the 50-field limit holds for additions at once; a rename changes only the
+  label (`contact_fields` grants `UPDATE (label)` only); a deletion removes the field row, then the
+  values (`attributes - key`), in the order a contact change locks them (ADR-112). 0092 widens the
+  scope checks of `app.api_keys` and `ops.plans`.
+- **Following message changes (0093, ADR-116):** triggers on `messages` (insert, and an update that
+  changes the status, status time, error or content) call `app.message_changes_capture`, a SECURITY
+  DEFINER function that upserts the message's one `app.message_changes` row with `xact` =
+  `pg_current_xact_id()` (the message row is already locked by its change, so the upsert adds no
+  wait and nothing needs compacting). `apiMessageChanges` (`api/message-changes.ts`) reads rows above
+  the cursor and below `pg_snapshot_xmin`, joined to the message, its conversation and contact for
+  the current state (`feedMessageColumns`, `toApiFeedMessage`, shared with `GET /messages`); both
+  change feeds seal cursors with `api/change-cursors.ts`, the feed's name and the company being the
+  associated data.
 - **Text replies (0042, ADR-070):** `POST /messages` with `type: "text"` (`apiSendMessage` picks
   `apiSendText`; no `type` is a template) needs `messages.reply`. It finds an existing, not erased
   contact by number and locks its conversation on the number (`from`, or the only active one); a
@@ -875,8 +982,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   ids), the unread count, the last message and
   inbound times and when the 24-hour window ends; a message reads in the webhooks' words
   (`inboundSummary` for inbound; for outbound the text, a template's rendered body or an interactive
-  message's body), with who sent it (`agent`, `bot`, `campaign`, `api`, `system`), the key for API
-  messages, the status and its error, never the media or internal notes. `updatedSince` compares the
+  message's body; since ADR-132 `inboundOmissions` says whether inbound content was too large to
+  keep and how many contacts a card left out), with who sent it (`agent`, `bot`, `campaign`, `api`,
+  `system`), the key for API messages, the status and its error, never the media or internal
+  notes. `updatedSince` compares the
   row's `updated_at`, which its trigger stamps with the transaction's start, so integrations are
   told to overlap their passes. `conversations_created_idx` (0045, built concurrently) serves the
   pages.
@@ -1005,6 +1114,22 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   inbox's `assign` and `setTeam` use too; a team move without a member ends with `routeConversation`.
   `GET /members` and `GET /teams` (`api/members.ts`, `conversations.read`) page the members routing
   would take (active, `INBOX_WORKER_ROLES`) and the teams, oldest first on exact keyset cursors.
+- **Many conversations at once (ADR-120):** `POST /conversations/update-many`
+  (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
+  transaction it locks the member first (as a suspension does before releasing its conversations),
+  then every conversation `FOR UPDATE` in id order, refuses an id that is not one of the company's
+  visible conversations (naming `conversationIds.<index>`), and applies `changeLockedConversation`,
+  the function `PATCH` uses, to each in the order given, which locks the team as a conversation
+  moves into it (after the conversations, as a team's deletion does); it answers the conversations
+  in that order.
+- **Many contacts at once (ADR-122):** `POST /contacts/update-many` (`apiUpdateManyContacts`,
+  `api/contacts.ts`) takes 1 to 100 contacts, each with its id and `PATCH`'s fields. It checks each
+  change before the transaction (`prepareContactChange`: email, tags), then locks every field any
+  change names in one statement (`lockFields`, as a field's deletion takes them) and checks the
+  values against them (`checkFieldChanges`), locks the contacts `FOR UPDATE` in id order, refuses an
+  id that is not one of the company's live contacts (naming `contacts.<index>.id`), and applies
+  `changeLockedContact`, the function `PATCH` uses, to each in the order given; it answers the
+  contacts in that order.
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built
@@ -1025,7 +1150,8 @@ true`); the same key with another request (method, path and body hashed) answers
   `forbidden` with reason `not_in_plan` (creating and rotating keys are refused too); a month used
   up answers 429 `rate_limited` with reason `quota_exceeded` and `Retry-After` until the next
   period. The minute plan sweep emails the billing managers once per period
-  (`ops.api_quota_reached`), and once before, at 80% of the limit (ADR-062).
+  (`ops.api_quota_reached`), and once before, at 80% of the limit or the share the company chose
+  (ADR-062, ADR-144).
 - **API scopes by plan (0069, ADR-092):** `ops.plans.api_scopes` is empty for every scope or the
   scopes the version includes; `app.tenant_entitlements` returns them. `admitApiRequest` takes the
   authenticated key (`ApiKeyContext`) and returns the request's `ApiContext` with `planScopes`, so
@@ -1070,8 +1196,9 @@ true`); the same key with another request (method, path and body hashed) answers
   memory); rotation with an overlap; revocation.
 - **Not built yet:** media and call-to-action messages, taking reactions back, assigning many
   conversations or starting many runs in one call, bulk sends, media downloads, statuses changed
-  since a time, networks for the whole company, limits and availability per endpoint, OAuth apps
-  and packs of extra API requests (BACKLOG P5-08). Outgoing webhooks are section 6O.
+  since a time, defining contact fields, changing numbers or many contacts in one call, limits and
+  availability per endpoint and OAuth apps (BACKLOG P5-08). Packs of extra API requests are plan add-ons (ADR-110, section 7). Outgoing
+  webhooks are section 6O.
 
 ## 6O. Outgoing webhooks **[built — verified with local test receivers only; no customer endpoints yet]**
 
@@ -1090,7 +1217,8 @@ true`); the same key with another request (method, path and body hashed) answers
   or `unknown_outcome`, with the error code and title), `app.consent_events` (every opt-in and
   opt-out) and `app.template_status_events` (the statuses Meta reports, and deletion) call
   `app.capture_webhook_event`, which writes an event and its deliveries only when an active endpoint
-  of the row's company subscribes to the type. They run as the role making the change (the runtime
+  of the row's company subscribes to the type (for `message.status`, since 0095, only when one also
+  takes the status, ADR-119). They run as the role making the change (the runtime
   role in the company's scope, or a definer function such as `app.erase_contact`), so row security
   keeps each event in its row's company, and a rolled-back change leaves none. A delivery insert
   sends an empty `w360_webhooks` notification.
@@ -1098,15 +1226,25 @@ true`); the same key with another request (method, path and body hashed) answers
   `app.conversations` (`conversation.status_changed` with the status before;
   `conversation.assignment_changed` for every change of the member and, since 0070 (ADR-094),
   `conversation.team_changed` for every change of the team, each with the ids before and after and
-  stamped with the time it is captured), `app.contacts` (`contact.created`; `contact.updated` for the name, number or email;
-  `contact.erased`) and `app.contact_tags` (`contact.updated`). Contact events go through
+  stamped with the time it is captured), `app.contacts` (`contact.created`; `contact.updated` for the name, number or email,
+  and since 0090 (ADR-112) for a value of one of the company's custom fields, compared by key so
+  that a field's deletion captures nothing; `contact.erased`) and `app.contact_tags`
+  (`contact.updated`). Contact events go through
   `app.capture_contact_webhook_event`: `contact.created` and `contact.updated` are captured when an
   active endpoint takes either, once per contact and top-level transaction (`captured_xact`, found
   by a partial index built concurrently), and `contact.erased` first deletes what its own
   transaction captured for the contact, so an erasure (which removes the tags first) sends only
-  that. Their payloads are built when delivered: conversation events as the message events are,
-  contact events with the API's contact (`api/contact-view.ts`, shared with the public API) and
-  `erased`, an erased contact keeping its id, source and creation time only.
+  that. Since 0096 (ADR-121) each trigger also says what changed (`name`, `phone`, `email`, `tags`,
+  `fields.<key>`), kept in `contact_changes` on the `contact.updated` event; a later change in the
+  same transaction adds to it through `app.add_contact_webhook_changes`, a definer function that
+  updates only an event its caller's transaction captured. Since 0098 (ADR-123) a `contact.updated`
+  delivery is created only for an endpoint whose `contact_parts` is null or holds a part the change
+  names (`fields` for any `fields.<key>`), and a later change in the transaction queues the
+  endpoints it newly concerns. Their payloads are built when
+  delivered: conversation events as the message events are, contact events with the API's contact
+  (`api/contact-view.ts`, shared with the public API) and `erased`, an erased contact keeping its
+  id, source and creation time only, and `contact.updated` with `changes` (null for events captured
+  before 0096).
 - **Automation run events** (migrations 0055–0056, ADR-078): triggers on `app.automation_runs`
   capture `automation.run_started` when a live run is inserted and `automation.run_ended` when one
   moves from running or waiting to an ended status, through `app.capture_webhook_event` (the run and
@@ -1129,7 +1267,10 @@ true`); the same key with another request (method, path and body hashed) answers
   it and a pause or completion reason, in `detail`), stamped with `clock_timestamp()` so that a
   start and a pause made in one runner transaction keep their order. Their payloads are built when
   delivered: the campaign's name, template, times and counters now, the statuses and reason as
-  captured, and the number; never a recipient or a member.
+  captured, and the number; never a recipient or a member. Since ADR-150 they also carry `results`,
+  as `GET /campaigns/{id}` counts them, counted in the delivery's claim by `campaignAnalytics`
+  (`campaigns/results.ts`), which counts in one statement so its numbers agree at any isolation;
+  null while the campaign is a draft.
 - **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
   notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
   SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same
@@ -1141,8 +1282,9 @@ LOCKED`; pending ones due now, then `delivering` ones whose lease expired), buil
   from the company's current data (`webhooks/payloads.ts`; an erased contact has no number or name,
   a message, conversation, contact, run or order that is gone ends the delivery as `event_gone`),
   signs it, sets the lease (the 10 s egress deadline plus 35 s) and commits. A delivery whose payload
-  or signature cannot be built (a bug, data the builder cannot describe, a secret the keyring cannot
-  open, or a database error while building, each build running in a savepoint) ends at once as
+  or signature cannot be built (a bug, data the builder cannot describe, a secret or the endpoint's
+  own headers the keyring cannot open, or a database error while building, each build running in a
+  savepoint) ends at once as
   `payload_failed` without an attempt, and the rest of the batch goes on; the worker logs its
   company, delivery, endpoint, event type, what failed and the error's class and code, never the
   payload or the error's message. The POSTs go through the egress client (DNS pinned, private,
@@ -1159,6 +1301,73 @@ LOCKED`; pending ones due now, then `delivering` ones whose lease expired), buil
   `W360-Event-Type`, `W360-Delivery-Id`, `W360-Delivery-Attempt` and `User-Agent:
 HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with the AAD
   `webhook-secret:<company>:<endpoint>:<version>`.
+- **Endpoint headers** (migration 0094, ADR-118): up to 5 headers an endpoint's receiver asks for,
+  their names in `header_names` and names and values sealed together in `headers_ciphertext` (AAD
+  `webhook-headers:<company>:<endpoint>`; a check keeps both empty or both set). Settings, the API,
+  audit entries and the export carry names only. The claim opens them once per endpoint and batch
+  and sends them before HyFib's own headers, which names HyFib or the transport sets can never
+  replace (refused when saved and when opened); headers that do not open end the delivery as
+  `payload_failed`, stage `headers`.
+- **Message status filters** (migration 0095, ADR-119): `message_statuses` on an endpoint lists the
+  `message.status` statuses it takes, null for every status; a check keeps it to 1 to 8 known
+  statuses and to endpoints that take `message.status`. `app.capture_webhook_event` (replaced with
+  the same signature) creates a `message.status` delivery only for endpoints whose list is null or
+  holds the status, and writes no event when none does; other types, replays and test events are
+  unchanged. Settings and the API (`messageStatuses`) set it; a change that drops the event clears
+  it.
+- **Contact part filters** (migration 0098, ADR-123): `contact_parts` on an endpoint lists the parts
+  of a contact whose change it takes as `contact.updated` (`name`, `phone`, `email`, `tags`,
+  `fields`), null for every change; a check keeps it to 1 to 5 known parts and to endpoints that
+  take `contact.updated`. `app.capture_contact_webhook_event` (replaced with the same signature)
+  queues the first capture of a contact's update for endpoints whose list is null or holds a part
+  it names, and each later change of the contact in the transaction for those it newly concerns
+  that have no delivery of the event yet; the event is still written when an endpoint takes
+  `contact.created` or `contact.updated`, and each endpoint receives the same event, naming every
+  part that changed. Settings and the API (`contactParts`) set it; a change that drops the event
+  clears it.
+- **Automation filters** (migration 0109, ADR-145): `automation_ids` on an endpoint lists the
+  automations whose runs it takes as `automation.run_started` and `automation.run_ended`, null for
+  every automation; a check keeps it to 1 to 20 ids without nulls and to endpoints that take one of
+  the two events. The services accept only automations of the company with a published version
+  (which cannot be deleted, only archived). `app.capture_webhook_event` (replaced with the same
+  signature) creates a run event's delivery only for endpoints whose list is null or holds the
+  run's automation (`automationId` in the event's detail), and writes no event when none does;
+  other types, replays and test events are unchanged. Settings and the API (`automationIds`) set
+  it, Settings from `automationChoices` (the company's published automations by name); a change
+  that drops both events clears it.
+- **Campaign status filters** (migration 0110, ADR-146): `campaign_statuses` on an endpoint lists
+  the statuses a campaign reaches that it takes as `campaign.status_changed`, null for every
+  status; a check keeps it to 1 to 7 known statuses and to endpoints that take the event.
+  `app.capture_webhook_event` (replaced with the same signature) creates a campaign event's
+  delivery only for endpoints whose list is null or holds the status reached, and writes no event
+  when none does; other types, replays and test events are unchanged. Settings and the API
+  (`campaignStatuses`) set it; a change that drops the event clears it.
+- **Order status filters** (migration 0111, ADR-147): `order_statuses` on an endpoint lists the
+  statuses an order reaches that it takes as `order.status_changed` (`confirmed`,
+  `awaiting_payment`, `paid`, `fulfilled`, `cancelled`; `received` only arrives as
+  `order.received`), null for every status; a check keeps it to 1 to 5 known statuses and to
+  endpoints that take the event. `app.capture_webhook_event` (replaced with the same signature)
+  creates an order change's delivery only for endpoints whose list is null or holds the status
+  reached, and writes no event when none does; other types, replays and test events are unchanged.
+  Settings (the same status control as campaigns) and the API (`orderStatuses`) set it; a change
+  that drops the event clears it.
+- **Template status filters** (migration 0112, ADR-148): `template_statuses` on an endpoint lists
+  the statuses it takes as `template.status_changed` (the eleven the event reports, `pending` to
+  `locked`; HyFib's own steps, a deletion under way or refused and an unrecognised status are never
+  sent), null for every status; a check keeps it to 1 to 11 known statuses and to endpoints that
+  take the event. `app.capture_webhook_event` (replaced with the same signature) creates a template
+  status's delivery only for endpoints whose list is null or holds the status reported, and writes
+  no event when none does; other types, replays and test events are unchanged. Settings (the same
+  status control as campaigns and orders) and the API (`templateStatuses`) set it; a change that
+  drops the event clears it.
+- **Conversation status filters** (migration 0113, ADR-149): `conversation_statuses` on an endpoint
+  lists the statuses a conversation reaches that it takes as `conversation.status_changed` (`open`,
+  `resolved`; nothing sets one `pending`), null for every status; a check keeps it to 1 or 2 known
+  statuses and to endpoints that take the event. `app.capture_webhook_event` (replaced with the
+  same signature) creates a conversation change's delivery only for endpoints whose list is null or
+  holds the status reached, and writes no event when none does; other types, replays and test
+  events are unchanged. Settings (the same status control) and the API (`conversationStatuses`) set
+  it; a change that drops the event clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and
@@ -1168,11 +1377,16 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   only in the page's memory); sending a test event (`ping`); rotating the secret; turning off and
   on; deleting. Each endpoint's page lists its latest 100 deliveries (or only failed ones) with
   attempts, result and timings, replays finished ones (a new delivery of the same event, audited)
-  and edits the URL, description and events. The OpenAPI document describes every event under
-  `webhooks`. Audit entries name the endpoint's host, never its full URL or secret.
-- **Not built yet:** filters beyond the event type, ordering, custom headers, mutual TLS, fixed
-  egress addresses for receivers' allowlists, endpoints per number, and events for conversations,
-  campaigns, automations, contact changes or orders.
+  and edits the URL, description, events, the message statuses, contact parts, automations,
+  campaign, order, template and conversation statuses it takes and headers (names shown, values
+  never; replacing gives each again).
+  The OpenAPI document describes every event under `webhooks`. Audit entries name the endpoint's
+  host, never its full URL or secret.
+- **Not built yet:** filters on a message's
+  or contact's values, ordering,
+  other authentication (OAuth client credentials, headers computed per delivery), mutual TLS, fixed
+  egress addresses for receivers' allowlists, endpoints per number, and events for conversations
+  started, notes or merges.
 
 ## 6P. Platform operations console **[built — verified with local test data only; no production companies yet]**
 
@@ -1213,6 +1427,40 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   with no attempts; the minute sweep processes it again, idempotently), and resolving a quarantine
   entry with a written resolution. Both need a reason and write `ops.platform_audit_events` in the
   same transaction.
+- **Dead letter retries** (ADR-108, migration 0086, `platform/dead-letter-retries.ts`): a platform
+  administrator sends a dead letter's failed job back to its queue once, with a reason, through
+  `ops.platform_retry_dead_letter`, which makes pg-boss's own retry (state back to `retry`, one
+  more attempt allowed, no completion time), marks the dead letter (`retried_at`,
+  `retried_by_user_id`) and writes the platform audit log in one transaction. It refuses a dead
+  letter already retried, unverified or without its job, of a company being deleted or gone, a job
+  pg-boss no longer keeps as failed, a job of a queue that never retries (`billing.auto-recharge`)
+  or of a receipt queue (the receipt retry repairs those), and a job whose work already waits in
+  its exclusive queue. The migration runner grants the definer role SELECT on `pgboss.job`'s id,
+  name, state and retry limit and UPDATE on its state, retry limit and completion time, after
+  pg-boss's install. `deadLetterRetryBlock` is the console's copy of those rules, by this release's
+  queue catalog, with the time the queue's retention ends. Retries matter for `template.submit`,
+  whose work no sweep signals again, and for the three queues below until their work is settled.
+- **Stranded work** (ADR-111, migration 0089, `jobs/stranded-work.ts`): `channel.onboard`,
+  `commerce.account` and `template.delete` leave their work in progress when their job
+  dead-letters. The minute messaging sweep lists, through `ops.dead_letters_to_settle` (SECURITY
+  DEFINER, the worker role only), the verified dead letters of those queues whose envelope names
+  its own queue, neither retried nor settled, of companies not being deleted, whose work no job is
+  doing again (`ops.dead_letter_work_live`: a waiting or running job under the work's singleton
+  key; the definer reads `pgboss.job.singleton_key` for it). For each, in the company's scope
+  (`authorizedTenantScope`, the company coming from the dead letter as the worker recorded it from
+  the verified envelope) and one transaction, it ends the work and marks the dead letter through
+  `ops.settle_dead_letter`, which checks the scope, the queue and the kind, and returns false when
+  the dead letter was retried or settled meanwhile or a job for its work waits or runs again; the
+  sweep then rolls back, so work a job is doing is never ended under it. The work: a template
+  still pending deletion goes back to Meta's last status (a `delete_failed` event and one for that
+  status, audit, sync request; one Meta itself reports as being deleted is left to the sync; the
+  template's history lists same-time events newest first by id), keys still being checked
+  fail, and a number still in setup fails with the step it stopped at (audit, live update). A
+  settled dead letter keeps `settled_at` and `settled_ended` (whether anything was left to end) and
+  is never retried from the console (a check keeps the two marks apart). The template sync keeps
+  `pending_deletion` while the template's last deletion event is the request itself, made in the
+  last 8 hours; `template.delete` and `commerce.account` retry longer than before (10 and 8 times,
+  at most an hour and 30 minutes apart).
 - **Failure alerts** (ADR-091, migration 0068, `platform/failure-alerts.ts`): the minute messaging
   sweep emails every platform administrator about each dead letter, each receipt that used all its
   attempts and each unresolved quarantine entry, once (`alerted_at` marks set by
@@ -1229,13 +1477,27 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   15 minutes, `ops.platform_alerts` kind `queues`; fresh checks only) in the transaction that queues
   one `platform.notice` email to every platform administrator. The Queues tab and the overview read
   `ops.queue_waits` as the platform role.
+- **Integration failure alerts** (ADR-139, migration 0106, `platform/integration-alerts.ts`): last
+  in the minute messaging sweep, `ops.integration_alerts_due` keeps the marks of failures the
+  console still lists (`ops.integration_failures`, the console's own rule), forgets those not listed
+  for an hour and counts the failures not yet told; `ops.mark_integration_alert` marks them (at most
+  every 15 minutes, `ops.platform_alerts` kind `integrations`, 1,000 at a time) in the transaction
+  that queues one `platform.notice` email to every platform administrator, with counts by kind only.
+- **Acknowledging failures** (ADR-141, migration 0107): a platform administrator acknowledges a
+  failure on Current failures with a note, through `ops.platform_acknowledge_integration_failure`
+  (definer, platform role only), which checks the administrator and that `ops.integration_failures`
+  lists the failure in that state now, upserts `ops.integration_acknowledgements` (by source,
+  subject and state) and writes the platform audit entry in one transaction; the console's list
+  returns each failure's acknowledgement. `ops.integration_alerts_due` keeps acknowledgements of
+  listed failures and forgets the others after an hour, as it does the alert marks.
 - **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
   90 days) and a health card on each company's platform page. Every page re-checks the platform
   actor. The functions read every company on each view, which suits the test envelope; paging and
   precomputed rollups come with growth.
-- **Not built yet:** other alerts (a company's failing integrations) and other channels, trends,
-  quality updates from Meta's quality webhook, API request counts, exports, redrive from the
-  console, and acknowledging issues.
+- **Not built yet:** other alert channels, trends,
+  quality updates from Meta's quality webhook, API request counts, exports, sweeps for the work of
+  `channel.onboard`, `commerce.account` and `template.delete`, retrying several dead letters at
+  once, and acknowledging the console's other lists (dead letters, receipts, late queues).
 
 ## 6Q. Company export and deletion **[built — providers verified against the local Graph, Shopify and Razorpay stand-ins only]**
 
@@ -1323,22 +1585,29 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `app.accept_invitation` checks the same limit in SQL. Live automation runs started by customer
   messages or store events consume `app.usage_counters` atomically (`ON CONFLICT … DO UPDATE …
 WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announces a used-up month
-  once (`notified_at`) and warns once at 80% of the limit (`warned_at`, 0036, ADR-062), each time
-  locking the counter and checking it against the current limit and period (a counter of an
-  earlier period is marked without an email). The tenant context drops the write permissions of
+  once (`notified_at`) and warns once at 80% of the limit (`warned_at`, 0036, ADR-062), or at the
+  share from 50% to 95% that a member who manages billing chose
+  (`app.tenants.usage_warning_percent`, 0108, ADR-144), each time locking the counter and checking
+  it against the current limit, period and share (a counter of an earlier period is marked without
+  an email). The company layout shows notices of those two limits (`plans/limit-notices.ts`,
+  ADR-140): nearly used up (from the same share) or used up, read per page in one
+  read-only transaction (`app.tenant_entitlements` and the period's counters) for an active company
+  and a member who reads billing, automations (runs used up) or manages API keys (requests used
+  up). The tenant context drops the write permissions of
   modules the plan leaves out (`MODULE_WRITE_PERMISSIONS`); workers check the module before
   starting runs, order messages and cart reminders (`not_in_plan`). Public API requests are counted
   the same way against the version's monthly API requests (0035, ADR-061; §6N). Platform staff see
   usage as counts only (`ops.platform_tenant_usage`). Staff set paid periods for payments settled
-  outside HyFib; companies can also pay by Razorpay subscription (below). Self-serve plan changes,
-  proration and plan invoices are not built.
+  outside HyFib; companies can also pay by Razorpay subscription (below) and change the plan it pays
+  for from the end of the paid period (ADR-109). Changes at once, proration and plan invoices are
+  not built.
 - **Paying for plans (0037, ADR-063) [built, behind `RAZORPAY_SUBSCRIPTIONS_ENABLED`]:** Billing →
   Paying for your plan (`packages/domain/src/billing/plan-subscriptions.ts`) quotes the plan version
   with the company's add-ons plus the tax platform owners set (`ops.plan_settings.plan_tax_bp`,
   `planPaymentQuote` in integer paise). Owners and billing managers with a recent sign-in start a
   subscription: `app.plan_subscriptions` is written first (`creating`, amounts, add-ons and the plan
-  fixed by column grants, one live row per company by a partial unique index, an advisory lock per
-  company), then Razorpay's plan (`POST /v1/plans`, monthly, quarterly or yearly) and subscription
+  fixed by column grants, one live row that keeps charging per company by a partial unique index,
+  an advisory lock per company), then Razorpay's plan (`POST /v1/plans`, monthly, quarterly or yearly) and subscription
   (`POST /v1/subscriptions`, five years of cycles, `expire_by` in one hour, `customer_notify`).
   Checkout opens with the `subscription_id`; its signature (`payment_id|subscription_id`, checked
   against OUR stored id) only prompts `syncPlanSubscription`, which is also run by every
@@ -1357,8 +1626,8 @@ WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announce
   `tenant_plans.subscription_id` and restarts the usage period. Company cancels are
   `cancel_at_cycle_end` for an active subscription (at once otherwise); `app.apply_plan_transition`
   ends such a period as canceled without grace days. Platform owners set the tax and cancel a
-  company's subscription at once (`/platform/tenants/<id>`), staff plan changes are refused while a
-  subscription is live, and company deletion cancels it at Razorpay (§6Q). Billing managers are
+  company's subscriptions at once (`/platform/tenants/<id>`), staff plan changes are refused while a
+  subscription is live, and company deletion cancels them at Razorpay (§6Q). Billing managers are
   emailed about payments, failed charges (`pending`), stopped retries (`halted`) and cancels: the
   company's own at once, and a platform owner's by the minute billing sweep, as the platform role
   cannot queue email (`staff_cancel_notice_due`, 0078, ADR-101: listed by
@@ -1409,6 +1678,95 @@ WHERE used < limit`), per monthly period from `usage_anchor`; the sweep announce
   cover both kinds. `/platform/refunds?kind=plan` lists the requests
   (`ops.platform_plan_payment_refund_requests`) and every refund of a plan payment across companies
   (`ops.platform_plan_payment_refunds`), each newest first on exact keyset pages.
+- **Plan choices (0082, 0083, ADR-105) [built]:** platform owners offer published plan versions
+  (`ops.plans.offered_at`, `offered_by_user_id`; `offerPlan` and `withdrawPlanOffer` in the platform
+  plans service, in the platform audit log). The plan guard lets only the offer change on a
+  published version, and check constraints keep it to published versions priced at ₹1 or more, so
+  retiring must clear it. `createPlanChoicesService` lists the offered versions for `billing.read`,
+  each with its quote (`planPaymentQuote` with the company's add-ons and the tax), what it holds
+  against what the company uses (`versionHoldingLimits`, `planShortfalls`) and why the company
+  cannot choose now. `choose` (`billing.manage`, a recent sign-in) takes the four limit locks
+  (`lockAllLimits`) and calls `app.choose_plan` (SECURITY DEFINER, runtime role), which takes the
+  company and member from the session's scope, the subscription-start advisory lock, the company row
+  for share and the plan state for update, checks the status, a live subscription, the offer and
+  the tax, takes the chosen version's advisory lock shared (0083: the plan guard takes it
+  exclusively when a published version stops being offered, so a withdrawal or retirement and a
+  choice never interleave), and changes only `plan_id`, the note, who and when, and the version.
+  The service then refuses a version the company could not pay for with its add-ons and the tax,
+  counts what the company uses against the new version's entitlements and rolls back on a
+  shortfall, and audits `billing.plan_chosen`. Billing links to `/c/<slug>/billing/plans` when
+  another offered version can be chosen; paying is unchanged (ADR-063): the payment offer and a
+  started subscription use the version the company is on.
+- **Plan add-ons (0084, ADR-106) [built]:** `createPlanAddOnsService` lists, for `billing.read`, the
+  add-ons the company's version sells (extra seats, extra WhatsApp numbers, run packs) with each
+  one's price, quantity, the most the version allows and the fewest that still hold what the
+  company uses, the current quote, and why the company cannot change them now
+  (`planChangeUnavailable`, shared with plan choices, plus a version no longer published). `choose`
+  (`billing.manage`, a recent sign-in, digits only) takes the four limit locks and calls
+  `app.choose_add_ons(seats, numbers, packs)` (SECURITY DEFINER, runtime role), which takes the
+  company and member from the session's scope and the locks of `app.choose_plan`, checks the same
+  conditions with a published version instead of an offered one, and changes only the three
+  quantities, the note, who and when, and the version; the plan state's guard keeps them to what the
+  version sells. The service then refuses a total that cannot be paid and, after a decrease, seats
+  (with waiting invitations) or WhatsApp numbers that no longer fit, and audits
+  `billing.add_ons_chosen`. Billing links to `/c/<slug>/billing/add-ons`, whose form shows the
+  total as the quantities change (`planPaymentQuote` in the browser); paying is unchanged.
+- **Price list for visitors (0085, ADR-107) [built]:** platform owners show or hide it
+  (`showPriceList` / `hidePriceList` in the plan admin service, writing
+  `ops.plan_settings.price_list_shown_at` and `price_list_shown_by_user_id`, audited). The public
+  page `/pricing` (no sign-in) calls `createPriceListService().publicPriceList()`, which reads in
+  the system scope as the runtime role, in a read-only transaction, whether the list is shown, the
+  tax and the default trial (column grants from 0085), then the commercial terms of the published,
+  offered versions, cheapest first, each with its total with the tax from `planPaymentQuote`; a
+  version one plan payment cannot cover is left out. `priceListGaps` decides whether visitors see it
+  (shown, Razorpay subscriptions on, the tax set, a default trial, a payable version) for the page,
+  which is not found otherwise, and for the card on the platform Plans page, which names what is
+  missing. `priceListLines` words what each version includes and the add-ons it sells.
+- **Plan changes from the end of the paid period (0087, ADR-109) [built]:** `createPlanChangeService`
+  (`billing/plan-changes.ts`) tells `billing.read` whether the company can change
+  (`planChangeFromPeriodEndUnavailable`: not suspended or being deleted, Razorpay subscriptions on
+  and the tax set, an `active` plan whose period its subscription paid, that subscription `active`
+  or already ended, and at least 48 hours to the period's end), the versions it can change to (the
+  offered ones and its own while published, each with what it holds against what the company
+  uses), the subscription that follows the current one, and for one version the add-ons it sells,
+  starting from the capacity the company has now (`addOnsKeepingCapacity`, `planChangeAddOns`).
+  `scheduleChange` in the plan subscription service (`billing.manage`, a recent sign-in, the
+  subscription advisory lock) checks the same with the add-on bounds, the shortfalls and the quote,
+  then in order: cancels the current subscription at the end of its cycle at Razorpay (the company's
+  own cancel, emailed as a change) unless it already ends; cancels at once a follow-on still waiting
+  (a new choice replaces it); records the follow-on (`starts_at` = the plan's `period_end`,
+  `follows_subscription_id` = the paying subscription, audited `billing.plan_change_started`) and
+  creates it at Razorpay with `start_at`, as ADR-102. Checkout only authorises it.
+  `app.guard_plan_subscription_follow` (BEFORE INSERT, invoker rights) refuses a follow-on whose
+  predecessor is not the plan's paying subscription and charging no more, whose start is not the
+  period's end at least 48 hours ahead, whose company is suspended or being deleted, whose version
+  is not published and offered or current, whose add-ons the version does not sell, or whose price
+  is not the version's with the tax. `plan_subscriptions_one_live_uq` excludes rows cancelled at
+  their period's end, so the ending subscription and its follow-on can coexist but two rows that
+  keep charging cannot. `app.apply_plan_transition` takes the renewal path (past due within the
+  grace days, or expired) instead of canceled when an `authenticated`, `active`, `pending` or
+  `halted` follow-on starts at the period's end. `app.apply_plan_subscription_period` applies a
+  follow-on's paid cycle with its version and add-ons (audited with the previous ones), returns
+  `mismatch` for any other subscription that does not match the plan, and `stale` for a cycle of
+  another subscription that ends no later than the plan's period. The plan guard lets a retired
+  version in only as the plan of that paid follow-on. The company's cancel picks the subscription
+  that keeps charging (the follow-on, if any); staff cancels and company deletion cancel every live
+  one, with ADR-101's notice sent once. Billing shows the next subscription and its status,
+  `/c/<slug>/billing/change` lists the versions and `/c/<slug>/billing/change/<planId>` holds the
+  form (`ChangePlanForm`: live total, a confirmation that names what cannot be undone, Checkout).
+- **API request packs (0088, ADR-110) [built]:** a version with a monthly API request limit above 0
+  may sell packs (`api_request_pack_size`, `api_request_pack_price_minor`, both or neither, checked
+  by constraints and kept by the plan guard once published). `tenant_plans.api_request_packs` and
+  `plan_subscriptions.api_request_packs` (0 to 10,000) carry them like run packs: staff set them with
+  the plan (`setTenantPlan`), companies through `app.choose_add_ons(seats, numbers, run packs, API
+packs)` and Change plan, subscriptions record and price them (`planPaymentQuote`'s
+  `apiRequestPacksMinor`), and `app.apply_plan_subscription_period` applies them. The company's
+  limit is the version's plus packs × size in `app.tenant_entitlements`, `ops.api_quota_reached`
+  and `ops.usage_warnings_due`. No limit with packs passes 2,000,000,000 (`PLAN_BOUNDS.limitWithPacks`,
+  `packsMax` in the forms, the plan state's and the follow-on's guards, for run packs too); the
+  sweep lookups sum in 64 bits. `app.guard_plan_subscription_start` (BEFORE INSERT, invoker rights)
+  refuses a subscription that follows none unless its version and add-ons are the plan state's. The
+  three-quantity `app.choose_add_ons` stays for the previous release during a deploy.
 - **Ledger (0004_billing):** one INR wallet per company with five accounts (`wallet_available`,
   `wallet_held`, `payment_clearing`, `service_revenue`, `dispute_losses`). `ledger_transactions` and
   `ledger_entries` are append-only (trigger), balances are maintained by trigger from the entries,
@@ -1616,11 +1974,12 @@ payment_requested → succeeded`; before each provider call it is written as `un
 
 ## 8. Observability
 
-Structured JSON logs (pino) with redaction and correlation ids **[built]**; every failed job
-attempt logged by the worker with its queue and job ids **[built]**; audit and security events in
-the database **[built]**; queue counts and recorded dead letters in the platform operations
-console (§6P) **[built]**; OpenTelemetry traces/metrics with one hosted backend, queue lag and
-dead-letter alerts **[designed]**.
+Structured JSON logs (pino) with redaction and correlation ids **[built]**; failed queries logged
+without the data they quote (a `DatabaseQueryError` from `db.run` and the logger's `err` serializer,
+Better Auth's log lines included, ADR-129) **[built]**; every failed job attempt logged by the worker with its queue and job ids
+**[built]**; audit and security events in the database **[built]**; queue counts and recorded dead
+letters in the platform operations console (§6P) **[built]**; OpenTelemetry traces/metrics with one
+hosted backend, queue lag and dead-letter alerts **[designed]**.
 
 ## 9. Topology
 

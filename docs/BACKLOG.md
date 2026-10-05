@@ -44,9 +44,19 @@ verification, app review, Embedded Signup configuration).
   picker (phase 3).
 - **P2-10 Channel settings UI** — done: connect (Embedded Signup), setup progress and errors, retry,
   disconnect, quality and health time. Remaining: messaging limits and granted permissions display.
-- **P2-11 Platform quarantine view** — new: list and resolve quarantined webhooks in the platform area
-  (today the platform role can read and resolve them in the database only).
-- **P2-12 Token health** — new: periodic `debug_token` checks and reconnect prompts before sends fail.
+- **P2-11 Platform quarantine view** — done with P5-10 (ADR-054): the operations console's
+  Integrations page lists quarantined webhooks without their content and platform administrators
+  resolve them, or retry their receipts, with a reason in the platform audit log.
+- **P2-12 Token health** — _implemented and locally verified against the Graph stand-in (ADR-137)_:
+  each connected WhatsApp account's token is checked daily with `debug_token` by onboarding's rules,
+  and at once when Meta refuses it for a send or a template sync; a loss of access marks the account
+  and its numbers for reconnecting, emails the owners and administrators once and shows a banner on
+  every page of the company; an expiry Meta reports is reminded 7 days ahead and checked again as
+  soon as it passes; reconnecting brings back the account's other numbers that Meta still lists.
+  The same check lists the apps subscribed to the account's webhooks and subscribes HyFib's app
+  again when Meta no longer lists it, telling the company; when that fails, every page says that
+  messages are not reaching HyFib (ADR-138). **Remaining:** Meta's deauthorization callbacks
+  (unconfirmed, M-146) and which webhook fields the app receives.
 
 ## Phase 3 — contacts, consent, templates, campaigns, reports
 
@@ -72,7 +82,9 @@ verification, app review, Embedded Signup configuration).
   frequency cap, message and estimated spending caps (platform rate cards), pause/resume and
   idempotent cancel, test sends, per-recipient outcomes, last-touch reply/opt-out attribution,
   results with denominators, CSV export. Local 10,000-recipient run: snapshot 0.6 s, all recipients
-  queued in 21 ticks. **Remaining:** the 10k run in staging with real dispatch, per-recipient time
+  queued in 21 ticks. Segments refuse dates that do not exist (ADR-117; a creation day of 30
+  February used to fail the preview, the segment page and a campaign's audience), and compare
+  contacts' names (ADR-143). **Remaining:** the 10k run in staging with real dispatch, per-recipient time
   zones, A/B variants, messaging-tier awareness (read the number's limit from Meta), campaign
   sends through the public API (the API sends single templates since P5-08), media-header
   templates.
@@ -292,7 +304,11 @@ verification, app review, Embedded Signup configuration).
   for no limit, 0 leaves the public API out; counted atomically, refused with 429 when used up and
   403 without the API, one notice per period); **[a warning at 80% of the month's automation runs
   or API requests built, locally verified]** (ADR-062: one email per counter, marked on the plan
-  card; the used-up notices now skip counters of an earlier period); **[paying for plans by
+  card; the used-up notices now skip counters of an earlier period); **[notices in the app before
+  and at a monthly limit built, locally verified]** (ADR-140: on every page of an active company,
+  automation runs or API requests nearly used up (80%) or used up, for members who read billing,
+  and once used up for members who read automations or manage API keys, with what stops and until
+  when); **[paying for plans by
   Razorpay subscription built, locally verified against the stand-in]** (ADR-063, see P5-07);
   **[API scopes by plan built, locally verified]** (ADR-092, W-137: a version includes every API
   scope or only those chosen; requests needing another are refused with 403 `not_in_plan` whatever
@@ -301,10 +317,37 @@ verification, app review, Embedded Signup configuration).
   managers are emailed once about each plan HyFib staff set, with the plan now, its dates and
   add-ons and HyFib's reason, from the worker's minute sweep); **[emails when staff cancel a
   subscription built, locally verified]** (ADR-101, see P5-07); **[paying from the end of the trial
-  built, locally verified against the stand-in]** (ADR-102, see P5-07).
-  Remaining: self-serve plan changes and higher-plan trials,
-  proration, plan invoices, thresholds chosen per company, in-app notices, packs of extra API
-  requests and AI credits (Phase 6).
+  built, locally verified against the stand-in]** (ADR-102, see P5-07); **[companies choose the
+  plan they pay for built, locally verified against the stand-in]** (ADR-105: platform owners offer
+  published versions; owners and billing managers with a recent sign-in choose one under Billing
+  while on a trial or without a paid period and with no live subscription, if it holds the seats,
+  numbers, teams and live automations they use, then pay for it; a trial keeps its end);
+  **[companies choose their add-ons built, locally verified against the stand-in]** (ADR-106: on
+  the same companies, owners and billing managers with a recent sign-in set the extra seats, extra
+  WhatsApp numbers and run packs their published version sells, within its maximums, under Billing
+  → Add-ons; a decrease cannot leave fewer seats or numbers than they use; then they pay for them
+  with the plan); **[a price list for visitors built, locally verified]** (ADR-107: platform owners
+  show the offered versions at `/pricing`, with their prices before and with the tax, what they
+  include and their add-ons, for anyone who has not signed in; not found unless paying for plans,
+  the tax, a default trial and a payable version are set); **[paying companies change their plan or
+  add-ons from the end of the paid period built, locally verified against the stand-in]** (ADR-109:
+  owners and billing managers with a recent sign-in choose an offered version, or their own, with
+  its add-ons under Billing → Change plan until 48 hours before the paid period ends; the current
+  subscription is cancelled at the end of its cycle first and a new one, authorised in Checkout,
+  starts then and is charged for the new plan, so the two never both charge; its first paid cycle
+  applies the new version and add-ons; Razorpay test-mode checks are on the release checklist);
+  **[packs of extra API requests built, locally verified against the stand-in]** (ADR-110: a
+  version with a monthly API request limit sells packs of a size and price, as it sells run packs;
+  staff set them with the plan and companies under Billing → Add-ons and Change plan; the limit is
+  the version's requests plus packs × size in admission, the plan card, the 80% warning and the
+  used-up notice; limits with packs are bounded at 2,000,000,000 for run packs too, which fixed
+  limits past the 32-bit range that failed every company's sweep lookups); **[usage warnings at a
+  share each company chooses built, locally verified]** (ADR-144: members who manage billing choose
+  50% to 95% in steps of 5 under Billing → Usage warnings, 80% until then; the sweep's email, the
+  notices on every page and the plan card all warn from that share, still once per counter and
+  period; API keys' own limits keep 80%).
+  Remaining: changes that take effect at once and proration, plan invoices, packs bought once, and
+  AI credits (Phase 6).
 - **P5-02 Ledger** **[built, locally verified]**: accounts, append-only journal balanced at commit,
   balances by trigger, holds, settlements, releases (expiry sweep), refunds and chargebacks as
   compensating postings; INR paise; monthly statements computed from the ledger (ADR-057).
@@ -375,7 +418,7 @@ verification, app review, Embedded Signup configuration).
   active for each cycle Razorpay reports paid, fetched and checked by HyFib (Checkout, webhooks,
   hourly and daily checks, before period ends); failed charges, stopped retries, cancelling at the
   end of the period, staff cancelling at once, deletion cancelling at Razorpay, plan payments in
-  the daily reconciliation); **[plan payment receipts built, locally verified]** (ADR-064: a receipt page per plan payment with the plan, add-ons, billing period and tax, not a tax invoice, linked from Billing and the payment email); **[rate change notices built, locally verified]** (ADR-065: billing managers emailed once when a published card for the company's billing currency takes effect within 7 days, with what it changes); **[emails when staff cancel a subscription built, locally verified]** (ADR-101: the company's billing managers are emailed once when a platform owner cancels its subscription, with HyFib's reason and what the plan keeps, from the worker's minute sweep); **[paying from the end of the trial built, locally verified against the stand-in]** (ADR-102: a trial ending at least 48 hours ahead is paid from its end; Checkout only authorises, Razorpay charges the first cycle when the trial ends, and the ended trial waits for that charge for the plan version's grace days); **[refunds of plan payments built, locally verified against the stand-in]** (ADR-103: platform owners refund part or all of a plan payment from the company's platform page with a reason; the worker asks Razorpay with an idempotency key and the request in the notes, refunds made in the Dashboard are recorded from the webhook or the daily reconciliation, the receipt and Billing show them, and the plan does not change); **[refund requests of plan payments built, locally verified against the stand-in]** (ADR-104: billing managers with a recent sign-in ask from a plan payment's receipt, with one daily limit shared with requests of service credit; platform owners approve, which starts the refund of ADR-103 with every check run again, or decline with a note the billing managers are emailed; `/platform/refunds` lists requests and every refund of plan payments across companies). Remaining: invoices (tax review), plan and add-on changes with proration, pausing,
+  the daily reconciliation); **[plan payment receipts built, locally verified]** (ADR-064: a receipt page per plan payment with the plan, add-ons, billing period and tax, not a tax invoice, linked from Billing and the payment email); **[rate change notices built, locally verified]** (ADR-065: billing managers emailed once when a published card for the company's billing currency takes effect within 7 days, with what it changes); **[emails when staff cancel a subscription built, locally verified]** (ADR-101: the company's billing managers are emailed once when a platform owner cancels its subscription, with HyFib's reason and what the plan keeps, from the worker's minute sweep); **[paying from the end of the trial built, locally verified against the stand-in]** (ADR-102: a trial ending at least 48 hours ahead is paid from its end; Checkout only authorises, Razorpay charges the first cycle when the trial ends, and the ended trial waits for that charge for the plan version's grace days); **[refunds of plan payments built, locally verified against the stand-in]** (ADR-103: platform owners refund part or all of a plan payment from the company's platform page with a reason; the worker asks Razorpay with an idempotency key and the request in the notes, refunds made in the Dashboard are recorded from the webhook or the daily reconciliation, the receipt and Billing show them, and the plan does not change); **[refund requests of plan payments built, locally verified against the stand-in]** (ADR-104: billing managers with a recent sign-in ask from a plan payment's receipt, with one daily limit shared with requests of service credit; platform owners approve, which starts the refund of ADR-103 with every check run again, or decline with a note the billing managers are emailed; `/platform/refunds` lists requests and every refund of plan payments across companies); **[choosing the plan to pay for built, locally verified against the stand-in]** (ADR-105, see P5-01: Billing → Choose a plan lists the versions platform owners offer with what each would cost with the company's add-ons and the tax, and what it holds less of); **[choosing add-ons built, locally verified against the stand-in]** (ADR-106, see P5-01: Billing → Add-ons with each add-on's price and bounds, and the total as the quantities change); **[a price list for visitors built, locally verified]** (ADR-107, see P5-01: `/pricing` with the offered versions, shown and hidden by platform owners); **[changing the plan or add-ons a subscription pays for, from the end of the paid period, built, locally verified against the stand-in]** (ADR-109, see P5-01: Billing → Change plan, a new subscription that follows the current one, and the next subscription on Billing and the platform company page); **[API request packs on the billing screens built, locally verified against the stand-in]** (ADR-110, see P5-01: the plan card with the limit the packs raise, Add-ons, Change plan, the payment card and receipts). Remaining: invoices (tax review), plan and add-on changes at once with proration, pausing,
   offers, Razorpay test-mode checks (RELEASE-CHECKLIST).
 - **P5-08 Public API** **[built, locally verified; sends through the Graph stand-in only]**
   (ADR-052): company API keys (SHA-256 only, scopes granted within the creator's permissions,
@@ -451,13 +494,79 @@ verification, app review, Embedded Signup configuration).
   built, locally verified]** (ADR-098: owners and administrators are emailed once at 80% of a key's
   own limit and once at the limit, in each period, and again after the limit changes); **[addresses
   for all keys built, locally verified]** (ADR-099: owners and administrators list up to 20 networks
-  every key of the company accepts requests from, on top of each key's own).
+  every key of the company accepts requests from, on top of each key's own); **[packs of extra API
+  requests built, locally verified against the stand-in]** (ADR-110, see P5-01: they raise the
+  company's monthly limit, never a key's own); **[custom fields and contact changes built, locally
+  verified]** (ADR-112: every contact the API returns carries the values of the company's custom
+  fields, typed; `GET /contact-fields` lists the fields; `POST /contacts` sets them on a new contact
+  and fills an existing one's empty ones; `PATCH /contacts/{id}` changes the name, email, field
+  values and tags of a contact under its row lock, each value checked strictly against its field's
+  type and a refusal saving nothing; the 50-tag limit now holds through `POST /contacts` too);
+  **[finding contacts built, locally verified]** (ADR-113: `GET /contacts` by email, tag and up to 5
+  custom field values, typed, all of which a contact must match; pages filtered by tag or field read
+  at most 2,000 contacts and never skip or repeat one); **[following contact changes built, locally
+  verified]** (ADR-114: `GET /contact-changes` reads every contact once, as it is now, in the order
+  its changes were saved (name, number, email, field values, tags, consent, added, erased), from the
+  start or from a cursor sealed to the company; changes are recorded by triggers in the transactions
+  that make them and read only once every transaction begun before them has finished, so following
+  the cursor misses none; the minute sweep deletes the records later changes replaced);
+  **[defining contact fields built, locally verified]** (ADR-115: a key with
+  `contact_fields.manage`, granted only by owners and administrators, adds, renames and deletes the
+  company's custom fields by key, as Settings does, through the same functions; key and type never
+  change; additions take turns under a lock, so the 50-field limit holds for members and keys at
+  once; renames are audited, in Settings too); **[following message changes built, locally
+  verified]** (ADR-116: `GET /message-changes` reads every message once, as it is now, in the order
+  its changes were saved (received or sent, its status, status time or error, its contact erased),
+  from the start or from a cursor sealed to the company and the feed; the trigger on messages moves
+  each message's one row to the transaction that changed it, so following the cursor misses no
+  status and nothing needs compacting); **[searching contacts with segment conditions built,
+  locally verified]** (ADR-117: `POST /contacts/search` finds contacts with segments' conditions,
+  compiled by segments' code: custom field comparisons, tags, consent, the creation day in the
+  company's time zone, source and calling code, all or any of them, on the pages `GET /contacts`
+  reads; refusals name the condition's part). **[Changing many conversations in one call built,
+  locally verified]** (ADR-120: `POST /conversations/update-many` assigns, moves, resolves or reopens
+  up to 100 conversations, each as `PATCH` changes one, all of them or none, locked in id order).
+  **[Changing many contacts in one call built, locally verified]** (ADR-122:
+  `POST /contacts/update-many` changes the name, email, custom field values and tags of up to 100
+  contacts, each as `PATCH` changes one, all of them or none, the fields locked first and the
+  contacts in id order).
+  **[Finding contacts by name built, locally verified]** (ADR-124: `name` on `GET /contacts` finds
+  contacts whose name contains a text whatever its case, as members' search does, the text taken as
+  written, on the windowed pages of the other filters; a request whose query string or body holds
+  the NUL character is refused with 422 naming where, instead of failing in the database).
+  **[Reading campaigns built, locally verified]** (ADR-125: a new reading scope, `campaigns.read`,
+  lists the company's campaigns newest first, in one status or all, and reads one with its results
+  counted when read as its page counts them: recipients by state, messages sent, delivered, read and
+  failed, replies, opt-outs, skip reasons and failure codes; counts only, no recipients, members or
+  costs; migration 0099).
+  **[Conversation and campaign conditions in contact searches built, locally verified]** (ADR-126:
+  `POST /contacts/search` takes segments' `last_message` condition with `conversations.read` and
+  `campaign` condition with `campaigns.read`, finding the contacts a segment with the same
+  conditions finds).
+  **[Name conditions in contact searches built, locally verified]** (ADR-143:
+  `POST /contacts/search` and segments take a `name` condition with a text field's comparisons, the
+  whole name compared whatever its case, `contains` taking the text as written, a name of spaces
+  only counted as none).
+  **[A campaign's recipients built, locally verified]** (ADR-127: `GET /campaigns/{id}/recipients`
+  lists a campaign's recipients with what happened to each one's message, with `campaigns.read` and
+  `contacts.read`, by the outcomes its results count, erased contacts left out).
+  **[Pausing and cancelling campaigns built, locally verified]** (ADR-128: a new writing scope,
+  `campaigns.stop`, granted by `campaigns.send`, pauses a scheduled or running campaign and cancels
+  one that has not finished, as members do, the key named in the campaign's history and the audit;
+  resuming stays with members; migration 0100).
+  **[What was left out of a message built, locally verified]** (ADR-132: every message says
+  `contentTooLarge` when WhatsApp sent more than a message may hold, so its content was not kept,
+  and `contactsLeftOut` when a contact card left contacts out; the same in `message.received`).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
-  assigning many conversations at once, media downloads, statuses changed since a time, starting or
-  stopping runs for many contacts in one call, bulk sends in one call, limits per endpoint,
-  availability per single endpoint (plans choose per scope since ADR-092). The one-argument key
-  lookup kept for rolling deploys (0051) is dropped (0074). Replaying many deliveries in one call
-  is built with P5-09 (ADR-095).
+  choosing conversations to change by a filter, media downloads, a contact card's contacts (Meta's
+  contact object is not confirmed), starting or stopping runs for many
+  contacts in one call, bulk sends in one call, changing a field's type, changing numbers, choosing
+  contacts to change by a filter, groups of conditions,
+  which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
+  resuming, approving, scheduling, creating and editing campaigns through the API, campaign
+  recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose
+  per scope since ADR-092). The one-argument key lookup kept for rolling deploys (0051) is dropped
+  (0074). Replaying many deliveries in one call is built with P5-09 (ADR-095).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers
@@ -489,11 +598,50 @@ verification, app review, Embedded Signup configuration).
   locally verified]** (ADR-095: every event whose deliveries to an endpoint that is on all failed
   since a chosen time, 500 at most per call, oldest first, each once, from Settings → Webhooks or
   `POST /webhook-endpoints/{id}/replay-failed`; events delivered or waiting, gone events and test
-  events left out; audited once per call). Remaining: filters beyond the event type (such as by
-  automation or status), custom headers, mutual TLS, fixed egress addresses, custom field changes,
-  delivery counts in campaign events, events for store orders, Payment Links and each step of a
-  run, `createdAt` finer than the millisecond, replays across endpoints or by event type, load
-  tests.
+  events left out; audited once per call). **[Custom field changes built, locally verified]**
+  (ADR-112: `contact.updated` also for a change of a custom field's value, whoever makes it, once per
+  contact and transaction; the contact carries its `fields`; a field's deletion or rename sends
+  nothing). **[Endpoint headers built, locally verified]** (ADR-118: up to 5 headers an endpoint's
+  receiver asks for, such as an `Authorization` header it issued, given in Settings or through the
+  API, sent with every attempt, test event and replay; values sealed and never shown, logged,
+  audited or exported; names HyFib or the transport sets refused). **[Message status filters built,
+  locally verified]** (ADR-119: an endpoint takes only the `message.status` statuses it chooses, in
+  Settings or through the API, or every status as before; applied where events are captured, so a
+  status no endpoint takes is not recorded). **[What a contact change changed built, locally
+  verified]** (ADR-121: `contact.updated` names what its transaction changed, `name`, `phone`,
+  `email`, `tags` and `fields.<key>`, never a value; null for events captured before). **[Contact
+  part filters built, locally verified]** (ADR-123: an endpoint takes `contact.updated` only for
+  the parts it chooses, `name`, `phone`, `email`, `tags` and `fields`, in Settings or through the
+  API, or every change as before; applied where events are captured, a later change in the
+  transaction queuing the endpoints it newly concerns). **[What was left out of a message built,
+  locally verified]** (ADR-132: `message.received` says `contentTooLarge` and `contactsLeftOut`,
+  as the API does; bodies are built when delivered, so replays of earlier events say them too).
+  **[Automation filters built, locally verified]** (ADR-145: an endpoint takes
+  `automation.run_started` and `automation.run_ended` only for the automations it chooses, up to
+  20 of the company's published automations, in Settings or through the API, or every
+  automation's runs as before; applied where events are captured, so a run no endpoint takes is not
+  recorded). **[Campaign status filters built, locally verified]** (ADR-146: an endpoint takes
+  `campaign.status_changed` only for the statuses a campaign reaches that it chooses, in Settings
+  or through the API, or every status as before; applied where events are captured, so a change no
+  endpoint takes is not recorded). **[Order status filters built, locally verified]** (ADR-147: an
+  endpoint takes `order.status_changed` only for the statuses an order reaches that it chooses,
+  `confirmed`, `awaiting_payment`, `paid`, `fulfilled` and `cancelled`, in Settings or through the
+  API, or every status as before; applied where events are captured, whoever changes the order).
+  **[Template status filters built, locally verified]** (ADR-148: an endpoint takes
+  `template.status_changed` only for the template statuses it chooses, the eleven the event
+  reports, in Settings or through the API, or every status as before; applied where events are
+  captured, whoever records the status). **[Conversation status filters built, locally
+  verified]** (ADR-149: an endpoint takes `conversation.status_changed` only for the statuses a
+  conversation reaches that it chooses, `open` or `resolved`, in Settings or through the API, or
+  every status as before; applied where events are captured). **[Campaign results in campaign events
+  built, locally verified]** (ADR-150: `campaign.status_changed` carries the campaign's results as
+  `GET /campaigns/{id}` counts them, counted when each event is delivered, so a retry or a replay
+  counts again; null while it is a draft; counts only, never costs). Remaining: filters for other
+  event types and on a message's or contact's values (such as by campaign, template, tag or field
+  key, or a run's trigger or outcome), which tags were added or removed, other authentication (OAuth
+  client credentials, headers computed per delivery), mutual TLS, fixed egress addresses, events for
+  store orders, Payment Links and each step of a run, `createdAt` finer than the millisecond,
+  replays across endpoints or by event type, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,
@@ -508,9 +656,25 @@ verification, app review, Embedded Signup configuration).
   verified]** (ADR-096: the worker's minute sweep records each queue's ready jobs and the oldest
   one's wait, shown on the Queues tab with the queue's limit; every platform administrator is
   emailed once each time a queue's oldest job waits past its limit, at most every 15 minutes, and
-  the console says when the worker stopped checking). Remaining: other alerts (companies' failing
-  integrations) and channels, trends, Meta's quality webhook, API request counts, exports, redrive
-  from the console, acknowledging issues, paging and rollups for many companies.
+  the console says when the worker stopped checking). **[Dead letter retries built, locally
+  verified]** (ADR-108: a platform administrator sends a dead letter's failed job back to its queue
+  once, with a reason, in the platform audit log; refused for unverified jobs, companies being
+  deleted, jobs pg-boss no longer keeps, queues that never retry or whose receipts have their own
+  retry, and work already waiting; needed for `template.submit`, whose work no sweep signals
+  again). **[Stranded work settled, locally verified]** (ADR-111: the minute sweep ends the work of
+  `channel.onboard`, `commerce.account` and `template.delete` dead letters in the company's scope,
+  unless a job for the same work waits or runs again: the number's setup fails with its step, the
+  keys' check fails, a deletion goes back to Meta's last status; the template sync keeps a deletion
+  while its job tries; deletions and key checks retry longer). **[Alerts for companies' failing
+  integrations built, locally verified]** (ADR-139: every platform administrator emailed once about
+  each failure the Integrations page lists, by kind and with counts only, at most every 15 minutes,
+  from the console's own list; a failure not listed for an hour is forgotten). **[Acknowledging
+  failing integrations built, locally verified]** (ADR-141: a platform administrator acknowledges a
+  failure Current failures lists with a note, shown with who and when to the other administrators
+  and kept in the platform audit log; replaced by a later note; refused once the failure recovered
+  or changed state; forgotten an hour after the failure stops being listed). Remaining: other alert
+  channels, trends, Meta's quality webhook (unconfirmed), API request counts, exports, assigning
+  failures and acknowledging the console's other lists, paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded
@@ -548,7 +712,11 @@ review; production rollout per RELEASE-CHECKLIST.
   automation HTTP step, the Flows data endpoint (P4-03) and outgoing webhooks (P5-09); imports
   must use it too. Remaining: a network
   egress policy as a second layer in deployment._
-- **SEC-4** Dual-key job signing for rotation without draining.
+- **SEC-4** ~~Dual-key job signing for rotation without draining.~~ Settled by ADR-135: a next key
+  is accepted before any instance signs with it, then the previous key is accepted while the
+  worker's minute sweep signs the queued jobs it signed again with the new one, so the job signing
+  key rotates in three deploys without draining a queue; Operations → Keys shows what each key still
+  signs.
 - **SEC-5** Hash-chained audit checkpoints exported to WORM storage.
 - **SEC-6** Media scanning pipeline (malware) before exposure.
 - **SEC-7** OpenTelemetry tracing/metrics, alert rules (queue lag, dead letters, error rates, auth
@@ -557,7 +725,31 @@ review; production rollout per RELEASE-CHECKLIST.
   `ops.step_up_verifications` for sensitive settings (billing, security).~~ Settled by ADR-056: a
   new sign-in within the last 15 minutes, which reuses the sign-in's rate limits, two-factor attempt
   limit and lockout instead of a second verification path.
-- **SEC-9** Per-user login history view.
-- **SEC-10** Keyring re-encryption job: re-encrypt every keyring ciphertext (provider tokens, HTTP
-  secrets, flow private keys, stored webhook bodies) under the primary key so an old key can be
-  removed (`Keyring.needsRotation` exists; the job does not).
+- **SEC-9** ~~Per-user login history view.~~ Settled by ADR-136: every completed sign-in (the
+  password step once two-factor has decided, an authenticator or backup code, the email
+  confirmation link) is a security event with its address, browser and method, and Account &
+  security lists each person's last 20; failed attempts are not listed.
+- **SEC-10** ~~Keyring re-encryption job: re-encrypt every keyring ciphertext (provider tokens,
+  HTTP secrets, flow private keys, stored webhook bodies) under the primary key so an old key can be
+  removed (`Keyring.needsRotation` exists; the job does not).~~ Settled by ADR-134: while a key
+  other than the primary is configured, the minute sweep seals every stored value (15 kinds) that
+  key sealed again with the primary key, in its company's scope, with a compare and set and without
+  moving a row's time; Operations → Keys shows what each key still seals.
+- **SEC-11** ~~Keep failed queries' parameters out of error logs. A query that fails with an error
+  the app does not map is logged whole by the API's and server actions' error logs, the worker's job
+  log and several webhook routes, and the driver's message repeats the query's parameters (names,
+  emails, message text), against the logger's rule; `errorClassAndCode` (class and SQLSTATE only)
+  exists and webhook delivery uses it. Found with ADR-124, whose check now keeps the NUL character
+  from reaching queries; a probe of members' contact search with it showed the search text in the
+  error's message.~~ Settled by ADR-129: `db.run` and the platform database's `run` replace a
+  driver's error with a `DatabaseQueryError` (SQLSTATE, the names PostgreSQL gave, its message only
+  where that quotes no values, and the frames), and every logger's `err` serializer does the same.
+- **SEC-12** ~~Bound inbound message content. A message's stored content may be at most 64 KB, and
+  a contact card or an interactive reply with an oversized field is stored whole, so one such
+  message fails its webhook receipt with every message and status delivered beside it (WhatsApp's
+  own limits keep real messages far below it). Found with ADR-130, whose test of a receipt failing
+  in the database uses one.~~ Settled by ADR-131: inbound content is bounded by construction under
+  the 64 KB a message holds (a contact card keeps the contacts that fit and counts the rest;
+  anything larger is kept as too large), a status's errors and pricing are kept within their
+  columns, and jsonb is written as JSON PostgreSQL stores (half of an emoji as U+FFFD), which also
+  kept long messages with emoji from failing their receipts.

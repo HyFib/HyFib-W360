@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { displayMoney } from '@w360/core';
-import { PLAN_INTERVAL_LABELS } from '@w360/domain';
+import { PLAN_INTERVAL_LABELS, PRICE_LIST_GAP_TEXT, priceListGaps } from '@w360/domain';
 import {
   Badge,
   Button,
@@ -18,7 +18,7 @@ import {
   TR,
   Table,
 } from '@w360/ui';
-import { DefaultTrialForm, PlanTaxForm } from '@/components/platform/plan-forms';
+import { DefaultTrialForm, PlanTaxForm, PriceListActions } from '@/components/platform/plan-forms';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
 
@@ -30,7 +30,7 @@ const TONE = { draft: 'neutral', published: 'success', retired: 'warning' } as c
 export default async function PlansPage() {
   const actor = await requirePlatformActor();
   const { planAdmin, razorpay } = await getRuntime();
-  const { plans, defaultTrialPlanId, planTaxBp } = await planAdmin.listPlans(actor);
+  const { plans, defaultTrialPlanId, planTaxBp, priceListShown } = await planAdmin.listPlans(actor);
   const isOwner = actor.role === 'platform_owner';
   const trialOptions = plans
     .filter((p) => p.status === 'published' && p.trialDays > 0)
@@ -39,6 +39,16 @@ export default async function PlansPage() {
       label: `${p.name} (${p.code} v${p.version}) · ${p.trialDays}-day trial`,
     }));
   const defaultTrial = plans.find((p) => p.id === defaultTrialPlanId);
+  // What keeps the price list from visitors, by the rule the public page applies (ADR-107).
+  const priceListMissing = priceListGaps({
+    shown: priceListShown,
+    subscriptionsEnabled: Boolean(razorpay?.subscriptionsEnabled),
+    taxBp: planTaxBp,
+    defaultTrialDays: defaultTrial ? defaultTrial.trialDays : null,
+    offeredPrices: plans
+      .filter((p) => p.status === 'published' && p.offeredAt)
+      .map((p) => p.priceMinor),
+  }).filter((gap) => gap !== 'hidden');
   return (
     // One column that never grows past the screen: on a phone the plans table scrolls in its card.
     <div className="grid grid-cols-1 gap-6">
@@ -93,6 +103,38 @@ export default async function PlansPage() {
         ) : null}
       </Card>
       <Card>
+        <CardHeader>
+          <CardTitle>Price list for visitors</CardTitle>
+          <CardDescription>
+            {!priceListShown
+              ? 'Hidden. Once shown, anyone can see the versions offered to companies, with their prices, what they include and their add-ons, at /pricing without signing in.'
+              : priceListMissing.length === 0
+                ? 'Shown: anyone can see the versions offered to companies, with their prices, what they include and their add-ons, at /pricing without signing in.'
+                : 'Shown, but visitors see nothing at /pricing yet.'}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3">
+          {priceListMissing.length > 0 ? (
+            <div className="grid gap-1 text-sm">
+              <p className="font-medium">What keeps it from visitors:</p>
+              <ul className="grid list-disc gap-1 pl-5">
+                {priceListMissing.map((gap) => (
+                  <li key={gap}>{PRICE_LIST_GAP_TEXT[gap]}</li>
+                ))}
+              </ul>
+            </div>
+          ) : priceListShown ? (
+            <Link
+              href="/pricing"
+              className="justify-self-start text-sm text-primary underline-offset-4 hover:underline"
+            >
+              Open the price list
+            </Link>
+          ) : null}
+          {isOwner ? <PriceListActions shown={priceListShown} /> : null}
+        </CardContent>
+      </Card>
+      <Card>
         <CardContent className="p-0">
           {plans.length === 0 ? (
             <div className="p-6">
@@ -142,6 +184,7 @@ export default async function PlansPage() {
                         {p.id === defaultTrialPlanId ? (
                           <Badge tone="info">default trial</Badge>
                         ) : null}
+                        {p.offeredAt ? <Badge tone="info">offered to companies</Badge> : null}
                       </div>
                     </TD>
                   </TR>

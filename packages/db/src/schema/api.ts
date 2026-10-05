@@ -1,4 +1,5 @@
-import { cidr, integer, jsonb, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { cidr, integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { jsonb } from './columns';
 import { appSchema } from './tenancy';
 
 const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
@@ -8,11 +9,14 @@ export const API_SCOPES = [
   'templates.read',
   'contacts.read',
   'contacts.write',
+  'contact_fields.manage',
   'messages.send',
   'messages.send_marketing',
   'messages.reply',
   'conversations.read',
   'conversations.write',
+  'campaigns.read',
+  'campaigns.stop',
   'automations.start',
   'webhooks.manage',
 ] as const;

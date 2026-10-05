@@ -110,6 +110,7 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
     sellsSeats: p.seatPriceMinor !== null,
     sellsNumbers: p.numberPriceMinor !== null,
     sellsRunPacks: p.runPackSize !== null,
+    sellsApiRequestPacks: p.apiRequestPackSize !== null,
   });
   const options: AssignablePlanOption[] = published.map(option);
   if (planView.plan && !options.some((o) => o.id === planView.plan?.id))
@@ -400,6 +401,7 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                   extraSeats: state.extraSeats,
                   extraNumbers: state.extraNumbers,
                   runPacks: state.runPacks,
+                  apiRequestPacks: state.apiRequestPacks,
                 }}
                 options={options}
               />
@@ -445,7 +447,12 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                   {planView.subscription.startsAt && planView.subscription.paidCount === 0 ? (
                     <div>
                       <dt className="text-muted-foreground">First charge</dt>
-                      <dd>{formatDate(planView.subscription.startsAt, tz)}, when the trial ends</dd>
+                      <dd>
+                        {formatDate(planView.subscription.startsAt, tz)}
+                        {planView.subscription.followsSubscriptionId
+                          ? ', when the previous paid period ends'
+                          : ', when the trial ends'}
+                      </dd>
                     </div>
                   ) : null}
                   <div>
@@ -469,6 +476,25 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                     </div>
                   ) : null}
                 </dl>
+              ) : null}
+              {planView.nextSubscription?.startsAt ? (
+                <div className="grid gap-1 rounded-md border border-border p-3">
+                  <p className="font-medium">
+                    From {formatDate(planView.nextSubscription.startsAt, tz)}:{' '}
+                    {planView.nextSubscription.planName},{' '}
+                    {displayMoney(BigInt(planView.nextSubscription.amountMinor), 'INR')}{' '}
+                    {PLAN_INTERVAL_LABELS[planView.nextSubscription.intervalMonths] ?? ''} (
+                    {PLAN_SUBSCRIPTION_STATUS_LABELS[planView.nextSubscription.status]})
+                  </p>
+                  <p className="text-muted-foreground">
+                    The company changes its plan from the end of the paid period (ADR-109): this
+                    subscription follows the current one, which ends then. Cancelling (below)
+                    cancels both.
+                  </p>
+                  <p className="break-all font-mono text-xs">
+                    {planView.nextSubscription.providerSubscriptionId ?? '—'}
+                  </p>
+                </div>
               ) : null}
               {planView.payments.length > 0 ? (
                 <Table>

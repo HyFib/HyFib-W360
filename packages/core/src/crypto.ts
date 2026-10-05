@@ -62,6 +62,11 @@ export class Keyring {
     return this.primaryKeyId;
   }
 
+  /** Every configured key id, the primary first (key ids only, never the keys). */
+  get keyIds(): string[] {
+    return [this.primaryKeyId, ...[...this.keys.keys()].filter((kid) => kid !== this.primaryKeyId)];
+  }
+
   encrypt(plaintext: string | Buffer, aad: string): string {
     const key = this.keys.get(this.primaryKeyId);
     if (!key) throw new Error('Primary encryption key unavailable');

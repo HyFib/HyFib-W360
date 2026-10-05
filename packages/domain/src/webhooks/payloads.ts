@@ -24,8 +24,10 @@ import {
   type WebhookEventType,
 } from '@w360/db';
 import { apiContactColumns, apiContactSchema, toApiContact } from '../api/contact-view';
+import { campaignAnalytics, campaignResultsSchema, toCampaignResults } from '../campaigns/results';
 import { COMMERCE_LIMITS } from '../commerce/model';
 import { findAnsweredMessageId } from '../messaging/reply-context';
+import { WEBHOOK_MESSAGE_STATUSES } from './model';
 
 /**
  * The JSON bodies of outgoing webhooks (ADR-053, ADR-074, ADR-078, ADR-085, ADR-087). The zod schemas
@@ -57,17 +59,6 @@ function envelope<T extends string, D extends z.ZodType>(type: T, data: D) {
   });
 }
 
-export const WEBHOOK_MESSAGE_STATUSES = [
-  'accepted',
-  'sent',
-  'delivered',
-  'read',
-  'played',
-  'failed',
-  'canceled',
-  'unknown_outcome',
-] as const;
-
 /** The reply a contact tapped, as webhooks and the API give it (ADR-080 added type and description). */
 export const tappedReplySchema = z
   .object({
@@ -85,6 +76,22 @@ export const tappedReplySchema = z
   .describe('The button or list reply the contact tapped.');
 
 export type TappedReply = z.infer<typeof tappedReplySchema>;
+
+/** Whether an inbound message's content was too large to keep (ADR-131, ADR-132). */
+export const contentTooLargeSchema = z
+  .boolean()
+  .describe(
+    'True when WhatsApp sent more than a message may hold (64 KB), so its content was not kept: text, reply and mimeType are null. False for outbound messages.',
+  );
+
+/** How many contacts an inbound contact card left out (ADR-131, ADR-132). */
+export const contactsLeftOutSchema = z
+  .number()
+  .int()
+  .min(0)
+  .describe(
+    'For a contact card: how many of its contacts were left out because the card was larger than a message may hold; 0 otherwise. The cards’ contacts are not given.',
+  );
 
 export const messageReceivedPayloadSchema = envelope(
   'message.received',
@@ -108,6 +115,8 @@ export const messageReceivedPayloadSchema = envelope(
           'The id of the message this one answers: the message the contact quoted, the message a reaction is for, or the message whose button or row was tapped. Null when there is none or it is not in the conversation.',
         ),
       mimeType: z.string().nullable().describe('For media messages (the media is not attached).'),
+      contentTooLarge: contentTooLargeSchema,
+      contactsLeftOut: contactsLeftOutSchema,
       receivedAt: z.iso.datetime(),
     }),
     conversation: z.object({ id: z.uuid() }),
@@ -256,9 +265,20 @@ export const contactCreatedPayloadSchema = envelope(
   'contact.created',
   z.object({ contact: webhookContactSchema }),
 );
+/** A part of the contact a change can change, in the API contact's names (ADR-121). */
+export const CONTACT_CHANGE_PART_RE = /^(name|phone|email|tags|fields\.[a-z][a-z0-9_]{0,39})$/;
+
 export const contactUpdatedPayloadSchema = envelope(
   'contact.updated',
-  z.object({ contact: webhookContactSchema }),
+  z.object({
+    contact: webhookContactSchema,
+    changes: z
+      .array(z.string().regex(CONTACT_CHANGE_PART_RE))
+      .nullable()
+      .describe(
+        'What the change changed, sorted, once each: `name`, `phone`, `email`, `tags` (a tag added or removed), and `fields.<key>` for each custom field whose value changed (GET /contact-fields). Names only: the contact carries the values as they are now. Null for an event captured before HyFib recorded what changed.',
+      ),
+  }),
 );
 export const contactErasedPayloadSchema = envelope(
   'contact.erased',
@@ -401,7 +421,7 @@ const webhookCampaignSchema = z.object({
     .enum(CAMPAIGN_PAUSE_REASONS)
     .nullable()
     .describe(
-      'Why it paused, when the status is paused: a member paused it (manual), the spending or message cap was reached, the template is no longer approved, the number is not active, the member whose authority it runs under left or lost the permission, or no rate card is published for its spending cap. Null otherwise.',
+      'Why it paused, when the status is paused: a member paused it (manual), an API key did (api), the spending or message cap was reached, the template is no longer approved, the number is not active, the member whose authority it runs under left or lost the permission, or no rate card is published for its spending cap. Null otherwise.',
     ),
   completionReason: z
     .enum(CAMPAIGN_COMPLETION_REASONS)
@@ -424,6 +444,11 @@ const webhookCampaignSchema = z.object({
     .number()
     .int()
     .describe('Recipients skipped: no consent, suppressed, erased, over a cap and the like.'),
+  results: campaignResultsSchema
+    .nullable()
+    .describe(
+      'Its results as GET /campaigns/{id} counts them, counted when this request was built (the t of its W360-Signature), so a retry or a replay counts again. Null while it is a draft, which has no recipients yet.',
+    ),
 });
 
 export const campaignStatusChangedPayloadSchema = envelope(
@@ -452,6 +477,8 @@ export interface StoredWebhookEvent {
   templateId: string | null;
   status: string | null;
   detail: Record<string, unknown>;
+  /** What a contact.updated event's transaction changed (ADR-121); null for other events. */
+  contactChanges: string[] | null;
   occurredAt: Date;
 }
 
@@ -472,6 +499,8 @@ export function inboundSummary(
   reply: TappedReply;
   mimeType: string | null;
 } {
+  // Content larger than a message may hold was kept without it (ADR-131): nothing to read.
+  if (content.tooLarge === true) return { text: null, reply: null, mimeType: null };
   switch (type) {
     case 'text':
       return { text: str(content.text), reply: null, mimeType: null };
@@ -515,6 +544,23 @@ export function inboundSummary(
     default:
       return { text: null, reply: null, mimeType: null };
   }
+}
+
+/**
+ * What was left out of an inbound message's content (ADR-132): whether WhatsApp sent more than a
+ * message may hold, so its content was not kept, and how many contacts a contact card left out
+ * (ADR-131).
+ */
+export function inboundOmissions(
+  type: string,
+  content: Record<string, unknown>,
+): { contentTooLarge: boolean; contactsLeftOut: number } {
+  const leftOut = type === 'contacts' ? content.omittedContacts : undefined;
+  return {
+    contentTooLarge: content.tooLarge === true,
+    contactsLeftOut:
+      typeof leftOut === 'number' && Number.isSafeInteger(leftOut) && leftOut > 0 ? leftOut : 0,
+  };
 }
 
 async function contactOf(tx: Tx, tenantId: string, contactId: string | null) {
@@ -616,6 +662,7 @@ async function webhookContactOf(tx: Tx, tenantId: string, contactId: string | nu
     phone: null,
     email: null,
     tags: [],
+    fields: {},
     consent: { marketing: null, utility: null },
     source: row.source,
     createdAt: row.createdAt.toISOString(),
@@ -710,6 +757,7 @@ async function campaignOf(tx: Tx, tenantId: string, campaignId: string | null) {
     .select({
       id: campaigns.id,
       name: campaigns.name,
+      status: campaigns.status,
       templateId: campaigns.templateId,
       templateName: messageTemplates.name,
       scheduledAt: campaigns.scheduledAt,
@@ -856,7 +904,10 @@ export async function buildWebhookPayload(
     case 'contact.erased': {
       const contact = await webhookContactOf(tx, tenantId, event.contactId);
       if (!contact) throw new WebhookEventGoneError();
-      return { ...base, data: { contact } };
+      // What changed as captured (ADR-121); the contact as it is now.
+      return event.type === 'contact.updated'
+        ? { ...base, data: { contact, changes: event.contactChanges } }
+        : { ...base, data: { contact } };
     }
     case 'automation.run_started':
     case 'automation.run_ended': {
@@ -918,9 +969,13 @@ export async function buildWebhookPayload(
     }
     case 'campaign.status_changed': {
       // The status, the one before it and why it paused or completed as captured; the rest as it
-      // is now.
+      // is now, its results counted now in one statement (ADR-150).
       const campaign = await campaignOf(tx, tenantId, str(event.detail.campaignId));
       if (!campaign) throw new WebhookEventGoneError();
+      const results =
+        campaign.status === 'draft'
+          ? null
+          : toCampaignResults(await campaignAnalytics(tx, tenantId, campaign.id));
       return {
         ...base,
         data: {
@@ -940,6 +995,7 @@ export async function buildWebhookPayload(
             audienceCount: campaign.audienceCount,
             queuedCount: campaign.queuedCount,
             skippedCount: campaign.skippedCount,
+            results,
           },
           channel: campaign.channelId
             ? { id: campaign.channelId, phone: campaign.channelPhone ?? null }
@@ -962,6 +1018,7 @@ export async function buildWebhookPayload(
               id: event.messageId,
               type: message.type,
               ...inboundSummary(message.type, message.content),
+              ...inboundOmissions(message.type, message.content),
               replyTo: await findAnsweredMessageId(tx, tenantId, {
                 conversationId: message.conversationId,
                 channelAccountId: message.channelId,

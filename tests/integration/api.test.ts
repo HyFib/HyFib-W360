@@ -3,6 +3,7 @@ import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/co
 import { QUEUES } from '@w360/contracts';
 import { authorizedTenantScope, channelAccounts, sql, whatsappAccounts } from '@w360/db';
 import {
+  API_LIMITS,
   API_KEY_LIMITS,
   API_KEY_REMINDER_DAYS,
   API_MESSAGE_FEED_WINDOW,
@@ -31,6 +32,7 @@ import {
   apiSendMessage,
   apiSendTemplate,
   apiUpdateConversation,
+  apiUpdateManyConversations,
   apiStartAutomationRun,
   apiStopAutomationRun,
   authenticateApiRequest,
@@ -2817,6 +2819,8 @@ describe('conversation reads (ADR-072)', () => {
       reply: null,
       replyTo: null,
       mimeType: null,
+      contentTooLarge: false,
+      contactsLeftOut: 0,
       templateId: null,
       templateName: null,
       sentBy: null,
@@ -2901,6 +2905,72 @@ describe('conversation reads (ADR-072)', () => {
     );
     expect(onePerPage.flat().map((m) => m.id)).toEqual(newestFirst);
     expect(newestFirst).toHaveLength(11);
+  });
+
+  it('say which messages were too large to keep and how many contacts a card left out (ADR-132)', async () => {
+    const c = await fx.company();
+    const reader = await apiKey(c, ['conversations.read']);
+    const waId = '919811100072';
+    // A system update larger than a message may hold, kept as too large (ADR-131).
+    const wide = '𝒳'.repeat(2048); // 4,096 code units, 8 KB as UTF-8
+    const system = Object.fromEntries(
+      [
+        'type',
+        'body',
+        'user_id',
+        'parent_user_id',
+        'previous_user_id',
+        'previous_parent_user_id',
+        'wa_id',
+        'new_wa_id',
+      ].map((key) => [key, wide]),
+    );
+    // A contact card of 25 contacts of about 4 KB, which keeps the first that fit.
+    const card = Array.from({ length: 25 }, (_, i) => ({
+      name: { formatted_name: `Contact ${i}` },
+      addresses: [{ street: 'x'.repeat(4_000), city: 'Pune' }],
+    }));
+    await inbound(c, waId, [
+      { text: 'Hello' },
+      { type: 'system', extra: { system } },
+      { type: 'contacts', extra: { contacts: card } },
+    ]);
+    const conv = await conversationOf(c, waId);
+    const [stored] = await fx.query<{ omitted: number }>(
+      `SELECT (content->>'omittedContacts')::int AS omitted FROM app.messages
+        WHERE conversation_id = $1 AND type = 'contacts'`,
+      [conv.id],
+    );
+    expect(stored!.omitted).toBeGreaterThan(0);
+
+    const { data } = await apiListConversationMessages(deps(), reader.ctx, conv.id, {});
+    const byType = new Map(data.map((m) => [m.type, m]));
+    expect(byType.get('system')).toMatchObject({
+      text: null,
+      reply: null,
+      mimeType: null,
+      contentTooLarge: true,
+      contactsLeftOut: 0,
+    });
+    expect(byType.get('contacts')).toMatchObject({
+      text: null,
+      contentTooLarge: false,
+      contactsLeftOut: stored!.omitted,
+    });
+    expect(byType.get('text')).toMatchObject({
+      text: 'Hello',
+      contentTooLarge: false,
+      contactsLeftOut: 0,
+    });
+    // The feed across conversations (this company has only this one) says the same.
+    const feed = await apiListMessages(deps(), reader.ctx, {});
+    expect(feed.data.map((m) => [m.type, m.contentTooLarge, m.contactsLeftOut]).sort()).toEqual(
+      [
+        ['contacts', false, stored!.omitted],
+        ['system', true, 0],
+        ['text', false, 0],
+      ].sort(),
+    );
   });
 
   it('leave out erased contacts and other companies, and check what they are asked', async () => {
@@ -3659,6 +3729,8 @@ describe('assigning conversations (ADR-093)', () => {
       apiUpdateConversation(deps(), writer.ctx, erased.id, { assigneeId: agent.membership.id }),
       'not_found',
     );
+    expect((await conversationRow(erased.id)).assigned).toBeNull();
+    expect(await changes(c, erased.id)).toEqual([]);
     expect(await conversationRow(conv.id)).toEqual(before);
   });
 
@@ -3716,6 +3788,300 @@ describe('assigning conversations (ADR-093)', () => {
     );
     expect(await conversationRow(conv.id)).toEqual(before);
     expect(await changes(c, conv.id)).toEqual([]);
+  });
+
+  it('change many conversations in one call, each as PATCH changes it, in the order given, audited as the key (ADR-120)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const supervisor = await joined(c, 'supervisor', 'Sam Supervisor');
+    const { teamId: support } = await teams().createTeam(owner, {
+      name: 'Support',
+      assignment: 'round_robin',
+      memberIds: [agent.membership.id, supervisor.membership.id],
+    });
+    await teams().setAvailability(agent, { available: true });
+    await teams().setAvailability(supervisor, { available: true });
+    const writer = await apiKey(c, ['conversations.write'], 'Bulk router');
+    const many = (body: unknown) => apiUpdateManyConversations(deps(), writer.ctx, body);
+    const [first, second, third] = [
+      await conversationWith(c, '919811100301'),
+      await conversationWith(c, '919811100302'),
+      await conversationWith(c, '919811100303'),
+    ];
+
+    // Assigned to one member, answered in the order given.
+    const assigned = await many({
+      conversationIds: [third.id, first.id, second.id],
+      assigneeId: supervisor.membership.id,
+    });
+    expect(assigned.map((v) => [v.id, v.assigneeId])).toEqual([
+      [third.id, supervisor.membership.id],
+      [first.id, supervisor.membership.id],
+      [second.id, supervisor.membership.id],
+    ]);
+    for (const conv of [first, second, third]) {
+      expect((await changes(c, conv.id)).map((a) => [a.action, a.actor_type, a.actor_id])).toEqual([
+        ['conversation.assigned', 'api_key', writer.id],
+      ]);
+    }
+    const correlation = new Set(
+      (await Promise.all([first, second, third].map((v) => changes(c, v.id)))).map(
+        (rows) => rows[0]?.correlation_id,
+      ),
+    );
+    expect(correlation).toEqual(new Set([writer.ctx.requestId]));
+
+    // Resolved together; the same call again changes nothing.
+    const ids = [first.id, second.id, third.id];
+    expect((await many({ conversationIds: ids, status: 'resolved' })).map((v) => v.status)).toEqual(
+      ['resolved', 'resolved', 'resolved'],
+    );
+    const audited = async () =>
+      (await Promise.all(ids.map((id) => changes(c, id)))).reduce((n, rows) => n + rows.length, 0);
+    const before = await audited();
+    const versions = await Promise.all(ids.map(async (id) => (await conversationRow(id)).version));
+    await many({ conversationIds: ids, status: 'resolved' });
+    expect(await audited()).toBe(before);
+    expect(await Promise.all(ids.map(async (id) => (await conversationRow(id)).version))).toEqual(
+      versions,
+    );
+
+    // Moved into a round-robin team, open and unassigned ones go out in turn, in the order given.
+    const [fourth, fifth] = [
+      await conversationWith(c, '919811100304'),
+      await conversationWith(c, '919811100305'),
+    ];
+    const moved = await many({ conversationIds: [fifth.id, fourth.id], teamId: support });
+    expect(moved.map((v) => [v.id, v.teamId, v.assigneeId])).toEqual([
+      [fifth.id, support, agent.membership.id],
+      [fourth.id, support, supervisor.membership.id],
+    ]);
+    for (const conv of [fourth, fifth]) {
+      expect((await changes(c, conv.id)).map((a) => a.action)).toEqual([
+        'conversation.team_changed',
+        'conversation.routed',
+      ]);
+    }
+
+    // The most a call takes.
+    const hundred: string[] = [];
+    for (let i = 0; i < API_LIMITS.conversationsPerChange; i++) {
+      hundred.push((await conversationWith(c, `9198122${String(i).padStart(5, '0')}`)).id);
+    }
+    const all = await many({ conversationIds: hundred, status: 'resolved' });
+    expect(all.map((v) => v.id)).toEqual(hundred);
+    expect(new Set(all.map((v) => v.status))).toEqual(new Set(['resolved']));
+  });
+
+  it('refuse the whole call, changing nothing, for an id that names none of the company’s conversations, a member or a team it may not take (ADR-120)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const marketer = await fx.ctx(c, c.marketer);
+    const other = await fx.company();
+    const { teamId: foreign } = await teams().createTeam(await fx.ctx(other, other.owner), {
+      name: 'Foreign',
+    });
+    const writer = await apiKey(c, ['conversations.write']);
+    const theirs = await apiKey(other, ['conversations.write']);
+    const kept = await conversationWith(c, '919811100311');
+    const alsoKept = await conversationWith(c, '919811100312');
+    const theirConversation = await conversationWith(other, '919811100313');
+    const erased = await conversationWith(c, '919811100314');
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(owner, {
+      contactId: erased.contact_id,
+      suppress: false,
+    });
+    const rows = async () => Promise.all([kept.id, alsoKept.id].map((id) => conversationRow(id)));
+    const before = await rows();
+    const refused = async (ctx: typeof writer.ctx, body: unknown, path: string) => {
+      const error = await expectAppError(
+        apiUpdateManyConversations(deps(), ctx, body),
+        'validation_failed',
+      );
+      expect(isAppError(error) && error.issues).toEqual([{ path, message: expect.any(String) }]);
+    };
+    const pair = [kept.id, alsoKept.id];
+    await refused(
+      writer.ctx,
+      { conversationIds: [...pair, theirConversation.id], status: 'resolved' },
+      'conversationIds.2',
+    );
+    await refused(
+      writer.ctx,
+      { conversationIds: [kept.id, erased.id, alsoKept.id], status: 'resolved' },
+      'conversationIds.1',
+    );
+    await refused(
+      writer.ctx,
+      { conversationIds: [uuidv7(), ...pair], assigneeId: agent.membership.id },
+      'conversationIds.0',
+    );
+    await refused(
+      writer.ctx,
+      { conversationIds: pair, assigneeId: marketer.membership.id },
+      'assigneeId',
+    );
+    await refused(
+      writer.ctx,
+      { conversationIds: pair, status: 'resolved', teamId: foreign },
+      'teamId',
+    );
+    await refused(theirs.ctx, { conversationIds: pair, status: 'resolved' }, 'conversationIds.0');
+    await refused(
+      writer.ctx,
+      { conversationIds: [kept.id, kept.id], status: 'resolved' },
+      'conversationIds',
+    );
+    expect(await rows()).toEqual(before);
+    for (const id of pair) expect(await changes(c, id)).toEqual([]);
+    await expectAppError(
+      apiUpdateManyConversations(deps(), (await apiKey(c, ['conversations.read'])).ctx, {
+        conversationIds: pair,
+        status: 'resolved',
+      }),
+      'forbidden',
+    );
+  });
+
+  it('take turns with calls changing the same conversations, locking them in id order (ADR-120)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const writer = await apiKey(c, ['conversations.write']);
+    const [low, middle, high] = (
+      await Promise.all(
+        ['919811100321', '919811100322', '919811100323'].map((waId) => conversationWith(c, waId)),
+      )
+    )
+      .map((v) => v.id)
+      .sort() as [string, string, string];
+    const holder = await fx.dbs.adminPool.connect();
+    let calls: Promise<unknown[]> | undefined;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT id FROM app.conversations WHERE id = $1 FOR UPDATE', [middle]);
+      // Both wait: one for the held conversation, the other for one the first has locked. Locked
+      // in the order given instead, the second would hold the last one while waiting, and the two
+      // would deadlock once the conversation is let go.
+      calls = Promise.all(
+        [
+          { conversationIds: [low, middle, high], assigneeId: agent.membership.id },
+          { conversationIds: [high, middle, low], assigneeId: owner.membership.id },
+        ].map((body) =>
+          apiUpdateManyConversations(deps(), writer.ctx, body).then(
+            () => 'changed',
+            (error: unknown) => (isAppError(error) ? error.code : String(error)),
+          ),
+        ),
+      );
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await fx.query<{ n: number }>(
+            `SELECT count(*)::int AS n FROM pg_stat_activity
+              WHERE cardinality(pg_blocking_pids(pid)) > 0`,
+          );
+          if (waiting!.n < 2) throw new Error('both calls are not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+    } finally {
+      await holder.query('COMMIT');
+      holder.release();
+    }
+    expect(await calls).toEqual(['changed', 'changed']);
+    const assignees = await Promise.all(
+      [low, middle, high].map(async (id) => (await conversationRow(id)).assigned),
+    );
+    expect(new Set(assignees).size).toBe(1);
+  });
+
+  it('wait for a member being suspended or a team being deleted, locking in the order they do, then refuse them (ADR-120)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const { teamId: sales } = await teams().createTeam(owner, { name: 'Sales' });
+    const writer = await apiKey(c, ['conversations.write']);
+    const outcome = (body: unknown) =>
+      apiUpdateManyConversations(deps(), writer.ctx, body).then(
+        () => 'changed',
+        (error: unknown) =>
+          isAppError(error) ? (error.issues?.[0]?.path ?? error.code) : String(error),
+      );
+
+    /** Runs `first` in another transaction, the call while it holds its locks, then `then`. */
+    async function race(
+      first: (q: (sql: string, values: unknown[]) => Promise<unknown>) => Promise<void>,
+      body: unknown,
+      then: (q: (sql: string, values: unknown[]) => Promise<unknown>) => Promise<void>,
+    ) {
+      const other = await fx.dbs.adminPool.connect();
+      const q = (sql: string, values: unknown[]) => other.query(sql, values);
+      let call: Promise<unknown> | undefined;
+      try {
+        await other.query('BEGIN');
+        await first(q);
+        const [held] = (await other.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+        call = outcome(body);
+        await vi.waitFor(
+          async () => {
+            const [waiting] = await fx.query<{ n: number }>(
+              'SELECT count(*)::int AS n FROM pg_stat_activity a WHERE $1 = ANY (pg_blocking_pids(a.pid))',
+              [held!.pid],
+            );
+            if (waiting!.n < 1) throw new Error('the call is not waiting yet');
+          },
+          { timeout: 4_000, interval: 20 },
+        );
+        // The other transaction finishes without waiting for the call, which holds nothing it
+        // needs: locked the other way round, the two would deadlock here.
+        await then(q);
+      } finally {
+        await other.query('COMMIT');
+        other.release();
+      }
+      return call;
+    }
+
+    // A suspension locks the member, then releases the member's conversations.
+    const assigned = await conversationWith(c, '919811100331');
+    const waiting = await conversationWith(c, '919811100332');
+    await apiUpdateConversation(deps(), writer.ctx, assigned.id, {
+      assigneeId: agent.membership.id,
+    });
+    expect(
+      await race(
+        (q) =>
+          q(`UPDATE app.memberships SET status = 'suspended' WHERE id = $1`, [
+            agent.membership.id,
+          ]).then(() => undefined),
+        { conversationIds: [assigned.id, waiting.id], assigneeId: agent.membership.id },
+        (q) =>
+          q('UPDATE app.conversations SET assigned_membership_id = NULL WHERE id = $1', [
+            assigned.id,
+          ]).then(() => undefined),
+      ),
+    ).toBe('assigneeId');
+    expect((await conversationRow(assigned.id)).assigned).toBeNull();
+    expect((await conversationRow(waiting.id)).assigned).toBeNull();
+
+    // A team's deletion releases its conversations, then deletes the team.
+    const inSales = await conversationWith(c, '919811100333');
+    const elsewhere = await conversationWith(c, '919811100334');
+    await apiUpdateConversation(deps(), writer.ctx, inSales.id, { teamId: sales });
+    expect(
+      await race(
+        (q) =>
+          q('UPDATE app.conversations SET team_id = NULL WHERE team_id = $1', [sales]).then(
+            () => undefined,
+          ),
+        { conversationIds: [inSales.id, elsewhere.id], teamId: sales },
+        (q) => q('DELETE FROM app.teams WHERE id = $1', [sales]).then(() => undefined),
+      ),
+    ).toBe('teamId');
+    expect((await conversationRow(inSales.id)).team_id).toBeNull();
+    expect((await conversationRow(elsewhere.id)).team_id).toBeNull();
   });
 });
 

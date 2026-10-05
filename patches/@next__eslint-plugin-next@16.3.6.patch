@@ -1,0 +1,33 @@
+diff --git a/dist/utils/get-root-dirs.js b/dist/utils/get-root-dirs.js
+index 47108c943514a1d7e686c5eb18aad00a59963c83..bc0ec8abd232146d2341ffd11caa4a9b2cbb16dd 100644
+--- a/dist/utils/get-root-dirs.js
++++ b/dist/utils/get-root-dirs.js
+@@ -8,12 +8,25 @@ Object.defineProperty(exports, "getRootDirs", {
+         return getRootDirs;
+     }
+ });
+-var _fastglob = require("fast-glob");
++var _fs = require("fs");
+ /**
+  * Process a Next.js root directory glob.
++ *
++ * HyFib W360 patch (docs/DECISIONS.md ADR-142): Node's fs.globSync instead of fast-glob, whose
++ * micromatch pulls in braces (GHSA-vfj7-8cjw-p6xm, no patched release). It keeps fast-glob's
++ * result for this call: the matching directories, as the pattern names them (relative or
++ * absolute), with the pattern's trailing slash. One difference: a `**` does not follow symbolic
++ * links to directories.
+  */ var processRootDir = function(rootDir) {
+-    return (0, _fastglob.globSync)(rootDir.replace(/\\/g, '/'), {
+-        onlyDirectories: true
++    var pattern = rootDir.replace(/\\/g, '/');
++    var trailingSlash = pattern.length > 1 && pattern.endsWith('/') ? '/' : '';
++    return _fs.globSync(pattern).filter(function(match) {
++        var stats = _fs.statSync(match, {
++            throwIfNoEntry: false
++        });
++        return stats !== undefined && stats.isDirectory();
++    }).map(function(dir) {
++        return dir.replace(/\\/g, '/') + trailingSlash;
+     });
+ };
+ var getRootDirs = function(context) {

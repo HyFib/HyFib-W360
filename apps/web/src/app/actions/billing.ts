@@ -201,6 +201,57 @@ export async function updateAutoRechargeAction(
   });
 }
 
+/** Chooses the share of a monthly limit at which the company is warned (ADR-144). */
+export async function setUsageWarningAction(
+  slug: string,
+  percent: number,
+): Promise<ActionResult<{ percent: number }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { plans } = await getRuntime();
+    const result = await plans.setUsageWarningPercent(ctx, { percent }, await requestMeta());
+    refresh();
+    return { percent: result.percent };
+  });
+}
+
+/** Puts the company on a plan version HyFib offers, to pay for it (ADR-105). */
+export async function choosePlanAction(
+  slug: string,
+  input: { planId: string },
+): Promise<ActionResult<{ changed: boolean; planName: string }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { planChoices } = await getRuntime();
+    const result = await planChoices.choose(ctx, { planId: input.planId }, await requestMeta());
+    refresh();
+    return { changed: result.changed, planName: result.planName };
+  });
+}
+
+/** Sets the add-ons of the company's plan version, to pay for them with it (ADR-106). */
+export async function chooseAddOnsAction(
+  slug: string,
+  input: { extraSeats: string; extraNumbers: string; runPacks: string; apiRequestPacks: string },
+): Promise<ActionResult<{ changed: boolean; totalMinor: number | null }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { planAddOns } = await getRuntime();
+    const result = await planAddOns.choose(
+      ctx,
+      {
+        extraSeats: String(input.extraSeats ?? ''),
+        extraNumbers: String(input.extraNumbers ?? ''),
+        runPacks: String(input.runPacks ?? ''),
+        apiRequestPacks: String(input.apiRequestPacks ?? ''),
+      },
+      await requestMeta(),
+    );
+    refresh();
+    return { changed: result.changed, totalMinor: result.quote?.totalMinor ?? null };
+  });
+}
+
 /** Starts paying for the plan (ADR-063): the browser then opens Checkout for the subscription. */
 export async function startPlanSubscriptionAction(
   slug: string,
@@ -209,6 +260,39 @@ export async function startPlanSubscriptionAction(
     const ctx = await tenantForAction(slug);
     const { planPayments } = await getRuntime();
     return planPayments.start(ctx, await requestMeta());
+  });
+}
+
+/**
+ * Changes the plan the company pays for from the end of the paid period (ADR-109): the current
+ * subscription ends with the period, and the browser then opens Checkout to authorise the new one.
+ */
+export async function schedulePlanChangeAction(
+  slug: string,
+  input: {
+    planId: string;
+    extraSeats: string;
+    extraNumbers: string;
+    runPacks: string;
+    apiRequestPacks: string;
+  },
+): Promise<ActionResult<SubscriptionCheckoutStart>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { planPayments } = await getRuntime();
+    const result = await planPayments.scheduleChange(
+      ctx,
+      {
+        planId: String(input.planId ?? ''),
+        extraSeats: String(input.extraSeats ?? ''),
+        extraNumbers: String(input.extraNumbers ?? ''),
+        runPacks: String(input.runPacks ?? ''),
+        apiRequestPacks: String(input.apiRequestPacks ?? ''),
+      },
+      await requestMeta(),
+    );
+    refresh();
+    return result;
   });
 }
 

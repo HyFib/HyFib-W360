@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
+import { clipText } from '@w360/core';
 import type { FlowAnswerMapping } from '@w360/db';
 import { TOKEN_ALPHABET, randomToken } from '../growth/model';
 import { FLOW_LIMITS } from './flow-json';
@@ -113,7 +114,7 @@ export interface FlowHealthSummary {
 }
 
 const text = (value: unknown, max: number) =>
-  typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : null;
+  typeof value === 'string' && value.trim() ? clipText(value.trim(), max) : null;
 
 /**
  * Reads a flow’s `health_status` as stored from Meta (research M-107, M-163): `can_send_message`, and

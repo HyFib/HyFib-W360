@@ -15,11 +15,13 @@ security operations. It is not a compliance claim; see `docs/THREAT-MODEL.md` fo
 | Sessions & cookies | `w360` cookie prefix, HttpOnly, SameSite=Lax, Secure in production; session lifetime 7 days, refreshed daily; step-up: exporting or deleting the company, payment settings, paying for the plan and cancelling its subscription, the company's Razorpay keys, API keys, webhook endpoints, new owners and turning off required two-factor need a sign-in within the last 15 minutes (ADR-056; the library's `freshAge` uses the same window).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | CSRF               | SameSite cookies, Next.js server-action Origin/Host verification, and our exact trusted-origin check for every action.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | Browser hardening  | Per-request nonce CSP with `strict-dynamic`, `frame-ancestors 'none'`, HSTS (preload-ready), `X-Content-Type-Options`, strict referrer policy, COOP/CORP, restrictive Permissions-Policy, `Cache-Control: private, no-store` on app pages.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| Secrets            | Loaded from environment populated by the secret manager; production start-up refuses placeholder values; AES-256-GCM keyring with key ids, AAD binding and rotation support; logger redaction.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| Audit              | Append-only company audit log and platform audit log (privileges + trigger); security events for invalid job signatures, password resets and sign-up attempts on existing emails.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Secrets            | Loaded from environment populated by the secret manager; production start-up refuses placeholder values; AES-256-GCM keyring with key ids, AAD binding and rotation (the worker seals stored values again under a new primary key, ADR-134); logger redaction.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Error logs         | A database driver's error leaves `db.run` and the platform database's `run` as a `DatabaseQueryError` with the SQLSTATE, the constraint, table and column PostgreSQL named and the frames of the failed query, and PostgreSQL's message only where its SQLSTATE's messages quote no values (not data exceptions nor syntax errors); never the query, its parameters (names, numbers, message text) or PostgreSQL's detail, which repeats keys and rows (ADR-129). Mapped and wrapping errors carry it as their cause, so logs, failed jobs' outputs, dead letters and receipts' `last_error` hold it, and every logger writes `err` through a serializer that does the same to any driver error it is given, along the causes. Better Auth, which queries on its own pool, logs through the same serializer, and its API errors and server-side calls drop the driver's error.                                                                                                                                                                                                                                                                                                                                                                              |
+| Text input         | PostgreSQL text cannot hold the NUL character (U+0000), so input never takes it to a query: the API refuses it with 422 naming where (ADR-124); every service's `parseInput` refuses it in what a schema keeps, naming the field; CSV values are refused with their line; Better Auth's forms are refused by a hook before any endpoint (ADR-130). Provider and outside JSON (Meta, Graph, Razorpay, Shopify, WooCommerce, companies' endpoints) is parsed with the character replaced by U+FFFD, so one message or product holding it is kept instead of failing everything delivered beside it; signatures are checked on the bytes as received. jsonb is written as JSON PostgreSQL stores: half of an emoji (a lone UTF-16 surrogate, cut by a clip or sent as an escape) is written as U+FFFD, as text columns store it, and clips keep emoji whole, in inbound text and in text sent to Meta or Razorpay or shown to members (ADR-133); an inbound message's content is bounded under the 64 KB its column allows (a contact card keeps the contacts that fit, anything larger is kept as too large), and a status's errors and pricing are kept within their columns, so one message or status never fails its receipt (ADR-131).                    |
+| Audit              | Append-only company audit log and platform audit log (privileges + trigger); security events for invalid job signatures, password resets, sign-up attempts on existing emails and every completed sign-in, which each person reads back as their own sign-in history on Account & security (ADR-136).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | Platform access    | Separate platform role without BYPASSRLS; customer data only through reasoned, scoped, ≤8 h support grants visible to the company; no impersonation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | Webhooks           | Raw-body HMAC-SHA256 (`X-Hub-Signature-256`) with constant-time compare against the current and previous app secret; 4 MB cap enforced while streaming; encrypted durable receipt before 200; tenant resolved only from verified asset bindings; quarantine otherwise; rate-limited security events for bad signatures.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| Provider tokens    | Exchanged server-side from Embedded Signup codes, verified with `debug_token` and an ownership check, stored AES-256-GCM with AAD (company + account), never sent to browsers or logs; registration PINs encrypted the same way.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Provider tokens    | Exchanged server-side from Embedded Signup codes, verified with `debug_token` and an ownership check, stored AES-256-GCM with AAD (company + account), never sent to browsers or logs; registration PINs encrypted the same way. Each connected account’s token is checked daily with `debug_token` by the same rules (at once when Meta refuses it for a send or a template sync); a token Meta no longer accepts marks the account and its numbers for reconnecting, and a check that could not be made stores only the error’s kind, code and title (ADR-137).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | Live updates       | SSE and polling endpoints authenticate the session, resolve membership per request, re-validate every 30 s, carry ids only and filter events by conversation visibility; unauthenticated or non-member requests get 404.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | Payments           | Card entry only inside Razorpay Checkout's frame; the Checkout signature is verified against our stored order id and the payment is then fetched from Razorpay; only captured payments credit, exactly once, through SECURITY DEFINER functions; runtime roles cannot write ledger rows or balances; webhooks verified over the raw body (current + previous secret) and stored before 200; only card network, issuer, last four digits and expiry stored (no PAN/CVV); billing actions limited to owner and billing roles (MFA-required roles) and audited; adding a card and turning automatic top-ups on or changing them need a sign-in within the last 15 minutes (ADR-056).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | Contacts & consent | Consent is append-only (runtime role can only insert events; current state is written by a SECURITY DEFINER trigger); every template send re-checks consent and the suppression list under the send intent's row lock; erasure is one audited definer function; the status-history guard allows clearing recipient ids only inside it; CSV import caps size, rows, columns and field length and never echoes row contents; CSV export is formula-safe and audited.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
@@ -37,18 +39,22 @@ security operations. It is not a compliance claim; see `docs/THREAT-MODEL.md` fo
 | Plans              | Plan state is written only by SQL functions (company creation, the time sweep in the company's own scope) and platform staff (column grants, a version check, both audit logs); companies can only read theirs (RLS). Published plan versions never change (trigger). Limits are checked by the services under a per-company advisory lock, seats also in `app.accept_invitation`, and automation runs through an atomic counter that never passes the limit; plan modules remove write permissions and stop worker actions. Platform staff see a company's usage as counts only.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | Public API         | Company API keys store only the token's SHA-256, which the runtime role cannot read (column grants); keys are found through a SECURITY DEFINER function that refuses revoked and expired keys and companies being deleted. Scopes are granted only by members holding the matching permission; a request acts in its key's company scope as the key (audit actor `api_key`), never from a company id in the request; writing scopes stop while the company is suspended or restricted. Template sends apply the members' checks and are re-checked before dispatch; an `Idempotency-Key` stored in the request's transaction replays the first response instead of sending twice. Per-key, per-company and per-address (failed authentication) rate limits, 64 KB bodies, no tokens in logs, `no-store` responses; keys expire, rotate with an overlap of up to 72 hours and are revoked at once, all audited. A week before a key expires, the company's owners and administrators are emailed once with its name and prefix, never a token (ADR-067).                                                                                                                                                                                                     |
 | Outgoing webhooks  | Endpoints are managed with `developer.manage` (at most 10, checked by the egress guard's URL rules); events are captured by triggers in the company's own scope and hold ids and non-personal facts only, and payloads are built when delivered, so an erased contact is sent without personal data. Contact events (ADR-074) carry the API's contact; erasing sends only `contact.erased`, with the id, source and creation time, and drops what its own transaction captured; conversation events name no members or teams. Run events (ADR-078) cover live runs only and carry no answers or inputs; order events (ADR-085) carry no Payment Link or payment details; campaign events (ADR-087) carry counts, never recipients or members. Requests go only through the egress guard (public addresses only, DNS pinned, no redirects, 10 s, 64 KB), signed with HMAC-SHA256 over the timestamp and body with a per-endpoint secret shown once and stored encrypted (bound to company, endpoint and version); the worker never takes a company id from a notification. Bounded retries, at-least-once delivery with a stable event id, automatic disabling after 72 hours of failures with an email, 30-day retention; audit entries name only the host. |
-| Operations console | Platform staff see counts, states, error codes, labels and times only, through four SECURITY DEFINER functions that refuse anyone but a platform administrator and read named columns; URLs are cut to their host inside the database; dead letters keep an error's name and code, never its message, and name a company only when the job's signature verifies; retrying a receipt and resolving a quarantine entry need a reason and are written to the platform audit log.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Operations console | Platform staff see counts, states, error codes, labels and times only, through four SECURITY DEFINER functions that refuse anyone but a platform administrator and read named columns; URLs are cut to their host inside the database; dead letters keep an error's name and code, never its message, and name a company only when the job's signature verifies; retrying a receipt or a dead letter's job and resolving a quarantine entry need a reason, and acknowledging a failing integration a note; each is written to the platform audit log; a job goes back to its queue once, never for an unverified envelope or a company being deleted, and the definer reads and writes only a job's id, name, state, retry limit and completion time.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | Company data       | Owners only (`tenant.export`, `tenant.delete`, re-checked in SQL for deletion). The export streams listed columns from one read-only transaction in the company's scope (credentials, secrets, token hashes, PIN and Flow tokens never exported; catalog tests fail on unclassified tables or columns), is not stored, runs once at a time and is audited and emailed before it starts. Deletion needs the company address typed, waits 14 days (cancellable, emails to owners and administrators), then runs as a signed worker job through SECURITY DEFINER functions whose delete policies match only the company being deleted; providers are cleaned up once; billing records, plan history and platform evidence are kept (ADR-055). Platform owners can also schedule a deletion (the address typed, a reason the company reads, the same 14 days and job); only platform owners cancel it, and staff cannot cancel an owner's (ADR-090).                                                                                                                                                                                                                                                                                                            |
 | Billing history    | Statements and receipts need `billing.read` and are computed from the append-only ledger in the company's scope (RLS), in one read-only snapshot; statement CSVs are audited (`billing.statement_exported`) and formula-safe; receipts show Razorpay references and the payment method Razorpay reported, never card numbers, and say they are not tax invoices; the method is written only by a definer function, once, for the payment that credited the top-up (ADR-057).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | Usage and rates    | Billing → Usage and rates needs `billing.read`, re-checked by the service. It reads published rate cards (platform data) and the company's own delivered-message counts by pricing category in the company's scope (RLS), in one read-only snapshot; it shows no message, number, contact or market breakdown, stores nothing and never posts to the ledger (ADR-060). A week before a card for the company's currency takes effect, its owners and billing managers are emailed once; the sweep's definer function returns ids only, and each notice is checked and recorded in the company's scope (ADR-065).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | Plan payments      | Starting and cancelling need `billing.manage` and a recent sign-in, one start at a time per company. HyFib records its subscription before calling Razorpay and follows it only as Razorpay reports it when asked: Checkout's signature is checked against the stored subscription id and only prompts a fetch, webhook payloads and notes are never trusted, and a plan payment is recorded (once per payment id) only for a paid invoice of our subscription, in INR, for our amount, whose payment Razorpay reports captured. The plan state changes only through `app.apply_plan_subscription_period` in the company's own scope, for exactly the paid cycle; an ended subscription never becomes live again, and an older read changes nothing. A subscription's amounts, add-ons, plan and starter never change (column grants), plan payments are append-only and neither is ever deleted (triggers), and platform staff can only move a subscription to cancelled (policy); platform owners alone set the tax and cancel a company's subscription, with a reason (ADR-063). Plan payment receipts need `billing.read` and are computed in the company's scope from the payment and its subscription (ADR-064).                                      |
 | Trial-end payments | A subscription paid from a trial's end records nothing until Razorpay reports a paid cycle, and its start is written once (no role may update it). The ended trial waits for the first charge only while that subscription may still be charged, and for at most the plan version's grace days, by one SQL rule (`app.trial_charge_wait_until`) used by the transition, the due list and the plan card. After the start, a company's cancellation asks Razorpay first, so a charge already made keeps its paid period; a trial less than 48 hours from its end is charged at once, as Billing says (ADR-102).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Plan choices       | Platform owners offer a published version and stop offering it (the platform service checks the owner role, as for every catalog change; a column grant lets the platform role write only the offer; a check keeps it off drafts, retired versions and versions under ₹1), in the platform audit log. Members with `billing.manage` and a sign-in within 15 minutes choose an offered version only through `app.choose_plan` (SECURITY DEFINER, `w360_app` only), which takes the company and member from the session's scope, never from input, and checks the company's status, the plan state, a subscription that may still be charged, the offer and the tax again in SQL under the subscription-start lock and the plan state's row lock; it changes only the version, the note and who changed it, after any withdrawal or retirement of the version in progress (migration 0083). The company role still cannot write its plan state. The version must hold the seats, numbers, teams and live automations in use, counted after the locks additions take, and be payable with the add-ons and the tax. Audited (`billing.plan_chosen`).                                                                                                            |
+| Plan add-ons       | Members with `billing.manage` and a sign-in within 15 minutes change the add-ons of their own version only through `app.choose_add_ons` (SECURITY DEFINER, `w360_app` only), which takes the company and member from the session's scope, never from input, and checks the company's status, the plan state, a subscription that may still be charged, a published version and the tax again in SQL under the subscription-start lock and the plan state's row lock; it changes only the three quantities, the note and who changed them, and the plan state's guard keeps them to what the version sells, within its maximums. The company role still cannot write its plan state. A decrease must leave the seats and WhatsApp numbers in use, counted after the locks additions take, and the total must be payable with the tax. Audited (`billing.add_ons_chosen`).                                                                                                                                                                                                                                                                                                                                                                                    |
+| Price list         | Platform owners show or hide the price list for visitors (the platform service checks the owner role, as for every catalog change; a column grant lets the platform role write only when it was shown and by whom, which a check pairs), in the platform audit log. `/pricing` needs no sign-in: it reads in the system scope as `w360_app`, in a read-only transaction, the commercial terms of the versions that are published and offered (never who made or offered them) and, of the settings, only whether the list is shown, the tax and the default trial (column grants: the runtime role cannot read who showed it, nor change any setting). It shows nothing of any company or person, and is not found while hidden or while a visitor could not follow it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Plan changes       | Members with `billing.manage` and a sign-in within 15 minutes change the plan a subscription pays for, from the end of the paid period, only by ending the current subscription at Razorpay first (cancelled at the end of its cycle, as their own cancel) and recording a new subscription that follows it (`follows_subscription_id`, insert-only). A trigger (`app.guard_plan_subscription_follow`, migration 0087) refuses one that does not start exactly when the period paid by the subscription it follows ends, at least 48 hours ahead, after that one charges no more, for a company not suspended or being deleted, for an offered or the current published version, within what it sells, at its price with the tax set now. A unique index allows one live subscription that keeps charging per company. The new subscription's first paid cycle, fetched from Razorpay, applies its version and add-ons through `app.apply_plan_subscription_period`, which never moves a period back. Audited (`billing.plan_change_started`).                                                                                                                                                                                                              |
 | Credit refunds     | Platform owners only (checked in SQL: `ops.platform_request_credit_refund` looks the user up in `ops.platform_admins`), with a reason in the platform audit log; at most the unrefunded amount and the unused credit (under the wallet's row lock), one open refund per top-up, none for a company being deleted. The credit is held at once; only `app.billing_record_refund` (a refund Razorpay reports, fetched first) and `app.billing_fail_credit_refund` settle the request and its hold, and the company role cannot move a request to either state (restrictive policy) or read the reason (column grants). Razorpay is called by the worker with an idempotency key, the same body every time (ADR-058).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | Plan refunds       | Platform owners only (checked in SQL by `ops.platform_request_plan_payment_refund`), with a reason in the platform audit log; at most what Razorpay has not refunded of the payment, one open refund per payment, none for a company being deleted, under a lock that recordings take too. Only `app.record_plan_payment_refund` (a refund fetched from Razorpay) marks a refund processed or records one made at Razorpay, and processed refunds never exceed the payment; the runtime role may only move a request to submitted or failed (restrictive policy). The company role cannot read the reason or who asked (column grants), and nobody deletes a refund. A refund never changes the plan or the subscription (ADR-103).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Refund requests    | Members with `billing.manage` and a sign-in within 15 minutes ask from a receipt: of a top-up, at most what is left of the payment and the unused credit; of a plan payment, at most what Razorpay has not refunded of it, and none while a refund of it runs. One open request per payment (unique indexes), 5 a day per company across both kinds (counted under one advisory lock), none once deletion is asked for (the company's status read under a share lock in the request's transaction). The company role inserts only open requests (column grants), moves them only to withdrawn (restrictive policies) and cannot read who decided. Only platform owners decide (checked in SQL); approving runs the staff refund's checks again under its locks, and declining needs a note. Platform owners are emailed counts only (ADR-073, ADR-104).                                                                                                                                                                                                                                                                                                                                                                                                     |
 | Reconciliation     | The worker reads Razorpay's settlement report and writes runs and items only through SECURITY DEFINER functions that check the run's current attempt; neither runtime role can read or write the tables. Companies are found through HyFib's own provider-id mappings; a missed payment or refund is recorded only after fetching it from Razorpay, through the functions its webhook uses (credit exactly once, refunds keyed by id). Platform staff read through functions that check `ops.platform_admins`; only platform owners run a day or resolve an item, with a reason or note in the platform audit log. Items keep ids and amounts, never notes, descriptions, receipts or card fields (ADR-059).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | Templates          | Created, deleted and listed only by the worker with the stored WABA token (never in the browser); webhooks for templates are signals routed through verified WABA bindings and never change status on their own; submission is write-ahead so a lost response cannot create a duplicate.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Supply chain       | Exact pins + lockfile, pnpm minimum release age, explicit install-script allowlist, `pnpm audit` and gitleaks in CI, GitHub Actions pinned by SHA, Trivy image scanning, Dependabot.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Supply chain       | Exact pins + lockfile, pnpm minimum release age, explicit install-script allowlist, `pnpm audit` and gitleaks in CI, GitHub Actions pinned by SHA, Trivy image scanning, Dependabot; an advisory with no patched release is cleared by removing the vulnerable package from the tree, not by ignoring it (ADR-142: a pnpm patch pinned to the plugin's version).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 ## Permission matrix
 
@@ -439,11 +445,13 @@ Phase 5 rules (Public API, P5-08):
 - Members with `developer.manage` (owners and administrators) create, rotate and revoke the
   company's API keys; a key belongs to the company, not to its author. Each scope needs the
   permission a member needs for the same work: `templates.read`, `contacts.read`, `contacts.write`,
-  `inbox.reply` for `messages.send` (utility templates) and `messages.reply` (text replies, ADR-070),
-  `campaigns.send` for `messages.send_marketing`, `inbox.read_all` for `conversations.read`
-  (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075), and `automations.publish` for
-  `automations.start` (ADR-077). Nobody grants a key more than they hold, and rotating needs the
-  same. A key keeps the scopes it was created with.
+  `inbox.reply` for `messages.send` (utility templates) and `messages.reply` (text replies,
+  ADR-070), `campaigns.send` for `messages.send_marketing`, `inbox.read_all` for
+  `conversations.read` (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075),
+  `automations.publish` for `automations.start` (ADR-077), `tenant.settings.manage` for
+  `contact_fields.manage` (ADR-115), `campaigns.read` for the scope of the same name (ADR-125), and
+  `campaigns.send` for `campaigns.stop` (ADR-128). Nobody grants a key more than they hold, and
+  rotating needs the same. A key keeps the scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -492,6 +500,26 @@ Phase 5 rules (Public API, P5-08):
   the suspension. `conversations.read` lists those members with their names, teams and whether they
   take conversations, never emails or roles; the members who can grant it see the team in the app
   already. Every change is audited as the key; routing that follows is the system's.
+- Changing many conversations in one call (ADR-120, `POST /conversations/update-many`) needs the
+  same scope and changes each conversation through the same function, under the same locks, as a
+  single change; at most 100 per call, all or none. It locks the member first, then the
+  conversations in id order, then the team as conversations move into it, the order suspensions and
+  team deletions lock them, so concurrent calls take turns, and a call meeting a suspension or a
+  deletion waits and is refused, instead of deadlocking (tested). An id
+  that names none of the company's conversations (another company's or an erased contact's
+  included) refuses the whole call, naming its place in the list, and changes nothing (tested), so
+  a call never reveals or touches another company's conversations beyond saying an id is not one of
+  the company's. A call counts as one request against the key's limits.
+- Changing many contacts in one call (ADR-122, `POST /contacts/update-many`) needs
+  `contacts.write` and changes each contact through the function `PATCH /contacts/{id}` uses, with
+  the same checks of every value against its field's type, the 50-tag limit and the audit as the
+  key; at most 100 per call, all or none, in the company's scope. It locks the fields any change
+  names first, in one statement, as a field's deletion takes them, then the contacts in id order,
+  so concurrent calls take turns and a call meeting a field's deletion waits and refuses the deleted
+  key without keeping a value of it (tested). An id of another company's contact or an erased one
+  refuses the whole call, naming its place in the list, and changes nothing (tested), so a call never
+  reveals or touches another company's contacts beyond saying an id is not one of the company's. A
+  call counts as one request against the key's limits.
 - Starting automations through the API (ADR-077) needs `automations.start`, which only members who
   publish automations (`automations.publish`: owners and administrators) can grant, as a started run
   messages contacts as a published version does; an automation whose version sends a marketing
@@ -563,6 +591,107 @@ Phase 5 rules (Public API, P5-08):
   only the key's company's conversations whose contacts are not erased (others answer 404). A note
   says whether a member or a key wrote it and, for a key's note, which key; never which member, and
   mentions are never read.
+- Contact custom fields (ADR-112): every contact the API or a contact webhook describes carries the
+  values of the company's own fields only, so a value left by a field deleted at the same moment is
+  never read. `contacts.read` also lists the fields (keys, labels and types). Changing a contact
+  (`PATCH /contacts/{id}`) needs `contacts.write`, which only members who can change contacts grant,
+  and an active company; it changes the name, email, field values and tags, never the phone number,
+  under the contact's row lock and with the field rows locked against a deletion at the same time
+  (taken first, in a deletion's order); erased and other companies' contacts are not found. Values
+  must have their field's type and a refusal saves nothing; tags keep the 50 a contact may have,
+  which `POST /contacts` now checks too. The audit entry names what changed and which fields, never
+  a value.
+- Finding contacts (ADR-113): `GET /contacts` filters by email, tag and custom field values in the
+  key's company only (erased contacts never match). Field keys are checked against the company's
+  fields before use, and keys, tags and values are bound parameters, never part of the SQL text. A
+  page filtered by tag or field reads at most 2,000 contacts, so a rare value cannot make one request
+  read every contact a company has.
+- Finding contacts by name (ADR-124): `name` on `GET /contacts` reads the key's company's live
+  contacts only (`contacts.read`, the company's scope), as the other filters do. The text is a bound
+  parameter with `%`, `_` and `\` escaped, so it is never SQL and never a pattern, and a page
+  filtered by it reads at most 2,000 contacts, so a text no name holds cannot make one request read
+  every contact a company has. Names come in the query string, which the app's request log leaves
+  out (it records the path); access logs at the edge are deployment's to strip or keep short
+  (DEPLOYMENT).
+- Text holding the NUL character (ADR-124): every API request's query parameters and JSON body are
+  checked before its handler runs, and one holding U+0000, which PostgreSQL text cannot store, is
+  refused with 422 naming where, instead of failing in a query as an internal error that a client
+  could repeat to fill error logs and alerts. The body is walked without recursion, so no nesting
+  exhausts the stack. Members' forms, Better Auth's and provider payloads have the same protection
+  since ADR-130 ("Text input" above).
+- Reading campaigns (ADR-125): `GET /campaigns` and `GET /campaigns/{id}` need `campaigns.read`
+  (granted only by members holding `campaigns.read`) and read the key's company's campaigns in its
+  scope: an id of another company's campaign answers 404 as an unknown one does, and an id that is
+  not a UUID is refused before any query. They answer counts only, never recipients, contacts,
+  messages, members or costs, so a key with the scope alone learns how a campaign did but not who
+  received it (listing recipients also needs `contacts.read`, ADR-127, below); campaign and template
+  names are the only text. A campaign's results are counted when read, one pass over its recipients,
+  and rate limits and monthly requests bound how often a key repeats it. As a reading scope it keeps
+  working while the company is suspended or restricted, as members' campaign pages do.
+- Conversation and campaign conditions in contact searches (ADR-126): a `last_message` condition
+  (whether a contact wrote in the last days) needs `conversations.read` as well as `contacts.read`,
+  and a `campaign` condition (what happened to a campaign's message to a contact) needs
+  `campaigns.read`; without the scope the search is refused before anything is read. With
+  `campaigns.read` and `contacts.read` a key learns which contacts a campaign reached, read or got a
+  reply from, as members who hold both see a campaign's recipients. A campaign the key's company
+  does not have (another company's included) is refused as unknown, and the campaign id and the days
+  are bound parameters, never SQL. The pages read at most 2,000 contacts, as before.
+- A campaign's recipients (ADR-127): `GET /campaigns/{id}/recipients` names contacts (name and
+  number) and what happened to each one's message, so it needs `campaigns.read` and `contacts.read`,
+  the pair members need to see a campaign's recipients, both checked before anything is read. The
+  campaign is looked up in the key's company first (RLS and an explicit filter): another company's
+  campaign answers 404 as an unknown one does. An id or cursor that is not a UUID and an outcome the
+  results do not count are refused before any query; the cursor is a bound parameter and the outcome
+  picks one fixed condition, never SQL from the request. Recipients whose contact was erased are
+  left out, as the API leaves erased contacts out everywhere (the results still count them), and no
+  costs, members or other contact details are returned. A page reads one campaign's recipients
+  (50,000 at most) and stops when it is full; rate limits and monthly requests bound repeats.
+- Pausing and cancelling campaigns (ADR-128): `POST /campaigns/{id}/pause` and `/cancel` need
+  `campaigns.stop`, a writing scope granted only by members holding `campaigns.send` (the permission
+  members pause and cancel with) and refused while the company is suspended or restricted. They only
+  stop sending: a pause releases the sends no worker claimed, a cancel also cancels waiting
+  recipients; neither sends a message, spends or resumes anything (resuming needs a member, under
+  whose authority the campaign then sends). The campaign is locked in the key's company (RLS and an
+  explicit filter): another company's campaign answers 404 as an unknown one does, and an id that is
+  not a UUID is refused before any query. The audit row names the key (`api_key`) with the request's
+  id, members' campaign history names the key, and `campaign.status_changed` reports the change. A
+  leaked key with the scope can stop the company's campaigns until it is revoked (members resume a
+  paused one; a cancelled one stays cancelled), so only integrations that must stop campaigns should
+  get it.
+- Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
+  only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
+  and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so
+  it shows nothing of other companies' activity and opens for no other company; a changed or foreign
+  cursor is refused with 422. Change rows hold no personal data; an erased contact is read as
+  `erased` with no contact. The triggers that record changes run as whoever changes the contact
+  (column grants: the runtime and definer roles insert only `tenant_id` and `contact_id`); only the
+  compaction function, owned by the definer role and run by the worker, deletes rows across
+  companies, and only rows a later change of the same contact replaced.
+- Defining contact fields (ADR-115): adding, renaming and deleting the company's custom fields needs
+  `contact_fields.manage`, which only members holding `tenant.settings.manage` (owners and
+  administrators, who define fields in Settings) grant, and an active company. Fields are named by
+  key in the key's company only; another company's key is not found. Keys and types never change,
+  so values already stored keep their meaning; a deletion removes every contact's value with the
+  field, as in Settings. Additions of one company take turns under a lock, so the 50-field limit
+  holds for members and keys at once. Every change is audited as the key or the member with the
+  field's key, never values; renames are audited now, in Settings too.
+- Following message changes (ADR-116): `GET /message-changes` reads the key's company's messages
+  only (`conversations.read`, which only members who read every conversation grant; RLS and an
+  explicit company filter). Its cursor is sealed as the contact feed's is, with the feed's name and
+  the company in the associated data, so a contact feed cursor or another company's does not open.
+  Change rows hold no personal data (a message id and a transaction id); a message of an erased
+  contact is read as `erased` with nothing of it. Only the trigger on `app.messages` writes the rows,
+  through a function owned by the definer role; the runtime role may only read them, so no code can
+  move a message to another place in the feed.
+- Searching contacts (ADR-117): `POST /contacts/search` (`contacts.read`) finds the key's company's
+  live contacts only (RLS and an explicit company filter; erased contacts never match), with
+  segments' conditions on data a contact already shows (custom fields, tags, consent, creation day,
+  source, calling code, and the name since ADR-143). Segments' conditions on conversations and
+  campaigns also need the scope that reads them (ADR-126, below). Field keys are checked against
+  the company's fields first, and keys, values, tags and dates are bound parameters, never part of
+  the SQL text; `contains` escapes `%` and `_`, so a value is never a pattern. Each page reads at
+  most 2,000 contacts, so no condition can make one request read every contact a company has. It
+  writes nothing.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.
@@ -619,6 +748,72 @@ Phase 5 rules (outgoing webhooks, P5-09):
   message repeats its parameters). Tested.
 - Secrets (`whsec_` + 32 random bytes) are shown once, kept only in the page's memory, and stored
   encrypted with the AAD `webhook-secret:<company>:<endpoint>:<version>`.
+- An endpoint's own headers (ADR-118), up to 5, are given when it is added or changed, in Settings
+  or by a key that manages it. Their values are secrets: they reach the server once, are sealed with
+  the keyring as one ciphertext with the AAD `webhook-headers:<company>:<endpoint>`, and are never
+  shown again, logged, put in audit entries (which name the headers), exported (the company data
+  export carries the names) or kept in an API key's idempotency record; Settings and the API show
+  names only, and a change gives every header again. Names HyFib sets or that describe the body or
+  the connection (`Content-Type`, `Content-Encoding`, `User-Agent`, `Host`, `Content-Length`,
+  `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Upgrade`, `TE`, `Trailer`, `Expect`,
+  `Accept-Encoding`), `Proxy-*` and `W360-*` are refused whatever their case, when saved and again
+  when opened, and HyFib's own headers are set after the endpoint's, so none can replace the
+  signature or the event's ids. Values are printable ASCII without line breaks, so a header cannot
+  inject another. Only the worker opens them, for the endpoint they are bound to; headers that do
+  not open fail that delivery alone as `payload_failed` (stage `headers`), logged without them.
+  Tested.
+- An endpoint can take only some `message.status` statuses (ADR-119), chosen by whoever may change
+  it (members with `developer.manage`, or the key that manages it). The list is checked against
+  the statuses the message trigger captures, kept only while the endpoint takes `message.status`
+  (a database check too), and applied in `app.capture_webhook_event`, which reads the company's own
+  endpoints: it narrows what one endpoint receives and never what another endpoint or company
+  receives, and a status no endpoint takes is not recorded. Audited with the list. Tested.
+- An endpoint can take `contact.updated` only for some parts of a contact (ADR-123), chosen the
+  same way. The list is checked against the parts the event names, kept only while the endpoint
+  takes `contact.updated` (a database check too), and applied in
+  `app.capture_contact_webhook_event`, which reads the company's own endpoints as the role making
+  the change: it narrows what one endpoint receives and never adds an event, a part or a delivery
+  for another company. A later change in the transaction queues only an event that transaction
+  captured, once per endpoint, and a rolled-back savepoint takes back what it queued. The event
+  names every part that changed, as before. Audited with the list. Tested.
+- An endpoint can take automation run events only for some automations (ADR-145), chosen the same
+  way. Each id must be an automation of the endpoint's company with a published version, looked up
+  in the company's scope, so another company's automation is refused like an unknown id and the
+  refusal reveals nothing about it; a published automation cannot be deleted, so a list never
+  points at an automation that is gone. The list is kept only while the endpoint takes a run event
+  (a database check too) and applied in `app.capture_webhook_event`, in the run's own transaction:
+  it narrows what one endpoint receives and never adds an event or a delivery for another endpoint
+  or company. The API answers and audits ids only; Settings names them to members with
+  `developer.manage`, who can read automations anyway. Audited with the list. Tested.
+- An endpoint can take `campaign.status_changed` only for some of the statuses a campaign reaches
+  (ADR-146), chosen the same way. The list is checked against the seven campaign statuses, kept
+  only while the endpoint takes `campaign.status_changed` (a database check too, which also refuses
+  a null entry), and applied in `app.capture_webhook_event`, in the campaign change's own
+  transaction: it narrows what one endpoint receives and never adds an event or a delivery for
+  another endpoint or company, and a status no endpoint takes is not recorded. Statuses are not
+  personal data. Audited with the list. Tested.
+- An endpoint can take `order.status_changed` only for some of the statuses an order reaches
+  (ADR-147), chosen the same way. The list is checked against the five statuses a change can reach
+  (`received` only arrives as `order.received`, which is never filtered), kept only while the
+  endpoint takes `order.status_changed` (a database check too, which also refuses a null entry),
+  and applied in `app.capture_webhook_event`, in the transaction that changes the order, whether a
+  member, the Payment Link worker or Razorpay's payment changes it: it narrows what one endpoint
+  receives and never adds an event or a delivery for another endpoint or company. Audited with the
+  list. Tested.
+- An endpoint can take `template.status_changed` only for some of the statuses reported (ADR-148),
+  chosen the same way. The list is checked against the eleven statuses the event reports (HyFib's
+  own steps, a deletion under way or refused and an unrecognised status are never sent), kept only
+  while the endpoint takes `template.status_changed` (a database check too, which also refuses a
+  null entry), and applied in `app.capture_webhook_event`, in the transaction that records the
+  status, whoever records it: it narrows what one endpoint receives and never adds an event or a
+  delivery for another endpoint or company. Audited with the list. Tested.
+- An endpoint can take `conversation.status_changed` only for some of the statuses a conversation
+  reaches (ADR-149), chosen the same way. The list is checked against the two statuses a change
+  reaches (`open`, `resolved`; nothing sets a conversation pending), kept only while the endpoint
+  takes `conversation.status_changed` (a database check too, which also refuses a null entry), and
+  applied in `app.capture_webhook_event`, in the transaction that changes the conversation: it
+  narrows what one endpoint receives and never adds an event or a delivery for another endpoint or
+  company. Audited with the list. Tested.
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or
@@ -627,7 +822,17 @@ Phase 5 rules (outgoing webhooks, P5-09):
   time. `contact.erased` deletes the created and updated events its own transaction captured, with
   their deliveries: `app.capture_contact_webhook_event` can delete only as the definer role that
   erasure runs as (the company role has no delete on webhook events, tested). One contact event per
-  contact and transaction keeps imports and tag changes from multiplying deliveries.
+  contact and transaction keeps imports and tag changes from multiplying deliveries. Since ADR-112
+  a change of a custom field's value captures `contact.updated` too (a trigger compares the company's
+  field keys only, as the role that made the change), and the payload carries the values; a field's
+  deletion sends nothing for each contact it removes the value from. Since ADR-121 the event names
+  what its transaction changed (`name`, `phone`, `email`, `tags`, `fields.<key>`), never a value,
+  so events still hold no personal data. Stored events stay history: a later change in the same
+  transaction adds to the event through `app.add_contact_webhook_changes`, a definer function that
+  updates only an event the calling transaction captured (which no delivery can have read); the
+  company role still has no update on webhook events (tested, as is another company's event and an
+  event of an earlier transaction staying as captured), and a database check keeps the list to known
+  parts on `contact.updated` only.
 - Automation run events (ADR-078) follow the same rules. They are captured for live runs only (a
   member's test run sends nothing), by triggers running as the role that changes the run (the
   runtime role, or `w360_definer` when erasure stops a run), so each event stays in the run's
@@ -644,7 +849,12 @@ Phase 5 rules (outgoing webhooks, P5-09):
   changes a campaign's status (only the runtime role, in the company's scope), so each event stays
   in the campaign's company and holds the campaign id, the statuses and a pause or completion reason
   only. Payloads carry the campaign's name, template, times and counters, never a recipient, a
-  contact's data or the member who acted.
+  contact's data or the member who acted. Since ADR-150 they also carry its results as
+  `GET /campaigns/{id}` counts them, counted in the company's scope when the request is built and
+  stored nowhere: counts, skip reasons and failure codes only, never costs. Who receives them is
+  unchanged: owners and administrators, who manage endpoints, read campaigns anyway, and keys with
+  `webhooks.manage` are granted only by them and already receive the campaign's counters and the
+  company's messages.
 
 Phase 5 rules (billing history, P5-07, ADR-057):
 
@@ -784,6 +994,133 @@ Phase 5 rules (refund requests of plan payments, P5-07, ADR-104):
   functions that check `ops.platform_admins`; the refund's staff reason ("Asked for by the company:"
   and the company's reason) stays platform-only, as ADR-103's reasons do.
 
+Phase 5 rules (companies choose their plan, P5-01, ADR-105):
+
+- Only platform owners offer a plan version or stop offering it, checked by the platform service as
+  every catalog change is (the platform role is shared by owners and operators), with the platform
+  audit log in the same transaction. The platform role may write only the two offer columns of a
+  published version (a column grant and the plan guard, which compares every other term); check
+  constraints keep the offer to published versions priced at ₹1 or more and pair it with the user
+  who made it; retiring a version must clear its offer in the same update.
+- A company changes its plan only through `app.choose_plan` (SECURITY DEFINER, pinned
+  `search_path`, executable by `w360_app` alone). It takes the company and the member from the
+  session's company scope (`app.current_tenant_id()`, `app.current_user_id()`), never from an
+  argument, so a forged form names at most a plan version. It refuses, under its locks, a company
+  suspended or being deleted, complimentary access, a paid period, a subscription that may still be
+  charged, a version that is not offered and a platform without the tax on plan prices; it changes
+  only the version, the note and who changed it, and the plan state's own guard keeps the add-ons
+  sold by the chosen version. The company role has no update privilege on its plan state, as
+  before.
+- The service needs `billing.manage` and a sign-in within the last 15 minutes (ADR-056), and
+  refuses while Razorpay subscriptions are off. It takes the advisory locks that additions take
+  (seats, numbers, teams, automations, in that order) before the function's locks, then counts what
+  the company uses against the chosen version and rolls the change back when it holds less, so an
+  addition and a choice never both pass, and refuses a version the company could not pay for with
+  its add-ons and the tax. Lock order: the limit locks, the subscription-start lock, the company row
+  (shared), the plan state (for update), as the plan sweep and staff changes take them, then the
+  chosen version's advisory lock (shared). The plan guard takes that lock exclusively whenever a
+  published version stops being offered (withdrawn, or retired), so a choice either commits before
+  the change or sees it and is refused; a withdrawal or retirement takes no company lock, so the
+  two never wait for each other in a cycle (migration 0083).
+- A choice replaces the version a subscription start would record only before the start takes its
+  lock; afterwards it is refused (a subscription that may still be charged), so Razorpay is never
+  asked to charge for a version the company no longer has.
+
+Phase 5 rules (companies choose their add-ons, P5-01, ADR-106):
+
+- A company changes its add-ons only through `app.choose_add_ons` (SECURITY DEFINER, pinned
+  `search_path`, executable by `w360_app` alone), which takes the company and the member from the
+  session's company scope, never from an argument, so a forged form names at most three
+  quantities. It refuses, under the locks of `app.choose_plan`, everything that function refuses
+  except the offer, and a version that is no longer published; it changes only the quantities, the
+  note and who changed them, and the plan state's guard keeps them to what the version sells,
+  within its maximums. The company role has no update privilege on its plan state, as before.
+- The service needs `billing.manage` and a sign-in within the last 15 minutes, refuses while
+  Razorpay subscriptions are off, and accepts whole numbers only (digits, within the table's
+  bounds). It takes the advisory locks that additions take before the function's locks, then counts
+  the seats (with waiting invitations) and WhatsApp numbers in use after a decrease and rolls it
+  back when they no longer fit, so an addition and a decrease never both pass; an increase is never
+  refused for what is in use. A total with the tax above one plan payment is refused.
+- A change of add-ons replaces the quantities a subscription start would record only before the
+  start takes its lock; afterwards it is refused, so Razorpay is never asked to charge for add-ons
+  the company no longer has.
+
+Phase 5 rules (a price list for visitors, P5-01, ADR-107):
+
+- Only platform owners show or hide the price list, checked by the platform service as every
+  catalog change is, with the platform audit log in the same transaction. The platform role may
+  write only when the list was shown and by whom (a column grant), and a check constraint pairs the
+  two, so a shown list always names the owner who showed it.
+- `/pricing` reads in the system scope as `w360_app`, in a read-only transaction, without a
+  function: the commercial terms of the versions that are published and offered (name, description,
+  prices, limits, add-on prices, modules, and whether the API is limited, never who created,
+  published or offered them), and of the settings only whether the list is shown, the tax on plan
+  prices and the default trial. Migration 0085 grants the runtime role those two settings columns
+  only; it cannot read who showed the list, nor write any setting.
+- The page shows nothing about any company or person, and is not found while the list is hidden or
+  while a visitor could not follow it: paying for plans off, no tax, no default trial, or no offered
+  version one plan payment can cover. Its links lead only to sign-in and sign-up, and search engines
+  are asked not to index it, as for every page.
+
+Phase 5 rules (paying companies change their plan from the next period, P5-01, ADR-109):
+
+- A change never lets two subscriptions charge a company: the current subscription is cancelled at
+  the end of its cycle at Razorpay before HyFib records the new one, and the unique index on live
+  subscriptions now allows only one that is not ending at its period's end. A change is refused
+  within 48 hours of the period's end, before Razorpay starts the renewal debit (R-073).
+- The new subscription is written by the runtime role in the company's own scope, so the guard
+  trigger checks what the service checked: the subscription it follows paid the plan's current
+  period and charges no more after it, the new one starts exactly at that period's end, the company
+  is not suspended or being deleted, the version is offered or the company's own and published, the
+  add-ons are within what it sells, and the price is the version's for those add-ons with the tax
+  set now. Nobody can update which subscription it follows (no column grant).
+- The plan takes another version or other add-ons from a subscription only when that subscription
+  follows the one that paid the plan's period and its own cycle was paid, as Razorpay reports when
+  asked; a cycle of another subscription that ends no later than the plan's paid period is never
+  applied, so a late renewal cannot take the plan back. The plan guard lets a retired version in only
+  as the plan of that following subscription, with its paid cycle.
+- The service needs `billing.manage` and a sign-in within the last 15 minutes, accepts whole numbers
+  only, and refuses before cancelling anything: a version that holds less than the company has, add-
+  ons the version does not sell or beyond its maximums, and a total one plan payment cannot cover.
+  Staff cancels and company deletion cancel every subscription that may still charge.
+
+Phase 5 rules (packs of extra API requests, P5-01/P5-08, ADR-110):
+
+- A version sells API request packs only with a monthly API request limit above 0, with both a size
+  and a price; check constraints hold this for every writer (a NULL limit included), and the plan
+  guard keeps a published version's packs. The platform role may update the two columns of a draft
+  only (column grant), and `api_request_packs` of a plan state, which the plan state's guard keeps
+  to versions that sell packs.
+- No limit with packs passes 2,000,000,000: the plan state's guard and the guard of a following
+  subscription refuse more packs of either kind, summing in 64 bits, so nobody (staff, a company's
+  function, a following subscription's paid cycle) can store a plan state whose entitlements leave
+  the integer range. The sweep's lookups compare in 64 bits, so one plan state cannot stop them for
+  every company.
+- Companies set their packs only through `app.choose_add_ons` (four quantities; SECURITY DEFINER,
+  pinned `search_path`, `w360_app` alone, the company and member from the session's scope), under
+  ADR-106's conditions and locks. The three-quantity function kept for a deploy leaves the packs
+  unchanged.
+- A subscription that follows none is refused unless its version and add-ons are the company's plan
+  state's (`app.guard_plan_subscription_start`, invoker rights, executable by nobody), so a payment
+  is never taken for add-ons the company does not have, nor a company left with add-ons it did not
+  pay for, whichever server recorded the subscription.
+
+Phase 5 rules (usage warnings at a share the company chooses, P5-01, ADR-144):
+
+- Only members with `billing.manage` (owners and billing managers) choose the share, re-checked by
+  the service; administrators, who read billing, and every other role are refused. No recent
+  sign-in is asked: the share moves no money and changes no access, and the notices at a limit
+  itself do not depend on it. Each change is in the company's audit log with the share before and
+  after (`billing.usage_warning_changed`); choosing the current share writes nothing.
+- The runtime role gains `UPDATE` on `app.tenants.usage_warning_percent` alone (a column grant) and
+  reaches only its company's row (RLS); a check constraint keeps the share to 50% to 95% in steps of
+  5 for every writer, and the service refuses anything else with one message.
+- The share moves only when a warning comes, never how often: the sweep still warns each counter at
+  most once per period, under the counter's lock, after reading the company's share again in the
+  company's scope, so a share raised after the sweep listed a counter is respected.
+  `ops.usage_warnings_due` (SECURITY DEFINER, pinned `search_path`, `w360_app` alone) still returns
+  ids only. API keys' own limits keep their 80% email (ADR-098).
+
 Phase 5 rules (daily settlement reconciliation, P5-05, ADR-059):
 
 - The settlement report is used only to look HyFib's own records up by provider id; a company is
@@ -821,7 +1158,7 @@ refund unused credit (ADR-058), decide refund requests (ADR-073, ADR-104), run o
 cancel a company's plan subscription at Razorpay (ADR-063), and staff cannot change a company's plan
 while its subscription can still be authorised or charged. Only platform
 owners change the plan catalog (create, edit and publish versions, retire them, choose the default
-trial); owners and operators put companies on plans and end them, with a reason shown in the
+trial, offer versions to companies and stop offering them, ADR-105); owners and operators put companies on plans and end them, with a reason shown in the
 company's audit log and emailed to its billing managers (ADR-100). The platform role only marks the
 change (`app.tenant_plans.staff_notice_version`, a column grant); the worker queues the emails from
 the company's own scope (`ops.plan_change_notices_due`, and `app.take_plan_change_notice`, which
@@ -856,6 +1193,34 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   `failed`, `quarantined` or processing with its last attempt's lease run out (since 0068), only
   while its body is kept) and resolving a quarantine entry each need a written reason and write
   `ops.platform_audit_events` in the same transaction. Neither reads or changes company data.
+- Dead letter retries (ADR-108): `ops.platform_retry_dead_letter` (owned by `w360_definer`,
+  executable only by `w360_platform`, `W3403` unless the session's user is a platform
+  administrator) sends a dead letter's failed job back to its queue once, with a written reason of
+  10 to 2,000 characters, marks the dead letter with who retried it and when (a check pairs the
+  two; only the definer may write them) and writes `ops.platform_audit_events`, in one transaction.
+  It refuses a dead letter already retried, one whose envelope did not verify (so a forged job is
+  never run again on a platform administrator's word), one of a company being deleted or gone, a
+  job pg-boss no longer keeps as failed, a job of a queue that never retries
+  (`billing.auto-recharge`) or of a receipt queue, and a job whose work already waits. The job runs
+  again with its own signed envelope, which the worker verifies and authorizes again; the retry
+  changes no company data. The migration runner grants the definer, on `pgboss.job`, SELECT on id,
+  name, state and retry limit and UPDATE on state, retry limit and completion time only: it can
+  read no job's data or output, and insert or delete none (tested). It also refuses a dead letter
+  whose work was settled (ADR-111).
+- Settling stranded work (ADR-111): the minute sweep ends the work of `channel.onboard`,
+  `commerce.account` and `template.delete` dead letters in the company's own scope. The company
+  comes from the dead letter, which the worker recorded only from a verified envelope, through
+  `ops.dead_letters_to_settle` (SECURITY DEFINER, executable only by `w360_app`; companies being
+  deleted are left out). `ops.settle_dead_letter` (SECURITY DEFINER, `w360_app` only) marks a dead
+  letter only in its own company's scope (`W3403` without a company scope or an answer, `W3404` for
+  another company's), only a verified one of those queues whose envelope names its own queue
+  (`W3412`), and returns false when the dead letter was retried or settled, or a job for its work
+  waits or runs: the sweep then rolls back the work it ended in that transaction. The work it ends
+  is the company's own row, through RLS, guarded by its state. Checks keep a settled time paired
+  with its answer, limit it to those queues and keep it apart from a retry. `ops.dead_letter_work_live`
+  is executable by the definer only, which reads `pgboss.job.singleton_key` for it (the runner's
+  grant; still no job data or output). Neither the worker nor platform staff can mark a dead letter
+  directly (tested).
 - Failure alerts (ADR-091): the worker emails every platform administrator counts of dead letters by
   queue, used-up receipts by provider and quarantine entries by provider and reason, never a
   company, receipt, reference or error. `ops.failure_alerts_due`, `ops.mark_failure_alert` and
@@ -869,6 +1234,23 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   the worker's role; only the definer role writes `ops.queue_waits`, which the worker and platform
   roles read (queue names, counts and times). The email to every platform administrator names
   queues, counts, waits and limits only, at most every 15 minutes.
+- Integration failure alerts (ADR-139): the worker emails every platform administrator counts of
+  companies' failing integrations by kind, never a company, label, host, error or id.
+  `ops.integration_failures` (the console's list) is callable only by its owner, through the
+  console's function (platform administrators only) and the alert's two functions
+  (`ops.integration_alerts_due`, `ops.mark_integration_alert`), which are SECURITY DEFINER and
+  executable only by the worker's role; only the definer role reads and writes
+  `ops.integration_alerts`. Each failure is emailed once, at most one alert every 15 minutes.
+- Acknowledging integration failures (ADR-141): a platform administrator notes on the console that a
+  listed failure is being handled, through `ops.platform_acknowledge_integration_failure` (SECURITY
+  DEFINER, executable only by the platform role), which checks the administrator, the note (10 to
+  500 characters) and that the console lists the failure in that state now, and writes the platform
+  audit entry (`platform.integration_failure_acknowledged`, the note as its reason) in the same
+  transaction. Only the definer role reads and writes `ops.integration_acknowledgements` (the
+  failure's source, subject and state, the administrator, the time and the note); the console's
+  list returns the administrator's name and the note to platform administrators only, and the
+  company never sees them. An acknowledgement is forgotten an hour after its failure stops being
+  listed.
 
 Company export and deletion (Settings → Company data, ADR-055):
 
@@ -905,8 +1287,8 @@ Company export and deletion (Settings → Company data, ADR-055):
 
 | Secret                                      | Rotation procedure                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `W360_ENCRYPTION_KEYS`                      | Add a new key id, make it primary (`W360_ENCRYPTION_PRIMARY_KEY_ID`), deploy. New values use the new key at once; existing ciphertexts (provider tokens, HTTP secrets, flow private keys, companies' Razorpay secrets, stored webhook bodies) need the re-encryption job, which is not built yet (SEC-10). Remove the old key only after `Keyring.needsRotation` finds no rows.                                                                                      |
-| `W360_JOB_SIGNING_KEY`                      | Drain queues or deploy dual-key verification first (backlog item SEC-4); then rotate. Invalid-signature jobs are dropped and logged.                                                                                                                                                                                                                                                                                                                                 |
+| `W360_ENCRYPTION_KEYS`                      | Add a new key id next to the old one, make it primary (`W360_ENCRYPTION_PRIMARY_KEY_ID`), deploy: new values use the new key at once, and the worker's minute sweep seals every stored value the old key sealed again with the new one (ADR-134; RUNBOOKS §13). Remove the old key once Operations → Keys shows it seals nothing, every instance runs the new configuration and integrations have read their change feeds since.                                     |
+| `W360_JOB_SIGNING_KEY`                      | Add the new key as `W360_JOB_SIGNING_KEY_NEXT` and deploy (accepted, signs nothing); once every instance runs with it, make it `W360_JOB_SIGNING_KEY` with the old one as `W360_JOB_SIGNING_KEY_PREVIOUS` and deploy: the worker signs the queued jobs the old key signed again (ADR-135). Remove the previous key once Operations → Keys shows no job that can still run signed with it (RUNBOOKS §13). Invalid-signature jobs are dropped and logged.              |
 | `BETTER_AUTH_SECRET`                        | Rotating signs everyone out and invalidates encrypted TOTP secrets; plan with the library's multi-secret support (`secrets` option) before production.                                                                                                                                                                                                                                                                                                               |
 | Database role passwords                     | Rotate in the secret manager and PostgreSQL (`ALTER ROLE … PASSWORD`), rolling restart.                                                                                                                                                                                                                                                                                                                                                                              |
 | Provider secrets (Meta, Razorpay, SMTP)     | Rotate at the provider, update the secret manager, rolling restart; webhook secrets support an overlap window where the provider allows it.                                                                                                                                                                                                                                                                                                                          |
@@ -927,7 +1309,7 @@ Incident handling follows `docs/RUNBOOKS.md` (compromised tenant, credential exp
 See `docs/THREAT-MODEL.md` (status P/D/A) and `docs/BACKLOG.md` (SEC-* items): WebAuthn, breached
 password screening, hash-chained audit checkpoints, a network egress policy behind the egress guard
 (deployment), edge rate limits for the public chat-link and widget routes, media scanning,
-dual-key job signing, OpenTelemetry alerting, independent penetration test, WebAuthn as a step-up
+OpenTelemetry alerting, independent penetration test, WebAuthn as a step-up
 factor, Razorpay sandbox verification of the payment flows and Checkout CSP, and for the public
 API: IP allowlists per key, monthly API quotas and reminders before keys expire; for outgoing
 webhooks: fixed egress addresses that receivers can allowlist, mutual TLS and ending a rotated

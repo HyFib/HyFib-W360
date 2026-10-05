@@ -12,7 +12,7 @@ import {
 } from '@w360/db';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
 import { loadEntitlements } from '../plans/entitlements';
-import { usagePeriod, warningThreshold } from '../plans/model';
+import { DEFAULT_USAGE_WARNING_PERCENT, usagePeriod, warningThreshold } from '../plans/model';
 import { deletionRecipients, formatCompanyTime } from '../tenancy/deletion';
 import { apiKeyState } from './model';
 
@@ -142,7 +142,8 @@ export async function noticeApiKeyUsage(
       return null;
     }
     if (usage.periodStart.getTime() !== period.start.getTime()) return null;
-    const threshold = warningThreshold(key.limit);
+    // A key's own limit warns at 80%, whatever the company chose for its limits (ADR-144).
+    const threshold = warningThreshold(key.limit, DEFAULT_USAGE_WARNING_PERCENT);
     const kind: ApiKeyUsageNoticeKind | null =
       usage.used >= key.limit
         ? 'reached'

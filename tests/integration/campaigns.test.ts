@@ -337,6 +337,103 @@ describe('segments', () => {
   });
 });
 
+describe('campaign results (ADR-150)', () => {
+  it('come from one statement, the commonest skip reasons and failure codes first, ties by reason or code', async () => {
+    const s = await setup();
+    const ctx = await fx.ctx(s.c, s.c.owner);
+    const consent = createConsentService({ db: fx.dbs.app, clock: systemClock });
+    const phone = (n: number) => `+9198200500${String(n).padStart(2, '0')}`;
+    const audience = (tag: string) => ({
+      audience: {
+        kind: 'conditions',
+        definition: { match: 'all', conditions: [{ type: 'tag', op: 'has', tag }] },
+      },
+    });
+    // Runs the campaign and fails each contact's message with the code given, or without one.
+    const failEach = async (id: string, failures: [contactId: string, code: number | null][]) => {
+      await s.campaigns.submitCampaign(ctx, id, { expectedVersion: 1 }, {});
+      await s.tick(id);
+      expect(await s.dispatchAll(id)).toEqual(Array(failures.length).fill('accepted'));
+      const wamids = await fx.query<{ external_message_id: string; contact_id: string }>(
+        `SELECT m.external_message_id, cv.contact_id FROM app.messages m
+           JOIN app.conversations cv ON cv.id = m.conversation_id WHERE m.campaign_id = $1`,
+        [id],
+      );
+      const now = String(Math.floor(Date.now() / 1000));
+      await fx.deliver(
+        fx.messagesBody(s.c, {
+          statuses: failures.map(([contactId, code]) => ({
+            id: wamids.find((w) => w.contact_id === contactId)!.external_message_id,
+            status: 'failed',
+            timestamp: now,
+            recipient_id: '919820050001',
+            ...(code === null ? {} : { errors: [{ code, title: `Error ${code}` }] }),
+          })),
+        }),
+      );
+      return (await s.campaigns.getCampaign(ctx, id)).analytics;
+    };
+
+    // Two suppressed contacts and one without consent are skipped. Every message fails: one code
+    // three times, another and no code twice each, nine codes once.
+    const once = [131047, 131031, 131021, 131016, 131009, 131008, 131005, 131000, 130472];
+    const codes = [131049, 131049, 131049, 131026, 131026, null, null, ...once];
+    const failures: [string, number | null][] = [];
+    for (const [i, code] of codes.entries()) {
+      failures.push([await s.contact(phone(i + 1), { tags: ['first'] }), code]);
+    }
+    await s.contact(phone(17), { name: 'Esha', tags: ['first'] });
+    await s.contact(phone(18), { name: 'Gita', tags: ['first'] });
+    await s.contact(phone(19), { name: 'Farah', tags: ['first'], optIn: false });
+    await consent.addSuppression(ctx, { phone: phone(17), reason: 'complaint' });
+    await consent.addSuppression(ctx, { phone: phone(18), reason: 'complaint' });
+    const first = await s.draft('Results', audience('first'));
+    const analytics = await failEach(first.id, failures);
+    expect(analytics).toMatchObject({ audience: 19, skipped: 3, queued: 16, failed: 16 });
+    expect(analytics?.skipReasons).toEqual([
+      { reason: 'suppressed', count: 2 },
+      { reason: 'no_marketing_opt_in', count: 1 },
+    ]);
+    // The 10 commonest codes, ties in the codes' order and no code after them: two codes failing
+    // once are left out.
+    expect(analytics?.failureCodes).toEqual([
+      { code: '131049', count: 3 },
+      { code: '131026', count: 2 },
+      { code: 'unknown', count: 2 },
+      { code: '130472', count: 1 },
+      { code: '131000', count: 1 },
+      { code: '131005', count: 1 },
+      { code: '131008', count: 1 },
+      { code: '131009', count: 1 },
+      { code: '131016', count: 1 },
+      { code: '131021', count: 1 },
+    ]);
+
+    // When the tenth place is tied, no code is the one left out.
+    const tied: [string, number | null][] = [];
+    for (const [i, code] of [131049, 131049, null, 131026, ...once.slice(1)].entries()) {
+      tied.push([await s.contact(phone(i + 21), { tags: ['second'] }), code]);
+    }
+    const again = await s.draft('Results again', audience('second'));
+    const tiedAnalytics = await failEach(again.id, tied);
+    // Only this campaign's recipients and messages count.
+    expect(tiedAnalytics).toMatchObject({ audience: 12, skipped: 0, queued: 12, failed: 12 });
+    expect(tiedAnalytics?.skipReasons).toEqual([]);
+    expect(tiedAnalytics?.failureCodes).toEqual([
+      { code: '131049', count: 2 },
+      { code: '130472', count: 1 },
+      { code: '131000', count: 1 },
+      { code: '131005', count: 1 },
+      { code: '131008', count: 1 },
+      { code: '131009', count: 1 },
+      { code: '131016', count: 1 },
+      { code: '131021', count: 1 },
+      { code: '131026', count: 1 },
+      { code: '131031', count: 1 },
+    ]);
+  });
+});
+
 describe('campaign lifecycle', () => {
   let s: Setup;
   const ids: Record<string, string> = {};
@@ -483,6 +580,12 @@ describe('campaign lifecycle', () => {
       skipped: 3,
     });
     expect(view.analytics?.failureCodes).toEqual([{ code: '131049', count: 1 }]);
+    // Reasons tied at one each come in the reasons' order (ADR-150).
+    expect(view.analytics?.skipReasons).toEqual([
+      { reason: 'no_marketing_opt_in', count: 1 },
+      { reason: 'opted_out', count: 1 },
+      { reason: 'suppressed', count: 1 },
+    ]);
     expect(view.events.map((e) => e.type)).toEqual(
       expect.arrayContaining([
         'created',

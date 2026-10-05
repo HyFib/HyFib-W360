@@ -3,12 +3,13 @@ import {
   boolean,
   inet,
   integer,
-  jsonb,
   pgSchema,
+  smallint,
   text,
   timestamp,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { jsonb } from './columns';
 
 export const appSchema = pgSchema('app');
 
@@ -52,6 +53,8 @@ export const tenants = appSchema.table('tenants', {
   locale: text('locale').notNull().default('en'),
   dataRegion: text('data_region').notNull().default('in'),
   requireMfaAllMembers: boolean('require_mfa_all_members').notNull().default(false),
+  /** The share of a monthly limit at which billing managers are warned (ADR-144). */
+  usageWarningPercent: smallint('usage_warning_percent').notNull().default(80),
   createdByUserId: text('created_by_user_id').notNull(),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),

@@ -41,19 +41,21 @@ function UsageRow({
   used,
   limit,
   detail,
-  monthly = false,
+  warningPercent,
 }: {
   label: string;
   used: number;
   limit: number | null;
   detail?: string;
-  /** A monthly allowance, which warns at 80% (ADR-062). */
-  monthly?: boolean;
+  /**
+   * For a monthly allowance, the share of it at which the billing managers are warned by email
+   * (ADR-062, chosen by the company since ADR-144).
+   */
+  warningPercent?: number;
 }) {
   const share = limit === null || limit === 0 ? null : Math.min(100, (used / limit) * 100);
   const full = limit !== null && used >= limit;
-  // At 80% of a monthly limit the billing managers are warned by email (ADR-062).
-  const threshold = monthly ? warningThreshold(limit) : null;
+  const threshold = warningPercent === undefined ? null : warningThreshold(limit, warningPercent);
   const nearly = !full && threshold !== null && used >= threshold;
   return (
     <TR>
@@ -95,9 +97,12 @@ export function PlanCard({
   overview,
   timeZone,
   payment = null,
+  next = null,
 }: {
   overview: CompanyPlanOverview;
   timeZone: string;
+  /** The plan the company changes to from the end of the paid period (ADR-109). */
+  next?: { planName: string; startsAt: Date; authorised: boolean } | null;
   /**
    * Whether the company pays by subscription (ADR-063), has one whose payments start when the
    * trial ends (ADR-102), or can pay for its plan here.
@@ -134,6 +139,11 @@ export function PlanCard({
                 : payHere
                   ? 'HyFib sets plans; you can pay for yours below.'
                   : 'HyFib sets plans and periods; there is nothing to pay here for the plan.'}
+          {next
+            ? next.authorised
+              ? ` From ${day(next.startsAt)}, your plan is ${next.planName}.`
+              : ` Your plan changes to ${next.planName} on ${day(next.startsAt)} once its payment is authorised.`
+            : null}
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-6">
@@ -194,6 +204,16 @@ export function PlanCard({
                 </dd>
               </div>
             ) : null}
+            {plan.apiRequestPackSize !== null && plan.apiRequestPackPriceMinor !== null ? (
+              <div className="grid gap-1">
+                <dt className="text-muted-foreground">API request packs</dt>
+                <dd>
+                  {overview.addOns.apiRequestPacks} ·{' '}
+                  {plan.apiRequestPackSize.toLocaleString('en-IN')} requests for{' '}
+                  {inr(plan.apiRequestPackPriceMinor)}
+                </dd>
+              </div>
+            ) : null}
             {plan.status === 'retired' ? (
               <div className="grid gap-1 sm:col-span-3">
                 <dt className="sr-only">Availability</dt>
@@ -251,7 +271,7 @@ export function PlanCard({
               label="Automation runs this month"
               used={runs.used}
               limit={usage.limits.automationRuns}
-              monthly
+              warningPercent={overview.usageWarningPercent}
               detail={`${day(runs.periodStart)} to ${day(runs.periodEnd)}; test runs are not counted`}
             />
             {usage.limits.apiRequests === 0 ? (
@@ -264,7 +284,7 @@ export function PlanCard({
                 label="API requests this month"
                 used={usage.apiRequests.used}
                 limit={usage.limits.apiRequests}
-                monthly
+                warningPercent={overview.usageWarningPercent}
                 detail={`${day(usage.apiRequests.periodStart)} to ${day(usage.apiRequests.periodEnd)}; requests with the company's API keys`}
               />
             )}

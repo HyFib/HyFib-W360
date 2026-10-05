@@ -1,4 +1,4 @@
-import { displayMoney, uuidv7, type Clock, type Keyring } from '@w360/core';
+import { displayMoney, parseExternalJson, uuidv7, type Clock, type Keyring } from '@w360/core';
 import {
   and,
   autoRechargeAttempts,
@@ -663,7 +663,7 @@ export async function processRazorpayReceipt(
     let event: { event?: unknown; payload?: unknown };
     try {
       if (!claimed.bodyCiphertext) throw new Error('body erased');
-      event = JSON.parse(
+      event = parseExternalJson(
         deps.keyring.decryptString(claimed.bodyCiphertext, receiptAad(claimed.id)),
       ) as typeof event;
     } catch {

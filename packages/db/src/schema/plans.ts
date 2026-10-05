@@ -42,6 +42,12 @@ export const plans = opsSchema.table('plans', {
   apiRequestsMonthly: integer('api_requests_monthly'),
   /** The public API scopes the plan includes; null: every scope, including later ones (ADR-092). */
   apiScopes: text('api_scopes').array().$type<ApiScope[]>(),
+  /**
+   * Extra API requests a month in one pack, with its price per billing interval; both null when the
+   * version sells none, which it can only with a monthly limit above 0 (ADR-110, migration 0088).
+   */
+  apiRequestPackSize: integer('api_request_pack_size'),
+  apiRequestPackPriceMinor: bigint('api_request_pack_price_minor', { mode: 'number' }),
   status: text('status', { enum: PLAN_STATUSES }).notNull().default('draft'),
   createdByUserId: text('created_by_user_id').notNull(),
   createdAt: tz('created_at').notNull().defaultNow(),
@@ -49,6 +55,9 @@ export const plans = opsSchema.table('plans', {
   publishedAt: tz('published_at'),
   retiredByUserId: text('retired_by_user_id'),
   retiredAt: tz('retired_at'),
+  /** Offered to companies, which can choose it (a published version only, ADR-105). */
+  offeredAt: tz('offered_at'),
+  offeredByUserId: text('offered_by_user_id'),
 });
 
 /** The default trial for new companies and the tax on plan prices (a single row). */
@@ -59,6 +68,9 @@ export const planSettings = opsSchema.table('plan_settings', {
   planTaxBp: integer('plan_tax_bp'),
   updatedByUserId: text('updated_by_user_id'),
   updatedAt: tz('updated_at').notNull().defaultNow(),
+  /** The public price list of offered versions is shown; null: hidden (ADR-107). */
+  priceListShownAt: tz('price_list_shown_at'),
+  priceListShownByUserId: text('price_list_shown_by_user_id'),
 });
 
 export const TENANT_PLAN_STATUSES = [
@@ -84,6 +96,8 @@ export const tenantPlans = appSchema.table('tenant_plans', {
   extraSeats: integer('extra_seats').notNull().default(0),
   extraNumbers: integer('extra_numbers').notNull().default(0),
   runPacks: integer('run_packs').notNull().default(0),
+  /** Packs of extra API requests a month (ADR-110, migration 0088). */
+  apiRequestPacks: integer('api_request_packs').notNull().default(0),
   usageAnchor: tz('usage_anchor').notNull().defaultNow(),
   note: text('note'),
   changedByUserId: text('changed_by_user_id'),
@@ -112,7 +126,11 @@ export const PLAN_SUBSCRIPTION_STATUSES = [
   'failed',
 ] as const;
 export type PlanSubscriptionStatus = (typeof PLAN_SUBSCRIPTION_STATUSES)[number];
-/** Subscriptions that may still be authorised or charged: at most one per company (0037). */
+/**
+ * Subscriptions that may still be authorised or charged. At most one per company keeps charging: the
+ * current one may stay live while it ends at its period's end, next to the one that follows it
+ * (0087, ADR-109).
+ */
 export const LIVE_PLAN_SUBSCRIPTION_STATUSES = [
   'creating',
   'created',
@@ -133,6 +151,8 @@ export const planSubscriptions = appSchema.table('plan_subscriptions', {
   extraSeats: integer('extra_seats').notNull(),
   extraNumbers: integer('extra_numbers').notNull(),
   runPacks: integer('run_packs').notNull(),
+  /** Packs of extra API requests it pays for (ADR-110, migration 0088). */
+  apiRequestPacks: integer('api_request_packs').notNull().default(0),
   subtotalMinor: bigint('subtotal_minor', { mode: 'number' }).notNull(),
   taxBp: integer('tax_bp').notNull(),
   taxMinor: bigint('tax_minor', { mode: 'number' }).notNull(),
@@ -160,8 +180,13 @@ export const planSubscriptions = appSchema.table('plan_subscriptions', {
    * (ADR-101, migration 0078); the worker's sweep clears it.
    */
   staffCancelNoticeDue: boolean('staff_cancel_notice_due').notNull().default(false),
-  /** When the first charge is due, at the trial's end (ADR-102, 0079); null: charged in Checkout. */
+  /**
+   * When the first charge is due: at the trial's end (ADR-102, 0079) or, for one that follows
+   * another, when the paid period ends (ADR-109); null: charged in Checkout.
+   */
   startsAt: tz('starts_at'),
+  /** The subscription this one follows from the end of its paid period (ADR-109, 0087). */
+  followsSubscriptionId: uuid('follows_subscription_id'),
 });
 
 /** A paid invoice of a subscription: the charge and the billing cycle it paid for (0037). */

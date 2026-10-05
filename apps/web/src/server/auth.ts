@@ -1,23 +1,36 @@
 import 'server-only';
 import { betterAuth } from 'better-auth';
+import { APIError, createAuthMiddleware } from 'better-auth/api';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { nextCookies } from 'better-auth/next-js';
 import { twoFactor } from 'better-auth/plugins/two-factor';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import type pg from 'pg';
-import type { Logger, WebConfig } from '@w360/core';
+import {
+  isDatabaseQueryError,
+  logLibraryLine,
+  withoutDriverErrors,
+  withoutDriverErrorsFrom,
+  type Logger,
+  type WebConfig,
+} from '@w360/core';
 import { betterAuthSchema, systemScope, type Database } from '@w360/db';
 import {
   enqueueEmail,
+  NUL_CHARACTER_MESSAGE,
+  nulCharacterPathIn,
   RECENT_SIGN_IN_MINUTES,
   recordSecurityEvent,
   type OutboxDeps,
 } from '@w360/domain';
+import { signInHistory } from './sign-in-history';
 
 /**
  * Identity: email/password with mandatory email verification, TOTP two-factor with backup codes,
  * database-backed sessions (revocation takes effect immediately; no stateless cookie cache),
  * database-backed rate limits shared by all replicas, and built-in sign-up enumeration protection.
+ * Better Auth queries the database on its own pool, so its failed queries never pass through
+ * `db.run`: its log lines, API errors and server-side calls drop the driver's error (ADR-129).
  */
 export function createAuth(deps: {
   config: WebConfig;
@@ -45,7 +58,7 @@ export function createAuth(deps: {
     );
   };
 
-  return betterAuth({
+  const auth = betterAuth({
     appName: 'HyFib W360',
     baseURL: config.APP_BASE_URL,
     secret: config.BETTER_AUTH_SECRET,
@@ -135,10 +148,36 @@ export function createAuth(deps: {
           : {}),
       },
     },
+    // Members' auth forms (names, emails, passwords, tokens) are refused when they hold the NUL
+    // character, as every other form is (ADR-130): PostgreSQL text cannot store it, so the query
+    // would otherwise fail.
+    hooks: {
+      before: createAuthMiddleware(async (ctx) => {
+        if (nulCharacterPathIn({ body: ctx.body, query: ctx.query, params: ctx.params }) !== null) {
+          throw new APIError('BAD_REQUEST', { message: NUL_CHARACTER_MESSAGE });
+        }
+      }),
+    },
+    // Better Auth's own lines through ours: an error among a line's arguments (a failed query's
+    // repeats its parameters: emails, names, session and verification tokens) is written without
+    // the data it quotes, and the line's other arguments are left out.
+    logger: {
+      log: (level, message, ...args: unknown[]) =>
+        logLibraryLine(logger, level, `better-auth: ${message}`, args),
+    },
     onAPIError: {
       onError: (error) => {
+        // A failed query is logged as its DatabaseQueryError; any other error by its message, as
+        // before (an API error also holds the response's headers).
+        const safe = withoutDriverErrors(error);
         logger.warn(
-          { err: error instanceof Error ? error.message : String(error) },
+          {
+            err: isDatabaseQueryError(safe)
+              ? safe
+              : error instanceof Error
+                ? error.message
+                : String(error),
+          },
           'auth api error',
         );
       },
@@ -148,10 +187,15 @@ export function createAuth(deps: {
         issuer: 'HyFib W360',
         backupCodeOptions: { amount: 10, length: 12 },
       }),
+      // After two-factor, which withdraws the password step's session until a code is given, and
+      // before nextCookies: records each completed sign-in (ADR-136).
+      signInHistory({ db, logger }),
       // Must be last: lets server actions set auth cookies.
       nextCookies(),
     ],
   });
+  // Pages, routes and actions call these; an error they throw reaches Next.js's output.
+  return { ...auth, api: withoutDriverErrorsFrom(auth.api) };
 }
 
 export type Auth = ReturnType<typeof createAuth>;

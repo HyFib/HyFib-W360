@@ -3,8 +3,14 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import {
   can,
+  WEBHOOK_CAMPAIGN_STATUS_LABELS,
+  WEBHOOK_CONTACT_PART_LABELS,
+  WEBHOOK_CONVERSATION_STATUS_LABELS,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_LIMITS,
+  WEBHOOK_ORDER_STATUS_LABELS,
+  WEBHOOK_MESSAGE_STATUS_LABELS,
+  WEBHOOK_TEMPLATE_STATUS_LABELS,
   webhookHost,
   type WebhookEndpointView,
 } from '@w360/domain';
@@ -31,7 +37,10 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'developer.manage')) notFound();
   const { webhooks } = await getRuntime();
-  const endpoints = await webhooks.list(ctx);
+  const [endpoints, automationChoices] = await Promise.all([
+    webhooks.list(ctx),
+    webhooks.automationChoices(ctx),
+  ]);
   const tz = ctx.tenant.timezone;
   const base = `/c/${ctx.tenant.slug}/settings/webhooks`;
   return (
@@ -96,6 +105,61 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                     </div>
                     <p className="font-mono text-xs break-all">{e.url}</p>
                     {e.description ? <p className="text-sm">{e.description}</p> : null}
+                    {e.messageStatuses ? (
+                      <p className="text-xs text-muted-foreground">
+                        Message statuses sent:{' '}
+                        {e.messageStatuses.map((s) => WEBHOOK_MESSAGE_STATUS_LABELS[s]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.templateStatuses ? (
+                      <p className="text-xs text-muted-foreground">
+                        Template statuses sent:{' '}
+                        {e.templateStatuses
+                          .map((t) => WEBHOOK_TEMPLATE_STATUS_LABELS[t])
+                          .join(', ')}
+                      </p>
+                    ) : null}
+                    {e.conversationStatuses ? (
+                      <p className="text-xs text-muted-foreground">
+                        Conversation statuses sent:{' '}
+                        {e.conversationStatuses
+                          .map((s) => WEBHOOK_CONVERSATION_STATUS_LABELS[s])
+                          .join(', ')}
+                      </p>
+                    ) : null}
+                    {e.contactParts ? (
+                      <p className="text-xs text-muted-foreground">
+                        Contact changes sent:{' '}
+                        {e.contactParts.map((p) => WEBHOOK_CONTACT_PART_LABELS[p]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.orderStatuses ? (
+                      <p className="text-xs text-muted-foreground">
+                        Order statuses sent:{' '}
+                        {e.orderStatuses.map((o) => WEBHOOK_ORDER_STATUS_LABELS[o]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.campaignStatuses ? (
+                      <p className="text-xs text-muted-foreground">
+                        Campaign statuses sent:{' '}
+                        {e.campaignStatuses
+                          .map((c) => WEBHOOK_CAMPAIGN_STATUS_LABELS[c])
+                          .join(', ')}
+                      </p>
+                    ) : null}
+                    {e.automations ? (
+                      <p className="text-xs text-muted-foreground">
+                        Automation runs sent:{' '}
+                        {e.automations
+                          .map((a) => (a.archived ? `${a.name} (archived)` : a.name))
+                          .join(', ')}
+                      </p>
+                    ) : null}
+                    {e.headerNames.length > 0 ? (
+                      <p className="text-xs text-muted-foreground">
+                        Headers sent: {e.headerNames.join(', ')} (values hidden)
+                      </p>
+                    ) : null}
                     <p className="flex flex-wrap gap-1">
                       {e.eventTypes.map((t) => (
                         <Badge key={t} tone="neutral">
@@ -182,6 +246,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
         <CardContent>
           <WebhookEndpointForm
             slug={ctx.tenant.slug}
+            automationChoices={automationChoices}
             atLimit={endpoints.length >= WEBHOOK_LIMITS.endpoints}
           />
         </CardContent>

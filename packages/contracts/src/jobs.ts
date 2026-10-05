@@ -192,13 +192,17 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 168,
   },
+  /**
+   * Deletes a template at Meta. A repeat is harmless, so it retries for 4 to 5 hours; a deletion
+   * still pending after that is settled by the minute sweep (ADR-111).
+   */
   templateDelete: {
     name: 'template.delete',
     policy: 'exclusive',
-    retryLimit: 5,
+    retryLimit: 10,
     retryDelaySeconds: 30,
     retryBackoff: true,
-    retryDelayMaxSeconds: 900,
+    retryDelayMaxSeconds: 3600,
     expireInSeconds: 120,
     deadLetter: 'dead-letter',
     deleteAfterHours: 168,
@@ -214,6 +218,22 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 72,
     maxWaitMinutes: 60,
+  },
+  /**
+   * Checks a WhatsApp account's access with `debug_token` (ADR-137). A check that cannot be made is
+   * recorded and the minute sweep signals the account again after 30 minutes, so only a failure of
+   * the job itself is retried here.
+   */
+  whatsappAccessCheck: {
+    name: 'whatsapp.access_check',
+    policy: 'exclusive',
+    retryLimit: 2,
+    retryDelaySeconds: 60,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 600,
+    expireInSeconds: 120,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 72,
   },
   campaignRun: {
     name: 'campaign.run',
@@ -328,14 +348,17 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 168,
   },
-  /** Checks a company's Razorpay keys against Razorpay. */
+  /**
+   * Checks a company's Razorpay keys against Razorpay. A read, so it retries for 1.5 to 2 hours;
+   * keys still being checked after that are settled by the minute sweep (ADR-111).
+   */
   commerceAccount: {
     name: 'commerce.account',
     policy: 'exclusive',
-    retryLimit: 3,
+    retryLimit: 8,
     retryDelaySeconds: 30,
     retryBackoff: true,
-    retryDelayMaxSeconds: 300,
+    retryDelayMaxSeconds: 1800,
     expireInSeconds: 60,
     deadLetter: 'dead-letter',
     deleteAfterHours: 72,
@@ -416,6 +439,14 @@ export const jobEnvelopeSchema = z.object({
   actorUserId: z.string().min(1).max(200).nullable(),
   ref: z.string().min(1).max(200),
   issuedAt: z.number().int().positive(),
+  /**
+   * The id of the key that signed the envelope (ADR-135), outside the signature so that releases
+   * before it, which drop unknown fields, still verify it. Absent from envelopes signed before.
+   */
+  kid: z
+    .string()
+    .regex(/^[0-9a-f]{16}$/)
+    .optional(),
   sig: z.string().regex(/^[0-9a-f]{64}$/),
 });
 

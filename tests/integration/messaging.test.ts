@@ -534,6 +534,22 @@ describe('outbound sends', () => {
     expect(conv!.assigned_membership_id).toBe(ctx.membership.id);
   });
 
+  it("clips the conversation's preview of a reply without splitting an emoji (ADR-133)", async () => {
+    const c = await companyWithChannel();
+    const conversationId = await openConversation(c);
+    const ctx = await ctxFor(c, c.agent);
+    await queueTextMessage(outboundDeps(), ctx, {
+      conversationId,
+      text: `${'x'.repeat(199)}😀 and the rest of a long reply`,
+      clientKey: 'ck-preview-emoji',
+    });
+    const [conv] = await adminQuery<{ last_message_preview: string }>(
+      'SELECT last_message_preview FROM app.conversations WHERE id = $1',
+      [conversationId],
+    );
+    expect(conv!.last_message_preview).toBe('x'.repeat(199));
+  });
+
   it('schedules retries for rate limits and server errors, and fails permanently otherwise', async () => {
     const c = await companyWithChannel();
     const conversationId = await openConversation(c);
@@ -613,6 +629,13 @@ describe('outbound sends', () => {
       [c.channelAccountId],
     );
     expect(channel!.status).toBe('needs_reconnect');
+    // The account's access is checked at once (ADR-137); until then it stays connected.
+    const [account] = await adminQuery<{ status: string; requested: Date | null }>(
+      'SELECT status, token_check_requested_at AS requested FROM app.whatsapp_accounts WHERE id = $1',
+      [c.whatsappAccountId],
+    );
+    expect(account!.status).toBe('connected');
+    expect(account!.requested).not.toBeNull();
   });
 
   it('never resends automatically when no response arrived; a member decides', async () => {

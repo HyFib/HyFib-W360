@@ -4,13 +4,17 @@ import { toError } from '@w360/core';
 import { authorizedTenantScope } from '@w360/db';
 import {
   alertFailures,
+  alertIntegrationFailures,
   alertLateQueues,
   applyMessagingRetention,
   authorizeJob,
   cancelSendIntent,
   checkQueueWaits,
+  compactContactChanges,
   findStaleReceipts,
   findStaleSendIntents,
+  newResealState,
+  newResignState,
   noticeApiKeyUsageDue,
   processChannelOnboarding,
   processMetaWebhookReceipt,
@@ -21,7 +25,12 @@ import {
   queueWaitLimits,
   recoverExpiredSend,
   remindExpiringApiKeys,
+  resealStoredValues,
+  RESEAL_SKIP_LIMIT,
+  resignQueuedJobs,
+  RESIGN_SKIP_LIMIT,
   routeDueConversations,
+  settleStrandedWork,
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
 import { sweepAutomationRuns } from './automations';
@@ -29,6 +38,7 @@ import { sweepTaskReminders } from './crm';
 import { signalDueCampaigns } from './campaigns';
 import { RetryableJobError } from './email';
 import { signalDueTemplateSyncs } from './templates';
+import { signalDueAccessChecks } from './whatsapp-access';
 import { sweepCommerceWork } from './commerce';
 import { sweepStoreMessages, sweepStoreWork } from './stores';
 import { sweepFlowWork } from './flows';
@@ -151,12 +161,19 @@ export function channelOnboardHandler(rt: WorkerRuntime) {
 /**
  * Every minute: re-signal webhook receipts and send intents whose signal was lost, settle send
  * intents whose worker died (before dispatch: re-queued; after dispatch: unknown outcome, never an
- * automatic resend), signal automation runs and task reminders that are due or lost their
- * signal, route waiting conversations of round-robin teams, remind companies of API keys that
- * expire soon, delete rate limit buckets that are full again, alert platform staff to work that
- * failed for good, and check how long jobs wait in each queue.
+ * automatic resend), signal template syncs and checks of WhatsApp access that are due, signal
+ * automation runs and task reminders that are due or lost their signal, route waiting conversations
+ * of round-robin teams, remind companies of API keys that expire soon, delete rate limit buckets
+ * that are full again, end work whose job ran out of retries where its company sees it, re-encrypt
+ * stored secrets under the primary key while another key is configured, sign queued jobs again
+ * while a previous job signing key is configured, alert platform staff to work that failed for
+ * good, and check how long jobs wait in each queue.
  */
 export function messagingSweepHandler(rt: WorkerRuntime) {
+  // Values this worker could not open and when it next looks for values to re-encrypt (ADR-134).
+  const reseal = newResealState();
+  // Jobs this worker could not verify and when it next looks for jobs to sign again (ADR-135).
+  const resign = newResignState();
   return async (): Promise<void> => {
     const receipts = await findStaleReceipts(rt);
     for (const id of receipts) {
@@ -191,6 +208,9 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     }
     const templateSyncs = await signalDueTemplateSyncs(rt);
     if (templateSyncs > 0) rt.logger.info({ templateSyncs }, 'template syncs signalled');
+    // WhatsApp accounts whose access is due a check (ADR-137).
+    const accessChecks = await signalDueAccessChecks(rt);
+    if (accessChecks > 0) rt.logger.info({ accessChecks }, 'WhatsApp access checks signalled');
     const flowWork = await sweepFlowWork(rt);
     if (flowWork > 0) rt.logger.info({ flowWork }, 'flow work signalled');
     const commerceWork = await sweepCommerceWork(rt);
@@ -252,8 +272,83 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     // Token buckets that are full again limit nothing (ADR-068).
     const buckets = await purgeRateLimitBuckets(rt.db);
     if (buckets > 0) rt.logger.info({ buckets }, 'full rate limit buckets deleted');
+    // Contact changes a later change of the same contact replaced (ADR-114).
+    const contactChanges = await compactContactChanges(rt.db);
+    if (contactChanges > 0) rt.logger.info({ contactChanges }, 'replaced contact changes deleted');
+    // Number setup, key checks and template deletions whose job ran out of retries (ADR-111).
+    const stranded = await settleStrandedWork({ db: rt.db, clock: rt.clock });
+    for (const failure of stranded.failed) {
+      rt.logger.warn(
+        { deadLetterId: failure.deadLetterId, err: toError(failure.error).message },
+        'ending stranded work failed; will retry',
+      );
+    }
+    if (stranded.ended + stranded.nothingLeft > 0)
+      rt.logger.info(
+        { ended: stranded.ended, nothingLeft: stranded.nothingLeft },
+        'stranded work settled',
+      );
     const deadLettersPurged = await purgeDeadLetters(rt.db);
     if (deadLettersPurged > 0) rt.logger.info({ deadLettersPurged }, 'old dead letters deleted');
+    // Stored secrets sealed with a configured key other than the primary, sealed again with the
+    // primary key, so the other key can be removed (ADR-134). Kinds and ids only, never a value.
+    const resealed = await resealStoredValues(
+      { db: rt.db, keyring: rt.keyring, clock: rt.clock },
+      reseal,
+    );
+    for (const value of resealed.unopenable) {
+      rt.logger.warn(
+        { kind: value.kind, id: value.id, tenantId: value.tenantId, reason: value.reason },
+        'a sealed value does not open with its key; it is left as it is',
+      );
+    }
+    if (resealed.stopped && resealed.unopenable.length > 0) {
+      rt.logger.error(
+        { limit: RESEAL_SKIP_LIMIT },
+        'too many sealed values do not open; re-encryption stops until the worker restarts (check W360_ENCRYPTION_KEYS)',
+      );
+    }
+    for (const failure of resealed.failed) {
+      rt.logger.warn(
+        {
+          kind: failure.kind,
+          id: failure.id,
+          tenantId: failure.tenantId,
+          err: toError(failure.error).message,
+        },
+        're-encrypting a sealed value failed; will retry',
+      );
+    }
+    if (resealed.resealed + resealed.changed > 0) {
+      rt.logger.info(
+        { resealed: resealed.resealed, changed: resealed.changed },
+        'sealed values re-encrypted under the primary key',
+      );
+    }
+    // Queued jobs the previous job signing key signed, signed again with the signing key, so that
+    // the previous key can be removed (ADR-135). Queues and job ids only, never a job's data.
+    const resigned = await resignQueuedJobs(
+      { db: rt.db, signer: rt.signer, clock: rt.clock },
+      resign,
+    );
+    for (const job of resigned.unverifiable) {
+      rt.logger.warn(
+        { queue: job.queue, jobId: job.id },
+        'a queued job does not verify with any job signing key; it is left as it is',
+      );
+    }
+    if (resigned.stopped && resigned.unverifiable.length > 0) {
+      rt.logger.error(
+        { limit: RESIGN_SKIP_LIMIT },
+        'too many queued jobs do not verify; signing jobs again stops until the worker restarts (check W360_JOB_SIGNING_KEY_PREVIOUS)',
+      );
+    }
+    if (resigned.resigned + resigned.changed > 0) {
+      rt.logger.info(
+        { resigned: resigned.resigned, changed: resigned.changed },
+        'queued jobs signed again with the job signing key',
+      );
+    }
     const webhooks = await sweepWebhooks(rt);
     if (webhooks.woken + webhooks.purged > 0) rt.logger.info(webhooks, 'webhook sweep');
     if (receipts.length > 0 || intents.length > 0) {
@@ -301,6 +396,25 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
       rt.logger.warn(
         { queues: lateQueues.unsent },
         'job queues are late but there is no platform administrator to email',
+      );
+    }
+    // Companies' failing integrations as Operations → Integrations lists them: platform staff hear
+    // of each failure once, at most every 15 minutes (ADR-139).
+    const integrations = await alertIntegrationFailures({
+      db: rt.db,
+      outbox: rt.notices.outbox,
+      appBaseUrl: rt.notices.appBaseUrl,
+    });
+    if (integrations.alerted > 0) {
+      rt.logger.info(
+        { failures: integrations.alerted, recipients: integrations.recipients },
+        'integration failure alert emailed to platform staff',
+      );
+    }
+    if (integrations.unsent > 0) {
+      rt.logger.warn(
+        { failures: integrations.unsent },
+        'company integrations are failing but there is no platform administrator to email',
       );
     }
   };

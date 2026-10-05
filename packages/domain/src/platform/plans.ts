@@ -45,7 +45,9 @@ import {
   ASSIGNABLE_PLAN_STATES,
   PLAN_BOUNDS,
   PLAN_MODULE_KEYS,
+  PLAN_PAYMENT_MIN_MINOR,
   PLAN_TAX_MAX_BP,
+  packsMax,
   usagePeriod,
 } from '../plans/model';
 import { parseInput } from '../validation';
@@ -183,6 +185,14 @@ const planFieldsSchema = z
       PLAN_BOUNDS.apiRequests,
       'API requests are a whole number up to 1,000,000,000',
     ),
+    apiRequestPackSize: optionalWhole(
+      1,
+      PLAN_BOUNDS.apiRequestPackSize,
+      'An API request pack is a whole number of requests up to 100,000,000',
+    ),
+    apiRequestPackPrice: optionalRupees(
+      'Enter the price of an API request pack in rupees, or leave it empty',
+    ),
     // Every API scope, including scopes added later, or the scopes chosen (ADR-092).
     apiScopeChoice: z
       .enum(['all', 'chosen'], { error: 'Choose which API scopes the plan includes' })
@@ -215,6 +225,16 @@ const planFieldsSchema = z
       issue('runPackSize', 'Give both the size and the price of a run pack, or neither');
     if (d.runPackSize !== null && d.automationRunsMonthly === null)
       issue('runPackSize', 'Run packs need a monthly automation run limit');
+    if ((d.apiRequestPackSize === null) !== (d.apiRequestPackPrice === null))
+      issue(
+        'apiRequestPackSize',
+        'Give both the size and the price of an API request pack, or neither',
+      );
+    if (
+      d.apiRequestPackSize !== null &&
+      !(d.apiRequestsMonthly !== null && d.apiRequestsMonthly > 0)
+    )
+      issue('apiRequestPackSize', 'API request packs need a monthly API request limit above 0');
     if (d.apiScopeChoice === 'chosen' && d.apiRequestsMonthly !== 0 && d.apiScopes.length === 0)
       issue('apiScopes', 'Choose at least one API scope, or include every scope');
   });
@@ -300,6 +320,10 @@ const tenantPlanSchema = z
     extraSeats: quantity(PLAN_BOUNDS.addOnUnits, 'Extra seats are a whole number up to 10,000'),
     extraNumbers: quantity(PLAN_BOUNDS.numbers, 'Extra numbers are a whole number up to 100'),
     runPacks: quantity(PLAN_BOUNDS.addOnUnits, 'Run packs are a whole number up to 10,000'),
+    apiRequestPacks: quantity(
+      PLAN_BOUNDS.addOnUnits,
+      'API request packs are a whole number up to 10,000',
+    ),
   })
   .and(reasonSchema);
 
@@ -325,6 +349,8 @@ function planValues(d: PlanFields) {
     apiRequestsMonthly: d.apiRequestsMonthly,
     // A plan without the API has no scopes to choose.
     apiScopes: d.apiRequestsMonthly === 0 || d.apiScopeChoice === 'all' ? null : d.apiScopes,
+    apiRequestPackSize: d.apiRequestPackSize,
+    apiRequestPackPriceMinor: d.apiRequestPackPrice,
     modules: d.modules,
   };
 }
@@ -405,6 +431,34 @@ export function createPlanAdminService(deps: {
     metadata,
   });
 
+  /** Shows or hides the price list for visitors (platform owners, ADR-107). */
+  const setPriceListShown = async (actor: PlatformActor, shown: boolean): Promise<void> => {
+    if (actor.role !== 'platform_owner')
+      throw forbidden('Only platform owners can show or hide the price list.');
+    await platformDb.run(actor.userId, async (tx) => {
+      const [settings] = await tx
+        .select({ shownAt: planSettings.priceListShownAt })
+        .from(planSettings)
+        .for('update');
+      if (Boolean(settings?.shownAt) === shown) return;
+      const now = clock.now();
+      await tx
+        .update(planSettings)
+        .set({
+          priceListShownAt: shown ? now : null,
+          priceListShownByUserId: shown ? actor.userId : null,
+          updatedByUserId: actor.userId,
+          updatedAt: now,
+        })
+        .where(eq(planSettings.id, true));
+      await tx
+        .insert(platformAuditEvents)
+        .values(
+          audit(actor, shown ? 'platform.price_list_shown' : 'platform.price_list_hidden', {}),
+        );
+    });
+  };
+
   return {
     /** Every version of every plan, with the companies on each, and the default trial. */
     async listPlans(actor: PlatformActor) {
@@ -423,6 +477,7 @@ export function createPlanAdminService(deps: {
             numbersIncluded: plans.numbersIncluded,
             modules: plans.modules,
             createdAt: plans.createdAt,
+            offeredAt: plans.offeredAt,
             companies: sql<number>`(select count(*)::int from app.tenant_plans tp where tp.plan_id = ${outerColumn(plans.id)})`,
           })
           .from(plans)
@@ -431,12 +486,15 @@ export function createPlanAdminService(deps: {
           .select({
             defaultTrialPlanId: planSettings.defaultTrialPlanId,
             planTaxBp: planSettings.planTaxBp,
+            priceListShownAt: planSettings.priceListShownAt,
           })
           .from(planSettings);
         return {
           plans: rows,
           defaultTrialPlanId: settings?.defaultTrialPlanId ?? null,
           planTaxBp: settings?.planTaxBp ?? null,
+          /** The price list for visitors is shown (ADR-107). */
+          priceListShown: Boolean(settings?.priceListShownAt),
         };
       });
     },
@@ -512,82 +570,110 @@ export function createPlanAdminService(deps: {
     },
 
     /**
-     * Cancels a company's plan subscription at once (platform owners, with a reason), for example
-     * before changing its plan: Razorpay first, then HyFib's record. The period already paid stands.
+     * Cancels a company's plan subscriptions at once (platform owners, with a reason), for example
+     * before changing its plan: every one that may still charge, the one that follows the current
+     * one from the period's end included (ADR-109), Razorpay first, then HyFib's record. The period
+     * already paid stands. The billing managers are emailed once (ADR-101), about the subscription
+     * that paid the plan.
      */
     async cancelTenantSubscription(actor: PlatformActor, input: unknown): Promise<void> {
       if (actor.role !== 'platform_owner') {
         throw forbidden('Only platform owners can cancel a company’s subscription.');
       }
       const { tenantId, reason } = parseInput(cancelSubscriptionSchema, input);
-      const [row] = await platformDb.run(actor.userId, (tx) =>
-        tx
-          .select()
-          .from(planSubscriptions)
-          .where(
-            and(
-              eq(planSubscriptions.tenantId, tenantId),
-              inArray(planSubscriptions.status, [...LIVE_PLAN_SUBSCRIPTION_STATUSES]),
-            ),
-          ),
-      );
-      if (!row) throw notFound('Subscription');
-      if (row.status === 'creating' || !row.providerSubscriptionId) {
-        throw conflict('The company is starting a payment. Try again in a few minutes.');
-      }
-      if (!deps.razorpay) {
-        throw new AppError('provider_unavailable', 'Razorpay is not configured on this platform.');
-      }
-      const res = await deps.razorpay.cancelSubscription(row.providerSubscriptionId, {
-        cancelAtCycleEnd: false,
-      });
-      if (!res.ok) {
-        if (res.kind !== 'permanent') {
-          throw new AppError('provider_unavailable', 'Razorpay did not answer. Try again.');
-        }
-        throw new AppError(
-          'precondition_failed',
-          `Razorpay did not cancel the subscription: ${res.description} HyFib updates its record at its next check with Razorpay.`,
-        );
-      }
-      await platformDb.run(actor.userId, async (tx) => {
-        const now = clock.now();
-        const updated = await tx
-          .update(planSubscriptions)
-          .set({
-            status: 'cancelled',
-            endedAt: now,
-            cancelRequestedAt: now,
-            cancelledByUserId: actor.userId,
-            // The worker emails the company's billing managers about it (ADR-101).
-            staffCancelNoticeDue: true,
-          })
-          .where(
-            and(
-              eq(planSubscriptions.tenantId, tenantId),
-              eq(planSubscriptions.id, row.id),
-              inArray(planSubscriptions.status, [...LIVE_PLAN_SUBSCRIPTION_STATUSES]),
-            ),
-          )
-          .returning({ id: planSubscriptions.id });
-        if (updated.length === 0) return;
-        const metadata = { subscriptionId: row.id, previousStatus: row.status };
-        await tx
-          .insert(platformAuditEvents)
-          .values(audit(actor, 'platform.plan_subscription_cancelled', metadata, reason, tenantId));
-        await tx.insert(auditEvents).values({
-          id: uuidv7(),
-          tenantId,
-          actorType: 'platform_admin',
-          actorId: actor.userId,
-          action: 'platform.plan_subscription_cancelled',
-          subjectType: 'plan_subscription',
-          subjectId: row.id,
-          result: 'success',
-          correlationId: actor.correlationId,
-          metadata: { reason, ...metadata },
+      const razorpay = deps.razorpay;
+      const done = new Set<string>();
+      let noticed = false;
+      // A second look catches a subscription that followed the first while it was cancelled.
+      for (let round = 0; round < 2; round += 1) {
+        const { rows, payingId } = await platformDb.run(actor.userId, async (tx) => {
+          const [state] = await tx
+            .select({ subscriptionId: tenantPlans.subscriptionId })
+            .from(tenantPlans)
+            .where(eq(tenantPlans.tenantId, tenantId));
+          const live = await tx
+            .select()
+            .from(planSubscriptions)
+            .where(
+              and(
+                eq(planSubscriptions.tenantId, tenantId),
+                inArray(planSubscriptions.status, [...LIVE_PLAN_SUBSCRIPTION_STATUSES]),
+              ),
+            )
+            .orderBy(planSubscriptions.createdAt);
+          return { rows: live.filter((r) => !done.has(r.id)), payingId: state?.subscriptionId };
         });
-      });
+        if (rows.length === 0) {
+          if (round === 0) throw notFound('Subscription');
+          break;
+        }
+        if (rows.some((r) => r.status === 'creating' || !r.providerSubscriptionId)) {
+          throw conflict('The company is starting a payment. Try again in a few minutes.');
+        }
+        if (!razorpay) {
+          throw new AppError(
+            'provider_unavailable',
+            'Razorpay is not configured on this platform.',
+          );
+        }
+        const notice = noticed ? undefined : (rows.find((r) => r.id === payingId) ?? rows[0]);
+        for (const row of rows) {
+          const res = await razorpay.cancelSubscription(row.providerSubscriptionId as string, {
+            cancelAtCycleEnd: false,
+          });
+          if (!res.ok) {
+            if (res.kind !== 'permanent') {
+              throw new AppError('provider_unavailable', 'Razorpay did not answer. Try again.');
+            }
+            throw new AppError(
+              'precondition_failed',
+              `Razorpay did not cancel the subscription: ${res.description} HyFib updates its record at its next check with Razorpay.`,
+            );
+          }
+          await platformDb.run(actor.userId, async (tx) => {
+            const now = clock.now();
+            const updated = await tx
+              .update(planSubscriptions)
+              .set({
+                status: 'cancelled',
+                endedAt: now,
+                cancelRequestedAt: now,
+                cancelledByUserId: actor.userId,
+                // The worker emails the company's billing managers about it, once (ADR-101).
+                staffCancelNoticeDue: row === notice,
+              })
+              .where(
+                and(
+                  eq(planSubscriptions.tenantId, tenantId),
+                  eq(planSubscriptions.id, row.id),
+                  inArray(planSubscriptions.status, [...LIVE_PLAN_SUBSCRIPTION_STATUSES]),
+                ),
+              )
+              .returning({ id: planSubscriptions.id });
+            if (updated.length === 0) return;
+            if (row === notice) noticed = true;
+            const metadata = { subscriptionId: row.id, previousStatus: row.status };
+            await tx
+              .insert(platformAuditEvents)
+              .values(
+                audit(actor, 'platform.plan_subscription_cancelled', metadata, reason, tenantId),
+              );
+            await tx.insert(auditEvents).values({
+              id: uuidv7(),
+              tenantId,
+              actorType: 'platform_admin',
+              actorId: actor.userId,
+              action: 'platform.plan_subscription_cancelled',
+              subjectType: 'plan_subscription',
+              subjectId: row.id,
+              result: 'success',
+              correlationId: actor.correlationId,
+              metadata: { reason, ...metadata },
+            });
+          });
+          done.add(row.id);
+        }
+      }
     },
 
     async getPlan(actor: PlatformActor, id: string) {
@@ -636,6 +722,9 @@ export function createPlanAdminService(deps: {
             numbersIncluded: plans.numbersIncluded,
             numbersMax: plans.numbersMax,
             runPackSize: plans.runPackSize,
+            automationRunsMonthly: plans.automationRunsMonthly,
+            apiRequestPackSize: plans.apiRequestPackSize,
+            apiRequestsMonthly: plans.apiRequestsMonthly,
           })
           .from(plans)
           .where(eq(plans.status, 'published'))
@@ -715,6 +804,8 @@ export function createPlanAdminService(deps: {
           runPackPriceMinor: source.runPackPriceMinor,
           apiRequestsMonthly: source.apiRequestsMonthly,
           apiScopes: source.apiScopes,
+          apiRequestPackSize: source.apiRequestPackSize,
+          apiRequestPackPriceMinor: source.apiRequestPackPriceMinor,
           modules: source.modules,
           createdByUserId: actor.userId,
         });
@@ -773,6 +864,64 @@ export function createPlanAdminService(deps: {
     },
 
     /**
+     * Offers a published version to companies, which can then choose it to pay for (ADR-105). A
+     * version priced under ₹1 is refused: it could never be paid.
+     */
+    async offerPlan(actor: PlatformActor, id: string): Promise<void> {
+      assertOwner(actor);
+      idOrNotFound(id, 'Plan');
+      await platformDb.run(actor.userId, async (tx) => {
+        const [plan] = await tx
+          .select({
+            status: plans.status,
+            priceMinor: plans.priceMinor,
+            offeredAt: plans.offeredAt,
+          })
+          .from(plans)
+          .where(eq(plans.id, id))
+          .for('update');
+        if (!plan) throw notFound('Plan');
+        if (plan.status !== 'published')
+          throw new AppError('precondition_failed', 'Only a published version can be offered.');
+        if (plan.priceMinor < PLAN_PAYMENT_MIN_MINOR)
+          throw new AppError(
+            'precondition_failed',
+            'A version priced under ₹1 cannot be offered: companies could never pay for it.',
+          );
+        if (plan.offeredAt) return;
+        await tx
+          .update(plans)
+          .set({ offeredAt: clock.now(), offeredByUserId: actor.userId })
+          .where(eq(plans.id, id));
+        await tx
+          .insert(platformAuditEvents)
+          .values(audit(actor, 'platform.plan_offered', { planId: id }));
+      });
+    },
+
+    /** Stops offering a version: companies already on it keep it (ADR-105). */
+    async withdrawPlanOffer(actor: PlatformActor, id: string): Promise<void> {
+      assertOwner(actor);
+      idOrNotFound(id, 'Plan');
+      await platformDb.run(actor.userId, async (tx) => {
+        const [plan] = await tx
+          .select({ offeredAt: plans.offeredAt })
+          .from(plans)
+          .where(eq(plans.id, id))
+          .for('update');
+        if (!plan) throw notFound('Plan');
+        if (!plan.offeredAt) return;
+        await tx
+          .update(plans)
+          .set({ offeredAt: null, offeredByUserId: null })
+          .where(eq(plans.id, id));
+        await tx
+          .insert(platformAuditEvents)
+          .values(audit(actor, 'platform.plan_offer_withdrawn', { planId: id }));
+      });
+    },
+
+    /**
      * No longer offered: companies already on the version keep it, but it cannot be assigned again.
      * Retiring a draft discards it.
      */
@@ -799,7 +948,14 @@ export function createPlanAdminService(deps: {
           );
         await tx
           .update(plans)
-          .set({ status: 'retired', retiredByUserId: actor.userId, retiredAt: clock.now() })
+          .set({
+            status: 'retired',
+            retiredByUserId: actor.userId,
+            retiredAt: clock.now(),
+            // A retired version is no longer offered to companies (ADR-105).
+            offeredAt: null,
+            offeredByUserId: null,
+          })
           .where(eq(plans.id, id));
         await tx
           .insert(platformAuditEvents)
@@ -812,6 +968,19 @@ export function createPlanAdminService(deps: {
             ),
           );
       });
+    },
+
+    /**
+     * Shows the versions offered to companies on the public price list (ADR-107). Visitors see it
+     * once paying for plans is available, a default trial is set and a version can be paid for.
+     */
+    async showPriceList(actor: PlatformActor): Promise<void> {
+      await setPriceListShown(actor, true);
+    },
+
+    /** Hides the public price list: `/pricing` is not found again (ADR-107). */
+    async hidePriceList(actor: PlatformActor): Promise<void> {
+      await setPriceListShown(actor, false);
     },
 
     /** The version new companies start a trial of; none means new companies are complimentary. */
@@ -880,6 +1049,9 @@ export function createPlanAdminService(deps: {
                 numbersIncluded: plans.numbersIncluded,
                 numbersMax: plans.numbersMax,
                 runPackSize: plans.runPackSize,
+                automationRunsMonthly: plans.automationRunsMonthly,
+                apiRequestPackSize: plans.apiRequestPackSize,
+                apiRequestsMonthly: plans.apiRequestsMonthly,
               })
               .from(plans)
               .where(eq(plans.id, state.planId))
@@ -905,10 +1077,13 @@ export function createPlanAdminService(deps: {
           );
         const counted = (metric: string) => counters.find((c) => c.metric === metric)?.used ?? 0;
         const usage = counts.rows[0];
-        const [subscription] = await tx
+        // The live subscriptions (the current one and the one that follows it, ADR-109), or else
+        // the latest one that was paid.
+        const subscriptions = await tx
           .select({
             id: planSubscriptions.id,
             status: planSubscriptions.status,
+            planName: plans.name,
             amountMinor: planSubscriptions.amountMinor,
             taxBp: planSubscriptions.taxBp,
             intervalMonths: planSubscriptions.intervalMonths,
@@ -920,11 +1095,13 @@ export function createPlanAdminService(deps: {
             failureReason: planSubscriptions.failureReason,
             createdAt: planSubscriptions.createdAt,
             syncedAt: planSubscriptions.syncedAt,
-            // The first charge, due at the trial's end (ADR-102).
+            // The first charge, due at the trial's end (ADR-102) or the paid period's (ADR-109).
             startsAt: planSubscriptions.startsAt,
             paidCount: planSubscriptions.paidCount,
+            followsSubscriptionId: planSubscriptions.followsSubscriptionId,
           })
           .from(planSubscriptions)
+          .innerJoin(plans, eq(plans.id, planSubscriptions.planId))
           .where(
             and(
               eq(planSubscriptions.tenantId, tenantId),
@@ -935,7 +1112,18 @@ export function createPlanAdminService(deps: {
             ),
           )
           .orderBy(desc(planSubscriptions.createdAt))
-          .limit(1);
+          .limit(5);
+        const isLive = (status: string) =>
+          (LIVE_PLAN_SUBSCRIPTION_STATUSES as readonly string[]).includes(status);
+        const live = subscriptions.filter((r) => isLive(r.status));
+        const subscription =
+          live.find((r) => r.id === state.subscriptionId) ??
+          live.find((r) => !r.cancelAtPeriodEnd) ??
+          live[0] ??
+          subscriptions[0];
+        const next = state.subscriptionId
+          ? live.find((r) => r.followsSubscriptionId === state.subscriptionId && r !== subscription)
+          : undefined;
         const paid = await tx
           .select({
             id: planPayments.id,
@@ -1006,13 +1194,9 @@ export function createPlanAdminService(deps: {
           timezone: company.timezone,
           state,
           subscription: subscription
-            ? {
-                ...subscription,
-                live: (LIVE_PLAN_SUBSCRIPTION_STATUSES as readonly string[]).includes(
-                  subscription.status,
-                ),
-              }
+            ? { ...subscription, live: isLive(subscription.status) }
             : null,
+          nextSubscription: next ?? null,
           payments,
           refunds,
           plan: plan ?? null,
@@ -1148,8 +1332,9 @@ export function createPlanAdminService(deps: {
               extraSeats: data.extraSeats,
               extraNumbers: data.extraNumbers,
               runPacks: data.runPacks,
+              apiRequestPacks: data.apiRequestPacks,
             }
-          : { extraSeats: 0, extraNumbers: 0, runPacks: 0 };
+          : { extraSeats: 0, extraNumbers: 0, runPacks: 0, apiRequestPacks: 0 };
         if (plan) {
           if (addOns.extraSeats > 0 && plan.seatPriceMinor === null)
             throw invalid('This plan does not sell extra seats.');
@@ -1162,6 +1347,26 @@ export function createPlanAdminService(deps: {
             throw invalid(`This plan allows at most ${numbersMax} WhatsApp numbers.`);
           if (addOns.runPacks > 0 && plan.runPackSize === null)
             throw invalid('This plan does not sell automation run packs.');
+          if (
+            addOns.runPacks > 0 &&
+            plan.runPackSize !== null &&
+            plan.automationRunsMonthly !== null &&
+            addOns.runPacks > packsMax(plan.automationRunsMonthly, plan.runPackSize)
+          )
+            throw invalid(
+              `This plan sells at most ${packsMax(plan.automationRunsMonthly, plan.runPackSize).toLocaleString('en-IN')} automation run packs.`,
+            );
+          if (addOns.apiRequestPacks > 0 && plan.apiRequestPackSize === null)
+            throw invalid('This plan does not sell API request packs.');
+          if (
+            addOns.apiRequestPacks > 0 &&
+            plan.apiRequestPackSize !== null &&
+            plan.apiRequestsMonthly !== null &&
+            addOns.apiRequestPacks > packsMax(plan.apiRequestsMonthly, plan.apiRequestPackSize)
+          )
+            throw invalid(
+              `This plan sells at most ${packsMax(plan.apiRequestsMonthly, plan.apiRequestPackSize).toLocaleString('en-IN')} API request packs.`,
+            );
         }
 
         // Monthly usage periods restart with a new trial or a new paid period, and continue
@@ -1188,7 +1393,8 @@ export function createPlanAdminService(deps: {
           current.periodEnd?.getTime() === periodEnd?.getTime() &&
           current.extraSeats === addOns.extraSeats &&
           current.extraNumbers === addOns.extraNumbers &&
-          current.runPacks === addOns.runPacks;
+          current.runPacks === addOns.runPacks &&
+          current.apiRequestPacks === addOns.apiRequestPacks;
         if (same) return;
 
         await tx

@@ -78,6 +78,10 @@ describe('ad referrals', () => {
       sourceType: null,
       headline: 'x'.repeat(200),
     });
+    // An ad's headline is clipped without splitting an emoji (ADR-133).
+    expect(parseAdReferral({ headline: `${'x'.repeat(199)}😀 offer` })?.headline).toBe(
+      'x'.repeat(199),
+    );
     expect(parseAdReferral('not an object')).toBeNull();
     expect(parseAdReferral({ headline: 42 })).toBeNull();
   });

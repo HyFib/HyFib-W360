@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { clipText } from '@w360/core';
 import type { OrderStatus } from '@w360/db';
 import { formatMinor, isCurrency, parseAmountToMinor } from '../crm/money';
 import { REF_ALPHABET, TOKEN_ALPHABET, randomToken } from '../growth/model';
@@ -270,7 +271,7 @@ export function parseOrder(order: unknown): ParsedOrder | null {
   const note = typeof order.text === 'string' && order.text.trim() ? order.text.trim() : null;
   return {
     catalogId,
-    note: note ? note.slice(0, 1000) : null,
+    note: note ? clipText(note, 1000) : null,
     items,
     dropped,
     currency,

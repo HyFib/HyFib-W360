@@ -14,6 +14,8 @@ export const TEMPLATE_STATUS: Record<string, { label: string; tone: Tone }> = {
   archived: { label: 'Archived', tone: 'neutral' },
   pending_deletion: { label: 'Being deleted', tone: 'neutral' },
   deleted: { label: 'Deleted', tone: 'neutral' },
+  /** Status events only: a deletion Meta refused or that could not reach Meta. */
+  delete_failed: { label: 'Deletion failed', tone: 'danger' },
   limit_exceeded: { label: 'Limit exceeded', tone: 'warning' },
   locked: { label: 'Locked', tone: 'warning' },
   unknown: { label: 'Unknown status', tone: 'neutral' },

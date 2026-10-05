@@ -130,9 +130,10 @@ describe('database roles', () => {
     }
     // Plans (0023): the sweep functions for the worker (with the API request notice of 0035, the
     // warnings of 0036, the subscription functions of 0037, the rate change notices of 0038, the
-    // notices of staff changes and cancellations of 0077 and 0078, and the refunds of plan payments
-    // of 0080), the usage counts for platform staff, the entitlements for both, and the plan-state
-    // triggers for nobody.
+    // notices of staff changes and cancellations of 0077 and 0078, the refunds of plan payments of
+    // 0080, and the company's own choice of a plan of 0082 and of add-ons of 0084, with API request
+    // packs since 0088), the usage counts for platform staff, the entitlements for both, and the
+    // plan-state triggers for nobody.
     for (const fn of [
       'ops.plan_transitions_due(integer)',
       'ops.usage_limits_reached(integer)',
@@ -149,6 +150,9 @@ describe('database roles', () => {
       'app.take_plan_subscription_cancel_notice(uuid)',
       'ops.plan_payment_refunds_due(integer)',
       'app.record_plan_payment_refund(text,text,bigint,uuid)',
+      'app.choose_plan(uuid)',
+      'app.choose_add_ons(integer,integer,integer)',
+      'app.choose_add_ons(integer,integer,integer,integer)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);
@@ -269,13 +273,29 @@ describe('database roles', () => {
       expect(await can('w360_auth', fn), fn).toBe(false);
       expect(await can('w360_platform', fn), fn).toBe(false);
     }
+    // Companies' failing integrations (0106): the alert's check and mark for the worker's sweep
+    // only; the list they share with the console for the definer functions only.
+    for (const fn of ['ops.integration_alerts_due()', 'ops.mark_integration_alert()']) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
+      expect(await can(role, 'ops.integration_failures()'), role).toBe(false);
+    }
+    // Acknowledging those failures on the console (0107): platform staff only.
+    const acknowledge = 'ops.platform_acknowledge_integration_failure(text,uuid,text,text,text)';
+    expect(await can('w360_platform', acknowledge)).toBe(true);
+    expect(await can('w360_app', acknowledge)).toBe(false);
+    expect(await can('w360_auth', acknowledge)).toBe(false);
     const rule = 'ops.webhook_receipt_exhausted(text,integer,timestamp with time zone)';
     expect(await can('w360_app', rule)).toBe(true);
     expect(await can('w360_platform', rule)).toBe(true);
     expect(await can('w360_auth', rule)).toBe(false);
-    // Outgoing webhooks (0025, 0047): the dispatch and retention sweeps for the worker; capture,
-    // which the triggers call as the role making the change (the runtime role, or a definer
-    // function); the trigger functions for nobody.
+    // Outgoing webhooks (0025, 0047, 0096): the dispatch and retention sweeps for the worker;
+    // capture, which the triggers call as the role making the change (the runtime role, or a
+    // definer function), and adding what a contact's change changed to the event its transaction
+    // captured; the trigger functions for nobody.
     for (const fn of ['ops.webhook_dispatch_due(integer)', 'ops.purge_webhook_data(integer)']) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);
@@ -284,7 +304,8 @@ describe('database roles', () => {
     for (const fn of [
       'app.webhook_subscribed(uuid,text)',
       'app.capture_webhook_event(uuid,text,uuid,uuid,uuid,uuid,text,jsonb,timestamp with time zone)',
-      'app.capture_contact_webhook_event(uuid,uuid,text)',
+      'app.capture_contact_webhook_event(uuid,uuid,text,text[])',
+      'app.add_contact_webhook_changes(uuid,uuid,text[])',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_definer', fn), fn).toBe(true);
@@ -299,24 +320,34 @@ describe('database roles', () => {
       'app.webhook_capture_conversation()',
       'app.webhook_capture_contact()',
       'app.webhook_capture_contact_tag()',
+      'app.webhook_capture_contact_fields()',
     ]) {
       for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
         expect(await can(role, fn), `${role} ${fn}`).toBe(false);
       }
     }
-    for (const fn of ['app.sync_tenant_plan_access()', 'app.init_tenant_plan()']) {
+    // The plan-state triggers, and the guards of a subscription that follows another (0087) and of
+    // one that follows none (0088).
+    for (const fn of [
+      'app.sync_tenant_plan_access()',
+      'app.init_tenant_plan()',
+      'app.guard_plan_subscription_follow()',
+      'app.guard_plan_subscription_start()',
+    ]) {
       for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
         expect(await can(role, fn), `${role} ${fn}`).toBe(false);
       }
     }
-    // Platform operations (0026): the read functions and the receipt retry for platform staff only;
-    // the dead-letter purge for the worker; the URL host helper for the definer functions.
+    // Platform operations (0026): the read functions, the receipt retry and the dead letter retry
+    // (0086) for platform staff only; the dead-letter purge for the worker; the URL host helper for
+    // the definer functions.
     for (const fn of [
       'ops.platform_ops_health(uuid)',
       'ops.platform_ops_activity(timestamp with time zone,uuid)',
       'ops.platform_ops_signup_sessions(timestamp with time zone,integer)',
       'ops.platform_ops_integration_failures(integer)',
       'ops.platform_retry_webhook_receipt(uuid,text,text)',
+      'ops.platform_retry_dead_letter(uuid,text,text)',
     ]) {
       expect(await can('w360_platform', fn), fn).toBe(true);
       expect(await can('w360_app', fn), fn).toBe(false);
@@ -324,6 +355,20 @@ describe('database roles', () => {
     }
     expect(await can('w360_app', 'ops.purge_dead_letters(integer)')).toBe(true);
     expect(await can('w360_platform', 'ops.purge_dead_letters(integer)')).toBe(false);
+    // Settling work whose job ran out of retries (0089): the sweep's lookup and the mark for the
+    // worker only; whether a job is waiting or running again for the definer functions only.
+    for (const fn of [
+      'ops.dead_letters_to_settle(integer)',
+      'ops.settle_dead_letter(uuid,boolean)',
+    ]) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
+    expect(await can('w360_definer', 'ops.dead_letter_work_live(text,text)')).toBe(true);
+    for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
+      expect(await can(role, 'ops.dead_letter_work_live(text,text)'), role).toBe(false);
+    }
     expect(await can('w360_definer', 'ops.url_host(text)')).toBe(true);
     for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
       expect(await can(role, 'ops.url_host(text)'), role).toBe(false);

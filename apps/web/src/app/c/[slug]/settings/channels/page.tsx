@@ -19,6 +19,7 @@ import {
 import { LiveEvents } from '@/components/inbox/live-events';
 import { ChannelActions } from '@/components/settings/channel-actions';
 import { RequireOwnDocument } from '@/components/require-own-document';
+import { WhatsAppAccessAlerts } from '@/components/settings/whatsapp-access-alerts';
 import { WhatsAppConnect } from '@/components/settings/whatsapp-connect';
 import { formatDateTime } from '@/lib/format';
 import { liveEventCursor } from '@/server/inbox';
@@ -53,7 +54,9 @@ export default async function ChannelsPage({ params }: { params: Promise<{ slug:
   assertCan(ctx, 'channels.read');
   const { onboarding, meta, plans } = await getRuntime();
   const since = await liveEventCursor(ctx);
-  const channels = onboarding ? await onboarding.listChannels(ctx) : [];
+  const [channels, accessIssues] = onboarding
+    ? await Promise.all([onboarding.listChannels(ctx), onboarding.accessIssues(ctx)])
+    : [[], []];
   const usage = await plans.usage(ctx);
   const canManage = can(ctx, 'channels.manage');
   const signupReady = Boolean(meta?.embeddedSignupConfigId);
@@ -73,6 +76,13 @@ export default async function ChannelsPage({ params }: { params: Promise<{ slug:
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
+          <WhatsAppAccessAlerts
+            issues={accessIssues}
+            slug={ctx.tenant.slug}
+            timeZone={ctx.tenant.timezone}
+            canManage={canManage}
+            onChannelsPage
+          />
           {canManage ? (
             <PlanLimitHint
               ctx={ctx}
@@ -146,6 +156,23 @@ export default async function ChannelsPage({ params }: { params: Promise<{ slug:
                         {ch.healthCheckedAt ? (
                           <div className="text-xs text-muted-foreground">
                             Checked {formatDateTime(ch.healthCheckedAt, ctx.tenant.timezone)}
+                          </div>
+                        ) : null}
+                        {ch.accountStatus === 'connected' && ch.accessCheckedAt ? (
+                          <div className="text-xs text-muted-foreground">
+                            Access checked {formatDateTime(ch.accessCheckedAt, ctx.tenant.timezone)}
+                          </div>
+                        ) : null}
+                        {ch.accountStatus === 'connected' && ch.webhooksCheckedAt ? (
+                          <div className="text-xs text-muted-foreground">
+                            Webhooks checked{' '}
+                            {formatDateTime(ch.webhooksCheckedAt, ctx.tenant.timezone)}
+                          </div>
+                        ) : null}
+                        {ch.accountStatus === 'connected' && ch.accessExpiresAt ? (
+                          <div className="text-xs text-muted-foreground">
+                            Access {ch.accessExpired ? 'expired' : 'expires'}{' '}
+                            {formatDateTime(ch.accessExpiresAt, ctx.tenant.timezone)}
                           </div>
                         ) : null}
                       </TD>

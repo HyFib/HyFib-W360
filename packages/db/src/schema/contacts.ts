@@ -1,4 +1,14 @@
-import { boolean, integer, jsonb, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import {
+  bigint,
+  boolean,
+  customType,
+  integer,
+  smallint,
+  text,
+  timestamp,
+  uuid,
+} from 'drizzle-orm/pg-core';
+import { jsonb } from './columns';
 import { sql } from 'drizzle-orm';
 import { appSchema } from './tenancy';
 
@@ -15,6 +25,22 @@ export const contactTags = appSchema.table('contact_tags', {
   contactId: uuid('contact_id').notNull(),
   tag: text('tag').notNull(),
   createdAt: tz('created_at').notNull().defaultNow(),
+});
+
+/** PostgreSQL xid8, carried as a decimal string (values exceed Number.MAX_SAFE_INTEGER). */
+const xid8 = customType<{ data: string; driverData: string }>({
+  dataType: () => 'xid8',
+});
+
+/**
+ * One row per contact and transaction that changed how the API describes the contact, written only
+ * by triggers (migration 0091, ADR-114) and read by the API's contact change feed.
+ */
+export const contactChanges = appSchema.table('contact_changes', {
+  id: bigint('id', { mode: 'bigint' }).primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  contactId: uuid('contact_id').notNull(),
+  xact: xid8('xact').notNull(),
 });
 
 export const CONTACT_FIELD_TYPES = ['text', 'number', 'date', 'boolean'] as const;

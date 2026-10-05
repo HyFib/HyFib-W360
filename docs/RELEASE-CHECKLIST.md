@@ -5,7 +5,7 @@ made. This checklist records the evidence required per gate; unchecked items blo
 
 ## Build and version
 
-- [x] Lockfile committed, exact versions pinned, `pnpm audit` clean (2026-09-26, local)
+- [x] Lockfile committed, exact versions pinned, `pnpm audit` clean (2026-10-04, local; braces advisory GHSA-vfj7-8cjw-p6xm cleared by ADR-142)
 - [x] Web and worker images build and start locally (2026-09-26)
 - [ ] Images built by CI, scanned (Trivy HIGH/CRITICAL = 0 unfixed), digests recorded
 - [ ] Release notes with commit SHA, image digests, migration list
@@ -196,6 +196,45 @@ made. This checklist records the evidence required per gate; unchecked items blo
       staff refund above, which appears in the Razorpay Dashboard once; a request for more than is
       left after a Dashboard refund is refused on approval and stays open; agree who watches
       `/platform/refunds` → Plan payments and how quickly requests are decided
+- [ ] Companies choosing their plan (ADR-105) on the same staging deployment, after migrations 0082
+      and 0083 and before the new web image: a platform owner offers a published test-mode
+      version; a billing manager on a trial chooses it under Billing → Choose a plan, the plan card
+      shows it with the trial's end unchanged, and paying for it creates a Razorpay subscription for
+      the chosen version's amount; agree which versions are offered and who stops offering them
+- [ ] Companies choosing their add-ons (ADR-106) on the same staging deployment, after migration
+      0084 and before the new web image: a billing manager on a trial of a test-mode version that
+      sells extra seats sets them under Billing → Add-ons, the plan card and the payment offer show
+      them, a decrease below the seats in use is refused, and paying creates a Razorpay
+      subscription for the amount with the add-ons; agree each version's most seats and numbers
+- [ ] The price list for visitors (ADR-107) on the same staging deployment, after migration 0085
+      and before the new web image: with the tax, a default trial and an offered test-mode version
+      set, a platform owner shows the price list, `/pricing` lists that version with the prices
+      Billing → Choose a plan shows, and hiding it makes `/pricing` not found; agree the wording
+      around the prices (legal and commercial review) and who decides to show the list
+- [ ] Plan changes from the end of the paid period (ADR-109) in Razorpay test mode on the same
+      staging deployment, after migration 0087 and before the new web and worker images: a billing
+      manager of a company paying monthly by a test-mode subscription changes to another offered
+      version with an extra seat under Billing → Change plan; the Razorpay Dashboard shows the
+      current subscription cancelled at the end of its cycle (R-122, unconfirmed point 30) and the
+      new one with `start_at` at the end of the paid period, `authenticated` after Checkout with
+      nothing charged; choosing again cancels that one at once and authorises another; at the
+      period's end the current subscription becomes `cancelled` and the new one's first charge makes
+      the plan active on the new version and add-ons from that day, with the audit entry and the
+      payment email, and nothing is charged twice for that cycle (unconfirmed point 31); a payer who
+      leaves Checkout sees the warning on Billing, and the plan ends with the period if nothing is
+      authorised; ask Razorpay research question 14
+- [ ] API request packs (ADR-110) on the same staging deployment, after migration 0088 and before
+      the new web and worker images: a platform owner publishes a test-mode version with a monthly
+      API request limit and packs; staff set a pack, and a billing manager on a trial sets more under
+      Billing → Add-ons; the plan card, Settings → API keys and the platform company page show the
+      limit with the packs, a key's requests beyond the version's own limit and within the packs are
+      admitted, and paying creates a Razorpay subscription for the amount with the packs; before the
+      migration, confirm no company's automation run limit with its run packs passes 2,000,000,000
+      (RUNBOOKS, "API request packs"); agree each version's pack size and price
+- [ ] A job signing key rotation (ADR-135) rehearsed on the same staging deployment, with a CRM
+      reminder and a campaign scheduled days ahead: the three deploys of RUNBOOKS §13, Operations →
+      Keys falling to no job signed with the previous key, then the reminder and the campaign
+      running on time with the new key only, and no `job.invalid_signature` security event
 - [ ] Tenant-isolation and security gates passing in CI on the release commit
 - [ ] Measured load behaviour against the test envelope (k6 results)
 - [ ] Backup restoration drill performed and timings recorded (RPO/RTO)
@@ -210,7 +249,6 @@ made. This checklist records the evidence required per gate; unchecked items blo
 - Provider documentation could not be fetched directly; research is search-derived (ADR-016).
 - Auto-recharge timing on Indian card mandates (≈36–72 h) constrains product behaviour.
 - Plaintext session tokens at rest in `auth.sessions` (restricted to `w360_auth`).
-- Job-signing key rotation requires a dual-key window (backlog SEC-4).
 
 ## Rollout and rollback
 

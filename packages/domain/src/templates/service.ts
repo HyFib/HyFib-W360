@@ -24,6 +24,7 @@ import { recordAudit, recordSystemAudit, type RequestMeta } from '../audit';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import type { GraphClient, RemoteTemplate } from '../messaging/graph';
+import { requestAccessCheck } from '../messaging/access';
 import { credentialAad } from '../messaging/credentials';
 import { parseInput } from '../validation';
 import {
@@ -49,6 +50,12 @@ import {
  * member can submit again. Nothing is resubmitted automatically.
  */
 const SUBMIT_CONFIRM_WINDOW_MS = 10 * 60_000;
+/**
+ * How long the sync leaves a template pending deletion while Meta still lists it (ADR-111): the
+ * deletion job's retries take 4 to 5 hours, and a job that runs out of them has its deletion
+ * settled by the sweep. A template whose deletion Meta refused (`delete_failed`) is not kept.
+ */
+const DELETION_KEEP_MS = 8 * 60 * 60_000;
 const SYNC_MAX_PAGES = 50;
 /** Extra fields beyond Meta's defaults (confirmed by a third-party library only, see M-085). */
 const SYNC_FIELDS = 'id,name,language,status,category,components,rejected_reason,quality_score';
@@ -276,7 +283,7 @@ export function createTemplatesService(deps: TemplateDeps) {
                 eq(templateStatusEvents.templateId, templateId),
               ),
             )
-            .orderBy(desc(templateStatusEvents.occurredAt))
+            .orderBy(desc(templateStatusEvents.occurredAt), desc(templateStatusEvents.id))
             .limit(50);
           const definition = fromMetaComponents(row.category, row.components);
           const spec = sendSpecFor(row.category, row.components);
@@ -851,6 +858,97 @@ export async function processTemplateDelete(
   return 'done';
 }
 
+/**
+ * Of the given templates pending deletion, those whose deletion was asked for since `since` and has
+ * not failed: the last deletion event of each is the request itself (ADR-111).
+ */
+async function deletionsAskedSince(
+  tx: Tx,
+  tenantId: string,
+  templateIds: string[],
+  since: Date,
+): Promise<Set<string>> {
+  if (templateIds.length === 0) return new Set();
+  const last = await tx
+    .selectDistinctOn([templateStatusEvents.templateId], {
+      templateId: templateStatusEvents.templateId,
+      status: templateStatusEvents.status,
+      occurredAt: templateStatusEvents.occurredAt,
+    })
+    .from(templateStatusEvents)
+    .where(
+      and(
+        eq(templateStatusEvents.tenantId, tenantId),
+        inArray(templateStatusEvents.templateId, templateIds),
+        eq(templateStatusEvents.source, 'delete'),
+      ),
+    )
+    .orderBy(
+      templateStatusEvents.templateId,
+      desc(templateStatusEvents.occurredAt),
+      desc(templateStatusEvents.id),
+    );
+  return new Set(
+    last
+      .filter((e) => e.status === 'pending_deletion' && e.occurredAt >= since)
+      .map((e) => e.templateId),
+  );
+}
+
+/**
+ * Sweep: ends a deletion whose job ran out of retries (ADR-111). A template still pending deletion
+ * goes back to the status Meta last reported (the sync requested here refreshes it), with a
+ * `delete_failed` event and one for that status, as after a deletion Meta refuses and the sync that
+ * follows it, so the company can delete it again. False when nothing was left to end.
+ */
+export async function settleTemplateDeletion(
+  tx: Tx,
+  tenantId: string,
+  templateId: string,
+  at: Date,
+): Promise<boolean> {
+  const [row] = await tx
+    .select({
+      status: messageTemplates.status,
+      providerStatus: messageTemplates.providerStatus,
+      whatsappAccountId: messageTemplates.whatsappAccountId,
+    })
+    .from(messageTemplates)
+    .where(and(eq(messageTemplates.tenantId, tenantId), eq(messageTemplates.id, templateId)))
+    .for('update');
+  if (!row || row.status !== 'pending_deletion') return false;
+  const status = mapProviderTemplateStatus(row.providerStatus);
+  // Meta deleting the template itself: the next sync finds it deleted.
+  if (status === 'pending_deletion' || status === 'deleted') return false;
+  await tx
+    .update(messageTemplates)
+    .set({ status })
+    .where(and(eq(messageTemplates.tenantId, tenantId), eq(messageTemplates.id, templateId)));
+  await insertStatusEvent(tx, tenantId, {
+    templateId,
+    status: 'delete_failed',
+    reason: 'Meta could not be reached to delete it after repeated attempts. Delete it again.',
+    source: 'delete',
+    at,
+  });
+  await insertStatusEvent(tx, tenantId, {
+    templateId,
+    status,
+    reason: 'Back to the status Meta last reported.',
+    source: 'delete',
+    at,
+  });
+  await recordSystemAudit(tx, tenantId, {
+    action: 'template.delete_failed',
+    subjectType: 'template',
+    subjectId: templateId,
+    result: 'failure',
+    metadata: { kind: 'retries_exhausted' },
+  });
+  await requestSyncTx(tx, tenantId, row.whatsappAccountId, at);
+  return true;
+}
+
 async function listAllTemplates(
   deps: TemplateWorkerDeps,
   wabaId: string,
@@ -924,6 +1022,10 @@ export async function syncTemplates(
         result: 'failure',
         metadata: { kind: listing.kind, detail: listing.detail.slice(0, 200) },
       });
+      // Meta refused the token: check the account's access at once (ADR-137).
+      if (listing.kind === 'auth') {
+        await requestAccessCheck(tx, scope.tenantId, whatsappAccountId, startedAt);
+      }
     });
     return 'done';
   }
@@ -942,6 +1044,12 @@ export async function syncTemplates(
       .for('update');
     const byProviderId = new Map(
       local.flatMap((l) => (l.providerTemplateId ? [[l.providerTemplateId, l] as const] : [])),
+    );
+    const deletionsInProgress = await deletionsAskedSince(
+      tx,
+      scope.tenantId,
+      local.filter((l) => l.status === 'pending_deletion').map((l) => l.id),
+      new Date(now.getTime() - DELETION_KEEP_MS),
     );
     const byKey = new Map(local.map((l) => [`${l.name}|${l.language}`, l]));
     const seen = new Set<string>();
@@ -968,11 +1076,17 @@ export async function syncTemplates(
       }
       if (existing) {
         seen.add(existing.id);
+        // A deletion still being tried keeps its status; Meta's status is kept for when it ends.
+        const kept =
+          existing.status === 'pending_deletion' &&
+          status !== 'deleted' &&
+          deletionsInProgress.has(existing.id);
+        const changed = existing.status !== status && !kept;
         const set: Partial<typeof messageTemplates.$inferInsert> = { lastSyncedAt: now };
         if (existing.providerTemplateId !== remote.id) set.providerTemplateId = remote.id;
         if (existing.providerStatus !== remote.status)
           set.providerStatus = remote.status.slice(0, 32);
-        if (existing.status !== status) set.status = status;
+        if (changed) set.status = status;
         if (category && existing.category !== category) set.category = category;
         if (components && JSON.stringify(existing.components) !== JSON.stringify(components))
           set.components = components;
@@ -990,11 +1104,14 @@ export async function syncTemplates(
               eq(messageTemplates.id, existing.id),
             ),
           );
-        if (existing.status !== status) {
+        if (changed) {
           await insertStatusEvent(tx, scope.tenantId, {
             templateId: existing.id,
             status,
-            reason: remote.rejectedReason,
+            reason:
+              existing.status === 'pending_deletion' && status !== 'deleted'
+                ? 'Meta still lists it, so the deletion did not go through.'
+                : remote.rejectedReason,
             source: 'sync',
             at: now,
           });

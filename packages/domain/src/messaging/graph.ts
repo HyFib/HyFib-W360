@@ -11,6 +11,7 @@
  *   `unknown`     the request may have reached Meta but no response was received (timeouts,
  *                 resets). Callers must NOT blindly retry sends in this case.
  */
+import { clipText, parseExternalJson } from '@w360/core';
 import type { FlowValidationError } from '@w360/db';
 
 export type GraphFailureKind = 'retryable' | 'permanent' | 'auth' | 'unknown';
@@ -260,7 +261,7 @@ export class GraphClient {
     }
     let json: unknown;
     try {
-      json = await response.json();
+      json = parseExternalJson(await response.text());
     } catch {
       if (response.ok)
         return {
@@ -454,8 +455,13 @@ export class GraphClient {
         const catalogs = (json.data as Record<string, unknown>[]).flatMap((c): RemoteCatalog[] => {
           const id = str(c?.id);
           if (!id || !/^[0-9]{1,32}$/.test(id)) return [];
+          const name = str(c.name);
           return [
-            { id, name: str(c.name)?.slice(0, 200) ?? null, productCount: num(c.product_count) },
+            {
+              id,
+              name: name === null ? null : clipText(name, 200),
+              productCount: num(c.product_count),
+            },
           ];
         });
         const paging = (json.paging ?? {}) as { cursors?: { after?: unknown }; next?: unknown };
@@ -482,7 +488,7 @@ export class GraphClient {
         if (!Array.isArray(json.data)) return null;
         const clip = (v: unknown, max: number) => {
           const t = str(v)?.trim();
-          return t ? t.slice(0, max) : null;
+          return t ? clipText(t, max) : null;
         };
         const products = (json.data as Record<string, unknown>[]).flatMap((p): RemoteProduct[] => {
           const retailerId = str(p?.retailer_id);
@@ -640,6 +646,8 @@ export class GraphClient {
               targetIds: Array.isArray(g.target_ids) ? g.target_ids.map(String) : [],
             }))
           : [];
+        // `error`: what a request with the token would get (research M-187); its code only.
+        const error = data.error as { code?: unknown } | undefined;
         return {
           appId: typeof data.app_id === 'string' ? data.app_id : String(data.app_id ?? ''),
           isValid: data.is_valid === true,
@@ -649,6 +657,7 @@ export class GraphClient {
             typeof data.expires_at === 'number' && data.expires_at > 0
               ? new Date(data.expires_at * 1000)
               : null,
+          errorCode: num(error?.code),
         };
       },
     );
@@ -694,6 +703,41 @@ export class GraphClient {
       `/${encodeURIComponent(wabaId)}/subscribed_apps`,
       { token, body: {} },
       (json) => (json.success === true ? { subscribed: true } : null),
+    );
+  }
+
+  /**
+   * GET /{waba-id}/subscribed_apps: the ids of the apps subscribed to the account's webhooks
+   * (operation `getAllSubscriptionsForAWaba` in Meta's official OpenAPI description, research
+   * M-190). Its examples put each app under `whatsapp_business_api_data` while its schema puts `id`
+   * in the item itself, so both are read; an answer without a `data` list is not understood. The
+   * list is not `complete` when an app's id cannot be read or Meta says another page follows: such
+   * a list cannot tell that an app is missing from it.
+   */
+  listSubscribedApps(wabaId: string, token: string) {
+    return this.request(
+      'GET',
+      `/${encodeURIComponent(wabaId)}/subscribed_apps`,
+      { token },
+      (json) => {
+        if (!Array.isArray(json.data)) return null;
+        const appIds: string[] = [];
+        let complete = true;
+        for (const item of json.data as unknown[]) {
+          const entry = (typeof item === 'object' && item !== null ? item : {}) as {
+            id?: unknown;
+            whatsapp_business_api_data?: { id?: unknown } | null;
+          };
+          const id = entry.whatsapp_business_api_data?.id ?? entry.id;
+          if (typeof id === 'string' && id.length > 0) appIds.push(id);
+          else if (Number.isSafeInteger(id)) appIds.push(String(id));
+          else complete = false;
+        }
+        if (typeof (json.paging as { next?: unknown } | null | undefined)?.next === 'string') {
+          complete = false;
+        }
+        return { appIds, complete };
+      },
     );
   }
 

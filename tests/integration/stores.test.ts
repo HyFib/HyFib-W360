@@ -774,6 +774,17 @@ describe('Shopify stores', () => {
       expect(reread?.redacted_at).not.toBeNull();
     }
 
+    // A redaction naming an email that holds the NUL character finds nothing more to redact, as
+    // for any unknown email (ADR-130); its lookup failed in the database before (22021).
+    expect(
+      await shopify.deliverCompliance('customers/redact', {
+        shop_id: 1,
+        shop_domain: shop,
+        customer: { id: 3, email: 'nul\u0000@example.com' },
+        orders_to_redact: [],
+      }),
+    ).toBe(200);
+
     // customers/data_request: kept for the company until answered.
     expect(
       await shopify.deliverCompliance('customers/data_request', {

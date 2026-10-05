@@ -1,4 +1,4 @@
-import { uuidv7, type Clock, type Keyring } from '@w360/core';
+import { clipText, parseExternalJson, uuidv7, type Clock, type Keyring } from '@w360/core';
 import { EgressError, type EgressClient } from '@w360/core/egress';
 import { QUEUES } from '@w360/contracts';
 import {
@@ -54,7 +54,7 @@ const LEASE_MARGIN_MS = 30_000;
 const requestAad = (tenantId: string, callId: string) => `automation-http:${tenantId}:${callId}`;
 const secretAad = (tenantId: string, secretId: string) => `http-secret:${tenantId}:${secretId}`;
 
-export { secretAad as httpSecretAad };
+export { secretAad as httpSecretAad, requestAad as httpRequestAad };
 
 export interface HttpQueueDeps {
   jobs: JobQueue;
@@ -248,7 +248,7 @@ export function valueAtPath(document: unknown, path: string): string | null {
       return null;
     }
   }
-  if (typeof current === 'string') return current.slice(0, AUTOMATION_LIMITS.answerLength);
+  if (typeof current === 'string') return clipText(current, AUTOMATION_LIMITS.answerLength);
   if (typeof current === 'number' && Number.isFinite(current)) return String(current);
   if (typeof current === 'boolean') return current ? 'true' : 'false';
   return null;
@@ -262,7 +262,7 @@ export function savedValuesFrom(
   if (save.length === 0 || body.length === 0) return {};
   let document: unknown;
   try {
-    document = JSON.parse(body.toString('utf8'));
+    document = parseExternalJson(body.toString('utf8'));
   } catch {
     // Not JSON: there is nothing to save, and the call's outcome still stands.
     return {};

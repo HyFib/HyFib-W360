@@ -3,6 +3,7 @@ import { AppError, forbidden, isAppError, notFound, uuidv7, type Clock } from '@
 import { QUEUES } from '@w360/contracts';
 import {
   and,
+  apiKeys,
   asc,
   campaignEvents,
   campaignRecipients,
@@ -23,7 +24,6 @@ import {
   type CampaignEventType,
   type CampaignStatus,
   type Database,
-  type SkipReason,
   type SQL,
   type Tx,
 } from '@w360/db';
@@ -53,6 +53,7 @@ import {
 } from './audience';
 import { loadRateTable, marketFor, parseAmountToMicros, priceFor, rateCategoryFor } from './costs';
 import { recountedCounters } from './counters';
+import { campaignAnalytics, type CampaignAnalytics } from './results';
 import {
   formatTimeOfDay,
   isValidTimeZone,
@@ -215,7 +216,11 @@ export const recipientFilterSchema = z.object({
 
 type CampaignRow = typeof campaigns.$inferSelect;
 
-async function lockCampaign(tx: Tx, tenantId: string, campaignId: string): Promise<CampaignRow> {
+export async function lockCampaign(
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+): Promise<CampaignRow> {
   const [row] = await tx
     .select()
     .from(campaigns)
@@ -241,6 +246,116 @@ export async function recordCampaignEvent(
     actorUserId,
     detail,
   });
+}
+
+/** Who stopped a campaign: a member, or an API key with `campaigns.stop` (ADR-128). */
+export type CampaignStopper = { userId: string } | { apiKeyId: string };
+
+const stopperEvent = (by: CampaignStopper) =>
+  'userId' in by
+    ? { actorUserId: by.userId, detail: {} }
+    : { actorUserId: null, detail: { apiKeyId: by.apiKeyId } };
+
+/**
+ * Pauses a scheduled or running campaign whose row the caller has locked: sends no worker claimed
+ * are released and their recipients wait again (a claimed send cannot be recalled). A member's
+ * pause says `manual`, a key's `api`; the event names who paused it.
+ */
+export async function pauseLockedCampaign(
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+  by: CampaignStopper,
+  now: Date,
+): Promise<{ released: number }> {
+  const released = await releaseQueuedSends(
+    tx,
+    tenantId,
+    campaignId,
+    { code: 'campaign_paused', message: 'Not sent: the campaign was paused.' },
+    now,
+  );
+  await requeueReleased(tx, tenantId, campaignId, released);
+  const reason = 'userId' in by ? 'manual' : 'api';
+  await tx
+    .update(campaigns)
+    .set({
+      status: 'paused',
+      pauseReason: reason,
+      pausedAt: now,
+      nextRunAt: null,
+      ...recountedCounters(tenantId, campaignId),
+      version: sql`${campaigns.version} + 1`,
+    })
+    .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
+  const event = stopperEvent(by);
+  await recordCampaignEvent(tx, tenantId, campaignId, 'paused', event.actorUserId, {
+    reason,
+    released: released.length,
+    ...event.detail,
+  });
+  return { released: released.length };
+}
+
+/**
+ * Cancels a campaign that has not finished, whose row the caller has locked: waiting recipients
+ * and sends no worker claimed are cancelled with their messages. The event names who cancelled it.
+ */
+export async function cancelLockedCampaign(
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+  by: CampaignStopper,
+  now: Date,
+): Promise<{ canceledRecipients: number; releasedSends: number }> {
+  const pending = await tx
+    .update(campaignRecipients)
+    .set({ state: 'canceled' })
+    .where(
+      and(
+        eq(campaignRecipients.tenantId, tenantId),
+        eq(campaignRecipients.campaignId, campaignId),
+        eq(campaignRecipients.state, 'pending'),
+      ),
+    )
+    .returning({ id: campaignRecipients.id });
+  const released = await releaseQueuedSends(
+    tx,
+    tenantId,
+    campaignId,
+    { code: 'campaign_canceled', message: 'Not sent: the campaign was cancelled.' },
+    now,
+  );
+  if (released.length > 0) {
+    await tx
+      .update(campaignRecipients)
+      .set({ state: 'canceled' })
+      .where(
+        and(
+          eq(campaignRecipients.tenantId, tenantId),
+          eq(campaignRecipients.campaignId, campaignId),
+          inArray(campaignRecipients.messageId, released),
+        ),
+      );
+  }
+  await tx
+    .update(campaigns)
+    .set({
+      status: 'canceled',
+      canceledAt: now,
+      canceledByUserId: 'userId' in by ? by.userId : null,
+      nextRunAt: null,
+      ...recountedCounters(tenantId, campaignId),
+      version: sql`${campaigns.version} + 1`,
+    })
+    .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
+  const event = stopperEvent(by);
+  const counts = { canceledRecipients: pending.length, releasedSends: released.length };
+  await recordCampaignEvent(tx, tenantId, campaignId, 'canceled', event.actorUserId, {
+    ...counts,
+    ...event.detail,
+  });
+  return counts;
 }
 
 /** Wakes the runner for a campaign at `at` (duplicate signals for one instant collapse). */
@@ -541,96 +656,8 @@ async function estimateCost(
   };
 }
 
-export interface CampaignAnalytics {
-  audience: number;
-  pending: number;
-  skipped: number;
-  canceled: number;
-  queued: number;
-  inProgress: number;
-  sent: number;
-  delivered: number;
-  read: number;
-  failed: number;
-  unknown: number;
-  messageCanceled: number;
-  replied: number;
-  optedOut: number;
-  estimateMicros: number;
-  estimateMissing: number;
-  skipReasons: { reason: SkipReason; count: number }[];
-  failureCodes: { code: string; count: number }[];
-}
-
-export async function campaignAnalytics(
-  tx: Tx,
-  tenantId: string,
-  campaignId: string,
-): Promise<CampaignAnalytics> {
-  const res = await tx.execute<Record<string, number | string | null>>(sql`
-    select count(*)::int as audience,
-      (count(*) filter (where r.state = 'pending'))::int as pending,
-      (count(*) filter (where r.state = 'skipped'))::int as skipped,
-      (count(*) filter (where r.state = 'canceled'))::int as canceled,
-      (count(*) filter (where r.state = 'queued'))::int as queued,
-      (count(*) filter (where r.state = 'queued' and m.status in ('queued', 'sending', 'accepted')))::int as in_progress,
-      (count(*) filter (where r.state = 'queued' and m.status in ('sent', 'delivered', 'read', 'played')))::int as sent,
-      (count(*) filter (where r.state = 'queued' and m.status in ('delivered', 'read', 'played')))::int as delivered,
-      (count(*) filter (where r.state = 'queued' and m.status in ('read', 'played')))::int as read,
-      (count(*) filter (where r.state = 'queued' and m.status = 'failed'))::int as failed,
-      (count(*) filter (where r.state = 'queued' and m.status = 'unknown_outcome'))::int as unknown,
-      (count(*) filter (where m.status = 'canceled'))::int as message_canceled,
-      (count(*) filter (where r.replied_at is not null
-                          and m.status in ('delivered', 'read', 'played')))::int as replied,
-      (count(*) filter (where r.opted_out_at is not null
-                          and m.status in ('delivered', 'read', 'played')))::int as opted_out,
-      coalesce(sum(r.estimated_cost_micros) filter (where r.state = 'queued'), 0)::bigint as estimate_micros,
-      (count(*) filter (where r.state = 'queued' and r.estimated_cost_micros is null))::int as estimate_missing
-    from app.campaign_recipients r
-    left join app.messages m on m.tenant_id = r.tenant_id and m.id = r.message_id
-    where r.tenant_id = ${tenantId} and r.campaign_id = ${campaignId}`);
-  const row = res.rows[0] ?? {};
-  const n = (k: string) => Number(row[k] ?? 0);
-  const reasons = await tx
-    .select({ reason: campaignRecipients.skipReason, count: sql<number>`count(*)::int` })
-    .from(campaignRecipients)
-    .where(
-      and(
-        eq(campaignRecipients.tenantId, tenantId),
-        eq(campaignRecipients.campaignId, campaignId),
-        eq(campaignRecipients.state, 'skipped'),
-      ),
-    )
-    .groupBy(campaignRecipients.skipReason);
-  const failures = await tx.execute<{ code: string | null; count: number }>(sql`
-    select m.error_code as code, count(*)::int as count
-      from app.campaign_recipients r
-      join app.messages m on m.tenant_id = r.tenant_id and m.id = r.message_id
-     where r.tenant_id = ${tenantId} and r.campaign_id = ${campaignId} and m.status = 'failed'
-     group by m.error_code order by count(*) desc limit 10`);
-  return {
-    audience: n('audience'),
-    pending: n('pending'),
-    skipped: n('skipped'),
-    canceled: n('canceled'),
-    queued: n('queued'),
-    inProgress: n('in_progress'),
-    sent: n('sent'),
-    delivered: n('delivered'),
-    read: n('read'),
-    failed: n('failed'),
-    unknown: n('unknown'),
-    messageCanceled: n('message_canceled'),
-    replied: n('replied'),
-    optedOut: n('opted_out'),
-    estimateMicros: n('estimate_micros'),
-    estimateMissing: n('estimate_missing'),
-    skipReasons: reasons
-      .filter((r): r is { reason: SkipReason; count: number } => r.reason !== null)
-      .sort((a, b) => b.count - a.count),
-    failureCodes: failures.rows.map((r) => ({ code: r.code ?? 'unknown', count: r.count })),
-  };
-}
+// Counted in one statement in ./results (ADR-150); exported here as before.
+export { campaignAnalytics, type CampaignAnalytics };
 
 function toScheduledLocal(local: string | undefined): string | null {
   if (!local) return null;
@@ -813,6 +840,7 @@ export function createCampaignsService(deps: CampaignDeps) {
                 .from(segments)
                 .where(and(eq(segments.tenantId, ctx.tenant.id), eq(segments.id, c.segmentId)))
             : [];
+          // A key that paused or cancelled the campaign is named by its id in the detail (ADR-128).
           const events = await tx
             .select({
               id: campaignEvents.id,
@@ -820,9 +848,17 @@ export function createCampaignsService(deps: CampaignDeps) {
               detail: campaignEvents.detail,
               occurredAt: campaignEvents.occurredAt,
               actorName: users.name,
+              apiKeyName: apiKeys.name,
             })
             .from(campaignEvents)
             .leftJoin(users, eq(users.id, campaignEvents.actorUserId))
+            .leftJoin(
+              apiKeys,
+              and(
+                eq(apiKeys.tenantId, campaignEvents.tenantId),
+                sql`${apiKeys.id}::text = ${campaignEvents.detail}->>'apiKeyId'`,
+              ),
+            )
             .where(
               and(
                 eq(campaignEvents.tenantId, ctx.tenant.id),
@@ -1269,36 +1305,20 @@ export function createCampaignsService(deps: CampaignDeps) {
         if (c.status === 'paused') return { released: 0 };
         if (c.status !== 'scheduled' && c.status !== 'running')
           throw new AppError('conflict', 'Only scheduled or running campaigns can be paused.');
-        const released = await releaseQueuedSends(
+        const result = await pauseLockedCampaign(
           tx,
           ctx.tenant.id,
           campaignId,
-          { code: 'campaign_paused', message: 'Not sent: the campaign was paused.' },
+          { userId: ctx.user.id },
           now,
         );
-        await requeueReleased(tx, ctx.tenant.id, campaignId, released);
-        await tx
-          .update(campaigns)
-          .set({
-            status: 'paused',
-            pauseReason: 'manual',
-            pausedAt: now,
-            nextRunAt: null,
-            ...recountedCounters(ctx.tenant.id, campaignId),
-            version: sql`${campaigns.version} + 1`,
-          })
-          .where(and(eq(campaigns.tenantId, ctx.tenant.id), eq(campaigns.id, campaignId)));
-        await recordCampaignEvent(tx, ctx.tenant.id, campaignId, 'paused', ctx.user.id, {
-          reason: 'manual',
-          released: released.length,
-        });
         await recordAudit(
           tx,
           ctx,
           { action: 'campaign.paused', subjectType: 'campaign', subjectId: campaignId },
           meta,
         );
-        return { released: released.length };
+        return result;
       });
     },
 
@@ -1450,51 +1470,13 @@ export function createCampaignsService(deps: CampaignDeps) {
         if (c.status === 'canceled' || c.status === 'completed') {
           return { status: c.status, changed: false, canceledRecipients: 0, releasedSends: 0 };
         }
-        const pending = await tx
-          .update(campaignRecipients)
-          .set({ state: 'canceled' })
-          .where(
-            and(
-              eq(campaignRecipients.tenantId, ctx.tenant.id),
-              eq(campaignRecipients.campaignId, campaignId),
-              eq(campaignRecipients.state, 'pending'),
-            ),
-          )
-          .returning({ id: campaignRecipients.id });
-        const released = await releaseQueuedSends(
+        const counts = await cancelLockedCampaign(
           tx,
           ctx.tenant.id,
           campaignId,
-          { code: 'campaign_canceled', message: 'Not sent: the campaign was cancelled.' },
+          { userId: ctx.user.id },
           now,
         );
-        if (released.length > 0) {
-          await tx
-            .update(campaignRecipients)
-            .set({ state: 'canceled' })
-            .where(
-              and(
-                eq(campaignRecipients.tenantId, ctx.tenant.id),
-                eq(campaignRecipients.campaignId, campaignId),
-                inArray(campaignRecipients.messageId, released),
-              ),
-            );
-        }
-        await tx
-          .update(campaigns)
-          .set({
-            status: 'canceled',
-            canceledAt: now,
-            canceledByUserId: ctx.user.id,
-            nextRunAt: null,
-            ...recountedCounters(ctx.tenant.id, campaignId),
-            version: sql`${campaigns.version} + 1`,
-          })
-          .where(and(eq(campaigns.tenantId, ctx.tenant.id), eq(campaigns.id, campaignId)));
-        await recordCampaignEvent(tx, ctx.tenant.id, campaignId, 'canceled', ctx.user.id, {
-          canceledRecipients: pending.length,
-          releasedSends: released.length,
-        });
         await recordAudit(
           tx,
           ctx,
@@ -1502,16 +1484,11 @@ export function createCampaignsService(deps: CampaignDeps) {
             action: 'campaign.canceled',
             subjectType: 'campaign',
             subjectId: campaignId,
-            metadata: { canceledRecipients: pending.length, releasedSends: released.length },
+            metadata: counts,
           },
           meta,
         );
-        return {
-          status: 'canceled' as CampaignStatus,
-          changed: true,
-          canceledRecipients: pending.length,
-          releasedSends: released.length,
-        };
+        return { status: 'canceled' as CampaignStatus, changed: true, ...counts };
       });
     },
 

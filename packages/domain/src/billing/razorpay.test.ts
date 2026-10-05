@@ -591,6 +591,43 @@ describe('RazorpayClient subscriptions', () => {
     });
   });
 
+  it('clips names and descriptions to Razorpay’s lengths without splitting an emoji (ADR-133)', async () => {
+    // Razorpay would get half of the emoji where a length falls between its two halves.
+    const cutAt = (n: number) => `${'x'.repeat(n)}😀 and more`;
+    const customer = clientReturning(() =>
+      json(200, { id: 'cust_Abc123', entity: 'customer', name: 'x', email: 'a@b.test' }),
+    );
+    await customer.client.createCustomer({ name: cutAt(49), email: `${cutAt(63)}@example.test` });
+    expect(customer.seen[0]?.body).toMatchObject({ name: 'x'.repeat(49), email: 'x'.repeat(63) });
+    const plan = clientReturning(() =>
+      json(200, {
+        id: 'plan_Def456',
+        period: 'monthly',
+        interval: 1,
+        item: { amount: 1, currency: 'INR' },
+      }),
+    );
+    await plan.client.createPlan({
+      period: 'monthly',
+      amount: 1,
+      currency: 'INR',
+      name: cutAt(79),
+    });
+    expect(plan.seen[0]?.body).toMatchObject({ item: { name: 'x'.repeat(79) } });
+    const charge = clientReturning(() => json(200, { razorpay_payment_id: 'pay_Ghi789' }));
+    await charge.client.createRecurringPayment({
+      email: 'payer@example.test',
+      contact: '+919876543210',
+      amount: 100,
+      currency: 'INR',
+      orderId: 'order_Jkl012',
+      customerId: 'cust_Abc123',
+      tokenId: 'token_Mno345',
+      description: cutAt(254),
+    });
+    expect(charge.seen[0]?.body).toMatchObject({ description: 'x'.repeat(254) });
+  });
+
   it('reads a subscription strictly: an unknown status is null, a malformed field makes it unreadable', async () => {
     const read = (body: unknown) =>
       clientReturning(() => json(200, body)).client.fetchSubscription('sub_Abc123');

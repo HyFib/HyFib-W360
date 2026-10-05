@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { decodeKeysetCursor, encodeKeysetCursor } from './validation';
+import { z } from 'zod';
+import { isAppError } from '@w360/core';
+import {
+  NUL_CHARACTER_MESSAGE,
+  decodeKeysetCursor,
+  encodeKeysetCursor,
+  nulCharacterPathIn,
+  parseInput,
+} from './validation';
 
 const ID = '0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b';
 
@@ -42,5 +50,56 @@ describe('keyset cursors', () => {
       ).toThrow('Invalid cursor.');
     }
     expect(() => decodeKeysetCursor('not-a-cursor')).toThrow('Invalid cursor.');
+  });
+});
+
+describe('parseInput and the NUL character (ADR-130)', () => {
+  const schema = z.object({
+    name: z.string().trim().max(200),
+    tags: z.array(z.string()).default([]),
+    fields: z.record(z.string(), z.string()).default({}),
+  });
+
+  it('refuses what the schema keeps when it holds the character, naming where', () => {
+    for (const [input, path] of [
+      [{ name: 'Pri\u0000ya' }, 'name'],
+      [{ name: 'Priya', tags: ['vip', 'ne\u0000w'] }, 'tags.1'],
+      [{ name: 'Priya', fields: { city: 'Pu\u0000ne' } }, 'fields.city'],
+      [{ name: 'Priya', fields: { ['ci\u0000ty']: 'Pune' } }, 'fields.ci\\u0000ty'],
+    ] as const) {
+      let refused: unknown;
+      try {
+        parseInput(schema, input);
+      } catch (error) {
+        refused = error;
+      }
+      expect(isAppError(refused)).toBe(true);
+      expect(refused).toMatchObject({
+        code: 'validation_failed',
+        message: NUL_CHARACTER_MESSAGE,
+        issues: [{ path, message: NUL_CHARACTER_MESSAGE }],
+      });
+    }
+  });
+
+  it('keeps everything else, and ignores what the schema drops', () => {
+    expect(parseInput(schema, { name: ' Priya ', ignored: 'x\u0000' })).toEqual({
+      name: 'Priya',
+      tags: [],
+      fields: {},
+    });
+    // Other control characters are kept, as the API keeps them.
+    expect(parseInput(schema, { name: 'a\u0001b' }).name).toBe('a\u0001b');
+    // Schema errors come first.
+    expect(() => parseInput(schema, { name: 'x'.repeat(201) + '\u0000' })).toThrow(/200/);
+  });
+
+  it('walks any nesting without recursion, and names the value itself with an empty path', () => {
+    expect(nulCharacterPathIn('a\u0000')).toBe('');
+    expect(nulCharacterPathIn(new Date(0))).toBeNull();
+    expect(nulCharacterPathIn({ a: [{}, { b: null, c: 3, d: ['x', 'y\u0000'] }] })).toBe('a.1.d.1');
+    let deep: unknown = 'z\u0000';
+    for (let i = 0; i < 50_000; i += 1) deep = { n: deep };
+    expect(nulCharacterPathIn(deep)?.split('.')).toHaveLength(50_000);
   });
 });

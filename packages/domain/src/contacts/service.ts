@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AppError, notFound, uuidv7, type Clock } from '@w360/core';
+import { AppError, clipText, notFound, uuidv7, type Clock } from '@w360/core';
 import {
   and,
   asc,
@@ -38,11 +38,10 @@ import {
   parseInput,
 } from '../validation';
 import { CsvError, CSV_BOM, csvLine, parseCsv, restoreCell, type CsvLimits } from './csv';
+import { createContactField, deleteContactField, renameContactField } from './field-definitions';
 import {
-  MAX_CONTACT_FIELDS,
   MAX_TAGS_PER_CONTACT,
   coerceFieldValue,
-  fieldKeyFromLabel,
   normalizeEmail,
   normalizeTag,
   parseConsentCell,
@@ -707,51 +706,43 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
     async createField(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'tenant.settings.manage');
       const data = parseInput(createFieldSchema, input);
-      const key = data.key ?? fieldKeyFromLabel(data.label);
       return db.run(ctx.scope, async (tx) => {
-        const [{ count } = { count: 0 }] = await tx
-          .select({ count: sql<number>`count(*)::int` })
-          .from(contactFields)
-          .where(eq(contactFields.tenantId, ctx.tenant.id));
-        if (count >= MAX_CONTACT_FIELDS) {
-          throw new AppError(
-            'validation_failed',
-            `A company can define at most ${MAX_CONTACT_FIELDS} fields.`,
-          );
-        }
-        const id = uuidv7();
-        const [row] = await tx
-          .insert(contactFields)
-          .values({ id, tenantId: ctx.tenant.id, key, label: data.label, type: data.type })
-          .onConflictDoNothing()
-          .returning({ id: contactFields.id });
-        if (!row) throw new AppError('conflict', `A field with the key "${key}" already exists.`);
+        const field = await createContactField(tx, ctx.tenant.id, data);
         await recordAudit(
           tx,
           ctx,
           {
             action: 'contact_field.created',
             subjectType: 'contact_field',
-            subjectId: id,
-            metadata: { key, type: data.type },
+            subjectId: field.id,
+            metadata: { key: field.key, type: field.type },
           },
           meta,
         );
-        return { id, key };
+        return { id: field.id, key: field.key };
       });
     },
 
-    async renameField(ctx: TenantContext, fieldId: string, label: string) {
+    async renameField(ctx: TenantContext, fieldId: string, label: string, meta: RequestMeta = {}) {
       assertCan(ctx, 'tenant.settings.manage');
       const parsed = parseInput(createFieldSchema.shape.label, label);
       if (!z.uuid().safeParse(fieldId).success) throw notFound('Field');
       await db.run(ctx.scope, async (tx) => {
-        const [row] = await tx
-          .update(contactFields)
-          .set({ label: parsed })
-          .where(and(eq(contactFields.tenantId, ctx.tenant.id), eq(contactFields.id, fieldId)))
-          .returning({ id: contactFields.id });
-        if (!row) throw notFound('Field');
+        const result = await renameContactField(tx, ctx.tenant.id, { id: fieldId }, parsed);
+        if (!result) throw notFound('Field');
+        if (result.renamed) {
+          await recordAudit(
+            tx,
+            ctx,
+            {
+              action: 'contact_field.renamed',
+              subjectType: 'contact_field',
+              subjectId: fieldId,
+              metadata: { key: result.field.key },
+            },
+            meta,
+          );
+        }
       });
     },
 
@@ -760,20 +751,8 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
       assertCan(ctx, 'tenant.settings.manage');
       if (!z.uuid().safeParse(fieldId).success) throw notFound('Field');
       await db.run(ctx.scope, async (tx) => {
-        const [row] = await tx
-          .delete(contactFields)
-          .where(and(eq(contactFields.tenantId, ctx.tenant.id), eq(contactFields.id, fieldId)))
-          .returning({ key: contactFields.key });
-        if (!row) throw notFound('Field');
-        await tx
-          .update(contacts)
-          .set({ attributes: sql`${contacts.attributes} - ${row.key}::text` })
-          .where(
-            and(
-              eq(contacts.tenantId, ctx.tenant.id),
-              sql`${contacts.attributes} ? ${row.key}::text`,
-            ),
-          );
+        const field = await deleteContactField(tx, ctx.tenant.id, { id: fieldId });
+        if (!field) throw notFound('Field');
         await recordAudit(
           tx,
           ctx,
@@ -781,7 +760,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
             action: 'contact_field.deleted',
             subjectType: 'contact_field',
             subjectId: fieldId,
-            metadata: { key: row.key },
+            metadata: { key: field.key },
           },
           meta,
         );
@@ -844,7 +823,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
         if (index >= 0) suggestedFields[field.key] = index;
       }
       return {
-        fileName: input.fileName.slice(0, 200),
+        fileName: clipText(input.fileName, 200),
         headers,
         sample: parsed.rows.slice(0, 5).map((r) => r.map(restoreCell)),
         totalRows: parsed.rows.length,

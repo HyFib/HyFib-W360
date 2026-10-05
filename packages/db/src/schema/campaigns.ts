@@ -1,7 +1,6 @@
 import {
   bigint,
   integer,
-  jsonb,
   primaryKey,
   smallint,
   text,
@@ -9,6 +8,7 @@ import {
   timestamp,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { jsonb } from './columns';
 import { appSchema } from './tenancy';
 import { opsSchema } from './ops';
 
@@ -46,6 +46,7 @@ export type CampaignStatus = (typeof CAMPAIGN_STATUSES)[number];
 
 export const CAMPAIGN_PAUSE_REASONS = [
   'manual',
+  'api',
   'budget_reached',
   'message_cap_reached',
   'template_not_approved',

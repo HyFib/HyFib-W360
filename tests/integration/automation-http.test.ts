@@ -444,6 +444,57 @@ describe('automation HTTP step', () => {
     ]);
   });
 
+  it("saves an answer longer than a field's 500 characters to a contact field without splitting an emoji (ADR-131, ADR-133)", async () => {
+    // The answer is clipped to a field's 500 characters where the cut falls between the two halves
+    // of an emoji: jsonb refused the half left (22P02, ADR-131), and since ADR-133 the clip stops
+    // before the emoji instead of leaving U+FFFD in its place.
+    const s = await setup();
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).createField(s.owner, {
+      label: 'City',
+      key: 'city',
+      type: 'text',
+    });
+    await publish(s.owner, {
+      version: 1,
+      start: 'ask',
+      nodes: [
+        {
+          id: 'ask',
+          type: 'ask_text',
+          text: 'Which city?',
+          saveAs: 'city',
+          format: 'any',
+          retryText: null,
+          retries: 0,
+          invalidNext: null,
+          timeoutMinutes: 30,
+          timeoutNext: null,
+          next: 'set',
+        },
+        {
+          id: 'set',
+          type: 'update_contact',
+          action: { kind: 'set_field', field: 'city', value: '{{answer.city}}' },
+          next: 'done',
+        },
+        { id: 'done', type: 'send_text', text: 'Thanks.', next: null },
+      ],
+    });
+    const from = waId();
+    const conv = await inbound(s.c, from, 'order please');
+    const run = await onlyRun(conv);
+    expect(await drive(s.c, conv, run.id)).toBe('waiting');
+    await inbound(s.c, from, `${'x'.repeat(499)}😀`);
+    expect(await drive(s.c, conv, run.id)).toBe('ended');
+    const [contact] = await fx.query<{ attributes: Record<string, unknown> }>(
+      `SELECT c.attributes FROM app.contacts c
+         JOIN app.conversations cv ON cv.tenant_id = c.tenant_id AND cv.contact_id = c.id
+        WHERE cv.id = $1`,
+      [conv],
+    );
+    expect(contact?.attributes).toEqual({ city: 'x'.repeat(499) });
+  });
+
   it('takes the failure branch on an error status, a removed domain or a missing secret', async () => {
     const s = await setup();
     await publish(s.owner, orderGraph('/down'));

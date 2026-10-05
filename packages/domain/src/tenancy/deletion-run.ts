@@ -22,7 +22,7 @@ import {
   type TenantScope,
   type Tx,
 } from '@w360/db';
-import { isAppError } from '@w360/core';
+import { clipText, isAppError, jsonbText } from '@w360/core';
 import { cancelPendingAutoRecharge } from '../billing/attempts';
 import { cancelPlanSubscriptionForDeletion } from '../billing/plan-subscriptions';
 import type { RazorpayClient } from '../billing/razorpay';
@@ -143,8 +143,8 @@ async function cleanUpProviders(
     { accessMode: 'read only' },
   );
   for (const account of accounts) {
-    const label = `WhatsApp account ${account.name ?? account.wabaId} (${account.wabaId})`.slice(
-      0,
+    const label = clipText(
+      `WhatsApp account ${account.name ?? account.wabaId} (${account.wabaId})`,
       160,
     );
     if (!account.credential) {
@@ -199,9 +199,11 @@ async function cleanUpProviders(
     );
   }
 
-  // The plan subscription (ADR-063): cancelled at Razorpay at once, so nothing more is charged.
-  const subscription = await cancelPlanSubscriptionForDeletion(deps, scope);
-  if (subscription) items.push({ kind: 'plan_subscription', ...subscription });
+  // The plan subscriptions (ADR-063), the one that follows the current one included (ADR-109):
+  // each cancelled at Razorpay at once, so nothing more is charged.
+  for (const subscription of await cancelPlanSubscriptionForDeletion(deps, scope)) {
+    items.push({ kind: 'plan_subscription', ...subscription });
+  }
 
   // HyFib's own card mandate: delete the token at Razorpay (how a card mandate is cancelled).
   const mandates = await deps.db.run(
@@ -325,7 +327,7 @@ async function notifyDeleted(
         kind: 'tenant.notice',
         companyName: started.companyName,
         subject: 'Company deleted',
-        lines: lines.map((line) => line.slice(0, 600)),
+        lines: lines.map((line) => clipText(line, 600)),
       },
     });
   }
@@ -404,7 +406,7 @@ export async function runTenantDeletion(
   let cleanup = started.providerCleanup;
   if (!started.providerCleanupDone) {
     cleanup = await cleanUpProviders(deps, scope);
-    const items = JSON.stringify(cleanup);
+    const items = jsonbText(cleanup);
     await deps.db.run(systemScope, (tx) =>
       tx.execute(
         sql`select ops.record_tenant_deletion_cleanup(${tenantId}::uuid, ${items}::jsonb)`,

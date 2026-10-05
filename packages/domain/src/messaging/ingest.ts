@@ -1,4 +1,4 @@
-import { uuidv7, type Clock, type Keyring } from '@w360/core';
+import { clipText, parseExternalJson, uuidv7, type Clock, type Keyring } from '@w360/core';
 import {
   and,
   authorizedTenantScope,
@@ -42,6 +42,8 @@ import {
   metaMessagesValueSchema,
   metaStatusSchema,
   normaliseInboundContent,
+  statusErrorsToStore,
+  statusPricingToStore,
   type MetaContact,
   type MetaMessagesValue,
 } from './meta-webhook';
@@ -186,7 +188,8 @@ export async function processMetaWebhookReceipt(
     let envelopeJson: unknown;
     try {
       if (!claimed.bodyCiphertext) throw new Error('body erased');
-      envelopeJson = JSON.parse(
+      // A NUL character in a message would fail the whole receipt where it is stored (ADR-130).
+      envelopeJson = parseExternalJson(
         deps.keyring.decryptString(claimed.bodyCiphertext, receiptAad(claimed.id)),
       );
     } catch {
@@ -550,7 +553,7 @@ async function ingestMessagesChange(
       .set({
         ...(quietTap ? {} : { unreadCount: sql`${conversations.unreadCount} + 1` }),
         lastInboundAt: sql`greatest(${conversations.lastInboundAt}, ${providerAt.toISOString()}::timestamptz)`,
-        ...(newer ? { lastMessageAt: providerAt, lastMessagePreview: preview.slice(0, 200) } : {}),
+        ...(newer ? { lastMessageAt: providerAt, lastMessagePreview: clipText(preview, 200) } : {}),
         ...(reopened
           ? {
               status: 'open' as const,
@@ -620,6 +623,8 @@ async function ingestMessagesChange(
       )
       .for('update');
     const firstError = s.errors?.[0];
+    // Errors and pricing within what their columns hold, so one status never fails its receipt.
+    const pricing = statusPricingToStore(s.pricing);
     const inserted = await tx
       .insert(messageStatusEvents)
       .values({
@@ -632,8 +637,8 @@ async function ingestMessagesChange(
         providerTimestamp: providerAt,
         recipientWaId: s.recipient_id && /^[0-9]+$/.test(s.recipient_id) ? s.recipient_id : null,
         recipientBsuid: s.recipient_user_id ?? null,
-        errors: s.errors ?? null,
-        pricing: s.pricing ?? null,
+        errors: statusErrorsToStore(s.errors),
+        pricing,
         receiptId: ctx.receiptId,
       })
       .onConflictDoNothing()
@@ -664,7 +669,7 @@ async function ingestMessagesChange(
                   firstError?.title?.slice(0, 500) ?? firstError?.message?.slice(0, 500) ?? null,
               }
             : {}),
-          ...(s.pricing ? { pricing: s.pricing } : {}),
+          ...(pricing ? { pricing } : {}),
         })
         .where(and(eq(messages.tenantId, ctx.tenantId), eq(messages.id, message.id)));
       await emitTenantEvent(tx, ctx.tenantId, {
@@ -760,7 +765,7 @@ async function upsertIdentity(
       updates.parentBsuid = info.parentBsuid;
     if (info.waId && !existing.waId) updates.waId = info.waId;
     if (info.profileName && existing.profileName !== info.profileName)
-      updates.profileName = info.profileName.slice(0, 200);
+      updates.profileName = clipText(info.profileName, 200);
     if (Object.keys(updates).length > 0) {
       await tx
         .update(contactIdentities)
@@ -775,7 +780,7 @@ async function upsertIdentity(
   // another company number), so one person is one contact.
   const contactId = await contactForPhone(tx, tenantId, {
     phoneE164: phoneFromWaId(info.waId),
-    displayName: info.profileName?.slice(0, 200) ?? null,
+    displayName: info.profileName ? clipText(info.profileName, 200) : null,
     source: 'whatsapp',
   });
   await tx.insert(contactIdentities).values({
@@ -786,7 +791,7 @@ async function upsertIdentity(
     bsuid: info.bsuid ?? null,
     parentBsuid: info.parentBsuid ?? null,
     waId: info.waId ?? null,
-    profileName: info.profileName?.slice(0, 200) ?? null,
+    profileName: info.profileName ? clipText(info.profileName, 200) : null,
   });
   return contactId;
 }

@@ -196,6 +196,26 @@ export async function publishPlanAction(id: string): Promise<ActionResult> {
   });
 }
 
+/** Offers a published plan version to companies, which can then choose it (ADR-105). */
+export async function offerPlanAction(id: string): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.planAdmin.offerPlan(actor, String(id));
+    refresh();
+    return null;
+  });
+}
+
+/** Stops offering a plan version to companies; those on it keep it (ADR-105). */
+export async function withdrawPlanOfferAction(id: string): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.planAdmin.withdrawPlanOffer(actor, String(id));
+    refresh();
+    return null;
+  });
+}
+
 export async function retirePlanAction(id: string, input: unknown): Promise<ActionResult> {
   return runAction(async () => {
     const { actor, runtime } = await actorForAction();
@@ -219,6 +239,26 @@ export async function setPlanTaxAction(input: unknown): Promise<ActionResult> {
   return runAction(async () => {
     const { actor, runtime } = await actorForAction();
     await runtime.planAdmin.setPlanTax(actor, input);
+    refresh();
+    return null;
+  });
+}
+
+/** Shows the offered plan versions on the public price list (platform owners, ADR-107). */
+export async function showPriceListAction(): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.planAdmin.showPriceList(actor);
+    refresh();
+    return null;
+  });
+}
+
+/** Hides the public price list (platform owners, ADR-107). */
+export async function hidePriceListAction(): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.planAdmin.hidePriceList(actor);
     refresh();
     return null;
   });
@@ -264,6 +304,31 @@ export async function retryWebhookReceiptAction(
     const result = await runtime.platformOps.retryReceipt(actor, input);
     refresh();
     return result;
+  });
+}
+
+/** Sends a dead letter's job back to its queue for one more attempt (audited, ADR-108). */
+export async function retryDeadLetterAction(
+  input: unknown,
+): Promise<ActionResult<{ queue: string }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.platformOps.retryDeadLetter(actor, input);
+    refresh();
+    return result;
+  });
+}
+
+/**
+ * Acknowledges a company's failing integration on the operations console, with a note (audited,
+ * ADR-141).
+ */
+export async function acknowledgeIntegrationFailureAction(input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.platformOps.acknowledgeFailure(actor, input);
+    refresh();
+    return null;
   });
 }
 

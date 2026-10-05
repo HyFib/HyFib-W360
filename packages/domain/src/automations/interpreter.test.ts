@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { TEMPLATE_LIMITS } from '../templates/definition';
 import {
+  AUTOMATION_LIMITS,
   RUN_BUDGETS,
   checkGraph,
   encodeHeaderValue,
@@ -10,7 +12,9 @@ import {
   renderText,
   type AutomationGraph,
 } from './graph';
+import { valueAtPath } from './http';
 import {
+  acceptAnswer,
   advance,
   botButtonId,
   initialRunState,
@@ -662,6 +666,51 @@ describe('automation interpreter', () => {
     });
   });
 
+  it('clips long messages and template variables without splitting an emoji (ADR-133)', () => {
+    // Text whose clip falls between the two halves of an emoji, which Meta would get half of.
+    const cutAt = (n: number) => `${'x'.repeat(n)}😀 and more`;
+    const message = graphOf({
+      version: 1,
+      start: 'm',
+      nodes: [{ id: 'm', type: 'send_text', text: '{{name}}', next: null }],
+    });
+    const longName = { ...facts, contactName: cutAt(AUTOMATION_LIMITS.textLength - 2) };
+    expect(step(message, initialRunState(message), { kind: 'continue' }, longName).effects).toEqual(
+      [{ kind: 'send_text', text: `${'x'.repeat(AUTOMATION_LIMITS.textLength - 2)}…` }],
+    );
+    const template = graphOf({
+      version: 1,
+      start: 't',
+      nodes: [
+        {
+          id: 't',
+          type: 'send_template',
+          templateId: '0190a3e4-3333-7000-8000-000000000003',
+          header: [],
+          body: ['{{name}}'],
+          next: null,
+        },
+      ],
+    });
+    const longValue = { ...facts, contactName: cutAt(TEMPLATE_LIMITS.parameterValue - 2) };
+    expect(
+      step(template, initialRunState(template), { kind: 'continue' }, longValue).effects,
+    ).toEqual([
+      expect.objectContaining({
+        kind: 'send_template',
+        body: [`${'x'.repeat(TEMPLATE_LIMITS.parameterValue - 2)}…`],
+      }),
+    ]);
+    // An answer, and a value saved from a response, are clipped to the answer limit the same way.
+    const answer = cutAt(AUTOMATION_LIMITS.answerLength - 1);
+    expect(acceptAnswer('any', { type: 'text', text: answer, buttonId: null })).toBe(
+      'x'.repeat(AUTOMATION_LIMITS.answerLength - 1),
+    );
+    expect(valueAtPath({ data: { status: answer } }, 'data.status')).toBe(
+      'x'.repeat(AUTOMATION_LIMITS.answerLength - 1),
+    );
+  });
+
   it('renders placeholders case-insensitively and leaves unknown ones', () => {
     expect(
       renderText('{{ Name }} / {{COMPANY}} / {{answer.city}} / {{answer.none}} / {{x}}', {
@@ -840,6 +889,17 @@ describe('automation HTTP step', () => {
     expect(step(graph, success.state, { kind: 'continue' }).effects).toEqual([
       { kind: 'send_text', text: 'Your order is shipped.' },
     ]);
+
+    // A saved value is clipped to the answer limit without splitting an emoji (ADR-133).
+    const long = `${'x'.repeat(AUTOMATION_LIMITS.answerLength - 1)}😀`;
+    expect(
+      step(graph, calling.state, {
+        kind: 'http_result',
+        ok: true,
+        values: { status: long },
+        detail: '200',
+      }).state.variables,
+    ).toEqual({ order_no: '4217', status: 'x'.repeat(AUTOMATION_LIMITS.answerLength - 1) });
 
     const failure = step(graph, calling.state, {
       kind: 'http_result',

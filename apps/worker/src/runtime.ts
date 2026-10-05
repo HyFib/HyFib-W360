@@ -27,6 +27,7 @@ import {
   GraphClient,
   JobSigner,
   PgBossJobQueue,
+  pgBossErrorContext,
   RazorpayClient,
   SmtpEmailSender,
   type BillingNoticeDeps,
@@ -100,7 +101,9 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
     max: Math.max(4, config.WORKER_CONCURRENCY + 2),
     application_name: 'w360-worker-jobs',
   });
-  boss.on('error', (error: unknown) => logger.error({ err: error }, 'pg-boss error'));
+  boss.on('error', (error: unknown) =>
+    logger.error({ err: error, ...pgBossErrorContext(error) }, 'pg-boss error'),
+  );
   boss.on('warning', (warning: unknown) => logger.warn({ warning }, 'pg-boss warning'));
 
   const smtp = smtpConfigFrom(config);
@@ -111,7 +114,11 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
   if (!razorpayConfig)
     logger.warn('Razorpay is not configured: billing jobs stay queued until it is.');
   const jobs = new PgBossJobQueue(boss);
-  const signer = new JobSigner(config.W360_JOB_SIGNING_KEY);
+  // During a job signing key rotation, the next or previous key is accepted too (ADR-135).
+  const signer = new JobSigner(config.W360_JOB_SIGNING_KEY, {
+    next: config.W360_JOB_SIGNING_KEY_NEXT,
+    previous: config.W360_JOB_SIGNING_KEY_PREVIOUS,
+  });
   const egressPolicy: EgressPolicy = {
     ...DEFAULT_EGRESS_POLICY,
     // Only for local test targets; configuration refuses it outside APP_ENV=local|test.

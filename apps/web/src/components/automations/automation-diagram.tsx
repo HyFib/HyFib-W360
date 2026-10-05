@@ -1,3 +1,4 @@
+import { clipText } from '@w360/core/text';
 import {
   NODE_TYPE_LABELS,
   edgesOf,
@@ -64,7 +65,7 @@ function layout(graph: AutomationGraph) {
 }
 
 function truncate(text: string, max: number) {
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+  return text.length > max ? `${clipText(text, max - 1)}…` : text;
 }
 
 export function AutomationDiagram({ graph }: { graph: AutomationGraph }) {

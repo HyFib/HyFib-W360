@@ -53,6 +53,8 @@ export interface InboundSpec {
   timestamp?: number;
   /** The WhatsApp id of the message this one quotes (a reply the customer swiped to). */
   contextId?: string;
+  /** The customer's WhatsApp profile name (Priya Customer when left out). */
+  profileName?: string;
 }
 
 export interface WhatsAppFixture {
@@ -191,7 +193,7 @@ export async function startWhatsAppFixture(): Promise<WhatsAppFixture> {
         ...(m.contextId ? { context: { from: '919000000000', id: m.contextId } } : {}),
       }));
       const contacts = value.messages?.map((m) => ({
-        profile: { name: 'Priya Customer' },
+        profile: { name: m.profileName ?? 'Priya Customer' },
         ...(m.waId ? { wa_id: m.waId } : {}),
       }));
       return {

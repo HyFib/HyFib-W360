@@ -1,6 +1,22 @@
-import type { WebhookEventType } from '@w360/db';
+import type {
+  WebhookCampaignStatus,
+  WebhookContactPart,
+  WebhookConversationStatus,
+  WebhookEventType,
+  WebhookMessageStatus,
+  WebhookOrderStatus,
+  WebhookTemplateStatus,
+} from '@w360/db';
 
-export type { WebhookEventType } from '@w360/db';
+export type {
+  WebhookCampaignStatus,
+  WebhookContactPart,
+  WebhookConversationStatus,
+  WebhookEventType,
+  WebhookMessageStatus,
+  WebhookOrderStatus,
+  WebhookTemplateStatus,
+} from '@w360/db';
 
 /**
  * Outgoing webhooks (P5-09, ADR-053, ADR-074, ADR-078, ADR-085, ADR-087, ADR-094): the parts the
@@ -48,7 +64,7 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
     'conversation.status_changed': {
       label: 'Conversation status',
       description:
-        'A conversation was resolved, reopened or set to pending, by a member, an automation, an API key or the contact writing again.',
+        'A conversation was resolved or reopened, by a member, an automation, an API key or the contact writing again.',
     },
     'conversation.assignment_changed': {
       label: 'Conversation assignment',
@@ -67,7 +83,8 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
     },
     'contact.updated': {
       label: 'Contact changed',
-      description: 'A contact’s name, number, email or tags changed.',
+      description:
+        'A contact’s name, number, email, tags or custom field values changed. The event says which.',
     },
     'contact.erased': {
       label: 'Contact erased',
@@ -101,6 +118,145 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
     },
   };
 
+/** The statuses a `message.status` event carries, in the order a message reaches them. */
+export const WEBHOOK_MESSAGE_STATUSES = [
+  'accepted',
+  'sent',
+  'delivered',
+  'read',
+  'played',
+  'failed',
+  'canceled',
+  'unknown_outcome',
+] as const satisfies readonly WebhookMessageStatus[];
+
+/** How Settings names each status an endpoint can choose (ADR-119). */
+export const WEBHOOK_MESSAGE_STATUS_LABELS: Record<WebhookMessageStatus, string> = {
+  accepted: 'Accepted by WhatsApp',
+  sent: 'Sent',
+  delivered: 'Delivered',
+  read: 'Read',
+  played: 'Played',
+  failed: 'Failed',
+  canceled: 'Canceled',
+  unknown_outcome: 'Outcome unknown',
+};
+
+/**
+ * The parts of a contact whose change a `contact.updated` endpoint can choose (ADR-123), as the
+ * event names them; `fields` takes a change of any custom field (`fields.<key>`).
+ */
+export const WEBHOOK_CONTACT_PARTS = [
+  'name',
+  'phone',
+  'email',
+  'tags',
+  'fields',
+] as const satisfies readonly WebhookContactPart[];
+
+/** How Settings names each part an endpoint can choose (ADR-123). */
+export const WEBHOOK_CONTACT_PART_LABELS: Record<WebhookContactPart, string> = {
+  name: 'Name',
+  phone: 'Number',
+  email: 'Email',
+  tags: 'Tags',
+  fields: 'Custom field values',
+};
+
+/**
+ * The statuses a `campaign.status_changed` event reports, which an endpoint can choose (ADR-146),
+ * in the order a campaign reaches them.
+ */
+export const WEBHOOK_CAMPAIGN_STATUSES = [
+  'draft',
+  'pending_approval',
+  'scheduled',
+  'running',
+  'paused',
+  'completed',
+  'canceled',
+] as const satisfies readonly WebhookCampaignStatus[];
+
+/** How Settings names each campaign status an endpoint can choose (ADR-146), as Campaigns does. */
+export const WEBHOOK_CAMPAIGN_STATUS_LABELS: Record<WebhookCampaignStatus, string> = {
+  draft: 'Draft',
+  pending_approval: 'Waiting for approval',
+  scheduled: 'Scheduled',
+  running: 'Sending',
+  paused: 'Paused',
+  completed: 'Completed',
+  canceled: 'Cancelled',
+};
+
+/**
+ * The statuses an `order.status_changed` event reports, which an endpoint can choose (ADR-147), in
+ * the order an order reaches them; `received` is reported only by `order.received`.
+ */
+export const WEBHOOK_ORDER_STATUSES = [
+  'confirmed',
+  'awaiting_payment',
+  'paid',
+  'fulfilled',
+  'cancelled',
+] as const satisfies readonly WebhookOrderStatus[];
+
+/** How Settings names each order status an endpoint can choose (ADR-147), as Orders does. */
+export const WEBHOOK_ORDER_STATUS_LABELS: Record<WebhookOrderStatus, string> = {
+  confirmed: 'Confirmed',
+  awaiting_payment: 'Waiting for payment',
+  paid: 'Paid',
+  fulfilled: 'Fulfilled',
+  cancelled: 'Cancelled',
+};
+
+/**
+ * The statuses a `template.status_changed` event reports, which an endpoint can choose (ADR-148), in
+ * the order Templates lists them: Meta's review states, then the deletion and Meta's limits.
+ */
+export const WEBHOOK_TEMPLATE_STATUSES = [
+  'pending',
+  'approved',
+  'rejected',
+  'paused',
+  'disabled',
+  'in_appeal',
+  'flagged',
+  'archived',
+  'deleted',
+  'limit_exceeded',
+  'locked',
+] as const satisfies readonly WebhookTemplateStatus[];
+
+/** How Settings names each template status an endpoint can choose (ADR-148), as Templates does. */
+export const WEBHOOK_TEMPLATE_STATUS_LABELS: Record<WebhookTemplateStatus, string> = {
+  pending: 'In review',
+  approved: 'Approved',
+  rejected: 'Rejected',
+  paused: 'Paused by Meta',
+  disabled: 'Disabled by Meta',
+  in_appeal: 'In appeal',
+  flagged: 'Flagged',
+  archived: 'Archived',
+  deleted: 'Deleted',
+  limit_exceeded: 'Limit exceeded',
+  locked: 'Locked',
+};
+
+/**
+ * The statuses a `conversation.status_changed` change reaches, which an endpoint can choose
+ * (ADR-149), in the order the inbox lists them; nothing sets a conversation `pending` (ADR-075).
+ */
+export const WEBHOOK_CONVERSATION_STATUSES = [
+  'open',
+  'resolved',
+] as const satisfies readonly WebhookConversationStatus[];
+
+/** How Settings names each conversation status an endpoint can choose (ADR-149), as the inbox does. */
+export const WEBHOOK_CONVERSATION_STATUS_LABELS: Record<WebhookConversationStatus, string> = {
+  open: 'Open',
+  resolved: 'Resolved',
+};
+
 export const WEBHOOK_LIMITS = {
   endpoints: 10,
   urlLength: 2048,
@@ -114,7 +270,37 @@ export const WEBHOOK_LIMITS = {
   retentionDays: 30,
   /** Failed deliveries replayed in one call at most (ADR-095); another call queues the next ones. */
   replayBatch: 500,
+  /** An endpoint's own headers (ADR-118): how many, and how long a value can be. */
+  headers: 5,
+  headerValueLength: 1000,
+  /** The automations an endpoint can choose to take the runs of (ADR-145). */
+  automations: 20,
 } as const;
+
+/** The events of automation runs, which an endpoint can take for chosen automations (ADR-145). */
+export const WEBHOOK_AUTOMATION_EVENTS = [
+  'automation.run_started',
+  'automation.run_ended',
+] as const satisfies readonly WebhookEventType[];
+
+/** An automation an endpoint takes the runs of (ADR-145). */
+export interface WebhookEndpointAutomation {
+  id: string;
+  name: string;
+  archived: boolean;
+}
+
+/** An automation an endpoint can choose (ADR-145): published, so it cannot be deleted. */
+export interface WebhookAutomationChoice {
+  id: string;
+  name: string;
+  status: 'draft' | 'active' | 'paused' | 'archived';
+}
+
+/** Whether an endpoint with these events takes automation runs, and can choose automations. */
+export function webhookTakesAutomationRuns(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_AUTOMATION_EVENTS.some((type) => eventTypes.includes(type));
+}
 
 /**
  * The periods Settings → Webhooks replays failed deliveries from (ADR-095), up to the deliveries
@@ -182,7 +368,7 @@ export function webhookErrorLabel(code: string | null, status: number | null): s
     case 'event_gone':
       return 'What the event is about no longer exists';
     case 'payload_failed':
-      return 'HyFib could not build or sign the request';
+      return 'HyFib could not prepare the request';
     default:
       return code;
   }

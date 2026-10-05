@@ -1,4 +1,4 @@
-import { type Clock, type Keyring } from '@w360/core';
+import { clipText, type Clock, type Keyring } from '@w360/core';
 import { EgressError, type EgressClient } from '@w360/core/egress';
 import {
   and,
@@ -297,7 +297,7 @@ export async function handleFlowEndpoint(
   }
   // The company may refuse the token itself (an order already handled, a session expired).
   if (res.status === 427 && isObject(parsed) && typeof parsed.error_msg === 'string') {
-    return unavailable(parsed.error_msg.slice(0, 500), 'endpoint_token_refused');
+    return unavailable(clipText(parsed.error_msg, 500), 'endpoint_token_refused');
   }
   if (res.status < 200 || res.status > 299 || !isObject(parsed)) {
     return empty(500, { ...logBase, outcome: 'endpoint_failed', detail: String(res.status) });

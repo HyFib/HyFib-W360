@@ -10,6 +10,7 @@ import {
   apiAddressRefusal,
   apiErrorResponse,
   apiRequestError,
+  assertNoNulCharacter,
   authenticateApiRequest,
   bearerToken,
   type ApiContext,
@@ -56,8 +57,9 @@ function respond(
  * Runs one public API request (ADR-052): authenticates the bearer key from the client's address
  * (failed attempts, and keys that do not accept the address (ADR-076), are limited per client
  * address), applies the key's and the company's rate limits, counts the request against the plan's
- * monthly API requests (ADR-061), reads a bounded JSON body, checks the Idempotency-Key header, and
- * turns results and errors into JSON responses. Tokens are never logged.
+ * monthly API requests (ADR-061), reads a bounded JSON body, checks the Idempotency-Key header,
+ * refuses text holding the NUL character (ADR-124), and turns results and errors into JSON
+ * responses. Tokens are never logged.
  */
 export async function handleApiRequest(
   request: NextRequest,
@@ -194,6 +196,8 @@ export async function handleApiRequest(
     }
 
     const query = Object.fromEntries(request.nextUrl.searchParams.entries());
+    // Text PostgreSQL cannot store is refused here, naming where it is, not failed in a query.
+    assertNoNulCharacter(query, body);
     const result = await handler({ ctx, runtime, body, idempotency, query });
     const replayed = 'replayed' in result && result.replayed;
     log.info(

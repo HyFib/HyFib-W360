@@ -325,6 +325,36 @@ The OpenAPI spec (`facebook/openapi`, `business-messaging-api_v23.0.yaml`) was d
 | M-185 | Reaction limits (unconfirmed) | Meta's prose documentation is recalled as saying that a reaction is not delivered when its message is more than 30 days old, is not in the conversation, was deleted, or is itself a reaction (an error arrives by webhook), and that an empty `emoji` takes a reaction back. None of this is in the spec, and the documentation could not be read in this session. HyFib refuses the first, second and fourth cases before sending and offers no way to take a reaction back. | none | recalled; developers.facebook.com refused by the proxy | none (recalled) | Low |
 | M-186 | Quoted replies (webhook) | The spec gives inbound text messages a `context` only for "Message business" product enquiries (`ContextObject`, M-171) and gives taps theirs (M-158, M-178); it does not describe the `context` of a reply in which the customer quotes a message. pywa reads `context.id` of any inbound message as the message replied to (`ReplyToMessage`), and sends `context.message_id` with every message type it sends, buttons included. | `context.id`, `ContextObject` | same spec ; https://github.com/david-lev/pywa/blob/master/pywa/types/others.py ; https://github.com/david-lev/pywa/blob/master/pywa/types/message.py ; https://github.com/david-lev/pywa/blob/master/pywa/api.py | OFF-GH-SPEC + 3P-CODE | Medium |
 
+## 19. Addendum: debug_token for periodic access checks (searched 2026-10-04 for ADR-137)
+
+developers.facebook.com and GitHub were not reachable for reading in this session (the proxy refused
+the docs site; the session's GitHub access is limited to HyFib's repository), so these rows come from
+search-index snippets of official pages and are paraphrased by the search summarizer.
+
+| ID | Topic | Claim (paraphrased) | Exact identifiers (if shown) | Source URL | Evidence type | Confidence |
+|---|---|---|---|---|---|---|
+| M-187 | debug_token fields | The answer wraps its result in `data`: `app_id`, `application`, `user_id`, `issued_at`, `expires_at` ("when this access token expires"), `data_access_expires_at`, `is_valid` ("whether the access token is still valid or not"), `scopes`, `profile_id`, and `error` ("any error that a request to the graph api would return due to the access token", with `code` and `subcode`). So a token Meta no longer accepts is described with `is_valid` false, not refused as a request; an error about the request itself (for example the app access token) is a request error. | `data`, `is_valid`, `expires_at`, `scopes`, `error.code` | https://developers.facebook.com/docs/graph-api/reference/debug_token/ | OFF-DOC-SNIP | Medium |
+| M-188 | Business token lifetime | System user tokens are long-lived; the access tokens guide and Meta's 2022 blog post describe business integration system user tokens for server-to-server use as not expiring by default, and `expires_at` 0 in a debug_token answer as no expiry. Whether a normal Embedded Signup business token can expire was not confirmed (M-146). | `expires_at` | https://developers.facebook.com/documentation/business-messaging/whatsapp/access-tokens/ ; https://developers.facebook.com/blog/post/2022/12/05/auth-tokens/ | OFF-DOC-SNIP + OFF-BLOG-SNIP | Low |
+| M-189 | Granular scopes | Each object in `granular_scopes` names a permission (`scope`) and in `target_ids` the ids of every Messaging account that granted the app that permission, the most recently onboarded first. | `granular_scopes`, `target_ids` | https://developers.facebook.com/documentation/business-messaging/whatsapp/solution-providers/manage-accounts | OFF-DOC-SNIP | Medium |
+
+HyFib's checks (ADR-137) treat only Meta's explicit answer as a loss of access: `is_valid` false,
+another `app_id`, a WhatsApp permission missing from `scopes`, or target ids for the management
+permission that leave the account out (onboarding's rules). A failed request concludes nothing.
+
+## 20. Addendum: the apps subscribed to an account's webhooks (read 2026-10-04 for ADR-138)
+
+From Meta's official OpenAPI description (`facebook/openapi`, `business-messaging-api_v23.0.yaml`),
+fetched directly from raw.githubusercontent.com for this addendum.
+
+| ID | Topic | Claim (paraphrased) | Exact identifiers (if shown) | Source URL | Evidence type | Confidence |
+|---|---|---|---|---|---|---|
+| M-190 | Subscribed apps | `GET /{Version}/{WABA-ID}/subscribed_apps` ("Get All Subscriptions for a WABA", operation `getAllSubscriptionsForAWaba`) lists the applications subscribed to the account's webhook events in `data`; `data` is empty when no app is subscribed. The examples put each app's `id`, `name` and `link` under `whatsapp_business_api_data`; the response schema (`SubscribedAppsResponse` with items `SubscribedApp`) puts `id` and `name` directly in each item. Documented errors: 400 (code 100), 401 (190), 403 (200, "Your app doesn't have permission to access this WhatsApp Business Account"), 404 (803), 429 (4), 500 (2). `POST` on the same path ("Subscribe to WABA Webhooks", `subscribeToWabaWebhooks`) takes an optional body (`{}`, or `override_callback_uri` with `verify_token`) and answers `success: true`, optionally with `data`. | `subscribed_apps`, `data[].whatsapp_business_api_data.{id,name,link}`, `success` | https://github.com/facebook/openapi/blob/main/business-messaging-api_v23.0.yaml (path `/{Version}/{WABA-ID}/subscribed_apps`; schemas `SubscribedAppsResponse`, `SubscribedApp`, `SubscriptionRequest`, `SubscriptionResponse`) | OFF-GH-SPEC | High for the path and the empty list; the item's shape conflicts between the examples and the schema |
+
+HyFib's subscription check (ADR-138) reads an app's id from either shape, takes only a complete
+`data` list (every app's id read, no `paging.next`) without HyFib's app id as a missing
+subscription, and subscribes the app again with the `POST` onboarding makes. The description shows
+no paging for this list; HyFib does not follow a further page.
+
 ## Unconfirmed / conflicting
 
 1. **Access verification and the 200-customer cap (M-022 vs M-023).** The changelog says access verification is no longer required. The Embedded Signup overview still ties the rise from 10 to 200 new customers per 7 days to Business Verification, App Review and Access Verification. The current trigger for the higher cap is unknown.
@@ -336,7 +366,7 @@ The OpenAPI spec (`facebook/openapi`, `business-messaging-api_v23.0.yaml`) was d
 7. **Interactive types not in the spec enum** (`cta_url`, `location_request_message`, `address_message`, `voice_call`) were not confirmed in this session.
 8. **Automatic throughput upgrade to 1,000 mps.** The criteria are ambiguous: the snippet ties it to `current_limit: TIER_UNLIMITED`.
 9. **Template statuses, rejection reasons, component and button lists, and many error codes** (131047, 131026, 368, 131031, 131042 and others) are confirmed only through third-party code, not the official error table.
-10. **Coexistence restrictions** (countries, history window, throughput) and **token lifetimes and revocation signals** were not found.
+10. **Coexistence restrictions** (countries, history window, throughput) and **token lifetimes and revocation signals** were not found. debug_token's fields were seen through search snippets only (M-187 to M-189); whether an Embedded Signup business token can expire, and what Meta answers when a business removes the app, are still unconfirmed.
 11. **Embedded Signup flow simplification "in September".** The year is missing from the snippet, and the effect on event and screen shapes is unknown.
 12. **Webhook field names.** The docs snippet names `marketing_onboarding_status` while the SDK has `marketing_messages_onboarding_status`. The docs place `whatsapp_business_manager_messaging_limit` on the phone number, while the SDK has it on the WABA.
 13. **Account model changes.** The WABA docs page is now titled "WhatsApp accounts and Messaging accounts", and a page "Updates to WhatsApp Business accounts" (`/account-model-evolution`) exists. Their content was not retrieved; terminology or the account hierarchy may be changing.
@@ -366,7 +396,7 @@ The OpenAPI spec (`facebook/openapi`, `business-messaging-api_v23.0.yaml`) was d
 - **Inbound media:** download within the 7-day media-ID lifetime and re-fetch the URL each time (it is valid for 5 minutes). Store files in our own storage with our own retention policy.
 - **Templates:** sync from the status, category and quality webhooks plus periodic `GET /{WABA_ID}/message_templates`. Handle PAUSED, DISABLED, ARCHIVED and recategorized templates. Upload header media via the Resumable Upload API.
 - **Flows:** keep one RSA key per phone number, uploaded via `whatsapp_business_encryption`. Implement the `ping` health check and the 421, 427 and 432 responses. Monitor flow `health_status` and the BLOCKED and THROTTLED states.
-- **Tokens:** store BISU tokens encrypted and per tenant, and check them periodically with `debug_token`. Treat error 190 or a lost WABA subscription as possible deauthorization, since explicit signals are unconfirmed.
+- **Tokens:** store BISU tokens encrypted and per tenant, and check them periodically with `debug_token` (built: daily, ADR-137). Check that the app is still subscribed to each WABA's webhooks (built: the same daily check lists the subscribed apps and subscribes HyFib's app again when it is missing, ADR-138). Treat error 190 as possible deauthorization, since explicit signals are unconfirmed.
 
 ## Things we must NOT assume
 

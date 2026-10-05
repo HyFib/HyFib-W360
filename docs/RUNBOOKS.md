@@ -1,6 +1,6 @@
 # Runbooks
 
-Last updated 2026-09-28. Procedures marked **(phase N)** apply once that capability ships. Every
+Last updated 2026-10-03. Procedures marked **(phase N)** apply once that capability ships. Every
 action on customer data requires a support grant (`/platform`) with a reason; every platform action is
 audited. Never paste tokens, message content or card data into tickets or chat.
 
@@ -8,6 +8,15 @@ audited. Never paste tokens, message content or card data into tickets or chat.
 
 - Correlation ids: responses carry `x-request-id`; server-action errors show a reference to users.
   Search logs by `correlationId`.
+- A failed query is logged as a `DatabaseQueryError` (ADR-129): its message is PostgreSQL's own when
+  that names only objects (a constraint, table or column) or is one of our functions' sentences,
+  otherwise "Database query failed (SQLSTATE …)"; `code` is the SQLSTATE, `constraint`, `table` and
+  `column` name what failed and the stack's frames show where the query was awaited. The query's
+  parameters, PostgreSQL's detail (a unique violation's key, a check's whole row) and the value a
+  data exception (SQLSTATE 22…) quotes are never logged, nor kept in a receipt's `last_error` or a
+  failed job's output. Find the statement from the frames and the request (`requestId`,
+  `correlationId`) or job, then reproduce it with the company's data under a support grant; do not
+  turn on statement logging with parameters to find it (DEPLOYMENT, first-time database setup).
 - Health: web `/api/health/ready`, worker `:9464/ready`.
 - Queues (as owner or with a read-only diagnostic role):
   ```sql
@@ -52,9 +61,13 @@ sweep is not running: nobody is emailed about late queues until it does, so star
 3. If a poison job fails repeatedly, it moves to `dead-letter` after its retry limit, and the
    worker records it in `ops.dead_letters` (Operations → Queues: queue, kind, company when its
    signature verified, retries, error name and code, never the message). The worker log's
-   `job attempt failed` entries carry the error for each attempt; the job itself (ids only, with its
-   output) stays in pg-boss for 30 days. Fix the cause; the minute sweeps re-signal durable rows, so
-   re-driving is rarely needed (`boss.redrive('dead-letter', …)` as the owner when it is).
+   `job attempt failed` entries carry the error for each attempt; the failed job itself (ids only,
+   with its output) stays in its queue for the queue's retention (1 to 7 days) and its copy in
+   `dead-letter` for 30 days. Fix the cause. Most queues' work is a row the minute sweeps signal
+   again. The minute sweep ends the work of `channel.onboard`, `commerce.account` and
+   `template.delete` for its company instead (ADR-111), and the company starts it again;
+   `template.submit` dead letters can be retried from Operations → Queues (section 10P, ADR-108).
+   `boss.redrive('dead-letter', …)` does not help: the worker has already completed the copies.
 4. Index bloat warnings (`index_bloat`) → run `getReindexCommands()` output as the owner role during
    low traffic (runtime roles cannot reindex).
 
@@ -87,12 +100,38 @@ sweep is not running: nobody is emailed about late queues until it does, so star
 
 ## 6. Expired or revoked provider credentials
 
-1. Symptoms: Graph error 190/102/10 or HTTP 401 on sends or setup steps; the number shows
-   **Reconnect needed** in Settings → Channels (`channel_accounts.status = 'needs_reconnect'`).
-2. The failing send is marked failed with the provider error; later sends to that number fail fast at
-   the channel check until it is reconnected. Tell company admins.
-3. The company re-runs Embedded Signup (Connect WhatsApp number); the same WABA and number re-bind
-   to the same records, the token is replaced and setup re-runs from the first step.
+1. Symptoms: the daily check of the account's access (ADR-137) found that Meta no longer accepts it,
+   or Graph error 190/102/10 or HTTP 401 on sends, template syncs or setup steps. The account and
+   its numbers show **Reconnect needed** in Settings → Channels (`whatsapp_accounts.status` and
+   `channel_accounts.status = 'needs_reconnect'`, the reason in `whatsapp_accounts.token_problem`),
+   every page of the company shows a banner, and the owners and administrators were emailed once. A
+   send or template sync refused for the token asks for a check at once
+   (`whatsapp_accounts.token_check_requested_at`), so the account follows within about a minute.
+2. The failing send is marked failed with the provider error; later sends to that number fail fast
+   at the channel check until it is reconnected.
+3. The company re-runs Embedded Signup (Connect WhatsApp number) with the same account and one of
+   its numbers: the token is replaced and the reason cleared, that number's setup re-runs from the
+   first step, and the account's other numbers that Meta still lists resume their setup (an active
+   number only has its health read again; one Meta no longer lists stays as it is).
+4. A check that could not be made changes nothing for the company: `token_check_error` keeps the
+   error's kind, code and title and the account is tried again after 30 minutes. When many accounts
+   fail at once, check `META_APP_SECRET` (Meta refuses HyFib's app access token with error 190
+   `OAuthException`) and egress to `graph.facebook.com`. The operations console's Integrations page
+   lists an account whose access has not been checked successfully for 26 hours ("WhatsApp access
+   check").
+5. An expiry Meta reports for a token is shown on Channels; the owners and administrators are
+   reminded once 7 days before it, and the account is checked again as soon as it passes.
+   Reconnecting gives HyFib a new token.
+6. **WhatsApp messages are not reaching HyFib** (ADR-138): the daily check found HyFib's app missing
+   from the account's subscribed apps and could not subscribe it again. Channels and every page of
+   the company say so, the owners and administrators were emailed once, and the operations
+   console's Integrations page lists the account under "WhatsApp webhooks" with Meta's error
+   (`whatsapp_accounts.webhooks_missing_since`, `webhooks_check_error`). HyFib tries again every 30
+   minutes. Code 200 means Meta refuses the app's permission for the account (ask the company
+   whether it removed HyFib's app); others are usually transient. Reconnecting the account runs
+   onboarding's subscribe step. A subscription HyFib restored by itself is audited
+   (`whatsapp.webhooks_restored`) and the company is told that messages sent before then may be
+   missing.
 
 ## 7. Duplicate-send uncertainty
 
@@ -1015,6 +1054,154 @@ requested_at DESC`:
 - **"We asked too often":** 5 requests in 24 hours per company, of plan payments and service credit
   together (withdrawn requests count).
 
+**Offering plans that companies choose (ADR-105).** Platform owners offer a published version on
+its platform page → Actions → "Offer to companies", and stop offering it there ("Stop offering");
+retiring a version stops its offer too. Nothing is offered until a platform owner does, and a
+version priced under ₹1 cannot be offered. Companies without a paid period (on a trial, past due,
+ended or canceled; not complimentary access) see the offered versions under Billing → Choose a
+plan, each with what it would cost with their add-ons and the tax, and owners and billing managers
+with a sign-in within 15 minutes choose one, then pay for it as before. During a trial the chosen
+version's limits and modules apply at once, and the trial's end does not move. Nothing is emailed:
+the company's audit log shows `billing.plan_chosen`, and its platform page shows "Last change …:
+Chosen by the company.". A staff change not yet emailed when the company chose is not emailed.
+`SELECT p.code, p.version, p.status, p.offered_at FROM ops.plans p WHERE p.offered_at IS NOT NULL`
+lists what is offered.
+
+- **"You cannot choose a plan now":** the page says why. Razorpay subscriptions are off or the tax
+  on plan prices is not set (offering does nothing until both are); the company has complimentary
+  access or a paid period (staff change those plans; the company can choose once the period ends);
+  a payment is being started (its Checkout window closes within an hour); a subscription pays from
+  the trial's end (the company cancels it under Billing, and the trial goes on) or pays now
+  (the company changes its plan from the end of the paid period under Billing → Change plan,
+  ADR-109, below); or the company is suspended or being deleted.
+- **"… holds less than your company has now":** the version has fewer seats (members and
+  invitations still waiting, plus the company's extra seats), WhatsApp numbers, teams or live
+  automations than the company uses; the message names each one. The company frees some first
+  (revokes invitations, removes members, disconnects numbers, deletes teams or turns automations
+  off), or chooses a larger version. Monthly limits never refuse a choice.
+- **A version is listed without a button ("Your add-ons are not sold with this plan…"):** the
+  version does not sell the company's extra seats, numbers or run packs, or the total is more than a
+  plan payment can be. The company removes those add-ons under Billing → Add-ons first (ADR-106),
+  or staff change the company's plan and add-ons.
+- **A version is missing from the list:** it is not offered, was retired, or is a draft.
+- **"… costs more than can be paid here with your add-ons and the tax":** the version, with the
+  company's add-ons and the tax on plan prices, is more than a plan payment can be (the page shows
+  it without a price). Staff change the company's plan instead.
+- **Stopping an offer or retiring a version takes a moment longer than usual:** it waits for
+  choices of that version being committed at that instant (milliseconds), so none of them lands on
+  a version no longer offered.
+
+**Add-ons that companies choose (ADR-106).** Under Billing → Add-ons, owners and billing managers
+with a sign-in within 15 minutes set the extra seats, extra WhatsApp numbers and automation run
+packs of the version the company is on, when it is on a trial, past due, ended or canceled (the
+same companies that can choose a plan), and then pay for them with the plan. The version must still
+be published (offered or not) and sell the add-on, within its most seats and numbers. The new
+limits apply at once, during a trial too; the trial's end does not move. Nothing is emailed: the
+company's audit log shows `billing.add_ons_chosen` with the quantities before and after, and its
+platform page shows "Last change …: Add-ons chosen by the company.". `SELECT extra_seats,
+extra_numbers, run_packs, note, changed_by_user_id, changed_at FROM app.tenant_plans WHERE
+tenant_id = …` shows them.
+
+- **"You cannot change your add-ons now":** the page says why, as for choosing a plan above; also
+  when the company's version was retired (it cannot be paid for, so its add-ons stay as staff left
+  them: the company chooses another plan, or staff change it).
+- **"With these add-ons your plan holds … where your company uses …":** a decrease would leave
+  fewer seats (members and invitations still waiting) or WhatsApp numbers than the company uses.
+  The company frees some first (revokes invitations, removes members, disconnects numbers), or
+  keeps more. An increase is never refused for this, even when the company stays over its limit
+  (for example after staff removed add-ons); fewer run packs refuse nothing, and the month's runs
+  already used count against the smaller allowance.
+- **"… does not sell that many extra seats" (or numbers, or run packs):** the version does not sell
+  that add-on, or not that many; the page shows only what it sells and the most it allows.
+- **"With these add-ons your plan costs more than can be paid here":** the total with the tax is
+  more than one plan payment can be. Choose fewer, or staff change the plan.
+- **"No add-ons to choose":** the version sells none of them (choose another plan), or the company
+  has complimentary access.
+
+**API request packs (ADR-110).** A version with a monthly API request limit above 0 may sell packs
+of extra requests a month (the platform plan form's "API request pack (requests)" and "(₹)", both or
+neither). Staff set a company's packs with its plan on the company's platform page, and companies
+choose them under Billing → Add-ons and Billing → Change plan like the other add-ons. The company's
+limit is the version's plus packs × size, for every request, the usage warning, the used-up email,
+the plan card, Settings → API keys and the platform page; fewer packs lower it at once, and the
+month's requests already counted stay counted. `SELECT api_requests FROM
+app.tenant_entitlements(…)` shows the limit with them, and `SELECT api_request_packs FROM
+app.tenant_plans WHERE tenant_id = …` the packs.
+
+- **"API request packs need a monthly API request limit above 0":** a version without a limit or
+  without the API (0) has nothing to add to. Set a limit, or leave the packs empty.
+- **"This plan sells at most N API request packs" (or automation run packs):** no limit with packs
+  may pass 2,000,000,000 (the database returns limits as 32-bit integers); the forms show how many a
+  version sells. A version with a smaller pack size, or a larger plan, sells more.
+- **"This plan does not sell API request packs":** the version (or the one chosen) sells none. Set
+  the packs to 0 first, or choose a version that sells them.
+- **"A subscription pays for the plan and add-ons the company has now. Reload the page and try
+  again.":** a subscription was about to be recorded for another version or add-ons than the
+  company's plan state, which happens only from a page or server older than the plan state (during a
+  deploy, a server of the previous release does not know the packs). Reloading and paying again
+  records the right one.
+
+**Changing the plan a subscription pays for (ADR-109).** Under Billing → Change plan, owners and
+billing managers with a sign-in within 15 minutes choose the version (an offered one, or their own
+while published) and add-ons they pay for from the end of the paid period. HyFib cancels the current
+subscription at the end of its cycle at Razorpay (unless it already ends then), records a new
+subscription that follows it from the period's end, and the payer authorises it in Razorpay's
+payment window; nothing is charged for it before the period ends. At the period's end the current
+subscription ends, the period is due like a renewal (past due within the current version's grace
+days, or expired without any), and the new subscription's first paid cycle puts the plan on the new
+version and add-ons. Emails: "Your HyFib plan changes at the end of the paid period" when the
+current subscription is cancelled for the change, "Your HyFib plan changes on …" once the new one
+is authorised, then the usual payment email. The audit log shows `billing.plan_change_started` and
+`billing.plan_subscription_cancelled` (reason `plan_change`), then `plan.subscription_period` with
+the previous version and add-ons. `SELECT id, status, plan_id, starts_at, follows_subscription_id,
+cancel_at_period_end FROM app.plan_subscriptions WHERE tenant_id = … ORDER BY created_at` shows both.
+
+- **"You cannot change your plan here now":** the page says why: paying for plans is off or the tax
+  is not set; the plan has no period paid by subscription (a trial, a period staff set, or an ended
+  plan: the company chooses a plan instead); Razorpay reports the subscription paused or not
+  charging; the paid period ends within 48 hours (Razorpay starts a card debit 24 to 36 hours
+  ahead, so a change then could not take effect at the period's end: the company chooses a plan
+  once the period ends); or the company is suspended or being deleted.
+- **The payer closed Razorpay's window without authorising:** the current subscription still ends
+  with the period (Razorpay cannot undo a cancellation, R-068). Billing shows the next subscription
+  as waiting for the payment method, with "Authorise the new plan" until its window closes an hour
+  after the change (Change plan says "Not authorised yet"); after that the company changes its plan
+  again (any version, including the one it pays for now) until 48 hours before the period
+  ends. Otherwise the plan ends with the period, as after any cancellation, and the company pays
+  again from Billing.
+- **"Cancel the change":** cancels the new subscription at once (it was never charged). The current
+  subscription still ends with the period, so the plan ends then unless the company changes it
+  again. Choosing again replaces a scheduled change the same way.
+- **The plan did not change at the period's end:** the new subscription's first charge has not been
+  recorded yet (the plan is past due meanwhile, as at any renewal); the minute sweep asks Razorpay
+  hourly once the charge is due. If Razorpay reports the charge failed, the subscription retries
+  and halts as any renewal does (the payer changes the card through Razorpay's email).
+- **Staff cancel at once** (platform page) cancels both subscriptions, the current and the new one;
+  company deletion does too. Staff plan changes stay refused while either is live.
+- **Both subscriptions charged for the same period** should not happen (the current one is
+  cancelled before the new one exists). If Razorpay ever renews the cancelled one, its payment is
+  recorded but never applied (`stale`); refund it from the company's platform page (ADR-103).
+
+**The price list for visitors (ADR-107).** Platform owners show it on the platform Plans page
+("Price list for visitors", then "Show the price list"). Anyone can then see at `/pricing`, without
+signing in, every version offered to companies with its price before and with the tax, what it
+includes and its add-ons, the default trial's length, and that Meta bills WhatsApp's own message
+charges directly. "Hide the price list" takes it down at once. Both are in the platform audit log
+(`platform.price_list_shown`, `platform.price_list_hidden`). Changes to the offers, the tax or the
+default trial show on the next view: nothing is cached.
+
+- **`/pricing` says "Page not found":** the card on the Plans page names what keeps it from
+  visitors. Either the list is hidden, or paying for plans is turned off on this platform (Razorpay
+  subscriptions), or no tax on plan prices is set. It also stays hidden when there is no default
+  trial (new companies would start complimentary and could not choose a plan), or when no offered
+  version can be paid with one plan payment, tax included. Fix what the card names; the page
+  appears on the next view.
+- **A version is missing from the list:** it is not offered (offer it on its platform page), it is
+  a draft or retired, or its price with the tax is more than one plan payment can be.
+- **To take a price down at once** (a wrong price, say): hide the price list, or stop offering the
+  version. A published version never changes: publish a corrected version, offer it, and stop
+  offering the wrong one.
+
 **Cancelling a company's subscription.** Owners and billing managers cancel in Billing (an active
 one at the end of the paid period, otherwise at once). Platform owners cancel at once on the
 company's platform page with a reason (needed before changing the company's plan, which staff
@@ -1063,8 +1250,9 @@ ones do not. The company can free one, or staff can add extra seats or numbers (
 sells them) or move it to a larger version. A lower limit never removes anything.
 
 **Automations stopped answering customers.** The month's automation runs may be used up: the
-company's billing managers were emailed when 80% were used (limits of 5 or more) and again once all
-were (ADR-062), and Billing shows the runs used and the period.
+company's billing managers were emailed when 80% were used, or the share chosen under Billing →
+Usage warnings (ADR-144), and again once all were (ADR-062), and Billing shows the runs used and the
+period.
 Runs already in progress continue; runs from store events are recorded as "Not sent: the month's
 automation runs are used up". Add run packs (when the version sells them) or change the plan; the
 next customer message starts a run. The period starts on the day the current plan or trial started
@@ -1072,11 +1260,16 @@ next customer message starts a run. The period starts on the day the current pla
 ("not in the plan") and the automation pages say so.
 
 **A usage warning or used-up email did not come.** Each counter (company, automation runs or API
-requests, usage period) gets at most one warning, at 80% of the limit rounded up (none for limits of
-1 to 4, none when the limit is reached before a sweep saw 80%), and one used-up notice;
-`app.usage_counters.warned_at` and `notified_at` say when the sweep queued them. A counter of an
-earlier period is marked without an email, and a company that is suspended, restricted or being
-deleted gets none. Queued emails go out through the email outbox like every other notice.
+requests, usage period) gets at most one warning, at the company's share of the limit rounded up
+(`app.tenants.usage_warning_percent`: 80% unless a member who manages billing chose 50% to 95% under
+Billing → Usage warnings, ADR-144; none when the share rounds up to the limit itself, as for limits
+of 1 to 4 at 80%, and none when the limit is reached before a sweep saw the share), and one used-up
+notice; `app.usage_counters.warned_at` and `notified_at` say when the sweep queued them. A counter
+already warned is not warned again when the share changes; one already past a lowered share is
+warned at the next sweep. The company's audit log shows who changed the share
+(`billing.usage_warning_changed`, from and to). A counter of an earlier period is marked without an
+email, and a company that is suspended, restricted or being deleted gets none. Queued emails go out
+through the email outbox like every other notice.
 
 **A rate change email did not come, or came again.** A company is told once per published card
 (`app.rate_change_notices`: the card, its currency and effective time, when the email was queued)
@@ -1278,6 +1471,29 @@ by the minute sweep. The audit log shows the key's changes
 (`conversation.assigned`, `conversation.team_changed`, source `api`) and routing's
 (`conversation.routed`).
 
+**A call to change many conversations is refused with 422 naming `conversationIds.<n>`.** The id at
+that place in the list (counting from 0) names none of the company's conversations: another
+company's, an erased contact's, or none at all (ADR-120). Nothing in the call was changed, the other
+conversations included: `POST /conversations/update-many` changes all of them or none. Remove or
+correct that id and send the call again; what a conversation already has changes nothing, so
+repeating a call is harmless. A call takes at most 100 conversations, each once (422 naming
+`conversationIds`), and counts as one request against the key's limits. Each conversation's change
+is audited as a single change is, all with the call's correlation id.
+
+**A call to change many contacts is refused with 422 naming `contacts.<n>.…`.** The contact at that
+place in the list (counting from 0) could not be changed as asked (ADR-122): `contacts.<n>.id` names
+none of the company's live contacts (another company's, an erased one, or none at all);
+`contacts.<n>.fields.<key>` is a field the company does not have or a value of another type
+(`GET /api/v1/contact-fields` lists the fields and types); `contacts.<n>.email` is not an email;
+`contacts.<n>.addTags` would give the contact more than 50 tags; `contacts.<n>.removeTags` names a
+tag also being added. Nothing in the call was changed, the other contacts included:
+`POST /contacts/update-many` changes all of them or none. Correct that contact's change and send
+the call again; what a contact already has changes nothing, so repeating a call is harmless. A call
+takes at most 100 contacts, each once (422 naming `contacts`), and counts as one request. A 409
+`conflict` (retryable) means it met another transaction changing the same contacts in another order,
+such as a CSV import, and PostgreSQL ended it: send it again. Each contact's change is audited as a
+single change is, all with the call's correlation id.
+
 **An API key expired without a reminder, or the reminder came twice.** Owners and administrators
 are emailed once, 7 days before a key expires (ADR-067): `app.api_keys.expiry_reminded_at` says when
 the reminder was queued, and Settings → API keys shows it. Keys that never expire, rotated keys (the
@@ -1463,10 +1679,167 @@ means the delivery or endpoint was added by a member (keys see only what keys ad
 another company, or was deleted after 30 days. A delivery shows no body (payloads are built when
 delivered and never stored): match it to the receiver's log by `eventId`.
 
-**The company is suspended or its plan ended.** Keys keep reading; creating contacts, recording
-consent, sending, resolving conversations and adding notes to them, starting and stopping
-automations, and managing webhook endpoints (reading them and their deliveries included) answer 423
-until the company is active again.
+**A contact change through the API is refused, or a custom field value is missing (ADR-112).**
+A 422 names what it refused in `issues`: `fields.<key>` for a key the company has no field for
+(`GET /api/v1/contact-fields` lists the keys; a label is not a key), a value of another type (text
+and dates are strings, dates `YYYY-MM-DD`, numbers are JSON numbers, yes/no are `true` or `false`;
+`"3"` is not a number) or a bad value, `email`, `addTags` (51 tags, commas) or `removeTags`. Nothing
+of a refused request is saved, so the integration fixes the value and sends it again. A 404 means
+the contact is erased, belongs to another company or does not exist. A field that a member deleted
+while the request waited is refused as unknown. A value missing from a contact's `fields` was never
+set, was cleared, or belongs to a field that was deleted (deleting a field removes its values from
+every contact and sends no event); a create (`POST /contacts`) fills only the fields an existing
+contact has no value for, so a change of a value needs `PATCH /contacts/{id}`. Changes are audited
+as `contact.updated` by the key with the field keys, never the values.
+
+**A contact search through the API gives short or empty pages, or a 422 (ADR-113).** A page
+filtered by `tag` or `fields[<key>]` reads at most 2,000 contacts, newest first: when few contacts
+match, pages hold fewer than `limit`, or none, and still give `nextCursor`, which the integration
+follows until it is `null`. A 422 names the filter: `fields.<key>` for a key the company has no
+field for (`GET /api/v1/contact-fields`), a value of another type (numbers as members type them,
+dates `YYYY-MM-DD`, `true` or `false`) or an empty one, `email` or `tag`. Text matches whatever its
+case but compares whole values, not parts of them.
+
+**A search by name through the API finds fewer contacts than expected, or a 422 (ADR-124).** `name`
+finds contacts whose name contains the text, whatever its case, as members' Contacts search finds a
+name: try the same text there. Accents count (`Elodie` does not find `Élodie`), and so does the form
+of a name typed with combining accents; letters' case is folded by the database's locale
+(`SHOW lc_ctype;`): with `C` only ASCII letters fold, so `ÉLODIE` does not find `Élodie` (DEPLOYMENT
+asks for a UTF-8 locale). The filter reads names only, not emails or numbers (`email` and `phone`
+find those). A page filtered by name reads at most 2,000 contacts: short or empty pages still give
+`nextCursor`, followed until it is `null`. A 422 names `name` for an empty value or one longer than
+200 characters.
+
+**An API request is refused with "Text cannot hold the NUL character (U+0000)" (ADR-124).** The
+integration sent the character U+0000 in a query parameter or a JSON string, which PostgreSQL text
+cannot store; the refusal's `issues` names the parameter as sent or the body's path (such as
+`contacts.1.name`). The integration removes the character (often left by a C string or a binary
+field) before sending. Before ADR-124 such a request failed with 500 and an `api request failed` log
+line naming the database's encoding error (`invalid byte sequence for encoding "UTF8": 0x00`).
+
+**A member's form, a sign-up or a CSV import is refused with "Text cannot hold the NUL character
+(U+0000)", or a message shows "�" (ADR-130).** The text held U+0000, which PostgreSQL cannot store,
+often pasted from a binary field or left by a file saved as UTF-16 (re-save the CSV as UTF-8; the
+refusal names the line). Text from WhatsApp, Razorpay, the stores and companies' endpoints keeps
+the replacement character "�" where the character was; nothing else in the message, product or
+answer is changed.
+
+**A message shows "This message was too large to keep." or "N contacts were too large to keep", or
+text ends with "�" (ADR-131).** A message's content may take at most 64 KB: a contact card keeps the
+contacts that fit and counts the rest, and content larger than that (far beyond what WhatsApp sends)
+is kept without it; ask the customer to send it again in parts. "�" stands for half of an emoji or
+another character that a clip or a provider cut: HyFib clips text without splitting one (inbound
+text since ADR-131, text sent to Meta or Razorpay or shown to members since ADR-133), so it appears
+only where a provider or an API request sent half of one, or in clipped error text. A status's
+errors and pricing larger than their columns hold (4 KB and 2 KB) are kept shortened. The receipt is
+processed either way; none of these ever fails one. The API's messages and the `message.received`
+webhook say the same with `contentTooLarge` (its text, reply and media type are then null) and
+`contactsLeftOut` (ADR-132), so an integration can tell such a message from one without text.
+
+**A key's campaign results differ from the campaign page, or a campaign read through the API answers
+403 or 404 (ADR-125).** `GET /api/v1/campaigns/{id}` counts the results when it is read, as the
+campaign page does on each view: both move as delivery statuses, replies and opt-outs arrive, so
+compare them at the same moment. A reply or an opt-out counts once, for the last campaign message
+queued to the contact in the 72 hours before it, whichever campaign sent it: a later campaign takes
+it from an earlier one. A draft answers `results: null`. 403 `forbidden` means the key lacks
+`campaigns.read` (keys keep the scopes they were created with: create a key with it); 403
+`not_in_plan` means the company's plan version chose its scopes without it (ADR-092). 404 means the
+id is not one of the key's company's campaigns.
+
+**A contact search with a `last_message` or `campaign` condition answers 403 or 422, or finds other
+contacts than expected (ADR-126).** 403 `forbidden` names the scope the key lacks:
+`conversations.read` for `last_message`, `campaigns.read` for `campaign` (keys keep the scopes they
+were created with: create a key with it). 422 naming `conditions.N.campaignId` means the company has
+no such campaign (`GET /campaigns` lists them). `last_message` reads when the contact last wrote, in
+any conversation, so a contact who only received messages has not written; `not_within_days` also
+finds contacts who never wrote. Campaign outcomes count only the recipients a message was sent to:
+skipped and cancelled recipients match none. `replied` follows the campaign's reply attribution (the
+last campaign message in the 72 hours before the reply, of any campaign), so a later campaign takes
+a reply from an earlier one. A segment with the same conditions finds the same contacts: preview it
+in the app to compare.
+
+**A campaign's recipients through the API differ from its results or from the Recipients page, or
+answer 403, 404 or 422 (ADR-127).** Each `outcome` of `GET /api/v1/campaigns/{id}/recipients` lists
+the recipients its count in `results` counts, read when each page is asked for: while a campaign
+runs, recipients move between outcomes, so compare a list with a count read at the same moment.
+Recipients whose contact was erased are never listed but still counted. Replies and opt-outs count
+once their message is delivered: a recipient with `repliedAt` whose message is still `sent` is in
+neither `replied` nor its count. The Recipients page in the app groups differently: its Failed
+includes unknown outcomes and its Replied shows a reply whatever its message's status. 403
+`forbidden` names the scope the key lacks, `campaigns.read` or `contacts.read` (keys keep the scopes
+they were created with: create a key with both); `not_in_plan` means the plan leaves it out
+(ADR-092). 404 means the id is not one of the key's company's campaigns. 422 names the parameter: an
+`outcome` the results do not count, a `cursor` that is not the previous page's `nextCursor`, or an
+unknown parameter.
+
+**A campaign was paused or cancelled through the API, or `POST /api/v1/campaigns/{id}/pause` or
+`/cancel` answers 403, 404, 409 or 423 (ADR-128).** The campaign's page says "Paused through the
+API." and its history names the key ("through the API, key “name”"); Settings → Audit log lists
+`campaign.paused` or `campaign.canceled` with the key as the actor and the request's id. A member
+resumes a paused campaign as any other (messages released by the pause are queued again); a
+cancelled campaign is not resumed: create a new one. 403 `forbidden` names the scope the key lacks,
+`campaigns.stop` (keys keep the scopes they were created with: create a key with it); `not_in_plan`
+means the plan leaves it out (ADR-092). 404 means the id is not one of the key's company's
+campaigns. 409 names the campaign's status: only scheduled and running campaigns pause, and drafts
+are not cancelled through the API. 423 means the company is suspended or its plan ended (nothing
+sends then anyway). To stop a key from stopping campaigns, revoke it and create one without the
+scope.
+
+**A search with `POST /api/v1/contacts/search` gives short or empty pages, or a 422 (ADR-117).**
+Its pages read at most 2,000 contacts, as filtered lists do (entry above): the integration sends the
+same conditions with each `nextCursor` until it is `null`. A 422 names the condition's part:
+`conditions.<i>.key` for a key the company has no field for (`GET /api/v1/contact-fields`), `.op` for
+a comparison the field's type does not take (the message lists those it takes), `.value` for a value
+missing, given to a comparison that takes none (`is_set`, `is_not_set`, `is_true`, `is_false`), not a
+number, not a date that exists, or a number for a text or date field, `.tag`, `.date` for a creation
+day that does not exist, and `.type` for a condition the API does not offer (segments'
+`last_message` and `campaign` read conversations and campaigns, which `contacts.read` does not
+give). Creation days are the company's, in its time zone (Settings → General), so a contact added
+late in the evening UTC can fall on the next day there. The search and a segment with the same
+conditions find the same contacts.
+
+**A segment or campaign says "Enter a date written as YYYY-MM-DD." (ADR-117).** One of its
+conditions has a creation day or a date comparison that does not exist, like 30 February. Such a
+segment used to make its page or the campaign's audience fail; now it names the problem and shows no
+preview until a member changes the condition to a real date.
+
+**The contact change feed shows nothing new for a while, or refuses a cursor (ADR-114).**
+`GET /api/v1/contact-changes` reads a change only once every transaction that began before it has
+finished, so a long transaction anywhere in the database (a large import, a session left idle in a
+transaction) holds the feed back until it ends; nothing is skipped. Find it with
+`SELECT pid, state, xact_start, backend_xid FROM pg_stat_activity WHERE backend_xid IS NOT NULL ORDER BY xact_start`
+and let it finish or end it. A 422 with path `cursor` means the cursor is not one this company's
+feed gave, was changed, or was sealed with an encryption key the platform no longer holds (retiring
+a key ends the cursors sealed with it): the integration starts again without a cursor, which lists
+every contact. The worker's minute sweep compacts the change rows (`replaced contact changes
+deleted` in its log); `ops.contact_change_compaction.compacted_at` shows when it last ran. If it
+stops, the feed still answers correctly, with more rows to pass.
+
+**A key cannot add, rename or delete a custom field (ADR-115).** The key needs the "Define contact
+fields" scope (`contact_fields.manage`), which only owners and administrators can grant, and a plan
+version that chose its scopes may leave it out (403 `not_in_plan`). A 409 naming `key` means the
+company has a field with that key (also when the key was made from the label: give `key`); a 422
+at the 51st field means the company has 50 (delete one in Settings or through the API first). A 404
+means the company has no field with that key (keys are lower-case; list them with
+`GET /contact-fields`). A field's key and type never change: add a new field and delete the old one.
+Who added, renamed or deleted a field is in the audit log (`contact_field.created`, `.renamed`,
+`.deleted`, actor `api_key` or `user`). Deleting a field deletes every contact's value for it.
+
+**The message change feed shows nothing new for a while, or refuses a cursor (ADR-116).**
+`GET /api/v1/message-changes` reads a change only once every transaction that began before it has
+finished, as the contact change feed does (its entry above has the query that finds a long
+transaction); nothing is skipped. A message changed by a transaction still running is read once that
+transaction ends, at its new place. A 422 with path `cursor` means the cursor is not one this
+company's message feed gave (a contact feed cursor does not open it), was changed, or was sealed
+with an encryption key the platform no longer holds: the integration starts again without a cursor,
+which lists every message. The rows are written only by the trigger on `app.messages`; a message
+missing from the feed after its change committed and every older transaction ended is a bug: check
+`SELECT xact FROM app.message_changes WHERE message_id = '<id>'` against `pg_current_snapshot()`.
+
+**The company is suspended or its plan ended.** Keys keep reading; creating and changing contacts,
+recording consent, defining contact fields, sending, resolving conversations and adding notes to
+them, starting and stopping automations, and managing webhook endpoints (reading them and their
+deliveries included) answer 423 until the company is active again.
 
 **Migration 0024 failed.** It runs in one transaction. It creates the two tables, the guard trigger,
 the two SECURITY DEFINER functions (granted to `w360_app` before their ownership moves to
@@ -1479,6 +1852,67 @@ already stored: a short `ACCESS EXCLUSIVE` lock on the keys table), creates `app
 row security and its grants, and registers deletion step 855 with the definer's grants and
 policies. A failure usually means a lock wait on `app.api_keys` timed out (run the migrations again
 when requests are quieter) or the bootstrap roles are missing.
+
+**Migration 0088 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`ops.plans.api_request_pack_size` and `api_request_pack_price_minor` (with checks),
+`app.tenant_plans.api_request_packs` and `app.plan_subscriptions.api_request_packs` (with defaults,
+so no table is rewritten; short locks), replaces the plan guard, the plan state's guard, the follow
+guard and `app.tenant_entitlements`, adds the start guard trigger and a four-quantity
+`app.choose_add_ons`, and recreates `app.apply_plan_subscription_period`,
+`ops.usage_limits_reached`, `ops.api_quota_reached` and `ops.usage_warnings_due` (dropped as
+`w360_definer`, recreated by the migration role, granted to `w360_app` and handed back). A failure
+usually means the bootstrap roles are missing (`w360_owner` must be a member of `w360_definer`).
+Images built before it keep working: the three-quantity `app.choose_add_ons` stays, and the start
+guard refuses an old image's subscription only for a company that has API request packs (which
+only a new image can have set), so its payments never fail to match the plan. Run it before the new
+images. Before running it, `SELECT tp.tenant_id FROM app.tenant_plans tp JOIN ops.plans p ON p.id =
+tp.plan_id WHERE tp.run_packs > 0 AND p.automation_runs_monthly::bigint + tp.run_packs::bigint *
+p.run_pack_size > 2000000000` should return no rows: such a company's entitlement checks already
+fail with "integer out of range", and after the migration every change of its plan state, the
+sweep's included, is refused until staff lower its run packs from the company's platform page.
+
+**Migration 0087 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`app.plan_subscriptions.follows_subscription_id` (nullable, with a composite foreign key and a
+check), replaces the unique index on live subscriptions with one on those not ending at their
+period's end (a short lock on the subscriptions table), adds the follow guard trigger, replaces the
+plan guard `app.guard_tenant_plan()`, and recreates `app.apply_plan_subscription_period` and
+`app.apply_plan_transition` (dropped as `w360_definer`, recreated by the migration role, granted to
+`w360_app` and handed back). A failure usually means the bootstrap roles are missing (`w360_owner`
+must be a member of `w360_definer`). Web and worker images built before it keep working (they never
+record a following subscription); the new web image needs it for Billing → Change plan, so run it
+before that image.
+
+**Migration 0085 failed.** It runs in one transaction, so a failure applies nothing. It adds two
+nullable columns and a check to `ops.plan_settings` (a single row, so the lock is brief), lets the
+platform role update them, and lets the runtime role read the default trial and whether the price
+list is shown. A failure usually means the bootstrap roles are missing. Web images built before it
+keep working; the new web image needs it for `/pricing` and the platform Plans page, so run it
+before that image.
+
+**Migration 0084 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`app.choose_add_ons` (SECURITY DEFINER, owned by `w360_definer`, executable by `w360_app` only) and
+changes no table. A failure usually means the bootstrap roles are missing (`w360_owner` must be a
+member of `w360_definer`). Web images built before it keep working; the new web image needs it for
+Billing → Add-ons, so run it before that image.
+
+**Migration 0083 failed.** It runs in one transaction, so a failure applies nothing. It replaces
+the plan guard `ops.guard_plan()` and recreates `app.choose_plan` (dropped as `w360_definer`,
+recreated by the migration role, granted to `w360_app` and handed back to `w360_definer`), so that a
+choice waits for a withdrawal or retirement of its version in progress. A failure usually means the
+bootstrap roles are missing (`w360_owner` must be a member of `w360_definer`). Web images built for
+0082 keep working after it (the function keeps its name, argument and result); run it with 0082,
+before the new web image.
+
+**Migration 0082 failed.** It runs in one transaction, so a failure applies nothing. It adds
+`ops.plans.offered_at` and `offered_by_user_id` (nullable, with two checks validated against the
+plans already stored: a short `ACCESS EXCLUSIVE` lock on the small plans table) and the platform
+role's update grant on them, replaces the plan guard `ops.guard_plan()`, and creates
+`app.choose_plan`, granted to `w360_app` before it is handed to `w360_definer`. A failure usually
+means a function of the same name was created by hand or the bootstrap roles are missing. Web
+images from before it never read the new columns and keep working, except that one cannot retire a
+version a new image offered (the check refuses a retired version with an offer: retire it from a new
+image, or stop offering it first). The new web image needs it: Billing and the platform plan pages
+read the offer (migrate first).
 
 **Migration 0081 failed.** It runs in one transaction, so a failure applies nothing. It creates
 `app.plan_payment_refund_requests` (empty, with row security, column grants, a restrictive policy
@@ -1554,7 +1988,7 @@ endpoint subscribes; earlier ones are not sent). "Send test event" queues a `pin
 column names what went wrong: an HTTP status, `timeout` (no complete answer within 10 seconds),
 `dns_failed`, `address_blocked` (the name resolves to a private, loopback or reserved address, which
 is never called), `connect_failed`, `response_too_large` (more than 256 KB) or `invalid_status`;
-"HyFib could not build or sign the request" (`payload_failed`) is HyFib's side, see below.
+"HyFib could not prepare the request" (`payload_failed`) is HyFib's side, see below.
 Redirects are not followed: the endpoint must answer at the saved URL.
 
 **Deliveries wait and are not sent.** The worker is woken by the `w360_webhooks` notification and
@@ -1565,26 +1999,136 @@ restricted companies are not delivered to until they are active again. A deliver
 longer than 45 seconds belongs to a lost worker; the next run attempts it again (the receiver may see
 it twice and deduplicates on the event id).
 
-**A delivery failed as `payload_failed` ("HyFib could not build or sign the request").** HyFib could
-not build the event's payload or sign it: a bug in a payload builder, an event it cannot describe, a
-database error while building (a lock or statement timeout included), or an endpoint secret the
-keyring cannot open. No request was made: the delivery used no attempt, the endpoint's health is
-unchanged and the company's other deliveries went on. A backlog of them is ended 200 deliveries per
-job, each job queueing the next (`handedOver` in `webhooks delivered`). The worker logs
+**A delivery failed as `payload_failed` ("HyFib could not prepare the request").** HyFib could not
+build the event's payload, sign it or open the endpoint's headers: a bug in a payload builder, an
+event it cannot describe, a database error while building (a lock or statement timeout included), or
+an endpoint secret or the endpoint's own headers (ADR-118) the keyring cannot open. No request was
+made: the delivery used no attempt, the endpoint's health is unchanged and the company's other
+deliveries went on. A backlog of them is ended 200 deliveries per job, each job queueing the next
+(`handedOver` in `webhooks delivered`). The worker logs
 `webhook delivery could not be prepared; failed as payload_failed` with `tenantId`, `deliveryId`,
-`endpointId`, `eventType`, `stage` (`payload` or `signature`), `errorClass` and `errorCode` (a
-SQLSTATE for a database error), never the payload or the error's message. One `eventType` failing
-across deliveries is a builder bug: reproduce it from the event row (`app.webhook_events`, by the
-delivery's `event_id`) on a copy, not from the log. `stage` `signature` on every delivery of one
-endpoint means its secret cannot be opened: a key missing from `W360_ENCRYPTION_KEYS`, or a secret
-restored with the wrong version. Restore the key; if it cannot come back, the company deletes the
-endpoint and adds it again (rotating keeps the unreadable previous secret signing for 24 hours, so
-those deliveries keep failing). `errorCode` `55P03` or `57014` is a lock or statement timeout. Once
-the cause is fixed, the company replays: "Replay failed deliveries" on the endpoint's page, or
-`POST /webhook-endpoints/{id}/replay-failed`, includes `payload_failed` deliveries (unlike
-`event_gone`). Until 2026-10-02 such a delivery failed the whole `webhook.deliver` job instead: none
-of the company's deliveries went out, the minute sweep woke the job again every minute and the dead
-letters filled with the same failure. Deploying the change ends that by itself.
+`endpointId`, `eventType`, `stage` (`payload`, `signature` or `headers`), `errorClass` and
+`errorCode` (a SQLSTATE for a database error), never the payload or the error's message. One
+`eventType` failing across deliveries is a builder bug: reproduce it from the event row
+(`app.webhook_events`, by the delivery's `event_id`) on a copy, not from the log. `stage`
+`signature` on every delivery of one endpoint means its secret cannot be opened: a key missing from
+`W360_ENCRYPTION_KEYS`, or a secret restored with the wrong version. Restore the key; if it cannot
+come back, the company deletes the endpoint and adds it again (rotating keeps the unreadable
+previous secret signing for 24 hours, so those deliveries keep failing). `stage` `headers` on every
+delivery of one endpoint means its own headers cannot be opened: a key missing from
+`W360_ENCRYPTION_KEYS`, or headers restored onto another endpoint (they are bound to theirs).
+Restore the key; if it cannot come back, the company gives the headers again ("Replace the headers"
+on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `headers`). `errorCode` `55P03` or
+`57014` is a lock or statement timeout. Once the cause is fixed, the company replays: "Replay failed
+deliveries" on the endpoint's page, or `POST /webhook-endpoints/{id}/replay-failed`, includes
+`payload_failed` deliveries (unlike `event_gone`). Until 2026-10-02 such a delivery failed the whole
+`webhook.deliver` job instead: none of the company's deliveries went out, the minute sweep woke the
+job again every minute and the dead letters filled with the same failure. Deploying the change ends
+that by itself.
+
+**A receiver refuses deliveries for a missing or wrong header (ADR-118).** An endpoint can send up
+to 5 headers of its own (an `Authorization` or API key header its receiver issued) with every
+attempt, test event and replay; the endpoints list shows their names ("Headers sent: …"), the API
+answers `headers: [{ name }]`, and no one can read a value back, support staff included. When the
+receiver answers 401 or 403, or says a header is missing, the company gives the headers again with
+the values the receiver issued: on the endpoint's page, "Replace the headers" (every header again; a
+change replaces the list, and none removes them), or `PATCH /webhook-endpoints/{id}` with
+`headers`. Then "Send test event" and, once it is delivered, "Replay failed deliveries". Names are
+sent in lowercase (HTTP header names are case-insensitive), values as saved, trimmed. "HyFib sets
+this header itself." refuses `Content-Type`, `Content-Encoding`, `User-Agent`, the transport's
+headers (`Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Upgrade`, `TE`,
+`Trailer`, `Expect`, `Accept-Encoding`), `Proxy-*` and `W360-*`; a receiver that needs one of them
+cannot be served by this endpoint. A change takes effect at the next attempt, even of a delivery
+already waiting.
+
+**A receiver gets fewer `message.status` events than expected (ADR-119).** An endpoint can take
+only some statuses; the endpoints list shows them ("Message statuses sent: …"), and the API answers
+`messageStatuses` (null takes every status). A status the endpoint does not take is never queued for
+it, and when no endpoint of the company takes it, no event is recorded at all, so there is nothing
+to replay: statuses captured before a change are not sent afterwards. To take more, tick them under
+"Message status" on the endpoint's page (all ticked takes every status, including statuses added
+later), or `PATCH /webhook-endpoints/{id}` with `messageStatuses` (null for every status). Removing
+the `message.status` event clears the list. A message's status only moves forward, so one read
+before WhatsApp reported its delivery never reaches `delivered`: a receiver that takes only
+`delivered` misses such messages, and one that needs to know a message arrived should take `read`
+too.
+
+**A receiver gets fewer `contact.updated` events than expected (ADR-123).** An endpoint can take
+the event only for some parts of a contact; the endpoints list shows them ("Contact changes sent:
+…"), and the API answers `contactParts` (null takes every change). A change that names none of
+them is never queued for the endpoint, and changes saved before the endpoint took more are not sent
+afterwards. To take more, tick them under "Contact changed" on the endpoint's page (all ticked takes
+every change, including parts added later), or `PATCH /webhook-endpoints/{id}` with `contactParts`
+(null for every change). Removing the `contact.updated` event clears the list. One event stands
+for a contact's whole transaction and names every part it changed, so an endpoint taking only
+emails also receives an event that changed the email and the tags, naming both.
+
+**A receiver gets no automation run events for an automation (ADR-145).** An endpoint can take
+the runs of chosen automations only; the endpoints list shows them ("Automation runs sent: …",
+archived ones marked), and the API answers `automationIds` (null takes every automation's runs). A
+run of another automation is never queued for it, and when no endpoint of the company takes a run,
+no event is recorded at all, so there is nothing to replay: runs that started or ended before a
+change are not sent afterwards. To take more, choose "Every automation’s runs" or tick the
+automation under "Automation runs sent" on the endpoint's page (only published automations are
+offered; publish a draft first), or `PATCH /webhook-endpoints/{id}` with `automationIds` (null for
+every automation). Removing both automation run events clears the list. An archived automation has
+no runs until it is restored; it stays in the list meanwhile.
+
+**A receiver gets fewer campaign.status_changed events than expected (ADR-146).** An endpoint can
+take only the statuses a campaign reaches that it chose; the endpoints list shows them ("Campaign
+statuses sent: …"), and the API answers `campaignStatuses` (null takes every status). A change to
+another status is never queued for it, and when no endpoint of the company takes a change, no
+event is recorded at all, so there is nothing to replay: changes made before an edit are not sent
+afterwards. Each event still names the status before it (`previousStatus`), so an endpoint taking
+only `completed` learns what a campaign completed from. To take more, tick the statuses under
+"Campaign status" on the endpoint's page (all ticked takes every status, as a new endpoint does),
+or `PATCH /webhook-endpoints/{id}` with `campaignStatuses` (null for every status). Removing the
+`campaign.status_changed` event clears the list.
+
+**A receiver gets fewer order.status_changed events than expected (ADR-147).** An endpoint can take
+only the statuses an order reaches that it chose; the endpoints list shows them ("Order statuses
+sent: …"), and the API answers `orderStatuses` (null takes every status). A change to another
+status is never queued for it, and when no endpoint of the company takes a change, no event is
+recorded at all, so there is nothing to replay: changes made before an edit are not sent
+afterwards. `order.received` is never filtered, and each change still names the status before it
+(`previousStatus`). An order paid through its Payment Link reaches `awaiting_payment` and then
+`paid`; one whose link ended unpaid goes back to `confirmed`, which an endpoint taking only `paid`
+does not receive. To take more, tick the statuses under "Order status" on the endpoint's page (all
+ticked takes every status, as a new endpoint does), or `PATCH /webhook-endpoints/{id}` with
+`orderStatuses` (null for every status). Removing the `order.status_changed` event clears the list.
+
+**A receiver gets fewer template.status_changed events than expected (ADR-148).** An endpoint can
+take only the template statuses it chose; the endpoints list shows them ("Template statuses sent:
+…"), and the API answers `templateStatuses` (null takes every status). A status it did not choose is
+never queued for it, and when no endpoint of the company takes a status, no event is recorded at
+all, so there is nothing to replay: statuses reported before an edit are not sent afterwards. A
+template's review starts as "In review" (`pending`) and then reaches `approved` or `rejected`; a
+deletion that fails returns the template to the status Meta last reported, which is sent again to
+the endpoints that take that status. HyFib's own steps (drafts, submissions, a submission that
+failed, a deletion under way or refused) are never sent. To take more, tick the statuses under
+"Template status" on the endpoint's page (all ticked takes every status, as a new endpoint does), or
+`PATCH /webhook-endpoints/{id}` with `templateStatuses` (null for every status). Removing the
+`template.status_changed` event clears the list.
+
+**A receiver gets fewer conversation.status_changed events than expected (ADR-149).** An endpoint
+can take only the statuses a conversation reaches that it chose, `open` (reopened) or `resolved`;
+the endpoints list shows them ("Conversation statuses sent: …"), and the API answers
+`conversationStatuses` (null takes every status). A change to the other status is never queued for
+it, and when no endpoint of the company takes a change, no event is recorded at all, so there is
+nothing to replay: changes made before an edit are not sent afterwards. Each change still names the
+status before it (`previousStatus`). A conversation the contact writes to again after it was
+resolved is reopened, which an endpoint taking only `resolved` does not receive. To take more, tick
+the statuses under "Conversation status" on the endpoint's page (both ticked takes every status, as
+a new endpoint does), or `PATCH /webhook-endpoints/{id}` with `conversationStatuses` (null for every
+status). Removing the `conversation.status_changed` event clears the list.
+
+**A campaign event's results differ from the campaign page (ADR-150).** `campaign.results` are
+counted when the request is built (the `t` of its `W360-Signature`), as `GET /campaigns/{id}` counts
+them, and a retry or a replay counts again: an event delivered while the campaign's messages were on
+their way shows them in progress, and a replay of it later shows how they went. Members' campaign
+page counts the same numbers when it is read. The status, the status before it and the reasons are
+as captured. An event delivered while the campaign is a draft (submitted and then rejected, say) has
+`results: null`, whatever status it reports. Costs are never sent.
 
 **An endpoint was turned off automatically.** It failed every attempt for 72 hours; its waiting
 deliveries were marked failed (`endpoint_disabled`), owners and administrators got the
@@ -1717,6 +2261,36 @@ check was renamed by hand (`webhook_endpoints_event_types_check`, `webhook_event
 0071 validates the type check without blocking writes; it fails only if a stored event has a type
 outside the list, which no code writes: look for the row by `type` before running it again.
 
+**Custom field events (ADR-112).** Since migration 0090 `contact.updated` is also sent when a value
+of one of the company's custom fields changes, whoever changes it: an automation or a Flow that
+saves an answer sends one per contact, as an import does, and a name and a field changed together
+send one. Deleting or renaming a field sends nothing, so a receiver keeps a deleted field's values
+until it reads the contact again (`GET /api/v1/contact-fields` lists the fields there are). A
+receiver that asks which field changed: since ADR-121 the event's `changes` names it (below).
+
+**Migration 0090 failed.** It runs in one transaction, so a failure applies nothing: it creates
+`app.webhook_capture_contact_fields()` and the trigger `contacts_webhook_fields` on `app.contacts`.
+A failure usually means the bootstrap roles (fix them and run the migrations again) or a function or
+trigger of that name created by hand. Until it is applied, custom field changes send no event.
+
+**What a `contact.updated` changed (ADR-121).** Since migration 0096 the event's `changes` lists
+what its transaction changed: `name`, `phone`, `email`, `tags` and `fields.<key>`, sorted. Names
+only, never values: the contact in the same body is as it is when delivered, so a value can already
+differ from the one the change saved. `changes` is null for events captured before the migration,
+which replays of older deliveries still send; a receiver treats null as "anything may have
+changed". A name changed and changed back in one transaction is still named. To see what an event
+holds: `SELECT type, contact_changes, captured_xact FROM app.webhook_events WHERE tenant_id = $1 AND
+id = $2`. An event's list cannot be changed after its transaction commits, by design.
+
+**Migration 0096 or 0097 failed.** 0096 runs in one transaction, so a failure applies nothing: it
+adds `contact_changes` with its check (`NOT VALID`), the definer function
+`app.add_contact_webhook_changes`, the four-argument `app.capture_contact_webhook_event` (dropping
+the three-argument one) and the three trigger functions. A failure usually means the bootstrap
+roles (`w360_definer` must exist to own the function) or a function of that name created by hand.
+0097 validates the check without blocking captures; it fails only if a stored event has a list,
+which nothing wrote before 0096: look for rows with `contact_changes IS NOT NULL` before running it
+again.
+
 ## 10P. Platform operations console
 
 `/platform/ops` is for platform owners and operators (MFA). It shows counts, states, error codes,
@@ -1733,7 +2307,8 @@ letters: section 3; plan past due: section 10M. Quality is as of the number's la
 **Signals (7 days).** A flag asks for a review of that company's sending, not an action: look at its
 campaigns, templates and opt-out keywords (support grant if content is needed). Suspension stays a
 reasoned, audited action on the company page. The thresholds are HyFib's own heuristics
-(ADR-054), not Meta's rules.
+(ADR-054), not Meta's rules. Security events are counted by kind; `auth.sign_in` (info) counts
+completed sign-ins (ADR-136).
 
 **Onboarding.** Failed signups show the reason Meta returned; abandoned ones expired before the
 popup finished (the person can start again). A number setup stuck for over 30 minutes: check the
@@ -1765,6 +2340,42 @@ means no check for 5 minutes: the minute messaging sweep is not running or fails
 is not consuming (`dead letters recorded` and `job attempt failed` in its log). Rows are deleted 30
 days after the job failed.
 
+**Retrying a dead letter (ADR-108).** Once the cause is fixed, Retry (with a reason of at least 10
+characters) sends the failed job back to its queue once, for one more attempt, exactly as pg-boss's
+own retry does, and writes `platform.dead_letter_retried` to the platform audit log. The row then
+shows who retried it and when; if the job fails again it is listed again, as a new dead letter.
+Which ones need it:
+
+- `channel.onboard`, `commerce.account` and `template.delete`: none. Within a minute the sweep ends
+  their work for the company (ADR-111): the number's setup fails with the step it stopped at (the
+  company's "Retry setup" starts it again; Meta counts registration attempts, so it is never
+  repeated automatically), the keys' check fails with a message that Razorpay could not be reached
+  (saving the keys again checks them), and a deletion goes back to Meta's last status with
+  "Deletion failed" in the template's history (Delete starts it again). The row then says "Work
+  ended for its company", or "Nothing left to end" when the work had finished or been started
+  again, and offers no Retry. These jobs retry for 2 to 3 hours (setup), 1.5 to 2 hours (keys) and
+  4 to 5 hours (deletions) before they dead-letter, and the template sync keeps a deletion for 8
+  hours while its job tries.
+- `template.submit`: after 10 minutes the template sync marks the template "submit failed" and the
+  company submits it again; a retry after that does nothing.
+- Every other queue's work is signalled again by the minute sweeps once the cause is fixed: a
+  retry repeats it, or is refused because the sweep's job for the same work is already waiting.
+
+The row says why it offers no Retry: already retried; the signature did not verify (the worker would
+refuse the job again); the queue is not declared by this release; the queue never retries its jobs
+(`billing.auto-recharge`: its sweep repeats an attempt only after looking it up at Razorpay);
+pg-boss no longer keeps the failed job (its queue's retention has passed; the time is shown under
+Retry); a receipt queue (`webhook.process`, `billing.event-process`: retry the receipt on the
+Integrations page instead); the company is being deleted or is gone; or its work was ended for the
+company (ADR-111).
+
+**A dead letter of those three queues stays unsettled.** The sweep leaves one alone while its
+company is being deleted, while a job for the same work waits or runs (the company started it again,
+or a retry), and when its envelope did not verify. Otherwise look for `ending stranded work failed;
+will retry` in the worker's log: the error names the cause, and the next minute's sweep tries again.
+A setup, keys check or deletion that a company reports stuck with no dead letter is still being
+retried by its job.
+
 **Repairs.** Retry and Resolve (section 4) both need a reason of at least 10 characters and appear
 in the platform audit log as `platform.webhook_receipt_retried` and
 `platform.webhook_quarantine_resolved`. A receipt whose body was erased (after 7 days) cannot be
@@ -1784,8 +2395,109 @@ is marked until there is one. An item listed without "Staff emailed" for more th
 the alert did not run: it runs last in the minute messaging sweep, so look in the worker's logs for
 failures of `ops.messaging-sweep`. On the email: open the tab it links, find the cause (the worker's
 logs, the provider's status page), fix it, then retry receipts within 7 days of receipt and resolve
-quarantine entries (section 4). Dead letters need no action once the cause is fixed: the minute
-sweeps signal their work again.
+quarantine entries (section 4). Most dead letters need no action once the cause is fixed, because
+the minute sweeps signal their work again or end it for its company (ADR-111); retry those of
+`template.submit` if needed (ADR-108).
+
+**Integration failure alerts (ADR-139).** Every platform administrator is emailed "N company
+integrations are failing" when the Integrations page lists failures staff were not emailed about:
+counts by kind (such as "WhatsApp number, needs reconnecting 2"), never a company or an error. One
+email covers everything new since the last one, at most every 15 minutes, and Current failures says
+when the last one went out. Each failure is emailed once while it lasts, and again if it changes
+state; one that has not been listed for an hour is forgotten, so it is emailed again if it fails
+later. The worker logs `integration failure alert emailed to platform staff`; `company integrations
+are failing but there is no platform administrator to email` means nothing is marked until there is
+one. On the email: open Current failures, look for a pattern across companies (one kind failing at
+many companies points to HyFib or the provider: the worker's logs, the provider's status page) and
+for HyFib-side kinds (accounts not checked for 26 hours, webhooks not subscribed: section 6). Most
+failures are the company's to fix, and the company is told of them; HyFib staff contact it when it
+does not act.
+
+**Acknowledging failures (ADR-141).** On Current failures, the administrator who takes a failure
+opens Acknowledge on its row and writes a note of 10 to 500 characters: what was done or found
+("Called the owner: they will reconnect the number today", "Meta's status page reports an outage").
+The row then shows who acknowledged it, when, and the note, so the others need not call the company
+too. A new note replaces it (a colleague taking over, a finding); the platform audit log keeps each
+(`platform.integration_failure_acknowledged`). The acknowledgement lasts while the failure is
+listed in that state: one that changes state (a failing endpoint turned off) is listed again
+unacknowledged, and one that recovers keeps its acknowledgement for an hour, in case it comes back.
+"This integration is no longer failing in that state. Reload the page." means that it recovered or
+changed state since the page loaded. Acknowledging does not stop the alert email, which tells each
+failure once anyway.
+
+**Keys (ADR-134).** The configured encryption key ids, the primary first, and how many stored values
+each key seals, by kind (counts only). While another key is configured the worker seals the values
+it sealed again with the primary key, up to 500 a minute, and logs `sealed values re-encrypted under
+the primary key`; the count of the old key falls to zero, and the page then says it can be removed
+(section 13). "Values that cannot be opened" are sealed with a key that is not configured, or not
+sealed with the keyring at all: nothing can open them, so the company reconnects what they belong to
+(a WhatsApp account, a store, Razorpay keys) or saves the secret again. The worker logs each value
+that does not open with its key once (`a sealed value does not open with its key`, with its kind, id
+and company, never the value) and leaves it as it is; after 1,000 it stops re-encrypting until it
+restarts and logs an error naming `W360_ENCRYPTION_KEYS`: check that the old key's bytes are right.
+
+**Job signing keys (ADR-135)** are on the same tab: the signing key's id, the next or previous key's
+during a rotation, and how many jobs that can still run (waiting, running, failed) name each key.
+While a previous key is configured the worker signs the jobs it signed, and those signed before key
+ids, again with the signing key, up to 500 a minute, and logs `queued jobs signed again with the job
+signing key`; once none is left the page says the previous key can be removed (section 13). A
+running job is signed again once it waits for its retry. The worker logs a queued job that does not
+verify with any key once (`a queued job does not verify with any job signing key`, with its queue
+and id, never its data) and leaves it as it is: its consumer refuses it (`job.invalid_signature`)
+whatever the configuration, so it stays counted under the key it names; cancel it in pg-boss if it
+should not wait for that. After 1,000 such jobs a worker stops signing jobs again until it restarts
+and logs an error naming `W360_JOB_SIGNING_KEY_PREVIOUS`: check that the previous key's value is
+right. "Jobs that will be refused" name a key that is not configured.
+
+**Migration 0107 failed.** It creates `ops.integration_acknowledgements` and
+`ops.platform_acknowledge_integration_failure`, and recreates `ops.platform_ops_integration_failures`
+(with each failure's acknowledgement) and `ops.integration_alerts_due` (which keeps and forgets
+acknowledgements too), in one transaction; a failure rolls it back (usually the bootstrap roles: fix
+them and run the migrations again). Web servers of this release need it before they start, or
+acknowledging a failure fails and the list shows no acknowledgement; web servers and workers of the
+previous release work with it (they do not read the list's new columns, and the check keeps its name
+and result).
+
+**Migration 0106 failed.** It creates `ops.integration_failures` and `ops.integration_alerts`,
+recreates `ops.platform_ops_integration_failures` on the shared list, and adds the alert's two
+functions and its row in `ops.platform_alerts`, in one transaction; a failure rolls it back
+(usually the bootstrap roles: fix them and run the migrations again). Workers of this release need
+it before they start, or their minute sweep fails at the alert, after the rest of its work; workers
+of the previous release send no integration alert. The first alert after it tells every failure
+listed then.
+
+**Migration 0105 failed.** It adds the webhook subscription columns to `app.whatsapp_accounts` and
+recreates `ops.whatsapp_access_checks_due` and `ops.platform_ops_integration_failures`, in one
+transaction; a failure rolls it back (usually the bootstrap roles: fix them and run the migrations
+again). Workers of this release need it before they start, or their access checks fail when they
+store what they found; workers of the previous release check no subscription. Each connected
+account's subscription is first checked at its next daily access check.
+
+**Migration 0104 failed.** It adds the access check columns to `app.whatsapp_accounts`, creates
+`ops.whatsapp_access_checks_due` and recreates `ops.platform_ops_integration_failures`, in one
+transaction; a failure rolls it back (usually the bootstrap roles: fix them and run the migrations
+again). The migration runner declares the `whatsapp.access_check` queue: workers of this release
+need both before they start, or their minute sweep fails at the access checks; workers and web
+servers of the previous release check no access.
+
+**Migration 0103 failed.** It only creates `ops.my_sign_ins` and an index of sign-in events, in one
+transaction; a failure rolls it back (usually the bootstrap roles: fix them and run the migrations
+again). Web servers of this release then fail to show Account & security until it is applied, while
+sign-ins still work and are recorded; web servers of the previous release record no sign-in.
+
+**Migration 0102 failed.** It only creates `ops.job_signing_key_counts`, in one transaction; a
+failure rolls it back (usually the bootstrap roles: fix them and run the migrations again). The
+migration runner then grants the definer the data of pg-boss's jobs. Workers of the previous release
+sign no job again and accept no next or previous key; web servers of the previous release show no
+job signing keys.
+
+**Migration 0101 failed.** It replaces `app.touch_updated_at` (the shared trigger function, which
+then keeps a row's time while `w360.resealing` is on), grants the definer the sealed columns and a
+read policy on HTTP secrets, and creates `ops.sealed_value_keys`, `ops.sealed_values_to_reseal`,
+`ops.sealed_value_counts` and `app.reseal_store_webhook_secret` with a policy on
+`app.commerce_stores`, in one transaction; a failure rolls it all back (usually the bootstrap roles:
+fix them and run the migrations again). Workers of the previous release re-encrypt nothing; web
+servers of the previous release have no Keys tab.
 
 **Migration 0068 failed.** It adds nullable columns and partial indexes to `ops.dead_letters`,
 `ops.webhook_receipts` and `ops.webhook_quarantine`, marks existing dead letters and erased receipts
@@ -1793,6 +2505,24 @@ as told, and replaces `ops.platform_retry_webhook_receipt` (dropped as `w360_def
 as in 0011), in one transaction. A failure rolls it all back: fix the cause (usually the bootstrap
 roles) and run the migrations again. Workers of the previous release keep working; web servers of
 the previous release show receipts as before.
+
+**Migration 0086 failed.** It adds `retried_at` and `retried_by_user_id` to `ops.dead_letters` (with
+the check pairing them) and creates `ops.platform_retry_dead_letter`, in one transaction; a failure
+rolls it all back (usually the bootstrap roles: fix them and run the migrations again). The
+migration runner grants the definer what it needs of `pgboss.job` after pg-boss's own install, on
+every run: if Retry fails with "permission denied for table job", run the migrations again. Web
+servers of the previous release show dead letters without Retry.
+
+**Migration 0089 failed.** It adds `settled_at` and `settled_ended` to `ops.dead_letters` (three
+checks and a partial index), creates `ops.dead_letter_work_live`, `ops.dead_letters_to_settle` and
+`ops.settle_dead_letter`, and replaces `ops.platform_retry_dead_letter` (dropped as `w360_definer`
+and recreated, as in 0086), in one transaction; a failure rolls it all back (usually the bootstrap
+roles: fix them and run the migrations again). The migration runner grants the definer
+`pgboss.job.singleton_key` after pg-boss's install, on every run: if the sweep logs "permission
+denied for table job", run the migrations again. Workers of the previous release settle nothing;
+web servers of the previous release offer Retry on a settled dead letter, which the function
+refuses. The new retry settings of `template.delete` and `commerce.account` apply to jobs queued
+after the runner updated the queues.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates
@@ -1879,7 +2609,10 @@ cancel with the same signature.
    payment settings or the company's Razorpay keys, create API keys or webhook endpoints, add an
    owner or turn off required two-factor: those need a sign-in within the last 15 minutes
    (ADR-056). Check the audit log for them anyway (a stolen password is enough to sign in).
-4. Review the company audit log and security events; export evidence; notify the owner.
+4. Review the company audit log and security events; export evidence; notify the owner. The
+   person sees their last 20 sign-ins on Account & security (when, device, address, how;
+   ADR-136); platform staff with database access find all of them as `auth.sign_in` security
+   events with the person's `user_id`.
 5. Reactivate with a reason once clean.
 
 **"Sign in again to continue".** Members see it when an action needs a sign-in within the last 15
@@ -1898,7 +2631,41 @@ they sign in. It is not an error and cannot be switched off for a company.
 
 ## 13. Key rotation
 
-See `docs/SECURITY.md#secret-and-key-rotation`.
+See `docs/SECURITY.md#secret-and-key-rotation` for every secret. The encryption key
+(`W360_ENCRYPTION_KEYS`, ADR-134):
+
+1. Add the new key next to the old one (`old:…,new:…`), make it primary
+   (`W360_ENCRYPTION_PRIMARY_KEY_ID=new`) and deploy web and worker. New values are sealed with the
+   new key from then on, and both keys open what is stored.
+2. The worker's minute sweep seals what the old key sealed again with the new one, up to 500 values
+   a minute, in each company's scope; a row's time does not change. Operations → Keys (section 10P)
+   shows how many values each key still seals.
+3. Once the old key seals nothing and every web and worker instance runs the new configuration, wait
+   until integrations reading change feeds have fetched a page since the rotation: each page hands
+   out a cursor sealed with the primary key, and a cursor sealed with a removed key is refused as
+   invalid (the integration must start again from the first change). Then remove the old key and
+   deploy.
+4. A value that does not open with its key stays sealed with it (section 10P, Keys); removing the
+   key changes nothing for it, since nothing could open it before.
+
+The job signing key (`W360_JOB_SIGNING_KEY`, ADR-135), one rotation at a time, once every web server
+and worker runs a release with ADR-135:
+
+1. Generate the new key (`openssl rand -hex 32`), set it as `W360_JOB_SIGNING_KEY_NEXT` and deploy
+   web and worker. Every instance accepts jobs signed with it; nothing signs with it yet. Operations
+   → Keys shows it as the next key.
+2. Once every instance runs with it, set `W360_JOB_SIGNING_KEY` to the new key and
+   `W360_JOB_SIGNING_KEY_PREVIOUS` to the old one, unset `W360_JOB_SIGNING_KEY_NEXT`, and deploy.
+   New jobs are signed with the new key, jobs the old key signed still run, and the worker's minute
+   sweep signs the waiting, retrying and failed ones again with the new key, up to 500 a minute.
+   During each rollout every instance accepts what any other signs.
+3. Once every instance runs with the new key and Operations → Keys shows no job that can still run
+   signed with the previous key (or with no key id), unset `W360_JOB_SIGNING_KEY_PREVIOUS` and
+   deploy. A job left there that does not verify is refused whatever the configuration (section 10P,
+   Keys).
+4. If the old key leaked, do step 1, then in step 2 sign with the new key without setting a previous
+   one: jobs the old key signed are refused (each recorded as `job.invalid_signature`, critical),
+   and the sweeps signal their work again from its durable rows.
 
 ## 14. Queue policy changes
 

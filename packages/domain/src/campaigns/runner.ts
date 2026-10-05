@@ -1,5 +1,5 @@
 import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
-import { uuidv7, type Clock } from '@w360/core';
+import { clipText, uuidv7, type Clock } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -599,7 +599,7 @@ export async function runCampaignTick(
            set last_message_at = ${now.toISOString()}::timestamptz, last_message_preview = v.preview,
                version = cv.version + 1
           from unnest(${sql.param(rows.map((r) => r.conversationId))}::uuid[],
-                      ${sql.param(rows.map((r) => r.built.rendered.body.slice(0, 200)))}::text[]) as v(id, preview)
+                      ${sql.param(rows.map((r) => clipText(r.built.rendered.body, 200)))}::text[]) as v(id, preview)
          where cv.tenant_id = ${tenantId} and cv.id = v.id`);
       await tx.execute(sql`
         update app.campaign_recipients r

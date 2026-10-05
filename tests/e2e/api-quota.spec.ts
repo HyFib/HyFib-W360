@@ -10,7 +10,7 @@ import {
 
 const PASSWORD = 'correct horse battery staple 42';
 
-test('a plan allows five API requests a month: nearly used up at four, the sixth is refused', async ({
+test('a plan allows five API requests a month: warned at the share the company chose, the sixth is refused', async ({
   page,
   request,
 }) => {
@@ -69,27 +69,56 @@ test('a plan allows five API requests a month: nearly used up at four, the sixth
   await page.getByRole('button', { name: 'Save plan' }).click();
   await expect(page.getByText('The company’s plan was changed.')).toBeVisible();
 
-  // Four requests: 80% of the month's, so the plan card marks them nearly used up (ADR-062).
+  // Three requests are under the 80% warning (ADR-062), four of five.
   const auth = { Authorization: `Bearer ${token}` };
   const call = () => request.get('/api/v1/contacts', { headers: auth });
-  for (let i = 0; i < 4; i += 1) expect((await call()).status()).toBe(200);
+  for (let i = 0; i < 3; i += 1) expect((await call()).status()).toBe(200);
   await page.goto(`/c/${slug}/billing`);
-  await expect(page.getByRole('row', { name: /API requests this month/ })).toContainText(
-    '4 of 5 (nearly used up)',
+  const requestsRow = page.getByRole('row', { name: /API requests this month/ });
+  await expect(requestsRow).toContainText('3 of 5');
+  await expect(requestsRow).not.toContainText('nearly used up');
+  const nearly = page
+    .getByRole('status')
+    .filter({ hasText: "This month's API requests are nearly used up" });
+  await expect(nearly).toHaveCount(0);
+
+  // The owner, who manages billing, lowers the warning to 60% (ADR-144): three of five reach it.
+  const warnAt = page.getByLabel('Warn at');
+  await expect(warnAt).toHaveValue('80');
+  await warnAt.selectOption('60');
+  await page.getByRole('button', { name: 'Save usage warning' }).click();
+  await expect(page.getByText('Saved: warned at 60% of a monthly limit.')).toBeVisible();
+  await expect(requestsRow).toContainText('3 of 5 (nearly used up)');
+  // Billing shows the notice without a link to itself.
+  await expect(nearly).toContainText(
+    'Your company has used 3 of its 5 API requests for this month.',
   );
+  await expect(nearly.getByRole('link', { name: 'See the plan' })).toHaveCount(0);
+  await expectNoHorizontalOverflow(page);
+  await page.reload();
+  await expect(page.getByLabel('Warn at')).toHaveValue('60');
+  // Members who read billing see it on every page of the company (ADR-140), with a link to Billing.
+  await page.goto(`/c/${slug}`);
+  await expect(nearly).toContainText(
+    'Your company has used 3 of its 5 API requests for this month.',
+  );
+  await expect(nearly.getByRole('link', { name: 'See the plan' })).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
-  // The fifth passes; the sixth is refused with the reason and when to retry.
-  expect((await call()).status()).toBe(200);
+  // The fourth and fifth pass; the sixth is refused with the reason and when to retry.
+  for (let i = 0; i < 2; i += 1) expect((await call()).status()).toBe(200);
   const refused = await call();
   expect(refused.status()).toBe(429);
   expect(Number(refused.headers()['retry-after'])).toBeGreaterThan(0);
   const body = (await refused.json()) as { error: { code: string; reason: string } };
   expect(body.error).toMatchObject({ code: 'rate_limited', reason: 'quota_exceeded' });
 
-  // The company sees the month's use on the API keys page and its plan.
+  // The company sees the month's use on the API keys page and its plan, and why requests fail.
   await page.goto(`/c/${slug}/settings/api-keys`);
   await expect(page.getByText(/5 of 5\s*API requests/)).toBeVisible();
+  await expect(
+    page.getByRole('alert').filter({ hasText: "This month's API requests are used up" }),
+  ).toContainText('The public API refuses requests (429, reason quota_exceeded) until');
   await page.goto(`/c/${slug}/billing`);
   await expect(page.getByRole('row', { name: /API requests this month/ })).toContainText('5 of 5');
   await expectNoHorizontalOverflow(page);

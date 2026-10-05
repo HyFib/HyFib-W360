@@ -4,12 +4,12 @@ import {
   boolean,
   inet,
   integer,
-  jsonb,
   pgSchema,
   text,
   timestamp,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { jsonb } from './columns';
 
 export const opsSchema = pgSchema('ops');
 
@@ -114,6 +114,15 @@ export const deadLetters = opsSchema.table('dead_letters', {
   recordedAt: tz('recorded_at').notNull().defaultNow(),
   /** When platform staff were emailed about it (ADR-091). */
   alertedAt: tz('alerted_at'),
+  /** When a platform administrator sent the job back to its queue, and who (ADR-108). */
+  retriedAt: tz('retried_at'),
+  retriedByUserId: text('retried_by_user_id'),
+  /**
+   * When the sweep settled its work for the company, and whether anything was left to end
+   * (ADR-111); only for the stranded-work queues, never with a retry.
+   */
+  settledAt: tz('settled_at'),
+  settledEnded: boolean('settled_ended'),
 });
 
 /**
@@ -121,7 +130,7 @@ export const deadLetters = opsSchema.table('dead_letters', {
  * every 15 minutes.
  */
 export const platformAlerts = opsSchema.table('platform_alerts', {
-  kind: text('kind', { enum: ['failures', 'queues'] }).primaryKey(),
+  kind: text('kind', { enum: ['failures', 'queues', 'integrations'] }).primaryKey(),
   lastSentAt: tz('last_sent_at'),
 });
 

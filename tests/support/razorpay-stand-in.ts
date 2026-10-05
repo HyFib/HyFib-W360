@@ -678,6 +678,12 @@ export async function startRazorpayStandIn(options: {
     // A charge while pending or halted retries the current (unpaid) cycle; otherwise the next one
     // starts at the end of the current one.
     const retry = sub.status === 'pending' || sub.status === 'halted';
+    // Cancelled at the end of its cycle (R-068): Razorpay charges no cycle after the current one.
+    if (sub.cancelAtCycleEnd && !first && !retry) {
+      throw new Error(
+        `stand-in: subscription ${sub.id} ends with its cycle and is not charged again`,
+      );
+    }
     const cycle =
       first && sub.startAt !== null
         ? { start: sub.startAt, end: addMonthsUnix(sub.startAt, cycleMonths(plan)) }
@@ -984,6 +990,9 @@ export async function startRazorpayStandIn(options: {
   const server: Server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://stand-in');
+      // TEST-ONLY controls answer on a connection of their own: a runner request sent on a kept-alive
+      // socket just as the server closes it after its idle timeout hangs up (once in CI).
+      if (url.pathname.startsWith('/__stand-in/')) res.setHeader('connection', 'close');
       const body = (await readBody(req)) as Record<string, unknown> | undefined;
       state.calls.push({
         method: req.method ?? 'GET',

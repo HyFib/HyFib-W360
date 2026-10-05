@@ -1,25 +1,48 @@
-import { createHmac } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { Keyring } from '@w360/core';
 import {
   AUTOMATION_END_REASONS,
   CAMPAIGN_COMPLETION_REASONS,
   CAMPAIGN_PAUSE_REASONS,
   CAMPAIGN_STATUSES,
+  CONVERSATION_STATUSES,
   ORDER_STATUSES,
+  TEMPLATE_STATUSES,
 } from '@w360/db';
+import { apiCampaignResultsSchema } from '../api/campaigns';
 import { apiContactSchema } from '../api/contact-view';
 import { buildOpenApiDocument } from '../api/openapi';
+import {
+  campaignResultsSchema,
+  toCampaignResults,
+  type CampaignAnalytics,
+} from '../campaigns/results';
 import { renderEmail } from '../email/templates';
 import {
+  WEBHOOK_AUTOMATION_EVENTS,
+  WEBHOOK_CAMPAIGN_STATUS_LABELS,
+  WEBHOOK_CAMPAIGN_STATUSES,
+  WEBHOOK_CONTACT_PART_LABELS,
+  WEBHOOK_CONTACT_PARTS,
+  WEBHOOK_CONVERSATION_STATUS_LABELS,
+  WEBHOOK_CONVERSATION_STATUSES,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
+  WEBHOOK_MESSAGE_STATUS_LABELS,
+  WEBHOOK_MESSAGE_STATUSES,
+  WEBHOOK_ORDER_STATUS_LABELS,
+  WEBHOOK_ORDER_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_RETRY_SECONDS,
+  WEBHOOK_TEMPLATE_STATUS_LABELS,
+  WEBHOOK_TEMPLATE_STATUSES,
   webhookErrorLabel,
   webhookHost,
   webhookReplaySummary,
   webhookRetryDelaySeconds,
+  webhookTakesAutomationRuns,
 } from './model';
 import {
   automationRunEndedPayloadSchema,
@@ -29,9 +52,11 @@ import {
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
   contactUpdatedPayloadSchema,
+  CONTACT_CHANGE_PART_RE,
   conversationAssignmentPayloadSchema,
   conversationStatusPayloadSchema,
   conversationTeamPayloadSchema,
+  inboundOmissions,
   inboundSummary,
   messageReceivedPayloadSchema,
   messageStatusPayloadSchema,
@@ -42,6 +67,27 @@ import {
   templateStatusPayloadSchema,
 } from './payloads';
 import { webhookSignature, webhookSignatureHeader, verifyWebhookSignature } from './signing';
+import {
+  openWebhookHeaders,
+  reservedWebhookHeader,
+  sealWebhookHeaders,
+  webhookAutomationIdsFor,
+  webhookAutomationIdsSchema,
+  webhookCampaignStatusesFor,
+  webhookCampaignStatusesSchema,
+  webhookContactPartsFor,
+  webhookContactPartsSchema,
+  webhookConversationStatusesFor,
+  webhookConversationStatusesSchema,
+  webhookHeadersAad,
+  webhookHeadersSchema,
+  webhookMessageStatusesFor,
+  webhookMessageStatusesSchema,
+  webhookOrderStatusesFor,
+  webhookOrderStatusesSchema,
+  webhookTemplateStatusesFor,
+  webhookTemplateStatusesSchema,
+} from './service';
 
 const SECRET = 'whsec_test-secret-one';
 const OTHER = 'whsec_test-secret-two';
@@ -140,6 +186,32 @@ describe('inbound message summaries', () => {
     expect(inboundSummary('text', { text: 42 }).text).toBeNull();
   });
 
+  it('says what was left out: content too large to keep and contacts a card left out (ADR-132)', () => {
+    // Content kept as too large (ADR-131) has nothing to read, a tapped button included.
+    const nothing = { text: null, reply: null, mimeType: null };
+    expect(inboundSummary('button', { tooLarge: true })).toEqual(nothing);
+    expect(inboundSummary('image', { tooLarge: true })).toEqual(nothing);
+    expect(inboundOmissions('system', { tooLarge: true })).toEqual({
+      contentTooLarge: true,
+      contactsLeftOut: 0,
+    });
+    expect(inboundOmissions('text', { text: 'Hello' })).toEqual({
+      contentTooLarge: false,
+      contactsLeftOut: 0,
+    });
+    expect(inboundOmissions('contacts', { contacts: [{}], omittedContacts: 3 })).toEqual({
+      contentTooLarge: false,
+      contactsLeftOut: 3,
+    });
+    expect(inboundOmissions('contacts', { contacts: [] }).contactsLeftOut).toBe(0);
+    // Only a contact card's count is given, and only a whole number above 0.
+    expect(inboundOmissions('text', { text: 'x', omittedContacts: 3 }).contactsLeftOut).toBe(0);
+    for (const omittedContacts of [-1, 1.5, '3', Number.NaN, Number.POSITIVE_INFINITY])
+      expect(inboundOmissions('contacts', { omittedContacts }).contactsLeftOut).toBe(0);
+    // Only true marks content as too large.
+    expect(inboundOmissions('text', { tooLarge: 'true' }).contentTooLarge).toBe(false);
+  });
+
   it('says whether a tap was a reply button or a list row, with the row’s description (ADR-080)', () => {
     const tap = (interactiveType: string, reply: Record<string, unknown>) =>
       inboundSummary('interactive', { interactiveType, reply }).reply;
@@ -189,6 +261,8 @@ describe('webhook payload schemas', () => {
             reply: null,
             replyTo: null,
             mimeType: null,
+            contentTooLarge: false,
+            contactsLeftOut: 0,
             receivedAt: base.createdAt,
           },
           conversation,
@@ -353,6 +427,7 @@ describe('webhook payload schemas', () => {
       phone: '+919876543210',
       email: 'priya@example.com',
       tags: ['vip'],
+      fields: { city: 'Chennai', orders: 3, birthday: '1990-04-01', vip: true },
       consent: { marketing: 'opted_in', utility: null },
       source: 'whatsapp',
       createdAt: base.createdAt,
@@ -364,18 +439,28 @@ describe('webhook payload schemas', () => {
       phone: null,
       email: null,
       tags: [],
+      fields: {},
       consent: { marketing: null, utility: null },
       erased: true,
     };
+    // An update also names what it changed (ADR-121), even once the contact is erased: names only.
+    const changes = { 'contact.updated': ['email', 'fields.city', 'tags'] };
     for (const [schema, type] of [
       [contactCreatedPayloadSchema, 'contact.created'],
       [contactUpdatedPayloadSchema, 'contact.updated'],
       [contactErasedPayloadSchema, 'contact.erased'],
     ] as const) {
+      const data = (shown: unknown) =>
+        type === 'contact.updated'
+          ? { contact: shown, changes: changes[type] }
+          : { contact: shown };
       for (const shown of [person, erased]) {
-        expect(schema.safeParse({ ...base, type, data: { contact: shown } }).success, type).toBe(
-          true,
-        );
+        expect(schema.safeParse({ ...base, type, data: data(shown) }).success, type).toBe(true);
+      }
+      // Custom field values are strings, numbers or booleans (ADR-112).
+      for (const fields of [{ city: null }, { city: ['a'] }, { city: { name: 'a' } }]) {
+        const shown = { ...person, fields };
+        expect(schema.safeParse({ ...base, type, data: data(shown) }).success, type).toBe(false);
       }
     }
     // A contact reads as the API's contact, and whether it was erased.
@@ -401,6 +486,49 @@ describe('webhook payload schemas', () => {
         },
       }).success,
     ).toBe(false);
+  });
+
+  it('say what a contact.updated changed: known parts and field keys, or null for an older event (ADR-121)', () => {
+    const person = {
+      id: contact.id,
+      name: 'Priya',
+      phone: '+919876543210',
+      email: null,
+      tags: [],
+      fields: {},
+      consent: { marketing: null, utility: null },
+      source: 'manual',
+      createdAt: base.createdAt,
+      erased: false,
+    };
+    const parse = (data: Record<string, unknown>) =>
+      contactUpdatedPayloadSchema.safeParse({ ...base, type: 'contact.updated', data }).success;
+    for (const changes of [
+      ['name'],
+      ['email', 'fields.city', 'name', 'phone', 'tags'],
+      ['fields.a', `fields.a${'b'.repeat(39)}`],
+      null,
+    ]) {
+      expect(parse({ contact: person, changes }), JSON.stringify(changes)).toBe(true);
+    }
+    // Always given; parts in the API contact's names, field keys as the fields' keys are written.
+    expect(parse({ contact: person })).toBe(false);
+    for (const part of [
+      'Name',
+      'nickname',
+      'consent',
+      'source',
+      'fields',
+      'fields.',
+      'fields.City',
+      'fields.1st',
+      'fields.a-b',
+      `fields.a${'b'.repeat(40)}`,
+      ' name',
+    ]) {
+      expect(parse({ contact: person, changes: [part] }), part).toBe(false);
+    }
+    expect(parse({ contact: person, changes: 'name' })).toBe(false);
   });
 
   it('describe the automation run events (ADR-078)', () => {
@@ -559,6 +687,24 @@ describe('webhook payload schemas', () => {
       audienceCount: 1_200,
       queuedCount: 350,
       skippedCount: 12,
+      results: {
+        audience: 1_200,
+        pending: 838,
+        skipped: 12,
+        canceled: 0,
+        queued: 350,
+        inProgress: 50,
+        sent: 300,
+        delivered: 290,
+        read: 120,
+        failed: 0,
+        unknown: 0,
+        messagesCanceled: 0,
+        replied: 14,
+        optedOut: 2,
+        skipReasons: [{ reason: 'no_marketing_opt_in', count: 12 }],
+        failureCodes: [],
+      },
     };
     const channel = { id: base.id, phone: '+91 98765 43210' };
     const event = { ...base, type: 'campaign.status_changed', data: { campaign, channel } };
@@ -618,18 +764,23 @@ describe('webhook payload schemas', () => {
             audienceCount: 0,
             queuedCount: 0,
             skippedCount: 0,
+            results: null,
           },
           channel: null,
         },
       }).success,
     ).toBe(true);
-    // An unknown status or reason, a fractional count or another type is not described.
+    // An unknown status or reason, a fractional count, results left out or not counted as the API
+    // counts them (ADR-150), or another type is not described.
     for (const change of [
       { status: 'archived' },
       { previousStatus: 'sent' },
       { pauseReason: 'tired' },
       { completionReason: 'done' },
       { queuedCount: 1.5 },
+      { results: undefined },
+      { results: { ...campaign.results, delivered: 2.5 } },
+      { results: { ...campaign.results, skipReasons: [{ reason: 'tired', count: 1 }] } },
     ]) {
       expect(
         campaignStatusChangedPayloadSchema.safeParse({
@@ -679,18 +830,14 @@ describe('webhook labels and hosts', () => {
     expect(webhookErrorLabel('address_blocked', null)).toBe('The address is private or reserved');
     expect(webhookErrorLabel('endpoint_disabled', null)).toBe('The endpoint was turned off');
     expect(webhookErrorLabel('event_gone', null)).toBe('What the event is about no longer exists');
-    expect(webhookErrorLabel('payload_failed', null)).toBe(
-      'HyFib could not build or sign the request',
-    );
+    expect(webhookErrorLabel('payload_failed', null)).toBe('HyFib could not prepare the request');
     expect(webhookErrorLabel(null, null)).toBeNull();
     expect(webhookErrorLabel('something_new', null)).toBe('something_new');
   });
 
   it('names why a delivery ended without an attempt over the status an earlier attempt left', () => {
     // Attempt 1 got a 503; the delivery then ended at its next claim, which keeps that status.
-    expect(webhookErrorLabel('payload_failed', 503)).toBe(
-      'HyFib could not build or sign the request',
-    );
+    expect(webhookErrorLabel('payload_failed', 503)).toBe('HyFib could not prepare the request');
     expect(webhookErrorLabel('event_gone', 500)).toBe('What the event is about no longer exists');
     expect(webhookErrorLabel('endpoint_disabled', 500)).toBe('The endpoint was turned off');
     expect(webhookErrorLabel('interrupted', 502)).toBe('The attempt was interrupted');
@@ -781,5 +928,540 @@ describe('the OpenAPI document', () => {
       ]);
       expect(hook.post.security).toEqual([]);
     }
+  });
+
+  it('says what a contact.updated changed: always given, a list of parts or null (ADR-121)', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = doc.components.schemas as Record<string, unknown>;
+    const updated = schemas.WebhookContactUpdated as {
+      properties: {
+        data: {
+          required?: string[];
+          properties: { changes?: { anyOf?: { items?: { pattern?: string } }[] } };
+        };
+      };
+    };
+    const data = updated.properties.data;
+    expect(data.required).toEqual(['contact', 'changes']);
+    const list = data.properties.changes?.anyOf?.find((s) => s.items);
+    expect(list?.items?.pattern).toBe(CONTACT_CHANGE_PART_RE.source);
+    expect(data.properties.changes?.anyOf).toContainEqual({ type: 'null' });
+    const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
+    expect(webhooks['contact.updated']?.post?.description).toContain('The event says which.');
+  });
+
+  it('carry a campaign’s results as the API answers them, without the cost estimate members see (ADR-150)', () => {
+    const counted: CampaignAnalytics = {
+      audience: 10,
+      pending: 1,
+      skipped: 2,
+      canceled: 0,
+      queued: 7,
+      inProgress: 1,
+      sent: 5,
+      delivered: 4,
+      read: 3,
+      failed: 1,
+      unknown: 0,
+      messageCanceled: 1,
+      replied: 2,
+      optedOut: 1,
+      estimateMicros: 123_000,
+      estimateMissing: 1,
+      skipReasons: [{ reason: 'no_marketing_opt_in', count: 2 }],
+      failureCodes: [{ code: '131049', count: 1 }],
+    };
+    expect(toCampaignResults(counted)).toEqual({
+      audience: 10,
+      pending: 1,
+      skipped: 2,
+      canceled: 0,
+      queued: 7,
+      inProgress: 1,
+      sent: 5,
+      delivered: 4,
+      read: 3,
+      failed: 1,
+      unknown: 0,
+      messagesCanceled: 1,
+      replied: 2,
+      optedOut: 1,
+      skipReasons: [{ reason: 'no_marketing_opt_in', count: 2 }],
+      failureCodes: [{ code: '131049', count: 1 }],
+    });
+    // The API answers the same schema, and the event describes its results with it.
+    expect(apiCampaignResultsSchema).toBe(campaignResultsSchema);
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = doc.components.schemas as Record<string, unknown>;
+    const event = schemas.WebhookCampaignStatusChanged as {
+      properties: {
+        data: {
+          properties: {
+            campaign: {
+              required?: string[];
+              properties: { results?: { anyOf?: unknown[]; description?: string } };
+            };
+          };
+        };
+      };
+    };
+    const campaign = event.properties.data.properties.campaign;
+    expect(campaign.required).toContain('results');
+    expect(campaign.properties.results?.anyOf).toContainEqual({ type: 'null' });
+    expect(campaign.properties.results?.description).toContain(
+      'counted when this request was built (the t of its W360-Signature)',
+    );
+    const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
+    expect(webhooks['campaign.status_changed']?.post?.description).toContain(
+      'campaign.results are its results as GET /campaigns/{id} counts them, counted when the request is built',
+    );
+  });
+});
+
+describe('endpoint headers (ADR-118)', () => {
+  const problems = (headers: unknown) => {
+    const result = webhookHeadersSchema.safeParse(headers);
+    return result.success ? [] : result.error.issues.map((issue) => issue.message);
+  };
+  const one = (name: string, value = 'v') => problems([{ name, value }]);
+
+  it('take up to 5 headers with token names and printable ASCII values, trimmed', () => {
+    expect(
+      webhookHeadersSchema.parse([
+        { name: ' Authorization ', value: '  Bearer abc.def  ' },
+        { name: 'X-Api-Key', value: 'k=1; "quoted" ~!' },
+      ]),
+    ).toEqual([
+      { name: 'Authorization', value: 'Bearer abc.def' },
+      { name: 'X-Api-Key', value: 'k=1; "quoted" ~!' },
+    ]);
+    expect(webhookHeadersSchema.parse([])).toEqual([]);
+    expect(one('a'.repeat(60), 'x'.repeat(WEBHOOK_LIMITS.headerValueLength))).toEqual([]);
+    expect(
+      problems(
+        Array.from({ length: WEBHOOK_LIMITS.headers }, (_, i) => ({ name: `X-H${i}`, value: 'v' })),
+      ),
+    ).toEqual([]);
+  });
+
+  it('refuse the headers HyFib or the transport sets, whatever their case, and Proxy-* and W360-*', () => {
+    for (const name of [
+      'Content-Type',
+      'content-encoding',
+      'USER-AGENT',
+      'Host',
+      'Content-Length',
+      'Transfer-Encoding',
+      'Connection',
+      'Keep-Alive',
+      'Upgrade',
+      'TE',
+      'Trailer',
+      'Expect',
+      'Accept-Encoding',
+      'Proxy-Authorization',
+      'proxy-anything',
+      'W360-Signature',
+      'w360-event-id',
+    ]) {
+      expect(one(name), name).toEqual(['HyFib sets this header itself.']);
+      expect(reservedWebhookHeader(name), name).toBe(true);
+    }
+    for (const name of [
+      'Authorization',
+      'X-Api-Key',
+      'Accept',
+      'Cookie',
+      'W360',
+      'Proxy',
+      'X-W360-Id',
+    ]) {
+      expect(one(name), name).toEqual([]);
+      expect(reservedWebhookHeader(name), name).toBe(false);
+    }
+  });
+
+  it('refuse bad names and values, more than 5 headers, a header given twice and other keys', () => {
+    for (const name of ['X_Key', 'X Key', '-X', '', 'a'.repeat(61), 'Clé', 'X:Y']) {
+      expect(one(name), name).toEqual(['Header names use letters, digits and - (at most 60).']);
+    }
+    expect(one('Authorization', '')).toEqual(['Enter the header’s value.']);
+    expect(one('Authorization', '   ')).toEqual(['Enter the header’s value.']);
+    expect(one('Authorization', 'x'.repeat(WEBHOOK_LIMITS.headerValueLength + 1))).toEqual([
+      `Header values are limited to ${WEBHOOK_LIMITS.headerValueLength} characters.`,
+    ]);
+    // No line breaks (a header injected after them), tabs or characters outside printable ASCII.
+    for (const value of ['a\r\nX-Injected: 1', 'a\nb', 'a\tb', 'café', 'a\u0000b']) {
+      expect(one('Authorization', value), JSON.stringify(value)).toEqual([
+        'Header values use printable ASCII characters, without line breaks.',
+      ]);
+    }
+    expect(
+      problems(
+        Array.from({ length: WEBHOOK_LIMITS.headers + 1 }, (_, i) => ({
+          name: `X-H${i}`,
+          value: 'v',
+        })),
+      ),
+    ).toEqual([`An endpoint can have at most ${WEBHOOK_LIMITS.headers} headers.`]);
+    expect(
+      problems([
+        { name: 'X-Key', value: 'a' },
+        { name: 'x-key', value: 'b' },
+      ]),
+    ).toEqual(['Give each header once.']);
+    expect(problems([{ name: 'X-Key', value: 'a', secret: true }])).toHaveLength(1);
+    expect(problems({ 'X-Key': 'a' })).toHaveLength(1);
+  });
+
+  it('are sealed bound to the company and the endpoint, and opened only there', () => {
+    const ring = new Keyring({ primaryKeyId: 'k1', keys: { k1: randomBytes(32) } });
+    const tenant = '0192a1b2-0000-7000-8000-00000000000a';
+    const endpoint = '0192a1b2-0000-7000-8000-00000000000b';
+    const other = '0192a1b2-0000-7000-8000-00000000000c';
+    const sealed = sealWebhookHeaders(ring, tenant, endpoint, [
+      { name: 'Authorization', value: 'Bearer abc' },
+      { name: 'X-Api-Key', value: 'k-1' },
+    ]);
+    expect(sealed.headerNames).toEqual(['Authorization', 'X-Api-Key']);
+    expect(sealed.headersCiphertext).not.toMatch(/Bearer|abc|k-1/);
+    expect(openWebhookHeaders(ring, tenant, endpoint, sealed.headersCiphertext)).toEqual({
+      Authorization: 'Bearer abc',
+      'X-Api-Key': 'k-1',
+    });
+    expect(() => openWebhookHeaders(ring, other, endpoint, sealed.headersCiphertext)).toThrow();
+    expect(() => openWebhookHeaders(ring, tenant, other, sealed.headersCiphertext)).toThrow();
+    // No headers seal nothing, and nothing sealed opens as no headers.
+    expect(sealWebhookHeaders(ring, tenant, endpoint, [])).toEqual({
+      headerNames: [],
+      headersCiphertext: null,
+    });
+    expect(openWebhookHeaders(ring, tenant, endpoint, null)).toEqual({});
+    // What the seal never writes is refused when opened: a name HyFib sets, or not a list of pairs.
+    const aad = webhookHeadersAad(tenant, endpoint);
+    for (const content of [
+      [['W360-Signature', 't=1,v1=00']],
+      [['content-type', 'text/plain']],
+      { Authorization: 'Bearer abc' },
+      [['Authorization']],
+      [['Authorization', 'Bearer abc', 'X-Extra']],
+      [[1, 'x']],
+      [['Authorization', 2]],
+    ]) {
+      expect(
+        () =>
+          openWebhookHeaders(ring, tenant, endpoint, ring.encrypt(JSON.stringify(content), aad)),
+        JSON.stringify(content),
+      ).toThrow(/^Sealed webhook headers/);
+    }
+  });
+});
+
+describe('message status filters (ADR-119)', () => {
+  it('take 1 to 8 known statuses, once each, in the order a message reaches them; null takes every status', () => {
+    expect(webhookMessageStatusesSchema.parse(['failed', 'delivered', 'failed'])).toEqual([
+      'delivered',
+      'failed',
+    ]);
+    expect(webhookMessageStatusesSchema.parse(null)).toBeNull();
+    expect(webhookMessageStatusesSchema.parse([...WEBHOOK_MESSAGE_STATUSES].reverse())).toEqual([
+      ...WEBHOOK_MESSAGE_STATUSES,
+    ]);
+    for (const refused of [[], ['queued'], ['Failed'], 'failed', Array(9).fill('failed')]) {
+      expect(webhookMessageStatusesSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(Object.keys(WEBHOOK_MESSAGE_STATUS_LABELS)).toEqual([...WEBHOOK_MESSAGE_STATUSES]);
+  });
+
+  it('are kept only while the endpoint takes message.status: given, kept, or cleared', () => {
+    const both = ['message.status', 'consent.changed'] as const;
+    expect(webhookMessageStatusesFor([...both], ['failed'], null)).toEqual(['failed']);
+    expect(webhookMessageStatusesFor([...both], undefined, ['read'])).toEqual(['read']);
+    expect(webhookMessageStatusesFor([...both], null, ['read'])).toBeNull();
+    expect(webhookMessageStatusesFor([...both], undefined, null)).toBeNull();
+    expect(webhookMessageStatusesFor(['consent.changed'], ['failed'], ['read'])).toBeNull();
+    expect(webhookMessageStatusesFor(['consent.changed'], undefined, ['read'])).toBeNull();
+  });
+});
+
+describe('contact part filters (ADR-123)', () => {
+  it('take 1 to 5 known parts, once each, in the order Settings lists them; null takes every change', () => {
+    expect(webhookContactPartsSchema.parse(['tags', 'email', 'tags'])).toEqual(['email', 'tags']);
+    expect(webhookContactPartsSchema.parse(null)).toBeNull();
+    expect(webhookContactPartsSchema.parse([...WEBHOOK_CONTACT_PARTS].reverse())).toEqual([
+      ...WEBHOOK_CONTACT_PARTS,
+    ]);
+    expect(WEBHOOK_CONTACT_PARTS).toEqual(['name', 'phone', 'email', 'tags', 'fields']);
+    // A part is what a change names before its first dot: fields.<key> is fields.
+    for (const part of WEBHOOK_CONTACT_PARTS) {
+      expect(CONTACT_CHANGE_PART_RE.test(part === 'fields' ? 'fields.plan' : part)).toBe(true);
+    }
+    for (const refused of [
+      [],
+      ['fields.plan'],
+      ['Email'],
+      ['address'],
+      'email',
+      Array(6).fill('email'),
+    ]) {
+      expect(webhookContactPartsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(Object.keys(WEBHOOK_CONTACT_PART_LABELS)).toEqual([...WEBHOOK_CONTACT_PARTS]);
+  });
+
+  it('are kept only while the endpoint takes contact.updated: given, kept, or cleared', () => {
+    const both = ['contact.updated', 'contact.erased'] as const;
+    expect(webhookContactPartsFor([...both], ['email'], null)).toEqual(['email']);
+    expect(webhookContactPartsFor([...both], undefined, ['tags'])).toEqual(['tags']);
+    expect(webhookContactPartsFor([...both], null, ['tags'])).toBeNull();
+    expect(webhookContactPartsFor([...both], undefined, null)).toBeNull();
+    expect(webhookContactPartsFor(['contact.erased'], ['email'], ['tags'])).toBeNull();
+    expect(webhookContactPartsFor(['contact.created'], undefined, ['tags'])).toBeNull();
+  });
+});
+
+describe('automation filters (ADR-145)', () => {
+  const greeter = '0e1a2b3c-4d5e-4f60-8172-8394a5b6c7d8';
+  const farewell = '1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9';
+
+  it('take 1 to 20 automation ids, once each and in lower case, in the order given; null takes every automation', () => {
+    expect(
+      webhookAutomationIdsSchema.parse([farewell, greeter.toUpperCase(), farewell, greeter]),
+    ).toEqual([farewell, greeter]);
+    expect(webhookAutomationIdsSchema.parse(null)).toBeNull();
+    const ids = Array.from(
+      { length: WEBHOOK_LIMITS.automations + 1 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(WEBHOOK_LIMITS.automations).toBe(20);
+    expect(webhookAutomationIdsSchema.parse(ids.slice(1))).toEqual(ids.slice(1));
+    for (const refused of [[], ids, ['greeter'], [greeter, null], greeter, [42]]) {
+      expect(webhookAutomationIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookAutomationIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one automation, or take every automation.',
+    );
+    expect(webhookAutomationIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 20 automations.',
+    );
+  });
+
+  it('apply to the two automation run events and no other', () => {
+    expect(WEBHOOK_AUTOMATION_EVENTS).toEqual(['automation.run_started', 'automation.run_ended']);
+    expect(webhookTakesAutomationRuns(['automation.run_started'])).toBe(true);
+    expect(webhookTakesAutomationRuns(['consent.changed', 'automation.run_ended'])).toBe(true);
+    for (const type of WEBHOOK_EVENT_KEYS.filter((t) => !t.startsWith('automation.'))) {
+      expect(webhookTakesAutomationRuns([type]), type).toBe(false);
+    }
+    expect(webhookTakesAutomationRuns([])).toBe(false);
+  });
+
+  it('are kept only while the endpoint takes an automation run event: given, kept, or cleared', () => {
+    const both = ['automation.run_started', 'automation.run_ended'] as const;
+    expect(webhookAutomationIdsFor([...both], [greeter], null)).toEqual([greeter]);
+    expect(webhookAutomationIdsFor([...both], undefined, [farewell])).toEqual([farewell]);
+    expect(webhookAutomationIdsFor([...both], null, [farewell])).toBeNull();
+    expect(webhookAutomationIdsFor([...both], undefined, null)).toBeNull();
+    // One of the two events is enough to keep the list.
+    expect(webhookAutomationIdsFor(['automation.run_ended'], undefined, [farewell])).toEqual([
+      farewell,
+    ]);
+    expect(webhookAutomationIdsFor(['consent.changed'], [greeter], [farewell])).toBeNull();
+    expect(webhookAutomationIdsFor(['message.received'], undefined, [farewell])).toBeNull();
+  });
+});
+
+describe('campaign status filters (ADR-146)', () => {
+  it('take 1 to 7 campaign statuses, once each, in the order a campaign reaches them; null takes every status', () => {
+    expect(webhookCampaignStatusesSchema.parse(['completed', 'paused', 'completed'])).toEqual([
+      'paused',
+      'completed',
+    ]);
+    expect(webhookCampaignStatusesSchema.parse(null)).toBeNull();
+    expect(webhookCampaignStatusesSchema.parse([...WEBHOOK_CAMPAIGN_STATUSES].reverse())).toEqual([
+      ...WEBHOOK_CAMPAIGN_STATUSES,
+    ]);
+    expect(WEBHOOK_CAMPAIGN_STATUSES).toEqual([...CAMPAIGN_STATUSES]);
+    for (const refused of [
+      [],
+      ['sending'],
+      ['Paused'],
+      'paused',
+      [null],
+      Array(8).fill('paused'),
+    ]) {
+      expect(
+        webhookCampaignStatusesSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookCampaignStatusesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one campaign status, or take every status.',
+    );
+    expect(Object.keys(WEBHOOK_CAMPAIGN_STATUS_LABELS)).toEqual([...WEBHOOK_CAMPAIGN_STATUSES]);
+  });
+
+  it('are kept only while the endpoint takes campaign.status_changed: given, kept, or cleared', () => {
+    const both = ['campaign.status_changed', 'message.status'] as const;
+    expect(webhookCampaignStatusesFor([...both], ['paused'], null)).toEqual(['paused']);
+    expect(webhookCampaignStatusesFor([...both], undefined, ['completed'])).toEqual(['completed']);
+    expect(webhookCampaignStatusesFor([...both], null, ['completed'])).toBeNull();
+    expect(webhookCampaignStatusesFor([...both], undefined, null)).toBeNull();
+    expect(webhookCampaignStatusesFor(['message.status'], ['paused'], ['completed'])).toBeNull();
+    expect(webhookCampaignStatusesFor(['order.status_changed'], undefined, ['paused'])).toBeNull();
+  });
+});
+
+describe('order status filters (ADR-147)', () => {
+  it('take 1 to 5 of the statuses an order change reaches, once each, in the order an order reaches them; null takes every status', () => {
+    expect(webhookOrderStatusesSchema.parse(['cancelled', 'paid', 'cancelled'])).toEqual([
+      'paid',
+      'cancelled',
+    ]);
+    expect(webhookOrderStatusesSchema.parse(null)).toBeNull();
+    expect(webhookOrderStatusesSchema.parse([...WEBHOOK_ORDER_STATUSES].reverse())).toEqual([
+      ...WEBHOOK_ORDER_STATUSES,
+    ]);
+    // Every order status but `received`, which only order.received reports.
+    expect(WEBHOOK_ORDER_STATUSES).toEqual(ORDER_STATUSES.filter((s) => s !== 'received'));
+    for (const refused of [
+      [],
+      ['received'],
+      ['canceled'],
+      ['Paid'],
+      'paid',
+      [null],
+      Array(6).fill('paid'),
+    ]) {
+      expect(webhookOrderStatusesSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookOrderStatusesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one order status, or take every status.',
+    );
+    expect(Object.keys(WEBHOOK_ORDER_STATUS_LABELS)).toEqual([...WEBHOOK_ORDER_STATUSES]);
+  });
+
+  it('are kept only while the endpoint takes order.status_changed: given, kept, or cleared', () => {
+    const both = ['order.status_changed', 'order.received'] as const;
+    expect(webhookOrderStatusesFor([...both], ['paid'], null)).toEqual(['paid']);
+    expect(webhookOrderStatusesFor([...both], undefined, ['fulfilled'])).toEqual(['fulfilled']);
+    expect(webhookOrderStatusesFor([...both], null, ['fulfilled'])).toBeNull();
+    expect(webhookOrderStatusesFor([...both], undefined, null)).toBeNull();
+    expect(webhookOrderStatusesFor(['order.received'], ['paid'], ['fulfilled'])).toBeNull();
+    expect(webhookOrderStatusesFor(['campaign.status_changed'], undefined, ['paid'])).toBeNull();
+  });
+});
+
+describe('template status filters (ADR-148)', () => {
+  it('take 1 to 11 of the statuses a template event reports, once each, in the order Templates lists them; null takes every status', () => {
+    expect(webhookTemplateStatusesSchema.parse(['paused', 'rejected', 'paused'])).toEqual([
+      'rejected',
+      'paused',
+    ]);
+    expect(webhookTemplateStatusesSchema.parse(null)).toBeNull();
+    expect(webhookTemplateStatusesSchema.parse([...WEBHOOK_TEMPLATE_STATUSES].reverse())).toEqual([
+      ...WEBHOOK_TEMPLATE_STATUSES,
+    ]);
+    // Every template status but HyFib's own steps before Meta has the template, a deletion under
+    // way or refused (not a template status) and an unrecognised one: none of them is sent.
+    expect(WEBHOOK_TEMPLATE_STATUSES).toEqual(
+      TEMPLATE_STATUSES.filter(
+        (s) => !['draft', 'submitting', 'submit_failed', 'pending_deletion', 'unknown'].includes(s),
+      ),
+    );
+    // The event says which statuses it reports, in the same order.
+    expect(templateStatusPayloadSchema.shape.data.shape.template.shape.status.description).toBe(
+      `${WEBHOOK_TEMPLATE_STATUSES.slice(0, -1).join(', ')} or ${WEBHOOK_TEMPLATE_STATUSES.at(-1)}.`,
+    );
+    for (const refused of [
+      [],
+      ['draft'],
+      ['submit_failed'],
+      ['pending_deletion'],
+      ['delete_failed'],
+      ['unknown'],
+      ['Approved'],
+      'approved',
+      [null],
+      Array(12).fill('approved'),
+    ]) {
+      expect(
+        webhookTemplateStatusesSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookTemplateStatusesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one template status, or take every status.',
+    );
+    expect(Object.keys(WEBHOOK_TEMPLATE_STATUS_LABELS)).toEqual([...WEBHOOK_TEMPLATE_STATUSES]);
+  });
+
+  it('are kept only while the endpoint takes template.status_changed: given, kept, or cleared', () => {
+    const both = ['template.status_changed', 'message.status'] as const;
+    expect(webhookTemplateStatusesFor([...both], ['rejected'], null)).toEqual(['rejected']);
+    expect(webhookTemplateStatusesFor([...both], undefined, ['paused'])).toEqual(['paused']);
+    expect(webhookTemplateStatusesFor([...both], null, ['paused'])).toBeNull();
+    expect(webhookTemplateStatusesFor([...both], undefined, null)).toBeNull();
+    expect(webhookTemplateStatusesFor(['message.status'], ['rejected'], ['paused'])).toBeNull();
+    expect(
+      webhookTemplateStatusesFor(['campaign.status_changed'], undefined, ['paused']),
+    ).toBeNull();
+  });
+});
+
+describe('conversation status filters (ADR-149)', () => {
+  it('take 1 or 2 of the statuses a conversation change reaches, once each, in the order the inbox lists them; null takes every status', () => {
+    expect(webhookConversationStatusesSchema.parse(['resolved', 'open'])).toEqual([
+      'open',
+      'resolved',
+    ]);
+    expect(webhookConversationStatusesSchema.parse(['resolved', 'resolved'])).toEqual(['resolved']);
+    expect(webhookConversationStatusesSchema.parse(null)).toBeNull();
+    // Every conversation status but `pending`, which nothing sets (ADR-075); the event does not
+    // say otherwise.
+    expect(WEBHOOK_CONVERSATION_STATUSES).toEqual(
+      CONVERSATION_STATUSES.filter((s) => s !== 'pending'),
+    );
+    expect(WEBHOOK_EVENT_INFO['conversation.status_changed'].description).not.toContain('pending');
+    for (const refused of [
+      [],
+      ['pending'],
+      ['closed'],
+      ['Resolved'],
+      'resolved',
+      [null],
+      Array(3).fill('open'),
+    ]) {
+      expect(
+        webhookConversationStatusesSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookConversationStatusesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one conversation status, or take every status.',
+    );
+    expect(WEBHOOK_CONVERSATION_STATUS_LABELS).toEqual({ open: 'Open', resolved: 'Resolved' });
+  });
+
+  it('are kept only while the endpoint takes conversation.status_changed: given, kept, or cleared', () => {
+    const both = ['conversation.status_changed', 'conversation.team_changed'] as const;
+    expect(webhookConversationStatusesFor([...both], ['resolved'], null)).toEqual(['resolved']);
+    expect(webhookConversationStatusesFor([...both], undefined, ['open'])).toEqual(['open']);
+    expect(webhookConversationStatusesFor([...both], null, ['open'])).toBeNull();
+    expect(webhookConversationStatusesFor([...both], undefined, null)).toBeNull();
+    expect(
+      webhookConversationStatusesFor(['conversation.team_changed'], ['resolved'], ['open']),
+    ).toBeNull();
+    expect(
+      webhookConversationStatusesFor(['order.status_changed'], undefined, ['open']),
+    ).toBeNull();
   });
 });

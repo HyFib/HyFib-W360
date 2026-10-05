@@ -1,4 +1,5 @@
-import { integer, jsonb, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { integer, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { jsonb } from './columns';
 import { appSchema } from './tenancy';
 
 /** WhatsApp message templates and their review history (migration 0005). */

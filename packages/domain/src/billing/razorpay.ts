@@ -1,4 +1,4 @@
-import { constantTimeEqual, hmacSha256Hex } from '@w360/core';
+import { clipText, constantTimeEqual, hmacSha256Hex, parseExternalJson } from '@w360/core';
 
 /**
  * Minimal typed client for the Razorpay endpoints we use (docs/research/razorpay-billing.md). Keys
@@ -511,7 +511,7 @@ export class RazorpayClient {
     }
     let json: unknown;
     try {
-      json = await response.json();
+      json = parseExternalJson(await response.text());
     } catch {
       if (response.ok)
         return {
@@ -704,8 +704,8 @@ export class RazorpayClient {
       '/v1/customers',
       {
         body: {
-          name: input.name.slice(0, 50),
-          email: input.email.slice(0, 64),
+          name: clipText(input.name, 50),
+          email: clipText(input.email, 64),
           ...(input.contact ? { contact: input.contact } : {}),
           fail_existing: '0',
           ...(input.notes ? { notes: input.notes } : {}),
@@ -780,7 +780,7 @@ export class RazorpayClient {
           customer_id: input.customerId,
           token: input.tokenId,
           recurring: true,
-          description: input.description.slice(0, 255),
+          description: clipText(input.description, 255),
           ...(input.notes ? { notes: input.notes } : {}),
         },
       },
@@ -862,7 +862,7 @@ export class RazorpayClient {
         body: {
           period: input.period,
           interval: 1,
-          item: { name: input.name.slice(0, 80), amount: input.amount, currency: input.currency },
+          item: { name: clipText(input.name, 80), amount: input.amount, currency: input.currency },
           ...(input.notes ? { notes: input.notes } : {}),
         },
       },

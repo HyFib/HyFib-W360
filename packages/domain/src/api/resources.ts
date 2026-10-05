@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AppError, notFound, uuidv7 } from '@w360/core';
+import { AppError, clipText, jsonbText, notFound, uuidv7 } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -11,9 +11,7 @@ import {
   contactTags,
   contacts,
   conversations,
-  desc,
   eq,
-  exactTimestamp,
   inArray,
   isNotNull,
   isNull,
@@ -33,7 +31,7 @@ import {
   type ResolvedProductMessage,
 } from '../commerce/model';
 import { checkTemplateEligibility, recordConsentEvents } from '../consent/service';
-import { normalizeEmail, normalizeTag } from '../contacts/fields';
+import { MAX_TAGS_PER_CONTACT, normalizeEmail, type AttributeValue } from '../contacts/fields';
 import { normalizePhone, phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { contactForPhone } from '../contacts/service';
 import { emitTenantEvent } from '../messaging/events';
@@ -61,8 +59,18 @@ import {
   sendSpecFor,
   TEMPLATE_LIMITS,
 } from '../templates/definition';
-import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
-import { apiContactById, apiContactColumns, toApiContact, type ApiContact } from './contact-view';
+import { decodeKeysetCursor, likePattern, parseInput } from '../validation';
+import { apiContactById, toApiContact, type ApiContact } from './contact-view';
+import {
+  apiContactFieldFiltersSchema,
+  apiContactPage,
+  apiContactFieldsSchema,
+  apiContactListFilters,
+  apiFieldChanges,
+  apiFieldFilters,
+  apiTags,
+  contactListQuery,
+} from './contacts';
 import { apiActor, assertAnyScope, assertScope, type ApiContext } from './context';
 import {
   claimIdempotencyKey,
@@ -92,6 +100,7 @@ export const apiContactCreateSchema = z
       .max(20)
       .optional()
       .describe('Tags to add (lower-cased; commas are not allowed).'),
+    fields: apiContactFieldsSchema.optional(),
   })
   .strict();
 
@@ -100,6 +109,10 @@ export const apiContactListQuerySchema = z
     limit: z.coerce.number().int().min(1).max(API_LIMITS.pageSize).default(50),
     cursor: z.string().max(200).optional().describe('`nextCursor` from the previous page.'),
     phone: z.string().max(40).optional().describe('Only the contact with this number.'),
+    email: z.string().max(254).optional().describe('Only contacts with this email address.'),
+    name: z.string().max(200).optional().describe('Only contacts whose name contains this text.'),
+    tag: z.string().max(40).optional().describe('Only contacts with this tag.'),
+    fields: apiContactFieldFiltersSchema.optional(),
   })
   .strict();
 
@@ -597,42 +610,44 @@ export async function apiListTemplates(
   );
 }
 
+/**
+ * The company's contacts newest first on exact keyset pages, found by number, email address, tag
+ * and custom field values (ADR-113) and part of the name (ADR-124), all of which a contact must
+ * match. A page filtered by name, tag or field reads at most API_CONTACT_SEARCH_WINDOW contacts:
+ * when the filters leave out most of them it shows fewer than the limit, or none, and its cursor
+ * continues after the last one it read. Both reads see one snapshot.
+ */
 export async function apiListContacts(
   deps: Pick<OutboundDeps, 'db'>,
   ctx: ApiContext,
   query: unknown,
 ): Promise<{ data: ApiContact[]; nextCursor: string | null }> {
   assertScope(ctx, 'contacts.read');
-  const q = parseInput(apiContactListQuerySchema, query);
+  const q = parseInput(apiContactListQuerySchema, contactListQuery(query));
   const cursor = decodeKeysetCursor(q.cursor);
   const phone = q.phone ? explicitPhone(q.phone) : null;
+  const { email, tag, name } = apiContactListFilters(q);
   return deps.db.run(
     ctx.scope,
     async (tx) => {
-      const rows = await tx
-        .select({ ...apiContactColumns, cursorAt: exactTimestamp(contacts.createdAt) })
-        .from(contacts)
-        .where(
-          and(
-            eq(contacts.tenantId, ctx.tenant.id),
-            isNull(contacts.erasedAt),
-            phone ? eq(contacts.phoneE164, phone) : undefined,
-            cursor
-              ? sql`(${contacts.createdAt}, ${contacts.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
-              : undefined,
-          ),
-        )
-        .orderBy(desc(contacts.createdAt), desc(contacts.id))
-        .limit(q.limit + 1);
-      const page = rows.slice(0, q.limit);
-      const last = page.at(-1);
-      return {
-        data: page.map(toApiContact),
-        nextCursor:
-          rows.length > q.limit && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
-      };
+      const filters = await apiFieldFilters(tx, ctx.tenant.id, q.fields ?? {});
+      if (tag) {
+        filters.push(sql`exists (select 1 from app.contact_tags t where t.tenant_id = ${contacts.tenantId}
+          and t.contact_id = ${contacts.id} and t.tag = ${tag})`);
+      }
+      // As members' search compares names: letters whatever their case, the text as written.
+      if (name) filters.push(sql`${contacts.displayName} ilike ${likePattern(name)}`);
+      return apiContactPage(tx, ctx.tenant.id, {
+        cursor,
+        limit: q.limit,
+        narrow: [
+          phone ? eq(contacts.phoneE164, phone) : undefined,
+          email ? sql`lower(${contacts.email}) = lower(${email})` : undefined,
+        ],
+        filters,
+      });
     },
-    { accessMode: 'read only' },
+    { isolationLevel: 'repeatable read', accessMode: 'read only' },
   );
 }
 
@@ -652,7 +667,8 @@ export async function apiGetContact(
 
 /**
  * Creates a contact, or answers with the existing one for the number (200 instead of 201); a
- * name, email or tags given for an existing contact fill only what is empty (tags are added).
+ * name, email or custom field values given for an existing contact fill only what is empty, and
+ * tags are added (50 at most per contact, as members keep them).
  */
 export async function apiCreateContact(
   deps: Pick<OutboundDeps, 'db' | 'clock'>,
@@ -665,15 +681,17 @@ export async function apiCreateContact(
   const phone = explicitPhone(data.phone);
   const email = normalizeEmail(data.email ?? '');
   if (!email.ok) throw new AppError('validation_failed', email.message);
-  const tags: string[] = [];
-  for (const raw of data.tags ?? []) {
-    const tag = normalizeTag(raw);
-    if (!tag.ok) throw new AppError('validation_failed', tag.message);
-    if (!tags.includes(tag.tag)) tags.push(tag.tag);
-  }
+  const tags = apiTags(data.tags ?? [], 'tags');
   const now = deps.clock.now();
   return deps.db.run(ctx.scope, (tx) =>
     idempotent(tx, ctx, idempotency, now, async () => {
+      // Values only: an empty string, which clears a value elsewhere, gives none here.
+      const values: Record<string, AttributeValue> = {};
+      for (const [key, value] of Object.entries(
+        await apiFieldChanges(tx, ctx.tenant.id, data.fields ?? {}),
+      )) {
+        if (value !== null) values[key] = value;
+      }
       const [suppressed] = await tx
         .select({ id: suppressions.id })
         .from(suppressions)
@@ -693,6 +711,7 @@ export async function apiCreateContact(
           displayName: data.name || null,
           phoneE164: phone,
           email: email.email,
+          attributes: values,
           source: 'api',
         })
         .onConflictDoNothing({
@@ -715,8 +734,23 @@ export async function apiCreateContact(
           .set({
             displayName: sql`coalesce(${contacts.displayName}, ${data.name || null})`,
             email: sql`coalesce(${contacts.email}, ${email.email})`,
+            // The contact's own values win over the request's.
+            attributes: sql`${jsonbText(values)}::jsonb || ${contacts.attributes}`,
           })
           .where(and(eq(contacts.tenantId, ctx.tenant.id), eq(contacts.id, id)));
+        if (tags.length > 0) {
+          const existing = await tx
+            .select({ tag: contactTags.tag })
+            .from(contactTags)
+            .where(and(eq(contactTags.tenantId, ctx.tenant.id), eq(contactTags.contactId, id)));
+          const all = new Set([...existing.map((e) => e.tag), ...tags]);
+          if (all.size > MAX_TAGS_PER_CONTACT) {
+            const message = `A contact can have at most ${MAX_TAGS_PER_CONTACT} tags.`;
+            throw new AppError('validation_failed', message, {
+              issues: [{ path: 'tags', message }],
+            });
+          }
+        }
       }
       if (tags.length > 0) {
         await tx
@@ -994,7 +1028,7 @@ export async function apiSendTemplate(
         .update(conversations)
         .set({
           lastMessageAt: now,
-          lastMessagePreview: built.rendered.body.slice(0, 200),
+          lastMessagePreview: clipText(built.rendered.body, 200),
           version: sql`${conversations.version} + 1`,
         })
         .where(
@@ -1242,7 +1276,7 @@ async function sendReply(
         .update(conversations)
         .set({
           lastMessageAt: now,
-          lastMessagePreview: built.preview.slice(0, 200),
+          lastMessagePreview: clipText(built.preview, 200),
           version: sql`${conversations.version} + 1`,
         })
         .where(

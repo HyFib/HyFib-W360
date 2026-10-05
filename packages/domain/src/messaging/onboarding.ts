@@ -19,7 +19,11 @@ import {
   channelOnboardingSessions,
   eq,
   gt,
+  inArray,
+  isNotNull,
+  lte,
   ne,
+  or,
   sql,
   whatsappAccounts,
   type Database,
@@ -30,6 +34,14 @@ import { assertCan, type TenantContext } from '../authz/context';
 import { recordAudit, recordSystemAudit, type RequestMeta } from '../audit';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
+import {
+  ACCESS_EXPIRY_NOTICE_DAYS,
+  accessProblemReason,
+  accountLabel,
+  assessGrant,
+  missingPermissions,
+  type AccessProblem,
+} from './access';
 import { emitTenantEvent } from './events';
 import type { GraphClient, GraphResult } from './graph';
 import { credentialAad } from './outbound';
@@ -53,10 +65,6 @@ import { COUNTED_CHANNEL_STATUSES, assertNumberAvailable } from '../plans/entitl
  * The token is stored encrypted (AAD binds it to company and account) and never leaves the server.
  */
 export const ONBOARDING_SESSION_TTL_MS = 15 * 60_000;
-export const REQUIRED_META_PERMISSIONS = [
-  'whatsapp_business_management',
-  'whatsapp_business_messaging',
-] as const;
 
 const numericId = z.string().regex(/^[0-9]{1,32}$/);
 
@@ -96,6 +104,31 @@ export interface ChannelView {
   qualityRating: string | null;
   nameStatus: string | null;
   healthCheckedAt: string | null;
+  /** The access of the number's account (ADR-137). */
+  accountStatus: 'connected' | 'needs_reconnect' | 'disconnected';
+  accessCheckedAt: string | null;
+  accessExpiresAt: string | null;
+  /** Whether the expiry Meta reported for the account's access has passed. */
+  accessExpired: boolean;
+  /** When the app's webhook subscription to the number's account was last confirmed (ADR-138). */
+  webhooksCheckedAt: string | null;
+}
+
+/** An account whose access needs the company's attention (ADR-137). */
+export interface WhatsAppAccessIssue {
+  whatsappAccountId: string;
+  account: string;
+  /**
+   * `reconnect`: Meta no longer accepts the access; `expiring`: it expires within 7 days; `expired`:
+   * the expiry Meta reported has passed (the account is checked again at once); `webhooks`: HyFib's
+   * app is no longer subscribed to the account's webhooks and subscribing it again failed (ADR-138).
+   */
+  kind: 'reconnect' | 'expiring' | 'expired' | 'webhooks';
+  /** Why Meta no longer accepts the access (`reconnect`), as a clause. */
+  reason: string | null;
+  problem: AccessProblem | null;
+  since: string | null;
+  expiresAt: string | null;
 }
 
 class OnboardingFailure extends AppError {
@@ -135,31 +168,31 @@ export function createOnboardingService(deps: OnboardingDeps) {
     });
   }
 
-  /** Verifies the token and the assets the browser named; returns the granted permissions. */
+  /**
+   * Verifies the token and the assets the browser named, by the rules the daily access checks apply
+   * too (ADR-137); returns the granted permissions, the expiry Meta reports and the account's numbers.
+   */
   async function verifyGrant(
     token: string,
     wabaId: string,
     phoneNumberId: string,
-  ): Promise<string[]> {
+  ): Promise<{ scopes: string[]; expiresAt: Date | null; numberIds: string[] }> {
     const debug = await graph.debugToken(token, meta.appId, meta.appSecret);
     if (!debug.ok) throw new OnboardingFailure('debug_token_failed', describeFailure(debug));
-    if (!debug.data.isValid || debug.data.appId !== meta.appId) {
+    const verdict = assessGrant(debug.data, meta.appId, wabaId);
+    if (verdict?.problem === 'invalid' || verdict?.problem === 'other_app') {
       throw new OnboardingFailure(
         'token_not_for_app',
         'The returned token is not valid for this app.',
       );
     }
-    const missing = REQUIRED_META_PERMISSIONS.filter((p) => !debug.data.scopes.includes(p));
-    if (missing.length > 0) {
+    if (verdict?.problem === 'missing_permission') {
       throw new OnboardingFailure(
         'missing_permissions',
-        `WhatsApp permissions were not granted: ${missing.join(', ')}.`,
+        `WhatsApp permissions were not granted: ${verdict.missing.join(', ')}.`,
       );
     }
-    const management = debug.data.granularScopes.find(
-      (g) => g.scope === 'whatsapp_business_management',
-    );
-    if (management && management.targetIds.length > 0 && !management.targetIds.includes(wabaId)) {
+    if (verdict?.problem === 'account_not_shared') {
       throw new OnboardingFailure(
         'waba_not_granted',
         'The WhatsApp Business Account was not shared with this app.',
@@ -173,7 +206,11 @@ export function createOnboardingService(deps: OnboardingDeps) {
         'The selected phone number does not belong to that WhatsApp Business Account.',
       );
     }
-    return debug.data.scopes.slice(0, 50);
+    return {
+      scopes: debug.data.scopes.slice(0, 50),
+      expiresAt: debug.data.expiresAt,
+      numberIds: numbers.data.ids,
+    };
   }
 
   return {
@@ -258,13 +295,13 @@ export function createOnboardingService(deps: OnboardingDeps) {
       }
 
       let token: string;
-      let scopes: string[];
+      let grant: Awaited<ReturnType<typeof verifyGrant>>;
       try {
         const exchanged = await graph.exchangeCode(meta.appId, meta.appSecret, data.code);
         if (!exchanged.ok)
           throw new OnboardingFailure('code_exchange_failed', describeFailure(exchanged));
         token = exchanged.data.accessToken;
-        scopes = await verifyGrant(token, data.wabaId, data.phoneNumberId);
+        grant = await verifyGrant(token, data.wabaId, data.phoneNumberId);
       } catch (error) {
         const reason = error instanceof OnboardingFailure ? error.reason : 'verification_error';
         await failSession(ctx, session.id, reason);
@@ -293,14 +330,28 @@ export function createOnboardingService(deps: OnboardingDeps) {
             token,
             credentialAad(ctx.tenant.id, whatsappAccountId),
           );
+          // The new token was just checked: its access starts clean (ADR-137).
+          const access = {
+            grantedScopes: grant.scopes,
+            tokenCheckedAt: now,
+            tokenCheckAttemptedAt: now,
+            tokenExpiresAt: grant.expiresAt,
+          };
           if (existingAccount) {
             await tx
               .update(whatsappAccounts)
               .set({
                 status: 'connected',
                 credentialCiphertext: credential,
-                grantedScopes: scopes,
-                tokenCheckedAt: now,
+                ...access,
+                tokenCheckRequestedAt: null,
+                tokenCheckError: null,
+                tokenExpiryRemindedAt: null,
+                tokenProblem: null,
+                tokenProblemAt: null,
+                // Its setup job subscribes the app to the account's webhooks again (ADR-138).
+                webhooksCheckError: null,
+                webhooksMissingSince: null,
                 ...(data.businessId ? { businessId: data.businessId } : {}),
               })
               .where(
@@ -317,8 +368,7 @@ export function createOnboardingService(deps: OnboardingDeps) {
               businessId: data.businessId ?? null,
               status: 'connected',
               credentialCiphertext: credential,
-              grantedScopes: scopes,
-              tokenCheckedAt: now,
+              ...access,
               connectedByUserId: ctx.user.id,
             });
           }
@@ -389,6 +439,22 @@ export function createOnboardingService(deps: OnboardingDeps) {
           await tx.execute(
             sql`select app.bind_provider_asset('meta_whatsapp', 'phone_number', ${data.phoneNumberId}, ${channelAccountId}::uuid, ${data.wabaId})`,
           );
+          // The account's other numbers that need reconnecting and that Meta lists under it with
+          // the new token resume their setup from the step they had completed: an active number
+          // only has its health read again, since Meta counts registration attempts (ADR-137).
+          const restored = await tx
+            .update(channelAccounts)
+            .set({ status: 'onboarding', onboardingError: null })
+            .where(
+              and(
+                eq(channelAccounts.tenantId, ctx.tenant.id),
+                eq(channelAccounts.whatsappAccountId, whatsappAccountId),
+                eq(channelAccounts.status, 'needs_reconnect'),
+                ne(channelAccounts.id, channelAccountId),
+                inArray(channelAccounts.phoneNumberId, grant.numberIds),
+              ),
+            )
+            .returning({ id: channelAccounts.id });
           await tx
             .update(channelOnboardingSessions)
             .set({ status: 'completed', resultWhatsappAccountId: whatsappAccountId })
@@ -409,25 +475,28 @@ export function createOnboardingService(deps: OnboardingDeps) {
                 wabaId: data.wabaId,
                 phoneNumberId: data.phoneNumberId,
                 reconnect: Boolean(existingChannel),
+                restoredNumbers: restored.length,
               },
             },
             request,
           );
-          await emitTenantEvent(tx, ctx.tenant.id, {
-            type: 'channel.updated',
-            payload: { channelAccountId },
-          });
-          await deps.jobs.enqueue(
-            tx,
-            QUEUES.channelOnboard.name,
-            deps.signer.sign({
-              kind: 'channel.onboard',
-              tenantId: ctx.tenant.id,
-              actorUserId: ctx.user.id,
-              ref: channelAccountId,
-            }),
-            { singletonKey: channelAccountId },
-          );
+          for (const id of [channelAccountId, ...restored.map((r) => r.id)]) {
+            await emitTenantEvent(tx, ctx.tenant.id, {
+              type: 'channel.updated',
+              payload: { channelAccountId: id },
+            });
+            await deps.jobs.enqueue(
+              tx,
+              QUEUES.channelOnboard.name,
+              deps.signer.sign({
+                kind: 'channel.onboard',
+                tenantId: ctx.tenant.id,
+                actorUserId: ctx.user.id,
+                ref: id,
+              }),
+              { singletonKey: id },
+            );
+          }
           return { channelAccountId, whatsappAccountId };
         });
       } catch (error) {
@@ -603,6 +672,10 @@ export function createOnboardingService(deps: OnboardingDeps) {
               qualityRating: channelAccounts.qualityRating,
               nameStatus: channelAccounts.nameStatus,
               healthCheckedAt: channelAccounts.healthCheckedAt,
+              accountStatus: whatsappAccounts.status,
+              accessCheckedAt: whatsappAccounts.tokenCheckedAt,
+              accessExpiresAt: whatsappAccounts.tokenExpiresAt,
+              webhooksCheckedAt: whatsappAccounts.webhooksCheckedAt,
             })
             .from(channelAccounts)
             .innerJoin(
@@ -616,7 +689,97 @@ export function createOnboardingService(deps: OnboardingDeps) {
             .orderBy(asc(channelAccounts.createdAt)),
         { accessMode: 'read only' },
       );
-      return rows.map((r) => ({ ...r, healthCheckedAt: r.healthCheckedAt?.toISOString() ?? null }));
+      const now = clock.now();
+      return rows.map((r) => ({
+        ...r,
+        healthCheckedAt: r.healthCheckedAt?.toISOString() ?? null,
+        accessCheckedAt: r.accessCheckedAt?.toISOString() ?? null,
+        accessExpiresAt: r.accessExpiresAt?.toISOString() ?? null,
+        accessExpired: r.accessExpiresAt !== null && r.accessExpiresAt <= now,
+        webhooksCheckedAt: r.webhooksCheckedAt?.toISOString() ?? null,
+      }));
+    },
+
+    /**
+     * The company's accounts whose access needs attention (ADR-137): Meta no longer accepts it, it
+     * expires within 7 days, or the expiry Meta reported has passed. Shown on every page of the
+     * company and on Channels.
+     */
+    async accessIssues(ctx: TenantContext): Promise<WhatsAppAccessIssue[]> {
+      assertCan(ctx, 'channels.read');
+      const now = clock.now();
+      const soon = new Date(now.getTime() + ACCESS_EXPIRY_NOTICE_DAYS * 86_400_000);
+      const rows = await db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({
+              id: whatsappAccounts.id,
+              wabaId: whatsappAccounts.wabaId,
+              name: whatsappAccounts.name,
+              status: whatsappAccounts.status,
+              problem: whatsappAccounts.tokenProblem,
+              problemAt: whatsappAccounts.tokenProblemAt,
+              grantedScopes: whatsappAccounts.grantedScopes,
+              expiresAt: whatsappAccounts.tokenExpiresAt,
+              webhooksMissingSince: whatsappAccounts.webhooksMissingSince,
+            })
+            .from(whatsappAccounts)
+            .where(
+              and(
+                eq(whatsappAccounts.tenantId, ctx.tenant.id),
+                or(
+                  eq(whatsappAccounts.status, 'needs_reconnect'),
+                  and(
+                    eq(whatsappAccounts.status, 'connected'),
+                    or(
+                      lte(whatsappAccounts.tokenExpiresAt, soon),
+                      isNotNull(whatsappAccounts.webhooksMissingSince),
+                    ),
+                  ),
+                ),
+              ),
+            )
+            .orderBy(asc(whatsappAccounts.createdAt), asc(whatsappAccounts.id)),
+        { accessMode: 'read only' },
+      );
+      return rows.flatMap((r): WhatsAppAccessIssue[] => {
+        const base = {
+          whatsappAccountId: r.id,
+          account: accountLabel(r),
+          problem: r.problem,
+          expiresAt: r.expiresAt?.toISOString() ?? null,
+        };
+        if (r.status === 'needs_reconnect') {
+          return [
+            {
+              ...base,
+              kind: 'reconnect',
+              reason: accessProblemReason(r.problem, missingPermissions(r.grantedScopes)),
+              since: r.problemAt?.toISOString() ?? null,
+            },
+          ];
+        }
+        // A connected account: its webhooks, and its access's expiry, each as their own issue.
+        const issues: WhatsAppAccessIssue[] = [];
+        if (r.webhooksMissingSince) {
+          issues.push({
+            ...base,
+            kind: 'webhooks',
+            reason: null,
+            since: r.webhooksMissingSince.toISOString(),
+          });
+        }
+        if (r.expiresAt && r.expiresAt <= soon) {
+          issues.push({
+            ...base,
+            kind: r.expiresAt <= now ? 'expired' : 'expiring',
+            reason: null,
+            since: null,
+          });
+        }
+        return issues;
+      });
     },
   };
 }
@@ -793,4 +956,43 @@ export async function processChannelOnboarding(
     return 'active';
   }
   return 'skipped';
+}
+
+/**
+ * Sweep: ends a number's setup whose job ran out of retries (ADR-111). A number still in setup
+ * fails with the step it stopped at, so the company can retry the setup (a failed number takes no
+ * slot of the plan meanwhile). Setup is never repeated automatically: Meta counts registration
+ * attempts towards a limit. False when nothing was left to end.
+ */
+export async function settleChannelOnboarding(
+  tx: Tx,
+  tenantId: string,
+  channelAccountId: string,
+): Promise<boolean> {
+  const [row] = await tx
+    .select({ status: channelAccounts.status, step: channelAccounts.onboardingStep })
+    .from(channelAccounts)
+    .where(and(eq(channelAccounts.tenantId, tenantId), eq(channelAccounts.id, channelAccountId)))
+    .for('update');
+  if (!row || row.status !== 'onboarding') return false;
+  const step = row.step ?? 'subscribe_app';
+  await tx
+    .update(channelAccounts)
+    .set({
+      status: 'failed',
+      onboardingError: `Setup stopped at ${step}: Meta could not be reached after repeated attempts. Retry setup.`,
+    })
+    .where(and(eq(channelAccounts.tenantId, tenantId), eq(channelAccounts.id, channelAccountId)));
+  await recordSystemAudit(tx, tenantId, {
+    action: 'channel.setup_failed',
+    subjectType: 'channel',
+    subjectId: channelAccountId,
+    result: 'failure',
+    metadata: { step, code: null, kind: 'retries_exhausted' },
+  });
+  await emitTenantEvent(tx, tenantId, {
+    type: 'channel.updated',
+    payload: { channelAccountId },
+  });
+  return true;
 }

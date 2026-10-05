@@ -20,6 +20,13 @@ const baseSchema = z.object({
   W360_ENCRYPTION_KEYS: z.string().min(1),
   W360_ENCRYPTION_PRIMARY_KEY_ID: z.string().min(1),
   W360_JOB_SIGNING_KEY: secret(),
+  /**
+   * Rotating the job signing key, one rotation at a time (ADR-135). NEXT: a key whose signatures
+   * are accepted before any instance signs with it. PREVIOUS: the key being retired, still accepted
+   * while the worker signs the queued jobs it signed again with W360_JOB_SIGNING_KEY.
+   */
+  W360_JOB_SIGNING_KEY_NEXT: secret().optional(),
+  W360_JOB_SIGNING_KEY_PREVIOUS: secret().optional(),
   EMAIL_FROM: z.string().min(3).default('HyFib W360 <no-reply@localhost>'),
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().int().optional(),
@@ -157,6 +164,24 @@ function parse<T extends z.ZodType>(schema: T, env: NodeJS.ProcessEnv): z.infer<
   return result.data;
 }
 
+/** One job signing key rotation at a time, with keys that differ (ADR-135). */
+function assertJobSigningKeys(config: BaseConfig): void {
+  const key = config.W360_JOB_SIGNING_KEY;
+  const next = config.W360_JOB_SIGNING_KEY_NEXT;
+  const previous = config.W360_JOB_SIGNING_KEY_PREVIOUS;
+  const problems: string[] = [];
+  if (next !== undefined && previous !== undefined)
+    problems.push(
+      'W360_JOB_SIGNING_KEY_NEXT and W360_JOB_SIGNING_KEY_PREVIOUS cannot both be set (one rotation at a time)',
+    );
+  if (next === key)
+    problems.push('W360_JOB_SIGNING_KEY_NEXT must differ from W360_JOB_SIGNING_KEY');
+  if (previous === key)
+    problems.push('W360_JOB_SIGNING_KEY_PREVIOUS must differ from W360_JOB_SIGNING_KEY');
+  if (problems.length)
+    throw new ConfigError(`Invalid configuration:\n  - ${problems.join('\n  - ')}`);
+}
+
 /** Production safety rules that cannot be expressed per-field. */
 function isLoopbackUrl(value: string): boolean {
   const host = new URL(value).hostname;
@@ -198,6 +223,8 @@ function assertProductionSafety(config: BaseConfig & { BETTER_AUTH_SECRET?: stri
   const weak = /(changeme|dev-only|example|insecure)/i;
   for (const [key, value] of Object.entries({
     W360_JOB_SIGNING_KEY: config.W360_JOB_SIGNING_KEY,
+    W360_JOB_SIGNING_KEY_NEXT: config.W360_JOB_SIGNING_KEY_NEXT,
+    W360_JOB_SIGNING_KEY_PREVIOUS: config.W360_JOB_SIGNING_KEY_PREVIOUS,
     BETTER_AUTH_SECRET: config.BETTER_AUTH_SECRET,
     W360_ENCRYPTION_KEYS: config.W360_ENCRYPTION_KEYS,
   })) {
@@ -210,12 +237,14 @@ function assertProductionSafety(config: BaseConfig & { BETTER_AUTH_SECRET?: stri
 
 export function loadWebConfig(env: NodeJS.ProcessEnv = process.env): WebConfig {
   const config = parse(webSchema, env);
+  assertJobSigningKeys(config);
   assertProductionSafety(config);
   return config;
 }
 
 export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
   const config = parse(workerSchema, env);
+  assertJobSigningKeys(config);
   assertProductionSafety(config);
   return config;
 }

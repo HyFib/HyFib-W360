@@ -7,6 +7,7 @@ import { isAppError, uuidv7 } from '@w360/core';
 import { sql, systemScope } from '@w360/db';
 import {
   alertFailures,
+  alertIntegrationFailures,
   alertLateQueues,
   checkQueueWaits,
   createPlatformOpsService,
@@ -43,6 +44,8 @@ const ops = () =>
     platformDb: fx.dbs.platform,
     queues: pgBossQueueInspector(fx.boss),
     clock: { now: () => new Date() },
+    keyring: fx.keyring,
+    jobSigning: fx.signer,
   });
 
 async function expectCode(promise: Promise<unknown>, code: string) {
@@ -1170,5 +1173,502 @@ describe('queue waits and late queues (ADR-096)', () => {
         JSON.stringify(bad),
       ).rejects.toThrow(/violates check constraint/);
     }
+  });
+});
+
+describe('alerts for companies’ failing integrations (ADR-139)', () => {
+  const alert = () =>
+    alertIntegrationFailures({
+      db: fx.dbs.app,
+      outbox: { keyring: fx.keyring, jobs: fx.jobs(), signer: fx.signer },
+      appBaseUrl: 'https://app.w360.test',
+    });
+  /** The next alert is allowed now, as if the last one went out over 15 minutes ago. */
+  const allowNextAlert = () =>
+    fx.query(
+      `UPDATE ops.platform_alerts SET last_sent_at = now() - interval '16 minutes'
+        WHERE kind = 'integrations'`,
+    );
+  async function platformOwner() {
+    const user = await createUser(fx.dbs, { twoFactor: true });
+    await fx.dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_owner')`,
+      [user.id],
+    );
+    return user;
+  }
+  async function alertsTo(email: string) {
+    const rows = await fx.query<{
+      id: string;
+      tenant_id: string | null;
+      payload_ciphertext: string;
+    }>(
+      `SELECT id, tenant_id, payload_ciphertext FROM ops.email_outbox
+        WHERE to_address = $1 AND kind = 'platform.notice' ORDER BY created_at, id`,
+      [email],
+    );
+    return rows.map((r) => ({
+      tenantId: r.tenant_id,
+      payload: JSON.parse(fx.keyring.decryptString(r.payload_ciphertext, outboxAad(r.id))) as {
+        subject: string;
+        lines: string[];
+        url: string;
+      },
+    }));
+  }
+  /** The states staff were emailed about, by subject. */
+  async function told(ids: string[]) {
+    const rows = await fx.query<{ subject_id: string; state: string }>(
+      `SELECT subject_id, state FROM ops.integration_alerts
+        WHERE subject_id = ANY($1::uuid[]) ORDER BY subject_id, state`,
+      [ids],
+    );
+    return rows.reduce<Record<string, string[]>>(
+      (all, r) => ({ ...all, [r.subject_id]: [...(all[r.subject_id] ?? []), r.state] }),
+      {},
+    );
+  }
+  async function failingEndpoint() {
+    const id = uuidv7();
+    await fx.query(
+      `INSERT INTO app.webhook_endpoints (id, tenant_id, url, event_types, secret_ciphertext,
+         created_by_user_id, failing_since, last_failure_at)
+       VALUES ($1, $2, 'https://alerts.example.com/hook', ARRAY['message.received'], 'sealed', $3,
+         now() - interval '1 hour', now())`,
+      [id, company.tenant.id, company.owner.id],
+    );
+    return id;
+  }
+
+  it('emails every platform administrator once about each failing integration, with counts only', async () => {
+    const admin = await platformOwner();
+    // The console lists the company's failing endpoint and the number that needs reconnecting.
+    const listed = (await ops().integrations(staff)).failures.filter(
+      (f) => f.tenantId === company.tenant.id,
+    );
+    const endpoint = listed.find((f) => f.source === 'webhook_endpoint' && f.state === 'failing');
+    const number = listed.find((f) => f.source === 'whatsapp_number');
+    expect(endpoint).toBeDefined();
+    expect(number).toMatchObject({ state: 'needs_reconnect', label: '+91 90000 11111' });
+    await allowNextAlert();
+    const sent = await alert();
+    // Failures other test files left count too: at least these two.
+    expect(sent.alerted).toBeGreaterThanOrEqual(2);
+    expect(sent.recipients).toBeGreaterThanOrEqual(1);
+    // Every failure of the company that the console lists is told, by its state: one rule for both.
+    expect(await told(listed.map((f) => f.subjectId))).toEqual(
+      Object.fromEntries(listed.map((f) => [f.subjectId, [f.state]])),
+    );
+    const [sentAt] = await fx.query<{ at: Date }>(
+      `SELECT last_sent_at AS at FROM ops.platform_alerts WHERE kind = 'integrations'`,
+    );
+    expect((await ops().integrations(staff)).lastIntegrationAlertAt).toEqual(sentAt!.at);
+    const emails = await alertsTo(admin.email);
+    expect(emails).toHaveLength(1);
+    expect(emails[0]!.tenantId).toBeNull();
+    const { subject, lines, url } = emails[0]!.payload;
+    expect(subject).toMatch(/^\d+ company integrations are failing$/);
+    expect(url).toBe('https://app.w360.test/platform/ops/integrations');
+    expect(lines[0]).toContain('Webhook endpoint, failing');
+    expect(lines[0]).toContain('WhatsApp number, needs reconnecting');
+    // Counts only: no company, label, host, error or id.
+    const text = JSON.stringify(emails[0]!.payload).toLowerCase();
+    for (const secret of [
+      company.tenant.id,
+      company.tenant.slug,
+      SECRET_TOKEN,
+      'hooks.example.com',
+      '+91 90000 11111',
+      'meta rejected the stored token',
+      endpoint!.subjectId,
+    ]) {
+      expect(text).not.toContain(secret.toLowerCase());
+    }
+
+    // Told once: a new failure goes out in the next alert, and the earlier marks stay as they were.
+    const marks = () =>
+      fx.query<{ subject_id: string; alerted_at: Date }>(
+        `SELECT subject_id, alerted_at FROM ops.integration_alerts
+          WHERE subject_id = ANY($1::uuid[]) ORDER BY subject_id, state`,
+        [[endpoint!.subjectId, number!.subjectId]],
+      );
+    const before = await marks();
+    const fresh = await failingEndpoint();
+    await allowNextAlert();
+    expect((await alert()).alerted).toBeGreaterThanOrEqual(1);
+    expect(await told([fresh])).toEqual({ [fresh]: ['failing'] });
+    expect(await marks()).toEqual(before);
+    const again = await alertsTo(admin.email);
+    expect(again).toHaveLength(2);
+    expect(again[1]!.payload.lines[0]).toContain('Webhook endpoint, failing');
+  });
+
+  it('sends at most one alert every 15 minutes, and two sweeps at once send one', async () => {
+    const admin = await platformOwner();
+    const first = await failingEndpoint();
+    await allowNextAlert();
+    await Promise.all([alert(), alert()]);
+    expect(await alertsTo(admin.email)).toHaveLength(1);
+    expect(await told([first])).toEqual({ [first]: ['failing'] });
+    // Too soon after that alert: a new failure waits, not marked.
+    const second = await failingEndpoint();
+    expect((await alert()).alerted).toBe(0);
+    expect(await told([second])).toEqual({});
+    expect(await alertsTo(admin.email)).toHaveLength(1);
+    // Once 15 minutes have passed, it goes out in the next alert.
+    await allowNextAlert();
+    expect((await alert()).alerted).toBeGreaterThanOrEqual(1);
+    expect(await told([second])).toEqual({ [second]: ['failing'] });
+    expect(await alertsTo(admin.email)).toHaveLength(2);
+  });
+
+  it('forgets a failure the console has not listed for an hour, so a later one is told again', async () => {
+    const id = await failingEndpoint();
+    const mark = async () =>
+      (
+        await fx.query<{ alerted_at: Date; listed_at: Date }>(
+          `SELECT alerted_at, listed_at FROM ops.integration_alerts WHERE subject_id = $1`,
+          [id],
+        )
+      )[0];
+    const recover = () =>
+      fx.query(`UPDATE app.webhook_endpoints SET failing_since = NULL WHERE id = $1`, [id]);
+    const fail = () =>
+      fx.query(`UPDATE app.webhook_endpoints SET failing_since = now() WHERE id = $1`, [id]);
+    const unlistedForAnHour = () =>
+      fx.query(
+        `UPDATE ops.integration_alerts SET listed_at = now() - interval '61 minutes'
+          WHERE subject_id = $1`,
+        [id],
+      );
+    await allowNextAlert();
+    await alert();
+    const first = await mark();
+    expect(first).toBeDefined();
+    // It recovers and fails again within the hour: the same failure, not told again.
+    await recover();
+    await alert();
+    expect(await mark()).toEqual(first);
+    await fail();
+    await allowNextAlert();
+    await alert();
+    expect((await mark())?.alerted_at).toEqual(first!.alerted_at);
+    // Not listed for an hour: forgotten at the next check, and told again once it fails.
+    await recover();
+    await unlistedForAnHour();
+    await alert();
+    expect(await mark()).toBeUndefined();
+    await fail();
+    await allowNextAlert();
+    await alert();
+    const second = await mark();
+    expect(second!.alerted_at.getTime()).toBeGreaterThan(first!.alerted_at.getTime());
+    // Still listed: the check finds it before it forgets, however old its mark.
+    await unlistedForAnHour();
+    await alert();
+    const kept = await mark();
+    expect(kept!.alerted_at).toEqual(second!.alerted_at);
+    expect(kept!.listed_at.getTime()).toBeGreaterThan(Date.now() - 60_000);
+  });
+
+  it('tells a failure again when its state changes', async () => {
+    const id = await failingEndpoint();
+    await allowNextAlert();
+    await alert();
+    expect(await told([id])).toEqual({ [id]: ['failing'] });
+    // Turned off for failing: a new state of the same integration.
+    await fx.query(
+      `UPDATE app.webhook_endpoints SET state = 'disabled', disabled_reason = 'failing',
+         disabled_at = now() WHERE id = $1`,
+      [id],
+    );
+    await allowNextAlert();
+    await alert();
+    expect(await told([id])).toEqual({ [id]: ['disabled', 'failing'] });
+  });
+
+  it('keeps the shared list and the marks to the definer functions, and the alert to the worker', async () => {
+    for (const pool of [fx.dbs.appPool, fx.dbs.platformPool]) {
+      await expect(pool.query(`SELECT * FROM ops.integration_failures()`)).rejects.toThrow(
+        /permission denied for function/,
+      );
+      await expect(pool.query(`SELECT * FROM ops.integration_alerts`)).rejects.toThrow(
+        /permission denied for table/,
+      );
+    }
+    for (const fn of ['ops.integration_alerts_due()', 'ops.mark_integration_alert()']) {
+      await expect(fx.dbs.platformPool.query(`SELECT * FROM ${fn}`)).rejects.toThrow(
+        /permission denied for function/,
+      );
+    }
+  });
+});
+
+describe('acknowledging companies’ failing integrations (ADR-141)', () => {
+  async function failingEndpoint() {
+    const id = uuidv7();
+    await fx.query(
+      `INSERT INTO app.webhook_endpoints (id, tenant_id, url, event_types, secret_ciphertext,
+         created_by_user_id, failing_since, last_failure_at)
+       VALUES ($1, $2, 'https://acks.example.com/hook', ARRAY['message.received'], 'sealed', $3,
+         now() - interval '1 hour', now())`,
+      [id, company.tenant.id, company.owner.id],
+    );
+    return id;
+  }
+  async function namedStaff(name: string): Promise<PlatformActor> {
+    const user = await createUser(fx.dbs, { twoFactor: true, name });
+    await fx.dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_operator')`,
+      [user.id],
+    );
+    return { userId: user.id, role: 'platform_operator', correlationId: uuidv7() };
+  }
+  const listed = async (id: string) =>
+    (await ops().integrations(staff)).failures.find((f) => f.subjectId === id);
+  const acknowledge = (actor: PlatformActor, subjectId: string, note: string, state = 'failing') =>
+    ops().acknowledgeFailure(actor, { source: 'webhook_endpoint', subjectId, state, note });
+  /** The minute sweep's check (ADR-139), which keeps and forgets acknowledgements too. */
+  const check = () =>
+    fx.dbs.app.run(systemScope, (tx) => tx.execute(sql`select ops.integration_alerts_due()`));
+  const stored = (id: string) =>
+    fx.query<{ note: string; listed_at: Date }>(
+      `SELECT note, listed_at FROM ops.integration_acknowledgements WHERE subject_id = $1`,
+      [id],
+    );
+
+  it('records who took a listed failure and their note; another administrator replaces it; each is audited', async () => {
+    const id = await failingEndpoint();
+    expect((await listed(id))?.acknowledgement).toBeNull();
+    const asha = await namedStaff('Asha Ops');
+    await acknowledge(asha, id, '  Asked the company to fix their receiver.  ');
+    const first = (await listed(id))!.acknowledgement!;
+    expect(first).toMatchObject({
+      byName: 'Asha Ops',
+      note: 'Asked the company to fix their receiver.',
+    });
+    expect(Date.now() - first.at.getTime()).toBeLessThan(60_000);
+    await fx.query(
+      `UPDATE ops.integration_acknowledgements
+          SET acknowledged_at = acknowledged_at - interval '1 hour' WHERE subject_id = $1`,
+      [id],
+    );
+
+    const ravi = await namedStaff('Ravi Ops');
+    await acknowledge(ravi, id, 'Their receiver is back; watching the retries.');
+    const second = (await listed(id))!.acknowledgement!;
+    expect(second).toMatchObject({
+      byName: 'Ravi Ops',
+      note: 'Their receiver is back; watching the retries.',
+    });
+    expect(Date.now() - second.at.getTime()).toBeLessThan(60_000);
+    expect(await stored(id)).toHaveLength(1);
+
+    const audited = await fx.query<{
+      actor_user_id: string;
+      reason: string;
+      target_tenant_id: string;
+      metadata: unknown;
+      correlation_id: string;
+    }>(
+      `SELECT actor_user_id, reason, target_tenant_id, metadata, correlation_id
+         FROM ops.platform_audit_events
+        WHERE action = 'platform.integration_failure_acknowledged' AND metadata->>'subjectId' = $1
+        ORDER BY occurred_at, id`,
+      [id],
+    );
+    expect(audited.map((a) => [a.actor_user_id, a.reason, a.correlation_id])).toEqual([
+      [asha.userId, 'Asked the company to fix their receiver.', asha.correlationId],
+      [ravi.userId, 'Their receiver is back; watching the retries.', ravi.correlationId],
+    ]);
+    expect(audited[0]!.target_tenant_id).toBe(company.tenant.id);
+    expect(audited[0]!.metadata).toEqual({
+      source: 'webhook_endpoint',
+      subjectId: id,
+      state: 'failing',
+    });
+  });
+
+  it('refuses a failure not listed in that state, a note out of bounds and anyone who is not an administrator', async () => {
+    const id = await failingEndpoint();
+    await expectCode(
+      acknowledge(staff, id, 'Looking into it with the company.', 'disabled'),
+      'not_found',
+    );
+    await expectCode(
+      acknowledge(staff, uuidv7(), 'Looking into it with the company.'),
+      'not_found',
+    );
+    await expectCode(acknowledge(staff, id, 'Too short'), 'validation_failed');
+    await expectCode(acknowledge(staff, id, '      Too short      '), 'validation_failed');
+    await expectCode(acknowledge(staff, id, 'x'.repeat(501)), 'validation_failed');
+    // The function checks the note itself too, whatever calls it, and trims it.
+    const direct = (subjectId: string, note: string) =>
+      fx.dbs.platform.run(staff.userId, (tx) =>
+        tx.execute(
+          sql`select ops.platform_acknowledge_integration_failure('webhook_endpoint', ${subjectId}::uuid, 'failing', ${note}, 'c')`,
+        ),
+      );
+    await expectCode(direct(id, '   short   '), 'precondition_failed');
+    await expectCode(direct(id, 'x'.repeat(501)), 'precondition_failed');
+    const other = await failingEndpoint();
+    await direct(other, '   Noted straight in SQL.   ');
+    expect((await stored(other)).map((a) => a.note)).toEqual(['Noted straight in SQL.']);
+    const [audit] = await fx.query<{ reason: string }>(
+      `SELECT reason FROM ops.platform_audit_events
+        WHERE action = 'platform.integration_failure_acknowledged' AND metadata->>'subjectId' = $1`,
+      [other],
+    );
+    expect(audit!.reason).toBe('Noted straight in SQL.');
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    await expectCode(
+      acknowledge(
+        { userId: outsider.id, role: 'platform_operator', correlationId: uuidv7() },
+        id,
+        'Looking into it with the company.',
+      ),
+      'forbidden',
+    );
+    // Once it recovers, it can no longer be acknowledged.
+    await fx.query(`UPDATE app.webhook_endpoints SET failing_since = NULL WHERE id = $1`, [id]);
+    await expectCode(acknowledge(staff, id, 'Looking into it with the company.'), 'not_found');
+    expect(await stored(id)).toEqual([]);
+  });
+
+  it('keeps an acknowledgement while the failure is listed and forgets it an hour after, so a later failure starts without one', async () => {
+    const id = await failingEndpoint();
+    await acknowledge(staff, id, 'Asked the company to fix their receiver.');
+    const lastListed = (minutesAgo: number) =>
+      fx.query(
+        `UPDATE ops.integration_acknowledgements
+            SET listed_at = now() - make_interval(mins => $2) WHERE subject_id = $1`,
+        [id, minutesAgo],
+      );
+    // Still listed: the check finds it before it forgets, however old its mark.
+    await lastListed(120);
+    await check();
+    expect(Date.now() - (await stored(id))[0]!.listed_at.getTime()).toBeLessThan(60_000);
+    // Recovered: kept within the hour, forgotten after it.
+    await fx.query(`UPDATE app.webhook_endpoints SET failing_since = NULL WHERE id = $1`, [id]);
+    await lastListed(59);
+    await check();
+    expect(await stored(id)).toHaveLength(1);
+    // Back within the hour: listed with its acknowledgement.
+    await fx.query(`UPDATE app.webhook_endpoints SET failing_since = now() WHERE id = $1`, [id]);
+    expect((await listed(id))?.acknowledgement?.note).toBe(
+      'Asked the company to fix their receiver.',
+    );
+    await fx.query(`UPDATE app.webhook_endpoints SET failing_since = NULL WHERE id = $1`, [id]);
+    await lastListed(61);
+    await check();
+    expect(await stored(id)).toEqual([]);
+    // It fails again later: listed without an acknowledgement.
+    await fx.query(`UPDATE app.webhook_endpoints SET failing_since = now() WHERE id = $1`, [id]);
+    expect((await listed(id))?.acknowledgement).toBeNull();
+  });
+
+  it('still counts only the failures staff were not told of, as the check did before 0107', async () => {
+    const id = await failingEndpoint();
+    const due = async () => Number((await check()).rows[0]?.integration_alerts_due);
+    const before = await due();
+    expect(before).toBeGreaterThanOrEqual(1);
+    // Told (ADR-139): no longer counted.
+    await fx.query(
+      `INSERT INTO ops.integration_alerts (source, subject_id, state, alerted_at, listed_at)
+       VALUES ('webhook_endpoint', $1, 'failing', now(), now())`,
+      [id],
+    );
+    expect(await due()).toBe(before - 1);
+  });
+
+  it('starts a new state of the same integration without an acknowledgement', async () => {
+    const id = await failingEndpoint();
+    await acknowledge(staff, id, 'Asked the company to fix their receiver.');
+    await fx.query(
+      `UPDATE app.webhook_endpoints SET state = 'disabled', disabled_reason = 'failing',
+         disabled_at = now() WHERE id = $1`,
+      [id],
+    );
+    expect(await listed(id)).toMatchObject({ state: 'disabled', acknowledgement: null });
+    await acknowledge(
+      staff,
+      id,
+      'Turned off: the company is moving to a new receiver.',
+      'disabled',
+    );
+    expect((await listed(id))?.acknowledgement?.note).toBe(
+      'Turned off: the company is moving to a new receiver.',
+    );
+    // The failing state is no longer listed: forgotten an hour after, as the integration's other
+    // state is listed.
+    await fx.query(
+      `UPDATE ops.integration_acknowledgements SET listed_at = now() - interval '61 minutes'
+        WHERE subject_id = $1 AND state = 'failing'`,
+      [id],
+    );
+    await check();
+    const states = await fx.query<{ state: string }>(
+      `SELECT state FROM ops.integration_acknowledgements WHERE subject_id = $1`,
+      [id],
+    );
+    expect(states.map((a) => a.state)).toEqual(['disabled']);
+  });
+
+  it('gives the console the times the definer functions return, not null or the epoch', async () => {
+    // Found while building ADR-141: drizzle hands raw query results over as text, and the console
+    // dropped every time it read from a definer function.
+    const id = await failingEndpoint();
+    const [endpoint] = await fx.query<{ failing_since: Date }>(
+      `SELECT failing_since FROM app.webhook_endpoints WHERE id = $1`,
+      [id],
+    );
+    expect((await listed(id))?.since).toEqual(endpoint!.failing_since);
+    const [tenant] = await fx.query<{ created_at: Date }>(
+      `SELECT created_at FROM app.tenants WHERE id = $1`,
+      [company.tenant.id],
+    );
+    const health = await ops().companyHealth(staff, company.tenant.id);
+    expect(health!.health.facts.createdAt).toEqual(tenant!.created_at);
+    expect(health!.health.facts.qualityCheckedAt).toBeInstanceOf(Date);
+  });
+
+  it('keeps acknowledgements to the definer functions and the acknowledging to platform staff', async () => {
+    for (const pool of [fx.dbs.appPool, fx.dbs.platformPool]) {
+      await expect(pool.query(`SELECT * FROM ops.integration_acknowledgements`)).rejects.toThrow(
+        /permission denied for table/,
+      );
+    }
+    await expect(
+      fx.dbs.appPool.query(
+        `SELECT ops.platform_acknowledge_integration_failure('webhook_endpoint', gen_random_uuid(), 'failing', 'Looking into it.', 'c')`,
+      ),
+    ).rejects.toThrow(/permission denied for function/);
+    const functions = await fx.query<{
+      fn: string;
+      owner: string;
+      definer: boolean;
+      config: unknown;
+    }>(
+      `SELECT p.oid::regprocedure::text AS fn, pg_get_userbyid(p.proowner) AS owner,
+              p.prosecdef AS definer, p.proconfig AS config
+         FROM pg_proc p
+        WHERE p.oid IN (
+          'ops.platform_acknowledge_integration_failure(text,uuid,text,text,text)'::regprocedure,
+          'ops.platform_ops_integration_failures(integer)'::regprocedure,
+          'ops.integration_alerts_due()'::regprocedure)
+        ORDER BY 1`,
+    );
+    expect(functions).toEqual(
+      [
+        'ops.integration_alerts_due()',
+        'ops.platform_acknowledge_integration_failure(text,uuid,text,text,text)',
+        'ops.platform_ops_integration_failures(integer)',
+      ].map((fn) => ({
+        fn,
+        owner: 'w360_definer',
+        definer: true,
+        config: ['search_path=pg_catalog, pg_temp'],
+      })),
+    );
   });
 });

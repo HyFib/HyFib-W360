@@ -511,6 +511,20 @@ describe('template sends', () => {
     expect(contacts[0]!.n).toBe(1);
   });
 
+  it("clips the conversation's preview of a template without splitting an emoji (ADR-133)", async () => {
+    // "Hi " and 196 characters put the emoji's two halves at the 200th and 201st code units.
+    const contactId = await newContact('+919855500077');
+    await send('agent', contactId, utilityId, {
+      header: ['A-2003'],
+      body: [`${'x'.repeat(196)}😀`, 'A-2003'],
+    });
+    const [conv] = await fx.query<{ last_message_preview: string }>(
+      'SELECT last_message_preview FROM app.conversations WHERE tenant_id = $1 AND contact_id = $2',
+      [c.tenant.id, contactId],
+    );
+    expect(conv!.last_message_preview).toBe(`Hi ${'x'.repeat(196)}`);
+  });
+
   it('requires campaign permission and a marketing opt-in for marketing templates', async () => {
     const contactId = await newContact('+919855500002');
     await expectAppError(send('agent', contactId, promoId, { body: ['Asha'] }), 'forbidden');

@@ -1,12 +1,65 @@
 import type { z } from 'zod';
-import { AppError } from '@w360/core';
+import { AppError, NUL } from '@w360/core';
 
-/** Parses untrusted input with a zod schema, turning failures into a typed validation error. */
+/** What text holding the NUL character is told (ADR-124, ADR-130). */
+export const NUL_CHARACTER_MESSAGE = 'Text cannot hold the NUL character (U+0000).';
+
+/** One value of an input and how it was reached, for naming it without copying paths. */
+interface Step {
+  value: unknown;
+  key: string | null;
+  up: Step | null;
+}
+
+/** A name or key as an issue path writes it: with the NUL character written out as `\u0000`. */
+export const writtenKey = (part: string) => part.replaceAll(NUL, '\\u0000');
+
+function pathOf(step: Step): string {
+  const keys: string[] = [];
+  for (let at: Step | null = step; at; at = at.up)
+    if (at.key !== null) keys.push(writtenKey(at.key));
+  return keys.reverse().join('.');
+}
+
+/**
+ * Where `value` holds the NUL character (U+0000), which PostgreSQL text cannot store, or null: the
+ * path validation issues use (`contacts.1.name`; empty for the value itself), in the value's order.
+ * Walked without recursion, so no nesting exhausts the stack.
+ */
+export function nulCharacterPathIn(value: unknown): string | null {
+  const stack: Step[] = [{ value, key: null, up: null }];
+  for (let step = stack.pop(); step; step = stack.pop()) {
+    if (step.key?.includes(NUL)) return pathOf(step);
+    const at = step.value;
+    if (typeof at === 'string') {
+      if (at.includes(NUL)) return pathOf(step);
+    } else if (typeof at === 'object' && at !== null) {
+      const entries = Array.isArray(at)
+        ? at.map((item, i) => [String(i), item] as const)
+        : Object.entries(at);
+      // Pushed last to first, so the first is read first.
+      for (const [key, item] of entries.reverse()) stack.push({ value: item, key, up: step });
+    }
+  }
+  return null;
+}
+
+/**
+ * Parses untrusted input with a zod schema, turning failures into a typed validation error. What
+ * the schema keeps is refused when it holds the NUL character (ADR-130), naming where: PostgreSQL
+ * text cannot store it, so it would otherwise fail in the database as an internal error.
+ */
 export function parseInput<T extends z.ZodType>(schema: T, input: unknown): z.infer<T> {
   const result = schema.safeParse(input);
   if (!result.success) {
     throw new AppError('validation_failed', result.error.issues[0]?.message ?? 'Invalid input', {
       issues: result.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
+    });
+  }
+  const path = nulCharacterPathIn(result.data);
+  if (path !== null) {
+    throw new AppError('validation_failed', NUL_CHARACTER_MESSAGE, {
+      issues: [{ path, message: NUL_CHARACTER_MESSAGE }],
     });
   }
   return result.data;

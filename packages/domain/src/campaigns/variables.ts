@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { clipText } from '@w360/core';
 import { TEMPLATE_LIMITS, type TemplateParams } from '../templates/definition';
 
 /**
@@ -83,13 +84,13 @@ export function resolveVariables(
   for (const [i, source] of variables.header.entries()) {
     const text = resolveOne(source, contact);
     if (!text) return { ok: false, missing: `header.${i + 1}` };
-    header.push(text.slice(0, TEMPLATE_LIMITS.parameterValue));
+    header.push(clipText(text, TEMPLATE_LIMITS.parameterValue));
   }
   const body: string[] = [];
   for (const [i, source] of variables.body.entries()) {
     const text = resolveOne(source, contact);
     if (!text) return { ok: false, missing: `body.${i + 1}` };
-    body.push(text.slice(0, TEMPLATE_LIMITS.parameterValue));
+    body.push(clipText(text, TEMPLATE_LIMITS.parameterValue));
   }
   return { ok: true, params: { header, body } };
 }

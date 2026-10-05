@@ -1,4 +1,5 @@
-import { integer, jsonb, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { jsonb } from './columns';
 import { appSchema } from './tenancy';
 
 const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
@@ -26,6 +27,51 @@ export const WEBHOOK_EVENT_TYPES = [
 ] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
 
+/** The statuses a `message.status` event carries, which an endpoint can choose (ADR-119). */
+export type WebhookMessageStatus =
+  'accepted' | 'sent' | 'delivered' | 'read' | 'played' | 'failed' | 'canceled' | 'unknown_outcome';
+
+/**
+ * The parts of a contact whose change a `contact.updated` endpoint can choose (ADR-123); `fields`
+ * is a change of any custom field.
+ */
+export type WebhookContactPart = 'name' | 'phone' | 'email' | 'tags' | 'fields';
+
+/** The statuses a `campaign.status_changed` event reports, which an endpoint can choose (ADR-146). */
+export type WebhookCampaignStatus =
+  'draft' | 'pending_approval' | 'scheduled' | 'running' | 'paused' | 'completed' | 'canceled';
+
+/**
+ * The statuses an `order.status_changed` event reports, which an endpoint can choose (ADR-147); an
+ * order is `received` only when it is recorded, which `order.received` reports.
+ */
+export type WebhookOrderStatus =
+  'confirmed' | 'awaiting_payment' | 'paid' | 'fulfilled' | 'cancelled';
+
+/**
+ * The statuses a `template.status_changed` event reports, which an endpoint can choose (ADR-148):
+ * Meta's review states and the deletion; HyFib's own steps before Meta has the template, a
+ * deletion under way or refused and an unrecognised status are not sent.
+ */
+export type WebhookTemplateStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'paused'
+  | 'disabled'
+  | 'in_appeal'
+  | 'flagged'
+  | 'archived'
+  | 'deleted'
+  | 'limit_exceeded'
+  | 'locked';
+
+/**
+ * The statuses a `conversation.status_changed` change reaches, which an endpoint can choose
+ * (ADR-149); nothing sets a conversation `pending` (ADR-075).
+ */
+export type WebhookConversationStatus = 'open' | 'resolved';
+
 export const WEBHOOK_DELIVERY_STATES = ['pending', 'delivering', 'succeeded', 'failed'] as const;
 export type WebhookDeliveryState = (typeof WEBHOOK_DELIVERY_STATES)[number];
 
@@ -40,6 +86,45 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   secretVersion: integer('secret_version').notNull().default(1),
   previousSecretCiphertext: text('previous_secret_ciphertext'),
   previousSecretExpiresAt: tz('previous_secret_expires_at'),
+  /** The names of the endpoint's own headers, as written (ADR-118); their values are only sealed. */
+  headerNames: text('header_names').array().notNull().default([]),
+  /** The headers, names and values, encrypted by the keyring; null without headers. */
+  headersCiphertext: text('headers_ciphertext'),
+  /**
+   * The `message.status` statuses the endpoint takes (ADR-119); null takes every status. Set only
+   * while `message.status` is among its events.
+   */
+  messageStatuses: text('message_statuses').array().$type<WebhookMessageStatus[]>(),
+  /**
+   * The parts of a contact whose change it takes as `contact.updated` (ADR-123); null takes every
+   * change. Set only while `contact.updated` is among its events.
+   */
+  contactParts: text('contact_parts').array().$type<WebhookContactPart[]>(),
+  /**
+   * The automations whose runs it takes as `automation.run_started` and `automation.run_ended`
+   * (ADR-145); null takes every automation. Set only while one of those is among its events.
+   */
+  automationIds: uuid('automation_ids').array(),
+  /**
+   * The statuses a campaign reaches that it takes as `campaign.status_changed` (ADR-146); null
+   * takes every status. Set only while `campaign.status_changed` is among its events.
+   */
+  campaignStatuses: text('campaign_statuses').array().$type<WebhookCampaignStatus[]>(),
+  /**
+   * The statuses an order reaches that it takes as `order.status_changed` (ADR-147); null takes
+   * every status. Set only while `order.status_changed` is among its events.
+   */
+  orderStatuses: text('order_statuses').array().$type<WebhookOrderStatus[]>(),
+  /**
+   * The template statuses it takes as `template.status_changed` (ADR-148); null takes every status.
+   * Set only while `template.status_changed` is among its events.
+   */
+  templateStatuses: text('template_statuses').array().$type<WebhookTemplateStatus[]>(),
+  /**
+   * The statuses a conversation reaches that it takes as `conversation.status_changed` (ADR-149);
+   * null takes every status. Set only while `conversation.status_changed` is among its events.
+   */
+  conversationStatuses: text('conversation_statuses').array().$type<WebhookConversationStatus[]>(),
   state: text('state', { enum: ['active', 'disabled'] })
     .notNull()
     .default('active'),
@@ -69,6 +154,8 @@ export const webhookEvents = appSchema.table('webhook_events', {
   templateId: uuid('template_id'),
   status: text('status'),
   detail: jsonb('detail').notNull().$type<Record<string, unknown>>(),
+  /** What a contact.updated event's transaction changed (ADR-121); null for other events. */
+  contactChanges: text('contact_changes').array(),
   occurredAt: tz('occurred_at').notNull().defaultNow(),
   createdAt: tz('created_at').notNull().defaultNow(),
 });

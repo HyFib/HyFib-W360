@@ -26,7 +26,7 @@ import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { WEBHOOK_LIMITS, webhookHost, webhookRetryDelaySeconds } from './model';
 import { buildWebhookPayload, WebhookEventGoneError } from './payloads';
-import { failPendingDeliveries, webhookSecretAad } from './service';
+import { failPendingDeliveries, openWebhookHeaders, webhookSecretAad } from './service';
 import { webhookSignatureHeader } from './signing';
 
 /**
@@ -92,8 +92,11 @@ interface UnpreparedDelivery {
   deliveryId: string;
   endpointId: string;
   eventType: string;
-  /** What failed: building the payload, or signing it with the endpoint's secrets. */
-  stage: 'payload' | 'signature';
+  /**
+   * What failed: building the payload, signing it with the endpoint's secrets, or opening the
+   * endpoint's own headers (ADR-118).
+   */
+  stage: 'payload' | 'signature' | 'headers';
   errorClass: string;
   errorCode: string | null;
 }
@@ -287,6 +290,7 @@ async function claimDeliveries(
             secretVersion: webhookEndpoints.secretVersion,
             previousSecretCiphertext: webhookEndpoints.previousSecretCiphertext,
             previousSecretExpiresAt: webhookEndpoints.previousSecretExpiresAt,
+            headersCiphertext: webhookEndpoints.headersCiphertext,
           })
           .from(webhookEndpoints)
           .where(
@@ -310,6 +314,7 @@ async function claimDeliveries(
             templateId: webhookEvents.templateId,
             status: webhookEvents.status,
             detail: webhookEvents.detail,
+            contactChanges: webhookEvents.contactChanges,
             occurredAt: webhookEvents.occurredAt,
           })
           .from(webhookEvents)
@@ -349,6 +354,21 @@ async function claimDeliveries(
       return list;
     };
 
+    // The endpoint's own headers (ADR-118), opened once per endpoint and batch.
+    const ownHeaders = new Map<string, Record<string, string>>();
+    const endpointHeaders = (endpoint: NonNullable<ReturnType<typeof endpoints.get>>) => {
+      const known = ownHeaders.get(endpoint.id);
+      if (known) return known;
+      const opened = openWebhookHeaders(
+        deps.keyring,
+        tenantId,
+        endpoint.id,
+        endpoint.headersCiphertext,
+      );
+      ownHeaders.set(endpoint.id, opened);
+      return opened;
+    };
+
     const claimed: ClaimedDelivery[] = [];
     const unprepared: UnpreparedDelivery[] = [];
     let ended = 0;
@@ -379,6 +399,7 @@ async function claimDeliveries(
       }
       let body: string;
       let signature: string;
+      let headers: Record<string, string>;
       let stage: UnpreparedDelivery['stage'] = 'payload';
       try {
         // In a savepoint, so that a database error while building leaves the claim usable.
@@ -386,13 +407,15 @@ async function claimDeliveries(
         body = JSON.stringify(payload);
         stage = 'signature';
         signature = webhookSignatureHeader(signingSecrets(endpoint), timestamp, body);
+        stage = 'headers';
+        headers = endpointHeaders(endpoint);
       } catch (error) {
         if (error instanceof WebhookEventGoneError) {
           await end(delivery.id, 'event_gone');
           continue;
         }
-        // A bug, data the builder cannot describe, a secret the keyring cannot open or a database
-        // error. Thrown, it would roll back the batch, and the sweep would claim the same
+        // A bug, data the builder cannot describe, a secret or headers the keyring cannot open, or a
+        // database error. Thrown, it would roll back the batch, and the sweep would claim the same
         // deliveries again every minute; ended without an attempt, it is replayed once fixed.
         await end(delivery.id, 'payload_failed');
         unprepared.push({
@@ -418,6 +441,8 @@ async function claimDeliveries(
         url: endpoint.url,
         body,
         headers: {
+          // The endpoint's own first, so none of them can replace HyFib's.
+          ...headers,
           'content-type': 'application/json',
           'user-agent': WEBHOOK_USER_AGENT,
           'w360-signature': signature,

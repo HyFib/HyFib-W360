@@ -12,11 +12,14 @@ export const API_SCOPE_KEYS = [
   'templates.read',
   'contacts.read',
   'contacts.write',
+  'contact_fields.manage',
   'messages.send',
   'messages.send_marketing',
   'messages.reply',
   'conversations.read',
   'conversations.write',
+  'campaigns.read',
+  'campaigns.stop',
   'automations.start',
   'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
@@ -37,14 +40,23 @@ export const API_SCOPE_INFO: Record<
   },
   'contacts.read': {
     label: 'Read contacts',
-    description: 'Find contacts by phone number and read their details and consent.',
+    description:
+      "Find contacts by number, email, tag or custom field, read their details, custom fields and consent and follow their changes, and list the company's custom fields.",
     permission: 'contacts.read',
     writes: false,
   },
   'contacts.write': {
-    label: 'Create contacts and record consent',
-    description: 'Create contacts and record opt-ins and opt-outs with their evidence.',
+    label: 'Create and change contacts and record consent',
+    description:
+      'Create contacts, change their name, email, custom fields and tags, and record opt-ins and opt-outs with their evidence.',
     permission: 'contacts.write',
+    writes: true,
+  },
+  'contact_fields.manage': {
+    label: 'Define contact fields',
+    description:
+      'Add custom contact fields, rename them, and delete them with their values on every contact, as owners and administrators do in Settings.',
+    permission: 'tenant.settings.manage',
     writes: true,
   },
   'messages.send': {
@@ -70,7 +82,7 @@ export const API_SCOPE_INFO: Record<
   'conversations.read': {
     label: 'Read conversations',
     description:
-      "List the company's conversations and read their messages, one conversation or all of them, including what contacts wrote, and their internal notes, with the teams and the members conversations can be assigned to (names only).",
+      "List the company's conversations and read their messages, one conversation or all of them, including what contacts wrote, follow the messages as they change, and read the conversations' internal notes, with the teams and the members conversations can be assigned to (names only).",
     permission: 'inbox.read_all',
     writes: false,
   },
@@ -79,6 +91,20 @@ export const API_SCOPE_INFO: Record<
     description:
       'Mark conversations resolved, or open again, assign them to members or move them between teams, as members do in the inbox, and add internal notes the team reads there (WhatsApp never receives them). Resolving a conversation or assigning it to a member stops an automation answering it.',
     permission: 'inbox.supervise',
+    writes: true,
+  },
+  'campaigns.read': {
+    label: 'Read campaigns',
+    description:
+      "List the company's campaigns and read each one's progress and results: messages sent, delivered, read and failed, replies and opt-outs, and why recipients were skipped. A key that also reads contacts lists each campaign's recipients and what happened to each. Never members or costs.",
+    permission: 'campaigns.read',
+    writes: false,
+  },
+  'campaigns.stop': {
+    label: 'Pause and cancel campaigns',
+    description:
+      "Pause a scheduled or sending campaign and cancel one that has not finished, as members who send campaigns can. Resuming, approving, scheduling and editing stay in the app, under a member's authority.",
+    permission: 'campaigns.send',
     writes: true,
   },
   'automations.start': {
@@ -128,6 +154,10 @@ export const API_LIMITS = {
   textLength: 4096,
   idempotencyKeyLength: 255,
   idempotencyHours: 24,
+  /** Conversations one call to POST /conversations/update-many changes (ADR-120). */
+  conversationsPerChange: 100,
+  /** Contacts one call to POST /contacts/update-many changes (ADR-122). */
+  contactsPerChange: 100,
   keyRate: { capacity: 50, refillPerSecond: 10 },
   companyRate: { capacity: 200, refillPerSecond: 30 },
   authFailureRate: { capacity: 20, refillPerSecond: 0.2 },

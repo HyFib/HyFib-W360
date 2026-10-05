@@ -1,6 +1,6 @@
 # Deployment
 
-Last updated 2026-09-26. Nothing has been deployed to a shared environment yet; this document is the
+Last updated 2026-10-04. Nothing has been deployed to a shared environment yet; this document is the
 deployment design plus the procedures verified locally (Docker images built and run against
 PostgreSQL 18; CI workflow authored).
 
@@ -21,11 +21,15 @@ PostgreSQL 18; CI workflow authored).
   default 9464) and migration runner (`node dist/migrate.js`, SQL files at `/app/migrations`).
 - Builds behind a TLS-intercepting proxy may pass an extra CA as a BuildKit secret
   (`--secret id=extra_ca,src=…`); it is never baked into images.
+- Both runtime images install the updates Debian has released since the Node base image was built
+  (the build fails when `deb.debian.org` cannot be reached), so a fixed vulnerability in a Debian
+  package does not wait for the base image to be rebuilt. CI's image scan (Trivy) fails on any HIGH
+  or CRITICAL vulnerability that has a fix.
 
 ## Production topology (target)
 
 - Load balancer with TLS 1.2+ and HTTP/2 (SSE), WAF/rate limiting at the edge (including the public
-  chat-link and widget routes, see below).
+  chat-link, widget and price list routes, see below).
 - `web` ≥ 2 replicas (stateless); `worker` ≥ 2 replicas (jobs are claim-safe; schedules are
   deduplicated by pg-boss).
 - Managed PostgreSQL 17 or 18 with high availability, encryption at rest, automated backups and
@@ -60,12 +64,18 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
 
 ## First-time database setup
 
-1. Create the database (provider console) and an administrative login.
+1. Create the database (provider console) and an administrative login. Use a UTF-8 locale such as
+   `en_US.UTF-8` (not `C`): searches for contacts by name, members' and the API's (ADR-124), fold
+   letters' case by the database's locale, and with `C` only ASCII letters fold.
 2. Run `infra/db/bootstrap-roles.sql` once with passwords from the secret manager (PostgreSQL 16+
    required for `GRANT … WITH INHERIT FALSE, SET TRUE`).
 3. Store the four role connection strings in the secret manager: migrate (owner), app, auth,
    platform. Web receives app/auth/platform; worker receives app/platform; only the migration job
    receives the owner string.
+4. In the provider's database parameters, set `log_parameter_max_length` to 0 and keep
+   `log_parameter_max_length_on_error` at 0 (PostgreSQL's default), so the server's log does not
+   keep queries' parameters (names, numbers, message text) when it logs a slow or failed statement;
+   HyFib's own logs leave them out (ADR-129).
 
 ## Release procedure
 
@@ -79,6 +89,113 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    - migrate data in batches (owner role, temporarily `NO FORCE ROW LEVEL SECURITY` inside the
      migration if a backfill must read all rows, then `FORCE` again);
    - contract in a later release after no running version reads the old shape.
+
+   Migration 0091 (ADR-114) records every existing contact once while its triggers hold write locks
+   on contacts, tags and consent states, so writes to them wait for it; on a large contacts table
+   run it at a quiet time. Until the new workers run, an automation and a member removing the same
+   tag at the same moment can deadlock, as adding one already could; PostgreSQL ends one of the two
+   with an error.
+   Migration 0092 (ADR-115) only widens the scope checks of `app.api_keys` and `ops.plans`; it holds
+   an exclusive lock on each until it commits, which is brief, since both tables are small. Web
+   servers from before it do not know the new scope: until the web rollout ends, an old server
+   answers Settings → API keys with an error for a company with a key holding it (and the platform
+   plan pages for a plan version including it), and the new endpoints with 404 or 405.
+   Migration 0093 (ADR-116) records every existing message once while its triggers hold a write lock
+   on `app.messages`, so new and changed messages wait for it (measured locally: about 2.4 seconds
+   for 400,000 messages); on a large messages table run it at a quiet time.
+   Migration 0094 (ADR-118) adds two columns to `app.webhook_endpoints` (a constant default, so no
+   rewrite) and a check it validates by reading the table, which is small (at most 10 endpoints per
+   company); deliveries claimed meanwhile wait for its lock briefly. Workers roll out before web
+   servers, so no worker without ADR-118 sees an endpoint's headers; rolling workers back to an
+   image from before it sends deliveries without them, which their receivers may refuse (the
+   deliveries are retried).
+   Migration 0095 (ADR-119) adds a nullable column to `app.webhook_endpoints` with a check it
+   validates by reading the table (small, as above) and replaces `app.capture_webhook_event`, which
+   applies the filter from then on; every endpoint starts with none, so nothing changes until a
+   member or a key chooses statuses. Web servers from before it neither show nor change the column:
+   until the web rollout ends, an old server's change that drops `message.status` from an endpoint
+   with statuses fails on the check (it works once the rollout ends), and its other changes keep
+   them.
+   ADR-120 adds no migration; until the web rollout ends, a server from before it answers
+   `POST /api/v1/conversations/update-many` with 405 (the path reads as a conversation id there,
+   which takes no POST). ADR-122 adds no migration either, and such a server answers
+   `POST /api/v1/contacts/update-many` with 405 in the same way.
+   Migration 0096 (ADR-121) adds a nullable column to `app.webhook_events` with a check added
+   `NOT VALID` (no rewrite and no table read, so captures wait for its lock only briefly) and
+   replaces the contact capture and trigger functions, which record what changed from then on;
+   0097 validates the check while captures go on. Workers from before it deliver `contact.updated`
+   without `changes` until the worker rollout ends; rolling workers back to an image from before it
+   does the same, and the recorded lists stay for later deliveries and replays.
+   Migration 0098 (ADR-123) adds a nullable column to `app.webhook_endpoints` with a check it
+   validates by reading the table (small, as above) and replaces
+   `app.capture_contact_webhook_event`, which applies the filter from then on; every endpoint
+   starts with none, so nothing changes until a member or a key chooses parts. Web servers from
+   before it neither show nor change the column: until the web rollout ends, an old server's
+   change that drops `contact.updated` from an endpoint with parts fails on the check (it works once
+   the rollout ends), and its other changes keep them.
+   ADR-124 adds no migration; until the web rollout ends, a server from before it refuses
+   `GET /api/v1/contacts?name=` with 422 (a parameter it does not know) and still answers a
+   request holding the NUL character with 500.
+   Migration 0099 (ADR-125) widens the same scope checks as 0092, with the same brief locks. As with
+   0092, web servers from before it do not know the new scope: until the web rollout ends, an old
+   server answers Settings → API keys with an error for a company with a key holding
+   `campaigns.read` (and the platform plan pages for a plan version including it), and
+   `/api/v1/campaigns` with 404; rolling web servers back to an image from before it does the same.
+   ADR-126 adds no migration; until the web rollout ends, a server from before it refuses
+   `last_message` and `campaign` conditions in `POST /api/v1/contacts/search` with 422 naming the
+   condition's type.
+   ADR-127 adds no migration; until the web rollout ends, a server from before it answers
+   `GET /api/v1/campaigns/{id}/recipients` with 404, and Settings → API keys describes
+   `campaigns.read` without recipients.
+   Migration 0100 (ADR-128) widens the same scope checks as 0099, with the same brief locks, and
+   replaces the campaigns' pause reason check (`api` added), validated under the table's lock
+   (campaigns are made by hand, so the table is small). Web servers from before it know neither:
+   until the web rollout ends, an old server answers Settings → API keys with an error for a company
+   with a key holding `campaigns.stop` (and the platform plan pages for a plan version including
+   it), answers `/api/v1/campaigns/{id}/pause` and `/cancel` with 404, and shows a campaign a key
+   paused with the reason as stored (`api`); rolling web servers back to an image from before it
+   does the same.
+   Migration 0109 (ADR-145) adds a nullable column to `app.webhook_endpoints` with a check it
+   validates by reading the table (small, as for 0098) and replaces `app.capture_webhook_event`
+   with the same signature, which applies the automation filter from then on; every endpoint starts
+   with none, so nothing changes until a member or a key chooses automations. Workers are not
+   involved (capture runs in the database). Web servers from before it neither show nor change the
+   column: until the web rollout ends, an old server's change that drops both automation run events
+   from an endpoint with automations fails on the check (it works once the rollout ends), and its
+   other changes keep them.
+   Migration 0110 (ADR-146) adds a nullable column to `app.webhook_endpoints` with a check it
+   validates by reading the table (small, as for 0098) and replaces `app.capture_webhook_event`
+   with the same signature, which applies the campaign status filter from then on (and keeps
+   0109's automation filter); every endpoint starts with none, so nothing changes until a member or
+   a key chooses statuses. Workers are not involved (capture runs in the database). Web servers
+   from before it neither show nor change the column: until the web rollout ends, an old server's
+   change that drops `campaign.status_changed` from an endpoint with statuses fails on the check
+   (it works once the rollout ends), and its other changes keep them.
+   Migration 0111 (ADR-147) does the same for `order_statuses` and `order.status_changed`: a
+   nullable column with a check validated by reading the table, and `app.capture_webhook_event`
+   replaced with the same signature (keeping 0109's and 0110's filters); every endpoint starts
+   with none. Web servers from before it neither show nor change the column: until the web rollout
+   ends, an old server's change that drops `order.status_changed` from an endpoint with statuses
+   fails on the check, and its other changes keep them.
+   Migration 0112 (ADR-148) does the same for `template_statuses` and `template.status_changed`: a
+   nullable column with a check validated by reading the table, and `app.capture_webhook_event`
+   replaced with the same signature (keeping 0109's to 0111's filters); every endpoint starts with
+   none. Web servers from before it neither show nor change the column: until the web rollout ends,
+   an old server's change that drops `template.status_changed` from an endpoint with statuses fails
+   on the check, and its other changes keep them.
+   Migration 0113 (ADR-149) does the same for `conversation_statuses` and
+   `conversation.status_changed`: a nullable column with a check validated by reading the table,
+   and `app.capture_webhook_event` replaced with the same signature (keeping 0109's to 0112's
+   filters); every endpoint starts with none. Web servers from before it neither show nor change
+   the column: until the web rollout ends, an old server's change that drops
+   `conversation.status_changed` from an endpoint with statuses fails on the check, and its other
+   changes keep them.
+   ADR-150 adds no migration. Workers build each payload when they deliver it: until the worker
+   rollout ends, a `campaign.status_changed` delivered by a worker from before it has no
+   `campaign.results` (a retry or a replay a newer worker delivers has them), and rolling workers
+   back to an image from before it does the same; until the web rollout ends, an old server's
+   OpenAPI document does not describe them.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back
@@ -122,6 +239,19 @@ companies' sites).
 - **Headers.** The routes set their own `Cache-Control`, `Referrer-Policy: no-referrer` (links) and
   `Cross-Origin-Resource-Policy: cross-origin` (script); do not override them at the edge.
 
+## Price list for visitors
+
+`GET /pricing` (ADR-107) is public by design once a platform owner shows the price list; while it
+is hidden it answers 404. Each view reads the database in one read-only transaction (two small
+queries) and renders per request with the page's CSP nonce.
+
+- **Rate limits.** Apply the per-address limits of the public routes above at the edge (the app
+  does not limit it).
+- **Caching.** Do not cache it at the edge or CDN: a cached copy would keep prices a platform owner
+  has hidden or changed, and would reuse a CSP nonce.
+- **Indexing.** The app asks search engines not to index any page, this one included; HyFib's own
+  site links to it.
+
 ## WhatsApp Flows data endpoint
 
 `POST /api/flows/endpoint/<public id>` is called by WhatsApp while a customer has a form open. It is
@@ -142,6 +272,16 @@ authenticated by Meta's signature and the flow's encryption key, not by a sessio
   (they send every request); the app does not limit the route.
 - **Logs.** The app logs an outcome code and ids per request. Access logs must not record request
   bodies (they are encrypted, but keep them out of logs anyway).
+
+## Public API
+
+`/api/v1/*` (ADR-052) authenticates with company API keys. The app's request log holds the method,
+path, status, company and key of each request, never its query string or body.
+
+- **Access logs.** Query strings can hold personal data: `GET /api/v1/contacts` finds contacts by
+  number, email address and part of a name (ADR-113, ADR-124). Load-balancer or CDN access logs must
+  leave out the query strings of `/api/v1/*`, or be kept short-lived and named in the privacy
+  notice.
 
 ## Razorpay
 

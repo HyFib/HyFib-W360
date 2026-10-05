@@ -18,7 +18,7 @@ import {
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
 import { recordAudit, type RequestMeta } from '../audit';
-import { normalizeTag } from '../contacts/fields';
+import { NUMBER_RE, normalizeTag, validDate } from '../contacts/fields';
 import { likePattern, parseInput } from '../validation';
 
 /**
@@ -31,6 +31,46 @@ export const SEGMENT_LIMITS = { conditions: 20, previewSample: 10 } as const;
 
 const FIELD_KEY_RE = /^[a-z][a-z0-9_]{0,39}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** How a field condition compares; which comparisons apply depends on the field's type. */
+export const FIELD_COMPARISONS = [
+  'is_set',
+  'is_not_set',
+  'equals',
+  'not_equals',
+  'contains',
+  'greater_than',
+  'less_than',
+  'before',
+  'after',
+  'is_true',
+  'is_false',
+] as const;
+export type FieldComparison = (typeof FIELD_COMPARISONS)[number];
+
+/**
+ * How a `name` condition compares the contact's name (ADR-143): as a text field's value is, with a
+ * name of spaces only read as none.
+ */
+export const NAME_COMPARISONS = [
+  'is_set',
+  'is_not_set',
+  'equals',
+  'not_equals',
+  'contains',
+] as const;
+
+/** Whether a contact wrote within the last days (the `last_message` condition), and how far back. */
+export const LAST_MESSAGE_COMPARISONS = ['within_days', 'not_within_days'] as const;
+export const LAST_MESSAGE_DAYS = { min: 1, max: 365 } as const;
+/** What happened to a campaign's message to a contact (the `campaign` condition). */
+export const CAMPAIGN_OUTCOMES = [
+  'delivered',
+  'not_delivered',
+  'read',
+  'replied',
+  'not_replied',
+] as const;
 
 const conditionSchema = z.discriminatedUnion('type', [
   z.object({
@@ -46,19 +86,12 @@ const conditionSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('field'),
     key: z.string().regex(FIELD_KEY_RE, 'Choose a field'),
-    op: z.enum([
-      'is_set',
-      'is_not_set',
-      'equals',
-      'not_equals',
-      'contains',
-      'greater_than',
-      'less_than',
-      'before',
-      'after',
-      'is_true',
-      'is_false',
-    ]),
+    op: z.enum(FIELD_COMPARISONS),
+    value: z.string().trim().max(200).optional(),
+  }),
+  z.object({
+    type: z.literal('name'),
+    op: z.enum(NAME_COMPARISONS),
     value: z.string().trim().max(200).optional(),
   }),
   z.object({
@@ -69,8 +102,8 @@ const conditionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('source'), source: z.enum(CONTACT_SOURCES) }),
   z.object({
     type: z.literal('last_message'),
-    op: z.enum(['within_days', 'not_within_days']),
-    days: z.coerce.number().int().min(1).max(365),
+    op: z.enum(LAST_MESSAGE_COMPARISONS),
+    days: z.coerce.number().int().min(LAST_MESSAGE_DAYS.min).max(LAST_MESSAGE_DAYS.max),
   }),
   z.object({
     type: z.literal('calling_code'),
@@ -79,7 +112,7 @@ const conditionSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('campaign'),
     campaignId: z.uuid(),
-    outcome: z.enum(['delivered', 'not_delivered', 'read', 'replied', 'not_replied']),
+    outcome: z.enum(CAMPAIGN_OUTCOMES),
   }),
 ]);
 export type SegmentCondition = z.infer<typeof conditionSchema>;
@@ -93,13 +126,13 @@ export const segmentDefinitionSchema = z.object({
 });
 export type SegmentDefinition = z.infer<typeof segmentDefinitionSchema>;
 
-const FIELD_OPS: Record<ContactFieldType, ReadonlySet<SegmentCondition['type'] | string>> = {
+const FIELD_OPS: Record<ContactFieldType, ReadonlySet<FieldComparison>> = {
   text: new Set(['is_set', 'is_not_set', 'equals', 'not_equals', 'contains']),
   number: new Set(['is_set', 'is_not_set', 'equals', 'not_equals', 'greater_than', 'less_than']),
   date: new Set(['is_set', 'is_not_set', 'equals', 'before', 'after']),
   boolean: new Set(['is_set', 'is_not_set', 'is_true', 'is_false']),
 };
-const VALUE_OPS = new Set([
+const VALUE_OPS: ReadonlySet<FieldComparison> = new Set([
   'equals',
   'not_equals',
   'contains',
@@ -108,6 +141,42 @@ const VALUE_OPS = new Set([
   'before',
   'after',
 ]);
+
+/** The comparisons that apply to a type of field, in the order segments offer them. */
+export const fieldComparisonsFor = (type: ContactFieldType): FieldComparison[] =>
+  FIELD_COMPARISONS.filter((op) => FIELD_OPS[type].has(op));
+
+/** Whether a comparison compares with a value (`equals`, `before` …) rather than none (`is_set`). */
+export const comparisonTakesValue = (op: FieldComparison): boolean => VALUE_OPS.has(op);
+
+export type FieldConditionProblem = 'comparison' | 'value_missing' | 'not_number' | 'not_date';
+
+/**
+ * What keeps a field condition from applying to a field of this type, or null: a comparison of
+ * another type, no value where the comparison needs one, or a value that is not a number (as
+ * members type numbers) or not a real date. Segments and contact searches through the API
+ * (ADR-117) check conditions with these rules, each in its own words.
+ */
+export function fieldConditionProblem(
+  type: ContactFieldType,
+  op: FieldComparison,
+  value: string | undefined,
+): FieldConditionProblem | null {
+  if (!FIELD_OPS[type].has(op)) return 'comparison';
+  if (!VALUE_OPS.has(op)) return null;
+  const v = value ?? '';
+  if (!v) return 'value_missing';
+  if (type === 'number' && !NUMBER_RE.test(v)) return 'not_number';
+  if (type === 'date' && !validDate(v)) return 'not_date';
+  return null;
+}
+
+const FIELD_PROBLEM_MESSAGES: Record<FieldConditionProblem, (type: ContactFieldType) => string> = {
+  comparison: (type) => `That comparison does not apply to ${type} fields.`,
+  value_missing: () => 'Enter a value to compare with.',
+  not_number: () => 'Enter a number.',
+  not_date: () => 'Enter a date written as YYYY-MM-DD.',
+};
 
 /**
  * Checks a parsed definition against the company's fields and campaigns. Returns the first problem
@@ -124,14 +193,14 @@ export async function checkSegmentDefinition(
     if (c.type === 'field') {
       const type = fields.get(c.key);
       if (!type) return 'A condition uses a custom field that does not exist.';
-      if (!FIELD_OPS[type].has(c.op)) return `That comparison does not apply to ${type} fields.`;
-      if (VALUE_OPS.has(c.op)) {
-        const v = c.value ?? '';
-        if (!v) return 'Enter a value to compare with.';
-        if (type === 'number' && !/^-?\d{1,15}(\.\d{1,6})?$/.test(v)) return 'Enter a number.';
-        if (type === 'date' && !DATE_RE.test(v)) return 'Enter a date written as YYYY-MM-DD.';
-      }
+      const problem = fieldConditionProblem(type, c.op, c.value);
+      if (problem) return FIELD_PROBLEM_MESSAGES[problem](type);
     }
+    if (c.type === 'name' && comparisonTakesValue(c.op) && !c.value) {
+      return 'Enter a name to compare with.';
+    }
+    // The schema checks the form only; 30 February would fail in the query.
+    if (c.type === 'created' && !validDate(c.date)) return 'Enter a date written as YYYY-MM-DD.';
     if (c.type === 'campaign') {
       const [row] = await tx
         .select({ id: campaigns.id })
@@ -177,6 +246,24 @@ function fieldSql(c: Extract<SegmentCondition, { type: 'field' }>, type: Contact
   }
 }
 
+function nameSql(c: Extract<SegmentCondition, { type: 'name' }>): SQL {
+  // WhatsApp profile names are kept as sent, so a name of spaces only reads as none.
+  const name = sql`nullif(btrim(${contacts.displayName}), '')`;
+  const v = c.value ?? '';
+  switch (c.op) {
+    case 'is_set':
+      return sql`${name} is not null`;
+    case 'is_not_set':
+      return sql`${name} is null`;
+    case 'equals':
+      return sql`lower(${name}) = lower(${v})`;
+    case 'not_equals':
+      return sql`${name} is null or lower(${name}) <> lower(${v})`;
+    case 'contains':
+      return sql`${contacts.displayName} ilike ${likePattern(v)}`;
+  }
+}
+
 function conditionSql(
   c: SegmentCondition,
   timezone: string,
@@ -199,6 +286,8 @@ function conditionSql(
       // Unknown fields are refused by checkSegmentDefinition; match nothing if one slips through.
       return type ? fieldSql(c, type) : sql`false`;
     }
+    case 'name':
+      return nameSql(c);
     case 'created': {
       // A date in the company's time zone: "before 2026-10-01" means before its local midnight.
       const midnight = sql`((${c.date}::date)::timestamp at time zone ${timezone})`;
@@ -232,6 +321,19 @@ function conditionSql(
   }
 }
 
+/**
+ * A checked definition's conditions as one condition over app.contacts, all or any of them, without
+ * the company or erasure (contact searches through the API add those, ADR-117).
+ */
+export function segmentConditionsSql(
+  def: SegmentDefinition,
+  timezone: string,
+  fields: ReadonlyMap<string, ContactFieldType>,
+): SQL {
+  const parts = def.conditions.map((c) => sql`(${conditionSql(c, timezone, fields)})`);
+  return sql`(${sql.join(parts, def.match === 'all' ? sql` and ` : sql` or `)})`;
+}
+
 /** WHERE conditions (over app.contacts) for a checked definition, erased contacts excluded. */
 export function segmentWhere(
   tenantId: string,
@@ -239,9 +341,7 @@ export function segmentWhere(
   timezone: string,
   fields: ReadonlyMap<string, ContactFieldType>,
 ): SQL {
-  const parts = def.conditions.map((c) => sql`(${conditionSql(c, timezone, fields)})`);
-  const combined = sql.join(parts, def.match === 'all' ? sql` and ` : sql` or `);
-  return sql`${contacts.tenantId} = ${tenantId} and ${contacts.erasedAt} is null and (${combined})`;
+  return sql`${contacts.tenantId} = ${tenantId} and ${contacts.erasedAt} is null and ${segmentConditionsSql(def, timezone, fields)}`;
 }
 
 export async function loadFieldTypes(

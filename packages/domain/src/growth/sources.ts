@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { uuidv7 } from '@w360/core';
+import { clipText, uuidv7 } from '@w360/core';
 import {
   and,
   chatLinks,
@@ -36,7 +36,7 @@ export interface AdReferral {
 
 const clip = (value: string | undefined, max: number): string | null => {
   const text = value?.trim();
-  return text ? text.slice(0, max) : null;
+  return text ? clipText(text, max) : null;
 };
 
 /** The parts of a webhook referral object that identify the ad (null when it is not an object). */

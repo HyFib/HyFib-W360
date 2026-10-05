@@ -666,6 +666,8 @@ describe('sending forms and applying answers', () => {
     ).toBe(true);
 
     // The customer completes it: answers are kept (without the token) and applied field by field.
+    // The city holds half an emoji, as an escape: it is kept and applied with U+FFFD in its place
+    // (ADR-131); jsonb refused the half before (22P02).
     await fx.deliver(
       completion(
         c,
@@ -674,7 +676,7 @@ describe('sending forms and applying answers', () => {
           flow_token: send!.token,
           full_name: 'Priya Sharma',
           email: 'PRIYA@Example.test',
-          city: 'Pune',
+          city: 'Pune\ud83d',
         }),
       ),
     );
@@ -687,7 +689,7 @@ describe('sending forms and applying answers', () => {
     ]);
     expect(response).toEqual({
       flow_id: flowId,
-      answers: { full_name: 'Priya Sharma', email: 'PRIYA@Example.test', city: 'Pune' },
+      answers: { full_name: 'Priya Sharma', email: 'PRIYA@Example.test', city: 'Pune\ufffd' },
       applied: [
         { key: 'full_name', target: 'name', outcome: 'applied' },
         { key: 'email', target: 'email', outcome: 'applied' },
@@ -703,7 +705,7 @@ describe('sending forms and applying answers', () => {
       display_name: 'Priya Sharma',
       // Stored as entered, like the contacts service does.
       email: 'PRIYA@Example.test',
-      attributes: { city: 'Pune' },
+      attributes: { city: 'Pune\ufffd' },
     });
     const [message] = await fx.query<{ content: Record<string, unknown>; preview: string }>(
       `SELECT m.content, cv.last_message_preview AS preview FROM app.messages m
@@ -716,7 +718,7 @@ describe('sending forms and applying answers', () => {
       reply: null,
       flow: {
         body: 'Sent',
-        answers: { full_name: 'Priya Sharma', email: 'PRIYA@Example.test', city: 'Pune' },
+        answers: { full_name: 'Priya Sharma', email: 'PRIYA@Example.test', city: 'Pune\ufffd' },
         tooLarge: false,
       },
     });

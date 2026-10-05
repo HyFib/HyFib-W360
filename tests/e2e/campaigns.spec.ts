@@ -1,6 +1,7 @@
 import { expect, test } from './fixtures';
 import {
   connectTestChannel,
+  inboundMessage,
   messagingConfigured,
   sendSignedWebhook,
   standInRequests,
@@ -153,4 +154,185 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
   const text = await csv.text();
   expect(text).toContain('+919876512345,Asha Rao,queued,,delivered');
   expect(text).toContain('+919876512346,Bina Shah,skipped,no_marketing_opt_in');
+
+  // A key that reads campaigns finds the campaign and the results the page shows (ADR-125).
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Campaign reports');
+  await page.getByRole('checkbox', { name: /Read campaigns/ }).check();
+  await page.getByRole('checkbox', { name: /Read contacts/ }).check();
+  await page.getByRole('checkbox', { name: /Read conversations/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const tokenField = page.getByLabel('API key', { exact: true });
+  await expect(tokenField).toBeVisible();
+  const token = await tokenField.inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${token}` };
+  const campaignId = campaignPath.split('/').pop()!;
+  const listed = await request.get('/api/v1/campaigns?status=completed', { headers: auth });
+  expect(listed.status()).toBe(200);
+  expect(((await listed.json()) as { data: unknown[] }).data).toEqual([
+    expect.objectContaining({
+      id: campaignId,
+      name: 'Spring launch',
+      status: 'completed',
+      completionReason: 'all_processed',
+      templateName: 'spring_sale',
+      audienceCount: 2,
+      queuedCount: 1,
+      skippedCount: 1,
+    }),
+  ]);
+  const one = await request.get(`/api/v1/campaigns/${campaignId}`, { headers: auth });
+  expect(one.status()).toBe(200);
+  expect(((await one.json()) as { data: { results: unknown } }).data.results).toMatchObject({
+    audience: 2,
+    queued: 1,
+    sent: 1,
+    delivered: 1,
+    read: 0,
+    failed: 0,
+    skipped: 1,
+    skipReasons: [{ reason: 'no_marketing_opt_in', count: 1 }],
+  });
+
+  // Reading contacts and conversations too, it finds the contacts by what happened to the
+  // campaign's message and by when they last wrote (ADR-126): Asha answers the campaign.
+  await sendSignedWebhook(
+    request,
+    inboundMessage(wabaId, phoneNumberId, '919876512345', 'Interested in the sale!'),
+  );
+  const search = async (conditions: unknown[]) => {
+    const found = await request.post('/api/v1/contacts/search', {
+      headers: auth,
+      data: { conditions },
+    });
+    expect(found.status()).toBe(200);
+    return ((await found.json()) as { data: { name: string }[] }).data.map((c) => c.name);
+  };
+  await expect(async () => {
+    expect(await search([{ type: 'campaign', campaignId, outcome: 'replied' }])).toEqual([
+      'Asha Rao',
+    ]);
+  }).toPass({ timeout: 30_000 });
+  expect(await search([{ type: 'campaign', campaignId, outcome: 'delivered' }])).toEqual([
+    'Asha Rao',
+  ]);
+  // Bina was skipped: the campaign sent her nothing, so no outcome finds her.
+  expect(await search([{ type: 'campaign', campaignId, outcome: 'not_delivered' }])).toEqual([]);
+  expect(await search([{ type: 'last_message', op: 'within_days', days: 1 }])).toEqual([
+    'Asha Rao',
+  ]);
+  expect(await search([{ type: 'last_message', op: 'not_within_days', days: 1 }])).toEqual([
+    'Bina Shah',
+  ]);
+
+  // Reading campaigns and contacts, it lists the recipients the Recipients page shows, each with
+  // what happened to it, and those one count of the results counts (ADR-127).
+  type Recipients = {
+    data: {
+      contact: { name: string; phone: string };
+      state: string;
+      skipReason: string | null;
+      message: { status: string } | null;
+      repliedAt: string | null;
+    }[];
+    nextCursor: string | null;
+  };
+  const recipients = await request.get(`/api/v1/campaigns/${campaignId}/recipients`, {
+    headers: auth,
+  });
+  expect(recipients.status()).toBe(200);
+  const everyone = (await recipients.json()) as Recipients;
+  expect(everyone.nextCursor).toBeNull();
+  const byName = new Map(everyone.data.map((r) => [r.contact.name, r]));
+  expect([...byName.keys()].sort()).toEqual(['Asha Rao', 'Bina Shah']);
+  expect(byName.get('Asha Rao')).toMatchObject({
+    contact: { phone: '+919876512345' },
+    state: 'queued',
+    message: { status: 'delivered' },
+    repliedAt: expect.any(String),
+  });
+  expect(byName.get('Bina Shah')).toMatchObject({
+    state: 'skipped',
+    skipReason: 'no_marketing_opt_in',
+    message: null,
+  });
+  const replied = await request.get(`/api/v1/campaigns/${campaignId}/recipients?outcome=replied`, {
+    headers: auth,
+  });
+  expect(((await replied.json()) as Recipients).data.map((r) => r.contact.name)).toEqual([
+    'Asha Rao',
+  ]);
+  const unknownOutcome = await request.get(
+    `/api/v1/campaigns/${campaignId}/recipients?outcome=clicked`,
+    { headers: auth },
+  );
+  expect(unknownOutcome.status()).toBe(422);
+
+  // A key that pauses and cancels campaigns stops one scheduled for later (ADR-128): the page says
+  // it paused through the API, and its history names the key.
+  await page.goto(`/c/${slug}/campaigns`);
+  await page.getByRole('link', { name: 'New campaign' }).click();
+  await page.getByLabel('Campaign name').fill('Autumn preview');
+  await page.getByRole('button', { name: 'Create draft' }).click();
+  await expect(page.getByRole('heading', { name: 'Autumn preview', level: 1 })).toBeVisible();
+  await page.getByLabel('Send from').selectOption({ index: 1 });
+  await page.getByLabel('Template').selectOption({ label: 'spring_sale (en, marketing)' });
+  await page.getByLabel('Body variable {{1}}').selectOption('name');
+  await page.getByLabel('Tag', { exact: true }).fill('vip');
+  await page.getByLabel('When', { exact: true }).selectOption('later');
+  const later = new Date(Date.now() + 2 * 86_400_000).toISOString().slice(0, 10);
+  await page.getByLabel('Date and time').fill(`${later}T10:00`);
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByText('Draft saved. The review below is updated.')).toBeVisible();
+  await page.getByRole('button', { name: 'Start campaign' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Start campaign' }).click();
+  await expect(page.getByText('Scheduled', { exact: true }).first()).toBeVisible();
+  const autumnId = new URL(page.url()).pathname.split('/').pop()!;
+
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Campaign control');
+  await page.getByRole('checkbox', { name: /Pause and cancel campaigns/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const stopField = page.getByLabel('API key', { exact: true });
+  await expect(stopField).toBeVisible();
+  const stopAuth = { Authorization: `Bearer ${await stopField.inputValue()}` };
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  // The reading key does not stop campaigns.
+  const notAllowed = await request.post(`/api/v1/campaigns/${autumnId}/pause`, { headers: auth });
+  expect(notAllowed.status()).toBe(403);
+  const paused = await request.post(`/api/v1/campaigns/${autumnId}/pause`, { headers: stopAuth });
+  expect(paused.status()).toBe(200);
+  expect(((await paused.json()) as { data: unknown }).data).toMatchObject({
+    id: autumnId,
+    name: 'Autumn preview',
+    status: 'paused',
+    pauseReason: 'api',
+  });
+  const byKey = 'through the API, key “Campaign control”';
+  await page.goto(`/c/${slug}/campaigns/${autumnId}`);
+  await expect(page.getByText('Paused through the API.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('listitem').filter({ hasText: byKey })).toHaveCount(1);
+  // A completed campaign is not paused, and the refusal names its status.
+  const refused = await request.post(`/api/v1/campaigns/${campaignId}/pause`, {
+    headers: stopAuth,
+  });
+  expect(refused.status()).toBe(409);
+  expect(((await refused.json()) as { error: unknown }).error).toMatchObject({
+    code: 'conflict',
+    message: expect.stringContaining("This campaign's status is completed."),
+  });
+  // Cancelled through the API, and a retry answers it as it is.
+  for (let i = 0; i < 2; i += 1) {
+    const canceled = await request.post(`/api/v1/campaigns/${autumnId}/cancel`, {
+      headers: stopAuth,
+    });
+    expect(canceled.status()).toBe(200);
+    expect(((await canceled.json()) as { data: unknown }).data).toMatchObject({
+      status: 'canceled',
+    });
+  }
+  await page.reload();
+  await expect(page.getByText('Cancelled', { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('listitem').filter({ hasText: byKey })).toHaveCount(2);
 });

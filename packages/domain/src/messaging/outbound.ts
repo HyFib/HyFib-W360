@@ -1,5 +1,13 @@
 import { z } from 'zod';
-import { AppError, forbidden, notFound, uuidv7, type Clock, type Keyring } from '@w360/core';
+import {
+  AppError,
+  clipText,
+  forbidden,
+  notFound,
+  uuidv7,
+  type Clock,
+  type Keyring,
+} from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -39,6 +47,7 @@ import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { buildTemplateSend, sendSpecFor, templateParamsSchema } from '../templates/definition';
 import { markTemplateFromSendError } from '../templates/service';
+import { requestAccessCheck } from './access';
 import { credentialAad } from './credentials';
 import { emitTenantEvent } from './events';
 import type { GraphClient } from './graph';
@@ -239,7 +248,7 @@ export async function queueTextMessage(deps: OutboundDeps, ctx: TenantContext, i
       .update(conversations)
       .set({
         lastMessageAt: now,
-        lastMessagePreview: data.text.slice(0, 200),
+        lastMessagePreview: clipText(data.text, 200),
         unreadCount: 0,
         status: 'open',
         ...(claim ? { assignedMembershipId: ctx.membership.id } : {}),
@@ -461,7 +470,7 @@ export async function queueTemplateMessage(deps: OutboundDeps, ctx: TenantContex
       .update(conversations)
       .set({
         lastMessageAt: now,
-        lastMessagePreview: built.rendered.body.slice(0, 200),
+        lastMessagePreview: clipText(built.rendered.body, 200),
         status: 'open',
         ...(claim ? { assignedMembershipId: ctx.membership.id } : {}),
         version: sql`${conversations.version} + 1`,
@@ -915,8 +924,8 @@ export async function processSendIntent(
     return { outcome: 'retry_scheduled', retryAt, channelAccountId: intent.channelAccountId };
   }
   if (result.kind === 'auth') {
-    await deps.db.run(scope, (tx) =>
-      tx
+    await deps.db.run(scope, async (tx) => {
+      await tx
         .update(channelAccounts)
         .set({ status: 'needs_reconnect' })
         .where(
@@ -924,8 +933,10 @@ export async function processSendIntent(
             eq(channelAccounts.tenantId, scope.tenantId),
             eq(channelAccounts.id, intent.channelAccountId),
           ),
-        ),
-    );
+        );
+      // Meta refused the token: check the account's access at once (ADR-137).
+      await requestAccessCheck(tx, scope.tenantId, claimed.whatsappAccountId, deps.clock.now());
+    });
   }
   const code = result.code;
   await fail(

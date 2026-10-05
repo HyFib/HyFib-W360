@@ -12,7 +12,26 @@ import { tenantForAction } from '@/server/tenant-action';
  */
 export async function createWebhookEndpointAction(
   slug: string,
-  input: { url: string; description: string; eventTypes: string[] },
+  input: {
+    url: string;
+    description: string;
+    eventTypes: string[];
+    headers: { name: string; value: string }[];
+    /** The message.status statuses the endpoint takes; null takes every status. */
+    messageStatuses: string[] | null;
+    /** The contact parts it takes as contact.updated; null takes every change. */
+    contactParts: string[] | null;
+    /** The automations whose runs it takes (ADR-145); null takes every automation. */
+    automationIds: string[] | null;
+    /** The campaign statuses it takes (ADR-146); null takes every status. */
+    campaignStatuses: string[] | null;
+    /** The order statuses it takes (ADR-147); null takes every status. */
+    orderStatuses: string[] | null;
+    /** The template statuses it takes (ADR-148); null takes every status. */
+    templateStatuses: string[] | null;
+    /** The conversation statuses it takes (ADR-149); null takes every status. */
+    conversationStatuses: string[] | null;
+  },
 ): Promise<ActionResult<{ endpointId: string; secret: string }>> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);
@@ -25,7 +44,28 @@ export async function createWebhookEndpointAction(
 
 export async function updateWebhookEndpointAction(
   slug: string,
-  input: { endpointId: string; url: string; description: string; eventTypes: string[] },
+  input: {
+    endpointId: string;
+    url: string;
+    description: string;
+    eventTypes: string[];
+    /** Given, the endpoint's headers become these; left out, they stay. */
+    headers?: { name: string; value: string }[];
+    /** The message.status statuses the endpoint takes; null takes every status. */
+    messageStatuses: string[] | null;
+    /** The contact parts it takes as contact.updated; null takes every change. */
+    contactParts: string[] | null;
+    /** The automations whose runs it takes (ADR-145); null takes every automation. */
+    automationIds: string[] | null;
+    /** The campaign statuses it takes (ADR-146); null takes every status. */
+    campaignStatuses: string[] | null;
+    /** The order statuses it takes (ADR-147); null takes every status. */
+    orderStatuses: string[] | null;
+    /** The template statuses it takes (ADR-148); null takes every status. */
+    templateStatuses: string[] | null;
+    /** The conversation statuses it takes (ADR-149); null takes every status. */
+    conversationStatuses: string[] | null;
+  },
 ): Promise<ActionResult> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);

@@ -5,7 +5,9 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./egress": "./src/egress.ts"
+    "./egress": "./src/egress.ts",
+    "./money": "./src/money.ts",
+    "./text": "./src/text.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"

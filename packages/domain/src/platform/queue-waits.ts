@@ -1,4 +1,5 @@
 import { queueMaxWaitMinutes, type QueueDefinition } from '@w360/contracts';
+import { jsonbText } from '@w360/core';
 import { sql, systemScope, type Database } from '@w360/db';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
 
@@ -74,7 +75,7 @@ export async function checkQueueWaits(
       };
     });
     const recorded = await tx.execute<{ late: number }>(
-      sql`select ops.record_queue_waits(${JSON.stringify(waits)}::jsonb) as late`,
+      sql`select ops.record_queue_waits(${jsonbText(waits)}::jsonb) as late`,
     );
     return { checked: waits.length, late: Number(recorded.rows[0]?.late ?? 0) };
   });

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  clipText,
   constantTimeEqual,
   hmacSha256,
   hmacSha256Hex,
@@ -403,7 +404,7 @@ export function storeCustomerPhone(raw: string | null, callingCode: string | nul
 export function clip(value: unknown, max: number): string | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.replace(/\s+/g, ' ').trim();
-  return trimmed ? trimmed.slice(0, max) : null;
+  return trimmed ? clipText(trimmed, max) : null;
 }
 
 /** A timestamp from a store, or null when it does not parse. */

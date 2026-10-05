@@ -19,14 +19,22 @@ import {
   securityEvents,
   sql,
   tenants,
+  users,
   webhookQuarantine,
   webhookReceipts,
   type Tx,
 } from '@w360/db';
 import type { PlatformDatabase } from '@w360/db/platform';
+import { keyringOverview, parseSealedValueCounts, type KeyringOverview } from '../keyring/reseal';
+import {
+  jobSigningOverview,
+  parseJobSigningKeyCounts,
+  type JobSigningOverview,
+} from '../jobs/resign';
 import { MAX_RECEIPT_ATTEMPTS } from '../messaging/receipts';
 import type { QueueInspector, QueueSnapshot } from '../jobs/queue';
 import { QUEUE_CHECK_FRESH_MINUTES } from './queue-waits';
+import { deadLetterRetryBlock, deadLetterRetryableUntil } from './dead-letter-retries';
 import { parseInput } from '../validation';
 import {
   OPS_SIGNAL_RULES,
@@ -54,6 +62,14 @@ export interface PlatformOpsDeps {
   platformDb: PlatformDatabase;
   queues: QueueInspector;
   clock: Clock;
+  /** The configured encryption key ids (ADR-134); never the keys. */
+  keyring: { readonly currentKeyId: string; readonly keyIds: readonly string[] };
+  /** The configured job signing key ids (ADR-135); never the keys. */
+  jobSigning: {
+    readonly keyId: string;
+    readonly nextKeyId: string | null;
+    readonly previousKeyId: string | null;
+  };
 }
 
 const DAY_MS = 86_400_000;
@@ -65,7 +81,10 @@ export type UsageWindow = (typeof USAGE_WINDOWS)[number];
 
 type Row = Record<string, unknown>;
 const num = (value: unknown) => Number(value ?? 0);
-const date = (value: unknown) => (value instanceof Date ? value : null);
+// A timestamp the definer functions return: drizzle hands raw query results over as PostgreSQL's
+// text, which a Date parses (the driver gives Dates only to typed selects).
+const date = (value: unknown) =>
+  value instanceof Date ? value : typeof value === 'string' ? new Date(value) : null;
 const text = (value: unknown) => (typeof value === 'string' ? value : null);
 
 function toHealthFacts(r: Row): CompanyHealthFacts {
@@ -168,6 +187,11 @@ export interface IntegrationFailure {
   state: string;
   error: string | null;
   since: Date | null;
+  /**
+   * A platform administrator's acknowledgement of this failure (ADR-141): when, by whom (null once
+   * the account has no name) and the note; null while nobody has taken it.
+   */
+  acknowledgement: { at: Date; byName: string | null; note: string } | null;
 }
 
 export type ReceiptProblem = 'exhausted' | 'waiting';
@@ -250,6 +274,23 @@ const retrySchema = z.object({
   reason: z.string().trim().min(10, 'Give a reason of at least 10 characters').max(2000),
 });
 
+const deadLetterRetrySchema = z.object({
+  deadLetterId: z.uuid(),
+  reason: z.string().trim().min(10, 'Give a reason of at least 10 characters').max(2000),
+});
+
+/** A failure the console lists, by its integration and state, and what the administrator noted. */
+const acknowledgeSchema = z.object({
+  source: z.string().trim().min(1).max(40),
+  subjectId: z.uuid(),
+  state: z.string().trim().min(1).max(40),
+  note: z
+    .string()
+    .trim()
+    .min(10, 'Write a note of at least 10 characters')
+    .max(500, 'Write a note of at most 500 characters'),
+});
+
 const resolveSchema = z.object({
   quarantineId: z.uuid(),
   resolution: z
@@ -310,17 +351,27 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     const result = await tx.execute<Row>(
       sql`select * from ops.platform_ops_integration_failures(${limit})`,
     );
-    return result.rows.map((r) => ({
-      tenantId: String(r.tenant_id),
-      tenantName: String(r.tenant_name),
-      tenantSlug: String(r.tenant_slug),
-      source: String(r.source),
-      subjectId: String(r.subject_id),
-      label: text(r.label),
-      state: String(r.state),
-      error: text(r.error),
-      since: date(r.since),
-    }));
+    return result.rows.map((r) => {
+      const acknowledgedAt = date(r.acknowledged_at);
+      return {
+        tenantId: String(r.tenant_id),
+        tenantName: String(r.tenant_name),
+        tenantSlug: String(r.tenant_slug),
+        source: String(r.source),
+        subjectId: String(r.subject_id),
+        label: text(r.label),
+        state: String(r.state),
+        error: text(r.error),
+        since: date(r.since),
+        acknowledgement: acknowledgedAt
+          ? {
+              at: acknowledgedAt,
+              byName: text(r.acknowledged_by_name),
+              note: String(r.acknowledgement),
+            }
+          : null,
+      };
+    });
   }
 
   /** The last check of each queue's waits, by queue (ADR-096). */
@@ -560,15 +611,18 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           .where(gte(emailOutbox.createdAt, since7d))
           .groupBy(emailOutbox.kind)
           .orderBy(emailOutbox.kind);
-        // When platform staff were last emailed about work that failed for good (ADR-091).
-        const [alerts] = await tx
-          .select({ lastSentAt: platformAlerts.lastSentAt })
+        // When platform staff were last emailed about work that failed for good (ADR-091) and about
+        // companies' failing integrations (ADR-139).
+        const alerts = await tx
+          .select({ kind: platformAlerts.kind, lastSentAt: platformAlerts.lastSentAt })
           .from(platformAlerts)
-          .where(eq(platformAlerts.kind, 'failures'));
+          .where(inArray(platformAlerts.kind, ['failures', 'integrations']));
+        const lastSent = (kind: string) => alerts.find((a) => a.kind === kind)?.lastSentAt ?? null;
         return {
           failures,
           receipts,
-          lastFailureAlertAt: alerts?.lastSentAt ?? null,
+          lastFailureAlertAt: lastSent('failures'),
+          lastIntegrationAlertAt: lastSent('integrations'),
           quarantine: quarantine.map((q) => ({
             ...q,
             externalIds: quarantineExternalIds(q.externalIds),
@@ -579,6 +633,34 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
             .filter((e) => e.failed > 0 || e.stuck > 0),
         };
       });
+    },
+
+    /**
+     * The encryption keyring (ADR-134): the configured key ids and how many stored values of each
+     * kind each key sealed (`ops.sealed_value_counts`, counts only), so staff see when a key other
+     * than the primary seals nothing and can be removed.
+     */
+    async keyring(actor: PlatformActor): Promise<KeyringOverview> {
+      const counts = await platformDb.run(actor.userId, (tx) =>
+        tx.execute<{ kind: string; key_id: string | null; sealed: string }>(
+          sql`select kind, key_id, sealed from ops.sealed_value_counts()`,
+        ),
+      );
+      return keyringOverview(deps.keyring, parseSealedValueCounts(counts.rows));
+    },
+
+    /**
+     * Job signing (ADR-135): the configured key ids and how many jobs that can still run name each
+     * (`ops.job_signing_key_counts`, counts only), so staff see when a previous key signs nothing
+     * left and can be removed.
+     */
+    async jobSigning(actor: PlatformActor): Promise<JobSigningOverview> {
+      const counts = await platformDb.run(actor.userId, (tx) =>
+        tx.execute<{ key_id: string | null; state: string; jobs: string }>(
+          sql`select key_id, state, jobs from ops.job_signing_key_counts()`,
+        ),
+      );
+      return jobSigningOverview(deps.jobSigning, parseJobSigningKeyCounts(counts.rows));
     },
 
     /**
@@ -613,9 +695,15 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
             firstQueuedAt: deadLetters.firstQueuedAt,
             failedAt: deadLetters.failedAt,
             alertedAt: deadLetters.alertedAt,
+            tenantStatus: tenants.status,
+            retriedAt: deadLetters.retriedAt,
+            retriedByName: users.name,
+            settledAt: deadLetters.settledAt,
+            settledEnded: deadLetters.settledEnded,
           })
           .from(deadLetters)
           .leftJoin(tenants, eq(tenants.id, deadLetters.tenantId))
+          .leftJoin(users, eq(users.id, deadLetters.retriedByUserId))
           .orderBy(desc(deadLetters.failedAt))
           .limit(100);
         const known = new Set(ALL_QUEUES.map((q) => q.name));
@@ -645,7 +733,15 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         const check = queueCheck(waits, now);
         return {
           queues: rows,
-          deadLetters: recent,
+          deadLetters: recent.map((d) => {
+            const retryBlock = deadLetterRetryBlock(d, now);
+            return {
+              ...d,
+              retryableUntil: deadLetterRetryableUntil(d.sourceQueue, d.failedAt),
+              retryBlock,
+              retryable: retryBlock === null,
+            };
+          }),
           waitsCheckedAt: check.checkedAt,
           waitsFresh: check.fresh,
           lastQueueAlertAt: alerts?.lastSentAt ?? null,
@@ -722,6 +818,35 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           sql`select ops.platform_retry_webhook_receipt(${data.receiptId}::uuid, ${data.reason}, ${actor.correlationId}) as previous`,
         );
         return { previousStatus: String(result.rows[0]?.previous) };
+      });
+    },
+
+    /**
+     * Sends a dead letter's job back to its queue for one more attempt, as pg-boss's own retry does
+     * (ADR-108). The definer function checks the administrator, the dead letter, the company and
+     * pg-boss's job again, and marks and audits the retry in the same transaction.
+     */
+    async retryDeadLetter(actor: PlatformActor, input: unknown): Promise<{ queue: string }> {
+      const data = parseInput(deadLetterRetrySchema, input);
+      return platformDb.run(actor.userId, async (tx) => {
+        const result = await tx.execute<{ queue: string }>(
+          sql`select ops.platform_retry_dead_letter(${data.deadLetterId}::uuid, ${data.reason}, ${actor.correlationId}) as queue`,
+        );
+        return { queue: String(result.rows[0]?.queue) };
+      });
+    },
+
+    /**
+     * Records that a platform administrator is handling a failure the console lists now, with a
+     * note, replacing an earlier acknowledgement of it (ADR-141). The definer function checks the
+     * administrator and that the failure is still listed, and audits it in the same transaction.
+     */
+    async acknowledgeFailure(actor: PlatformActor, input: unknown): Promise<void> {
+      const data = parseInput(acknowledgeSchema, input);
+      await platformDb.run(actor.userId, async (tx) => {
+        await tx.execute(
+          sql`select ops.platform_acknowledge_integration_failure(${data.source}, ${data.subjectId}::uuid, ${data.state}, ${data.note}, ${actor.correlationId})`,
+        );
       });
     },
 

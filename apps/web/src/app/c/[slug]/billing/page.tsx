@@ -33,10 +33,11 @@ import { AutoRechargeForm } from '@/components/billing/auto-recharge-form';
 import { CardMandateSetup, RemoveCard } from '@/components/billing/card-mandate';
 import { PlanCard } from '@/components/billing/plan-card';
 import { PlanPaymentCard } from '@/components/billing/plan-payment-card';
+import { UsageWarningForm } from '@/components/billing/usage-warning-form';
 import { PageHeader } from '@/components/page-header';
 import { RequireOwnDocument } from '@/components/require-own-document';
 import { SignInAgain } from '@/components/sign-in-again';
-import { formatDateTime } from '@/lib/format';
+import { formatDate, formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
 
@@ -97,13 +98,28 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   assertCan(ctx, 'billing.read');
-  const { billing, plans, planPayments, refundRequests, clock } = await getRuntime();
-  const [overview, plan, planPayment, asked] = await Promise.all([
+  const {
+    billing,
+    plans,
+    planPayments,
+    refundRequests,
+    planChoices,
+    planAddOns,
+    planChanges,
+    clock,
+  } = await getRuntime();
+  const [overview, plan, planPayment, asked, choices, addOns, changes] = await Promise.all([
     billing.overview(ctx),
     plans.overview(ctx),
     planPayments.overview(ctx),
     refundRequests.list(ctx),
+    planChoices.choices(ctx),
+    planAddOns.addOns(ctx),
+    planChanges.overview(ctx),
   ]);
+  // Plans HyFib offers that the company could choose instead of its own (ADR-105).
+  const otherChoices =
+    choices.unavailable === null ? choices.choices.filter((c) => !c.current).length : 0;
   const canManage = can(ctx, 'billing.manage');
   // Adding a card and turning automatic top-ups on need a recent sign-in (ADR-056).
   const recent = hasRecentSignIn(ctx, clock.now());
@@ -139,6 +155,15 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
         <PlanCard
           overview={plan}
           timeZone={tz}
+          next={
+            planPayment.next?.subscription.startsAt
+              ? {
+                  planName: planPayment.next.planName,
+                  startsAt: planPayment.next.subscription.startsAt,
+                  authorised: planPayment.next.subscription.status !== 'created',
+                }
+              : null
+          }
           payment={
             // A payment still being started or in Checkout is finished below, so it counts as
             // paying offered here; one Razorpay may charge counts as a subscription (ADR-102).
@@ -157,6 +182,64 @@ export default async function BillingPage({ params }: { params: Promise<{ slug: 
                   : null
           }
         />
+        {otherChoices > 0 ? (
+          <p className="text-sm text-muted-foreground">
+            <Link
+              href={`/c/${ctx.tenant.slug}/billing/plans`}
+              className="text-primary underline-offset-4 hover:underline"
+            >
+              Choose a plan
+            </Link>
+            : HyFib offers {otherChoices === 1 ? 'another plan' : `${otherChoices} other plans`} you
+            can choose and pay for instead.
+          </p>
+        ) : null}
+        {addOns.unavailable === null && addOns.options.length > 0 ? (
+          <p className="text-sm text-muted-foreground">
+            <Link
+              href={`/c/${ctx.tenant.slug}/billing/add-ons`}
+              className="text-primary underline-offset-4 hover:underline"
+            >
+              Add-ons
+            </Link>
+            : choose extra seats, WhatsApp numbers, automation run packs or API request packs for
+            your plan, and pay for them with it.
+          </p>
+        ) : null}
+        {changes.unavailable === null && changes.periodEnd ? (
+          <p className="text-sm text-muted-foreground">
+            <Link
+              href={`/c/${ctx.tenant.slug}/billing/change`}
+              className="text-primary underline-offset-4 hover:underline"
+            >
+              Change plan
+            </Link>
+            : change your plan or add-ons from the end of the paid period, on{' '}
+            {formatDate(changes.periodEnd, tz)}.
+          </p>
+        ) : null}
+        {(plan.usage.limits.automationRuns ?? 0) > 0 || (plan.usage.limits.apiRequests ?? 0) > 0 ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>Usage warnings</CardTitle>
+              <CardDescription>
+                When this month&apos;s automation runs or API requests reach this share of the
+                plan&apos;s limit, members who manage billing are emailed once and members who read
+                billing see a notice on every page.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {canManage ? (
+                <UsageWarningForm slug={ctx.tenant.slug} percent={plan.usageWarningPercent} />
+              ) : (
+                <p className="text-sm">
+                  Warned at {plan.usageWarningPercent}% of a monthly limit. A member who manages
+                  billing can change this.
+                </p>
+              )}
+            </CardContent>
+          </Card>
+        ) : null}
         <PlanPaymentCard
           slug={ctx.tenant.slug}
           payment={planPayment}

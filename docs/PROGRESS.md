@@ -1,5 +1,3844 @@
 # Progress
 
+## 2026-10-05 — Phase 5: campaign results in campaign events (P5-09, ADR-150)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-087 `campaign.status_changed`
+carried a campaign's counters (the audience taken, the recipients queued and skipped) but not what
+happened to its messages: ADR-087 left delivery and read counts out because they change with every
+message status. A receiver that heard a campaign completed had to call `GET /campaigns/{id}`
+(ADR-125), with a key holding `campaigns.read`, to learn how it went. The results were also counted
+in three statements (the counts, the skip reasons, the failure codes), which agree only within one
+snapshot: the API reads them at repeatable read, members' campaign page at read committed.
+
+### Completed
+
+- **Design (ADR-150):** every `campaign.status_changed` carries `campaign.results`, the object
+  `GET /campaigns/{id}` answers (recipients pending, skipped, cancelled and queued; messages in
+  progress, sent, delivered, read, failed, of unknown outcome and cancelled; replies and opt-outs;
+  skip reasons and the 10 commonest failure codes), counted when the request is built (the `t` of
+  its `W360-Signature`), so a retry or a replay counts again; null while the campaign is a draft;
+  never the cost estimate members see; stored nowhere, so no migration; who receives them is
+  unchanged.
+- **Domain:** `campaigns/results.ts` (new): `campaignAnalytics` counts in one statement, the skip
+  reasons and failure codes in scalar subqueries, the commonest first, ties in the reasons' or
+  codes' order with no code after the codes it ties with; the results schema and
+  `toCampaignResults`, moved from `api/campaigns.ts`, shared by the API (`apiGetCampaign`), members'
+  campaign page (`campaigns/service.ts`, which re-exports `campaignAnalytics`) and the payloads.
+  `webhooks/payloads.ts`: `results` on the campaign of `campaign.status_changed`, counted in the
+  delivery's claim from the campaign's current status. OpenAPI: `WebhookCampaignStatusChanged`
+  gains `results`, and the event says when they are counted.
+- **Tests:**
+  - Unit (1 new, 1 extended): the payload schema (results required and nullable, refused when left
+    out, fractional or with an unknown skip reason); the mapping (`messagesCanceled`, no cost
+    estimate), the API sharing the schema, and the OpenAPI entries.
+  - Integration (2 new, 2 extended): a campaign submitted and rejected sends both changes with null
+    results; resubmitted, approved, ticked and dispatched, its changes carry the results counted at
+    each delivery, whatever status the change reports; once WhatsApp reports deliveries, a read and
+    a failure, its completion carries them, equal to `GET /campaigns/{id}`, and a replay of an
+    earlier change counts them again; every body passes the payload schema; the first campaign
+    events test's results (`webhook-events.test.ts`). The results counted in one statement: the
+    commonest skip reasons and failure codes first, ties in the reasons' or codes' order with no
+    code after the codes it ties with, the 10 commonest codes kept, no code the one left out when
+    the tenth place is tied, only the campaign's own recipients and messages counted; the lifecycle
+    test's tied skip reasons (`campaigns.test.ts`).
+  - E2E (1 extended in `webhook-events.spec.ts`): the campaign events test's completed change
+    carries the campaign's settled counts, and every change, all delivered after its draft, carries
+    results.
+- **Docs:** ADR-150 (and ADR-087's and ADR-125's "Not built" annotated); SECURITY (Phase 5 rules);
+  THREAT-MODEL T159; ARCHITECTURE; RUNBOOKS; DEPLOYMENT (no migration; workers from before it);
+  BACKLOG P5-09; feature matrix H-014 and W-138.
+- **Mutation checks:** 30 deliberate regressions tried. 29 were caught on the first run: 8 by unit
+  tests and 19 by integration tests in the domain and the API (the skip reasons' and failure codes'
+  order and ties, no code after the codes it ties with and the one left out at a tied tenth place,
+  the 10-code limit, `unknown` for a failure without a code, each subquery kept to the campaign and
+  to skipped recipients or failed messages, the mapping and the cost estimate it leaves out, the
+  schema the API shares, the payload's results, the draft rule decided by the campaign's status
+  rather than the change's, the payload schema and the OpenAPI entries), and 2 through the e2e test
+  (results never sent, results left out). 1 was not observable: without the skip reasons' tie-break
+  PostgreSQL still returned tied reasons in their order, as its plan groups them by sorting them;
+  the tie-break stays so that the order does not depend on the plan.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                                              | Result                                                                                       |
+| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                   | clean                                                                                        |
+| `pnpm test` (unit)                                                   | 693 passed (74 files; 1 new)                                                                 |
+| `pnpm test:integration` on PostgreSQL 18.6                           | 861 passed (56 files; 2 new)                                                                 |
+| `pnpm test:integration` on PostgreSQL 17.11                          | 861 passed (56 files)                                                                        |
+| `pnpm build`                                                         | passed                                                                                       |
+| e2e: webhooks, webhook-events, campaigns (chromium, mobile-chromium) | 30 passed (6.4 min); Firefox and WebKit are not installed here, so CI runs them              |
+| Mutation checks                                                      | 30 tried: 29 caught (8 by unit, 19 by integration, 2 through the e2e test), 1 not observable |
+| gitleaks 8.30.1 on the staged changes                                | no leaks found                                                                               |
+
+A first run of the integration suites was cut short when the local Docker daemon stopped (its
+background task reached its time limit) and its databases went with it; the results above are
+from the complete rerun once Docker was restarted.
+
+### Known gaps
+
+- Results as they were at the change (a snapshot stored with the event), results for a time range
+  or by day, the campaign in `message.status`, events for each recipient, and costs.
+- That the counts, skip reasons and failure codes come from one snapshot follows from counting them
+  in one statement; no test writes concurrently with a count.
+
+## 2026-10-04 — Phase 5: choosing the conversation statuses a webhook endpoint receives (P5-09, ADR-149)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-074 an endpoint that took
+`conversation.status_changed` received every change of every conversation's status: each resolve
+and each reopening, by a member, an automation, an API key or the contact writing again. A receiver
+that acts on one of them (a survey tool or a CRM closing its ticket on resolutions, a desk reopening
+its case when the contact writes again) had to read and drop the rest. ADR-146 to ADR-148 had just
+built filters by status for campaigns, orders and templates. The event's description also said a
+conversation could be set to pending, which nothing does.
+
+### Completed
+
+- **Design (ADR-149):** an endpoint takes every conversation status (null, as before) or 1 or 2 of
+  the statuses a change reaches (`open`, `resolved`; nothing sets a conversation pending, so the
+  list cannot name it), the status reached rather than the one before, kept only while it takes
+  `conversation.status_changed`; applied where events are captured, in the transaction that changes
+  the conversation, whoever changes it; audited and exported; permissions unchanged. The event's
+  description no longer says a conversation can be set to pending.
+- **Migration 0113:** `app.webhook_endpoints.conversation_statuses` (`text[]`, a check: null, or 1
+  or 2 known statuses while `conversation.status_changed` is among the events; containment also
+  refuses a null entry and `pending`), the runtime role's update of the column, and
+  `app.capture_webhook_event` replaced with the same signature (0112's, with the conversation
+  condition in both its existence check and its deliveries).
+- **Domain:** `webhooks/model.ts` (`WEBHOOK_CONVERSATION_STATUSES` in the order the inbox lists
+  them, their labels as the inbox names them, the event's corrected description);
+  `webhooks/service.ts` (`webhookConversationStatusesSchema`, `webhookConversationStatusesFor`, the
+  schemas' rule, `conversationStatuses` on each listed endpoint, create and update storing and
+  auditing the list); `api/webhook-endpoints.ts` (`conversationStatuses` on `POST` and
+  `PATCH /webhook-endpoints` and in every answer, kept or cleared, audited); OpenAPI
+  (`conversationStatuses`, and the event says how the filter applies); the company data export
+  carries the column.
+- **Web:** Settings → Webhooks, under "Conversation status" while it is ticked: "Statuses sent",
+  both statuses ticked to begin with (saving both keeps none); the endpoints list says
+  "Conversation statuses sent: …". The control is the one campaign, order and template statuses
+  use.
+- **Tests:**
+  - Unit (3 new, 1 extended): the list's rules (1 or 2 known statuses, `pending` and an unknown
+    status refused, repeats merged into the order the inbox lists them, null, the empty list's
+    message, the labels, the list matching the inbox's statuses but `pending`, the event's
+    description without pending), keeping and clearing; the API's schemas (only with the event, a
+    list alone is a change) and the OpenAPI entries.
+  - Integration (3 new, 1 changed): an endpoint naming resolutions gets only the resolutions and
+    each of the contact's messages, a reopening no endpoint takes is not recorded, and one taking
+    every status gets each change; refusals of statuses without the event, an empty list, `pending`
+    and an unknown status, keeping, replacing and clearing, the audits, each clause of the database
+    check (an empty list, three entries, `pending`, an unknown status, a null entry, any list
+    without the event) and the column grant (`webhooks.test.ts`, `webhook-events.test.ts`); the
+    same rules through the API, `pending` and an unknown status named by their place
+    (`api-webhook-endpoints.test.ts`, whose endpoint shape now includes `conversationStatuses`).
+  - E2E (1 new in `webhook-events.spec.ts`): conversation events through Settings, the inbox and the
+    worker: a member resolves a conversation and the customer writes again; an endpoint taking every
+    status gets the resolution and the reopening, signed, each with the status before, and a second
+    endpoint added with "Open" unticked gets the resolution alone; the form starts afresh, the
+    endpoints list names its statuses and no other endpoint's, and its page ticks resolutions only.
+- **Docs:** ADR-149 (and ADR-119's, ADR-146's, ADR-147's and ADR-148's "Not built" annotated);
+  SECURITY (Phase 5 rules); THREAT-MODEL T158; ARCHITECTURE; RUNBOOKS; DEPLOYMENT (0113's rollout);
+  DATA-RETENTION; BACKLOG P5-09; feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 63 deliberate regressions tried, all caught on the first run: 15 by unit
+  tests and 36 by integration tests in the domain, the API and the migration (the statuses, their
+  order and pending refused, the event's description, the list's rules, keeping and clearing, the
+  schemas' rule, each store, read and audit in Settings and the API, the OpenAPI entries, the
+  export, the capture's existence check and deliveries, the null branch, the condition kept to
+  conversation changes in both places, the status reached rather than the one before, each clause of
+  the database check and the column grant), and 12 in the web through the e2e test (the statuses
+  shown, what is sent, every status ticked sent as none, the statuses sent only with their event,
+  ticking and unticking, the page's starting state, the form starting afresh, the names shown in the
+  control, the endpoints list and its labels, the endpoint's page knowing its list, the names the
+  inbox uses).
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                  | Result                                                                                                                                                                                                                                              |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                       | clean                                                                                                                                                                                                                                               |
+| `pnpm test` (unit)                                                                       | 692 passed (74 files; 3 new)                                                                                                                                                                                                                        |
+| `pnpm test:integration` on PostgreSQL 18.6                                               | 859 passed (56 files; 3 new)                                                                                                                                                                                                                        |
+| `pnpm test:integration` on PostgreSQL 17.11                                              | 859 passed (56 files)                                                                                                                                                                                                                               |
+| `pnpm build`                                                                             | passed                                                                                                                                                                                                                                              |
+| e2e: webhooks, webhook-events, api-contact-fields, api-quota (chromium, mobile-chromium) | 36 passed (6.2 min) on the final build, once the `api.w360-e2e.test` host entry a container restart had removed was restored (a run without it failed each test waiting for a delivery); Firefox and WebKit are not installed here, so CI runs them |
+| Mutation checks                                                                          | 63 tried, all caught (15 by unit, 36 by integration, 12 through the e2e test)                                                                                                                                                                       |
+| gitleaks 8.30.1 on the staged changes                                                    | no leaks found                                                                                                                                                                                                                                      |
+
+### Known gaps
+
+- Filters by the status before a change, by who changed it, or by team or member; setting
+  conversations pending.
+
+## 2026-10-04 — Phase 5: choosing the template statuses a webhook endpoint receives (P5-09, ADR-148)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-053 an endpoint that took
+`template.status_changed` received every status reported for every template: Meta's review (in
+review, approved, rejected), its later decisions (paused, disabled, flagged, in appeal, archived,
+locked, a limit exceeded) and deletions. A receiver that acts on a few of them (a team keeping its
+campaigns running on pauses, rejections and disablements, a publishing tool on approvals) had to read
+and drop the rest. ADR-146 and ADR-147 had just built filters by status for campaigns and orders.
+
+### Completed
+
+- **Design (ADR-148):** an endpoint takes every template status (null, as before) or 1 to 11 of the
+  statuses the event reports (`pending`, `approved`, `rejected`, `paused`, `disabled`, `in_appeal`,
+  `flagged`, `archived`, `deleted`, `limit_exceeded`, `locked`; HyFib's own steps, a deletion under
+  way or refused and an unrecognised status are never sent), kept only while it takes
+  `template.status_changed`; applied where events are captured, in the transaction that records the
+  status, whoever records it; audited and exported; permissions unchanged.
+- **Migration 0112:** `app.webhook_endpoints.template_statuses` (`text[]`, a check: null, or 1 to 11
+  known statuses while `template.status_changed` is among the events; containment also refuses a
+  null entry and HyFib's own steps), the runtime role's update of the column, and
+  `app.capture_webhook_event` replaced with the same signature (0111's, with the template condition
+  in both its existence check and its deliveries).
+- **Domain:** `webhooks/model.ts` (`WEBHOOK_TEMPLATE_STATUSES` in the order Templates lists them,
+  their labels as Templates names them); `webhooks/service.ts` (`webhookTemplateStatusesSchema`,
+  `webhookTemplateStatusesFor`, the schemas' rule, `templateStatuses` on each listed endpoint, create
+  and update storing and auditing the list); `api/webhook-endpoints.ts` (`templateStatuses` on
+  `POST` and `PATCH /webhook-endpoints` and in every answer, kept or cleared, audited); OpenAPI
+  (`templateStatuses`, and the event says how the filter applies); the company data export carries
+  the column.
+- **Web:** Settings → Webhooks, under "Template status" while it is ticked: "Statuses sent", every
+  status ticked to begin with (saving all of them keeps none); the endpoints list says "Template
+  statuses sent: …". The control is the one campaign and order statuses use.
+- **Tests:**
+  - Unit (3 new, 1 extended): the list's rules (1 to 11 known statuses, HyFib's own steps, a deletion
+    under way or refused and an unknown status refused, repeats merged into the order Templates
+    lists them, null, the empty list's message, the labels, the list matching the event's
+    description), keeping and clearing; the API's schemas (only with the event, a list alone is a
+    change) and the OpenAPI entries.
+  - Integration (4 new, 1 changed): an endpoint naming approvals gets only the approval and its
+    other events, one taking every status gets each status, one naming rejections and pauses gets
+    those, and no status is recorded when no endpoint takes it; the domain's list, the capture
+    trigger's and the database check's held to the same statuses; refusals of statuses without the
+    event, an empty list, HyFib's own steps and a deletion under way, keeping, replacing and
+    clearing, the audits, each clause of the database check (an empty list, twelve entries, one of
+    HyFib's own steps, a deletion under way, an unknown status, a null entry, any list without the
+    event) and the column grant (`webhooks.test.ts`); the same rules through the API, HyFib's own
+    steps and a refused deletion named by their place (`api-webhook-endpoints.test.ts`, whose
+    endpoint shape now includes `templateStatuses`).
+  - E2E (1 new in `webhook-events.spec.ts`): template events through Settings, the worker and
+    Meta's stand-in: a member submits a template and Meta approves it; an endpoint taking every
+    status gets the review and the approval, signed, with the template's name, language and
+    category, and a second endpoint added with only approvals ticked (every status unticked, then
+    approvals ticked again) gets the approval alone; the form starts afresh, the endpoints list
+    names its statuses and no other endpoint's, and its page ticks approvals only.
+- **Docs:** ADR-148 (and ADR-146's and ADR-147's "Not built" annotated); SECURITY (Phase 5 rules);
+  THREAT-MODEL T157; ARCHITECTURE; RUNBOOKS; DEPLOYMENT (0112's rollout); DATA-RETENTION; BACKLOG
+  P5-09; feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 62 deliberate regressions tried, all caught on the first run: 14 by unit
+  tests and 36 by integration tests in the domain, the API and the migration (the statuses, their
+  order and HyFib's own steps refused, the list's rules, keeping and clearing, the schemas' rule,
+  each store, read and audit in Settings and the API, the OpenAPI entries, the export, the capture's
+  existence check and deliveries, the null branch, the condition kept to template statuses in both
+  places, the statuses chosen rather than the others, each clause of the database check and the
+  column grant), and 12 in the web through the e2e test (the statuses shown, what is sent, every
+  status ticked sent as none, the statuses sent only with their event, ticking and unticking, the
+  page's starting state, the form starting afresh, the names shown in the control, the endpoints
+  list and its labels, the endpoint's page knowing its list, the names Templates uses).
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                  | Result                                                                                             |
+| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                       | clean                                                                                              |
+| `pnpm test` (unit)                                                                       | 689 passed (74 files; 3 new)                                                                       |
+| `pnpm test:integration` on PostgreSQL 18.6                                               | 856 passed (56 files; 4 new)                                                                       |
+| `pnpm test:integration` on PostgreSQL 17.11                                              | 856 passed (56 files)                                                                              |
+| `pnpm build`                                                                             | passed                                                                                             |
+| e2e: webhooks, webhook-events, api-contact-fields, api-quota (chromium, mobile-chromium) | 34 passed (6.6 min) on the final build; Firefox and WebKit are not installed here, so CI runs them |
+| Mutation checks                                                                          | 62 tried, all caught (14 by unit, 36 by integration, 12 through the e2e test)                      |
+| gitleaks 8.30.1 on the staged changes                                                    | no leaks found                                                                                     |
+
+### Known gaps
+
+- Filters by template, category, language or WhatsApp account, by the status before a change or by
+  Meta's reason, and filters for conversation statuses.
+
+## 2026-10-04 — Phase 5: choosing the order statuses a webhook endpoint receives (P5-09, ADR-147)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-085 an endpoint that took
+`order.status_changed` received every change of every WhatsApp order's status: confirmations,
+fulfilments and cancellations by members, Payment Links requested, Razorpay's payments and the
+return to confirmed when a link ends unpaid. A receiver that acts on a few of them (a warehouse on
+paid orders, a refund desk on cancellations) had to read and drop the rest. ADR-085 left filters by
+status unbuilt; ADR-146 had just built them for campaigns.
+
+### Completed
+
+- **Design (ADR-147):** an endpoint takes every order status (null, as before) or 1 to 5 of the
+  statuses a change reaches (`confirmed`, `awaiting_payment`, `paid`, `fulfilled`, `cancelled`;
+  `received` only arrives as `order.received`, which is never filtered), the status reached and not
+  the one before, kept only while it takes `order.status_changed`; applied where events are
+  captured, in the transaction that changes the order, whoever changes it; audited and exported;
+  permissions unchanged.
+- **Migration 0111:** `app.webhook_endpoints.order_statuses` (`text[]`, a check: null, or 1 to 5
+  known statuses while `order.status_changed` is among the events; containment also refuses a null
+  entry and `received`), the runtime role's update of the column, and `app.capture_webhook_event`
+  replaced with the same signature (0110's, with the order condition in both its existence check
+  and its deliveries).
+- **Domain:** `webhooks/model.ts` (`WEBHOOK_ORDER_STATUSES` in the order an order reaches them,
+  their labels as Orders names them); `webhooks/service.ts` (`webhookOrderStatusesSchema`,
+  `webhookOrderStatusesFor`, the schemas' rule, `orderStatuses` on each listed endpoint, create and
+  update storing and auditing the list); `api/webhook-endpoints.ts` (`orderStatuses` on `POST` and
+  `PATCH /webhook-endpoints` and in every answer, kept or cleared, audited); OpenAPI
+  (`orderStatuses`, and the event says how the filter applies); the company data export carries the
+  column.
+- **Web:** Settings → Webhooks, under "Order status" while it is ticked: "Statuses sent", every
+  status ticked to begin with (saving all of them keeps none); the endpoints list says "Order
+  statuses sent: …". Campaign and order statuses now share one control (`ReachedStatusChoices`),
+  with the campaign checkboxes' ids and names unchanged.
+- **Tests:**
+  - Unit (3 new, 1 extended): the list's rules (1 to 5 known statuses, `received` and `canceled`
+    refused, repeats merged into the order an order reaches them, null, the empty list's message,
+    the labels), keeping and clearing; the API's schemas (only with the event, a list alone is a
+    change) and the OpenAPI entries.
+  - Integration (3 new, 1 changed): an endpoint naming fulfilled and cancelled gets only those
+    changes and every `order.received`, one taking every status gets each change, and no change is
+    recorded when no endpoint takes it (`webhook-events.test.ts`, whose endpoint helper takes the
+    statuses); refusals of statuses without the event, an empty list, `received` and an unknown
+    status, keeping, replacing and clearing, the audits, each clause of the database check (an empty
+    list, six entries, `received`, an unknown status, a null entry, any list without the event) and
+    the column grant (`webhooks.test.ts`); the same rules through the API, `received` and an
+    unknown status named by their place (`api-webhook-endpoints.test.ts`, whose endpoint shape now
+    includes `orderStatuses`).
+  - E2E (1 extended in `webhook-events.spec.ts`): a second endpoint is added with only fulfilments
+    ticked (every status unticked, then fulfilments ticked again); the form starts afresh, the
+    endpoints list names its statuses and no other endpoint's, its page ticks fulfilments only, and
+    once a member confirms and fulfils the order it has received the fulfilment alone while the
+    first endpoint has both changes. The campaign events test, which uses the shared control, still
+    passes.
+- **Docs:** ADR-147 (and ADR-085's and ADR-146's "Not built" annotated); SECURITY (Phase 5 rules);
+  THREAT-MODEL T156; ARCHITECTURE; RUNBOOKS; DEPLOYMENT (0111's rollout); DATA-RETENTION; BACKLOG
+  P5-09; feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 62 deliberate regressions tried, all caught on the first run: 14 by unit
+  tests and 36 by integration tests in the domain, the API and the migration (the statuses, their
+  order and `received` refused, the list's rules, keeping and clearing, the schemas' rule, each
+  store, read and audit in Settings and the API, the OpenAPI entries, the export, the capture's
+  existence check and deliveries, the null branch, the condition kept to order changes in both
+  places, the status reached rather than the one before, each clause of the database check and the
+  column grant), and 12 in the web through the e2e test (the statuses shown, what is sent, every
+  status ticked sent as none, ticking and unticking in the shared control, the page's starting
+  state, the form starting afresh, the endpoints list and its labels, the endpoint's page knowing
+  its list, the names Orders uses). Unlike ADR-146's first run, the capture test already named the
+  other event it expects (`order.received`, whose status `received` no list can hold).
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                  | Result                                                                                             |
+| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                       | clean                                                                                              |
+| `pnpm test` (unit)                                                                       | 686 passed (74 files; 3 new)                                                                       |
+| `pnpm test:integration` on PostgreSQL 18.6                                               | 852 passed (56 files; 3 new)                                                                       |
+| `pnpm test:integration` on PostgreSQL 17.11                                              | 852 passed (56 files)                                                                              |
+| `pnpm build`                                                                             | passed                                                                                             |
+| e2e: webhooks, webhook-events, api-contact-fields, api-quota (chromium, mobile-chromium) | 32 passed (6.4 min) on the final build; Firefox and WebKit are not installed here, so CI runs them |
+| Mutation checks                                                                          | 62 tried, all caught (14 by unit, 36 by integration, 12 through the e2e test)                      |
+| gitleaks 8.30.1 on the staged changes                                                    | no leaks found                                                                                     |
+
+### Known gaps
+
+- Filters by the status before a change, by store or catalog, by amount or by payment method,
+  filters for `order.received`, and filters for template or conversation statuses.
+
+## 2026-10-04 — Phase 5: choosing the campaign statuses a webhook endpoint receives (P5-09, ADR-146)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-087 an endpoint that took
+`campaign.status_changed` received every change of every campaign's status, from submissions and
+drafts sent back to each start, pause and resume; a receiver that acts on a few of them (a report
+pulled once a campaign ends, an alert on the runner's pauses) had to read and drop the rest. ADR-119,
+ADR-123 and ADR-145 had let an endpoint take some message statuses, contact changes and automations;
+ADR-087 and ADR-119 left filters for campaigns unbuilt (P5-09 Remaining).
+
+### Completed
+
+- **Design (ADR-146):** an endpoint takes every campaign status (null, as before) or 1 to 7 of
+  the statuses a campaign reaches that it chooses (`draft`, `pending_approval`, `scheduled`,
+  `running`, `paused`, `completed`, `canceled`), the status the change reached and not the one
+  before, kept only while it takes `campaign.status_changed`; applied where events are captured, in
+  the campaign change's own transaction, and no campaign event recorded when no endpoint takes it;
+  audited and exported; permissions unchanged.
+- **Migration 0110:** `app.webhook_endpoints.campaign_statuses` (`text[]`, a check: null, or 1 to 7
+  known statuses while `campaign.status_changed` is among the events; containment also refuses a
+  null entry), the runtime role's update of the column, and `app.capture_webhook_event` replaced
+  with the same signature (0109's, with the campaign condition in both its existence check and its
+  deliveries).
+- **Domain:** `webhooks/model.ts` (`WEBHOOK_CAMPAIGN_STATUSES` in the order a campaign reaches them,
+  their labels as Campaigns names them); `webhooks/service.ts` (`webhookCampaignStatusesSchema`,
+  `webhookCampaignStatusesFor`, the schemas' rule, `campaignStatuses` on each listed endpoint,
+  create and update storing and auditing the list); `api/webhook-endpoints.ts`
+  (`campaignStatuses` on `POST` and `PATCH /webhook-endpoints` and in every answer, kept or
+  cleared, audited); OpenAPI (`campaignStatuses`, and the event says how the filter applies); the
+  company data export carries the column.
+- **Web:** Settings → Webhooks, under "Campaign status" while it is ticked: "Statuses sent", every
+  status ticked to begin with (saving all of them keeps none); the endpoints list says "Campaign
+  statuses sent: …".
+- **Tests:**
+  - Unit (3 new, 1 extended): the list's rules (1 to 7 known statuses, repeats merged into the
+    order a campaign reaches them, null, refusals and the empty list's message, the labels), keeping
+    and clearing; the API's schemas (only with the event, a list alone is a change) and the OpenAPI
+    entries.
+  - Integration (3 new, 1 changed): an endpoint naming paused, completed and cancelled gets only
+    those changes while one taking every status gets each change, no change recorded when no
+    endpoint takes it, and the first endpoint's message statuses (accepted and canceled) unfiltered
+    (`webhook-events.test.ts`, whose endpoint helper takes the statuses); refusals of statuses
+    without the event, an empty list and an unknown status, keeping, replacing and clearing, the
+    audits, each clause of the database check (an empty list, eight entries, an unknown status, a
+    null entry, any list without the event) and the column grant (`webhooks.test.ts`); the same
+    rules through the API, an unknown status named by its place (`api-webhook-endpoints.test.ts`,
+    whose endpoint shape now includes `campaignStatuses`).
+  - E2E (1 extended in `webhook-events.spec.ts`): a second endpoint is added with only completions
+    ticked (every status unticked, then completions ticked again); the form starts afresh, the
+    endpoints list names its statuses and no other endpoint's, its page ticks completions only, and
+    once the campaign has run it has received the completion alone while the first endpoint has
+    every change.
+- **Docs:** ADR-146 (and ADR-087's and ADR-119's "Not built" annotated); SECURITY (Phase 5 rules);
+  THREAT-MODEL T155; ARCHITECTURE; RUNBOOKS; DEPLOYMENT (0110's rollout); DATA-RETENTION; BACKLOG
+  P5-09; feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 60 deliberate regressions tried, all caught: 13 by unit tests and 35 by
+  integration tests in the domain, the API and the migration (the statuses and their order, the
+  list's rules, keeping and clearing, the schemas' rule, each store, read and audit in Settings and
+  the API, the OpenAPI entries, the export, the capture's existence check and deliveries, the null
+  branch, the condition kept to campaign events in both places, the status reached rather than the
+  one before, each clause of the database check and the column grant), and 12 in the web through
+  the e2e test (the statuses shown, what is sent, every status ticked sent as none, ticking and
+  unticking, the page's starting state, the form starting afresh, the endpoints list and its labels,
+  the endpoint's page knowing its list, the names Campaigns uses). The campaign condition applied to
+  every event type in the deliveries first survived: the test only asked that some message status
+  arrive, and the queued message a pause cancels is `canceled`, a campaign status too. The test now
+  names the statuses (accepted and canceled), and the same regression in the existence check was
+  added and is caught. The e2e test was extended before the web regressions ran so that it
+  exercises the endpoint's page, the form after an add and ticking a status again.
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                  | Result                                                                                                                     |
+| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                       | clean                                                                                                                      |
+| `pnpm test` (unit)                                                                       | 683 passed (74 files; 3 new)                                                                                               |
+| `pnpm test:integration` on PostgreSQL 18.6                                               | 849 passed (56 files; 3 new)                                                                                               |
+| `pnpm test:integration` on PostgreSQL 17.11                                              | 849 passed (56 files)                                                                                                      |
+| `pnpm build`                                                                             | passed                                                                                                                     |
+| e2e: webhooks, webhook-events, api-contact-fields, api-quota (chromium, mobile-chromium) | 32 passed (6.1 min) on the final build; Firefox and WebKit are not installed here, so CI runs them                         |
+| Mutation checks                                                                          | 60 tried, all caught (13 by unit, 35 by integration, 12 through the e2e test), 1 of them after the test named the statuses |
+| gitleaks 8.30.1 on the staged changes                                                    | no leaks found                                                                                                             |
+
+A formatting-only change to one type alias (`WebhookCampaignStatus` on one line) came after the
+integration and e2e runs; lint, the format check, typecheck, the unit tests and the build ran again
+after it and passed.
+
+### Known gaps
+
+- Filters by campaign, by the status before a change or by why a campaign paused or completed, and
+  filters for template, order or conversation statuses.
+
+## 2026-10-04 — Phase 5: choosing the automations whose runs a webhook endpoint receives (P5-09, ADR-145)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-078 an endpoint that took
+`automation.run_started` or `automation.run_ended` received the start and end of every run of every
+automation, and a receiver that acts on one automation (a CRM recording what a qualification flow collects)
+had to read and drop the greetings and order updates of all the others. ADR-119 and ADR-123 had let
+an endpoint take some message statuses and some contact changes; ADR-078 and ADR-119 left filters by
+automation unbuilt (P5-09 Remaining).
+
+### Completed
+
+- **Design (ADR-145):** an endpoint takes every automation's runs (null, as before, including
+  automations published later) or the runs of 1 to 20 automations it chooses, one list for both
+  events, kept only while it takes one of them; only automations of the company with a published
+  version, which cannot be deleted (only archived), so a list never names one that is gone; another
+  company's automation refused like an unknown id; applied where events are captured, in the run's
+  own transaction, and no run event recorded when no endpoint takes it; audited and exported.
+- **Migration 0109:** `app.webhook_endpoints.automation_ids` (`uuid[]`, a check: null, or 1 to 20
+  ids without nulls while a run event is among the events), the runtime role's update of the column,
+  and `app.capture_webhook_event` replaced with the same signature (0095's, with the automation
+  condition in both its existence check and its deliveries).
+- **Domain:** `webhooks/model.ts` (`WEBHOOK_LIMITS.automations`, `WEBHOOK_AUTOMATION_EVENTS`,
+  `webhookTakesAutomationRuns`, the view and choice types); `webhooks/service.ts`
+  (`webhookAutomationIdsSchema`, `webhookAutomationIdsFor`, `assertWebhookAutomations` naming a
+  refused id by its place, the schemas' rule, `automations` on each listed endpoint with names and
+  archived ones marked, `automationChoices`, create and update storing, checking and auditing the
+  list); `api/webhook-endpoints.ts` (`automationIds` on `POST` and `PATCH /webhook-endpoints` and in
+  every answer, checked, kept or cleared, audited); OpenAPI (`automationIds`, and both run events
+  say how the filter applies); the company data export carries the column.
+- **Web:** Settings → Webhooks, under the events: "Automation runs sent" while either run event is
+  ticked, with "Every automation’s runs" or "Only the runs of the automations ticked" from the
+  company's published automations by name (paused and archived marked; an archived one offered only
+  while the endpoint has it); the endpoints list says "Automation runs sent: …".
+- **Tests:**
+  - Unit (4 new, 1 extended): the list's rules (1 to 20 ids, once each in lower case, null, refusals and their
+    messages), the two events and no other, keeping and clearing; the API's schemas (only with a run
+    event, a list alone is a change) and the OpenAPI entries.
+  - Integration (4 new, 1 changed): each endpoint gets only the runs of its automations, start and
+    end, an endpoint taking every automation every run, its other events unfiltered, and no run event
+    recorded when no endpoint takes it (`webhook-events.test.ts`); refusals of a draft, a tested
+    draft (a test version only), another company's automation, an unknown id, more than 20 and an
+    empty list, each named by its place, an archived automation kept, named and given again, keeping,
+    replacing and clearing, the audits, each clause of the database check and the column grant
+    (`webhooks.test.ts`); the choices by name, archived included, tested drafts and other companies
+    left out, for developers only; the same rules through the API, a refused list changing nothing,
+    and Settings naming the API's choice (`api-webhook-endpoints.test.ts`, whose endpoint shape now
+    includes `automationIds`).
+  - E2E (1 extended in `webhook-events.spec.ts`): a second automation is published and the endpoint
+    changed on its page to take only its runs (the choice kept after a reload, the endpoints list
+    naming it); a customer writing to the first automation adds no delivery once its run has ended,
+    and one writing to the second brings its start and end; both archived, the endpoint's page no
+    longer offers the first and still ticks the second, marked archived, as the list does.
+- **Docs:** ADR-145 (and ADR-078's and ADR-119's "Not built" annotated); SECURITY (Phase 5 rules);
+  THREAT-MODEL T154; ARCHITECTURE; RUNBOOKS; DEPLOYMENT (0109's rollout); DATA-RETENTION; BACKLOG
+  P5-09 (automation filters left the remaining list); feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 56 deliberate regressions tried, 55 caught: 12 by unit tests and 32 by
+  integration tests in the domain, the API and the migration (the limit, the two events, the list's
+  rules, keeping and clearing, the published check and the place it names, the schemas' rule, the
+  names and archived marks, the choices' permission, filter and order, each store, check and audit
+  in Settings and the API, the OpenAPI entry, the export, the capture's existence check and
+  deliveries, the null branch, both events filtered, each clause of the database check and the
+  column grant), and 11 in the web through the e2e test (the choices shown, what is sent, ticking,
+  the radio, the page's starting state, archived automations offered and marked, the endpoints list
+  and its archived mark, the endpoint's page knowing its list and its choices). One web regression
+  was first written so that it did not compile and was rewritten to compile, then caught. The
+  published check without its company condition is equivalent: RLS keeps it to the company, as the
+  test with another company's automation saw. The form's checks are covered by the e2e test only for
+  what it exercises (a choice made, kept, archived); paused automations' mark is not.
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                  | Result                                                                                             |
+| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                       | clean                                                                                              |
+| `pnpm test` (unit)                                                                       | 680 passed (74 files; 4 new)                                                                       |
+| `pnpm test:integration` on PostgreSQL 18.6                                               | 846 passed (56 files; 4 new)                                                                       |
+| `pnpm test:integration` on PostgreSQL 17.11                                              | 846 passed (56 files)                                                                              |
+| `pnpm build`                                                                             | passed                                                                                             |
+| e2e: webhooks, webhook-events, api-contact-fields, api-quota (chromium, mobile-chromium) | 32 passed (6.2 min) on the final build; Firefox and WebKit are not installed here, so CI runs them |
+| Mutation checks                                                                          | 56 tried, 55 caught (12 by unit, 32 by integration, 11 through the e2e test), 1 equivalent (RLS)   |
+| gitleaks 8.30.1 on the staged changes                                                    | no leaks found                                                                                     |
+
+### Known gaps
+
+- Filters on other facts of a run (its trigger, how it ended, the key that started it), choosing
+  automations by tag or folder, and filters for campaigns, templates, orders or conversations by
+  team or channel.
+
+## 2026-10-04 — Phase 5: usage warnings at a share each company chooses (P5-01, ADR-144)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-062 the billing managers
+were emailed once a monthly limit (automation runs, API requests, packs included) was 80% used, and
+since ADR-140 members who read billing saw a notice from the same point; a company whose month can
+run out within a day needed the warning earlier, and one that uses most of its allowance every
+month was warned when nothing was wrong (the backlog's "thresholds chosen per company").
+
+### Completed
+
+- **Design (ADR-144):** one share per company, 50% to 95% in steps of 5, 80% until one is chosen,
+  for both monthly limits; chosen by members who manage billing (no recent sign-in: it moves no
+  money and changes no access), audited with the share before and after; the sweep's list, its
+  locked check, the notices and the plan card all warn from the share of the limit rounded up,
+  still once per counter and period; API keys' own limits keep 80%.
+- **Migration 0108:** `app.tenants.usage_warning_percent` (`smallint`, default 80, a check
+  constraint for the list) with a column grant to `w360_app`; `ops.usage_warnings_due` recreated to
+  read the company's share (SECURITY DEFINER, pinned `search_path`, `w360_app` only).
+- **Domain:** `plans/model.ts` (`USAGE_WARNING_PERCENTS`, `DEFAULT_USAGE_WARNING_PERCENT`,
+  `warningThreshold(limit, percent)`); `plans/usage-warnings.ts` (`loadUsageWarningPercent`, the
+  input schema with one message for anything off the list); `plans/service.ts`
+  (`setUsageWarningPercent`, `billing.manage`, the row locked, audited; the overview carries the
+  share); `plans/sweep.ts` (the locked check reads the share in the company's scope; the email's
+  last line says at what share it came and where to change it); `plans/limit-notices.ts` (the
+  notices read the share); `api/key-usage-notices.ts` (keys' own limits at 80%, named).
+- **Web:** Billing → Usage warnings ("Warn at", shown while the plan limits automation runs or API
+  requests; members who only read billing see the share), `setUsageWarningAction`, and the plan
+  card's "nearly used up" at the company's share.
+- **Tests:**
+  - Unit (2 new): the shares and the default; the threshold at a chosen share rounded up, none
+    where it rounds up to the limit (19 at 95%, 1 at 50%); notices at shares of 50%, 80% and 95%.
+  - Integration (4 new in `usage-warnings.test.ts`, 1 in `api-quota.test.ts`): a share of 50% in
+    the sweep's list, its email (the last line naming 50%), the notices and the plan, then 95%
+    without warning the runs again and with the requests warned at 19; a share lowered below what
+    was used warned at the next sweep, and one raised after the list was read respected under the
+    lock; half of 7 rounded up to 4 in the list and the notices; administrators and marketers
+    refused, every value off the list refused with one message (45, 100, 82, 0, text, 70.5), the
+    same share again changing and auditing nothing, the other company untouched, the check
+    constraint refusing direct updates, and the column grants; a key's own limit still warned at
+    80% when the company chose 50%, even when its counter is asked for directly.
+  - E2E (1 extended in `api-quota.spec.ts`): three of five requests are below the 80% warning; the
+    owner lowers it to 60% under Billing, and the plan card and the notices show the requests
+    nearly used up at once; the share stays chosen after a reload.
+- **Docs:** ADR-144 (and ADR-062's and ADR-140's "Not built" annotated); SECURITY (Phase 5 rules);
+  THREAT-MODEL T153 (and T152's missing status); ARCHITECTURE; RUNBOOKS; BACKLOG P5-01 (thresholds
+  per company left the remaining list); feature matrix H-051 (H-040 and H-050 point to it).
+- **Mutation checks:** 40 deliberate regressions tried, 39 caught: 7 by unit tests and 25 by integration
+  tests in the domain and the migration (the shares, the rounding, a warning at the limit itself, the
+  share read and checked, the service's permission, its no-op and audit, the overview, the sweep's
+  list and its locked check, the email, the notices, keys' own limits, the column's grant and
+  check, the function's grant and search path), and 7 in the web through the e2e test (who gets the
+  form, when the card shows, the form's starting share, what it sends, the select, the refresh, the
+  plan card). A key's own limit warned at half was caught only once a test asked for that counter
+  directly (the sweep's list, still at 80%, hid it). An update without its company condition is
+  equivalent: RLS keeps it to the company's row, and the test saw the other company keep 80%.
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                        | Result                                                                                                          |
+| ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                             | clean                                                                                                           |
+| `pnpm test` (unit)                                                             | 676 passed (74 files; 2 new)                                                                                    |
+| `pnpm test:integration` on PostgreSQL 18.6                                     | 842 passed (56 files; 5 new)                                                                                    |
+| `pnpm test:integration` on PostgreSQL 17.11                                    | 842 passed (56 files)                                                                                           |
+| `pnpm build`                                                                   | passed                                                                                                          |
+| e2e: api-quota, api-request-packs, api-keys, plans (chromium, mobile-chromium) | 18 passed (7.8 min), and 6 again on the final build; Firefox and WebKit are not installed here, so CI runs them |
+| Mutation checks                                                                | 40 tried, 39 caught (7 by unit, 25 by integration, 7 through the e2e test), 1 equivalent (RLS)                  |
+| gitleaks 8.30.1 on the staged changes                                          | no leaks found                                                                                                  |
+
+### Known gaps
+
+- Shares per limit or per member, more than one warning per period, a share for keys' own limits,
+  and choosing who is warned.
+
+## 2026-10-04 — Phases 3 and 5: name conditions in segments and contact searches (P3-04, P5-08, ADR-143)
+
+Status: **Implemented and locally verified (test data only).** Segments compared contacts' custom
+fields, tags, consent, creation day, source, calling code, last message and campaign outcomes, but
+not their names, so members could not target "contacts named Asha" or "contacts without a name";
+`POST /contacts/search`, which takes segments' conditions, had no name condition either (the
+backlog's "a name condition in `POST /contacts/search`").
+
+### Completed
+
+- **Design (ADR-143):** a `name` condition with a text field's comparisons (`is_set`,
+  `is_not_set`, `equals`, `not_equals`, `contains`), the same in segments and in the API search:
+  whole names compared whatever their case, `contains` taking the text as written (never as a
+  pattern), `not_equals` also finding contacts without a name. WhatsApp profile names are kept as
+  sent, so the condition compares the name without the spaces around it and counts a name of spaces
+  only as none; stored names are not rewritten. No migration.
+- **Domain:** `campaigns/segments.ts` (the condition in the definition schema, its check in
+  members' words and its SQL, `NAME_COMPARISONS`); `api/contact-search.ts` (the strict API shape,
+  described in the OpenAPI document, refusals naming `conditions.N.value`, mapped to the segment
+  condition so segments' function compiles both); the OpenAPI search description names names.
+- **Web:** the segment builder (segments and campaign audiences) offers "Name" with "contains",
+  "is", "is not", "has a name" and "has no name"; the name field shows only when a comparison takes
+  one.
+- **Tests:**
+  - Unit (3 new in `segments.test.ts`, 2 extended in `contact-search.test.ts`): the comparisons kept
+    equal to a text field's; a missing name refused for `equals`, `not_equals` and `contains`, none
+    needed for `is_set` and `is_not_set`; values trimmed, 200 characters at most, other comparisons
+    refused; the API shape (comparisons, a number, a longer name, other keys refused) and its place
+    in the OpenAPI document.
+  - Integration (2 new in `api-contact-search.test.ts`): each comparison against members' contacts
+    and WhatsApp contacts whose profile names were padded with spaces or were spaces only (kept as
+    received), erased contacts and another company's left out, `%` and `_` taken as written, with a
+    tag and with `any`; the same counts as segments previewed and saved with the same conditions;
+    refusals naming `conditions.1.value` and the schema's paths; segments refusing the same in
+    members' words.
+  - E2E (1 extended in `api-contact-search.spec.ts`): a key's name conditions find what `name` on
+    `GET /contacts` and members' Contacts search find, and a missing name is refused with 422; a
+    member builds a segment on the name, previews 2 matches, the name field leaving for "has no
+    name", and the saved segment lists the same two contacts.
+- **Docs:** ADR-143 (and ADR-117's and ADR-126's "Not built" annotated); SECURITY; THREAT-MODEL
+  T130; ARCHITECTURE; BACKLOG P3-04 and P5-08 (the name condition left the remaining list); feature
+  matrix W-054, W-134 and H-033 (W-054 also no longer says keys lack the recent-message and
+  campaign conditions, which ADR-126 added).
+- **Mutation checks:** 32 deliberate regressions tried, all caught: 26 in the domain through unit and
+  integration tests (the comparisons, the definition's trimming and bound, the check, each
+  comparison's SQL, the spaces around a name and names of spaces only, case, `contains` read as a
+  pattern, the API's checks, trimming, shape and description), one of them (`not_equals` minding
+  case) only after its test compared a name in another case; 6 in the builder through the e2e
+  test.
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                        | Result                                                                              |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`             | clean                                                                               |
+| `pnpm test` (unit)                                             | 674 passed (74 files; 3 new, 2 extended)                                            |
+| `pnpm test:integration` on PostgreSQL 18.6                     | 837 passed (56 files; 2 new)                                                        |
+| `pnpm test:integration` on PostgreSQL 17.11                    | 837 passed (56 files)                                                               |
+| `pnpm build`                                                   | passed                                                                              |
+| e2e: api-contact-search, campaigns (chromium, mobile-chromium) | 6 passed (1.2 min); Firefox and WebKit are not installed here, so CI runs them      |
+| Mutation checks                                                | 32 tried, 32 caught (26 through unit and integration tests, 6 through the e2e test) |
+| gitleaks 8.30.1 on the staged changes                          | no leaks found                                                                      |
+
+### Known gaps
+
+- Names compared regardless of accents (é and e differ), starts-with and ends-with comparisons,
+  and conditions on a contact's email.
+
+## 2026-10-04 — CI: the dependency audit cleared (ADR-142)
+
+Status: **Fixed and locally verified; CI to confirm.** PR #19's "Dependency audit and secret scan"
+job had failed since GHSA-vfj7-8cjw-p6xm (a high-severity denial of service in `braces`, no patched
+release) was published, so its secret scan was skipped too. `braces` reached the repository only
+through the Next.js ESLint plugin (`@next/eslint-plugin-next` → `fast-glob` 3.3.1 → `micromatch`),
+a development dependency that its latest and canary releases still pin.
+
+### Completed
+
+- **Design (ADR-142):** remove the vulnerable package rather than ignore the advisory. The plugin
+  calls fast-glob once (`globSync(rootDir, { onlyDirectories: true })` for `settings.next.rootDir`),
+  so a pnpm patch pinned to `@next/eslint-plugin-next@16.3.6` makes that call use Node's
+  `fs.globSync` with fast-glob's results, and an override drops fast-glob from the plugin's
+  dependencies: fast-glob, micromatch, braces and 13 more packages leave the lockfile.
+- **Build:** `patches/@next__eslint-plugin-next@16.3.6.patch`; `patchedDependencies` and the
+  override in `pnpm-workspace.yaml`; both Dockerfiles copy `patches/` before their frozen install.
+- **Docs:** ADR-142; SECURITY (supply chain); THREAT-MODEL T16; RELEASE-CHECKLIST.
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                                                                        | Result                                                                                                                                                                                                                                                                                   |
+| ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm audit --audit-level=high`                                                                                                                | before: 1 high (braces, GHSA-vfj7-8cjw-p6xm); after: no known vulnerabilities                                                                                                                                                                                                            |
+| The patched lookup against fast-glob 3.3.1 (22 patterns: plain, absolute and trailing-slash paths, `*`, braces, missing paths, symbolic links) | same directories for all but `apps/**/app`, where fast-glob also followed pnpm's symbolic links into `node_modules`                                                                                                                                                                      |
+| `getRootDirs` for this repository's `rootDir: 'apps/web'`                                                                                      | `["apps/web"]`, as before                                                                                                                                                                                                                                                                |
+| `eslint` on a probe file with an `<a>` link to a temporary `pages/` page                                                                       | `@next/next/no-html-link-for-pages` reported it, as before the patch                                                                                                                                                                                                                     |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                                                                             | clean                                                                                                                                                                                                                                                                                    |
+| `pnpm test` (unit)                                                                                                                             | 671 passed (74 files)                                                                                                                                                                                                                                                                    |
+| `pnpm build`                                                                                                                                   | passed                                                                                                                                                                                                                                                                                   |
+| The Dockerfiles' install step (`pnpm install --frozen-lockfile` with only the files they copy)                                                 | fails without `patches/` (the patch file is missing), succeeds with it; the plugin is patched and braces, micromatch and fast-glob are absent                                                                                                                                            |
+| `docker build --target build` for the worker and web images                                                                                    | both built; the web stage holds the patched plugin, no braces, micromatch or fast-glob, and the standalone server. The full images were not built here: their unchanged runtime stage's `apt-get update` is refused by this environment's proxy (HTTP 405), and CI builds and scans them |
+| gitleaks 8.30.1 `detect` over the full history (as CI runs it)                                                                                 | no leaks found                                                                                                                                                                                                                                                                           |
+
+### Known gaps
+
+- `eslint-config-next`, which `apps/web` still lists, shares the patched plugin and was left in
+  place. Upgrading the plugin needs the patch redone, or dropped once the plugin stops pinning
+  fast-glob or braces is fixed; the install fails until then.
+
+## 2026-10-04 — Phase 5: acknowledging companies' failing integrations on the console (P5-10, ADR-141)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-139 every platform
+administrator is emailed about each failure Operations → Integrations lists, and the email names no
+company, so they all open the same list; nothing there said that someone had already taken a
+failure, contacted the company or found the cause.
+
+### Completed
+
+- **Design (ADR-141):** a platform administrator acknowledges a failure Current failures lists with
+  a note of 10 to 500 characters; the row shows who acknowledged it, when, and the note, and another
+  administrator may replace the note. Each acknowledgement is in the platform audit log
+  (`platform.integration_failure_acknowledged`, with the company and the failure's source, subject
+  and state). A failure is acknowledged by its integration and state, as ADR-139 tells it, so a new
+  state starts unacknowledged; only a failure listed at that moment can be acknowledged; an
+  acknowledgement lasts while the failure is listed and is forgotten an hour after it stops being
+  listed, as the alert marks are.
+- **Migration 0107:** `ops.integration_acknowledgements` (definer role only);
+  `ops.platform_acknowledge_integration_failure` (SECURITY DEFINER, platform role only: checks the
+  administrator, the note and that the failure is listed now, and records the acknowledgement and
+  the audit entry in one transaction); `ops.platform_ops_integration_failures` recreated with each
+  failure's acknowledgement (when, the administrator's name, the note); `ops.integration_alerts_due`
+  recreated to keep and forget acknowledgements as it does the alert marks.
+- **Domain** (`platform/ops.ts`): `platformOps.acknowledgeFailure` and the acknowledgement on each
+  listed failure. **Fixed in passing:** the console used a time its definer functions return only
+  when the driver handed over a Date, but drizzle hands raw query results over as text, so the
+  list's "Since", a company's last message and quality check on its platform page and the start of
+  the automation runs' period on Usage were blank, and failed onboarding sessions showed the page
+  view's time as their start; they are now parsed.
+- **Web:** an Acknowledged column on Current failures (who, when, the note) with an Acknowledge
+  form, "Replace the note" once acknowledged; the card says what acknowledging is for.
+- **Tests:**
+  - Integration (7 new in `platform-ops.test.ts`): who and the note listed, replaced by another
+    administrator, each audited with the company and the correlation id; refused for a state not
+    listed, an unknown or recovered failure, a note out of bounds (also padded with spaces) in the
+    service and in the function, which trims it, and a non-administrator; kept while listed, back
+    within the hour with its acknowledgement, forgotten an hour after, a later failure and a new
+    state unacknowledged, an old state's acknowledgement forgotten while another state is listed;
+    the recreated check still counting only failures not told; the console's times compared with
+    the stored ones; the table and the function kept from the runtime roles, run as the definer
+    with a pinned search path. The isolation suite: the function executable by the platform role
+    only.
+  - E2E (1 new in `platform-ops.spec.ts`): a platform owner acknowledges a company's failed number
+    on Current failures; the row shows who and the note and offers to replace it, with no
+    horizontal overflow; the platform audit log lists the acknowledgement.
+- **Docs:** ADR-141; SECURITY; THREAT-MODEL T152; RUNBOOKS (acknowledging failures, migration 0107);
+  ARCHITECTURE; BACKLOG P5-10; DATA-RETENTION (the acknowledgements, and the alert marks of
+  ADR-139, which had no row); feature matrix H-034.
+- **Mutation checks:** 41 deliberate regressions tried, 40 caught: 37 against migration 0107 and the service through integration tests (the acknowledging function's checks, replacement and audit entry, its grants, owner and search path, the console's list, the sweep's check, the service's bounds and the time parsing; the recreated check counting failures already told survived ADR-139's tests and is caught by a test added for it; a REVOKE from PUBLIC that the default privileges already make cannot be observed), and 4 through the e2e test (no acknowledgement shown, no offer to replace the note, the form sending another state, no refresh after acknowledging).
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                           | Result                                                                                                                                                           |
+| --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                | clean                                                                                                                                                            |
+| `pnpm test` (unit)                                                                | 671 passed (74 files)                                                                                                                                            |
+| `pnpm test:integration` on PostgreSQL 18.6                                        | 835 passed (56 files; 7 new, 1 extended)                                                                                                                         |
+| `pnpm test:integration` on PostgreSQL 17.11                                       | 835 passed (56 files)                                                                                                                                            |
+| `pnpm db:migrate` on the e2e database at 0106                                     | 0107 applied (its recorded checksum matches the committed file)                                                                                                  |
+| `pnpm build`                                                                      | passed                                                                                                                                                           |
+| e2e: platform-ops, dead-letter-retry, whatsapp-access (chromium, mobile-chromium) | 12 passed (10.2 min)                                                                                                                                             |
+| Mutation checks                                                                   | 41 tried: 40 caught (36 through integration tests, 4 through the e2e test), 1 cannot be observed (a REVOKE from PUBLIC that the default privileges already make) |
+| gitleaks 8.30.1 on the staged changes                                             | no leaks found                                                                                                                                                   |
+
+### Known gaps
+
+- Assigning a failure to someone, acknowledging the console's other lists (dead letters, receipts,
+  quarantine, late queues), editing or deleting a note (a new acknowledgement replaces it), and
+  leaving acknowledged failures out of the alert email (each failure is emailed once anyway).
+
+## 2026-10-04 — Phase 5: notices in the app before and at a monthly limit (P5-01, ADR-140)
+
+Status: **Implemented and locally verified (test data only).** Billing managers were emailed at
+80% of the month's automation runs or API requests and when they were used up (ADR-062), and the
+Billing plan card marked them; nobody else was told, so a marketer whose automations stopped
+answering or a developer whose integration was refused with 429 learnt why only from a billing
+manager.
+
+### Completed
+
+- **Design (ADR-140):** while the company is active, every page of the company shows a notice when
+  the current usage period's automation runs or API requests are nearly used up (80%, rounded up
+  as ADR-062 rounds it) or used up: members who read billing see both states of both limits, with
+  a link to Billing (not on Billing itself); members who read automations see the runs, and members
+  who manage API keys the requests, once used up, and are asked to ask a member who manages
+  billing. Limits that do not apply (none, 0, automations outside the plan) show nothing.
+- **Domain** (`plans/limit-notices.ts`): which notices a member gets and what they say (the
+  emails' words, the end of the period in the company's time zone), and `plans.limitNotices`, one
+  read-only transaction per page reading the plan's limits (packs included) and the period's two
+  counters, and nothing for a member who would get no notice or a company that is not active.
+- **Web:** the company layout shows the notices after the other notices. No migration.
+- **Tests:**
+  - Unit (7 new): who is told of which state, the threshold and limits that do not apply, the
+    wording, and no read for a member who gets no notice or a company that is not active.
+  - Integration (3 new): each role's notices at 70%, 80% and the limit (owner, administrator,
+    billing manager, marketer, agent); packs, the next period and an earlier period's counter;
+    suspended and restricted companies, complimentary access and a plan without automations.
+  - E2E (1 extended): at four of five API requests the notice on the company's pages with a link
+    to Billing, and on Billing without one; at the limit, why the API refuses requests.
+- **Docs:** ADR-140; ARCHITECTURE; BACKLOG P5-01; feature matrix H-050 (H-040 updated).
+- **Mutation checks:** 26 deliberate regressions tried, 26 caught: 24 against which notices a member gets, what they say and how the counts are read, through unit tests (19) and integration tests (5), and 2 through the e2e test (the layout showing no notice, Billing showing the notice with a link to itself).
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                                    | Result                                                                                                                                                                                                                           |
+| ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                                         | clean                                                                                                                                                                                                                            |
+| `pnpm test` (unit)                                                                                         | 671 passed (74 files; 7 new)                                                                                                                                                                                                     |
+| `pnpm test:integration` on PostgreSQL 18.6                                                                 | 828 passed (56 files; 3 new)                                                                                                                                                                                                     |
+| `pnpm test:integration` on PostgreSQL 17.11                                                                | 828 passed (56 files)                                                                                                                                                                                                            |
+| `pnpm build`                                                                                               | passed                                                                                                                                                                                                                           |
+| e2e: api-quota, whatsapp-access, plan-add-ons, api-request-packs, company-data (chromium, mobile-chromium) | 20 passed (12.1 min)                                                                                                                                                                                                             |
+| Mutation checks                                                                                            | 26 tried, 26 caught (19 through unit tests and 5 through integration tests against the rules, the wording and the reads; 2 through the e2e test: the layout showing no notice, Billing showing the notice with a link to itself) |
+| gitleaks 8.30.1 on the staged changes                                                                      | no leaks found                                                                                                                                                                                                                   |
+
+### Known gaps
+
+- Dismissing a notice, thresholds per company or per member, notices of keys' own monthly limits
+  (Settings → API keys shows them and ADR-098 emails them), and notices for limits that refuse
+  additions (seats, numbers, teams, live automations), which their forms show.
+
+## 2026-10-04 — Phase 5: alerts for companies' failing integrations (P5-10, ADR-139)
+
+Status: **Implemented and locally verified (test data only).** Operations → Integrations lists the
+companies' integrations that fail now, but platform staff saw them only when they opened the page;
+work that failed for good and late queues already reached them by email (ADR-091, ADR-096).
+
+### Completed
+
+- **Design (ADR-139):** every platform administrator is emailed once about each failing integration
+  of a company that Operations → Integrations lists, by its integration and state, with counts by
+  kind only, at most every 15 minutes; a failure the console has not listed for an hour is
+  forgotten, so a later failure is told again and one that comes back within the hour is not.
+- **Database** (migration 0106): `ops.integration_failures`, the console's list as one rule for the
+  console and the alert (only its owner may call it); `ops.platform_ops_integration_failures`
+  recreated on it; `ops.integration_alerts` (what staff were emailed about, by source, subject and
+  state, and when it was last listed); `ops.integration_alerts_due` (keeps and forgets marks, counts
+  what waits) and `ops.mark_integration_alert` (marks at most 1,000, at most every 15 minutes), for
+  the worker's role only; a row in `ops.platform_alerts`.
+- **Domain and worker** (`platform/integration-alerts.ts`): the email (the console's labels, six
+  kinds named at most) and the sweep's alert, run last in the minute messaging sweep.
+- **Web:** Current failures on the Integrations tab says that staff are emailed and when the last
+  integration alert went out.
+- **Tests:**
+  - Unit (5 new): the email's kinds, order, plurals and length with every kind the console has;
+    nothing marked without an administrator; nothing read when nothing waits.
+  - Integration (5 new, 1 extended): every listed failure of a company told once to every
+    administrator with counts only, the console showing when; the 15-minute gap and two sweeps at
+    once; a failure forgotten an hour after it stops being listed and told again, not when it comes
+    back within the hour, and kept while listed; a new state told again; the functions and the table
+    kept from the runtime and platform roles (and the isolation suite's function privileges,
+    extended).
+  - E2E (1 extended): the Integrations tab says that staff are emailed about failing integrations.
+- **Docs:** ADR-139; SECURITY; THREAT-MODEL T151; RUNBOOKS (integration failure alerts, migration
+  0106); ARCHITECTURE; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 15 deliberate regressions tried, 15 caught: 8 against migration 0106
+  (keeping, forgetting and counting marks, the 15-minute gap, the alert's time, the 1,000 limit, the
+  state marked, the shared list) and 1 against the console's read through integration tests, and 6
+  against the email and the sweep's steps through unit tests.
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                     | Result                                                                                                                                                                                    |
+| ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                          | clean                                                                                                                                                                                     |
+| `pnpm test` (unit)                                                                          | 664 passed (73 files; 5 new)                                                                                                                                                              |
+| `pnpm test:integration` on PostgreSQL 18.6                                                  | 825 passed (56 files; 5 new, 1 extended)                                                                                                                                                  |
+| `pnpm test:integration` on PostgreSQL 17.11                                                 | 825 passed (56 files)                                                                                                                                                                     |
+| `pnpm db:migrate` on the e2e database at 0105                                               | 0106 applied                                                                                                                                                                              |
+| `pnpm build`                                                                                | passed                                                                                                                                                                                    |
+| e2e: platform-ops, dead-letter-retry, whatsapp-access, webhooks (chromium, mobile-chromium) | 24 passed: 10 in the first run, where webhooks' 14 failed because this environment no longer mapped `api.w360-e2e.test` to 127.0.0.1 (CI's hosts entry); all 14 passed once it was mapped |
+| The worker's alert, by hand (local stack, Mailpit)                                          | the first sweep emailed "18 company integrations are failing" to the 5 platform administrators, with counts by kind only, and marked the 18 failures                                      |
+| Mutation checks                                                                             | 15 tried, 15 caught (8 against migration 0106 and 1 against the console's read through integration tests; 6 against the email and the sweep's steps through unit tests)                   |
+| gitleaks 8.30.1 on the staged changes                                                       | no leaks found                                                                                                                                                                            |
+
+### Known gaps
+
+- Alerts by kind or by company, choosing which kinds to be told of, digests and paging.
+- The check reads the console's whole list every minute (twice when something waits), which suits
+  the test envelope; paging and precomputed rollups come with growth.
+
+## 2026-10-04 — Phase 5: checking and restoring each account's webhook subscription (P2-12, ADR-138)
+
+Status: **Implemented and locally verified against the Graph stand-in (test data only).** The daily
+access check (ADR-137) confirmed each account's token but not that Meta still sends HyFib the
+account's messages: if HyFib's app stopped being subscribed to the account's webhooks, customers'
+messages simply stopped arriving and nobody was told.
+
+### Completed
+
+- **Design (ADR-138):** once Meta admits the token, the same job lists the account's subscribed apps
+  (`GET /{WABA_ID}/subscribed_apps`, documented in Meta's official OpenAPI description, research
+  M-190) and subscribes HyFib's app again with onboarding's call when it is missing; only a
+  complete list HyFib can read (every app's id, no further page) counts as a missing subscription.
+- **Domain** (`messaging/graph.ts`, `messaging/access.ts`): `listSubscribedApps` reads an app's id
+  in both shapes Meta documents and says whether the list is complete; the check stores when the
+  subscription was last confirmed or restored, the error of a listing or a restoration that failed,
+  and since when HyFib's app is known to be missing. A restoration is audited
+  (`whatsapp.webhooks_restored`) and emailed to the owners and administrators; so is the first
+  failure to restore (`whatsapp.webhooks_missing`), and the subscription found again after it.
+  Reconnecting clears the state.
+- **Worker:** the access check job logs subscriptions it could not confirm; the due list asks for
+  the account again 30 minutes after a listing or a restoration failed.
+- **Web:** every page of the company shows "WhatsApp messages are not reaching HyFib" while HyFib's
+  app is known to be missing and could not be subscribed again; Channels shows when each account's
+  webhooks were last checked; the operations console lists accounts whose subscription is missing,
+  and subscriptions not confirmed for 26 hours.
+- **Database** (migration 0105): the subscription columns on `app.whatsapp_accounts` (the
+  application role may update them), and `ops.whatsapp_access_checks_due` and
+  `ops.platform_ops_integration_failures` recreated.
+- **Test stand-in:** `GET /{waba}/subscribed_apps` in the shape of Meta's examples, with every
+  account subscribed unless a test removes it, other apps listed, an app listed without its id, and
+  refusals of the listing or of subscribing again.
+- **Tests:**
+  - Unit (5 new): both documented shapes, empty and malformed answers, lists made incomplete by an
+    app whose id cannot be read or by a further page, a refusal, the three emails.
+  - Integration (7 new, 2 extended): a subscription confirmed with the account's token and nobody
+    told; a missing one restored at once while another app is listed, with the audit entry and one
+    email; a restoration refused: recorded, emailed once, the banner and the console, tried again
+    after 30 minutes and not before, then restored with the second email; a subscription found again
+    after a failure; a listing that failed changing nothing, tried again after 30 minutes and listed
+    by the console after 26 hours; a list with an app HyFib cannot read not taken for a missing
+    subscription; no listing with a token Meta does not admit or an access that could not be
+    checked; reconnecting clearing the state (extended); healthy checks now confirming the
+    subscription (extended).
+  - E2E (1 new, 1 extended; chromium, mobile-chromium): an account whose subscription cannot be
+    restored shows the banner on Channels and on another page, with the email; an expiring access
+    also shows when its webhooks were checked.
+- **Found in review before committing:** a list with an app whose id could not be read was taken for
+  a missing subscription, so an answer in a shape neither documented form describes would have had
+  HyFib subscribe the app again and email every company at each daily check. Only a complete list
+  now counts (every app's id read, no further page); anything else is a check that could not be made
+  (an integration test and 6 mutations cover it).
+- **Docs:** ADR-138; research §20 (M-190); THREAT-MODEL T150; RUNBOOKS (section 6, migration
+  0105); META-SETUP; ARCHITECTURE; BACKLOG P2-12; feature matrix W-021.
+- **Mutation checks:** 30 deliberate regressions tried, 30 caught: 28 against the access module, the
+  reading of Meta's answer (both shapes, incomplete lists, ids too large for a number), onboarding
+  and migration 0105 through unit and integration tests, and 2 through the e2e test (the banner not
+  saying that messages are not reaching HyFib, Channels not saying when the webhooks were checked).
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                                                                                      | Result                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                                                                                           | clean                                                                                                                                                                                                                                                                                       |
+| `pnpm test` (unit)                                                                                                                                           | 659 passed (72 files; 5 new)                                                                                                                                                                                                                                                                |
+| `pnpm test:integration` on PostgreSQL 18.6                                                                                                                   | 820 passed (56 files; 7 new, 2 extended)                                                                                                                                                                                                                                                    |
+| `pnpm test:integration` on PostgreSQL 17.11                                                                                                                  | 820 passed (56 files)                                                                                                                                                                                                                                                                       |
+| `pnpm db:migrate` on an e2e database at 0104 (12 WhatsApp accounts, 10 connected), and on a new database                                                     | 0105 applied: both functions owned by `w360_definer` with `search_path` pinned, the due list executable by the application role only and the console's by the platform role only, neither by PUBLIC; all 105 applied                                                                        |
+| `pnpm build`                                                                                                                                                 | passed                                                                                                                                                                                                                                                                                      |
+| e2e on a new database: whatsapp-access, inbox, templates, onboarding, platform-ops, forms, campaigns, dead-letter-retry, step-up (chromium, mobile-chromium) | 42 passed (10.1 min)                                                                                                                                                                                                                                                                        |
+| Mutation checks                                                                                                                                              | 30 tried, 30 caught (28 against the access module, the reading of Meta's answer, onboarding and migration 0105, through unit and integration tests; 2 through the e2e test: the banner not saying that messages are not reaching HyFib, Channels not saying when the webhooks were checked) |
+| gitleaks 8.30.1 on the staged changes                                                                                                                        | no leaks found                                                                                                                                                                                                                                                                              |
+
+### Known gaps
+
+- Which webhook fields HyFib's app receives for an account is not checked.
+- A business that removed HyFib's app from its account on purpose but kept HyFib's token valid is
+  subscribed again until it disconnects the numbers (the email says how).
+- Meta's listing describes each app in two shapes (its examples and its schema disagree, M-190);
+  both are read, and what Meta answers in production was not seen. A list HyFib cannot fully read
+  is reported as not checked, never as missing, and a further page is not followed.
+
+## 2026-10-04 — Phase 5: checking each company's WhatsApp access before sends fail (P2-12, ADR-137)
+
+Status: **Implemented and locally verified against the Graph stand-in (test data only).** Each
+connected WhatsApp account's token was checked once, at onboarding. A token Meta stopped accepting
+was found only when a send failed (that number turned `needs_reconnect`, nobody was told), and
+never for a company that was not sending.
+
+### Completed
+
+- **Design (ADR-137):** a daily `debug_token` check of every connected account of an active company,
+  by the rules that admitted the token at onboarding (one function for both); checks asked at once
+  when Meta refuses the token for a send or a template sync; only Meta's explicit answer counts as a
+  loss of access, and a failed request changes nothing.
+- **Domain** (`messaging/access.ts`): `assessGrant` (not valid, another app, a WhatsApp permission
+  missing, the account left out of the management permission's target ids), the reasons and the two
+  emails, `checkWhatsAppAccess` (applied with the account locked and only while it is connected with
+  the same token; a loss marks the account and its active and setting-up numbers `needs_reconnect`,
+  audits `whatsapp.access_lost`, emits `channel.updated` and emails the owners and administrators
+  once; an expiry less than 7 days away is reminded once, and an access whose reported expiry has
+  passed is checked again at once; a failed check stores the attempt and the error's kind, code and
+  title), `findAccessChecksDue` and `requestAccessCheck`. Onboarding uses the same rules, stores the
+  expiry Meta reports and clears the reason; reconnecting brings back the account's other numbers
+  that need reconnecting and that Meta still lists, from the step they had completed (an active
+  number only has its health read again). Sends and template syncs refused for the token ask for a
+  check.
+- **Worker:** the minute sweep signals a `whatsapp.access_check` job per account due (at most 100 a
+  minute); the job logs checks that could not be made and losses.
+- **Web:** every page of the company shows a banner while an account needs reconnecting (or its
+  access expires within 7 days, or has expired), with a link to Channels for owners and
+  administrators; Channels explains each one with how to reconnect, and shows when each number's
+  account access was last checked and when it expires. The operations console's Integrations page
+  shows why an account needs reconnecting and lists accounts whose access could not be checked for
+  26 hours.
+- **Database** (migration 0104): the access columns on `app.whatsapp_accounts` (application role
+  may update them), `ops.whatsapp_access_checks_due` (definer, application role only) and
+  `ops.platform_ops_integration_failures` recreated with the reason and the failing checks.
+- **Test stand-in:** a control that registers a business token or changes what `debug_token` says
+  about it (validity, permissions, expiry), and `error` in the answer for an invalid token (M-187).
+- **Tests:**
+  - Unit (9 new): the rules in onboarding's order, target ids that include the account or none, the
+    missing permissions, the reasons, the account's name, the two emails (one-line subject, the
+    numbers listed, the company's time zone), the 7-day window and its edges, the numbers' message.
+  - Integration (real PostgreSQL; 11 new, 1 extended): a healthy token stored and nobody told; a
+    loss marking the account and its active and setting-up numbers (failed and disconnected numbers
+    untouched), the audit entry, live events and one email to the owner, then no further check; a
+    removed permission, another app and an account no longer shared named as such; checks that could
+    not be made (HyFib's app access token refused, Meta out of reach) changing nothing and tried
+    again after 30 minutes; a reconnection racing the check recording nothing, and the same token
+    sealed again still checked; the expiry reminded once, and once it has passed the banner saying
+    so and the account checked again at once; the due list (never checked, over a day old, asked,
+    not for accounts needing reconnecting, disconnected or of suspended companies); a template sync
+    refused for the token asking for a check; privileges; reconnecting storing the new token clean
+    and bringing back the listed number without registering it again; the console's rows; a refused
+    send asking for a check (extended).
+  - E2E (new; chromium, mobile-chromium): a company whose token Meta no longer accepts sees the
+    alert on Channels, the banner on another page with its link to Channels, and the email, all
+    within about a minute of connecting; a token that expires in 3 days shows the warning, the
+    access check and expiry times, and the reminder email.
+- **Docs:** ADR-137; research §19 (M-187 to M-189); SECURITY (provider tokens); THREAT-MODEL T22
+  and T149; RUNBOOKS (section 6, migration 0104); META-SETUP; ARCHITECTURE; BACKLOG (P2-11 marked
+  done by ADR-054, P2-12); feature matrix W-021.
+- **CI:** the end-to-end suite step may run 180 minutes (was 140) and its job 190 (was 150): 344
+  tests took 127.3 minutes on 3695c23, and the 8 added here each wait about a minute for the
+  worker's sweep, which would have left less than one retry of a long test before the limit.
+- **Image scans** (after cf0c0bd): Trivy's database now lists a HIGH vulnerability in Debian's
+  `libpcre2-8-0` 10.42-1+deb12u1 (CVE-2026-103111, fixed in 10.42-1+deb12u2), which the Node base
+  image still ships, so both image scans failed on cf0c0bd after passing on 3695c23. Both runtime
+  images now install the updates Debian has released when they are built, and a failed download
+  fails the build. This environment cannot reach `deb.debian.org`, so the images were not built
+  locally (BuildKit's Dockerfile checks pass); CI's image builds and scans are the check.
+- **Mutation checks:** 46 deliberate regressions tried, 46 caught: 41 against the access module,
+  onboarding, the send and template sync hooks and migration 0104 through unit and integration tests
+  (5 of them for the check once an expiry has passed and its wording), and 5 through the e2e test
+  (no banner on the company's pages, the banner only on Channels, Channels not explaining the loss,
+  the worker never checking, Channels not showing the expiry).
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                                                                                      | Result                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                                                                                           | clean                                                                                                                                                                                                                                                                                                                                        |
+| `pnpm test` (unit)                                                                                                                                           | 654 passed (72 files; 9 new)                                                                                                                                                                                                                                                                                                                 |
+| `pnpm test:integration` on PostgreSQL 18.6                                                                                                                   | 813 passed (56 files; 11 new, 1 extended)                                                                                                                                                                                                                                                                                                    |
+| `pnpm test:integration` on PostgreSQL 17.11                                                                                                                  | 813 passed (56 files)                                                                                                                                                                                                                                                                                                                        |
+| `pnpm db:migrate` on an e2e database at 0103 (22 connected accounts), and on a new database                                                                  | 0104 applied and the `whatsapp.access_check` queue declared, all 22 accounts then due their first check; all 104 applied                                                                                                                                                                                                                     |
+| `pnpm build`                                                                                                                                                 | passed                                                                                                                                                                                                                                                                                                                                       |
+| e2e on a new database: whatsapp-access, inbox, templates, onboarding, platform-ops, forms, campaigns, dead-letter-retry, step-up (chromium, mobile-chromium) | 40 passed                                                                                                                                                                                                                                                                                                                                    |
+| Mutation checks                                                                                                                                              | 46 tried, 46 caught (41 against the access module, onboarding, the send and template sync hooks and migration 0104, through unit and integration tests; 5 through the e2e test: no banner on the company's pages, the banner only on Channels, Channels not explaining the loss, the worker never checking, Channels not showing the expiry) |
+| gitleaks 8.30.1 on the staged changes                                                                                                                        | no leaks found                                                                                                                                                                                                                                                                                                                               |
+
+The first local e2e run failed: the local database's pg-boss queues had been declared before the new
+queue existed, so the worker's minute sweep failed at the access checks ("Queue
+whatsapp.access_check does not exist"). Running `pnpm db:migrate` again declared it, and the run
+above is clean; deployments run the migrations, which declare it, before the workers start
+(RUNBOOKS, migration 0104). One mutation survived at first (accounts of suspended companies
+checked): the test had left those accounts with a recent attempt, so the 30-minute wait kept them
+out for another reason; the test now clears it and the mutation is caught. Reviewing the change
+before committing found that once an expiry Meta reported had passed, the banner still said the
+access "expires" on a date in the past and nothing checked the account before the next daily check;
+the due list now asks for a check as soon as the expiry passes, and the banner and Channels say the
+access expired.
+
+### Known gaps
+
+- The app's webhook subscription to an account (`GET /{waba-id}/subscribed_apps`) is not checked or
+  renewed; Meta's deauthorization and uninstall callbacks are unconfirmed (M-146).
+- No "check now" button; accounts of companies that are not active are not checked; the account's
+  review and payment status (`health_status`) are not read.
+- What `debug_token` answers for a normal Embedded Signup token, and when Meta stops accepting one,
+  was seen only through search snippets (M-187 to M-189), not in Meta's documentation itself.
+
+## 2026-10-04 — Phase 5: sign-in history for each person (SEC-9, ADR-136)
+
+Status: **Implemented and locally verified (test data only).** Account & security listed a
+person's active sessions, but a session is gone once it is signed out or expires, so nobody could
+see when, from where and how their account was signed in to (SEC-9).
+
+### Completed
+
+- **Design (ADR-136):** every completed sign-in is a security event `auth.sign_in` with the
+  address and browser of the session it handed out, how they signed in and the session's id;
+  people read only their own.
+- **Web:** a HyFib plugin to Better Auth, after its two-factor plugin and before nextCookies,
+  records the sign-in after the password step, an authenticator code, a backup code and the email
+  confirmation link, once a session was handed out: not the password step that waits for a code
+  (the two-factor plugin withdraws its session), not a renewal of the same person's session
+  (turning two-factor on), not a wrong password or code. A sign-in that cannot be recorded fails and
+  its session is deleted. Account & security gains "Recent sign-ins": the last 20, when (UTC), the
+  device and browser, the address, how, and which one started the current session. The page's
+  grid now keeps a wide table within the screen on phones.
+- **Domain:** `signInFrom` (which requests are sign-ins, and how), `signInRecorder` (the hook,
+  failing closed), `recordSignIn`, and the account service's `signInHistory`.
+- **Database** (migration 0103): `ops.my_sign_ins` (security definer, run by the application role
+  only, the signed-in person's sign-ins newest first, at most 100, refused without a person); a
+  partial index on the person and time of sign-ins; the definer reads the columns it returns.
+- **Tests:**
+  - Unit (11 new): the endpoints watched; the session handed out with its address and browser;
+    nothing when the two-factor plugin withdrew it; each method, a trusted device included; a renewal
+    of the same person's session is none, a password sign-in again while signed in and a link
+    followed while signed in as someone else are sign-ins; other endpoints are none; the hook
+    records once and fails closed (the session deleted, the recording's error thrown, a failed
+    deletion logged); reading rows and labels.
+  - Integration (real PostgreSQL; 5 new): the person's own sign-ins newest first with method,
+    session, address (an IPv4 address mapped into IPv6 kept as IPv4) and browser, nobody else's and
+    no other security event; the last 20 by default and 100 at most; refused without a signed-in
+    person; the application role still cannot read security events; the function a definer with a
+    pinned search path run by the application role only, the definer reading and not writing; the
+    lookup served by the index.
+  - E2E (new): one person signs up and follows the link, turns two-factor on, signs in with a
+    password and a wrong then a right code trusting the device, signs in again on the trusted
+    device with the password alone, and signs in with a backup code on a device that is not
+    trusted: Account & security lists exactly those four sign-ins, newest first, with how, marks
+    the current one and does not scroll sideways.
+- **Docs:** ADR-136; SECURITY (audit); THREAT-MODEL T2 and T148; RUNBOOKS (compromised account,
+  Signals, migration 0103); DATA-RETENTION; ARCHITECTURE; BACKLOG SEC-9 settled; feature matrix
+  W-149.
+- **Mutation checks:** 33 deliberate regressions tried, 33 caught (29 against the
+  domain module and the migration, 4 against the plugin and the page through the e2e test).
+
+### Test commands and results (local, 2026-10-04)
+
+| Command                                                                                                                  | Result                                                                                                                                                                                                  |
+| ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                                                       | clean                                                                                                                                                                                                   |
+| `pnpm test` (unit)                                                                                                       | 645 passed (71 files; 11 new)                                                                                                                                                                           |
+| `pnpm test:integration` on PostgreSQL 18.6                                                                               | 802 passed (55 files; 5 new)                                                                                                                                                                            |
+| `pnpm test:integration` on PostgreSQL 17.11                                                                              | 802 passed (55 files)                                                                                                                                                                                   |
+| `pnpm db:migrate` on the e2e database at 0102, and on a new database                                                     | 0103 applied; all 103 applied                                                                                                                                                                           |
+| `pnpm build`                                                                                                             | passed                                                                                                                                                                                                  |
+| e2e on a new database: sign-in-history, two-factor, step-up, onboarding, forms, platform-ops (chromium, mobile-chromium) | 28 passed                                                                                                                                                                                               |
+| Mutation checks                                                                                                          | 33 tried, 33 caught (29 against the domain module and migration 0103; 4 through the e2e test: the plugin before two-factor or not registered, every sign-in marked current, the grid widening the page) |
+| gitleaks 8.30.1 on the staged changes                                                                                    | no leaks found                                                                                                                                                                                          |
+
+The first e2e run used the long-lived e2e database: platform-ops failed on both projects because six
+jobs queued during ADR-135's by-hand rotation check are signed with that check's key, so the
+console rightly showed "Jobs that will be refused"; on a new database it passes. The new test's
+check that the page does not scroll sideways then failed on mobile: the Account page's grid let
+the table widen it (541 px on a 412 px screen). The grid now uses a column that can shrink
+(`grid-cols-1`, as the operations pages do), and the run above is clean.
+
+### Known gaps
+
+- Failed sign-in attempts are not listed (recording a wrong password for an address with an account
+  only would tell whoever tries whether it has one, and anyone could fill a person's history); no
+  email about a sign-in from a new device; a sign-in's session cannot be signed out from the
+  history (Active sessions does that).
+- A session renewed by turning two-factor on or off or by a password change keeps no link to its
+  sign-in, so the current session's sign-in is marked only until then.
+- Security events are not purged after the retention period DATA-RETENTION proposes.
+- Sign-ins before this release were not recorded; addresses need a trusted proxy header, as for
+  the sessions list.
+
+## 2026-10-03 — Phase 5: rotating the job signing key without draining the queues (SEC-4, ADR-135)
+
+Status: **Implemented and locally verified (test data and the provider stand-ins only).** The job
+signing key could only be replaced by draining every queue first: an instance on the old key
+refused what the new key signed, and reminders, scheduled campaigns and automation waits stay
+queued for months signed with the key of their day (SEC-4).
+
+### Completed
+
+- **Design (ADR-135):** a rotation takes three deploys, one rotation at a time: the next key is
+  accepted before any instance signs with it, then the previous key is accepted while the worker
+  signs the queued jobs it signed again with the signing key, then it is removed once Operations →
+  Keys shows no job that can still run signed with it.
+- **Configuration:** `W360_JOB_SIGNING_KEY_NEXT` and `W360_JOB_SIGNING_KEY_PREVIOUS` (optional, at
+  least 32 characters, never both, never equal to the signing key, no development placeholder in
+  production).
+- **Contracts and domain:** envelopes name their key (`kid`, derived from the key, outside the
+  signature so that the previous release still verifies them); `JobSigner` takes the rotation's
+  other key, tries every configured key whatever an envelope names, returns the key that verified
+  it, and signs a verified envelope again with the same contents and time (`resign`);
+  `resignQueuedJobs` (the sweep's part: waiting, retrying and failed jobs naming the previous key or
+  none, up to 500 a minute, a compare and set on each job's state and signature, jobs that do not
+  verify reported once and left as they are, an hour's wait after a lookup that found nothing, stop
+  after 1,000); `jobSigningOverview` and the operations service's `jobSigning`.
+- **Database** (migration 0102): `ops.job_signing_key_counts` (key ids, states and counts of jobs
+  that can still run, for platform administrators); the migration runner grants the definer the
+  data of pg-boss's jobs for it.
+- **Worker:** the messaging sweep calls it every minute and logs counts, queues and job ids only.
+- **Web:** Operations → Keys gains a job signing card (key ids and roles, jobs waiting, running and
+  failed for each key, whether the previous key can be removed, jobs that will be refused).
+- **Tests:**
+  - Unit (14 new): the key id is derived and outside the signature (an envelope from before key ids
+    verifies); the named key is not trusted; the three steps accept and sign with the right keys;
+    a verified envelope signed again keeps its contents and time, nothing forged or tampered is;
+    refused rotations (both keys, the signing key again, a short key); no lookup without a previous
+    key, within the idle hour or once stopped; the console's keys, roles and counts; reading counts;
+    configuration (one rotation at a time, keys that differ, at least 32 characters, placeholders in
+    production).
+  - Integration (real PostgreSQL and pg-boss; 3 new): waiting, scheduled (90 days ahead), key-less,
+    retrying, failed and dead-lettered jobs the previous key signed are signed again with the same
+    contents, time, state, start and retries, and a worker with only the new key authorizes them;
+    forged, tampered, running, finished and already current jobs are untouched, a forged job is
+    reported once, the idle hour holds, and a running job that fails is signed again after it; the
+    console's counts before and after; a job a worker fetched, or whose data changed, between the
+    lookup and the write is left as it is; counts for platform administrators only, finished jobs
+    and data that is no envelope not counted, the function a definer with a pinned search path run
+    by the platform role only, and the definer reading but not writing a job's data.
+  - E2E: the operations console's test checks the job signing card (one key: no rotation, the
+    signing key's row, no job that will be refused).
+- **Docs:** ADR-135; SECURITY (rotation table, known gaps); RUNBOOKS (§13 job signing key, Keys tab,
+  migration 0102); THREAT-MODEL T147; BACKLOG SEC-4 settled; RELEASE-CHECKLIST (a rehearsal on
+  staging); ARCHITECTURE (envelope, minute sweep); `.env.example`.
+- **Mutation checks:** 48 deliberate regressions tried, 48 caught.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                 | Result                                                                                                                                                       |
+| ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                                                      | clean                                                                                                                                                        |
+| `pnpm test` (unit)                                                                                                      | 634 passed (70 files; 14 new)                                                                                                                                |
+| `pnpm test:integration` on PostgreSQL 18.6                                                                              | 797 passed (54 files; 3 new)                                                                                                                                 |
+| `pnpm test:integration` on PostgreSQL 17.11                                                                             | 797 passed (54 files)                                                                                                                                        |
+| `pnpm db:migrate` on a database at 0101                                                                                 | 0102 applied; the definer then reads `pgboss.job.data`                                                                                                       |
+| `pnpm build`                                                                                                            | passed                                                                                                                                                       |
+| e2e: platform-ops, dead-letter-retry, crm, campaigns, automations, inbox, stores, templates (chromium, mobile-chromium) | 30 passed                                                                                                                                                    |
+| By hand: built worker in step 2 (a new key signing, the e2e key previous) on the e2e database                           | its first sweep signed 10 queued jobs again (8 left by the e2e run, a reminder due in 5 minutes, one due in 40 days); none named the old key after; no error |
+| By hand: built worker in step 3 (the new key only)                                                                      | the reminder signed again ran on time; one queued with the old key after step 2 was refused (one `job.invalid_signature`, none before)                       |
+| By hand: built web server in step 2, Operations → Keys                                                                  | "Signing jobs again" with one job under the previous key, then "Signed again" after a step-2 worker's sweep                                                  |
+| Mutation checks                                                                                                         | 48 tried, 48 caught                                                                                                                                          |
+| gitleaks 8.30.1 on the staged changes                                                                                   | no leaks found                                                                                                                                               |
+
+The first integration run failed one existing assertion on both versions: ADR-108's test of the
+definer's job columns, which listed its grant before `data` was added for the counts. The test now
+lists `data` among the columns the definer reads (and still not among those it writes); the rerun
+above is clean.
+
+### Known gaps
+
+- Rotation cannot be started from the console; jobs that do not verify are logged by the worker,
+  not alerted.
+- If the old key leaked, the runbook skips the previous key, so jobs it signed are refused and their
+  work is signalled again from its durable rows (ADR-135).
+- Better Auth's secret still rotates as SECURITY describes (everyone signs in again).
+- The worker's call of the sweep and the three deploys are checked by hand only (CI and the e2e
+  environment configure one key): see the results.
+
+## 2026-10-03 — Phase 5: re-encrypting stored secrets under the primary key (SEC-10, ADR-134)
+
+Status: **Implemented and locally verified (test data and the provider stand-ins only).** Making a
+new encryption key primary sealed new values with it, but nothing sealed the stored ones again, so
+an old key could never leave `W360_ENCRYPTION_KEYS` without breaking companies' WhatsApp tokens,
+stores, Razorpay keys, webhook endpoints, Flows and HTTP steps (SEC-10).
+
+### Completed
+
+- **Design (ADR-134):** while a key other than the primary is configured, the minute sweep seals
+  the values such a key sealed again with the primary key, in each company's scope, with a compare
+  and set, without moving a row's time; Operations → Keys counts what each key seals.
+- **Database** (migration 0101): the touch trigger keeps `updated_at` while `w360.resealing` is on;
+  `ops.sealed_values_to_reseal` (ids and companies of values sealed with given keys, up to 1,000,
+  for the runtime role) and `ops.sealed_value_counts` (counts by kind and key, for platform
+  administrators) over `ops.sealed_value_keys` (15 kinds, the first 40 characters of each value);
+  `app.reseal_store_webhook_secret` (compare and set in the company in scope); the definer's reads
+  of the sealed columns and of HTTP secrets.
+- **Core:** `Keyring.keyIds` (ids only, the primary first).
+- **Domain** (`keyring/reseal.ts`): the registry of sealed values with the associated data their
+  services use; `resealValue` (one value, compare and set, the plaintext buffer zeroed after);
+  `resealStoredValues` (the sweep's part: up to 500 a minute, an hour's wait after a lookup that
+  found nothing, values that do not open reported once and left out, stop after 1,000);
+  `keyringOverview` and the operations service's `keyring`.
+- **Worker:** the messaging sweep calls it every minute and logs counts, kinds and ids only.
+- **Web:** Operations → Keys (configured key ids, values by key and by kind, values that cannot be
+  opened).
+- **Tests:**
+  - Unit (6 new, 1 new in core): the migration and the registry list the same kinds; counts of
+    unknown kinds are dropped; the console's keys (primary first, configured keys sealing nothing,
+    keys not configured, values in another format) and kinds; no lookup with one key, within the
+    idle hour or after too many values did not open; `keyIds` puts the primary first.
+  - Integration (real PostgreSQL; 7 new): every one of the 15 kinds re-encrypted and opened by a
+    keyring without the old key, with no row's time moved, the console's counts before and after,
+    and an automation's HTTP call (with its secret) and a provider's webhook then handled by the
+    services with the new key only; a value a member replaced while the re-encryption waited for
+    its row is left as it is; nothing of another company is read or written, and a value already
+    under the primary key is left as it is; a store's webhook secret changes only through its
+    function (not by the runtime role, not without a company, not for another company, not
+    without the current value, not into something unsealed or itself); a value that does not open
+    is reported once without its plaintext and stops a worker after 1,000; nothing happens with
+    one key, and a lookup that found nothing waits an hour; counts for platform administrators
+    only, a value sealed with a key no longer configured counted and never looked up, and which
+    roles may run the four functions.
+  - E2E: the operations console's test opens Keys (one key here: nothing to re-encrypt, the
+    primary key's row, provider webhook bodies counted, nothing that cannot be opened).
+- **Docs:** ADR-134; SECURITY (rotation table, controls); RUNBOOKS (§13 key rotation, Keys tab);
+  THREAT-MODEL T146 and T45/T47/T52; BACKLOG SEC-10 settled; ARCHITECTURE (minute sweep).
+- **Mutation checks:** 26 deliberate regressions tried, 26 caught. Three more survive by design and
+  stay: the company in a value's read and write and in the store secret swap (row security and the
+  swap's policy scope both as well), and an automation request's state in its read (the lookup
+  returns only unfinished calls, whose request a finished call clears). A fourth, the webhook
+  secret's version in the compare and set, could not fail (every sealing has a fresh IV) and was
+  removed.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                                                                                      | Result                                                                                           |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                                         | clean                                                                                            |
+| `pnpm test`                                                                                                                                                                                                                  | 620 passed                                                                                       |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                                                                                         | 794 passed on each                                                                               |
+| `pnpm build`, then `platform-ops.spec.ts`, `dead-letter-retry.spec.ts`, `stores.spec.ts`, `commerce.spec.ts`, `webhooks.spec.ts`, `automations.spec.ts`, `flows.spec.ts` and `inbox.spec.ts` on chromium and mobile-chromium | 42 passed                                                                                        |
+| The built worker, by hand, against the database those tests filled, with a second key made primary                                                                                                                           | one minute sweep re-encrypted all 112 values of 10 kinds; none left under the old key; no errors |
+| Mutation checks                                                                                                                                                                                                              | 26 regressions tried, 26 caught                                                                  |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                                | no leaks found                                                                                   |
+
+### Known gaps
+
+- Re-encryption cannot be started from the console; values that do not open are logged by the
+  worker, not alerted.
+- The job signing key (SEC-4) and Better Auth's secret still rotate as SECURITY describes.
+- A change-feed cursor sealed with a removed key is refused; the runbook keeps the old key until
+  integrations have read a page since the rotation.
+- The worker's call of the sweep is checked by hand only (CI and the e2e environment configure one
+  key; see the results), and against tables of e2e size: at 500 values a minute, the 7 days of
+  provider webhook bodies of a busy platform take a while.
+
+## 2026-10-03 — Phase 5: clips that keep characters whole (ADR-133)
+
+Status: **Implemented and locally verified (test data and the provider stand-ins only).** ADR-131
+kept emoji whole in inbound text only. Elsewhere text was clipped by UTF-16 code units, so a
+template variable, an automation's message, answer or field value, a saved reply inserted into the
+composer, or a Razorpay customer's name or plan's name cut inside an emoji went to Meta or Razorpay
+with half of it (as the escape `\ud83d`, whose handling is not confirmed), and members saw "�" at
+the end of clipped previews, store and catalog text, ad headlines and other text.
+
+### Completed
+
+- **Design (ADR-133):** clips of text that reaches providers or members use `clipText`; error and
+  status text (in English) and identifiers stay clipped by code units.
+- **Core:** `@w360/core/text`, an export of `text.ts` with no Node dependency, for code the browser
+  also runs.
+- **Domain and web:** `clipText` for template variables (campaigns, order messages, automations),
+  an automation's messages, questions, answers, field values and values saved from responses, a
+  company endpoint's refusal shown in a Flow, Razorpay's customer name and email, a recurring
+  charge's description and a plan's name, conversations' previews (members' replies, templates
+  sent from the inbox, the API and automations, Flows, order and product messages, campaigns),
+  stores' text and errors, catalogs' and products' names from Meta, ads' headlines, Flows' health
+  text, import file names, automation run step logs, a deletion's clean-up list, a saved reply
+  inserted into the composer and the automation diagram's labels.
+- **Tests:**
+  - Unit (4 new, 4 extended): an automation's message and template variable shortened before an
+    emoji with "…", an answer and a value read from a response, also through the interpreter;
+    campaign and store message variables, header and body; Razorpay's customer, plan and recurring
+    charge fields; a store's text and error; an ad's headline; a Flow's health text.
+  - Integration (real PostgreSQL; 2 new, 1 changed): a member's reply and a template whose
+    previews are cut where an emoji's halves meet; an automation's field value clipped before the
+    emoji instead of ending in U+FFFD (ADR-131's test).
+  - Converted by the same call without a test of their own: the previews of order messages, API
+    sends, Flows, product messages, campaigns and automations' sends, catalog and product names
+    from Meta, import file names, run step logs, a deletion's clean-up list, a Flow endpoint's
+    refusal, the composer and the diagram.
+- **Docs:** ADR-133 (and notes on ADR-131); SECURITY ("Text input"); THREAT-MODEL T145;
+  ARCHITECTURE (request flow); RUNBOOKS ("�").
+- **Mutation checks:** 19 deliberate regressions tried, 19 caught.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                                                                                                                                                                                            | Result                          |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                                                                                                                                               | clean                           |
+| `pnpm test`                                                                                                                                                                                                                                                                                                                        | 612 passed                      |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                                                                                                                                                                                               | 787 passed on each              |
+| `pnpm build`, then `inbox.spec.ts`, `inbox-teams.spec.ts`, `automations.spec.ts`, `stores.spec.ts`, `templates.spec.ts`, `campaigns.spec.ts`, `flows.spec.ts`, `commerce.spec.ts`, `growth.spec.ts`, `contacts.spec.ts`, `billing.spec.ts`, `plan-subscription.spec.ts` and `company-data.spec.ts` on chromium and mobile-chromium | 46 passed                       |
+| Mutation checks                                                                                                                                                                                                                                                                                                                    | 19 regressions tried, 19 caught |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                                                                                                                                      | no leaks found                  |
+
+### Known gaps
+
+- Clips separate an emoji's parts that are characters of their own (joined by zero-width joiners,
+  a flag's two regional indicators, a skin tone), showing a different emoji, never half of one.
+- Error and status text and identifiers are still clipped by code units (a half stored as U+FFFD).
+- A contact card's contacts are not given by the API or webhooks, nor shown in the inbox (ADR-132).
+- Pages' URL segments and query strings are not checked as such (services check ids, slugs,
+  cursors and filters by format or through `parseInput`).
+
+## 2026-10-03 — Phase 5: what was left out of a message, in the API and webhooks (ADR-132)
+
+Status: **Implemented and locally verified (test data and the provider stand-ins only).** Since
+ADR-131 a contact card keeps the contacts that fit and counts the rest, and content larger than a
+message may hold is kept as too large. The inbox said so; the API and the `message.received`
+webhook gave such a message `text: null`, as for a message without text, a tapped button kept as
+too large a reply of nulls, and a contact card nothing about the contacts it left out.
+
+### Completed
+
+- **Design (ADR-132):** two fields say what was left out; content kept as too large has nothing to
+  read; a card's contacts wait for Meta's contact object to be confirmed from its reference, which
+  this environment's network policy kept from being read.
+- **Domain** (`webhooks/payloads.ts`, `api/conversations.ts`, `api/openapi.ts`):
+  `inboundOmissions` reads `contentTooLarge` (only `true`) and `contactsLeftOut` (a contact card's
+  whole count above 0, otherwise 0) from stored content, and `inboundSummary` gives no text, reply
+  or media type for content kept as too large. The `message.received` payload and the API's
+  messages (`GET /conversations/{id}/messages`, `GET /messages`, `GET /message-changes`) carry
+  both, false and 0 for outbound messages, and the OpenAPI document requires and describes them.
+- **Tests:**
+  - Unit (`webhooks.test.ts` and `api.test.ts`, 1 new each; 2 updated): a too-large button and
+    image without a reply or media type; the fields for content too large, a card with 3 contacts
+    left out, an empty card, a count on a text message, and counts that are negative, fractional,
+    text, NaN or infinite; the OpenAPI document requiring both on its three message schemas.
+  - Integration (real PostgreSQL; `api.test.ts` and `webhooks.test.ts`, 1 new each; 1 updated): a
+    system message too large to keep, a 25-contact card larger than a message holds and a text,
+    read through a conversation's messages and the message feed, and posted as `message.received`.
+  - E2E (`api.spec.ts` and `webhooks.spec.ts`, 2 updated): the API's messages and a delivered
+    `message.received` say nothing was left out of a text.
+- **Docs:** ADR-132 (and a note on ADR-131); ARCHITECTURE (conversation reads); RUNBOOKS (a
+  message too large to keep); BACKLOG P5-08 and P5-09.
+- **Mutation checks:** 13 deliberate regressions tried, 13 caught.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                           | Result                          |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                              | clean                           |
+| `pnpm test`                                                                                                                                                       | 608 passed                      |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                              | 785 passed on each              |
+| `pnpm build`, then `api.spec.ts`, `webhooks.spec.ts`, `api-message-changes.spec.ts`, `webhook-events.spec.ts` and `inbox.spec.ts` on chromium and mobile-chromium | 46 passed                       |
+| Mutation checks                                                                                                                                                   | 13 regressions tried, 13 caught |
+| gitleaks 8.30.1 on the commit                                                                                                                                     | no leaks found                  |
+
+### Known gaps
+
+- A contact card's contacts are not given by the API or webhooks, nor shown in the inbox: Meta's
+  contact object is not in the research notes, and its reference could not be read from this
+  environment.
+- Clips outside the inbound path may still split a pair, stored as U+FFFD (an automation step's
+  field value, clipped by the interpreter the browser also runs).
+- Pages' URL segments and query strings are not checked as such (services check ids, slugs,
+  cursors and filters by format or through `parseInput`).
+
+## 2026-10-03 — Phase 5: split emoji and oversized inbound messages (ADR-131)
+
+Status: **Implemented and locally verified (test data and the provider stand-ins only).**
+PostgreSQL's jsonb refuses half of an emoji (a lone UTF-16 surrogate), which drizzle wrote as
+`JSON.stringify` does, as an escape. An inbound WhatsApp message longer than 4,096 code units whose
+clip fell inside an emoji failed its whole webhook receipt (22P02), with every other message and
+status in it, and so did a contact card larger than the 64 KB a message's content may take (23514,
+SEC-12) and a status whose errors were larger than the 4 KB their column allows. Half an emoji sent
+as an escape, or in an API request, failed wherever it was stored as jsonb.
+
+### Completed
+
+- **Design (ADR-131):** jsonb is written as JSON PostgreSQL stores, with half an emoji as U+FFFD
+  as text columns store it; inbound clips keep emoji whole; inbound content is bounded by
+  construction.
+- **Core** (`text.ts`): `jsonbText` writes a value as `JSON.stringify` does, with each lone
+  surrogate's escape as `�` (an escaped backslash read as a pair); `clipText` stops before a
+  surrogate pair it would split; `jsonbSize` is an upper bound of the bytes jsonb takes (header,
+  entries, text as UTF-8, numbers at their widest, alignment), walked without recursion.
+- **Database:** `@w360/db`'s `jsonb` column type (`columns.ts`) writes through `jsonbText`, and
+  every schema file declares its jsonb columns with it.
+- **Domain:** the six queries that build jsonb from JSON text use `jsonbText` (API field values, a
+  Flow's applied answers, an automation's field value, settlement records, queue waits and a
+  deletion's clean-up list). Inbound content keeps text (clipped), finite numbers and true or false
+  from a message's values; a reply keeps its id, title and description; an unsupported message
+  keeps at most 5 errors; a contact card keeps its first contacts, at most 20, while they fit a
+  60 KB budget, and counts the rest (`omittedContacts`); content still larger is kept as
+  `{ tooLarge: true }` with "[message too large to keep]" as the preview. A Flow's answers over
+  55 KB as jsonb are too large. A Flow's body, an order's note, a conversation's preview, profile
+  names and a deletion's label for a WhatsApp account are clipped with `clipText`. A status's
+  errors and pricing are kept as WhatsApp sent them when they fit a budget under their columns (3.5
+  and 1.5 KB), otherwise bounded: each error's code, title, message and details, clipped, while
+  they fit, and the pricing's billable flag, pricing model, category and type.
+- **Web:** the inbox says how many contacts a card left out, and "This message was too large to
+  keep." for content kept as too large.
+- **Tests:**
+  - Unit (`text.test.ts`, 6 new; `inbound-content.test.ts`, 10 new; `model.test.ts`, 1 new): halves
+    written as U+FFFD, escaped backslashes and pairs left as they are; clips before a pair;
+    `jsonbSize` of scalars, containers and 50,000 nested arrays; a message's text with an emoji at
+    the cut, picked values, replies and errors; contact cards of 25 large contacts, of 30 small ones
+    and of one over the budget; content kept as too large; a Flow's answers too large with the token
+    kept; a Flow's body and an order's note clipped before an emoji; a status's errors and pricing
+    kept as sent when they fit, and bounded when they do not.
+  - Integration (real PostgreSQL): a long message with an emoji at the cut; a preview and profile
+    names; a 25-contact card and a 120 KB one; a Flow's answer and an API field value holding half
+    an emoji; an automation's field value cut mid-emoji by the step's 500 characters; a deletion's
+    label for an account with a long name; a failed status with 6 KB of error details and 3 KB of
+    pricing; half an emoji written to a jsonb column directly;
+    `jsonbSize` at least `pg_column_size` over 300 generated values. ADR-129's receipt test now runs
+    a failing statement in the receipt's transaction, as no inbound content fails one any more.
+  - E2E (`inbox.spec.ts`, 1 new): one webhook with a long message cut mid-emoji, a large contact
+    card and a system message too large to keep, each shown in the inbox.
+- **Docs:** ADR-131 (and notes on ADR-130); SECURITY ("Text input" control); THREAT-MODEL T144;
+  ARCHITECTURE (request flow); RUNBOOKS (a message too large to keep, or "�"); BACKLOG SEC-12
+  settled.
+- **Mutation checks:** 36 deliberate regressions tried, 33 caught. The 3 that survived undo
+  `jsonbText` at the raw writes of settlement records, queue waits and a deletion's clean-up list,
+  which no input reaches with half an emoji: Razorpay's fields are checked as ASCII, queue names are
+  the app's own and labels are clipped whole. The harness now reads vitest's exit code: its first
+  run read the output's last lines, where a failure's details can follow the summary, and reported
+  one caught regression as surviving.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                                                                                                                                                                                          | Result                                                                                                                                                                                                                                                                                                    |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                                                                                                                                             | clean                                                                                                                                                                                                                                                                                                     |
+| `pnpm test`                                                                                                                                                                                                                                                                                                                      | 606 passed                                                                                                                                                                                                                                                                                                |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                                                                                                                                                                                             | 783 passed on each                                                                                                                                                                                                                                                                                        |
+| `pnpm build`, then `inbox.spec.ts`, `flows.spec.ts`, `contacts.spec.ts`, `automations.spec.ts`, `stores.spec.ts`, `commerce.spec.ts`, `company-data.spec.ts`, `api-contact-fields.spec.ts`, `webhook-events.spec.ts`, `campaigns.spec.ts`, `platform-ops.spec.ts` and `settlement-recon.spec.ts` on chromium and mobile-chromium | 51 passed, 1 failed: Chromium's campaign test waited 30 s for a template sync queued behind 128 that the worker signalled in its first minute for earlier runs' companies in the local e2e database (all done, none failed); it passed on mobile-chromium in the same run and on Chromium run again alone |
+| The long message's test with the old clip and the old jsonb write; the contact card's test keeping the first 20 contacts whole; the status's test storing errors and pricing as sent                                                                                                                                             | each failed its receipt: SQLSTATE 22P02, 23514 (`messages_content_check`) and 23514 (`message_status_events_errors_check`)                                                                                                                                                                                |
+| Mutation checks                                                                                                                                                                                                                                                                                                                  | 36 regressions tried, 33 caught (3 unreachable raw writes survived)                                                                                                                                                                                                                                       |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                                                                                                                                    | no leaks found                                                                                                                                                                                                                                                                                            |
+
+### Known gaps
+
+- The API and webhooks do not say that a message's content was too large (its text is null) or how
+  many contacts a card left out; contact cards' contacts are not shown in the inbox.
+- Clips outside the inbound path may still split a pair, stored as U+FFFD (an automation step's
+  field value, clipped by the interpreter the browser also runs).
+- Pages' URL segments and query strings are not checked as such (services check ids, slugs,
+  cursors and filters by format or through `parseInput`).
+
+## 2026-10-03 — Phase 5: text the database cannot store, in forms and provider payloads (ADR-130)
+
+Status: **Implemented and locally verified (test data and the provider stand-ins only).**
+PostgreSQL's text and jsonb cannot hold the NUL character (U+0000). ADR-124 refused it in the
+public API only: members' forms and searches, Better Auth's sign-up and account forms, imported CSV
+files and providers' JSON took it to a query, which failed. Members saw an internal error, and one
+inbound WhatsApp message holding it failed its whole webhook receipt, with every other message and
+status in it.
+
+### Completed
+
+- **Design (ADR-130):** members' input is refused, naming the field; providers' text is kept with
+  U+FFFD in place of the character.
+- **Core:** `parseExternalJson`, `NUL` and `NUL_REPLACEMENT` (`text.ts`): JSON text holds the
+  character only as the escape `\u0000`, so each such escape becomes `�` before parsing, keys
+  included, an escaped backslash read as a pair (`\\u0000` stays a backslash and "u0000").
+- **Domain:** `parseInput` refuses what a schema keeps when it holds the character
+  (`validation_failed` with the field's path, the API's message); the walk moved from the API's
+  check to `validation.ts` (`nulCharacterPathIn`, `NUL_CHARACTER_MESSAGE`, `writtenKey`), which the
+  API's check now uses; `parseCsv` refuses a value holding it with its line and a hint for files
+  saved as UTF-16. `parseExternalJson` parses Meta's webhooks (and a completed Flow's answers),
+  Graph's and Razorpay's answers, Razorpay's webhooks, companies' payment link webhooks, Shopify's
+  and WooCommerce's webhooks and REST answers, and a company endpoint's answer to an automation's
+  HTTP step.
+- **Web:** a Better Auth hook refuses the character in any auth request's body, query and path
+  parameters before the endpoint runs (400, the same message).
+- **Tests:**
+  - Unit (`text.test.ts`, 3 new; `validation.test.ts`, 3 new; `csv.test.ts`, 1 new;
+    `outside-json.test.ts`, 5 new): strings and keys at any depth, escaped backslashes before
+    "u0000", anything else exactly as `JSON.parse`; `parseInput` refusing a value, a list item, a
+    record's value and key with their paths, keeping what the schema drops and other control
+    characters, schema errors first, deep nesting without recursion; a CSV value with its line and a
+    UTF-16 file; Graph's, Razorpay's and a store's answers, an automation's saved value and a Flow's
+    answers keeping U+FFFD.
+  - Integration (real PostgreSQL): members' contact search with the character refused naming `q`
+    (it failed with 22021 before); an inbound message holding it processed and kept with U+FFFD (its
+    receipt failed with 22P05 before); a Razorpay event whose name holds it ignored, its receipt's
+    summary kept with U+FFFD (the receipt failed with 22P05 before); a payment link event whose name
+    holds it recorded with U+FFFD (its insert failed with 22021 before); a Shopify redaction naming
+    an email that holds it answered 200, as for any unknown email (it answered 500 before:
+    PostgreSQL refuses a text parameter holding the character with 22021). ADR-129's receipt test
+    now fails its receipt with a contact card larger than a message's content may be.
+  - E2E (`onboarding.spec.ts`, 1 new): a sign-up holding the character answers 400 with the
+    message.
+- **Docs:** ADR-130 (and notes on ADR-124 and ADR-129); SECURITY ("Text input" control);
+  THREAT-MODEL T143 (and T142's tests); ARCHITECTURE (request flow); RUNBOOKS (a refusal or "�"
+  in a message); BACKLOG SEC-12 (oversized inbound content, found with this slice).
+- **Mutation checks:** 20 deliberate regressions tried, all caught: 5 in `parseInput`'s check and
+  walk, 1 in CSV values, 4 in the parser, 9 at the provider sites (each delivered the character
+  through it) and the Better Auth hook disabled (caught by the browser run, which got 422 instead of
+  400).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                                                                                                | Result                                                                                                                                                                                                                 |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                                                   | clean                                                                                                                                                                                                                  |
+| `pnpm test`                                                                                                                                                                                                                            | 589 passed                                                                                                                                                                                                             |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                                                                                                   | 773 passed on each                                                                                                                                                                                                     |
+| `pnpm build`, then `onboarding.spec.ts`, `contacts.spec.ts`, `inbox.spec.ts`, `two-factor.spec.ts`, `step-up.spec.ts`, `stores.spec.ts`, `billing.spec.ts`, `flows.spec.ts` and `web-requests.spec.ts` on chromium and mobile-chromium | 40 passed                                                                                                                                                                                                              |
+| The Razorpay, payment link and Shopify webhook tests with `parseExternalJson` undone at their site                                                                                                                                     | each failed: Razorpay's receipt with SQLSTATE 22P05, the payment link event's insert with 22021, Shopify's redaction with 500 (PostgreSQL refuses a text parameter holding the character with 22021, checked directly) |
+| Mutation checks                                                                                                                                                                                                                        | 20 regressions tried, all caught                                                                                                                                                                                       |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                                          | no leaks found                                                                                                                                                                                                         |
+
+### Known gaps
+
+- Pages' URL segments and query strings are not checked as such (services check ids, slugs,
+  cursors and filters by format or through `parseInput`).
+- An inbound message whose content is larger than 64 KB still fails its receipt (SEC-12).
+
+## 2026-10-03 — Phase 5: database errors without the data they quote (SEC-11, ADR-129)
+
+Status: **Implemented and locally verified (test data only).** A query that failed with an error the
+app does not map left `db.run` as the driver raised it: drizzle's message repeats the query with
+its parameters, and PostgreSQL's error repeats values in its message (data exceptions) and its
+detail (a unique violation's key, a check's whole row). The logger wrote all of it, so the API's,
+server actions' and worker's error logs, the webhook routes, Next.js's output, failed jobs' outputs
+and a receipt's `last_error` could hold contacts' names, numbers, emails and message text (SEC-11,
+found with ADR-124). Better Auth, which queries on its own pool, printed its failed queries whole to
+the web's output (names, emails, and for a failed lookup a session or verification token).
+
+### Completed
+
+- **Design (ADR-129):** `db.run` and the platform database's `run` replace a driver's error with a
+  `DatabaseQueryError` (`@w360/core`): PostgreSQL's message where its SQLSTATE's messages quote no
+  values (not data exceptions, class 22, nor syntax errors, 42601; one line of at most 300
+  characters), otherwise "Database query failed (SQLSTATE …)" with the constraint, table and column;
+  the SQLSTATE and the names PostgreSQL gave as properties; the frames of the failed query under its
+  own first line. Never the query, its parameters, PostgreSQL's detail, hint, context or internal
+  query. Mapped errors (W34xx, 23505, 42501, 40001, 40P01) are mapped as before with it as their
+  cause, and an error wrapping a driver error keeps its own message with it as its cause. Every
+  logger's `err` serializer does the same, without changing the logged error, along the causes and
+  an `AggregateError`'s errors, and a caller's serializer cannot replace it. Driver errors are
+  recognised by shape (PostgreSQL's severity and SQLSTATE; drizzle's query and parameters), pg-boss's
+  plain-object copies included.
+- **Core:** `DatabaseQueryError`, `isDatabaseQueryError`, `isDatabaseDriverError`,
+  `toDatabaseQueryError` and `withoutDriverErrors` (`errors.ts`); `serializeError`, used by
+  `createLogger` for `err`, which also takes an optional destination stream (`logger.ts`).
+- **Database:** `mapDatabaseError` reads the W34xx public message first, then replaces the driver's
+  error and maps by the SQLSTATE (`packages/db/src/errors.ts`).
+- **Worker and web:** the pg-boss error handlers log the queue and worker beside the error
+  (`pgBossErrorContext`, `jobs/queue.ts`), since the copied error is now logged without its other
+  properties.
+- **Better Auth (web, `server/auth.ts`):** its log lines go through the web's logger
+  (`logLibraryLine`, `@w360/core`): the message, with the first error among the line's arguments as
+  `err`, and no other argument; its API error hook logs a failed query as its `DatabaseQueryError`
+  (other errors by their message, as before); `auth.api`, which pages, routes and actions call,
+  rethrows a failure without the driver's error (`withoutDriverErrorsFrom`).
+- **Tests:**
+  - Unit (`errors.test.ts`, 7 new; `logger.test.ts`, 6 new; `queue.test.ts`, 1 new): the facts and
+    names kept and anything else dropped; PostgreSQL's message kept for a unique violation and one of
+    our sentences, dropped for data exceptions, syntax errors, several lines, 300+ characters or no
+    SQLSTATE; only frame lines under the error's own first line, a parameter forging a frame left
+    out, a stack whose first line no longer matches dropped; recognition by shape (drizzle's,
+    PostgreSQL's, pg-boss's copy) and what is not a driver error; the class that stopped a query
+    before PostgreSQL answered; wrapping errors keeping their message with the new cause, a frozen
+    wrapper giving way, a cause loop; the serializer for drizzle's error, a wrapping `AppError` (the
+    logged error unchanged), pg-boss's copy, an `AggregateError`, and any other error exactly as
+    pino serializes it; `createLogger` (a child logger, a caller's own `err` serializer);
+    `pgBossErrorContext`.
+  - Integration (`database-errors.test.ts`, 6 new, real PostgreSQL): an invalid uuid holding a name
+    and number (22P02: the driver's error quoted both; `db.run`'s error, its stack and the log line
+    quote neither, the frames point at the test, and the logger sanitises the driver's own error
+    too); a check violation (23514) keeping PostgreSQL's message, constraint, table and schema, never
+    the row; a unique violation mapped to `conflict` with the constraint, `isUniqueViolation` true
+    and a cause that quotes no number; a W34xx sentence of more than 300 characters kept as the
+    public message, its cause naming only the SQLSTATE; members' contact search with a NUL character (22021) and an
+    inbound WhatsApp message holding one, whose receipt fails with `last_error` "Database query failed
+    (SQLSTATE 22P05)" instead of the insert with its text and number. The existing suites, which read
+    PostgreSQL's messages through `db.run` (guards, our functions' sentences), pass unchanged.
+  - Better Auth: unit tests for `logLibraryLine` (a line's error written as its
+    `DatabaseQueryError`, under `error` too, its other arguments left out) and
+    `withoutDriverErrorsFrom` (a method's driver error rethrown sanitised, other failures and
+    results unchanged); checked by hand against the local stack (test data): a sign-up whose name
+    holds a NUL character makes the user insert fail, and Better Auth's console line held the insert
+    with the name and email before; now one log line, "better-auth: Failed to create user", holds
+    "Database query failed (SQLSTATE 22021)" and neither.
+- **Docs:** ADR-129 (and ADR-124's note); SECURITY (an "Error logs" control); THREAT-MODEL T142 and
+  the `L` status in the legend; RUNBOOKS (triage: a failed query in the logs); ARCHITECTURE
+  (observability); DEPLOYMENT (PostgreSQL's own log keeps no parameters); BACKLOG SEC-11 settled.
+  No feature matrix row covers logging.
+- **Mutation checks:** 32 regressions tried, all caught, 2 only once tests were added for them, and
+  6 more on the Better Auth helpers (all of a line's arguments logged, an error argument or one
+  under `error` not found, the error logged outside the `err` serializer, a method's driver error
+  rethrown as it is, other properties wrapped as methods), all caught:
+  - caught: 3 in recognising a driver error (drizzle's or PostgreSQL's not recognised, a
+    `DatabaseQueryError` taken for one), 4 in what is kept (a SQLSTATE, a name, a severity or the
+    class of what stopped a query kept whatever it holds), 5 in PostgreSQL's message (kept for data
+    exceptions, for syntax errors, without a SQLSTATE or at any length, or never kept), 4 in the
+    stack (frames taken from anywhere in it, frames passed in kept unchecked, the failed query's
+    frames dropped, a stack whose rest is not frames still used), 3 in the facts (read from the
+    first error only, what stopped a query not named, causes not followed), 2 in wrapping errors
+    (the driver's error kept, a frozen wrapper kept with it), 3 in `db.run` (the driver's error
+    returned, our function's sentence read after it is replaced, a unique violation's cause the
+    driver's error), 6 in the logger (errors written as pino does, a caller's serializer winning, a
+    driver error logged as it is, causes not followed, the logged error changed, an
+    `AggregateError`'s errors written as pino does) and 2 in pg-boss's context (the queue left out,
+    anything logged as the worker);
+  - caught only once a test was added: frames kept from a stack whose message was cut after V8 wrote
+    it (a unit test), and our function's sentence read for the public message after the driver's
+    error is replaced, which gives the same sentence for every function today (an integration test
+    raising a sentence of more than 300 characters through `db.run`).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                       | Result                                                                                                          |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                          | clean                                                                                                           |
+| `pnpm test`                                                                                                                                   | 577 passed (575 before the Better Auth part)                                                                    |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                          | 771 passed on each (before the Better Auth part, which changes only the web's auth wiring and adds two helpers) |
+| `pnpm build`, then `contacts.spec.ts`, `campaigns.spec.ts` and `api-keys.spec.ts` on chromium and mobile-chromium (database migrated to 0100) | 14 passed                                                                                                       |
+| `pnpm build` with the Better Auth part, then `onboarding.spec.ts`, `two-factor.spec.ts` and `step-up.spec.ts` on chromium and mobile-chromium | 12 passed                                                                                                       |
+| A sign-up whose name holds a NUL character, against the local stack before and after the Better Auth part                                     | before: the insert with the name and email in the output; after: the SQLSTATE only                              |
+| Mutation checks                                                                                                                               | 38 regressions tried, all caught (2 only once tests were added for them)                                        |
+| gitleaks 8.30.1 on the commits                                                                                                                | no leaks found                                                                                                  |
+
+### Known gaps
+
+- Messages of other libraries' errors are logged as before (webhook delivery logs only their class
+  and code); migrations' console output keeps PostgreSQL's message; a job whose handler fails on
+  pg-boss's own query keeps PostgreSQL's error in its failed job's output (job envelopes: ids and a
+  signature); an error kept under another property than `cause` or `errors` is logged as pino logs
+  it; Better Auth's lookup of a session's or user's related rows prints its failed query to the
+  console itself (its parameters are ids).
+- Members' forms and searches and provider payloads are still not checked for the NUL character
+  (ADR-124): they fail as internal errors, now without the text.
+
+## 2026-10-03 — Phase 5: pausing and cancelling campaigns through the public API (P5-08, ADR-128)
+
+Status: **Implemented and locally verified (test data and the Graph stand-in only).** Since ADR-125
+and ADR-127 a key read campaigns, their results and their recipients, but only members could stop
+one: an integration that saw a product sell out or complaints arrive had a member pause or cancel
+the campaign by hand.
+
+### Completed
+
+- **Design (ADR-128):** a new writing scope, `campaigns.stop` ("Pause and cancel campaigns"),
+  granted only by members holding `campaigns.send`. `POST /campaigns/{id}/pause` pauses a scheduled
+  or running campaign as members pause it, with a new pause reason, `api`; `POST
+/campaigns/{id}/cancel` cancels one waiting for approval, scheduled, running or paused. A paused
+  campaign (for pausing) and a cancelled or completed one (for cancelling) answer as they are; the
+  other statuses, drafts included, are refused with 409 naming the status. Both answer the campaign
+  as `GET /campaigns/{id}` describes it. Resuming, approving, scheduling and editing stay with
+  members. Migration 0100 adds the scope to the key and plan checks and `api` to the pause reasons.
+- **Domain:** members' pause and cancel now run shared functions once the campaign row is locked
+  (`pauseLockedCampaign`, `cancelLockedCampaign`, `campaigns/service.ts`), which take who stopped
+  the campaign (a member or a key); `apiPauseCampaign` and `apiCancelCampaign` (`api/campaigns.ts`)
+  check the scope, lock the row, check the status, call them and write the key's audit row;
+  members' campaign history reads the key's name from the event's `apiKeyId`; the `api` reason in
+  the API's and the webhook's `pauseReason` descriptions; OpenAPI: both paths, the 409 description
+  and the info text.
+- **Found while testing:** a campaign cancelled while paused answered its last `pauseReason` in the
+  API, though the field is described as given while the campaign is paused (and
+  `campaign.status_changed` already gave null). `GET /campaigns`, `GET /campaigns/{id}` and both new
+  calls now give it only for a paused campaign.
+- **Web:** `POST /api/v1/campaigns/{id}/pause` and `/cancel`; the campaign page says "Paused through
+  the API." and its history "through the API, key “name”"; Settings → API keys and the platform plan
+  form list the scope (from the scope list).
+- **Tests:**
+  - Unit (`api.test.ts`, 3 new, 2 changed): the scope (label, permission `campaigns.send`, a writing
+    scope) and its place among the writing scopes; refusals before anything is read without the
+    scope, outside the plan, while suspended or restricted, and a bad id; the OpenAPI entries (no
+    body, the campaign as the answer, 404, 409 and 423, the `api` reason in the campaign's and the
+    webhook's schemas).
+  - Integration (`api-campaigns.test.ts`, 3 new, with the Graph stand-in): a running campaign paused
+    through the API: its queued messages cancelled with `campaign_paused`, its recipients waiting
+    again, the reason `api`, the answer equal to `GET /campaigns/{id}`, the event naming the key and
+    no member, members' history naming the key, the key's audit row with the request's id,
+    `campaign.status_changed` captured with `api`, a retry changing nothing, and a member resuming
+    it to send again; pausing refused for a draft, a campaign waiting for approval, a cancelled and
+    a completed one; cancelling a campaign waiting for approval, a scheduled one paused first (its
+    `pauseReason` null once cancelled), a running one with queued messages (cancelled with
+    `campaign_canceled`, `canceled_by_user_id` null), and a completed or cancelled one answered as
+    it is; a draft refused; another company's campaign, an unknown and a bad id not found; a key
+    without the scope, and a suspended or restricted company, refused with nothing changed. Members'
+    campaign tests, campaign webhook events and API quotas pass unchanged on the shared functions.
+  - e2e (`campaigns.spec.ts`, extended): a key made in Settings with "Pause and cancel campaigns"
+    pauses a campaign scheduled for later (a reading key is refused), the page says "Paused through
+    the API." with the key in its history, a completed campaign's pause is refused with 409 naming
+    its status, and the cancel, repeated, answers `canceled` both times with both changes in the
+    history.
+- **Docs:** ADR-128 (and ADR-125's and ADR-127's notes); SECURITY (the scope's permission, a
+  bullet); THREAT-MODEL T141; RUNBOOKS (a campaign stopped through the API, 403, 404, 409, 423);
+  ARCHITECTURE; DEPLOYMENT (migration 0100 and the rollout); BACKLOG P5-08; FEATURE-MATRIX W-134,
+  H-033.
+- **Mutation checks:** 36 regressions tried, 35 caught, 1 equivalent:
+  - caught: 5 in who may stop a campaign (pausing asking for `campaigns.read`, cancelling asking
+    for no scope, the scope not writing, granted by `campaigns.read`, a bad id sent to the
+    database), 7 in what pausing does (a campaign waiting for approval paused, a paused campaign
+    paused again or refused, a key's pause said to be a member's and a member's said to be a
+    key's, released recipients not waiting again, the answer from before the pause), 9 in who did
+    it (the key's id left out of the event or stored as a member's, the pause audited as HyFib or
+    without the request's id, the cancel audited without its source or stamped with the key's id
+    as a member's, the history's key looked up by another field, the history naming HyFib for a
+    key, no label for a key's pause), 4 in what cancelling does (a draft, a completed and a
+    cancelled campaign cancelled, released sends' recipients not cancelled), 3 in the database
+    (keys or plans refusing the scope, campaigns refusing the reason `api`), 4 in OpenAPI (the
+    pause route left out of the route list, the cancel's 409, the `api` reason in the campaign's
+    and the webhook's schemas), 2 in the routes (the pause route cancelling, the cancel route
+    answering 201) and the pause reason given whatever the campaign's status; 4 were caught only
+    by the e2e test (the history naming HyFib, the missing label and both routes);
+  - equivalent: the company dropped from the campaign's lock, which RLS keeps to the key's company
+    anyway (another company's campaign still answers 404).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                        | Result                                                                      |
+| ---------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                           | clean                                                                       |
+| `pnpm test`                                                                                                                                    | 561 passed                                                                  |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                           | 765 passed on each                                                          |
+| `pnpm build`, then `campaigns.spec.ts`, `api-keys.spec.ts` and `api-quota.spec.ts` on chromium and mobile-chromium (database migrated to 0100) | 16 passed                                                                   |
+| Mutation checks                                                                                                                                | 36 regressions tried, 35 caught (4 only through the e2e test), 1 equivalent |
+| gitleaks 8.30.1 on the commit                                                                                                                  | no leaks found                                                              |
+
+### Known gaps
+
+- Resuming, approving, scheduling, creating and editing campaigns through the API, cancelling
+  drafts, stopping many campaigns in one call, a reason given with the call, and
+  `campaign.status_changed` naming who cancelled a campaign are not built (ADR-128).
+
+## 2026-10-03 — Phase 5: a campaign's recipients through the public API (P5-08, ADR-127)
+
+Status: **Implemented and locally verified (test data and the Graph stand-in only).** Since ADR-125
+a key read a campaign's results (how many were delivered, read, failed or replied), but which
+contacts those were, with each message's status and error, was on members' recipients page and its
+CSV export only.
+
+### Completed
+
+- **Design (ADR-127):** `GET /campaigns/{id}/recipients` lists a campaign's recipients in a fixed
+  order (by id) on keyset pages, each with its contact (id, name, number), state and skip reason,
+  the message queued for it (id, status, when, WhatsApp's error or HyFib's reason) and when a reply
+  and an opt-out were counted for it. It needs `campaigns.read` and `contacts.read`, the pair members
+  need for the recipients page. `outcome` lists the recipients one count of the results counts,
+  with that count's own condition; erased contacts are left out (the results still count them). No
+  migration and no new scope.
+- **Domain:** `campaigns/outcomes.ts` (`RECIPIENT_OUTCOMES`, `RECIPIENT_OUTCOME_SQL`), which
+  `campaignAnalytics` now counts with; `api/campaigns.ts` (`apiCampaignRecipientQuerySchema`,
+  `apiCampaignRecipientSchema`, `apiListCampaignRecipients`); the `campaigns.read` description says
+  a key that also reads contacts lists recipients; OpenAPI: the path, `outcome`, `CampaignRecipient`
+  and the info text.
+- **Web:** `GET /api/v1/campaigns/{id}/recipients`.
+- **Tests:**
+  - Unit (`api.test.ts`, 5 new, 2 changed): each outcome named after a count of the results and
+    every count of recipients given an outcome; the query's rules (every outcome, page sizes, a
+    cursor that is not an id, unknown parameters); both scopes before anything is read, named, and
+    a plan without one; no scope description holding another scope's label (the first wording,
+    "With Read contacts", gave the Read campaigns checkbox a second scope's name, which the e2e
+    test's `/Read contacts/` selector caught); the OpenAPI entries, without costs.
+  - Integration (`api-campaigns.test.ts`, 2 new, with the Graph stand-in): every recipient of a run
+    campaign (delivered with a reply, read with a STOP, failed with WhatsApp's error, skipped,
+    unknown after a lost connection, sent with a STOP before delivery, erased after delivery) with
+    its contact, state, message status, time and error as the database and the message feed hold
+    them, in the order and set members' list holds less the erased contact; pages of two; each of
+    the 13 outcomes listing as many recipients as its count over four campaigns (run, waiting,
+    cancelled before its turn, cancelled with queued messages); a draft listing none; another
+    company's campaign, an unknown and a bad id not found; keys with one scope and bad parameters
+    refused, naming them.
+  - e2e (`campaigns.spec.ts`, extended): the key that reads the campaign lists its two recipients as
+    the Recipients page shows them (delivered with a reply, skipped for no opt-in), the one who
+    replied, and an unknown outcome refused with 422.
+- **Docs:** ADR-127 (and ADR-125's notes: recipients listed since ADR-127, and a campaign has at
+  most 50,000 recipients, not the 100,000 its cost note said); SECURITY (the ADR-125 bullet, a
+  bullet); THREAT-MODEL T140; RUNBOOKS (results differing from lists, 403, 404, 422);
+  ARCHITECTURE; DEPLOYMENT (the rollout); BACKLOG P5-08; FEATURE-MATRIX W-134, H-033.
+- **Measured** (a throwaway test, not kept): on the local PostgreSQL 18, with a campaign of 50,000
+  recipients, a page of 100 took 4 to 6 ms (median of 7) for every recipient, one state or a common
+  outcome, and 15 to 25 ms for outcomes few have; the database held little else.
+- **Mutation checks:** 47 regressions tried, 45 caught, 2 equivalent:
+  - caught: 5 in who may read (each scope dropped, another scope asked, a bad id sent to the
+    database, an unknown or another company's campaign answered with nothing), 6 in the query's
+    rules (an outcome of the results left out or one they do not count taken, a cursor that is not
+    an id sent to the database, longer pages, a smaller default page, unknown parameters), 9 in
+    the list (erased contacts listed, the outcome or the cursor ignored, the cursor repeating the
+    last recipient, contact order, no next page, the next cursor at the first recipient, a page one
+    recipient longer, every campaign's recipients listed), 9 in a recipient's fields (name and
+    number swapped, the message given only to recipients who replied, its status from the
+    recipient's state, the error or its title left out, the status time from the queueing time,
+    replies and opt-outs swapped, no skip reason, no queueing time), 9 in the outcomes shared with
+    the results (failed including unknown outcomes and replies counted without delivery, as
+    members' page groups them, opt-outs without delivery, cancelled messages of queued recipients
+    only, queued messages not in progress, read including delivered, sent leaving out messages
+    only sent, skipped listing waiting recipients, the results counting unknown outcomes as
+    failed), 5 in OpenAPI and the scope's description and 2 through the e2e test (the route passing
+    no query, the route nesting the page in `data`);
+  - equivalent: the company dropped from the campaign's lookup or the list's query, which RLS
+    keeps to the key's company anyway (another company's campaign still answers 404).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                 | Result                                                                 |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                    | clean                                                                  |
+| `pnpm test`                                                                                                                                             | 558 passed                                                             |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                    | 762 passed on each                                                     |
+| `pnpm build`, then `campaigns.spec.ts`, `api-keys.spec.ts` and `api-contact-search.spec.ts` on chromium and mobile-chromium (database migrated to 0099) | 16 passed                                                              |
+| Mutation checks                                                                                                                                         | 47 regressions tried, 45 caught (2 through the e2e test), 2 equivalent |
+| gitleaks 8.30.1 on the commit                                                                                                                           | no leaks found                                                         |
+
+### Known gaps
+
+- Recipients through webhooks, filters by contact, number or time, the message's conversation,
+  costs per recipient and members' groupings of failed and replied recipients are not built
+  (ADR-127).
+- How a rare outcome's page behaves next to a large messages table was not measured: the
+  measurement's database held one campaign.
+
+## 2026-10-03 — Phase 5: conversation and campaign conditions in API contact searches (P5-08, ADR-126)
+
+Status: **Implemented and locally verified (test data and the Graph stand-in only).** `POST
+/contacts/search` found contacts with segments' conditions (ADR-117) less the two that read
+conversations and campaigns, `last_message` and `campaign`, because `contacts.read` gave neither and
+campaigns had no scope. ADR-125 added `campaigns.read`.
+
+### Completed
+
+- **Design (ADR-126):** both conditions as segments have them: `last_message` (`within_days` or
+  `not_within_days`, 1 to 365 days; contacts who never wrote are among those who did not write) and
+  `campaign` (one of the company's campaigns and an outcome among the recipients it was sent to:
+  delivered, not_delivered, read, replied, not_replied). A `last_message` condition also needs
+  `conversations.read` and a `campaign` condition `campaigns.read`, refused with 403 before anything
+  is read; a campaign the company does not have is refused with 422 naming the condition's
+  `campaignId`. No migration.
+- **Domain:** `api/contact-search.ts` takes the two shapes (`days` a JSON number), checks the scopes
+  after parsing and the named campaigns in the company before building the query; the outcome list,
+  the `last_message` comparisons and the days' bounds move to constants in `campaigns/segments.ts`,
+  shared by segments and the API. OpenAPI: the two shapes in `ContactSearch`, and the description
+  naming the scopes and the refusal of an unknown campaign.
+- **Tests:**
+  - Unit (`contact-search.test.ts`, 1 new and 2 changed): the two conditions' forms (days 1 to 365,
+    whole JSON numbers, the comparisons and outcomes, no other keys); each scope needed before
+    anything is read, named in the refusal, and the search reaching the database with them; the
+    OpenAPI entries.
+  - Integration: `api-contact-search.test.ts` (1 new, 1 changed): contacts who wrote an hour, 10 or
+    40 days ago or never, found by `within_days` and `not_within_days`, with a tag all or any, never
+    another company's contact; the same counts as segments' preview; keys with contacts.read or
+    conversations.read alone refused. `api-campaigns.test.ts` (1 new): each outcome among the
+    recipients of a run campaign (delivered, read, failed, a reply, a skipped recipient matching
+    none), a draft finding nobody, the same counts as segments' preview, another company's campaign
+    refused naming `conditions.1.campaignId`, keys with contacts.read or campaigns.read alone
+    refused.
+  - e2e (`campaigns.spec.ts`, extended): the key that reads the campaign also reads contacts and
+    conversations; after Asha answers, it finds her by `replied` and `delivered` and as the contact
+    who wrote in the last day, and Bina, skipped, by no outcome and as the contact who did not.
+- **Docs:** ADR-126; SECURITY (the ADR-117 bullet, a bullet); THREAT-MODEL T139; RUNBOOKS (403, 422
+  and unexpected results); ARCHITECTURE; DEPLOYMENT (the rollout); BACKLOG P5-08; FEATURE-MATRIX
+  W-134, H-033.
+- **Mutation checks:** 21 regressions tried, 20 caught, 1 equivalent:
+  - caught: 4 in who may search (each scope dropped, the two swapped, a scope needed only when
+    every condition needs it), 4 in the campaign check (never run, an unknown campaign taken and a
+    known one refused, the refusal naming the first condition or the condition itself), 4 in the
+    conditions' form (days unbounded or taken as text, unknown keys taken, an outcome segments do
+    not have), 5 in what they find (not_within_days finding those who wrote, every campaign read
+    for one, replied read from opt-outs, not_replied including undelivered messages, skipped
+    recipients matched), 2 in OpenAPI and 1 through the e2e test (last_message finding nobody);
+  - equivalent: the company dropped from the campaign check's query, which RLS keeps to the key's
+    company anyway (another company's campaign is still refused).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                             | Result                                                                 |
+| ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                | clean                                                                  |
+| `pnpm test`                                                                                                                         | 553 passed                                                             |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                | 760 passed on each                                                     |
+| `pnpm build`, then `campaigns.spec.ts` and `api-contact-search.spec.ts` on chromium and mobile-chromium (database migrated to 0099) | 6 passed                                                               |
+| Mutation checks                                                                                                                     | 21 regressions tried, 20 caught (1 through the e2e test), 1 equivalent |
+| gitleaks 8.30.1 on the commit                                                                                                       | no leaks                                                               |
+
+### Known gaps
+
+- Groups of conditions, a name condition, conditions on a conversation's status, member or team,
+  campaign outcomes other than these (opt-outs, buttons) and automation runs are not built
+  (ADR-126).
+
+## 2026-10-03 — Phase 5: reading campaigns and their results through the public API (P5-08, ADR-125)
+
+Status: **Implemented and locally verified (test data and the Graph stand-in only).** An endpoint
+taking `campaign.status_changed` (ADR-087) learned when a campaign started or finished, with its
+stored counters, but how its messages did (delivered, read, failed, replies, opt-outs) was on
+members' campaign page only: the public API did not read campaigns.
+
+### Completed
+
+- **Design (ADR-125):** a new reading scope, `campaigns.read` ("Read campaigns"), granted only by
+  members holding `campaigns.read`. `GET /campaigns` lists the company's campaigns newest first on
+  exact keyset pages, in one status or all, with the counters they store; `GET /campaigns/{id}`
+  reads one with `results` counted when read as members' campaign page counts them (recipients by
+  state, messages by outcome, replies and opt-outs as attributed, skip reasons and the commonest
+  failure codes), in one read-only snapshot; null for a draft. Counts and names only: no recipients,
+  members or costs.
+- **Migration 0099:** the key and plan scope checks take the 12 scopes (as 0092); existing keys gain
+  nothing, and a plan version that chose its scopes leaves the new one out.
+- **Domain:** `api/campaigns.ts` (`apiCampaignListQuerySchema`, `apiCampaignSchema`,
+  `apiCampaignResultsSchema`, `apiListCampaigns`, `apiGetCampaign`, the latter through
+  `campaignAnalytics`); the scope in `API_SCOPES`, `API_SCOPE_KEYS` and `API_SCOPE_INFO`; OpenAPI:
+  both paths, `Campaign` and `CampaignWithResults`, and the info text.
+- **Web:** `GET /api/v1/campaigns` and `GET /api/v1/campaigns/{id}`; Settings → API keys and the
+  platform plan form list the scope from `API_SCOPE_KEYS`.
+- **Tests:**
+  - Unit (`api.test.ts`, 4): the scope, its permission and that it reads only; the query's rules
+    (every status, the page size, unknown parameters); refusals before anything is read without the
+    scope and for a bad id; the OpenAPI entries, with no recipients, members, costs or draft
+    settings in the schemas.
+  - Integration (`api-campaigns.test.ts`, 2, with the Graph stand-in): three campaigns newest first
+    (a completed run, a draft without a number or template, one cancelled before it started) with
+    their counters, number, template and times; one status at a time and exact pages of two; the
+    run's results from the send pipeline, delivery statuses, a reply and a STOP, equal to what
+    members' campaign page counts; the cancelled one's recipients not counted as cancelled messages;
+    a draft without results; another company's campaign never listed and read as not found; keys
+    without the scope and bad filters refused, naming them.
+  - e2e (`campaigns.spec.ts`, extended): a key created in Settings → API keys with "Read campaigns"
+    lists the completed campaign the test ran and reads the results its page shows.
+- **Docs:** ADR-125; SECURITY (the scope's permission, a bullet); THREAT-MODEL T138; RUNBOOKS
+  (results that differ from the page, 403 and 404); ARCHITECTURE; DEPLOYMENT (the rollout); BACKLOG
+  P5-08; FEATURE-MATRIX W-134, H-033.
+- **Mutation checks:** 44 regressions tried, 42 caught, 2 equivalent:
+  - caught: 3 in who may read (the scope checks, another scope), 8 in the list (the status filter,
+    the cursor ignored or compared the wrong way, oldest first, no next cursor, one campaign too
+    many, longer pages, unknown parameters), 6 in a campaign's fields (the number's phone, a number
+    given to a campaign without one, the template's name, the template joined by the wrong column,
+    the scheduled and cancellation times), 13 in one campaign and its results (a bad id sent to the
+    database, an unknown one answered with nothing, results for drafts or for none, 9 counts and
+    lists mixed up or left out), 5 in the scope (left out of the scope list, granted by the wrong
+    permission, counted as writing, missing from 0099's key or plan check), 5 in OpenAPI and 2
+    through the e2e test (the list route answering nothing, the campaign route answering without
+    `data`);
+  - the unit test first missed results that are never null: it looked for the word, which the
+    description holds. It now checks that the schema allows null, and the regression is caught;
+  - equivalent: the company dropped from the list's or the read's query, which RLS keeps to the
+    key's company anyway (another company's campaign is still never listed or read).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                       | Result                                                                 |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                          | clean                                                                  |
+| `pnpm test`                                                                                                                                                   | 552 passed                                                             |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                          | 758 passed on each                                                     |
+| `pnpm build`, then `campaigns.spec.ts`, `api.spec.ts`, `api-keys.spec.ts` and `api-quota.spec.ts` on chromium and mobile-chromium (database migrated to 0099) | 30 passed                                                              |
+| Mutation checks                                                                                                                                               | 44 regressions tried, 42 caught (2 through the e2e test), 2 equivalent |
+| gitleaks 8.30.1 on the commit                                                                                                                                 | no leaks                                                               |
+
+### Known gaps
+
+- Changing campaigns through the API, each recipient's outcome, costs, filters by template, number
+  or time, and results by day are not built (ADR-125).
+- The repeatable-read snapshot that keeps a campaign's row and its counts in agreement has no test:
+  no test writes between the two reads.
+
+## 2026-10-03 — Phase 5: finding contacts by name through the public API (P5-08, ADR-124)
+
+Status: **Implemented and locally verified (test data only).** `GET /contacts` found contacts by
+number, email, tag and custom field values (ADR-113) and `POST /contacts/search` by segments'
+conditions (ADR-117), but neither by name: an integration that knew a person only by name read
+every contact the company had. While building it, a request holding the NUL character was found to
+fail in the database as an internal error, in any endpoint.
+
+### Completed
+
+- **Design (ADR-124):** `name` on `GET /contacts` finds contacts whose name contains the text,
+  compared as members' search compares names (`ilike`): letters whatever their case (as the
+  database's locale folds them), the text as written (`%` and `_` are characters), without the
+  spaces at its ends; 1 to 200 characters, refused empty or longer with 422 naming `name`; combined
+  with the other filters; names only. A page filtered by name reads at most 2,000 contacts, as one
+  filtered by tag or field does. No migration and no index; scope `contacts.read`.
+- **Also fixed:** PostgreSQL text cannot hold U+0000, and a query parameter or JSON string holding it
+  failed in the database (500, logged as a failure). Every API request's query parameters and JSON
+  body are now checked before the handler runs, and such a request is refused with 422 naming where
+  (the parameter as sent, or the body's path such as `contacts.1.name`); the body is walked without
+  recursion. Without the check the e2e test's query got 500.
+- **Domain:** `apiContactListQuerySchema` takes `name`; `apiContactListFilters` trims it and refuses
+  it empty; `apiListContacts` adds `display_name ilike likePattern(name)` to the windowed filters.
+  `api/request-text.ts`: `nulCharacterPath` and `assertNoNulCharacter`. OpenAPI: the `name`
+  parameter, the window naming it, and the rule on the NUL character under Limits.
+- **Web:** `handleApiRequest` (`apps/web/src/server/api.ts`) calls `assertNoNulCharacter` with the
+  query and the parsed body before the handler.
+- **Tests:**
+  - Unit (`api.test.ts`, 4 and 4 changed): the name read as written without the spaces at its ends
+    and refused empty or longer than a name; the OpenAPI entries; the NUL character found in
+    parameters (by name, a name holding it written out), the body's values, keys, arrays and nested
+    values in order, the query first, other control characters kept, and through 50,000 levels of
+    nesting; the refusal as the API answers it (422, the path, the message).
+  - Integration (`api-contact-fields.test.ts`, 3): part of a name whatever its case, accented
+    letters, `%` and `_` as characters, names only (not emails or numbers), with a tag and an email,
+    never another company's, an erased or a nameless contact, and what members' search finds for the
+    same texts; an empty, a too long and an unscoped request refused; pages across a window's edge
+    with a limit of 1 and an empty first window.
+  - e2e (`api-contact-search.spec.ts`): a key finds contacts by part of a name, an accented one and
+    one with `%`; members' Contacts search shows the same contacts for the same text; an empty name
+    is refused, and the NUL character in a query, a contact's name and a search condition is refused
+    naming `name`, `name` and `conditions.0.tag`, with nothing saved.
+- **Docs:** ADR-124; SECURITY; THREAT-MODEL T137; RUNBOOKS (a name search finding fewer contacts, a
+  request refused for the NUL character); ARCHITECTURE; DEPLOYMENT (a UTF-8 locale for the
+  database, the rollout, and a Public API section: access logs leaving out API query strings);
+  BACKLOG P5-08; FEATURE-MATRIX W-134, H-033.
+- **Mutation checks:** 30 regressions tried, 30 caught:
+  - 8 in the filter's query (dropped, read without a window, compared with case, read as a pattern,
+    as a whole name, from the start only, with emails, on emails), 5 in reading it (the spaces kept,
+    an empty or longer text taken, the parameter unknown, never read), 12 in the NUL check
+    (parameters not checked or named by their value, keys, arrays and nested values not read, the
+    body read last to first, paths joined with slashes, the character not written out, its escape
+    taken for it, never refusing, a 400, no place named), 4 in OpenAPI and 1 through the e2e test
+    (the API not checking).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                     | Result                                                   |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                        | clean                                                    |
+| `pnpm test`                                                                                                                                                 | 548 passed                                               |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                        | 756 passed on each                                       |
+| `pnpm build`, then `api-contact-search.spec.ts`, `api-contact-fields.spec.ts` and `api.spec.ts` on chromium and mobile-chromium (database migrated to 0098) | 22 passed                                                |
+| Mutation checks                                                                                                                                             | 30 regressions tried, 30 caught (1 through the e2e test) |
+| gitleaks 8.30.1 on the commit                                                                                                                               | no leaks                                                 |
+
+### Known gaps
+
+- A name condition in `POST /contacts/search`, matching names whatever their accents or Unicode
+  form, fuzzy matching and an index for names are not built (ADR-124).
+- Members' forms and searches and provider payloads are not checked for the NUL character: members'
+  contact search with it still fails in the database (a probe through the contacts service), so the
+  Contacts page fails as an internal error.
+- Recorded as SEC-11 (BACKLOG): a query failing with an error the app does not map is logged whole,
+  and the driver's message repeats the query's parameters (names, emails, message text).
+
+## 2026-10-03 — Phase 5: choosing the contact changes a webhook endpoint receives (P5-09, ADR-123)
+
+Status: **Implemented and locally verified (local test receivers only).** Since ADR-121 a
+`contact.updated` names what its change changed, but an endpoint that takes the event still received
+every change: a receiver that only copies emails to a mailing tool was sent every tag an automation
+or an import added, and had to read and drop each.
+
+### Completed
+
+- **Design (ADR-123):** an endpoint takes every `contact.updated` (null, as before, including parts
+  added later) or only those whose change names one of 1 to 5 parts it chooses (`name`, `phone`,
+  `email`, `tags`, `fields` for any custom field); chosen in Settings → Webhooks under "Contact
+  changed" or through the API (`contactParts` on `POST` and `PATCH /webhook-endpoints`), only while
+  the endpoint takes `contact.updated`. A change that removes the event clears the list; an API
+  change that leaves it out keeps it. Audited with the list. Each endpoint receives the same event,
+  naming every part that changed.
+- **Migration 0098:** `contact_parts text[]` on `app.webhook_endpoints` with a check (null, or 1 to
+  5 known parts while `contact.updated` is among the events), an update grant for the runtime role,
+  and `app.capture_contact_webhook_event` replaced with the same signature: the first capture of a
+  contact's update queues the endpoints that take one of its parts, and each later change in the
+  transaction those it newly concerns that have no delivery of the event yet.
+- **Domain:** `webhookContactPartsSchema` and `webhookContactPartsFor` (`webhooks/service.ts`),
+  `WEBHOOK_CONTACT_PARTS` and their labels (`webhooks/model.ts`); the settings service and the API
+  store, keep, clear and audit the list; the API answers `contactParts` and refuses a list without
+  the event (`contactParts`, 422) or with an unknown part (named by its place); the export carries
+  the column. OpenAPI: the field in the endpoint and the bodies, and a sentence on the
+  `contact.updated` webhook.
+- **Web:** under "Contact changed", the add and edit forms show the parts, all ticked to begin with
+  (all ticked saves none, so later parts arrive too); the endpoints list shows "Contact changes
+  sent: …".
+- **Tests:**
+  - Unit (`webhooks.test.ts`, 2; `api.test.ts`, 1 changed): the list's rules (known parts, 1 to 5,
+    repeats merged, Settings' order, a field key refused, null) and how a change keeps, replaces or
+    clears it; the OpenAPI schemas and the webhook's sentence.
+  - Integration (`webhook-events.test.ts`, 2; `webhooks.test.ts`, 1;
+    `api-webhook-endpoints.test.ts`, 1): endpoints taking every change, emails, and tags and fields
+    each queued only for their parts (a name, an email, a tag, a field value), once each; a name
+    then a tag in one transaction reaching the tags endpoint at the second change; an email then a
+    rolled-back tag leaving no tag delivery; a tag, an email and another tag queuing each endpoint
+    once; endpoints taking only added contacts, or turned off, never queued; the bodies naming every
+    part; an erasure (as the definer role) still sending only `contact.erased` and queuing nothing
+    for another company's endpoint; refusals, keeping, replacing and clearing, audits and each
+    clause of the database check; through the API: chosen, answered in order, kept, cleared with the
+    event, refused without it, empty or with an unknown part named by its place, audited.
+  - e2e (`webhooks.spec.ts`): emails chosen in Settings next to an endpoint taking every change; a
+    member's tag reaches only the latter and an email change both, the emails endpoint's page
+    listing one delivery; tags added on its page; ticking every part keeps none.
+- **Docs:** ADR-123; SECURITY; THREAT-MODEL T136; RUNBOOKS (a receiver getting fewer contact events
+  than expected); ARCHITECTURE (also dropping a not-built item ADR-121 had built); DEPLOYMENT
+  (0098); DATA-RETENTION; BACKLOG P5-09; FEATURE-MATRIX W-138, W-139, H-014.
+- **Mutation checks:** 31 regressions tried, 31 caught:
+  - 13 in the database (an empty list, any part, parts without the event, no update grant; a first
+    change queued for every endpoint, a field change not the part `fields`, an endpoint without
+    parts not queued; a later change queuing nobody, an endpoint twice, every endpoint, endpoints
+    without the event, turned off or of other companies), 4 on the list (an empty list, kept as
+    given, kept without the event, null keeping it), 5 in the settings service (parts without the
+    event, changes not saving them, adding without them, audits without them, the list without
+    them), 5 in the API (adding or changing parts without the event, answering without them, changes
+    keeping them, adding without them), 2 in OpenAPI (the parts, the webhook's sentence), 1 in the
+    export and 1 through the e2e test (every part ticked saved as a list).
+  - Before the run, the capture test gained an endpoint taking only added contacts, one turned off
+    and another company's endpoint during an erasure, so that each condition of a later change is
+    tested; no first result was corrected.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                        | Result                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                           | clean                                                    |
+| `pnpm test`                                                                                                                    | 544 passed                                               |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                           | 753 passed on each                                       |
+| `pnpm build`, then `webhooks.spec.ts` and `webhook-events.spec.ts` on chromium and mobile-chromium (database migrated to 0098) | 24 passed                                                |
+| Mutation checks                                                                                                                | 31 regressions tried, 31 caught (1 through the e2e test) |
+| gitleaks 8.30.1 on the commit                                                                                                  | no leaks                                                 |
+
+### Known gaps
+
+- Field keys chosen one by one, filters for `contact.created` or `contact.erased`, and filters on a
+  contact's values (a tag, a field's value) are not built (ADR-123).
+
+## 2026-10-03 — Phase 5: changing many contacts in one call through the public API (P5-08, ADR-122)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-112 a key changed one
+contact per request: an integration tagging everyone who joined a webinar, or copying a field from
+its CRM to a few hundred contacts, made one request for each, counted against its limits, and a
+failure halfway left half of them changed.
+
+### Completed
+
+- **Design (ADR-122):** `POST /contacts/update-many` takes 1 to 100 `contacts`, each with its `id`
+  (each contact once) and what `PATCH /contacts/{id}` takes (`name`, `email`, `fields`, `addTags`,
+  `removeTags`, at least one); `contacts.write`; all of them or none, in one transaction, a refusal
+  naming its place (`contacts.<n>.…`); answered in the order given; one request against the limits;
+  no `Idempotency-Key` (a repeat changes nothing more).
+- **Domain (`api/contacts.ts`):** the change `PATCH` makes is now `changeLockedContact`, with
+  `prepareContactChange`, `lockFields` and `checkFieldChanges` naming each refusal's place, used by
+  `apiUpdateContact` and `apiUpdateManyContacts`. The latter locks every field any change names in
+  one statement (as a field's deletion takes them), checks each change against them, locks the
+  contacts `FOR UPDATE` in id order, refuses an unknown, another company's or an erased contact with
+  422 naming `contacts.<index>.id`, applies each change in the order given and reads them back.
+  `API_LIMITS.contactsPerChange` (100). OpenAPI: `updateManyContacts` and its body.
+- **Route:** `apps/web/src/app/api/v1/contacts/update-many/route.ts`.
+- **Tests:**
+  - Unit (`api.test.ts`, 2): the body (1 to 100 contacts, each once, ids, at least one change,
+    nothing else, numbers refused) and the refusals before anything is read (the scope, suspended or
+    restricted companies, a bad email, a bad tag and a tag both added and removed named by their
+    place); the OpenAPI entry (all or none, a place named, one request, the body's limits, no 404).
+  - Integration (`api-contact-fields.test.ts`, 5): three contacts changed in the order given (name,
+    email, fields, tags), each changed one audited as the key with the call's correlation id, a
+    contact that already had the value not audited, and a repeat changing nothing; refusals by place
+    (an unknown, another company's and an erased contact, an unknown field, a value of another type,
+    a 51st tag, a bad email) changing nothing, and a key without the scope; 100 contacts in one
+    call; two calls naming the same contacts in opposite orders while a holder locks the middle one,
+    each also setting another field of it, both finishing without a deadlock and both values kept; a
+    field's deletion held mid-way, which goes on while the call waits, the call then refusing
+    `contacts.1.fields.city` and changing nothing.
+  - e2e (`api-contact-fields.spec.ts`): a call with a value of another type is refused naming
+    `contacts.1.fields.plan` and changes nothing; a valid call changes two contacts, answered in the
+    order given, and their pages show the new name, tag and plan.
+- **Docs:** ADR-122; SECURITY; THREAT-MODEL T135; RUNBOOKS (a refused call naming
+  `contacts.<n>.…`); ARCHITECTURE; DEPLOYMENT (servers from before it answer 405); BACKLOG P5-08;
+  FEATURE-MATRIX W-134, H-033.
+- **Mutation checks:** 31 regressions tried, 29 caught:
+  - 9 on the body and the first checks (more than 100, none, a contact twice, other properties, no
+    change, a bad email, a bad tag and a tag added and removed named without their place, the
+    scope), 14 in the call (a field, an unknown field, a 51st tag and an unknown contact named
+    without their place, an erased contact changed, an unknown one skipped, the fields locked after
+    the contacts, the contacts not locked or locked one by one in the order given, changes in id
+    order, answers in the database order or read before the change, one item's change or the first
+    item's fields given to all), 3 in the shared change and PATCH (the email always written, audits
+    without the request, PATCH's places named with a prefix), 2 in OpenAPI (the operation, all or
+    none) and 1 through the e2e test (the route answering 201).
+  - Not caught, as the tests cannot tell them apart: the contacts locked without an order (one
+    statement locks every named contact in the order of its scan, which two calls naming the same
+    contacts share; the id order keeps that true whatever the plan), and PATCH finding an erased
+    contact (the read after the change finds none, so the call is still refused as not found and
+    the change rolled back).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                      | Result                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                         | clean                                                                                                                                                                                                                                                                                                                                                                       |
+| `pnpm test`                                                                                                                                                  | 542 passed                                                                                                                                                                                                                                                                                                                                                                  |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                                         | 749 passed on each                                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm build`, then `api-contact-fields.spec.ts`, `api-contact-changes.spec.ts` and `api.spec.ts` on chromium and mobile-chromium (database migrated to 0097) | 20 passed                                                                                                                                                                                                                                                                                                                                                                   |
+| Mutation checks                                                                                                                                              | 31 regressions tried, 29 caught (1 through the e2e test); the other two change nothing the tests can see: the contacts locked without an order (one statement locks them in the order of its scan, which two calls naming the same contacts share) and PATCH finding an erased contact (the read after the change finds none, so the call is still refused and rolled back) |
+| gitleaks 8.30.1 on the commit                                                                                                                                | no leaks                                                                                                                                                                                                                                                                                                                                                                    |
+
+### Known gaps
+
+- Choosing contacts to change by a filter (all with a tag, a segment), changes that partly succeed,
+  adding contacts in the same call, changing numbers, and the same change for many contacts in the
+  inbox are not built (ADR-122).
+
+## 2026-10-03 — Phase 5: saying what changed in `contact.updated` (P5-09, ADR-121)
+
+Status: **Implemented and locally verified (local test receivers only).** `contact.updated` was sent
+with the contact as it is when delivered, so a receiver could not tell a new email from a new tag
+without keeping a copy of every contact to compare.
+
+### Completed
+
+- **Design (ADR-121):** `contact.updated` carries `changes`, what its transaction changed in the API
+  contact's names (`name`, `phone`, `email`, `tags`, `fields.<key>`), sorted, once each; names only,
+  never values. Null for events captured before migration 0096; `contact.created` and
+  `contact.erased` carry none. Still one event per contact and transaction: later changes in the
+  transaction add what they changed, and a rolled-back savepoint takes back what it added.
+- **Migrations 0096 and 0097:** `contact_changes text[]` on `app.webhook_events` with a check (null,
+  or a non-empty list of known parts and field keys, on `contact.updated` only) added `NOT VALID`
+  and validated by 0097; `app.add_contact_webhook_changes`, a definer function that adds to an event
+  only if the calling transaction captured it; `app.capture_contact_webhook_event` with what changed
+  (refusing `contact.updated` without it and the other types with it; the three-argument version
+  dropped); the triggers of 0047 and 0090 naming what changed. The runtime role still has no update
+  on events; the definer role gains the update of this column.
+- **Domain:** the stored event carries `contactChanges` and delivery reads it; the `contact.updated`
+  payload has `changes` (`CONTACT_CHANGE_PART_RE`); Settings and the OpenAPI document say the event
+  names what changed.
+- **Tests:**
+  - Unit (`webhooks.test.ts`, 2 and 1 changed): the parts and field keys taken, null, refusals
+    (unknown parts, bad keys, missing, not a list); the OpenAPI schema (always given, a list with the
+    pattern or null) and the event's sentence.
+  - Integration (`webhook-events.test.ts`, 2 and 6 changed; `tenant-isolation.test.ts`, 1 changed):
+    each update naming what its save changed (name, email, number, all three at once, a tag added and
+    removed, a field's value, a field never changed not named), the bodies carrying each event's
+    list and created and erased bodies none; an import changing name, email and tags in several
+    statements naming all three; across savepoints, a rolled-back savepoint taking back what it
+    added; the capture function's rule on what changed; adding only to an event of the calling
+    transaction, named with its company (an earlier one, another company's, and its own named with
+    another company stay as captured) and the company role refused an update; each clause of the
+    database check; the functions' grants.
+  - e2e (`webhook-events.spec.ts`): a member's tags arrive as `["tags"]`, then a save of the name and
+    email as one event naming `["email", "name"]`; the erasure (two tags removed first) still sends
+    only `contact.erased`, without the new name or email.
+- **Docs:** ADR-121; SECURITY; THREAT-MODEL T134; RUNBOOKS (what an event names, and 0096/0097
+  failing); ARCHITECTURE; DEPLOYMENT (0096, 0097, and the rolling-deploy note ADR-120 lacked);
+  DATA-RETENTION; BACKLOG P5-08, P5-09; FEATURE-MATRIX W-138, H-014.
+- **Mutation checks:** 37 regressions tried, 37 caught:
+  - 10 in the triggers (the name, number or email never named, the email compared with itself, a
+    tag added or removed named as the name, field keys without `fields.`, every field named,
+    created and erased contacts named as changed), 6 in the capture (later changes adding nothing,
+    the list stored unsorted, the rule on what changed not checked, only an update without changes
+    refused, an empty list taken, both guards against adding to a created event removed), 7 in
+    adding and the grants (an earlier transaction's event changed, the company condition left out,
+    the list unsorted and repeated, adding running as the caller, the definer role without the
+    column's update, the runtime role unable to add or to capture), 6 in the database check (other
+    types, several dimensions, null parts, any field key, an empty list, any part), 7 in the
+    payloads and the schema (updates sent without what changed, every contact event saying it,
+    delivery not reading it, the schema taking any part, refusing null or letting it out, Settings
+    and the OpenAPI document not saying it) and 1 through the e2e test (updates sent without what
+    changed).
+  - One first result was corrected: leaving the company condition out of adding survived until a
+    test named the event its own transaction captured with another company; rerun: caught.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                      | Result                                                                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                         | clean                                                                                                                                                       |
+| `pnpm test`                                                                                                                                  | 540 passed                                                                                                                                                  |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                                         | 744 passed on each                                                                                                                                          |
+| `pnpm build`, then `webhook-events.spec.ts` and `api-contact-fields.spec.ts` on chromium and mobile-chromium, on a database migrated to 0097 | 12 passed                                                                                                                                                   |
+| Mutation checks                                                                                                                              | 37 regressions tried, 37 caught (1 through the e2e test); one first result corrected once a test named an event with another company in its own transaction |
+| gitleaks 8.30.1 on the commit                                                                                                                | no leaks                                                                                                                                                    |
+
+### Known gaps
+
+- What changed in `GET /contact-changes`, which tags were added or removed, the values before a
+  change, and endpoints taking `contact.updated` only for chosen parts are not built (ADR-121).
+
+## 2026-10-03 — Phase 5: changing many conversations in one call through the public API (P5-08, ADR-120)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-093 a key changed one
+conversation per request: a helpdesk handing a departing agent's conversations to someone else made
+a request for each, counted against its limits, and a failure halfway left half of them changed.
+
+### Completed
+
+- **Design (ADR-120):** `POST /conversations/update-many` takes 1 to 100 `conversationIds`, each
+  once, and any of `status`, `assigneeId` and `teamId`, with `PATCH`'s meaning; `conversations.write`;
+  all of them or none, in one transaction; answered in the order given; one request against the
+  limits; no `Idempotency-Key` (a repeat changes nothing more).
+- **Domain (`api/conversations.ts`):** the change `PATCH` makes is now `changeLockedConversation`,
+  used by `apiUpdateConversation` and `apiUpdateManyConversations`. The latter checks and locks the
+  member first (as a suspension does), then every conversation `FOR UPDATE` in id order, refuses an
+  id that is not one of the company's visible conversations with 422 naming
+  `conversationIds.<index>`, applies the change to each in the order given (which locks the team as
+  a conversation moves into it, after the conversations, as a team's deletion does) and reads them
+  back. `API_LIMITS.conversationsPerChange`
+  (100). OpenAPI: `updateManyConversations` and its body.
+- **Route:** `apps/web/src/app/api/v1/conversations/update-many/route.ts`.
+- **Tests:**
+  - Unit (`api.test.ts`, 2): the body (1 to 100 ids, each once, ids, at least one change, nothing
+    else) and the refusals before anything is read (scope, suspended or restricted companies); the
+    OpenAPI entry (all or none, one request, the body's limits, no 404).
+  - Integration (`api.test.ts`, 4, and ADR-093's refusal test checking that an erased contact's
+    conversation is left unchanged): three conversations assigned in the order given, each audited as
+    the key with the call's correlation id, resolved together, and a repeat changing nothing (no new
+    audit entry or version); two moved into a round-robin team given out in the order given; 100
+    resolved in one call; refusals (another company's, an erased contact's and an unknown
+    conversation by place, a member or team it may not take, a key of another company, a
+    conversation named twice, a key without the scope) changing nothing; two calls naming the same
+    conversations in opposite orders, while one is held, both finishing without a deadlock; a
+    suspension and a team's deletion held mid-way (the member locked, then its conversations; the
+    team's conversations, then the team), each finishing without waiting for the call, which waits
+    and is then refused.
+  - e2e (`api.spec.ts`): three customers write; a call naming an unknown id is refused naming its
+    place and changes nothing; the three are given to the owner in one call (the inbox shows them
+    assigned) and resolved in another.
+- **Docs:** ADR-120; SECURITY; THREAT-MODEL T133; RUNBOOKS (a refused call naming
+  `conversationIds.<n>`); ARCHITECTURE; BACKLOG P5-08; FEATURE-MATRIX W-134, H-033.
+- **Mutation checks:** 26 regressions tried, 25 caught:
+  - 7 on the body (more than 100, the limit raised, an empty list, a conversation named twice, ids
+    that are not ids, no change, other fields), 13 in the call (the scope, the member locked first,
+    the team locked before the conversations, the conversations locked in the order given or not
+    locked, an erased contact's conversation taken, an unknown one skipped, the refusal not naming
+    its place, changes in id order, answers in id order or read before the change, nothing changed),
+    3 in the shared change (a move into a team not routed, PATCH finding erased contacts'
+    conversations, audits without the request), 2 in OpenAPI (the operation, all or none) and 1
+    through the e2e test (the route answering 201).
+  - Not caught, as RLS repeats it: removing the company condition from the lock query.
+  - Three first results were corrected: the member and team locks survived until a test held a
+    suspension and a team's deletion mid-way (which also showed the team must be locked after the
+    conversations, as a team's deletion does, and the code now does so), and PATCH's visibility
+    check survived until ADR-093's test checked that an erased contact's conversation is left
+    unchanged; rerun: caught.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                          | Result                                                                                                                                   |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`             | clean                                                                                                                                    |
+| `pnpm test`                                                      | 538 passed                                                                                                                               |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11             | 742 passed on each                                                                                                                       |
+| `pnpm build`, then `api.spec.ts` on chromium and mobile-chromium | 14 passed                                                                                                                                |
+| Mutation checks                                                  | 26 regressions tried, 25 caught (1 through the e2e test); the other removes the company condition from the lock query, which RLS repeats |
+| gitleaks 8.30.1 on the commit                                    | no leaks                                                                                                                                 |
+
+### Known gaps
+
+- Choosing conversations by a filter (all of a member's or a team's), changes that partly succeed,
+  notes for many conversations and the same change for members in the inbox are not built
+  (ADR-120).
+
+## 2026-10-03 — Phase 5: choosing the message statuses a webhook endpoint receives (P5-09, ADR-119)
+
+Status: **Implemented and locally verified (local test receivers only).** `message.status` is the
+busiest event: every message a company sends is accepted, sent, delivered and often read, so a
+receiver that acts only on failures was sent four or five deliveries per message and discarded most
+of them.
+
+### Completed
+
+- **Design (ADR-119):** an endpoint takes every `message.status` status (null, as before, including
+  statuses added later) or a list of 1 to 8 of them, kept in the order a message reaches them;
+  chosen in Settings → Webhooks under "Message status" or through the API (`messageStatuses` on
+  `POST` and `PATCH /webhook-endpoints`), only while the endpoint takes `message.status`. A change
+  that removes the event clears the list; an API change that leaves it out keeps it. Audited with
+  the list.
+- **Migration 0095:** `message_statuses text[]` on `app.webhook_endpoints` with a check (null, or 1
+  to 8 known statuses while `message.status` is among the events), an update grant for the runtime
+  role, and `app.capture_webhook_event` replaced with the same signature: a `message.status`
+  delivery is created only for the endpoints that take the status, and no event is written when no
+  active endpoint takes it.
+- **Domain:** `webhookMessageStatusesSchema` and `webhookMessageStatusesFor` (`webhooks/service.ts`),
+  `WEBHOOK_MESSAGE_STATUSES` and their labels (`webhooks/model.ts`); the settings service and the
+  API store, keep, clear and audit the list; the API answers `messageStatuses` and refuses a list
+  without the event (`messageStatuses`, 422); the export carries the column. OpenAPI: the field in
+  the endpoint and the bodies, and a sentence on the `message.status` webhook.
+- **Web:** under "Message status", the add and edit forms show the statuses, all ticked to begin with
+  (all ticked saves none, so later statuses arrive too); the endpoints list shows "Message statuses
+  sent: …".
+- **Tests:**
+  - Unit (`webhooks.test.ts`, 2; `api.test.ts`, 1 changed): the list's rules (known statuses, 1 to 8,
+    repeats merged, catalogue order, null) and how a change keeps, replaces or clears it; the
+    OpenAPI schemas and the webhook's sentence.
+  - Integration (`webhooks.test.ts`, 2; `api-webhook-endpoints.test.ts`, 1 and 1 changed): an
+    endpoint taking failures only gets nothing (and no event is recorded) for an acceptance or a
+    delivery, then its failure; its other event types are not filtered; with endpoints taking every
+    status and deliveries and reads, each gets only its statuses; refusals (without the event, empty,
+    unknown) change nothing; a change keeps, replaces, clears with null or with the event; the audit
+    of additions and changes; the database check; through the API: chosen, answered in order, kept
+    by changes that leave them out, cleared with the event, refused without it or empty, audited.
+  - e2e (`webhooks.spec.ts`): failures chosen in Settings, deliveries added on the endpoint's page,
+    a key's endpoint taking reads (refused without the event); a reply sent through the API and
+    reported sent, delivered and read reaches each endpoint once, with its status only (and the
+    delivery histories say so); the key takes every status again; ticking every status in Settings
+    keeps none.
+- **Docs:** ADR-119; SECURITY; THREAT-MODEL T132; RUNBOOKS (a receiver getting fewer status events
+  than expected); ARCHITECTURE; DEPLOYMENT (0095); DATA-RETENTION; BACKLOG P5-09; FEATURE-MATRIX
+  W-138, W-139, H-014.
+- **Mutation checks:** 46 regressions tried, 46 caught:
+  - 8 on the list (statuses not checked, empty, more than 8, kept as given, null refused, kept
+    without the event, a change that leaves it out clearing it, null keeping it), 10 in the settings
+    service (statuses without the event when adding or changing, adding storing none or ignoring
+    them, a change ignoring or not storing them, the audit of additions and changes, the list and the
+    lock without them), 11 in the API (statuses without the event when adding or changing, a change
+    checked against the old events, adding ignoring them, the audit of additions and changes, a
+    change of statuses alone doing nothing or refused, a change ignoring them, none answered or
+    read), 2 in OpenAPI (the endpoint's statuses not nullable, the webhook's sentence), 9 in the
+    database (no check, unknown statuses, an empty list, statuses without the event, no update grant,
+    an event recorded or deliveries created for a status no endpoint takes, other event types
+    filtered for events or for deliveries), 1 in the export and 5 through the e2e test (Settings
+    sending every status, every status ticked saved as a list, ticking adding nothing, the
+    endpoint's page forgetting the statuses, the list not showing them).
+  - Two first results were corrected: the database check's unknown-status and empty-list clauses
+    survived until the test set each on an endpoint that takes `message.status` (the event clause
+    had refused them first); rerun: caught.
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                            | Result                                                                                                                                            |
+| ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                               | clean                                                                                                                                             |
+| `pnpm test`                                                                                                                        | 536 passed                                                                                                                                        |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                               | 738 passed on each                                                                                                                                |
+| `pnpm build`, then `webhooks.spec.ts` and `webhook-events.spec.ts` on chromium and mobile-chromium, on a database migrated to 0095 | 22 passed                                                                                                                                         |
+| Mutation checks                                                                                                                    | 46 regressions tried, 46 caught (5 through the e2e test); two first results corrected once the database check's clauses were tested one at a time |
+| gitleaks 8.30.1 on the commit                                                                                                      | no leaks                                                                                                                                          |
+
+### Known gaps
+
+- Filters for other event types (conversation statuses, automations, campaigns), filters on a
+  message's fields (its template, number or sender) and retry settings per status are not built
+  (ADR-119).
+
+## 2026-10-03 — Phase 5: custom headers on webhook endpoints (P5-09, ADR-118)
+
+Status: **Implemented and locally verified (local test receivers only).** Receivers that accept
+only requests carrying a credential they issued (an `Authorization` or API key header: automation
+platforms' catch hooks, API gateways, services behind an authenticating proxy) could not be
+delivered to without a relay of the company's own.
+
+### Completed
+
+- **Design (ADR-118):** up to 5 headers per endpoint, given in Settings → Webhooks or through the
+  API (`headers` on `POST` and `PATCH /webhook-endpoints`: a list given replaces them, `[]` removes
+  them, left out they stay), sent with every attempt, test event and replay before HyFib's own
+  headers. Names are letters, digits and `-` (at most 60), once whatever their case; values are 1 to
+  1,000 printable ASCII characters. Names HyFib or the transport sets, `Proxy-*` and `W360-*` are
+  refused. Values are sealed with the keyring, bound to the company and the endpoint, and never shown
+  again; names are shown and audited.
+- **Migration 0094:** `header_names` and `headers_ciphertext` on `app.webhook_endpoints`, a check
+  that both are empty or both set with at most 5 names, update grants for the runtime role.
+- **Domain:** `webhookHeadersSchema`, `reservedWebhookHeader`, `sealWebhookHeaders` and
+  `openWebhookHeaders` (`webhooks/service.ts`); the settings service and the API seal headers when
+  given and audit their names; the claim opens them once per endpoint and batch (`webhooks/
+delivery.ts`), and headers that do not open end the delivery as `payload_failed`, stage `headers`;
+  the export carries the names and leaves the sealed values out. `payload_failed` now reads "HyFib
+  could not prepare the request" in Settings and the OpenAPI document.
+- **Web:** the add and edit forms take headers (names, and values in password fields kept only in
+  the page's memory until saved); the edit form keeps the headers unless "Replace the headers" is
+  ticked; the endpoints list shows "Headers sent: … (values hidden)". OpenAPI: `headers` in the
+  endpoint (names only), the create and update bodies (with values) and the webhooks introduction.
+- **Tests:**
+  - Unit (`webhooks.test.ts`, 4; `api.test.ts`, 1 changed): the rules (names, the names HyFib sets in
+    any case, values, the 5 limit, a header given twice, other keys), sealing bound to the company
+    and the endpoint, opening refusing what the seal never writes; the OpenAPI schemas (values given,
+    names answered).
+  - Integration (`webhooks.test.ts`, 4; `api-webhook-endpoints.test.ts`, 1; `company-data.test.ts`,
+    1 changed): headers on the first attempt, a retry after a change of address that keeps them and
+    a replay, beside HyFib's signed headers; names only in the list and the audit; replacing and
+    removing them; refusals changing nothing; the database check; headers sealed for another
+    endpoint failing that endpoint's deliveries alone (stage `headers`, nothing logged) while two
+    other endpoints of the batch get their own headers, and a replay delivering once they are given
+    again; through the API: set, kept by a change without them, replaced, removed, delivered,
+    answered, kept for replays and audited by name only, refusals naming the field's path; the
+    sealed values a secret column of the export.
+  - e2e (`webhooks.spec.ts`): headers set in Settings arrive with a signed test event and are shown
+    by name only (the page never holds the value); on the endpoint's page a header HyFib sets is
+    refused and replacing gives new ones; a key sets a header on its endpoint, sees only its name,
+    has a header HyFib sets refused with the field's path and removes it.
+- **Docs:** ADR-118; SECURITY; THREAT-MODEL T131; RUNBOOKS (a receiver refusing for a missing or
+  wrong header; `payload_failed` with stage `headers`); ARCHITECTURE; DEPLOYMENT (0094);
+  DATA-RETENTION; BACKLOG P5-09; FEATURE-MATRIX W-138, W-139, H-014.
+- **Mutation checks:** 52 regressions tried, 51 caught:
+  - 9 on names (not checked, up to 100 characters, names HyFib sets allowed, `Proxy-*`, `W360-*`,
+    compared by case, `Host`, `User-Agent`, `Content-Length`), 5 on values (line breaks, tabs, not
+    trimmed, empty, up to 4,096 characters), 3 on the list (more than 5, a header given twice in
+    another case, other keys), 6 on sealing and opening (the endpoint or the company left out of
+    the binding, values kept with the names, no headers sealed as an empty list, opened headers not
+    checked again or of another shape), 6 in the settings service (adding ignoring headers, values
+    in the audit when adding or changing, a change dropping or ignoring them, the list without
+    names), 6 in delivery (not sent, opened for the wrong endpoint, cached across endpoints, not
+    read with the endpoint, opened outside the claim's guard, the stage not named), 7 in the API
+    (adding ignoring headers, values audited when adding or changing, a change dropping them, a
+    change of headers alone doing nothing or refused, no names answered), 2 in OpenAPI (no headers,
+    values answered), 3 in the database (no check, 10 headers allowed, no update grant), 1 in the
+    export (the sealed values exported) and 3 through the e2e test (adding in Settings without the
+    headers, replacing keeping the old ones, the list without the names).
+  - Not caught, as it removes a defense something else repeats: sending the endpoint's headers after
+    HyFib's (names HyFib sets are refused when saved and again when opened).
+  - Two first results were corrected: one edit broke the file's syntax and proved nothing (rerun with
+    a valid edit: caught), and one survived until a unit test gave a sealed pair a third value
+    (rerun: caught).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                            | Result                                                                                                                                                                 |
+| ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                               | clean                                                                                                                                                                  |
+| `pnpm test`                                                                                                                        | 534 passed                                                                                                                                                             |
+| `pnpm test:integration` on PostgreSQL 18.6 and 17.11                                                                               | 735 passed on each                                                                                                                                                     |
+| `pnpm build`, then `webhooks.spec.ts` and `webhook-events.spec.ts` on chromium and mobile-chromium, on a database migrated to 0094 | 20 passed                                                                                                                                                              |
+| Mutation checks                                                                                                                    | 52 regressions tried, 51 caught (3 through the e2e test); the other sends the endpoint's headers after HyFib's, which the checks of names on saving and opening repeat |
+| gitleaks 8.30.1 on the commit                                                                                                      | no leaks                                                                                                                                                               |
+
+### Known gaps
+
+- Other authentication schemes (OAuth client credentials, mutual TLS), headers computed per delivery,
+  headers per event type, values outside printable ASCII and showing a value again are not built
+  (ADR-118).
+
+## 2026-10-03 — Phase 5: searching contacts with segment conditions through the public API (P5-08, ADR-117)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-113 keys found contacts
+only by values equal to a given one; an integration asking for contacts with more than three
+orders, without a tag, opted in to marketing or added after a day had to read every contact. Members
+ask such questions in segments.
+
+### Completed
+
+- **Design (ADR-117):** `POST /contacts/search` (`contacts.read`) takes 1 to 20 of segments'
+  conditions (custom field comparisons, tags, consent, the creation day in the company's time zone,
+  source, calling code), all or any of them, and answers with `GET /contacts`'s pages. Segments'
+  `last_message` and `campaign` conditions are not offered: they read conversations and campaigns.
+- **Domain and web:** `api/contact-search.ts` (the body, the checks with paths like
+  `conditions.1.key`, the search), segments' rules shared through `fieldConditionProblem`,
+  `comparisonTakesValue`, `fieldComparisonsFor` and `segmentConditionsSql` (`campaigns/segments.ts`),
+  `apiContactPage` (`api/contacts.ts`) shared with `GET /contacts`, the route, the OpenAPI operation
+  and body schema. No migration.
+- **Also fixed:** segments took a creation day or a date comparison that does not exist (30
+  February): the creation day then failed the preview, the segment page and a campaign's audience
+  with a database error. Both are refused now, with the problem named.
+- **Tests:**
+  - Unit (`contact-search.test.ts`, 4; `segments.test.ts`, 4): the body (1 to 20 conditions, strict,
+    segments' conversation and campaign conditions refused); the scope and refusals before anything
+    is read; reads for suspended and restricted companies in one read-only snapshot; the OpenAPI
+    entries; the comparisons of each type, the problems they can have, dates that exist, and
+    segments' checks in members' words.
+  - Integration (`api-contact-search.test.ts`, 6): each comparison of each type of field, numbers
+    given as numbers or strings, `contains` as written (`%_` finds only the contact whose text holds
+    it), all or any, a limit splitting pages; tags, consent, creation days in India's time zone,
+    source and calling code; the contacts a segment with the same conditions counts; every refusal
+    naming its part, and keys without `contacts.read`; windows across an edge, empty and with a
+    limit of one; segments refusing dates that do not exist.
+  - e2e (`api-contact-search.spec.ts`): a key defines fields, adds contacts and finds them with a
+    comparison and a tag it must not have, then with any of two conditions; a refusal names its part.
+- **Docs:** ADR-117 (ADR-113 annotated); SECURITY; THREAT-MODEL T130; RUNBOOKS (a search giving short
+  pages or a 422; a segment naming a date that does not exist); ARCHITECTURE; BACKLOG P5-08 and
+  P3-04; FEATURE-MATRIX W-134, W-054, H-033.
+- **Mutation checks:** 33 regressions tried, 32 caught:
+  - 7 in the body (the body or a condition not strict, no conditions or more than 20 accepted, limits
+    above a page, any by default, segments' last-message condition offered), 10 in the search
+    (unknown keys, numbers for text fields, values for comparisons that take none, values not
+    trimmed, creation days not checked, bad tags taken, all or any ignored, days in UTC, the scope,
+    the read-only snapshot), 8 in segments' shared rules and code (comparisons of another type, a
+    missing value, numbers, dates, segments' creation days, any matched as all, `contains` read as a
+    pattern, a date check taking the form only), 5 in the shared pages (no window, a window one
+    contact longer, the window's last contact left out, erased contacts found, the cursor after the
+    look-ahead contact; each also caught by `GET /contacts`' tests), 1 in the routes and 1 through the
+    e2e test (the route answering the page inside `data`).
+  - Not caught, as it removes a defense something else repeats: the company condition in the shared
+    pages (forced row-level security limits every read to the company's contacts).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                                                       | Result                                                                     |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                          | clean                                                                      |
+| `pnpm test`                                                                                                                                                                   | 530 passed                                                                 |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                           | 730 passed on each                                                         |
+| `pnpm build`, then `api-contact-search.spec.ts` and `api-contact-fields.spec.ts` on chromium and mobile-chromium, on a database migrated to 0093 (no migration in this slice) | 4 passed                                                                   |
+| Mutation checks                                                                                                                                                               | 33 regressions, 32 caught (1 through the e2e test; the other listed above) |
+| gitleaks 8.30.1 on the commit                                                                                                                                                 | no leaks                                                                   |
+
+### Known gaps
+
+- Searching by name, the `last_message` and `campaign` conditions, groups of conditions, orders other
+  than newest first, counting matches and saved segments through the API are not built (ADR-117).
+
+## 2026-10-03 — Phase 5: following messages through the public API (P5-08, ADR-116)
+
+Status: **Implemented and locally verified (test data only; sends through the Graph stand-in).**
+Integrations that keep a copy of a company's conversations could catch up on messages only with
+`since` (ADR-088), which asks them to overlap and deduplicate, and could not follow statuses at all
+without the webhooks: a template read this morning showed its new status only when read again.
+
+### Completed
+
+- **Design (ADR-116):** `GET /message-changes` (`conversations.read`) reads every message once, as it
+  is now, in the order its changes were saved (received or sent; status, status time or error
+  changed; contact erased), from the start or from a cursor. Items are `{ id, erased, message }`,
+  the message as `GET /messages` gives it, or null once its contact is erased.
+- **Migration 0093:** `app.message_changes`, one row per message moved to the transaction that last
+  changed it by a SECURITY DEFINER trigger function on `app.messages` (insert, or an update of the
+  status, status time, error or content), read only below the snapshot's xmin. The message row is
+  locked by its change already, so the upsert adds no wait, and there is nothing to compact. Every
+  existing message is recorded once; the keys, foreign key and index are built after the rows
+  (measured locally: 2.4 seconds for 402,976 messages, against 19.6 row by row). Deleted with the
+  company before its messages; not exported.
+- **Domain and web:** `api/message-changes.ts`, `api/change-cursors.ts` (both feeds' cursors, sealed
+  to the feed and the company; the contact feed's are unchanged), `feedMessageColumns` and
+  `toApiFeedMessage` shared with `GET /messages`, the route, the OpenAPI operation and schema, the
+  `conversations.read` description, the export classification.
+- **Tests:**
+  - Unit (`message-changes.test.ts`, 9): cursors bound to the feed and the company, the contact
+    feed's unchanged; the query; the scope and refusals before anything is read; reads for suspended
+    and restricted companies; each message as the message feed gives it, erased ones as erased, the
+    cursor after the last message shown; a full last page saying no more remain; an empty page
+    keeping its place; the OpenAPI entries.
+  - Integration (`api-message-changes.test.ts`, 4): a message received and a reply queued, accepted,
+    delivered and read, read once at its latest change from the start and from cursors, a late status
+    changing nothing, one message a page; a failure with its error, two changes in one transaction,
+    writes that change nothing and pricing, an erasure giving each message once as erased; a
+    transaction held open, nothing read past it and none twice; foreign, contact-feed, changed and
+    garbled cursors refused, a key without the scope refused, the runtime role unable to write rows.
+  - e2e (`api-message-changes.spec.ts`): a key follows a customer's message, then its reply as the
+    worker sends it and WhatsApp reports it delivered and read, through the Graph stand-in.
+- **Docs:** ADR-116 (ADR-088 annotated); SECURITY; THREAT-MODEL T129; RUNBOOKS (a feed held back or a refused cursor);
+  ARCHITECTURE; DATA-RETENTION; DEPLOYMENT (0093's lock, and 0092's note on web servers from before
+  it); BACKLOG P5-08; FEATURE-MATRIX W-134, H-033.
+- **Mutation checks:** 31 regressions tried, 30 caught:
+  - 13 in migration 0093 (new messages, status changes, errors or erasure not recorded; writes that
+    change nothing, or pricing, recorded; a change never moving the row; the trigger run as whoever
+    changes the message; the runtime role able to write the rows, or keys unable to read them; the
+    definer unable to move a row; the rows not deleted with the company, or deleted after its
+    messages), 1 in the export (the table left unclassified), 10 in the feed (the scope, passing
+    changes still being saved, the cursor read again or compared by row alone, messages in the order
+    they were first recorded, erased contacts' messages shown or not marked, more said to remain on a
+    full last page, the cursor after the look-ahead message, an empty page starting again), 3 in the
+    cursors (not bound to their feed or their company, the message feed sealing as the contact
+    feed), 2 in the OpenAPI document and routes, and 1 through the e2e test (the route answering the
+    page inside `data`).
+  - Not caught, as it removes a defense something else repeats: the company condition in the feed's
+    query (forced row-level security limits every read to the company's rows).
+
+### Test commands and results (local, 2026-10-03)
+
+| Command                                                                                                                                  | Result                                                                                            |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                     | clean                                                                                             |
+| `pnpm test`                                                                                                                              | 522 passed                                                                                        |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                      | 724 passed on each                                                                                |
+| `pnpm build`, then `api-message-changes.spec.ts` and `api.spec.ts` on chromium and mobile-chromium, on a fresh database migrated to 0093 | 14 passed                                                                                         |
+| Migration 0093 on a copy of a local database with 12,593 messages in 132 companies                                                       | each message recorded once, in each company's order; the runtime role's insert and update refused |
+| Mutation checks                                                                                                                          | 31 regressions, 30 caught (1 through the e2e test; the other listed above)                        |
+| gitleaks 8.30.1 on the commit                                                                                                            | no leaks                                                                                          |
+
+### Known gaps
+
+- Filters on the feed, a time to start from, which part of a message changed, notes and conversation
+  changes, and media are not built (ADR-116).
+
+## 2026-10-02 — Phase 5: defining contact fields through the public API (P5-08, ADR-115)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-112 integrations read and
+set custom field values, but only owners and administrators could add or delete the fields in
+Settings, so an integration mapping its own properties onto HyFib's needed a member to add each field
+by hand, with the same key.
+
+### Completed
+
+- **Design (ADR-115):** a key with `contact_fields.manage` ("Define contact fields"), which only
+  members holding `tenant.settings.manage` grant, adds a field (`POST /contact-fields`, key made from
+  the label unless given, once per optional `Idempotency-Key`), renames it (`PATCH
+/contact-fields/{key}`, the label only) and deletes it with every contact's value (`DELETE
+/contact-fields/{key}`). Key and type never change. `GET /contact-fields` answers either scope.
+- **Also fixed: the 50-field limit could be passed by additions at once.** It was checked by
+  counting, then inserting; additions of one company now take turns under a transaction lock and
+  count under it, for members and keys alike. Renames, which left no trace, are audited
+  (`contact_field.renamed`), in Settings' service too.
+- **Migration 0092:** the scope checks of API keys and plan versions take the new scope (11 at
+  most).
+- **Domain and web:** `contacts/field-definitions.ts` (`createContactField`, `renameContactField`,
+  `deleteContactField`) shared by Settings and the API; `api/contact-fields.ts`; the routes; the
+  OpenAPI operations and schemas; the scope in Settings → API keys and the platform plan form (both
+  list scopes from the model); the `contacts.read` description brought up to date (search and the
+  change feed).
+- **Tests:**
+  - Unit (`contact-fields.test.ts`, 6): the scope and its permission; the bodies; refusals before
+    anything is read (scope, company status, keys no field can have, other bodies); the list for
+    either scope; the OpenAPI entries. `api.test.ts`: the scope among the writing ones.
+  - Integration (`api-contact-field-definitions.test.ts`, 5): fields added from a label or with a
+    key, a key the company has refused naming `key`, one field per `Idempotency-Key`, audited as the
+    key, values taken at once; renames keeping key, type and values, the same label leaving no
+    trace, members' renames audited; a deletion removing every value, each contact that had one in
+    the change feed (ADR-114), audited; an addition waiting for one in progress and counting it, for
+    a member and for a key, at 50; keys without the scope, another company's fields, and members who
+    cannot define fields granting the scope.
+  - e2e (`api-contact-field-definitions.spec.ts`): a key adds a field members see in Settings, a
+    contact gets a value the contact page shows, the key renames it (the value stays under the new
+    label) and deletes it (the value goes, Settings shows no fields, a second deletion is not found).
+- **Docs:** ADR-115; SECURITY; THREAT-MODEL T128; RUNBOOKS (a key that cannot add, rename or delete a
+  field); ARCHITECTURE; DEPLOYMENT; BACKLOG P5-08; FEATURE-MATRIX W-134, H-033.
+- **Mutation checks:** 33 regressions tried, 32 caught:
+  - 10 in the shared definitions (additions not taking turns, the count taken before the lock, the
+    limit one too high, a key the company has not answered as a conflict, the conflict not naming
+    `key`, the key not made from the label, a rename to the same label written again, a deletion
+    leaving the values, removing every value or removing them before the field), 2 in Settings'
+    service (renames audited never, or when nothing changed), 11 in the API (each of the three scope
+    checks, additions not idempotent or audited as the system, a key's renames not audited,
+    deletions audited without the key, a key in the path taken as it is, an addition answered 200,
+    the list refused to definers or answered to any key), 5 in migration 0092 and the scope (keys or
+    plans unable to hold it, a key unable to hold every scope, granted by members who change
+    contacts, taken as read only), 3 in the OpenAPI document and routes, and 1 through the e2e test
+    (an addition needing an `Idempotency-Key`).
+  - Not caught, as it removes a defense something else repeats: the company condition in the field
+    lookup (forced row-level security limits every read and write to the company's fields).
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                                                          | Result                                                                     |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                             | clean                                                                      |
+| `pnpm test`                                                                                                                                                                                      | 513 passed                                                                 |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                              | 720 passed on each                                                         |
+| `pnpm build`, then `api-contact-field-definitions.spec.ts`, `api-contact-fields.spec.ts` and `api-contact-changes.spec.ts` on chromium and mobile-chromium, on a fresh database migrated to 0092 | 6 passed                                                                   |
+| Mutation checks                                                                                                                                                                                  | 33 regressions, 32 caught (1 through the e2e test; the other listed above) |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                    | no leaks                                                                   |
+
+### Known gaps
+
+- Changing a field's type, renaming fields in the app (Settings adds and deletes them), choices for a
+  field, field order and events for field definitions are not built (ADR-115).
+
+## 2026-10-02 — Phase 5: following contact changes through the public API (P5-08, ADR-114)
+
+Status: **Implemented and locally verified (test data only).** Integrations that keep a copy of a
+company's contacts heard of changes through the contact webhooks, but a receiver that was down past
+the retries, a disabled endpoint or a new install could only list every contact again: no read told
+them what changed since, without overlaps or gaps.
+
+### Completed
+
+- **Design (ADR-114):** `GET /contact-changes` (`contacts.read`) reads every contact whose API
+  description changed, once, as it is now, in the order its changes were saved, from the start
+  (every contact) or from a cursor. Changes are rows written by triggers in the transactions that
+  make them and read only below the reading snapshot's xmin, so following the cursor misses no
+  change; the cursor is sealed with the keyring and bound to the company. The minute sweep deletes
+  the rows later changes replaced.
+- **Migration 0091:** `app.contact_changes` (RLS, column grants, composite key to the contact,
+  deleted with the company before its contacts), `app.capture_contact_change` (one row per contact
+  and transaction) and its triggers on contacts, tags and consent states, every existing contact
+  recorded once, `ops.compact_contact_changes` with its place in `ops.contact_change_compaction`.
+  Applied to a copy of the local e2e database: its 81 contacts in 62 companies recorded once each,
+  and a change made by the runtime role recorded once for three writes in one transaction.
+- **Also fixed: a run and a member changing the same tag at once deadlocked.** The automation runner
+  changed tags without the contact's lock, while members and keys take the contact before its tags,
+  so an automation adding a tag a member was adding at that moment deadlocked and PostgreSQL ended
+  one of them; with 0091's change records, removing the same tag would have too. The runner now
+  locks the contact for key share (the lock adding a tag takes anyway) before it changes a tag.
+- **Domain, web and worker:** `apiContactChanges`, the sealed cursor (`sealContactChangeCursor`,
+  `openContactChangeCursor`), `compactContactChanges` in the worker's minute sweep, the
+  `/api/v1/contact-changes` route, the OpenAPI entry and `ContactChange` schema, the export spec
+  (the rows are not exported; the contacts are).
+- **Tests:**
+  - Unit (`contact-changes.test.ts`, 6): cursors open where they were sealed and nowhere else
+    (another company, another key, any change, plain positions), hold digits only, show no position;
+    the query; the scope checked before anything is read; the OpenAPI entry.
+  - Integration (`api-contact-changes.test.ts`, 5): every contact once at its latest change, in
+    order, from the start and from cursors, one contact a page; what counts as a change (name,
+    number, email, field values and a field's deletion, tags added and removed, consent set and
+    changed, erasure, whoever makes it) and what does not (the same name, a column written with its
+    own value, the row's times, an opt-in that keeps the state), a request changing several things
+    recorded once; transactions held open (nothing read past them; afterwards both changes of the
+    earlier one, then the later one, none twice); compaction (the rows later changes replaced
+    deleted, the feed reading the same before and after, held back by an open transaction, its place
+    kept); cursors of another company, another key, changed or garbled refused, and a key without
+    `contacts.read`.
+  - Integration (`automations.test.ts`, 2): a run removing, then adding, a tag while a member holds
+    the contact and changes the same tag: the run waits for the member, where both deadlocked
+    without the runner's lock (checked by removing it).
+  - e2e (`api-contact-changes.spec.ts`): a key reads both contacts it added, then only the one a
+    member tagged in the app, then the one the member erased as erased with nothing about it, and a
+    cursor the feed did not give is refused.
+- **Docs:** ADR-114; SECURITY; THREAT-MODEL T127; RUNBOOKS (a feed held back by a long transaction, a
+  refused cursor, the compaction); ARCHITECTURE; DATA-RETENTION; BACKLOG P5-08; FEATURE-MATRIX W-134,
+  H-033.
+- **Mutation checks:** 35 regressions tried, all caught: the runner's lock on the contact, recording
+  (a change recorded again in one transaction, new contacts, a column written with its own value,
+  the name, number, email and field values, tags added and removed, consent set and changed, an
+  event that keeps the state, the definer role's insert), the feed (passing a change still being
+  saved, replaced changes read, a contact replaced by a change still being saved left out, the
+  cursor read again or compared by change id alone, the order, paging, an empty page starting again,
+  an erased contact carried, the scope, the limit), the cursors (opening for every company, a cursor
+  that does not open breaking the request, any position taken, the position readable), the
+  compaction (passing a change still being saved, deleting later changes, forgetting its place,
+  reading out of order) and the OpenAPI entry.
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                 | Result                     |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                    | clean                      |
+| `pnpm test`                                                                                                                                             | 507 passed                 |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                     | 715 passed on each         |
+| `pnpm build`, then `api-contact-changes.spec.ts` and `api-contact-fields.spec.ts` on chromium and mobile-chromium, on a fresh database migrated to 0091 | 4 passed                   |
+| Mutation checks                                                                                                                                         | 35 regressions, all caught |
+| gitleaks 8.30.1 on the commit                                                                                                                           | no leaks                   |
+
+### Known gaps
+
+- A field's rename or creation is not a change (no value changes; a field's deletion is recorded),
+  the feed does not say which fields changed, and has no filters or start time. The migration's
+  recording of existing contacts was checked on a copy of the local e2e database, not by a test
+  (test databases start empty). Not verified against a production-sized table: the migration locks
+  contacts, tags and consent states against writes while it records every contact.
+
+## 2026-10-02 — Phase 5: finding contacts through the public API (P5-08, ADR-113)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-112 integrations read and
+change contacts' custom fields, but `GET /contacts` found contacts only by number: matching records
+by email, syncing a tag's contacts or looking contacts up by a field value meant paging through
+every contact a company has.
+
+### Completed
+
+- **Design (ADR-113):** `GET /contacts` takes `email`, `tag` and up to 5 `fields[<key>]=<value>`
+  (OpenAPI `deepObject`), all of which a contact must match, with `phone`. Values are read with
+  their field's type and compared as segments compare "equals" (text whatever its case, numbers as
+  numbers, dates as written, `true` or `false`); unknown keys, values of another type, empty values
+  and bad email addresses or tags are refused naming the parameter. A page filtered by tag or field
+  reads at most 2,000 contacts, as the message feed does (ADR-088). No migration.
+- **Domain:** `contactListQuery` (the `fields[<key>]` parameters as one object),
+  `apiContactListFilters` (email and tag written as the app keeps them), `apiFieldFilters` (keys
+  checked against the company's fields, values read by `apiFieldFilterValue`, compared as bound
+  parameters), the windowed list in `apiListContacts` (a repeatable read snapshot), the OpenAPI
+  parameters and description.
+- **Tests:**
+  - Unit: the value rule for each type (and its refusals), the query parameters, at most 5 field
+    filters, the email and tag rules, refusals before anything is read, the OpenAPI entry.
+  - Integration (3 more in `api-contact-fields.test.ts`): filters by email, tag and each field type,
+    alone and together, never another company's or an erased contact, a text value in a number field
+    never compared as a number; every refusal with its path and message, another company's field
+    unknown, a writing key refused; 2,005 contacts read in windows (the first ending at its 2,000th
+    contact, an empty window still giving its cursor, a limit of one splitting windows, never
+    skipping or repeating a contact) and unfiltered pages unchanged.
+  - e2e (`api-contact-fields.spec.ts`): the key finds the contact by a number field and a tag, and an
+    unknown field is refused.
+- **Docs:** ADR-113 (ADR-112's list annotated); SECURITY; THREAT-MODEL T126; RUNBOOKS (short or empty
+  pages and refusals); ARCHITECTURE; BACKLOG P5-08; FEATURE-MATRIX W-134, H-033.
+- **Mutation checks:** 26 regressions tried, all caught: the value rule (yes/no read as members type
+  it, an empty value), the query and filters (a bracket with no key, the fields parameters, six
+  filters, empty and bad email addresses, the tag as written and a bad tag), the comparisons (text
+  in its case, numbers as text or cast whatever their type, yes and no swapped, unknown keys,
+  unchecked values), the list (the tag, the email's case, the field filters, reading past the
+  window, no cursor past an empty window, a window one longer or shorter or counted in the other
+  order, erased contacts) and the OpenAPI entry. The first run left 2 alive, now caught: numbers
+  compared as text (only a value stored with a trailing zero shows the difference, now tested) and
+  erased contacts in the unfiltered list (no test had checked it since ADR-052).
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                               | Result                                                            |
+| --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                  | clean                                                             |
+| `pnpm test`                                                                                                           | 501 passed                                                        |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                   | 708 passed on each                                                |
+| `pnpm build`, then `api-contact-fields.spec.ts`, `api.spec.ts` and `contacts.spec.ts` on chromium and mobile-chromium | 16 passed                                                         |
+| Mutation checks                                                                                                       | 26 regressions, all caught (the first run missed 2, listed above) |
+| gitleaks 8.30.1 on the commit                                                                                         | no leaks found                                                    |
+
+### Known gaps
+
+- Other comparisons (contains, greater or less than, not set), several values for one filter,
+  other orders, contacts changed since a time and searching by name are not built.
+
+## 2026-10-02 — Phase 5: contact custom fields and contact changes through the public API (P5-08, P5-09, ADR-112)
+
+Status: **Implemented and locally verified (test data only; webhooks delivered to local test
+receivers only).** A company describes its contacts with up to 50 custom fields that members,
+imports, automations and Flows fill, but the API's contact had no custom fields, `POST /contacts`
+could not set them, nothing changed a contact once it existed apart from tags and consent, and
+`contact.updated` (ADR-074) ignored custom field changes, so an integration kept in step with HyFib
+missed every answer an automation or a Flow saved.
+
+### Completed
+
+- **Design (ADR-112):** the API's contact carries `fields`, the values of the company's custom
+  fields by key, typed (strings for text and dates, numbers, booleans), and only of fields the
+  company has; `GET /contact-fields` lists the fields; `POST /contacts` sets them on a new contact
+  and fills only an existing contact's empty ones; `PATCH /contacts/{id}` changes the name, email,
+  field values and tags, each value checked strictly against its field's type, a refusal saving
+  nothing; the phone number is not changed through the API. `contact.updated` also fires for a
+  change of a custom field's value, whoever makes it, once per contact and transaction.
+- **Migration 0090:** `app.webhook_capture_contact_fields()` and its trigger on `app.contacts`
+  (after an update of `attributes` while the contact is not erased), comparing the values of the
+  company's field keys only, so a field's deletion or rename captures nothing; not executable by
+  PUBLIC.
+- **Domain:** `api/contacts.ts` (the schemas, `apiFieldChanges` locking the named fields `FOR SHARE`
+  before the contact row, as a field's deletion takes them, `apiListContactFields`,
+  `apiUpdateContact` under the contact's row lock, writing and auditing only what differs);
+  `apiFieldValue` in `contacts/fields.ts` (JSON types, no coercion; numbers within what members can
+  type); the API contact's `fields` subquery (`api/contact-view.ts`), shared with the contact
+  webhooks (an erased contact's `fields` is empty); `POST /contacts` takes `fields` and keeps the
+  50-tag limit; the OpenAPI document (`updateContact`, `listContactFields`, `ContactUpdate`,
+  `ContactField`); the scope's wording ("Create and change contacts and record consent").
+- **Web:** the `PATCH /api/v1/contacts/{id}` and `GET /api/v1/contact-fields` routes; Settings → API
+  keys describes what `contacts.write` now allows.
+- **Tests:**
+  - Unit: the value rule for each type (JSON types, the number bounds, real dates, null and empty
+    strings clearing), the schemas (at least one change, nothing else, 50 fields at most), the order
+    of refusals before anything is read, the OpenAPI entries, the webhook payloads with `fields`.
+  - Integration (`api-contact-fields.test.ts`, 9): the field list by label for `contacts.read` only,
+    a rename changing the label and not the key; typed values in every contact read, never a key no
+    field has; creating with fields and filling only an existing contact's empty ones, refusals
+    creating nothing; the 50-tag limit through `POST /contacts`; a change of name, email, fields and
+    tags with its audit, the same change again saving nothing, empty values clearing; refusals
+    naming `fields.<key>`, `email`, `addTags` or `removeTags`, saving nothing; another company's,
+    erased or unknown contacts not found, another company's fields unknown, a reading key refused,
+    a suspended company refused; a change waiting for a field's deletion without holding the
+    contact, then refusing the deleted key with no value left; `contact.updated` captured once per
+    transaction for a value changed by a key, a member or the runtime role, never for the same
+    value, a key no field has, a rename or a deletion, delivered with the fields, and an erasure
+    sending only `contact.erased` with no values. `webhook-events.test.ts`: a custom field change
+    now sends `contact.updated` (ADR-074's test said it sent nothing).
+  - e2e (`api-contact-fields.spec.ts`, chromium and mobile-chromium): a key reads the fields, adds a
+    contact with a value, is refused a value of another type by name and changes a number and a tag;
+    the contact page shows them and a member changes the city; both changes reach a signed endpoint,
+    the last with the member's city; the key reads it.
+- **Docs:** ADR-112 (and ADR-074 annotated); SECURITY; THREAT-MODEL T125; RUNBOOKS (a refused
+  change or a missing value, custom field events, migration 0090); ARCHITECTURE (and two stale "not
+  built" lists corrected: networks for all keys were built by ADR-099, and conversation, campaign,
+  automation, contact and order events by ADR-074 to ADR-087); DATA-RETENTION; BACKLOG P5-08 and
+  P5-09; FEATURE-MATRIX W-134, W-138, H-033, H-014.
+- **Found while building:** `POST /contacts` added up to 20 tags to an existing contact without the
+  50-tag limit members and automations keep, so repeated calls could pass it. It is now refused,
+  naming `tags`.
+- **Mutation checks:** 47 regressions tried, 45 caught:
+  - 8 in the value rule (null, each type taking another, infinite and oversized numbers, 16
+    digits), 23 in the change (the scope, the id check, the field lock and its order before the
+    contact, unknown keys, unchecked values, unchanged values saved, clearing, the tag limit and
+    counts, the audit, a tag both added and removed, a bad email, the write, commas, the field
+    list's scope and order), 2 in the read (fields without a value, keys no field has), 4 in the
+    create (overwriting values, the tag limit, unchecked values, empty strings), 4 in migration
+    0090 and the payloads (no capture, every key compared, an erasure captured, an erased
+    contact's values), 2 in the OpenAPI routes, all caught; 2 through the e2e test (the change
+    route reading no body, the field list answering nothing), both caught.
+  - Not caught, as they remove defenses something else repeats: the early refusal of an erased
+    contact (the final read refuses it too, rolling the change back) and the migration's
+    `REVOKE … FROM PUBLIC` (0002's default privileges).
+  - The first run missed two more, now caught: a tag given twice counted twice (a unit test of the
+    tags and a tag given twice in the change test), and values in an erased contact's payload (the
+    assertion matched any object; it, and ADR-074's test of a deleted field, now compare exactly).
+  - The lock-order regression was caught only after the deletion test was changed to run the
+    deletion's statements in its own order around the waiting change.
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                                                                   | Result                                                                                                                                                                                                                                              |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                      | clean                                                                                                                                                                                                                                               |
+| `pnpm test`                                                                                                                                                                                               | 494 passed                                                                                                                                                                                                                                          |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                                       | 705 passed on each                                                                                                                                                                                                                                  |
+| `pnpm build`, then `api-contact-fields.spec.ts`, `api.spec.ts`, `contacts.spec.ts`, `webhook-events.spec.ts` and `webhooks.spec.ts` on chromium and mobile-chromium, on a fresh database migrated to 0090 | 23 passed, 11 failed: 9 webhook tests on chromium found no receiver (the test host's name had dropped out of the container's hosts file; restored before the mobile run, where they passed) and the new test's own tag check was too strict on both |
+| The new test and both webhook specs again on both, after restoring the host name and fixing the check (no app change)                                                                                     | 20 passed                                                                                                                                                                                                                                           |
+| `pnpm build` on the final tree                                                                                                                                                                            | succeeded                                                                                                                                                                                                                                           |
+| Mutation checks                                                                                                                                                                                           | 47 regressions, 45 caught (2 through the e2e test; the other 2 listed above)                                                                                                                                                                        |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                             | no leaks                                                                                                                                                                                                                                            |
+
+### Known gaps
+
+- Defining fields through the API, filtering contacts by a field value, changing numbers through the
+  API, changing many contacts in one call, and an event that says which fields changed are not
+  built.
+
+## 2026-10-02 — Phase 5: work that runs out of retries ends where the company can see it (P5-10, ADR-111)
+
+Status: **Implemented and locally verified against the Graph and Razorpay stand-ins (test data
+only).** ADR-108 found three queues whose work stays in progress for good when their job
+dead-letters: number setup (`channel.onboard`: the number stays in setup), the check of a company's
+Razorpay keys (`commerce.account`: the keys stay "checking", so payment requests are refused) and
+template deletions (`template.delete`: the template stays "pending deletion" until the next template
+sync silently undoes the deletion). ADR-108 retried them by hand and left out sweeps for them
+(BACKLOG P5-10).
+
+### Completed
+
+- **Design (ADR-111):** the work is not signalled again by a sweep (these jobs fail only after
+  hours of backoff, repeats would loop while a provider is down, and Meta counts registration
+  attempts, error 133016). The minute sweep settles it instead, in the company's scope, once the
+  job has run out of retries, unless a job for the same work waits or runs again; the company starts
+  the work again itself. Deletions and key checks, whose repeats are harmless, retry longer.
+- **Migration 0089:** `ops.dead_letters.settled_at` and `settled_ended` (checks pairing them,
+  limiting them to verified dead letters of the three queues and keeping them apart from a retry;
+  a partial index for the lookup); `ops.dead_letter_work_live` (a waiting or running job under the
+  work's singleton key; the definer only); `ops.dead_letters_to_settle` and `ops.settle_dead_letter`
+  (SECURITY DEFINER, `w360_app` only); `ops.platform_retry_dead_letter` recreated to refuse a settled
+  dead letter. The migration runner grants the definer `pgboss.job.singleton_key` as well.
+- **Domain and worker:** `jobs/stranded-work.ts` (the lookup, one dead letter settled in its
+  company's scope with its mark in the same transaction, rolled back when the mark refuses, and the
+  sweep's batch); `settleTemplateDeletion` (Meta's last status back, a `delete_failed` event and one
+  for that status, an audit entry, a sync request; a template Meta reports as being deleted is left
+  to the sync), `settlePaymentAccountCheck` (keys still being checked fail) and
+  `settleChannelOnboarding` (a number still in setup fails with its step, an audit entry, a live
+  update); the template sync keeps a deletion while its last deletion event is the request itself,
+  made in the last 8 hours; the template history lists same-time events by id; `template.delete`
+  retries 10 times at most an hour apart and `commerce.account` 8 times at most 30 minutes apart;
+  the minute messaging sweep runs the batch and logs failures.
+- **Web:** the Queues tab says "Work ended for its company" or "Nothing left to end" for a settled
+  dead letter instead of offering Retry; the template history labels "Deletion failed".
+- **Tests:**
+  - Unit: a settled dead letter offers no retry, before any other reason, in its own words.
+  - Integration (`stranded-work.test.ts`, 8, against real pg-boss and the Graph stand-in): a
+    template deletion ended once, back to the status Meta reported while it was tried, with
+    "Deletion failed" and that status at the same time and listed in that order on its page, the
+    audit entry and the sync request, the dead letter marked, never settled again, and the company
+    deleting it again; a deletion left alone while a job for it waits or runs, even after the
+    lookup, kept by the sync at 7 hours and not at 9, then nothing left; a template Meta reports as
+    being deleted left to the sync, and one Meta reports deleted applied at once; a deletion Meta
+    refused not kept; keys saved again waited for, then the check ended once in a sweep that finds
+    nothing left for the newer dead letter and one naming no account; a number's setup left alone
+    while a retried setup waits, then failed with its step, an audit entry and a live update, and
+    retried by the company; which dead letters are listed and marked (unverified, another queue,
+    another kind, a company being deleted, another company's scope, no scope, no answer, a
+    reference naming no record), the table's checks and the marks no role but the definer writes;
+    the console refusing a settled dead letter and showing why, and a retried one never settled,
+    even after its job fails again. The isolation suite covers the three functions' grants, and
+    `dead-letter-retries.test.ts` the definer's grant of the singleton key.
+  - e2e (`dead-letter-retry.spec.ts`, chromium and mobile-chromium): the running worker's minute
+    sweep settles a company's template deletion dead letter whose template is gone, and the Queues
+    tab says "Nothing left to end" for it and "Work ended for its company" for an ended one,
+    offering no retry.
+  - The "Deletion failed" label in a template's history (also used for deletions Meta refuses) has
+    no test of its own.
+- **Docs:** ADR-111; SECURITY; THREAT-MODEL T124; RUNBOOKS (section 3, which dead letters need a
+  retry, an unsettled dead letter, migration 0089); ARCHITECTURE; DATA-RETENTION; BACKLOG P5-10;
+  FEATURE-MATRIX H-034.
+- **Found while building:**
+  - A first draft compared the dead job's first queueing time with the keys' row: pg-boss's time
+    reaches the worker through a JavaScript date, in milliseconds, while the row's time is in
+    microseconds, so the save that queued the check would have looked newer than its own job. The
+    live-job check covers saves made since instead.
+  - A template sync keeping every pending deletion for hours would also have kept one Meta refused
+    outright, which the sync restored at once before; the keep needs the request to be the last
+    deletion event.
+- **Mutation checks:**
+  - 20 in migration 0089, all caught: the live check (key checks of keys saved again, running jobs,
+    the deletion and setup keys); the lookup (companies being deleted, the kind, settled or retried
+    dead letters, live jobs, oldest first); the mark (live jobs, a console retry, the company
+    scope, the kind, its answer, no answer); the console retry of a settled dead letter; the three
+    checks.
+  - 24 in the services and the sweep, all caught after the tests were strengthened: the template
+    settle (a deletion Meta reports, the status it restores, the sync request, a deletion that is
+    over, its two events, the audit), the sync's keep (a deletion Meta reports done or refused,
+    forever, at 10 and 6 hours, the reason), the history's order, the keys and setup settles (their
+    guards, the check time, the live update, the audit), the sweep (committing work a job is doing,
+    odd references, its counts, ending the wrong work) and the console's reason.
+  - 4 through the e2e test, all caught: the worker's sweep settling nothing, the Queues tab without
+    the settled marker, the marker saying the opposite, the console reading no settled time.
+  - The first run of 42 missed one: the sweep's counts swapped, because the batch it was tested with
+    ended one dead letter and found nothing left for one. The batch now has two of one kind. The
+    template mutations were run again after the template settle gained its second event, with two
+    more for that event and the history's order, all caught.
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                                                                        | Result                                                                                    |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                           | clean                                                                                     |
+| `pnpm test`                                                                                                                                                                                                    | 485 passed                                                                                |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                                            | 696 passed on each                                                                        |
+| `pnpm build`, then `dead-letter-retry.spec.ts`, `platform-ops.spec.ts`, `templates.spec.ts`, `commerce.spec.ts` and `onboarding.spec.ts` on chromium and mobile-chromium, on a fresh database migrated to 0089 | 16 passed                                                                                 |
+| Mutation checks                                                                                                                                                                                                | 48 regressions, all caught (4 through the e2e test; the first run missed 1, listed above) |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                  | no leaks                                                                                  |
+
+### Known gaps
+
+- Settling the work of queues whose work the sweeps already signal again, a company email about
+  ended work (each page shows it), and automatic repeats of number setup are not built.
+
+## 2026-10-02 — Phase 5: packs of extra API requests (P5-01, P5-08, ADR-110)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** A plan
+limits a company's public API requests per monthly usage period (ADR-061); at the limit every
+request is refused with 429 `quota_exceeded` until the next period, and the company's only way out
+was another plan. Automation runs had packs that raise their limit (ADR-051); API requests had none
+(BACKLOG P5-08, ARCHITECTURE "Not built yet").
+
+### Completed
+
+- **Design (ADR-110):** a version with a monthly API request limit above 0 sells packs of extra
+  requests a month as it sells run packs: a pack size (1 to 100,000,000) and a price per billing
+  interval, both or neither. The company's limit is the version's requests plus packs × size,
+  wherever the limit is read. No limit with packs may pass 2,000,000,000, for run packs as for API
+  request packs: the database returns limits as 32-bit integers.
+- **Migration 0088:** `ops.plans.api_request_pack_size` and `api_request_pack_price_minor` (range
+  checks, a pair check, and a check that packs come only with a limit above 0, a NULL limit
+  included); the plan guard keeps them on published versions; `app.tenant_plans.api_request_packs`
+  (0 to 10,000, none without a plan) and `app.plan_subscriptions.api_request_packs`; the plan
+  state's guard refuses packs a version does not sell and any limit with packs past the bound, in
+  64-bit sums; the follow guard (ADR-109) checks a following subscription's packs and prices them; a
+  new start guard refuses a subscription that follows none unless its version and add-ons are the
+  plan state's; `app.apply_plan_subscription_period` applies, compares and audits the packs; a
+  four-quantity `app.choose_add_ons` (the three-quantity one stays for the previous release's web
+  servers); `app.tenant_entitlements` adds the packs; the sweep's three lookups add every limit in
+  64 bits.
+- **Domain:** the plan form's fields and rules; staff set packs with the plan (with how many a
+  version sells, `packsMax`); Billing → Add-ons and Change plan offer them with their bounds; the
+  quote, the subscription, the payment card, receipts, the staff plan email (ADR-100), the price
+  list (ADR-107) and the company export carry them; a change of plan keeps the company's requests
+  a month in packs of the new version.
+- **Web:** the platform plan form and page; the company's platform page; the Billing plan card (the
+  packs, and the limit with them); Billing → Add-ons and Change plan; the payment card; receipts.
+- **Tests:**
+  - Unit: how many packs a version sells (10,000, fewer near the bound); the quote with packs; a
+    change of plan keeping the requests a month (and none from a version without the API); the
+    staff email and the price list with packs.
+  - Integration (`api-request-packs.test.ts`, 5, against the Razorpay stand-in): what a version
+    sells, refused by the form and by the table whatever writes it, a NULL limit included, copied to
+    a new version and kept once published; the limit with the packs staff set for every request
+    (seven of nine concurrent requests admitted at 3 + 2 × 2), the plan card and the platform page,
+    the plan overview, fewer packs at once, complimentary access clearing them, the audit; what a
+    version sells and the bound, run packs included, in the service and in the plan state's guard
+    (10,000 packs of either kind refused in the guard's own words, so its sums never pass the
+    integer range); the packs in the 80% warning and the used-up notice, a plan state past the bound
+    (written past the guard) failing its own entitlements while the lookups go on for every company,
+    and the sweep notifying once; the company choosing packs under Add-ons with their price, the
+    quote and the audit, the three-quantity function leaving them, the four-quantity one refusing
+    unsold packs, paying with them, and the start guard refusing a subscription without the packs
+    the company has or for another version. In `plan-changes.test.ts`, a change carrying packs to
+    the new subscription, priced with its add-ons, named in the email once authorised and put on the
+    plan by its first paid cycle, the follow guard's checks of packs (10,000 of either kind
+    included) and the subscription table's own bound; in `plan-subscriptions.test.ts`, a paid cycle
+    for other packs than the plan's never applied.
+  - e2e (`api-request-packs.spec.ts`, chromium and mobile-chromium): the plan form refusing packs
+    without a limit, then publishing a version with packs; staff setting one; Billing showing the
+    pack and the limit with it; Add-ons with the pack's terms and the total as the quantity changes;
+    the limit rising at once and the payment offer charging the packs.
+- **Docs:** ADR-110; SECURITY; THREAT-MODEL T123; RUNBOOKS (API request packs, migration 0088 with a
+  check to run first); ARCHITECTURE; DATA-RETENTION; RELEASE-CHECKLIST; BACKLOG P5-01, P5-07, P5-08;
+  FEATURE-MATRIX H-049 (and W-001, W-014, H-039, H-040, W-136).
+- **Found while building:**
+  - A limit with run packs was computed in 32 bits: 10,000 packs of up to 10,000,000 runs on top of
+    up to 100,000,000 pass that range. Such a company got "integer out of range" from every
+    entitlement check, and the minute sweep's lookups, which compute every company's limit in one
+    query, failed for every company. Limits with packs are now bounded and summed in 64 bits.
+  - W-014 in the feature matrix still said buying run packs in HyFib was not built, although
+    companies choose them under Billing → Add-ons and pay for them with their plan since ADR-106;
+    corrected.
+  - The mutation baseline caught a test of this slice leaving a company with packs its version does
+    not sell: every later update of that plan state is refused (the guard checks the whole row), so
+    the notice sweep of a later test file failed for that company. The test takes them away again.
+- **Mutation checks:** 72 regressions tried one at a time, 71 caught (4 through the e2e test).
+  - 36 in migration 0088, all caught: the version's checks (the pair, packs with a limit, a NULL
+    limit, the size bound) and the plan guard; the plan state's guard (packs not sold, both
+    bounds, the bound off by one, the sums in 32 bits) and its check of packs without a plan;
+    the subscription's check; the follow guard (packs unchecked, unpriced, the bound loosened, the
+    sums in 32 bits); the start guard (off, without the packs, without the version); the paid cycle
+    (a cycle for other packs than the plan's, applying them, the audit); the four-quantity function (not setting
+    the packs, a change of packs alone, the packs before); the entitlements; each sweep lookup
+    without the packs or in 32 bits; the platform role's two column grants.
+  - 32 in the services, 31 caught: the form's rules and values; a new version's packs; staff packs
+    (set at all, how many of either kind, not sold, a change of packs alone); Add-ons (how many of
+    either kind, passing the packs, the pack price for the page's total, the audit); the
+    subscription (recording the packs, their price, the email's words, the change's check of what
+    is sold); Change plan (how many, keeping the capacity, rounding, the starting quantity); how many
+    a version sells (rounding, 10,000); the quote; unsold packs kept by another version; the staff
+    email; the price list; the export of both tables; the plan overview.
+  - 4 in the pages, all caught through the e2e test: the plan card's packs, the payment offer's
+    packs, the packs the Add-ons form sends, the plan form's pack size. Two were first written as
+    constant conditions, which TypeScript's narrowing refused in the build, so they were written
+    again as conditions that are false only when run.
+  - The first run left 6 alive. The tests now catch 5: run packs that pass the 32-bit range (the
+    guard's sums made in 32 bits went unnoticed below it), the subscription table's own bound, the
+    pack price the Add-ons page totals with, the packs in the email once a change is authorised, and
+    the plan overview's packs. The sixth removed a condition that turned out redundant (a version
+    without the API sells no packs, so a change from it keeps no requests either way); the condition
+    is gone. Three regressions were added for the other 32-bit sums (the plan state's API bound, the
+    follow guard's two bounds), all caught.
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                                                                                                                           | Result                                                              |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                                                                              | clean                                                               |
+| `pnpm test`                                                                                                                                                                                                                                                       | 484 passed                                                          |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                                                                                               | 688 passed on each                                                  |
+| `pnpm build`, then `api-request-packs.spec.ts`, `plan-add-ons.spec.ts`, `plan-change.spec.ts`, `plan-choice.spec.ts`, `plan-subscription.spec.ts`, `plans.spec.ts` and `price-list.spec.ts` on chromium and mobile-chromium, on a fresh database migrated to 0088 | 12 passed, 2 failed (`api-request-packs.spec.ts`, its own selector) |
+| `api-request-packs.spec.ts` again on both, after fixing its selector (no app change)                                                                                                                                                                              | 2 passed                                                            |
+| After the tests and the code change the mutation checks led to: rebuilt, then `api-request-packs.spec.ts`, `plan-add-ons.spec.ts` and `plan-change.spec.ts` on both                                                                                               | 6 passed                                                            |
+| Mutation checks                                                                                                                                                                                                                                                   | 72 regressions, 71 caught (listed above)                            |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                                                                     | no leaks                                                            |
+
+### Known gaps
+
+- Packs bought once instead of every billing interval, packs per API key (a key's own limit stays
+  its own, ADR-097), packs that take effect at once for a paying company (they come with the next
+  paid period, ADR-109) and AI credits (Phase 6) are not built.
+- Paying for packs is checked against the Razorpay stand-in only; the test-mode checks are on the
+  release checklist.
+- Firefox and WebKit are not installed locally; CI runs them.
+
+## 2026-10-02 — Phase 5: paying companies change their plan or add-ons from the next period (P5-01, P5-07, ADR-109)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** Since
+ADR-105 and ADR-106 a company chooses its plan version and add-ons, but only while nothing may
+still charge it; a company paying by subscription had to ask HyFib staff, who cannot change a plan
+while a subscription is live. Razorpay cannot change the plan of a domestic-card subscription and
+cannot update one authorised through UPI or eMandate (R-069), and a cancelled subscription cannot be
+restarted (R-068, R-122).
+
+### Completed
+
+- **Design (ADR-109):** a change takes effect when the paid period ends. HyFib first cancels the
+  current subscription at the end of its cycle (this cannot be undone), then records a new
+  subscription that follows it from the period's end and creates it with Razorpay's `start_at`;
+  Checkout only authorises it. Because the current one is cancelled first, the two never both
+  charge; if the payer never authorises the new one, the plan ends with the period. Changes are
+  open until 48 hours before the period ends (Razorpay starts a card debit 24 to 36 hours ahead).
+- **Migration 0087:** `app.plan_subscriptions.follows_subscription_id` (composite FK, a check that
+  a following subscription has a start and is not its own); the one-live index now allows one live
+  subscription that keeps charging, so the ending one and its follow-on coexist;
+  `app.guard_plan_subscription_follow()` (BEFORE INSERT, invoker rights) checks the company, the
+  subscription followed, the start, the version, the add-ons and the price with the tax; the plan
+  guard lets a retired version in only as the plan of that paid follow-on, for the cycle it paid;
+  `app.apply_plan_subscription_period` applies a follow-on's version and add-ons (audited with the
+  previous ones) and never moves a period back (`stale`); `app.apply_plan_transition` treats a
+  period followed by an authorised or charging subscription as a renewal (past due within the grace
+  days) instead of ending it as canceled.
+- **Domain:** `billing/plan-changes.ts` (who may change and why not, the versions, the add-ons from
+  the capacity the company has now, the form's schema); `scheduleChange` in the plan subscription
+  service (end the current subscription, replace a waiting change, record and create the
+  follow-on, reopen the same one's Checkout); the company's cancel picks the subscription that keeps
+  charging; staff cancels and company deletion cancel every live subscription, with ADR-101's
+  notice once; emails when the current subscription is cancelled for a change and when the new one
+  is authorised; the company export carries the new column.
+- **Web:** Billing → Change plan (`/c/<slug>/billing/change`) with each version's terms and what it
+  holds less of; `/c/<slug>/billing/change/<planId>` with the add-ons, the total as they change and
+  a confirmation that says what cannot be undone, then Checkout; Billing shows the next subscription
+  (authorise, cancel the change) and the plan card what the plan becomes; the platform company page
+  lists both subscriptions.
+- **Tests:**
+  - Unit (`plan-changes.test.ts`, 5): who may change and why not, in order (company, paying for
+    plans, the paid period, the subscription, the 48-hour boundary); each add-on's bounds from what
+    the version sells and what the company uses; keeping the company's capacity on another version;
+    the form.
+  - Integration (`plan-changes.test.ts`, 13, against the Razorpay stand-in):
+    - the whole change: the current subscription cancelled at the end of its cycle first, the new one
+      following it from the period's end with `start_at`, Checkout reopened for the same change,
+      authorised with nothing charged, the period due like a renewal, the first paid cycle putting the
+      plan on Pro with its seat, audited with the previous version, with the emails;
+    - the same from the plan sweep alone, with extra WhatsApp numbers and run packs;
+    - replacing a waiting change, and cancelling one, which leaves the plan to end with the period;
+    - every refusal before anything is cancelled (the same plan, an unoffered version, unsold or too
+      many add-ons, too little capacity, digits only, a stale sign-in, an agent, within 48 hours, a
+      trial);
+    - the follow guard's conditions one at a time (the subscription followed still charging or not
+      the plan's, the start, the 48 hours, a suspended company, an unoffered or retired version,
+      unsold seats or numbers, each part of the price), one subscription that keeps charging, no role
+      repointing a follow-on, and the constraints behind the trigger;
+    - another version only from the subscription that follows the one that paid the plan; a cycle of
+      another subscription never moving the period back, the same end included; a version retired
+      meanwhile applied, and the plan guard refusing it for another period, without the subscription,
+      or after another subscription;
+    - a period ending the plan as canceled unless an authorised subscription follows it from its end
+      (never authorised, starting later, following another);
+    - staff cancels of both subscriptions with one email, also of a follow-on created during the
+      cancel, and company deletion.
+  - Elsewhere: the company export classifies the new column; the isolation suite lists the guard
+    function for nobody; the deletion results of `plan-subscriptions.test.ts` are now a list.
+  - e2e (`plan-change.spec.ts`, chromium and mobile-chromium): Billing points to Change plan; the
+    versions, the add-ons and the total as they change; the confirmation names what cannot be undone;
+    Checkout authorises the new subscription; both emails; Billing shows the next subscription and the
+    plan card what the plan becomes; the platform company page lists both subscriptions.
+- **Docs:** ADR-109; research R-122 and unconfirmed points 30 and 31 (research question 14
+  extended); SECURITY; THREAT-MODEL T122; RUNBOOKS (plan changes, migration 0087); ARCHITECTURE;
+  DATA-RETENTION; RELEASE-CHECKLIST (Razorpay test-mode checks); BACKLOG P5-01, P5-07;
+  FEATURE-MATRIX H-048 (and W-001, H-041, H-045, H-046).
+- **Found while building:**
+  - The full integration run caught the new column unclassified in the company export; it is
+    exported (which subscription a change follows).
+  - The first mutation run left 20 regressions alive, nearly all database rules no test reached on
+    their own: each follow-guard condition alone, the stale rule at the same end, run packs and numbers
+    from a follow-on, the transition's conditions on the follow-on, the plan guard's rule for a retired
+    version, and the staff cancel's second look. The tests now catch 17 of them. One verdict of that
+    run did not count: its replacement left the plan guard's SQL unbalanced, so it was run again.
+- **Mutation checks:** 58 regressions tried one at a time, 55 caught (none through the e2e test).
+  - 37 in migration 0087, 35 caught: the one-live index; each condition of the follow guard; the
+    trigger, the check and the FK; the plan guard's rule for a retired version; applying another
+    version, its seats and run packs, the note and the audit; the `stale` rule and its boundary; the
+    transition's conditions on the follow-on (removed, its status, start and predecessor); the column
+    grant.
+  - 17 in the services, 16 caught: the permission and the recent sign-in; each refusal before
+    anything is cancelled; the order (ending the current subscription first, replacing a waiting
+    change); the cancel's choice of subscription; deletion and staff cancels of every subscription,
+    the notice once and the second look; the email once authorised; the sync's guard against older
+    answers.
+  - 4 in the rule (unit tests): the 48 hours, a halted subscription, a suspended company, paying for
+    plans being off.
+  - The three survivors remove defenses something else repeats: the migration's revocation from
+    PUBLIC (0002's default privileges already withhold it), the plan guard's condition that the
+    subscription changed (implied by the one it follows being the old one, as none follows itself),
+    and a staff cancel stopping at the first live subscription (a company has at most two, and the
+    second look cancels the other).
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                                                                                                                                           | Result                                                                                                                                                                                                                                                                                      |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                                                                                              | clean                                                                                                                                                                                                                                                                                       |
+| `pnpm test`                                                                                                                                                                                                                                                                       | 479 passed                                                                                                                                                                                                                                                                                  |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                                                                                                               | 678 passed on each                                                                                                                                                                                                                                                                          |
+| `pnpm build`, then `plan-change.spec.ts`, `plan-subscription.spec.ts`, `plan-add-ons.spec.ts`, `plan-choice.spec.ts`, `plans.spec.ts`, `billing.spec.ts`, `company-data.spec.ts` and `platform-ops.spec.ts` on chromium and mobile-chromium, on a fresh database migrated to 0087 | 20 passed, 2 failed (`plan-change.spec.ts`, its own selectors)                                                                                                                                                                                                                              |
+| `plan-change.spec.ts` again on both, after fixing its selectors (no app change)                                                                                                                                                                                                   | 2 passed                                                                                                                                                                                                                                                                                    |
+| Mutation checks                                                                                                                                                                                                                                                                   | 58 regressions, 55 caught (listed above)                                                                                                                                                                                                                                                    |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                                                                                     | no leaks                                                                                                                                                                                                                                                                                    |
+| After merging `main` (PR #20, webhook deliveries that cannot be prepared)                                                                                                                                                                                                         | lint, format and typecheck pass; `pnpm test`: 482 passed; `pnpm test:integration` on PostgreSQL 18.6 and 17.11: 682 passed on each (PR #20's 4 new tests included); the e2e suite was not run again: the merge's only page change is the label of a webhook delivery, unit tested in PR #20 |
+
+### Known gaps
+
+- Changes that take effect at once (with proration), changes while a trial is paid from its end, a
+  reminder email for a change left unauthorised and changes through the public API are not built.
+- The Razorpay behaviour this relies on (a cancel at the cycle's end followed by a subscription
+  starting then, never undone and never charged twice) is checked against the stand-in only; the
+  test-mode checks are on the release checklist (unconfirmed points 30 and 31).
+- Firefox and WebKit are not installed locally; CI runs them.
+
+## 2026-10-02 — Phase 5: retrying dead-lettered jobs from the operations console (P5-10, ADR-108)
+
+Status: **Implemented and locally verified (test data only).** ADR-054 left out a redrive button
+because the minute sweeps signal every queue's work again, and the runbook's fallback was
+`boss.redrive('dead-letter', …)`. An audit of the 25 queues that dead-letter showed the sweeps do
+not signal the work of `channel.onboard`, `commerce.account`, `template.delete` and
+`template.submit` again, and that `boss.redrive` finds nothing once the worker has recorded a dead
+letter.
+
+### Completed
+
+- **Design (ADR-108):** a platform administrator sends a dead letter's failed job back to its queue
+  once, with a reason, as pg-boss's own retry does (one more attempt), marked on the dead letter and
+  written to the platform audit log in one transaction. Refused for a dead letter already retried,
+  an unverified envelope or a missing job, a company being deleted or gone, a job pg-boss no longer
+  keeps as failed, a queue that never retries (`billing.auto-recharge`), the receipt queues (the
+  receipt retry repairs those) and work already waiting in its exclusive queue. ADR-054 and the
+  runbook are corrected.
+- **Migration 0086:** `ops.dead_letters.retried_at` and `retried_by_user_id` (paired by a check;
+  only the definer writes them) and `ops.platform_retry_dead_letter` (SECURITY DEFINER, executable
+  by `w360_platform` only). The migration runner grants `w360_definer` SELECT on `pgboss.job`'s id,
+  name, state and retry limit and UPDATE on its state, retry limit and completion time, after
+  pg-boss's install, on every run.
+- **Domain:** `platform/dead-letter-retries.ts` (`deadLetterRetryBlock`, the console's copy of the
+  rules by this release's queue catalog, with the reasons in words; `deadLetterRetryableUntil`);
+  `retryDeadLetter` in the ops service; the dead letter listing says who retried each and when,
+  until when it can be retried and why not.
+- **Web:** Operations → Queues: a Retry form with a reason on each dead letter that can be retried,
+  the time pg-boss keeps it until, "Retried … by …" once retried, and why not otherwise; the card
+  says what pg-boss keeps for how long.
+- **Tests:**
+  - Unit: 7 (the retry window by queue, each reason a retry is not offered and its words,
+    every dead-lettering queue keeping failed jobs at most a week).
+  - Integration (`dead-letter-retries.test.ts`, 6): a real pg-boss job sent back for one more
+    attempt, once, with the reason audited, taken again by a worker with its envelope and listed
+    again when it fails; the listing's reasons; each refusal changing nothing (unverified, without
+    its job, a company pending deletion, deleted or gone, a job deleted or already sent back, a
+    queue that never retries, a receipt queue, work already waiting in an exclusive queue, which
+    goes back once that job is done); a platform administrator and a reason needed, the runtime role
+    refused, the platform role unable to mark a dead letter, the check pairing who and when; the
+    definer's column grants on pg-boss jobs. The isolation suite lists the new function for the
+    platform role only.
+  - e2e (`dead-letter-retry.spec.ts`, chromium and mobile-chromium): a platform owner retries a
+    failed job from the Queues tab with a reason; the row then says who retried it, pg-boss holds
+    the job waiting with one more attempt, and the platform audit log has it.
+- **Docs:** ADR-108 (and ADR-054 amended); SECURITY; THREAT-MODEL T121; RUNBOOKS (section 3, the
+  console's dead letters and retries, migration 0086); ARCHITECTURE; DATA-RETENTION; BACKLOG P5-10;
+  FEATURE-MATRIX H-034.
+- **Found while building:**
+  - ADR-054's claim that the sweeps signal every queue's work again did not hold for four queues,
+    and the runbook's `boss.redrive` fallback could not work since the worker consumes the
+    dead-letter queue.
+  - A dead letter's failed job keeps the retry limit pg-boss gave it; no producer sets one, so a
+    limit of 0 is the queue's, which the function uses to refuse `billing.auto-recharge`.
+  - Failure alerts are platform-wide (ADR-091): a full integration run showed the new file's dead
+    letters crowding another file's alert line, which names six queues at most. The file now marks
+    its own dead letters as told when it ends.
+  - Outgoing webhooks: a delivery whose payload cannot be built (any error but "event gone") rolls
+    back its company's whole delivery batch and is signalled again every minute. Outside this slice;
+    suggested as a separate task.
+- **Mutation checks:** 45 regressions tried one at a time, 44 caught (4 through the e2e test).
+  - 23 in the migration: the check pairing who and when; the definer unable to mark, or the platform
+    role able to; each refusal removed (not an administrator, no reason, already retried,
+    unverified, a company being deleted or gone, a job no longer failed, a queue that never retries,
+    a receipt queue, work already waiting); no extra attempt, the completion time kept, the job left
+    failed; the mark or the audit left out, the reason audited untrimmed; the runtime role allowed,
+    the platform role not; the revocation from PUBLIC removed; the function left to the migration
+    role.
+  - 4 in the runner's grants: none, the job's data readable, more columns writable, deleting jobs.
+  - 3 in the service and listing: a short reason passed on, who retried not listed, the listing
+    without the rule.
+  - 11 in the rule (unit tests): each reason a retry is not offered removed or loosened, the
+    retention counted in minutes, a Razorpay receipt job offered.
+  - 4 through the e2e test: no Retry offered, no mark of who retried, the form retrying another
+    dead letter, the page not refreshed.
+  - The survivor removes the migration's revocation from PUBLIC, which 0002's default privileges
+    already enforce. A first run left 3 more alive, all weak tests (a short reason refused only by a
+    later check, the audit's trimming untested on a direct call, update probes that read the columns
+    they wrote); the tests now check each, and catch them.
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                           | Result                                   |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                              | clean                                    |
+| `pnpm test`                                                                                                                                                       | 474 passed                               |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                               | 665 passed on each                       |
+| `pnpm build` and `pnpm test:e2e` for `dead-letter-retry.spec.ts` and `platform-ops.spec.ts` on chromium and mobile-chromium, on a fresh database migrated to 0086 | 4 passed (1.6 min)                       |
+| Mutation checks                                                                                                                                                   | 45 regressions, 44 caught (listed above) |
+| gitleaks 8.30.1 on the commit                                                                                                                                     | no leaks                                 |
+
+### Known gaps
+
+- Sweeps for the stranded work of `channel.onboard`, `commerce.account` and `template.delete`,
+  retrying several dead letters at once, whether a retried attempt succeeded (a new failure shows as
+  a new dead letter) and retries through the public API are not built.
+- Firefox and WebKit are not installed locally; CI runs them.
+
+## 2026-10-02 — Phase 5: a price list for visitors (P5-01, P5-07, ADR-107)
+
+Status: **Implemented and locally verified (test data only).** Since ADR-105 platform owners offer
+plan versions that companies choose and pay for under Billing, but someone deciding whether to sign
+up could not see them: prices appeared only inside a company.
+
+### Completed
+
+- **Design (ADR-107):** platform owners show or hide a public price list of the versions offered to
+  companies; it is hidden until shown, because offering a version to companies is not the same as
+  publishing its price. Visitors see it at `/pricing` only when they could follow it: paying for
+  plans available (Razorpay subscriptions on and the tax set), a default trial, and an offered
+  version one plan payment can cover; otherwise the page is not found.
+- **Migration 0085:** `ops.plan_settings.price_list_shown_at` and `price_list_shown_by_user_id`
+  (paired by a check constraint), the platform role's update grant on them, and the runtime role's
+  read grant on whether the list is shown and the default trial (not who showed it).
+- **Domain:** `billing/price-list.ts` (`publicPriceList`, read in the system scope in a read-only
+  transaction: the commercial terms of published, offered versions, cheapest first, with their
+  totals with the tax, leaving out a version one plan payment cannot cover; `priceListGaps`, the
+  rule the page and the platform card share; `priceListLines`, the wording of what a version
+  includes and the add-ons it sells); `showPriceList` / `hidePriceList` and `priceListShown` in the
+  plan admin service.
+- **Web:** `/pricing` (no sign-in): the offered versions with their prices before and with the tax,
+  what they include, their add-ons, the default trial's length and that Meta bills WhatsApp's own
+  message charges directly, with links to sign in and create an account; not found otherwise. The
+  platform Plans page has a "Price list for visitors" card with what keeps it from visitors and the
+  show and hide controls.
+- **Tests:**
+  - Unit: the visibility rule and the wording of each version (5).
+  - Integration (`price-list.test.ts`, 4): hidden until shown, then only published, offered versions
+    one plan payment can cover, cheapest first, with their terms and totals with the tax; nothing
+    while paying for plans is off, without the tax or without a default trial; only platform owners
+    show or hide it, each change once in the platform audit log; the runtime role reads whether it
+    is shown, the tax and the default trial, never who showed it, and writes nothing; the check
+    pairing the shown time with who showed it.
+  - e2e (`price-list.spec.ts`, chromium and mobile-chromium): not found while hidden; a platform
+    owner sets the tax, offers a version with a trial, makes it the default trial and shows the
+    list; a visitor sees it with its prices and terms, without horizontal scrolling, and goes on to
+    create an account; hidden again it is not found.
+- **Docs:** ADR-107; SECURITY (the price list row and rules); THREAT-MODEL T120; RUNBOOKS (the price
+  list, migration 0085); DEPLOYMENT (edge limits, no caching); ARCHITECTURE; DATA-RETENTION;
+  RELEASE-CHECKLIST; BACKLOG P5-01 and P5-07; FEATURE-MATRIX H-047 and W-001.
+- **Found while building:**
+  - Without a default trial a new company starts complimentary and cannot choose a plan (ADR-105),
+    so a price list then would invite visitors to something they cannot do: a default trial is one
+    of the conditions.
+  - Every test file shares the plan settings (the tax, the default trial and now the list), and
+    earlier files leave versions offered, so the integration test saves the settings first,
+    restores them after, and checks only its own versions' order.
+  - The sign-in and sign-up pages render without the database; a link to the price list there would
+    add a query to every sign-in, so they do not link to it (HyFib's own site does).
+  - A mutation run showed that the e2e test's clean-up stopped at its first failing step, leaving
+    the tax and the default trial set for the tests after it. It now restores those first, then
+    hides the list and withdraws the offer, each only when needed.
+- **Mutation checks:** 37 regressions tried one at a time, all caught (5 through the e2e test).
+  - 5 in the migration: the check pairing the shown time with who showed it removed; the runtime
+    role reading who showed the list, or allowed to change whether it is shown; the platform role
+    unable to record who showed it; the runtime role unable to read whether it is shown.
+  - 10 in the public read: versions not offered, or drafts and retired versions, listed; a version
+    one plan payment cannot cover listed; listed while hidden or while paying for plans is off; the
+    visibility rule not applied; totals without the tax; not cheapest first; a limited API not
+    flagged; the trial's length taken from another version.
+  - 7 in showing and hiding: operators allowed; showing twice changing it again; a change not
+    audited; who showed it not recorded; hiding keeping who showed it; hiding showing the list; the
+    platform not told the list is shown.
+  - 10 in the rule and the wording (unit tests): each of the five gaps not named (a hidden list,
+    payments off, no tax, no default trial, versions one payment cannot cover counted); automation
+    limits or run packs listed without the module; the most seats, a limited API or the modules
+    left out not stated.
+  - 5 through the e2e test: the page shown while hidden; the price with the tax not shown; the
+    platform card offering the wrong control, or naming a hidden list as missing; creating an
+    account leading elsewhere.
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                                         | Result                                    |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                            | clean                                     |
+| `pnpm test`                                                                                                                                                                     | 467 passed                                |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                             | 659 passed on each                        |
+| `pnpm build` and `pnpm test:e2e` for `price-list.spec.ts`, `plans.spec.ts` and `plan-choice.spec.ts` on chromium and mobile-chromium, on the local database migrated on to 0085 | 6 passed (4.4 min)                        |
+| Mutation checks                                                                                                                                                                 | 37 regressions, all caught (listed above) |
+| gitleaks 8.30.1 on the commit                                                                                                                                                   | no leaks                                  |
+
+### Known gaps
+
+- Links from the sign-in and sign-up pages, caching, prices in other currencies and the price list
+  through the public API are not built.
+- The wording around the prices needs legal and commercial review before the list is shown in
+  production (RELEASE-CHECKLIST). Firefox and WebKit are not installed locally; CI runs them.
+
+## 2026-10-02 — Phase 5: companies choose their add-ons (P5-01, P5-07, ADR-106)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** Since
+ADR-105 a company chooses its plan version, but only HyFib staff set its add-ons, so a company whose
+team outgrew its version's seats needed staff, or a bigger version, before it could pay for more.
+
+### Completed
+
+- **Design (ADR-106):** owners and billing managers with a sign-in within 15 minutes set the extra
+  seats, extra WhatsApp numbers and automation run packs of the version the company is on, under the
+  conditions of choosing a plan (on a trial, past due, expired or canceled; neither suspended nor
+  being deleted; no subscription that may still be charged; Razorpay subscriptions on and the tax on
+  plan prices set), on a version still published (offered or not). Only the quantities change, at
+  once (during a trial too); a decrease cannot leave fewer seats or numbers than the company uses,
+  an increase is never refused for that, and a total that cannot be paid is refused. Changing add-ons
+  a subscription pays for is not built (R-069).
+- **Migration 0084:** `app.choose_add_ons(seats, numbers, packs)` (SECURITY DEFINER, `w360_app`
+  only): the company and member from the session's scope, the locks of `app.choose_plan` (the
+  subscription-start lock, the company row shared, the plan state for update), every condition
+  checked again with a published version instead of an offered one, and only the three quantities,
+  the note, member, time and version number written; the plan state's guard (0023) keeps them to
+  what the version sells, within its maximums. No table changes.
+- **Domain:** `billing/plan-add-ons.ts` (what the version sells, with prices, quantities, the most
+  allowed and the fewest that still hold what the company uses, the current quote and why the
+  company cannot change them now; the change under every limit's lock, digits only, refused when
+  the total cannot be paid or a decrease leaves fewer seats or numbers than in use, audited as
+  `billing.add_ons_chosen`); `planChangeUnavailable` shared with plan choices; `PlanAddOnKind` and
+  `PLAN_ADD_ON_LABELS` in the browser-safe plan model.
+- **Web:** Billing → Add-ons (`/c/<slug>/billing/add-ons`): a field for each add-on the version
+  sells with its price, what the plan includes, what the company uses and its bounds, the total as
+  the quantities change, and what saving does now; why the company cannot change them, the sign-in
+  prompt, or who can. Billing links to it when the company can change add-ons.
+- **Tests:**
+  - Unit: when a company may change its plan or add-ons (4).
+  - Integration (`plan-add-ons.test.ts`, 8, against the Razorpay stand-in): the listing, the quote
+    and a billing manager's change on a trial with only the quantities changing, the new limits at
+    once, the audit and paying for them with the plan; a payment being started and every status
+    Razorpay may still charge holding the change; permissions, recent sign-ins and digits only;
+    what the version sells and its maximums, and a total that cannot be paid; refused in SQL for no
+    tax, outside a member's scope, suspended, being deleted, a retired version, a paid period and
+    complimentary access; decreases below the seats and numbers in use refused, increases allowed
+    when still over, fewer run packs allowed; a restricted company; the locks of a subscription
+    start, a seat addition and a staff change, and two changes at once; a staff notice superseded,
+    another company on the same version untouched and the company role refused.
+  - Integration elsewhere: `app.choose_add_ons` executable by `w360_app` alone (`tenant-isolation`).
+  - e2e (`plan-add-ons.spec.ts`, chromium and mobile-chromium): Billing points to the add-ons; the
+    page shows prices and bounds and the total as the quantities change; a decrease below the seats
+    in use is refused; the saved add-ons appear on the plan card and in what paying costs; the audit
+    log and the staff page show the change; once paying from the trial's end, nothing can change.
+- **Docs:** ADR-106; SECURITY (the plan add-ons row and rules); THREAT-MODEL T119; RUNBOOKS
+  (add-ons companies choose, migration 0084); ARCHITECTURE; DATA-RETENTION; RELEASE-CHECKLIST;
+  BACKLOG P5-01 and P5-07; FEATURE-MATRIX H-046 and W-001.
+- **Found while building:**
+  - A decrease is checked only against the seats and numbers it takes away: a company already over
+    a limit (staff removed add-ons, say) can still add seats, and a team count over the version's
+    limit does not block changing the seats (ADR-105 refuses any shortfall because the whole version
+    changes there).
+  - Values exported from a client component cannot be called from a server page, so the add-on
+    labels live in the browser-safe plan model rather than beside the form.
+  - The form first formatted amounts with the browser's `Intl`, which no other e2e-checked page
+    does in the browser and which Firefox and WebKit could print differently; it now uses the
+    server's own formatter (`displayMoney`, exported as `@w360/core/money`, which has no
+    dependencies), so the page reads the same in every browser and on the server.
+  - The Choose a plan page (ADR-105), copied here, reloaded itself whenever it was reached by a link
+    (`RequireOwnDocument`, which only pages loading a provider's script need: Billing for Razorpay
+    Checkout and Channels for Embedded Signup). The reload could undo a choice or a typed quantity
+    made in the moment before it; neither page reloads now, like the other billing pages.
+  - The first e2e run used a heading locator that also matched the card's own title; it now names
+    the page heading exactly. One page regression did not compile as first written (it removed the
+    check that narrows the plan); it was rewritten as a form that needs a stale sign-in.
+- **Mutation checks:** 52 regressions tried one at a time, 51 caught (4 through the e2e test).
+  - 24 in the migration: a change outside a member's scope; the subscription-start lock not taken;
+    the company row or the plan state read without its lock; a company being deleted or suspended,
+    complimentary access, a paid period, a live subscription, one being started or one authorised,
+    a retired version or no tax allowed; the same quantities recorded again; each quantity, the
+    note, who changed them or the plan state's version not written; other companies on the version
+    changed too; the quantities before reported as the new ones; the platform role allowed to run
+    it; and the migration's `REVOKE … FROM PUBLIC` (not caught: the default privileges of 0002
+    already withhold EXECUTE, as for every function).
+  - 13 in the change: administrators or a stale sign-in allowed; Razorpay subscriptions off; the
+    limits' locks not taken; a total that cannot be paid accepted; a decrease of seats or of numbers
+    not checked; an increase checked against what is in use; the change not audited, or audited
+    without the quantities before; any number format, an empty field refused, or more seats than
+    the table holds accepted.
+  - 7 in what the company sees: a retired version offered add-ons; the fewest seats not shown; the
+    most seats or numbers ignoring the version; numbers or run packs listed when not sold; the quote
+    without the add-ons.
+  - 4 in the shared check of when a company may change its plan or add-ons (unit tests): a payment
+    being started, a paid period, Razorpay subscriptions off and a suspended company not told.
+  - 4 through the e2e test: Billing not pointing to the add-ons; the form sending the seats as the
+    numbers; the total shown without the run packs; the form shown only after a stale sign-in.
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                                                                        | Result                                   |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                           | clean                                    |
+| `pnpm test`                                                                                                                                                                                                    | 462 passed                               |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                                            | 655 passed on each                       |
+| `pnpm build` and `pnpm test:e2e` for `plan-add-ons.spec.ts`, `plan-choice.spec.ts`, `plans.spec.ts` and `plan-subscription.spec.ts` on chromium and mobile-chromium, on the local database migrated on to 0084 | 8 passed (12.7 min)                      |
+| Mutation checks                                                                                                                                                                                                | 52 regressions, 51 caught (listed above) |
+| gitleaks 8.30.1 on the commit                                                                                                                                                                                  | no leaks                                 |
+
+### Known gaps
+
+- Changing add-ons a subscription pays for (a new subscription from the end of the paid period,
+  R-069), proration, add-ons through the public API and emails about a company's change are not
+  built.
+- Razorpay test mode has not been run (RELEASE-CHECKLIST). Firefox and WebKit are not installed
+  locally; CI runs them.
+
+## 2026-10-02 — Phase 5: companies choose the plan they pay for (P5-01, P5-07, ADR-105)
+
+Status: **Implemented and locally verified against the Razorpay stand-in (test data only).** A
+company could pay only for the plan version HyFib staff put it on (ADR-063): a company on the
+default trial needed staff before it could pay for another plan.
+
+### Completed
+
+- **Design (ADR-105):** platform owners offer published plan versions to companies and can stop
+  offering them; nothing is offered until they do, and a version priced under ₹1 is never offered.
+  Owners and billing managers with a sign-in within 15 minutes choose an offered version while the
+  company is on a trial, past due, expired or canceled, is neither suspended nor being deleted, has
+  no subscription that may still be charged, and paying for plans is available (Razorpay
+  subscriptions on and the tax on plan prices set). Only the version changes (the trial's end, the
+  paid period, the add-ons and the usage period stay); the version must hold the seats, numbers,
+  teams and live automations the company uses; the company then pays for it as before. Changing a
+  plan a subscription pays for is not built (R-069).
+- **Migration 0082:** `ops.plans.offered_at` and `offered_by_user_id` (checks: published versions of
+  ₹1 or more only, paired with the user; the platform role's update grant on the two columns), the
+  plan guard rebuilt so that only the offer changes on a published version, and `app.choose_plan`
+  (SECURITY DEFINER, `w360_app` only): the company and member from the session's scope, the
+  subscription-start lock, the company row shared and the plan state for update, every condition
+  checked again, and only the version, note, member, time and version number written.
+- **Migration 0083 (after review):** the plan guard takes a per-version advisory lock exclusively
+  when a published version stops being offered (withdrawn, or retired), and `app.choose_plan`
+  (recreated) takes it shared before it reads the version, so a choice and a withdrawal or
+  retirement never interleave; no new privileges.
+- **Domain:** `plan-choices.ts` (the offered versions with each one's quote with the company's
+  add-ons and the tax, what it holds less of and why the company cannot choose now; the choice
+  under every limit's lock, refused when the chosen version holds less or could not be paid for
+  with the company's add-ons and the tax, audited as `billing.plan_chosen`); `offerPlan` and
+  `withdrawPlanOffer` (platform owners, platform audit log) and retiring stops the offer;
+  `lockAllLimits`; `versionHoldingLimits`, `planShortfalls` and `planShortfallText`.
+- **Web:** Billing → Choose a plan (`/c/<slug>/billing/plans`): each offered version as a card with
+  its price and what the company would pay, what it includes, what it holds less of, and a choose
+  button with a confirmation that says what changes; why the company cannot choose now, the
+  sign-in prompt, or who can choose. Billing links to it when another offered version can be
+  chosen. The platform plan page offers a published version and stops offering it, and the plans
+  list marks offered versions.
+- **Tests:**
+  - Unit (3 new, `model.test.ts`): what a version holds counts the extra seats and numbers bought,
+    as the entitlements do; only the limits below what the company has are listed, in display
+    order, and holding exactly a limit fits; the wording, seats with the invitations that hold
+    them.
+  - Integration (`plan-choices.test.ts`, 9 new, against the Razorpay stand-in):
+    - offering: platform owners only (operators refused), drafts, retired and free versions never
+      offered, offering twice audited once, stopping audited, retiring stops the offer;
+    - the rules in SQL whatever the service does: only the offer changes on a published version,
+      the two checks, retiring with an offer refused, a retired version never published again and
+      the default trial never retired (the rebuilt guard);
+    - a billing manager on a trial: the offered versions with the quote (₹1,999 and an extra seat
+      at ₹100, plus 18% = ₹2,476.82), the fit and the current version; the choice changes only the
+      version, note, member, time and version number, is audited with the version before, and the
+      same version again changes nothing; paying is then offered for the chosen version from the
+      trial's end and the subscription records it; a payment being started, and every status in
+      which Razorpay may still charge, holds the choice in SQL;
+    - `billing.manage` and a sign-in within 15 minutes (administrators, agents, stale and unknown
+      sign-ins), bad input, and no choice without Razorpay subscriptions;
+    - refused in SQL: versions not offered, withdrawn or unknown, a version that does not sell the
+      company's extra seat (shown without a price, refused by the plan state's guard), no tax on
+      plan prices, no member in the company's scope, suspended, being deleted, a paid period and
+      complimentary access; and by the service, a version whose total with the add-ons and the tax
+      is more than a plan payment can be;
+    - limits: seats counted with a waiting invitation, teams, and holding exactly the limit fits;
+    - a restricted company chooses and stays restricted until it pays, charged at once;
+    - locks: the choice waits for the subscription-start lock, a seat addition's lock and a staff
+      change's company row, before it locks the plan state; a staff change committed while it
+      waits is not lost; two choices at once both apply, in turn; a retirement in progress holds a
+      choice of the version, which is then refused, and a choice in progress holds stopping the
+      offer through the platform service;
+    - a staff notice not yet emailed is not emailed after the company chose; another company on the
+      same version is untouched; the company role cannot update its plan state.
+  - Integration elsewhere: `app.choose_plan` executable by `w360_app` alone (`tenant-isolation`).
+  - e2e (`plan-choice.spec.ts`, new): a platform owner sets the tax, publishes three versions and
+    offers two; the company is on a trial of the third with an extra seat and two waiting
+    invitations; Billing links to Choose a plan, which lists the two offered versions with their
+    prices, marks Solo as holding less (two seats where three are used) without a button, and
+    Growth at ₹2,476.82 a month; the owner chooses Growth and Billing shows it on the same trial
+    with its payment total; the audit log and the staff page show the choice; a platform owner
+    stops offering Growth and the company keeps it; the owner pays from the trial's end, and the
+    page then says why another plan cannot be chosen.
+- **Docs:** ADR-105; SECURITY (the plan choices row, the rules, platform owners offer versions);
+  THREAT-MODEL T118; RUNBOOKS (offering plans, why a company cannot choose, migrations 0082 and
+  0083);
+  ARCHITECTURE; DATA-RETENTION; RELEASE-CHECKLIST; BACKLOG P5-01 and P5-07; FEATURE-MATRIX H-045.
+- **Found in review (Codex on PR #19, two P2 findings, both fixed after the first push):**
+  - The chosen version was read without a lock, so a platform owner retiring it while a company's
+    choice of it committed left the company on a retired version, which cannot be paid for. Fixed
+    by migration 0083's per-version lock (a row lock would have needed an update grant and policy
+    for the definer); stopping an offer serialises the same way.
+  - A version whose total with the company's add-ons and the tax is more than a plan payment can be
+    was chosen anyway when the request bypassed the page (a stale page after a tax change, or a
+    direct call), leaving the company on a plan it could not pay for. The service now refuses it.
+- **Found while finishing:**
+  - The first e2e run read the company page's address right after clicking its link, before the
+    page changed, and later revisited `/platform` instead of the company page; the test now waits
+    for the address first. Everything before that step had passed on both browsers.
+  - The first mutation run left 7 regressions uncaught; the tests were strengthened and caught 5 of
+    them: the rebuilt guard's two rules (the platform service refuses both first, so only SQL shows
+    them), the lock order inside `app.choose_plan` (the audit row's foreign key waits for a staff
+    change's company row anyway, so the test now checks the plan state is still free while the
+    choice waits) and the plan state read under its lock (a staff change committed meanwhile is now
+    shown not to be lost), and another company on the same version (the definer's policy reads
+    every company, so only the function's own condition keeps the update to one company).
+- **Mutation checks:** 57 regressions tried one at a time, 55 caught (4 through the e2e test). After
+  migration 0083 replaced the guard and `app.choose_plan`, the 24 regressions of their bodies and
+  grants were run again against 0083's copies, with the same results.
+  - 27 in the migration: drafts, retired versions or versions under ₹1 offered; an offer without
+    who made it; the plan guard letting a published version be renamed with its offer, the default
+    trial be retired or a retired version be published again; a plan chosen outside a member's
+    scope; the subscription-start lock, the company row's lock or the plan state's lock not taken;
+    a company being deleted, a suspended company, complimentary access or a paid period choosing; a
+    live subscription, one being started or an authorised one paying from the trial's end not
+    holding the choice; a version not offered chosen; a plan chosen without the tax on plan prices;
+    the same version recorded again; the note, the member or the version number not written; other
+    companies on the version changed too; the platform role able to choose; and the two not caught:
+    the function's own check that the version is published (a check constraint makes an offer imply
+    it) and the migration's revocation from PUBLIC (the default privileges of 0002 already withhold
+    it).
+  - 15 in the choosing service: administrators or a stale sign-in choosing; a plan chosen without
+    Razorpay subscriptions; the limits' locks not taken; no check of what the version holds; the
+    choice not audited, or audited without the version before; versions not offered listed; the
+    quote, or what a version holds, without the add-ons; a paid period, a company without Razorpay
+    subscriptions or a suspended company offered a choice; a payment being started not told; the
+    current version not marked.
+  - 2 in the model: a version holding exactly a limit refused; extra seats not counted in what a
+    version holds (each caught by the unit and the integration tests).
+  - 6 in the platform service: operators offering or stopping an offer; offering or stopping not in
+    the platform audit log; offering twice recorded twice; retiring keeping the offer.
+  - 4 through the e2e test: Billing not pointing to the offered plans; a version that holds less
+    choosable from the page; the offer button stopping the offer; the choose button sending the
+    version the company is on.
+  - 3 for the review fixes: a choice without the version's lock; stopping an offer without waiting
+    for choices of it; a version the company cannot pay for chosen.
+  - The locks the concurrency test holds are released in `finally` blocks, so a regression there
+    fails in seconds instead of holding them until the hook times out (two runs had taken two
+    minutes each).
+
+### Test commands and results (local, 2026-10-02)
+
+| Command                                                                                                                                                                                                                                                        | Result                                   |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `pnpm lint` / `pnpm format:check` / `pnpm typecheck`                                                                                                                                                                                                           | clean                                    |
+| `pnpm test`                                                                                                                                                                                                                                                    | 458 passed                               |
+| `pnpm test:integration` (PostgreSQL 18.6 and 17.11)                                                                                                                                                                                                            | 647 passed on each                       |
+| `pnpm build` and `pnpm test:e2e` for `plan-choice.spec.ts`, `plans.spec.ts` and `plan-subscription.spec.ts` on chromium and mobile-chromium, on a fresh local database migrated to 0082, and again after the review fixes on that database migrated on to 0083 | 6 passed each time (12.3 and 12.2 min)   |
+| Mutation checks                                                                                                                                                                                                                                                | 57 regressions, 55 caught (listed above) |
+| gitleaks 8.30.1 on both commits                                                                                                                                                                                                                                | no leaks                                 |
+
+### Known gaps
+
+- Changing a plan a subscription pays for (a new subscription from the end of the paid period,
+  R-069), choosing add-ons, a price list for visitors before sign-up, proration and emails about a
+  company's choice are not built.
+- Razorpay test mode has not been run (RELEASE-CHECKLIST).
+
 ## 2026-10-02 — Phase 5: webhook deliveries that cannot be prepared (P5-09, ADR-053)
 
 Status: **Implemented and locally verified (unit and integration tests against real PostgreSQL;

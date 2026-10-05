@@ -1,0 +1,232 @@
+import { expect, test } from './fixtures';
+import { signUpAndVerify, uniqueEmail } from './support';
+
+const PASSWORD = 'correct horse battery staple 42';
+
+interface Page {
+  data: { name: string | null }[];
+  nextCursor: string | null;
+}
+
+test('a key finds contacts with segment conditions: comparisons, tags, all or any (ADR-117)', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(120_000);
+  const email = uniqueEmail('apisearch');
+  const slug = `apisearch-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Jaya Search', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Search Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+
+  // A key that defines fields, adds contacts and reads them.
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('CRM search');
+  await page.getByRole('checkbox', { name: /Define contact fields/ }).check();
+  await page.getByRole('checkbox', { name: /Read contacts/ }).check();
+  await page
+    .getByRole('checkbox', { name: /Create and change contacts and record consent/ })
+    .check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const tokenField = page.getByLabel('API key', { exact: true });
+  await expect(tokenField).toBeVisible();
+  const token = await tokenField.inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${token}` };
+
+  // Two fields and three contacts.
+  for (const field of [
+    { label: 'Orders', type: 'number' },
+    { label: 'City', type: 'text' },
+  ]) {
+    const added = await request.post('/api/v1/contact-fields', { headers: auth, data: field });
+    expect(added.status()).toBe(201);
+  }
+  const stamp = String(Date.now()).slice(-6);
+  for (const [n, contact] of [
+    { name: 'Asha', fields: { orders: 2, city: 'Pune' }, tags: ['vip'] },
+    { name: 'Bina', fields: { orders: 7, city: 'Pune' } },
+    { name: 'Chitra', fields: { orders: 12, city: 'Delhi' }, tags: ['vip'] },
+  ].entries()) {
+    const created = await request.post('/api/v1/contacts', {
+      headers: auth,
+      data: { phone: `+91974${stamp}${n}`, ...contact },
+    });
+    expect(created.status()).toBe(201);
+  }
+
+  const search = async (body: Record<string, unknown>) => {
+    const res = await request.post('/api/v1/contacts/search', { headers: auth, data: body });
+    expect(res.status()).toBe(200);
+    return (await res.json()) as Page;
+  };
+  // More than 5 orders and without the tag vip; then city Pune or the tag vip, newest first.
+  const busy = await search({
+    conditions: [
+      { type: 'field', key: 'orders', op: 'greater_than', value: 5 },
+      { type: 'tag', op: 'not_has', tag: 'VIP' },
+    ],
+  });
+  expect([busy.data.map((c) => c.name), busy.nextCursor]).toEqual([['Bina'], null]);
+  const any = await search({
+    match: 'any',
+    conditions: [
+      { type: 'field', key: 'city', op: 'equals', value: 'pune' },
+      { type: 'tag', op: 'has', tag: 'vip' },
+    ],
+  });
+  expect(any.data.map((c) => c.name)).toEqual(['Chitra', 'Bina', 'Asha']);
+
+  // A comparison the field's type does not take is refused, naming it.
+  const refused = await request.post('/api/v1/contacts/search', {
+    headers: auth,
+    data: { conditions: [{ type: 'field', key: 'city', op: 'greater_than', value: 'a' }] },
+  });
+  expect(refused.status()).toBe(422);
+  expect(((await refused.json()) as { error: { issues: unknown } }).error.issues).toEqual([
+    {
+      path: 'conditions.0.op',
+      message:
+        'greater_than does not apply to text fields: use is_set, is_not_set, equals, not_equals, contains.',
+    },
+  ]);
+  // The search has its own route: reading it is not reading a contact.
+  expect((await request.get('/api/v1/contacts/search', { headers: auth })).status()).toBe(405);
+});
+
+test('a key finds contacts by part of their name as members do, with name conditions in searches and segments too (ADR-143), and text holding the NUL character is refused where it is (ADR-124)', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(120_000);
+  const email = uniqueEmail('apinames');
+  const slug = `apinames-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Neha Names', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Name Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+
+  // A key that adds contacts and reads them.
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('CRM names');
+  await page.getByRole('checkbox', { name: /Read contacts/ }).check();
+  await page
+    .getByRole('checkbox', { name: /Create and change contacts and record consent/ })
+    .check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const tokenField = page.getByLabel('API key', { exact: true });
+  await expect(tokenField).toBeVisible();
+  const token = await tokenField.inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${token}` };
+
+  const stamp = String(Date.now()).slice(-6);
+  for (const [n, name] of ['Élodie Martin', 'MARTINA Rao', 'Ravi 100% Real'].entries()) {
+    const created = await request.post('/api/v1/contacts', {
+      headers: auth,
+      data: { phone: `+91975${stamp}${n}`, name },
+    });
+    expect(created.status()).toBe(201);
+  }
+  const find = async (name: string) => {
+    const res = await request.get(`/api/v1/contacts?${new URLSearchParams({ name }).toString()}`, {
+      headers: auth,
+    });
+    expect(res.status()).toBe(200);
+    return ((await res.json()) as Page).data.map((c) => c.name);
+  };
+  // Part of a name whatever its case, newest first; % is a character, not a pattern.
+  expect(await find('mart')).toEqual(['MARTINA Rao', 'Élodie Martin']);
+  expect(await find('ÉLODIE')).toEqual(['Élodie Martin']);
+  expect(await find('100%')).toEqual(['Ravi 100% Real']);
+
+  // A member searching Contacts for the same text finds the same contacts.
+  await page.goto(`/c/${slug}/contacts`);
+  await page.getByLabel('Search').fill('mart');
+  await page.getByRole('button', { name: 'Apply' }).click();
+  await expect(page).toHaveURL(/[?&]q=mart/);
+  await expect(page.getByRole('table').getByRole('link')).toHaveText([
+    'MARTINA Rao',
+    'Élodie Martin',
+  ]);
+
+  // A name condition in a search finds the same contacts, and compares whole names whatever their
+  // case; without the name to compare with it is refused, naming it (ADR-143).
+  const byName = async (condition: Record<string, unknown>) => {
+    const res = await request.post('/api/v1/contacts/search', {
+      headers: auth,
+      data: { conditions: [{ type: 'name', ...condition }] },
+    });
+    return [res.status(), ((await res.json()) as Page).data?.map((c) => c.name)];
+  };
+  expect(await byName({ op: 'contains', value: 'mart' })).toEqual([
+    200,
+    ['MARTINA Rao', 'Élodie Martin'],
+  ]);
+  expect(await byName({ op: 'equals', value: 'martina rao' })).toEqual([200, ['MARTINA Rao']]);
+  expect(await byName({ op: 'not_equals', value: 'martina rao' })).toEqual([
+    200,
+    ['Ravi 100% Real', 'Élodie Martin'],
+  ]);
+  const noName = await request.post('/api/v1/contacts/search', {
+    headers: auth,
+    data: { conditions: [{ type: 'name', op: 'equals' }] },
+  });
+  expect([
+    noName.status(),
+    ((await noName.json()) as { error: { issues: unknown } }).error.issues,
+  ]).toEqual([
+    422,
+    [{ path: 'conditions.0.value', message: 'equals needs a name to compare with.' }],
+  ]);
+
+  // A member builds a segment with the same condition: it counts the same contacts.
+  await page.goto(`/c/${slug}/contacts/segments`);
+  await page.getByLabel('Segment name').fill('Martins');
+  await page.getByLabel('Condition 1').selectOption({ label: 'Name' });
+  await expect(page.getByLabel('Comparison')).toHaveValue('contains');
+  await page.getByLabel('Name', { exact: true }).fill('MART');
+  await page.getByRole('button', { name: 'Preview matches' }).click();
+  await expect(page.getByText('2 contacts match now.')).toBeVisible();
+  // Without a name to compare with, the value field goes away.
+  await page.getByLabel('Comparison').selectOption({ label: 'has no name' });
+  await expect(page.getByLabel('Name', { exact: true })).toHaveCount(0);
+  await page.getByLabel('Comparison').selectOption({ label: 'contains' });
+  await page.getByLabel('Name', { exact: true }).fill('MART');
+  await page.getByRole('button', { name: 'Save segment' }).click();
+  await expect(page.getByRole('heading', { name: 'Martins', level: 1 })).toBeVisible();
+  await expect(page.getByText('2 contacts match now', { exact: true })).toBeVisible();
+  await expect(page.getByText('Élodie Martin, MARTINA Rao', { exact: true })).toBeVisible();
+
+  // Refusals name the parameter, or where the body holds the NUL character; nothing is saved.
+  const issues = async (res: Awaited<ReturnType<typeof request.get>>) =>
+    ((await res.json()) as { error: { issues: unknown } }).error.issues;
+  const nul = 'Text cannot hold the NUL character (U+0000).';
+  const empty = await request.get('/api/v1/contacts?name=%20', { headers: auth });
+  expect([empty.status(), await issues(empty)]).toEqual([
+    422,
+    [{ path: 'name', message: 'Give part of a name to find.' }],
+  ]);
+  const inQuery = await request.get('/api/v1/contacts?name=Mart%00', { headers: auth });
+  expect([inQuery.status(), await issues(inQuery)]).toEqual([
+    422,
+    [{ path: 'name', message: nul }],
+  ]);
+  const inBody = await request.post('/api/v1/contacts', {
+    headers: auth,
+    data: { phone: `+91975${stamp}9`, name: 'Nul\u0000Name' },
+  });
+  expect([inBody.status(), await issues(inBody)]).toEqual([422, [{ path: 'name', message: nul }]]);
+  const inCondition = await request.post('/api/v1/contacts/search', {
+    headers: auth,
+    data: { conditions: [{ type: 'tag', op: 'has', tag: 'v\u0000ip' }] },
+  });
+  expect([inCondition.status(), await issues(inCondition)]).toEqual([
+    422,
+    [{ path: 'conditions.0.tag', message: nul }],
+  ]);
+  expect(await find('Nul')).toEqual([]);
+});

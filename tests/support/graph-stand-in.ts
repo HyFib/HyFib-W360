@@ -75,6 +75,8 @@ export interface StandInState {
       valid: boolean;
       scopes: string[];
       granular?: { scope: string; target_ids?: string[] }[];
+      /** Unix seconds; 0 or absent: the token reports no expiry. */
+      expiresAt?: number;
     }
   >;
   wabaNumbers: Map<string, string[]>;
@@ -88,6 +90,8 @@ export interface StandInState {
   templateCreateQueue: TemplateCreateBehaviour[];
   /** When true, listing with fields beyond the defaults fails with code 100. */
   rejectExtraTemplateFields: boolean;
+  /** When set, template deletions fail with this Graph error and the template stays listed. */
+  templateDeleteError: { status: number; code: number; message: string } | null;
   /** Recipient -> WhatsApp id returned in send responses (defaults to the recipient). */
   waIdFor: Map<string, string>;
   templateCounter: number;
@@ -105,6 +109,18 @@ export interface StandInState {
   catalogProducts: Map<string, Record<string, unknown>[]>;
   /** When set, catalog reads fail with this Graph error (for example a missing permission). */
   catalogError: { status: number; code: number; message: string } | null;
+  /**
+   * WABAs whose webhooks the app is not subscribed to (every other WABA is: onboarding subscribes
+   * it), and the Graph errors that subscribing again or listing the subscribed apps fails with for
+   * a WABA (ADR-138).
+   */
+  unsubscribedWabas: Set<string>;
+  /** Other apps' ids listed as subscribed to a WABA, before HyFib's app when it is subscribed. */
+  otherSubscribedApps: Map<string, string[]>;
+  /** WABAs whose list of subscribed apps also describes an app without its id. */
+  unreadableSubscribedApps: Set<string>;
+  subscribeErrors: Map<string, { status: number; code: number; message: string }>;
+  subscribedAppsErrors: Map<string, { status: number; code: number; message: string }>;
 }
 
 export interface GraphStandIn {
@@ -376,6 +392,7 @@ export async function startGraphStandIn(options: {
     templates: new Map(),
     templateCreateQueue: [],
     rejectExtraTemplateFields: false,
+    templateDeleteError: null,
     waIdFor: new Map(),
     templateCounter: 0,
     flows: new Map(),
@@ -383,6 +400,11 @@ export async function startGraphStandIn(options: {
     catalogs: new Map(),
     catalogProducts: new Map(),
     catalogError: null,
+    unsubscribedWabas: new Set(),
+    otherSubscribedApps: new Map(),
+    unreadableSubscribedApps: new Set(),
+    subscribeErrors: new Map(),
+    subscribedAppsErrors: new Map(),
     flowCreateQueue: [],
     flowUploadErrors: [],
     businessKeys: new Map(),
@@ -399,6 +421,9 @@ export async function startGraphStandIn(options: {
   const server: Server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://stand-in');
+      // TEST-ONLY controls answer on a connection of their own: a runner request sent on a kept-alive
+      // socket just as the server closes it after its idle timeout hangs up (once in CI).
+      if (url.pathname.startsWith('/__stand-in/')) res.setHeader('connection', 'close');
       const body = await readBody(req);
       const authorization = req.headers.authorization ?? null;
       if (req.method === 'GET' && url.pathname === '/__stand-in/requests') {
@@ -416,6 +441,45 @@ export async function startGraphStandIn(options: {
           return json(res, 400, { ok: false });
         state.catalogs.set(String(b.wabaId), [b.catalog]);
         state.catalogProducts.set(b.catalog.id, b.products);
+        return json(res, 200, { ok: true });
+      }
+      // Test control: register a business token, or change what debug_token says about one (valid,
+      // the app, permissions, shared accounts, expiry), as a business changing HyFib's access would.
+      if (req.method === 'POST' && url.pathname === '/__stand-in/token') {
+        const b = (body ?? {}) as {
+          token?: string;
+          valid?: boolean;
+          appId?: string;
+          scopes?: string[];
+          granular?: { scope: string; target_ids?: string[] }[];
+          expiresAt?: number;
+        };
+        if (typeof b.token !== 'string' || !b.token) return json(res, 400, { ok: false });
+        state.tokens.set(b.token, {
+          appId: b.appId ?? state.appId,
+          valid: b.valid ?? true,
+          scopes: b.scopes ?? ['whatsapp_business_management', 'whatsapp_business_messaging'],
+          ...(b.granular ? { granular: b.granular } : {}),
+          ...(b.expiresAt ? { expiresAt: b.expiresAt } : {}),
+        });
+        return json(res, 200, { ok: true });
+      }
+      // Test control: whether the app is subscribed to a WABA's webhooks, and whether subscribing it
+      // again fails, as a business removing the app from its account in Meta's settings would cause.
+      if (req.method === 'POST' && url.pathname === '/__stand-in/subscription') {
+        const b = (body ?? {}) as { wabaId?: string; subscribed?: boolean; refuse?: boolean };
+        if (typeof b.wabaId !== 'string' || !b.wabaId) return json(res, 400, { ok: false });
+        if (b.subscribed === false) state.unsubscribedWabas.add(b.wabaId);
+        if (b.subscribed === true) state.unsubscribedWabas.delete(b.wabaId);
+        if (b.refuse === true) {
+          state.subscribeErrors.set(b.wabaId, {
+            status: 403,
+            code: 200,
+            message:
+              "Your app doesn't have permission to subscribe to this WhatsApp Business Account",
+          });
+        }
+        if (b.refuse === false) state.subscribeErrors.delete(b.wabaId);
         return json(res, 200, { ok: true });
       }
       // Test control: set a template's review status, as Meta's review would.
@@ -465,7 +529,10 @@ export async function startGraphStandIn(options: {
             is_valid: info.valid,
             scopes: info.scopes,
             ...(info.granular ? { granular_scopes: info.granular } : {}),
-            expires_at: 0,
+            expires_at: info.expiresAt ?? 0,
+            ...(info.valid
+              ? {}
+              : { error: { code: 190, message: 'The access token is invalid.' } }),
           },
         });
       }
@@ -476,10 +543,38 @@ export async function startGraphStandIn(options: {
         if (!numbers) return graphError(res, 400, 100, 'Unsupported get request.');
         return json(res, 200, { data: numbers.map((id) => ({ id })) });
       }
+      // The apps subscribed to a WABA's webhooks, in the shape of the examples in Meta's official
+      // OpenAPI description (research M-190).
+      if (req.method === 'GET' && first && second === 'subscribed_apps') {
+        const failure = state.subscribedAppsErrors.get(first);
+        if (failure) return graphError(res, failure.status, failure.code, failure.message);
+        const appIds = [
+          ...(state.otherSubscribedApps.get(first) ?? []),
+          ...(state.unsubscribedWabas.has(first) ? [] : [state.appId]),
+        ];
+        return json(res, 200, {
+          data: [
+            ...appIds.map((id) => ({
+              whatsapp_business_api_data: {
+                id,
+                name: id === state.appId ? 'HyFib test app' : 'Another app',
+                link: `https://www.facebook.com/games/?app_id=${id}`,
+              },
+            })),
+            ...(state.unreadableSubscribedApps.has(first)
+              ? [{ whatsapp_business_api_data: { name: 'An app without its id' } }]
+              : []),
+          ],
+        });
+      }
       if (req.method === 'POST' && first && second === 'subscribed_apps') {
+        const failure = state.subscribeErrors.get(first);
+        if (failure) return graphError(res, failure.status, failure.code, failure.message);
+        state.unsubscribedWabas.delete(first);
         return json(res, 200, { success: true });
       }
       if (req.method === 'DELETE' && first && second === 'subscribed_apps') {
+        state.unsubscribedWabas.add(first);
         return json(res, 200, { success: true });
       }
       if (req.method === 'POST' && first && second === 'register') {
@@ -607,6 +702,10 @@ export async function startGraphStandIn(options: {
           });
         }
         if (req.method === 'DELETE') {
+          if (state.templateDeleteError) {
+            const e = state.templateDeleteError;
+            return graphError(res, e.status, e.code, e.message);
+          }
           const name = url.searchParams.get('name');
           const hsmId = url.searchParams.get('hsm_id');
           const index = list.findIndex((t) => t.name === name && (!hsmId || t.id === hsmId));

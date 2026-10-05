@@ -1,6 +1,7 @@
 'use client';
 import { useRouter } from 'next/navigation';
 import { useId, useRef, useState, useSyncExternalStore } from 'react';
+import { clipText } from '@w360/core/text';
 import { Button, Select, Textarea } from '@w360/ui';
 import { sendReplyAction } from '@/app/actions/inbox';
 import { FormError } from '@/components/form-status';
@@ -167,7 +168,7 @@ export function Composer({
                 const chosen = savedReplies.find((r) => r.id === event.target.value);
                 if (!chosen) return;
                 const next = text.trim() ? `${text.trimEnd()}\n${chosen.text}` : chosen.text;
-                update(next.slice(0, MAX_LENGTH));
+                update(clipText(next, MAX_LENGTH));
                 setNotice(
                   chosen.missing.includes('name')
                     ? `Inserted “${chosen.title}”. This customer has no name on file, so {{name}} was left empty: check the text.`

@@ -1,4 +1,4 @@
-import { uuidv7, type Clock, type Keyring } from '@w360/core';
+import { parseExternalJson, uuidv7, type Clock, type Keyring } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -92,7 +92,7 @@ export async function handlePaymentWebhook(
   }
   let body: { event?: unknown; payload?: { payment_link?: { entity?: { id?: unknown } } } };
   try {
-    body = JSON.parse(input.rawBody.toString('utf8')) as typeof body;
+    body = parseExternalJson(input.rawBody.toString('utf8')) as typeof body;
   } catch {
     return { status: 400, log: { outcome: 'malformed', tenantId: scope.tenantId } };
   }

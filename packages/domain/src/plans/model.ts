@@ -63,14 +63,40 @@ export const planGivesAccess = (status: TenantPlanStatus): boolean =>
  * sell are zero, so a quantity kept from a previous plan cannot block the change.
  */
 export function addOnsForPlan(
-  plan: { sellsSeats: boolean; sellsNumbers: boolean; sellsRunPacks: boolean } | undefined,
-  addOns: { extraSeats: string; extraNumbers: string; runPacks: string },
-): { extraSeats: string; extraNumbers: string; runPacks: string } {
+  plan:
+    | {
+        sellsSeats: boolean;
+        sellsNumbers: boolean;
+        sellsRunPacks: boolean;
+        sellsApiRequestPacks: boolean;
+      }
+    | undefined,
+  addOns: { extraSeats: string; extraNumbers: string; runPacks: string; apiRequestPacks: string },
+): { extraSeats: string; extraNumbers: string; runPacks: string; apiRequestPacks: string } {
   return {
     extraSeats: plan?.sellsSeats ? addOns.extraSeats : '0',
     extraNumbers: plan?.sellsNumbers ? addOns.extraNumbers : '0',
     runPacks: plan?.sellsRunPacks ? addOns.runPacks : '0',
+    apiRequestPacks: plan?.sellsApiRequestPacks ? addOns.apiRequestPacks : '0',
   };
+}
+
+/** The add-ons a plan version can sell (ADR-051, API request packs ADR-110), in display order. */
+export type PlanAddOnKind = 'seats' | 'numbers' | 'runPacks' | 'apiRequestPacks';
+
+export const PLAN_ADD_ON_LABELS: Record<PlanAddOnKind, string> = {
+  seats: 'Extra seats',
+  numbers: 'Extra WhatsApp numbers',
+  runPacks: 'Automation run packs',
+  apiRequestPacks: 'API request packs',
+};
+
+/** A company's add-on quantities (the plan state's, or a subscription's). */
+export interface PlanAddOnQuantities {
+  extraSeats: number;
+  extraNumbers: number;
+  runPacks: number;
+  apiRequestPacks: number;
 }
 
 /** Limits after add-ons; null means no limit. */
@@ -97,16 +123,41 @@ export const PLAN_BOUNDS = {
   runPackSize: 10_000_000,
   addOnUnits: 10_000,
   apiRequests: 1_000_000_000,
+  apiRequestPackSize: 100_000_000,
+  /**
+   * The most a monthly limit can be with its packs (ADR-110): the database returns limits as 32-bit
+   * integers, and the plan state's guard refuses more packs.
+   */
+  limitWithPacks: 2_000_000_000,
 } as const;
 
 /**
- * The count at which the billing managers are warned before a monthly limit (ADR-062): 80% of the
- * limit, rounded up, when that is still below the limit; null for no warning (no limit, a limit of
- * 0, and limits of 1 to 4). Integer arithmetic, so it matches `ceil(limit * 0.8)` in SQL.
+ * The most packs of `size` a version sells on top of the `included` monthly limit: 10,000, or fewer
+ * when more would take the limit past PLAN_BOUNDS.limitWithPacks (ADR-110).
  */
-export function warningThreshold(limit: number | null): number | null {
+export function packsMax(included: number, size: number): number {
+  return Math.max(
+    0,
+    Math.min(PLAN_BOUNDS.addOnUnits, Math.floor((PLAN_BOUNDS.limitWithPacks - included) / size)),
+  );
+}
+
+/**
+ * The shares of a monthly limit at which a company's billing managers can choose to be warned
+ * (ADR-144); every company starts at 80%, the share of ADR-062.
+ */
+export const USAGE_WARNING_PERCENTS = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95] as const;
+export const DEFAULT_USAGE_WARNING_PERCENT = 80;
+
+/**
+ * The count at which a monthly limit warns (ADR-062, ADR-144): `percent` of the limit, rounded up,
+ * when that is still below the limit; null for no warning (no limit, a limit of 0, and limits so
+ * small that the share rounds up to the limit itself). It matches
+ * `ceil(limit * percent / 100.0)` in SQL.
+ */
+export function warningThreshold(limit: number | null, percent: number): number | null {
   if (limit === null) return null;
-  const threshold = Math.ceil((limit * 4) / 5);
+  const threshold = Math.ceil((limit * percent) / 100);
   return threshold < limit ? threshold : null;
 }
 
@@ -127,11 +178,11 @@ export const CARD_MANDATE_FRICTIONLESS_MAX_MINOR = 1_500_000;
  * with the bank's notice to the payer 24 to 36 hours before it (R-073, R-119), so a closer first
  * charge is taken at once instead.
  */
-export const PLAN_PAYMENT_TRIAL_LEAD_MS = 48 * 3600_000;
+export const PLAN_PAYMENT_START_LEAD_MS = 48 * 3600_000;
 
 /**
  * When a subscription started now would first be charged (ADR-102): at the end of a trial at least
- * PLAN_PAYMENT_TRIAL_LEAD_MS away, else null (charged at once in Checkout, and the rest of any
+ * PLAN_PAYMENT_START_LEAD_MS away, else null (charged at once in Checkout, and the rest of any
  * trial is not carried over).
  */
 export function planPaymentStart(
@@ -139,7 +190,7 @@ export function planPaymentStart(
   now: Date,
 ): Date | null {
   if (state.status !== 'trialing' || !state.trialEndsAt) return null;
-  return state.trialEndsAt.getTime() - now.getTime() >= PLAN_PAYMENT_TRIAL_LEAD_MS
+  return state.trialEndsAt.getTime() - now.getTime() >= PLAN_PAYMENT_START_LEAD_MS
     ? state.trialEndsAt
     : null;
 }
@@ -150,6 +201,7 @@ export interface PlanPaymentQuote {
   seatsMinor: number;
   numbersMinor: number;
   runPacksMinor: number;
+  apiRequestPacksMinor: number;
   subtotalMinor: number;
   taxBp: number;
   taxMinor: number;
@@ -160,19 +212,23 @@ export type PlanPaymentQuoteResult =
   | { ok: true; quote: PlanPaymentQuote }
   | { ok: false; reason: 'add_on_not_sold' | 'too_small' | 'too_large' };
 
+/** A plan version's price and the prices of its add-ons per billing interval, in paise. */
+export interface PlanPrices {
+  priceMinor: number;
+  seatPriceMinor: number | null;
+  numberPriceMinor: number | null;
+  runPackPriceMinor: number | null;
+  apiRequestPackPriceMinor: number | null;
+}
+
 /**
  * The price of a plan version with add-ons at the version's prices, plus the tax on plan prices
  * (rounded half up to the paisa). Exact integer arithmetic: a quantity of an add-on the version
  * does not sell, a total below ₹1 or above HyFib's ceiling is refused.
  */
 export function planPaymentQuote(
-  prices: {
-    priceMinor: number;
-    seatPriceMinor: number | null;
-    numberPriceMinor: number | null;
-    runPackPriceMinor: number | null;
-  },
-  addOns: { extraSeats: number; extraNumbers: number; runPacks: number },
+  prices: PlanPrices,
+  addOns: PlanAddOnQuantities,
   taxBp: number,
 ): PlanPaymentQuoteResult {
   const line = (quantity: number, price: number | null): bigint | null =>
@@ -180,10 +236,11 @@ export function planPaymentQuote(
   const seats = line(addOns.extraSeats, prices.seatPriceMinor);
   const numbers = line(addOns.extraNumbers, prices.numberPriceMinor);
   const runPacks = line(addOns.runPacks, prices.runPackPriceMinor);
-  if (seats === null || numbers === null || runPacks === null) {
+  const apiRequestPacks = line(addOns.apiRequestPacks, prices.apiRequestPackPriceMinor);
+  if (seats === null || numbers === null || runPacks === null || apiRequestPacks === null) {
     return { ok: false, reason: 'add_on_not_sold' };
   }
-  const subtotal = BigInt(prices.priceMinor) + seats + numbers + runPacks;
+  const subtotal = BigInt(prices.priceMinor) + seats + numbers + runPacks + apiRequestPacks;
   const tax = (subtotal * BigInt(taxBp) + 5000n) / 10000n;
   const total = subtotal + tax;
   if (total < BigInt(PLAN_PAYMENT_MIN_MINOR)) return { ok: false, reason: 'too_small' };
@@ -195,6 +252,7 @@ export function planPaymentQuote(
       seatsMinor: Number(seats),
       numbersMinor: Number(numbers),
       runPacksMinor: Number(runPacks),
+      apiRequestPacksMinor: Number(apiRequestPacks),
       subtotalMinor: Number(subtotal),
       taxBp,
       taxMinor: Number(tax),
@@ -280,4 +338,75 @@ export function usagePeriod(anchor: Date, now: Date): { start: Date; end: Date }
   while (months > 0 && addMonthsUtc(anchor, months) > now) months -= 1;
   while (addMonthsUtc(anchor, months + 1) <= now) months += 1;
   return { start: addMonthsUtc(anchor, months), end: addMonthsUtc(anchor, months + 1) };
+}
+
+/** What a company holds now that a plan version's limits must fit (ADR-105). */
+export interface PlanHoldings {
+  /** Active members and invitations still waiting (both hold a seat). */
+  seats: number;
+  numbers: number;
+  teams: number;
+  liveAutomations: number;
+}
+
+export type PlanShortfallKind = keyof PlanHoldings;
+
+/** A limit of a plan version that holds less than the company already has. */
+export interface PlanShortfall {
+  kind: PlanShortfallKind;
+  limit: number;
+  used: number;
+}
+
+/**
+ * The limits a plan version gives a company with its add-ons, as `app.tenant_entitlements` counts
+ * them: seats and WhatsApp numbers include the extras bought; null means no limit.
+ */
+export function versionHoldingLimits(
+  version: {
+    seatsIncluded: number;
+    numbersIncluded: number;
+    teamsMax: number | null;
+    liveAutomationsMax: number | null;
+  },
+  addOns: { extraSeats: number; extraNumbers: number },
+): Record<PlanShortfallKind, number | null> {
+  return {
+    seats: version.seatsIncluded + addOns.extraSeats,
+    numbers: version.numbersIncluded + addOns.extraNumbers,
+    teams: version.teamsMax,
+    liveAutomations: version.liveAutomationsMax,
+  };
+}
+
+/**
+ * The limits that hold less than the company has now, in display order (ADR-105). Holding exactly
+ * the limit fits: additions stop at a limit, but what is already there stays.
+ */
+export function planShortfalls(
+  limits: Record<PlanShortfallKind, number | null>,
+  holdings: PlanHoldings,
+): PlanShortfall[] {
+  const shortfalls: PlanShortfall[] = [];
+  for (const kind of ['seats', 'numbers', 'teams', 'liveAutomations'] as const) {
+    const limit = limits[kind];
+    if (limit !== null && holdings[kind] > limit) {
+      shortfalls.push({ kind, limit, used: holdings[kind] });
+    }
+  }
+  return shortfalls;
+}
+
+const SHORTFALL_NOUNS: Record<PlanShortfallKind, readonly [string, string]> = {
+  seats: ['seat', 'seats'],
+  numbers: ['WhatsApp number', 'WhatsApp numbers'],
+  teams: ['team', 'teams'],
+  liveAutomations: ['live automation', 'live automations'],
+};
+
+/** "3 seats, where your company uses 5 (members and invitations still waiting)". */
+export function planShortfallText(shortfall: PlanShortfall): string {
+  const [one, many] = SHORTFALL_NOUNS[shortfall.kind];
+  const text = `${shortfall.limit.toLocaleString('en-IN')} ${shortfall.limit === 1 ? one : many}, where your company uses ${shortfall.used.toLocaleString('en-IN')}`;
+  return shortfall.kind === 'seats' ? `${text} (members and invitations still waiting)` : text;
 }

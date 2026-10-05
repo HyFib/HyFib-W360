@@ -68,6 +68,10 @@ function Body({
   if (c.redacted === true && type !== 'template') {
     return <p className="italic">Content removed</p>;
   }
+  // Inbound content larger than a message may hold (ADR-131): kept without it.
+  if (c.tooLarge === true) {
+    return <p className="italic">This message was too large to keep.</p>;
+  }
   switch (type) {
     case 'text':
       return (
@@ -265,8 +269,20 @@ function Body({
     }
     case 'button':
       return <p>{text(c.text) ?? 'Button reply'}</p>;
-    case 'contacts':
-      return <p>Shared a contact card</p>;
+    case 'contacts': {
+      // Contacts beyond what a message may hold are left out, and counted (ADR-131).
+      const omitted = typeof c.omittedContacts === 'number' ? c.omittedContacts : 0;
+      return (
+        <div className="grid gap-1">
+          <p>Shared a contact card</p>
+          {omitted > 0 ? (
+            <p className="text-xs opacity-80">
+              {omitted} contact{omitted === 1 ? ' was' : 's were'} too large to keep
+            </p>
+          ) : null}
+        </div>
+      );
+    }
     case 'order': {
       // A cart from the catalog (amounts in minor units, read when the webhook arrived).
       const order = (typeof c.order === 'object' && c.order !== null ? c.order : null) as Record<

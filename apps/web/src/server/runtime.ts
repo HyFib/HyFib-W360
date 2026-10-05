@@ -22,7 +22,9 @@ import {
   GraphClient,
   JobSigner,
   PgBossJobQueue,
+  pgBossErrorContext,
   RazorpayClient,
+  createAccountService,
   createApiKeysService,
   createWebhooksService,
   createApiWebhookEndpoints,
@@ -46,6 +48,10 @@ import {
   createInboxService,
   createOnboardingService,
   createPlanAdminService,
+  createPlanAddOnsService,
+  createPlanChangeService,
+  createPlanChoicesService,
+  createPriceListService,
   createPlanSubscriptionService,
   createPlansService,
   createPlatformService,
@@ -63,6 +69,7 @@ import {
   createCompanyDeletionService,
   createWebRequestService,
   writeCompanyExport,
+  type AccountService,
   type CompanyDeletionService,
   type RequestMeta,
   type TenantContext,
@@ -75,6 +82,10 @@ import {
   type BillingService,
   type BillingHistoryService,
   type PlanRefundRequestsService,
+  type PlanAddOnsService,
+  type PlanChangeService,
+  type PriceListService,
+  type PlanChoicesService,
   type RefundRequestsService,
   type BusinessHoursService,
   type CampaignsService,
@@ -129,6 +140,8 @@ export interface Runtime {
   jobs: JobQueue;
   signer: JobSigner;
   auth: Auth;
+  /** The signed-in person's own account: their sign-in history (ADR-136). */
+  account: AccountService;
   tenancy: TenancyService;
   /** Deleting the company after its grace period (Settings → Company data). */
   companyDeletion: CompanyDeletionService;
@@ -202,6 +215,14 @@ export interface Runtime {
   /** Refunds of unused credit asked for by the company (ADR-073). */
   refundRequests: RefundRequestsService;
   planRefundRequests: PlanRefundRequestsService;
+  /** Choosing the plan a company pays for (ADR-105). */
+  planChoices: PlanChoicesService;
+  /** A company choosing its add-ons (ADR-106). */
+  planAddOns: PlanAddOnsService;
+  /** What a paying company can change its plan to from the end of the paid period (ADR-109). */
+  planChanges: PlanChangeService;
+  /** The public price list of offered plan versions (ADR-107). */
+  priceList: PriceListService;
   events: TenantEventHub;
   shutdown(): Promise<void>;
 }
@@ -257,11 +278,17 @@ async function init(): Promise<Runtime> {
     max: 2,
     application_name: 'w360-web-jobs',
   });
-  boss.on('error', (error: unknown) => logger.error({ err: error }, 'pg-boss error'));
+  boss.on('error', (error: unknown) =>
+    logger.error({ err: error, ...pgBossErrorContext(error) }, 'pg-boss error'),
+  );
   await boss.start();
 
   const jobs = new PgBossJobQueue(boss);
-  const signer = new JobSigner(config.W360_JOB_SIGNING_KEY);
+  // During a job signing key rotation, the next or previous key is accepted too (ADR-135).
+  const signer = new JobSigner(config.W360_JOB_SIGNING_KEY, {
+    next: config.W360_JOB_SIGNING_KEY_NEXT,
+    previous: config.W360_JOB_SIGNING_KEY_PREVIOUS,
+  });
   const outbox = { keyring, jobs, signer };
   const auth = createAuth({ config, authPool, db, outbox, logger });
 
@@ -281,11 +308,14 @@ async function init(): Promise<Runtime> {
   const exportDeps = { ...outbox, db, clock: systemClock, appBaseUrl: config.APP_BASE_URL };
   const companyExport: Runtime['companyExport'] = (ctx, write, meta) =>
     writeCompanyExport(exportDeps, ctx, write, meta);
+  const account = createAccountService({ db });
   const platform = createPlatformService({ db, platformDb, clock: systemClock });
   const platformOps = createPlatformOpsService({
     platformDb,
     queues: pgBossQueueInspector(boss),
     clock: systemClock,
+    keyring,
+    jobSigning: signer,
   });
   const platformBilling = createPlatformBillingService({ platformDb });
   const platformReconciliation = createPlatformReconciliationService({ platformDb });
@@ -433,6 +463,25 @@ async function init(): Promise<Runtime> {
   const billingHistory = createBillingHistoryService({ db, clock: systemClock });
   const refundRequests = createRefundRequestsService({ db, clock: systemClock });
   const planRefundRequests = createPlanRefundRequestsService({ db, clock: systemClock });
+  const planChoices = createPlanChoicesService({
+    db,
+    clock: systemClock,
+    subscriptionsEnabled: Boolean(razorpayClient && razorpay?.subscriptionsEnabled),
+  });
+  const planAddOns = createPlanAddOnsService({
+    db,
+    clock: systemClock,
+    subscriptionsEnabled: Boolean(razorpayClient && razorpay?.subscriptionsEnabled),
+  });
+  const planChanges = createPlanChangeService({
+    db,
+    clock: systemClock,
+    subscriptionsEnabled: Boolean(razorpayClient && razorpay?.subscriptionsEnabled),
+  });
+  const priceList = createPriceListService({
+    db,
+    subscriptionsEnabled: Boolean(razorpayClient && razorpay?.subscriptionsEnabled),
+  });
   const events = createTenantEventHub({ connectionString: config.DATABASE_URL_APP, logger });
 
   logger.info({ env: config.APP_ENV }, 'web runtime initialised');
@@ -447,6 +496,7 @@ async function init(): Promise<Runtime> {
     jobs,
     signer,
     auth,
+    account,
     tenancy,
     companyDeletion,
     companyExport,
@@ -492,6 +542,10 @@ async function init(): Promise<Runtime> {
     billingHistory,
     refundRequests,
     planRefundRequests,
+    planChoices,
+    planAddOns,
+    planChanges,
+    priceList,
     events,
     async shutdown() {
       await events.close();

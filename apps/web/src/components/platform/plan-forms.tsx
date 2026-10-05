@@ -9,12 +9,16 @@ import {
   cancelTenantSubscriptionAction,
   createPlanAction,
   createPlanVersionAction,
+  hidePriceListAction,
+  offerPlanAction,
   publishPlanAction,
   retirePlanAction,
   setDefaultTrialAction,
   setPlanTaxAction,
   setTenantPlanAction,
+  showPriceListAction,
   updatePlanDraftAction,
+  withdrawPlanOfferAction,
 } from '@/app/actions/platform';
 import { ClientButton, ClientForm, useHydrated } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
@@ -40,6 +44,8 @@ export interface PlanFormValues {
   runPackSize: string;
   runPackPrice: string;
   apiRequestsMonthly: string;
+  apiRequestPackSize: string;
+  apiRequestPackPrice: string;
   /** Every API scope, including later ones, or only `apiScopes` (ADR-092). */
   apiScopeChoice: 'all' | 'chosen';
   apiScopes: string[];
@@ -66,6 +72,8 @@ export const EMPTY_PLAN_FORM: PlanFormValues = {
   runPackSize: '',
   runPackPrice: '',
   apiRequestsMonthly: '',
+  apiRequestPackSize: '',
+  apiRequestPackPrice: '',
   apiScopeChoice: 'all',
   apiScopes: [],
   modules: [],
@@ -246,6 +254,11 @@ export function PlanForm({
             inputMode: 'numeric',
             description: '0 leaves the public API out of the plan.',
           })}
+          {text('apiRequestPackSize', 'API request pack (requests)', {
+            inputMode: 'numeric',
+            description: 'Needs a monthly API request limit above 0. Empty: not sold.',
+          })}
+          {text('apiRequestPackPrice', 'API request pack (₹)', { inputMode: 'decimal' })}
         </div>
       </fieldset>
       <fieldset className="grid gap-2">
@@ -414,6 +427,98 @@ export function PlanVersionActions({
           />
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/** Offering a published version to companies, which can then choose it to pay for (ADR-105). */
+export function PlanOfferActions({
+  id,
+  offered,
+  payable,
+}: {
+  id: string;
+  offered: boolean;
+  /** Priced at ₹1 or more, Razorpay's minimum payment. */
+  payable: boolean;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const fail = (r: { ok: boolean; message?: string }) => {
+    if (!r.ok) setError(r.message ?? 'Something went wrong.');
+  };
+  return (
+    <div className="grid gap-2">
+      <FormError message={error} />
+      <p className="text-sm text-muted-foreground">
+        {offered
+          ? 'Offered to companies: those without a paid period (on a trial, or whose plan or paid period has ended) can choose this version under Billing and pay for it.'
+          : payable
+            ? 'Not offered. Once offered, companies without a paid period (on a trial, or whose plan or paid period has ended) can choose it under Billing and pay for it.'
+            : 'Priced under ₹1, so it cannot be offered: companies could never pay for it.'}
+      </p>
+      {offered ? (
+        <ConfirmDialog
+          title="Stop offering this version?"
+          description="Companies can no longer choose it. Those already on it keep it."
+          confirmLabel="Stop offering"
+          onConfirm={() => void withdrawPlanOfferAction(id).then(fail)}
+          trigger={
+            <ClientButton variant="outline" className="justify-self-start">
+              Stop offering
+            </ClientButton>
+          }
+        />
+      ) : payable ? (
+        <ConfirmDialog
+          title="Offer this version to companies?"
+          description="Companies without a paid period (on a trial, or whose plan or paid period has ended) can then choose it and pay for it. During a trial, its limits and modules apply at once, until the trial ends."
+          confirmLabel="Offer"
+          onConfirm={() => void offerPlanAction(id).then(fail)}
+          trigger={
+            <ClientButton variant="outline" className="justify-self-start">
+              Offer to companies
+            </ClientButton>
+          }
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/** Showing or hiding the public price list of offered versions (ADR-107). */
+export function PriceListActions({ shown }: { shown: boolean }) {
+  const [error, setError] = useState<string | null>(null);
+  const fail = (r: { ok: boolean; message?: string }) => {
+    if (!r.ok) setError(r.message ?? 'Something went wrong.');
+  };
+  return (
+    <div className="grid gap-2">
+      <FormError message={error} />
+      {shown ? (
+        <ConfirmDialog
+          title="Hide the price list?"
+          description="Visitors no longer see the plans and prices at /pricing. Companies can still choose an offered version under Billing."
+          confirmLabel="Hide"
+          onConfirm={() => void hidePriceListAction().then(fail)}
+          trigger={
+            <ClientButton variant="outline" className="justify-self-start">
+              Hide the price list
+            </ClientButton>
+          }
+        />
+      ) : (
+        <ConfirmDialog
+          title="Show the price list?"
+          description="Anyone can then see, without signing in, every version offered to companies with its price, what it includes and its add-ons, at /pricing."
+          confirmLabel="Show"
+          onConfirm={() => void showPriceListAction().then(fail)}
+          trigger={
+            <ClientButton variant="outline" className="justify-self-start">
+              Show the price list
+            </ClientButton>
+          }
+        />
+      )}
     </div>
   );
 }
@@ -594,6 +699,7 @@ export interface AssignablePlanOption {
   sellsSeats: boolean;
   sellsNumbers: boolean;
   sellsRunPacks: boolean;
+  sellsApiRequestPacks: boolean;
 }
 
 /** Calendar arithmetic on YYYY-MM-DD, independent of the browser's time zone. */
@@ -635,6 +741,7 @@ export function TenantPlanForm({
     extraSeats: number;
     extraNumbers: number;
     runPacks: number;
+    apiRequestPacks: number;
   };
   options: AssignablePlanOption[];
 }) {
@@ -659,6 +766,7 @@ export function TenantPlanForm({
     extraSeats: String(current.extraSeats),
     extraNumbers: String(current.extraNumbers),
     runPacks: String(current.runPacks),
+    apiRequestPacks: String(current.apiRequestPacks),
   });
   const [reason, setReason] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -783,7 +891,9 @@ export function TenantPlanForm({
           </Field>
         </div>
       ) : null}
-      {needsPlan && plan && (plan.sellsSeats || plan.sellsNumbers || plan.sellsRunPacks) ? (
+      {needsPlan &&
+      plan &&
+      (plan.sellsSeats || plan.sellsNumbers || plan.sellsRunPacks || plan.sellsApiRequestPacks) ? (
         <div className="grid gap-4 sm:grid-cols-3">
           {plan.sellsSeats ? (
             <Field id="tenant-plan-seats" label="Extra seats">
@@ -817,6 +927,18 @@ export function TenantPlanForm({
                   inputMode="numeric"
                   value={addOns.runPacks}
                   onChange={(e) => setAddOns({ ...addOns, runPacks: e.target.value })}
+                />
+              )}
+            </Field>
+          ) : null}
+          {plan.sellsApiRequestPacks ? (
+            <Field id="tenant-plan-api-packs" label="API request packs">
+              {(aria) => (
+                <Input
+                  {...aria}
+                  inputMode="numeric"
+                  value={addOns.apiRequestPacks}
+                  onChange={(e) => setAddOns({ ...addOns, apiRequestPacks: e.target.value })}
                 />
               )}
             </Field>

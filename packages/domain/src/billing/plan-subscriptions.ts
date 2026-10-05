@@ -30,14 +30,28 @@ import { recordAudit, recordSystemAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import {
+  PLAN_PAYMENT_START_LEAD_MS,
   planPaymentQuote,
   planPaymentStart,
+  planShortfallText,
+  planShortfalls,
+  versionHoldingLimits,
   PLAN_PAYMENT_UNAVAILABLE_TEXT,
+  type PlanAddOnKind,
+  type PlanAddOnQuantities,
   type PlanPaymentQuote,
   type PlanPaymentUnavailable,
 } from '../plans/model';
+import { parseInput } from '../validation';
 import { paymentMethodLabel } from './history';
 import { notifyBillingManagers, type BillingNoticeDeps } from './notices';
+import {
+  planChangeAddOns,
+  planChangeFromPeriodEndUnavailable,
+  planChangeHoldings,
+  planChangeSchema,
+  PLAN_CHANGE_UNAVAILABLE_TEXT,
+} from './plan-changes';
 import { transient, TransientProviderError, type BillingProviderDeps } from './provider';
 import {
   verifySubscriptionCheckoutSignature,
@@ -82,6 +96,11 @@ type SubscriptionRow = typeof planSubscriptions.$inferSelect;
 export interface PlanSubscriptionSummary {
   id: string;
   status: PlanSubscriptionStatus;
+  planId: string;
+  extraSeats: number;
+  extraNumbers: number;
+  runPacks: number;
+  apiRequestPacks: number;
   intervalMonths: number;
   subtotalMinor: number;
   taxBp: number;
@@ -96,11 +115,16 @@ export interface PlanSubscriptionSummary {
   failureReason: string | null;
   authorizeBy: Date;
   createdAt: Date;
-  /** When the first charge is due, at the trial's end (ADR-102); null: charged in Checkout. */
+  /**
+   * When the first charge is due: at the trial's end (ADR-102) or, for one that follows another,
+   * when the paid period ends (ADR-109); null: charged in Checkout.
+   */
   startsAt: Date | null;
+  /** The subscription this one follows from the end of its paid period (ADR-109). */
+  followsSubscriptionId: string | null;
   /** Billing cycles Razorpay has charged. */
   paidCount: number;
-  /** Its first charge, due at the trial's end, is still ahead (ADR-102). */
+  /** Its first charge, due at its start, is still ahead (ADR-102, ADR-109). */
   firstChargeAhead: boolean;
   /** Checkout can still authorise it: created and its window is open. */
   checkoutOpen: boolean;
@@ -159,6 +183,7 @@ export interface PlanPaymentReceipt {
   extraSeats: number;
   extraNumbers: number;
   runPacks: number;
+  apiRequestPacks: number;
   periodStart: Date;
   periodEnd: Date;
   paidAt: Date;
@@ -178,8 +203,13 @@ export interface PlanPaymentReceipt {
 
 export interface PlanPaymentOverview {
   offer: PlanPaymentOffer;
-  /** The subscription that may still be charged, or else the latest one that was paid. */
+  /**
+   * The subscription that paid the plan's period while it is live, else the one that may still be
+   * charged, else the latest one that was paid.
+   */
   subscription: PlanSubscriptionSummary | null;
+  /** The subscription that follows it from the end of the paid period (ADR-109), and its plan. */
+  next: { subscription: PlanSubscriptionSummary; planName: string } | null;
   payments: PlanPaymentRecord[];
 }
 
@@ -207,6 +237,11 @@ function summary(row: SubscriptionRow, now: Date): PlanSubscriptionSummary {
   return {
     id: row.id,
     status: row.status,
+    planId: row.planId,
+    extraSeats: row.extraSeats,
+    extraNumbers: row.extraNumbers,
+    runPacks: row.runPacks,
+    apiRequestPacks: row.apiRequestPacks,
     intervalMonths: row.intervalMonths,
     subtotalMinor: row.subtotalMinor,
     taxBp: row.taxBp,
@@ -222,6 +257,7 @@ function summary(row: SubscriptionRow, now: Date): PlanSubscriptionSummary {
     authorizeBy: row.authorizeBy,
     createdAt: row.createdAt,
     startsAt: row.startsAt,
+    followsSubscriptionId: row.followsSubscriptionId,
     paidCount: row.paidCount,
     firstChargeAhead: row.startsAt !== null && row.paidCount === 0 && now < row.startsAt,
     checkoutOpen:
@@ -256,6 +292,7 @@ async function offerIn(
           seatPriceMinor: plans.seatPriceMinor,
           numberPriceMinor: plans.numberPriceMinor,
           runPackPriceMinor: plans.runPackPriceMinor,
+          apiRequestPackPriceMinor: plans.apiRequestPackPriceMinor,
         })
         .from(plans)
         .where(eq(plans.id, state.planId))
@@ -316,6 +353,32 @@ async function companyDay(tx: Tx, tenantId: string) {
 async function planNameOf(tx: Tx, planId: string): Promise<string> {
   const [plan] = await tx.select({ name: plans.name }).from(plans).where(eq(plans.id, planId));
   return plan?.name ?? 'your';
+}
+
+/** Each add-on in a sentence, after a quantity or "does not sell". */
+const ADD_ON_NOUNS: Record<PlanAddOnKind, string> = {
+  seats: 'extra seats',
+  numbers: 'extra WhatsApp numbers',
+  runPacks: 'automation run packs',
+  apiRequestPacks: 'API request packs',
+};
+
+/** The add-ons of a subscription in words, after its plan's name ('' for none). */
+function addOnsText(row: PlanAddOnQuantities): string {
+  const parts = [
+    row.extraSeats > 0 ? `${row.extraSeats} extra ${row.extraSeats === 1 ? 'seat' : 'seats'}` : '',
+    row.extraNumbers > 0
+      ? `${row.extraNumbers} extra WhatsApp ${row.extraNumbers === 1 ? 'number' : 'numbers'}`
+      : '',
+    row.runPacks > 0
+      ? `${row.runPacks} automation run ${row.runPacks === 1 ? 'pack' : 'packs'}`
+      : '',
+    row.apiRequestPacks > 0
+      ? `${row.apiRequestPacks} API request ${row.apiRequestPacks === 1 ? 'pack' : 'packs'}`
+      : '',
+  ].filter(Boolean);
+  if (parts.length === 0) return '';
+  return ` with ${parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`}`;
 }
 
 const fromUnix = (seconds: number | null) => (seconds === null ? null : new Date(seconds * 1000));
@@ -394,7 +457,7 @@ async function planPaymentFrom(
   };
 }
 
-export type PlanPeriodResult = 'applied' | 'unchanged' | 'not_paid' | 'mismatch';
+export type PlanPeriodResult = 'applied' | 'unchanged' | 'not_paid' | 'mismatch' | 'stale';
 
 export interface PlanSubscriptionSyncResult {
   status: PlanSubscriptionStatus;
@@ -551,7 +614,8 @@ export async function syncPlanSubscription(
     }
     const becamePending = status === 'pending' && current.status !== 'pending';
     const becameHalted = status === 'halted' && current.status !== 'halted';
-    // Authorised in Checkout, to be charged first when the trial ends (ADR-102).
+    // Authorised in Checkout, to be charged first when the trial ends (ADR-102) or, for one that
+    // follows another, when the paid period ends (ADR-109).
     const becameScheduled =
       status === 'authenticated' && current.status !== 'authenticated' && current.startsAt !== null;
     if (period === 'applied' || becamePending || becameHalted || becameScheduled) {
@@ -603,6 +667,14 @@ export async function syncPlanSubscription(
           lines: [
             `Razorpay could not charge ${amount} for the ${planName} plan and has stopped trying.`,
             `The payer can change the card through the link in Razorpay’s email; the plan is paid${(after?.paidCount ?? 0) > 0 ? ' again' : ''} once a charge goes through. You can also cancel the subscription in billing and pay again.`,
+          ],
+        });
+      } else if (current.startsAt && current.followsSubscriptionId) {
+        await notifyBillingManagers(deps.notices, tx, scope, {
+          subject: `Your HyFib plan changes on ${day(current.startsAt)}`,
+          lines: [
+            `From ${day(current.startsAt)}, when the paid period ends, your plan is the ${planName} plan${addOnsText(row)}. Razorpay charges ${amount} for it then, and ${EVERY[row.intervalMonths] ?? 'each period'} after that until the subscription is cancelled in billing.`,
+            'Until then your plan stays as it is, and nothing more is charged for it.',
           ],
         });
       } else if (current.startsAt) {
@@ -764,16 +836,16 @@ export async function sweepPlanSubscriptions(
 }
 
 /**
- * The company's subscription that may still be charged, synced before the plan sweep moves an ended
+ * The company's subscriptions that may still be charged, synced before the plan sweep moves an ended
  * period or trial on: the one that paid the current period (a renewal whose webhook was missed then
- * counts), or one whose first charge was due at the trial's end (ADR-102). A company has at most one
- * live subscription; one still in Checkout is left alone.
+ * counts), one whose first charge was due at the trial's end (ADR-102), and one that follows the
+ * current one from the period's end (ADR-109), oldest first. One still in Checkout is left alone.
  */
 export async function syncPlanSubscriptionOfPlan(
   deps: BillingProviderDeps,
   scope: TenantScope,
 ): Promise<void> {
-  const [live] = await deps.db.run(
+  const live = await deps.db.run(
     scope,
     (tx) =>
       tx
@@ -790,21 +862,23 @@ export async function syncPlanSubscriptionOfPlan(
               'paused',
             ]),
           ),
-        ),
+        )
+        .orderBy(planSubscriptions.createdAt),
     { accessMode: 'read only' },
   );
-  if (live) await syncPlanSubscription(deps, scope, live.id);
+  for (const row of live) await syncPlanSubscription(deps, scope, row.id);
 }
 
 /**
- * Company deletion (ADR-055): cancels the company's subscription at Razorpay at once, so nothing
- * more is charged. Returns what happened, for the deletion's clean-up record.
+ * Company deletion (ADR-055): cancels every subscription of the company that may still be charged
+ * at Razorpay at once, the one that follows the current one included (ADR-109), so nothing more is
+ * charged. Returns what happened to each, for the deletion's clean-up record.
  */
 export async function cancelPlanSubscriptionForDeletion(
   deps: Pick<BillingProviderDeps, 'db' | 'clock'> & { razorpay: RazorpayClient | null },
   scope: TenantScope,
-): Promise<{ label: string; outcome: 'done' | 'failed' | 'skipped'; code?: string } | null> {
-  const [row] = await deps.db.run(
+): Promise<{ label: string; outcome: 'done' | 'failed' | 'skipped'; code?: string }[]> {
+  const rows = await deps.db.run(
     scope,
     (tx) =>
       tx
@@ -815,46 +889,57 @@ export async function cancelPlanSubscriptionForDeletion(
             eq(planSubscriptions.tenantId, scope.tenantId),
             inArray(planSubscriptions.status, [...LIVE]),
           ),
-        ),
+        )
+        .orderBy(planSubscriptions.createdAt),
     { accessMode: 'read only' },
   );
-  if (!row) return null;
-  const label = 'Plan subscription at Razorpay';
-  const stop = async (status: PlanSubscriptionStatus) =>
-    deps.db.run(scope, async (tx) => {
-      const now = deps.clock.now();
-      await tx
-        .update(planSubscriptions)
-        .set({
-          status,
-          ...(status === 'cancelled' ? { endedAt: now, cancelRequestedAt: now } : {}),
-          ...(status === 'failed' ? { failureReason: 'The company was deleted.' } : {}),
-        })
-        .where(
-          and(eq(planSubscriptions.tenantId, scope.tenantId), eq(planSubscriptions.id, row.id)),
-        );
-      await recordSystemAudit(tx, scope.tenantId, {
-        action: 'billing.plan_subscription_cancelled',
-        subjectType: 'plan_subscription',
-        subjectId: row.id,
-        metadata: { reason: 'company_deleted', status },
+  const results: { label: string; outcome: 'done' | 'failed' | 'skipped'; code?: string }[] = [];
+  for (const row of rows) {
+    const label = row.followsSubscriptionId
+      ? 'Next plan subscription at Razorpay'
+      : 'Plan subscription at Razorpay';
+    const stop = async (status: PlanSubscriptionStatus) =>
+      deps.db.run(scope, async (tx) => {
+        const now = deps.clock.now();
+        await tx
+          .update(planSubscriptions)
+          .set({
+            status,
+            ...(status === 'cancelled' ? { endedAt: now, cancelRequestedAt: now } : {}),
+            ...(status === 'failed' ? { failureReason: 'The company was deleted.' } : {}),
+          })
+          .where(
+            and(eq(planSubscriptions.tenantId, scope.tenantId), eq(planSubscriptions.id, row.id)),
+          );
+        await recordSystemAudit(tx, scope.tenantId, {
+          action: 'billing.plan_subscription_cancelled',
+          subjectType: 'plan_subscription',
+          subjectId: row.id,
+          metadata: { reason: 'company_deleted', status },
+        });
       });
+    if (!row.providerSubscriptionId) {
+      // Never created at Razorpay: nothing can be charged.
+      await stop('failed');
+      results.push({ label, outcome: 'skipped', code: 'not_created' });
+      continue;
+    }
+    if (!deps.razorpay) {
+      results.push({ label, outcome: 'skipped', code: 'razorpay_not_set_up' });
+      continue;
+    }
+    const res = await deps.razorpay.cancelSubscription(row.providerSubscriptionId, {
+      cancelAtCycleEnd: false,
     });
-  if (!row.providerSubscriptionId) {
-    // Never created at Razorpay: nothing can be charged.
-    await stop('failed');
-    return { label, outcome: 'skipped', code: 'not_created' };
+    // A permanent refusal: Razorpay already ended it (cancelled, completed or expired).
+    if (!res.ok && res.kind !== 'permanent') {
+      results.push({ label, outcome: 'failed', code: `razorpay_${res.kind}` });
+      continue;
+    }
+    await stop('cancelled');
+    results.push({ label, outcome: 'done' });
   }
-  if (!deps.razorpay) return { label, outcome: 'skipped', code: 'razorpay_not_set_up' };
-  const res = await deps.razorpay.cancelSubscription(row.providerSubscriptionId, {
-    cancelAtCycleEnd: false,
-  });
-  // A permanent refusal: Razorpay already ended it (cancelled, completed or expired).
-  if (!res.ok && res.kind !== 'permanent') {
-    return { label, outcome: 'failed', code: `razorpay_${res.kind}` };
-  }
-  await stop('cancelled');
-  return { label, outcome: 'done' };
+  return results;
 }
 
 /** The company side: the plan payment overview, starting, confirming and cancelling. */
@@ -876,14 +961,25 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
     return { db, razorpay, clock, notices: deps.notices };
   }
 
-  async function liveRow(tx: Tx, tenantId: string): Promise<SubscriptionRow | undefined> {
-    const [row] = await tx
+  /** The company's live subscriptions, newest first. */
+  async function liveRows(tx: Tx, tenantId: string): Promise<SubscriptionRow[]> {
+    return tx
       .select()
       .from(planSubscriptions)
       .where(
         and(eq(planSubscriptions.tenantId, tenantId), inArray(planSubscriptions.status, [...LIVE])),
-      );
-    return row;
+      )
+      .orderBy(desc(planSubscriptions.createdAt));
+  }
+
+  /**
+   * The live subscription that keeps charging (at most one, 0087), else the newest live one: the
+   * current subscription may stay live while it ends with its period, next to the one that follows
+   * it (ADR-109).
+   */
+  async function liveRow(tx: Tx, tenantId: string): Promise<SubscriptionRow | undefined> {
+    const rows = await liveRows(tx, tenantId);
+    return rows.find((r) => !r.cancelAtPeriodEnd) ?? rows[0];
   }
 
   function checkoutFor(
@@ -908,6 +1004,212 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
   const unavailable = () =>
     new AppError('provider_unavailable', 'We could not reach Razorpay. Try again in a moment.');
 
+  /**
+   * Creates a subscription recorded as `creating` at Razorpay: its Razorpay plan for the amount,
+   * then the subscription itself (from `starts_at` when set), each stored as Razorpay answers. On any
+   * failure the record fails and nothing can be charged.
+   */
+  async function createAtRazorpay(
+    ctx: TenantContext,
+    razorpay: RazorpayClient,
+    config: RazorpayConfig,
+    row: SubscriptionRow,
+    planName: string,
+  ): Promise<SubscriptionCheckoutStart> {
+    const fail = async (reason: string): Promise<never> => {
+      await db.run(ctx.scope, (tx) => failCreating(tx, ctx.tenant.id, row.id, reason));
+      throw new AppError(
+        'provider_unavailable',
+        'We could not start the payment. Try again in a moment.',
+      );
+    };
+    const period = PERIODS[row.intervalMonths as keyof typeof PERIODS];
+    if (!period) throw new Error(`unsupported billing interval ${row.intervalMonths}`);
+    const notes = { purpose: 'plan_subscription', subscription: row.id };
+    const plan = await razorpay.createPlan({
+      period,
+      amount: row.amountMinor,
+      currency: 'INR',
+      name: `HyFib ${planName} plan`,
+      notes,
+    });
+    if (!plan.ok) return fail(`Razorpay did not create the plan: ${plan.description}`);
+    if (plan.data.amount !== row.amountMinor || plan.data.currency !== 'INR') {
+      return fail('Razorpay created a plan for another amount.');
+    }
+    await db.run(ctx.scope, (tx) =>
+      tx
+        .update(planSubscriptions)
+        .set({ providerPlanId: plan.data.id })
+        .where(
+          and(
+            eq(planSubscriptions.tenantId, ctx.tenant.id),
+            eq(planSubscriptions.id, row.id),
+            eq(planSubscriptions.status, 'creating'),
+          ),
+        ),
+    );
+    const sub = await razorpay.createSubscription({
+      planId: plan.data.id,
+      totalCount: row.totalCount,
+      expireBy: Math.floor(row.authorizeBy.getTime() / 1000),
+      customerNotify: true,
+      ...(row.startsAt ? { startAt: Math.floor(row.startsAt.getTime() / 1000) } : {}),
+      notes,
+    });
+    if (!sub.ok) return fail(`Razorpay did not create the subscription: ${sub.description}`);
+    if (sub.data.planId !== plan.data.id) {
+      return fail('Razorpay created a subscription for another plan.');
+    }
+    const [created] = await db.run(ctx.scope, (tx) =>
+      tx
+        .update(planSubscriptions)
+        .set({
+          providerSubscriptionId: sub.data.id,
+          status: sub.data.status ?? 'created',
+          syncedAt: clock.now(),
+        })
+        .where(
+          and(
+            eq(planSubscriptions.tenantId, ctx.tenant.id),
+            eq(planSubscriptions.id, row.id),
+            eq(planSubscriptions.status, 'creating'),
+          ),
+        )
+        .returning(),
+    );
+    // Null: the sweep failed it meanwhile (the calls took longer than it waits).
+    if (!created) return fail('The payment took too long to start.');
+    return checkoutFor(ctx, config, created, planName);
+  }
+
+  /**
+   * Cancels one of the company's subscriptions at Razorpay first, then records, audits and emails it:
+   * an active one at the end of the paid period, any other at once. `purpose`: the company cancelled
+   * it; it ends for a change of plan from the period's end (`change`, with the next plan's name); or
+   * a new change replaces the one it was for (`replace`, no email: the new one is emailed once it is
+   * authorised). Null when Razorpay refused because it had already ended there.
+   */
+  async function cancelAtRazorpay(
+    ctx: TenantContext,
+    razorpay: RazorpayClient,
+    row: SubscriptionRow,
+    meta: RequestMeta,
+    purpose: 'cancel' | 'replace' | { change: string },
+  ): Promise<{ atPeriodEnd: boolean } | null> {
+    if (row.status === 'creating' || !row.providerSubscriptionId) {
+      throw new AppError('conflict', 'The payment is still being started. Try again in a moment.');
+    }
+    const atPeriodEnd = row.status === 'active';
+    const res = await razorpay.cancelSubscription(row.providerSubscriptionId, {
+      cancelAtCycleEnd: atPeriodEnd,
+    });
+    const where = and(
+      eq(planSubscriptions.tenantId, ctx.tenant.id),
+      eq(planSubscriptions.id, row.id),
+    );
+    if (!res.ok) {
+      if (res.kind !== 'permanent') throw unavailable();
+      // Refused: it may have ended at Razorpay meanwhile.
+      await syncPlanSubscription(providerDeps(razorpay), ctx.scope, row.id).catch(
+        (error: unknown) => {
+          if (!(error instanceof TransientProviderError)) throw error;
+        },
+      );
+      const [still] = await db.run(
+        ctx.scope,
+        (tx) => tx.select().from(planSubscriptions).where(where),
+        {
+          accessMode: 'read only',
+        },
+      );
+      if (still && ENDED.includes(still.status)) return null;
+      throw new AppError(
+        'precondition_failed',
+        `Razorpay did not cancel the subscription: ${res.description}`,
+      );
+    }
+    await db.run(ctx.scope, async (tx) => {
+      const now = clock.now();
+      await tx
+        .update(planSubscriptions)
+        .set({
+          ...(atPeriodEnd ? { cancelAtPeriodEnd: true } : {}),
+          cancelRequestedAt: now,
+          cancelledByUserId: ctx.user.id,
+        })
+        .where(where);
+      await recordAudit(
+        tx,
+        ctx,
+        {
+          action: 'billing.plan_subscription_cancelled',
+          subjectType: 'plan_subscription',
+          subjectId: row.id,
+          metadata: {
+            atPeriodEnd,
+            ...(purpose === 'cancel'
+              ? {}
+              : { reason: purpose === 'replace' ? 'plan_change_replaced' : 'plan_change' }),
+          },
+        },
+        meta,
+      );
+      if (purpose === 'replace') return;
+      const day = await companyDay(tx, ctx.tenant.id);
+      const planName = await planNameOf(tx, row.planId);
+      if (typeof purpose === 'object') {
+        // Ends at the period's end so that the next plan can follow it (ADR-109).
+        await notifyBillingManagers(deps.notices, tx, ctx.scope, {
+          subject: 'Your HyFib plan changes at the end of the paid period',
+          lines: [
+            `${ctx.user.name} is changing your plan to the ${purpose.change} plan from ${row.currentEnd ? day(row.currentEnd) : 'the end of the paid period'}. The subscription for the ${planName} plan ends then, and nothing more is charged for it.`,
+            'The new plan starts then once its payment is authorised in Razorpay’s payment window; we email you when it is. If it is not authorised, your plan ends with the paid period.',
+          ],
+        });
+        return;
+      }
+      if (row.followsSubscriptionId && row.paidCount === 0 && row.startsAt) {
+        // The change of plan it was for is dropped; the current subscription still ends (ADR-109).
+        const changeBy = new Date(row.startsAt.getTime() - PLAN_PAYMENT_START_LEAD_MS);
+        await notifyBillingManagers(deps.notices, tx, ctx.scope, {
+          subject: 'Your HyFib plan change is cancelled',
+          lines: [
+            `${ctx.user.name} cancelled the change to the ${planName} plan. Nothing was charged for it.`,
+            now < changeBy
+              ? `Your current subscription ends on ${day(row.startsAt)}, so your plan ends then unless you change it again in billing by ${day(changeBy)}.`
+              : `Your current subscription ends on ${day(row.startsAt)}, so your plan ends then.`,
+          ],
+        });
+        return;
+      }
+      await notifyBillingManagers(deps.notices, tx, ctx.scope, {
+        subject: 'Your HyFib plan subscription is cancelled',
+        lines: [
+          `${ctx.user.name} cancelled the subscription for the ${planName} plan. Nothing more is charged.`,
+          atPeriodEnd && row.currentEnd && row.paidCount === 0
+            ? `Razorpay’s first charge is under way: if it goes through, the plan stays paid until ${day(row.currentEnd)}, then ends.`
+            : atPeriodEnd && row.currentEnd
+              ? `The plan ends on ${day(row.currentEnd)}, at the end of the paid period.`
+              : row.startsAt && row.paidCount === 0
+                ? row.startsAt > now
+                  ? `Nothing was charged for it, and the trial goes on until ${day(row.startsAt)}.`
+                  : `Nothing was charged for it, and the trial ended on ${day(row.startsAt)}.`
+                : 'The plan keeps any period already paid, then ends.',
+        ],
+      });
+    });
+    if (!atPeriodEnd) {
+      // Stores Razorpay's cancelled state now (the sweep would otherwise).
+      await syncPlanSubscription(providerDeps(razorpay), ctx.scope, row.id).catch(
+        (error: unknown) => {
+          if (!(error instanceof TransientProviderError)) throw error;
+        },
+      );
+    }
+    return { atPeriodEnd };
+  }
+
   return {
     /** What the company pays for its plan, its subscription and its plan payments (`billing.read`). */
     async overview(ctx: TenantContext): Promise<PlanPaymentOverview> {
@@ -916,10 +1218,16 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
       return db.run(
         ctx.scope,
         async (tx) => {
-          const live = await liveRow(tx, ctx.tenant.id);
-          const { offer } = await offerIn(tx, ctx.tenant.id, enabled(), Boolean(live), now);
-          const [shown] = live
-            ? [live]
+          const live = await liveRows(tx, ctx.tenant.id);
+          const { offer } = await offerIn(tx, ctx.tenant.id, enabled(), live.length > 0, now);
+          const [state] = await tx
+            .select({ subscriptionId: tenantPlans.subscriptionId })
+            .from(tenantPlans)
+            .where(eq(tenantPlans.tenantId, ctx.tenant.id));
+          const paying = live.find((r) => r.id === state?.subscriptionId);
+          const current = paying ?? live.find((r) => !r.cancelAtPeriodEnd) ?? live[0];
+          const [shown] = current
+            ? [current]
             : await tx
                 .select()
                 .from(planSubscriptions)
@@ -961,7 +1269,17 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
               openRefundMinor: open ? open.amountMinor : null,
             };
           });
-          return { offer, subscription: shown ? summary(shown, now) : null, payments };
+          // The one that follows the subscription that paid the plan, from the period's end.
+          const following = state?.subscriptionId
+            ? live.find((r) => r.followsSubscriptionId === state.subscriptionId && r !== shown)
+            : undefined;
+          const next = following
+            ? {
+                subscription: summary(following, now),
+                planName: await planNameOf(tx, following.planId),
+              }
+            : null;
+          return { offer, subscription: shown ? summary(shown, now) : null, next, payments };
         },
         { accessMode: 'read only' },
       );
@@ -995,6 +1313,7 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
               extraSeats: planSubscriptions.extraSeats,
               extraNumbers: planSubscriptions.extraNumbers,
               runPacks: planSubscriptions.runPacks,
+              apiRequestPacks: planSubscriptions.apiRequestPacks,
               planName: plans.name,
               planCode: plans.code,
               planVersion: plans.version,
@@ -1039,6 +1358,7 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
             extraSeats: found.extraSeats,
             extraNumbers: found.extraNumbers,
             runPacks: found.runPacks,
+            apiRequestPacks: found.apiRequestPacks,
             periodStart: found.periodStart,
             periodEnd: found.periodEnd,
             paidAt: found.paidAt,
@@ -1124,6 +1444,7 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
               extraSeats: state.extraSeats,
               extraNumbers: state.extraNumbers,
               runPacks: state.runPacks,
+              apiRequestPacks: state.apiRequestPacks,
               subtotalMinor: offer.quote.subtotalMinor,
               taxBp: offer.quote.taxBp,
               taxMinor: offer.quote.taxMinor,
@@ -1167,72 +1488,7 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
           continue;
         }
 
-        const row = step.row;
-        const fail = async (reason: string) => {
-          await db.run(ctx.scope, (tx) => failCreating(tx, ctx.tenant.id, row.id, reason));
-          throw new AppError(
-            'provider_unavailable',
-            'We could not start the payment. Try again in a moment.',
-          );
-        };
-        const period = PERIODS[row.intervalMonths as keyof typeof PERIODS];
-        if (!period) throw new Error(`unsupported billing interval ${row.intervalMonths}`);
-        const notes = { purpose: 'plan_subscription', subscription: row.id };
-        const plan = await razorpay.createPlan({
-          period,
-          amount: row.amountMinor,
-          currency: 'INR',
-          name: `HyFib ${step.planName} plan`,
-          notes,
-        });
-        if (!plan.ok) return fail(`Razorpay did not create the plan: ${plan.description}`);
-        if (plan.data.amount !== row.amountMinor || plan.data.currency !== 'INR') {
-          return fail('Razorpay created a plan for another amount.');
-        }
-        await db.run(ctx.scope, (tx) =>
-          tx
-            .update(planSubscriptions)
-            .set({ providerPlanId: plan.data.id })
-            .where(
-              and(
-                eq(planSubscriptions.tenantId, ctx.tenant.id),
-                eq(planSubscriptions.id, row.id),
-                eq(planSubscriptions.status, 'creating'),
-              ),
-            ),
-        );
-        const sub = await razorpay.createSubscription({
-          planId: plan.data.id,
-          totalCount: row.totalCount,
-          expireBy: Math.floor(row.authorizeBy.getTime() / 1000),
-          customerNotify: true,
-          ...(row.startsAt ? { startAt: Math.floor(row.startsAt.getTime() / 1000) } : {}),
-          notes,
-        });
-        if (!sub.ok) return fail(`Razorpay did not create the subscription: ${sub.description}`);
-        if (sub.data.planId !== plan.data.id) {
-          return fail('Razorpay created a subscription for another plan.');
-        }
-        const [created] = await db.run(ctx.scope, (tx) =>
-          tx
-            .update(planSubscriptions)
-            .set({
-              providerSubscriptionId: sub.data.id,
-              status: sub.data.status ?? 'created',
-              syncedAt: clock.now(),
-            })
-            .where(
-              and(
-                eq(planSubscriptions.tenantId, ctx.tenant.id),
-                eq(planSubscriptions.id, row.id),
-                eq(planSubscriptions.status, 'creating'),
-              ),
-            )
-            .returning(),
-        );
-        // Null: the sweep failed it meanwhile (the calls took longer than it waits).
-        if (!created) return fail('The payment took too long to start.');
-        return checkoutFor(ctx, config, created, step.planName);
+        return createAtRazorpay(ctx, razorpay, config, step.row, step.planName);
       }
       throw new AppError('conflict', 'The payment could not be started. Try again.');
     },
@@ -1303,8 +1559,245 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
     },
 
     /**
-     * Cancels the company's subscription (`billing.manage`, recent sign-in): an active one at the
-     * end of the paid period (the plan then ends, without grace days), any other at once.
+     * Changes the plan the company pays for from the end of the paid period (`billing.manage`,
+     * recent sign-in; ADR-109). The current subscription is cancelled at the end of its cycle first
+     * (unless it already ends then) and an earlier change still waiting is cancelled at once; then a
+     * subscription for the next plan is recorded, following the current one from the period's end,
+     * and created at Razorpay. The browser opens Checkout to authorise it; nothing is charged before
+     * the period ends. One still in Checkout for the same plan is returned again instead.
+     */
+    async scheduleChange(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta = {},
+    ): Promise<SubscriptionCheckoutStart> {
+      assertCan(ctx, 'billing.manage');
+      // Razorpay will charge the card for another plan every period (ADR-056).
+      assertRecentSignIn(ctx, clock.now());
+      const { razorpay, config } = provider();
+      if (!config.subscriptionsEnabled) {
+        throw new AppError('precondition_failed', PLAN_CHANGE_UNAVAILABLE_TEXT.not_offered);
+      }
+      const wanted = parseInput(planChangeSchema, input);
+      const refuse = (message: string) => new AppError('precondition_failed', message);
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const step = await db.run(ctx.scope, async (tx) => {
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${`w360:plan-subscriptions:${ctx.tenant.id}`}, 0))`,
+          );
+          const now = clock.now();
+          const [company] = await tx
+            .select({ status: tenants.status })
+            .from(tenants)
+            .where(eq(tenants.id, ctx.tenant.id));
+          const [state] = await tx
+            .select()
+            .from(tenantPlans)
+            .where(eq(tenantPlans.tenantId, ctx.tenant.id));
+          if (!company || !state) throw new Error('The company has no plan state');
+          const [settings] = await tx.select({ taxBp: planSettings.planTaxBp }).from(planSettings);
+          const taxBp = settings?.taxBp ?? null;
+          const [paying] = state.subscriptionId
+            ? await tx
+                .select()
+                .from(planSubscriptions)
+                .where(
+                  and(
+                    eq(planSubscriptions.tenantId, ctx.tenant.id),
+                    eq(planSubscriptions.id, state.subscriptionId),
+                  ),
+                )
+            : [];
+          const reason = planChangeFromPeriodEndUnavailable({
+            companyStatus: company.status,
+            planStatus: state.status,
+            periodEnd: state.periodEnd,
+            paying: paying ?? null,
+            subscriptionsEnabled: true,
+            taxBp,
+            now,
+          });
+          if (reason) throw refuse(PLAN_CHANGE_UNAVAILABLE_TEXT[reason]);
+          if (!paying || !state.periodEnd || taxBp === null) {
+            throw new Error('a plan that can change has a paying subscription, a period and a tax');
+          }
+
+          const [version] = await tx.select().from(plans).where(eq(plans.id, wanted.planId));
+          if (
+            !version ||
+            version.status !== 'published' ||
+            (version.offeredAt === null && version.id !== state.planId)
+          ) {
+            throw refuse('That plan cannot be chosen now. Choose another plan.');
+          }
+          const holdings = await planChangeHoldings(tx, ctx.tenant.id, now);
+          const sold = planChangeAddOns(version, wanted, holdings);
+          const want: Record<PlanAddOnKind, number> = {
+            seats: wanted.extraSeats,
+            numbers: wanted.extraNumbers,
+            runPacks: wanted.runPacks,
+            apiRequestPacks: wanted.apiRequestPacks,
+          };
+          for (const kind of ['seats', 'numbers', 'runPacks', 'apiRequestPacks'] as const) {
+            const option = sold.find((o) => o.kind === kind);
+            const noun = ADD_ON_NOUNS[kind];
+            if (want[kind] > 0 && !option) {
+              throw refuse(`The ${version.name} plan does not sell ${noun}.`);
+            }
+            if (option && want[kind] > option.max) {
+              throw refuse(
+                `The ${version.name} plan sells at most ${option.max.toLocaleString('en-IN')} ${noun}.`,
+              );
+            }
+          }
+          const shortfalls = planShortfalls(versionHoldingLimits(version, wanted), holdings);
+          if (shortfalls.length > 0) {
+            throw refuse(
+              `With these add-ons the ${version.name} plan holds ${shortfalls.map(planShortfallText).join('; ')}. Free some first, or choose more.`,
+            );
+          }
+          const quote = planPaymentQuote(version, wanted, taxBp);
+          if (!quote.ok) {
+            throw refuse(
+              quote.reason === 'too_small'
+                ? `The ${version.name} plan costs less than can be paid here. Choose another plan.`
+                : `With these add-ons the ${version.name} plan costs more than can be paid here. Choose fewer add-ons or another plan.`,
+            );
+          }
+          // Ends with the period: cancelled at its end, or ended without charging again.
+          const ending = paying.status !== 'active' || paying.cancelAtPeriodEnd;
+          if (
+            !ending &&
+            version.id === state.planId &&
+            wanted.extraSeats === state.extraSeats &&
+            wanted.extraNumbers === state.extraNumbers &&
+            wanted.runPacks === state.runPacks &&
+            wanted.apiRequestPacks === state.apiRequestPacks
+          ) {
+            throw refuse('That is the plan you pay for now.');
+          }
+
+          // An earlier change still waiting for the end of the period.
+          const [earlier] = await tx
+            .select()
+            .from(planSubscriptions)
+            .where(
+              and(
+                eq(planSubscriptions.tenantId, ctx.tenant.id),
+                eq(planSubscriptions.followsSubscriptionId, paying.id),
+                inArray(planSubscriptions.status, [...LIVE]),
+              ),
+            );
+          if (earlier?.status === 'creating') {
+            if (now.getTime() - earlier.createdAt.getTime() < PLAN_SUBSCRIPTION_CREATING_MS) {
+              throw new AppError(
+                'conflict',
+                'A change is already being started. Try again in a moment.',
+              );
+            }
+            await failCreating(tx, ctx.tenant.id, earlier.id, 'The payment could not be started.');
+          } else if (earlier) {
+            if (earlier.status !== 'created' && earlier.status !== 'authenticated') {
+              throw new AppError(
+                'conflict',
+                'Your next plan has already started. Reload the page.',
+              );
+            }
+            const same =
+              earlier.status === 'created' &&
+              earlier.providerSubscriptionId !== null &&
+              now < earlier.authorizeBy &&
+              earlier.planId === version.id &&
+              earlier.extraSeats === wanted.extraSeats &&
+              earlier.extraNumbers === wanted.extraNumbers &&
+              earlier.runPacks === wanted.runPacks &&
+              earlier.apiRequestPacks === wanted.apiRequestPacks &&
+              earlier.amountMinor === quote.quote.totalMinor;
+            return same
+              ? { kind: 'reopen' as const, row: earlier, planName: version.name }
+              : { kind: 'replace' as const, row: earlier, planName: version.name };
+          }
+          if (!ending) return { kind: 'end_current' as const, row: paying, planName: version.name };
+
+          const id = uuidv7();
+          const [row] = await tx
+            .insert(planSubscriptions)
+            .values({
+              id,
+              tenantId: ctx.tenant.id,
+              planId: version.id,
+              intervalMonths: version.intervalMonths,
+              extraSeats: wanted.extraSeats,
+              extraNumbers: wanted.extraNumbers,
+              runPacks: wanted.runPacks,
+              apiRequestPacks: wanted.apiRequestPacks,
+              subtotalMinor: quote.quote.subtotalMinor,
+              taxBp: quote.quote.taxBp,
+              taxMinor: quote.quote.taxMinor,
+              amountMinor: quote.quote.totalMinor,
+              totalCount: (PLAN_SUBSCRIPTION_YEARS * 12) / version.intervalMonths,
+              authorizeBy: new Date(now.getTime() + PLAN_SUBSCRIPTION_AUTHORIZE_MS),
+              createdByUserId: ctx.user.id,
+              startsAt: state.periodEnd,
+              followsSubscriptionId: paying.id,
+            })
+            .returning();
+          if (!row) throw new Error('subscription was not recorded');
+          await recordAudit(
+            tx,
+            ctx,
+            {
+              action: 'billing.plan_change_started',
+              subjectType: 'plan_subscription',
+              subjectId: id,
+              metadata: {
+                previousPlanId: state.planId,
+                planId: version.id,
+                extraSeats: wanted.extraSeats,
+                extraNumbers: wanted.extraNumbers,
+                runPacks: wanted.runPacks,
+                apiRequestPacks: wanted.apiRequestPacks,
+                amountMinor: quote.quote.totalMinor,
+                taxBp: quote.quote.taxBp,
+                intervalMonths: version.intervalMonths,
+                startsAt: state.periodEnd.toISOString(),
+                followsSubscriptionId: paying.id,
+              },
+            },
+            meta,
+          );
+          return { kind: 'create' as const, row, planName: version.name };
+        });
+        if (step.kind === 'reopen') return checkoutFor(ctx, config, step.row, step.planName);
+        if (step.kind === 'end_current') {
+          // Null: it had already ended at Razorpay, so it charges no more either way.
+          await cancelAtRazorpay(ctx, razorpay, step.row, meta, { change: step.planName });
+          continue;
+        }
+        if (step.kind === 'replace') {
+          if (step.row.status === 'created' && clock.now() >= step.row.authorizeBy) {
+            // Its window closed, so it cannot be paid any more: cancelled at Razorpay by the sync.
+            try {
+              await syncPlanSubscription(providerDeps(razorpay), ctx.scope, step.row.id);
+            } catch (error) {
+              if (error instanceof TransientProviderError) throw unavailable();
+              throw error;
+            }
+          } else {
+            await cancelAtRazorpay(ctx, razorpay, step.row, meta, 'replace');
+          }
+          continue;
+        }
+        return createAtRazorpay(ctx, razorpay, config, step.row, step.planName);
+      }
+      throw new AppError('conflict', 'The change could not be started. Try again.');
+    },
+
+    /**
+     * Cancels the company's subscription that keeps charging (`billing.manage`, recent sign-in): an
+     * active one at the end of the paid period (the plan then ends, without grace days), any other at
+     * once. With a change of plan waiting (ADR-109), that is the new subscription: the change is
+     * dropped, and the plan ends with the period.
      */
     async cancel(
       ctx: TenantContext,
@@ -1343,77 +1836,8 @@ export function createPlanSubscriptionService(deps: PlanSubscriptionServiceDeps)
         );
       }
       if (row.cancelAtPeriodEnd) return { atPeriodEnd: true, periodEnd: row.currentEnd };
-      const atPeriodEnd = row.status === 'active';
-      const res = await razorpay.cancelSubscription(row.providerSubscriptionId, {
-        cancelAtCycleEnd: atPeriodEnd,
-      });
-      if (!res.ok) {
-        if (res.kind !== 'permanent') throw unavailable();
-        // Refused: it may have ended at Razorpay meanwhile.
-        await syncPlanSubscription(providerDeps(razorpay), ctx.scope, row.id).catch(
-          (error: unknown) => {
-            if (!(error instanceof TransientProviderError)) throw error;
-          },
-        );
-        const still = await db.run(ctx.scope, (tx) => liveRow(tx, ctx.tenant.id), {
-          accessMode: 'read only',
-        });
-        if (!still) return { atPeriodEnd: false, periodEnd: row.currentEnd };
-        throw new AppError(
-          'precondition_failed',
-          `Razorpay did not cancel the subscription: ${res.description}`,
-        );
-      }
-      await db.run(ctx.scope, async (tx) => {
-        const now = clock.now();
-        await tx
-          .update(planSubscriptions)
-          .set({
-            ...(atPeriodEnd ? { cancelAtPeriodEnd: true } : {}),
-            cancelRequestedAt: now,
-            cancelledByUserId: ctx.user.id,
-          })
-          .where(
-            and(eq(planSubscriptions.tenantId, ctx.tenant.id), eq(planSubscriptions.id, row.id)),
-          );
-        await recordAudit(
-          tx,
-          ctx,
-          {
-            action: 'billing.plan_subscription_cancelled',
-            subjectType: 'plan_subscription',
-            subjectId: row.id,
-            metadata: { atPeriodEnd },
-          },
-          meta,
-        );
-        const day = await companyDay(tx, ctx.tenant.id);
-        const planName = await planNameOf(tx, row.planId);
-        await notifyBillingManagers(deps.notices, tx, ctx.scope, {
-          subject: 'Your HyFib plan subscription is cancelled',
-          lines: [
-            `${ctx.user.name} cancelled the subscription for the ${planName} plan. Nothing more is charged.`,
-            atPeriodEnd && row.currentEnd && row.paidCount === 0
-              ? `Razorpay’s first charge is under way: if it goes through, the plan stays paid until ${day(row.currentEnd)}, then ends.`
-              : atPeriodEnd && row.currentEnd
-                ? `The plan ends on ${day(row.currentEnd)}, at the end of the paid period.`
-                : row.startsAt && row.paidCount === 0
-                  ? row.startsAt > now
-                    ? `Nothing was charged for it, and the trial goes on until ${day(row.startsAt)}.`
-                    : `Nothing was charged for it, and the trial ended on ${day(row.startsAt)}.`
-                  : 'The plan keeps any period already paid, then ends.',
-          ],
-        });
-      });
-      if (!atPeriodEnd) {
-        // Stores Razorpay's cancelled state now (the sweep would otherwise).
-        await syncPlanSubscription(providerDeps(razorpay), ctx.scope, row.id).catch(
-          (error: unknown) => {
-            if (!(error instanceof TransientProviderError)) throw error;
-          },
-        );
-      }
-      return { atPeriodEnd, periodEnd: row.currentEnd };
+      const cancelled = await cancelAtRazorpay(ctx, razorpay, row, meta, 'cancel');
+      return { atPeriodEnd: cancelled?.atPeriodEnd ?? false, periodEnd: row.currentEnd };
     },
   };
 }

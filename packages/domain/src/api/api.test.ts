@@ -3,9 +3,22 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { z } from 'zod';
 import { AppError, isAppError, sha256Hex } from '@w360/core';
-import { API_SCOPES } from '@w360/db';
+import { API_SCOPES, CAMPAIGN_STATUSES, MESSAGE_STATUSES, RECIPIENT_STATES } from '@w360/db';
 import { PERMISSIONS, ROLE_PERMISSIONS } from '../authz/permissions';
 import { apiErrorResponse, apiRequestError } from './errors';
+import { NUL_CHARACTER_MESSAGE } from '../validation';
+import { assertNoNulCharacter, nulCharacterPath } from './request-text';
+import {
+  apiCampaignListQuerySchema,
+  apiCampaignRecipientQuerySchema,
+  apiCampaignResultsSchema,
+  apiCancelCampaign,
+  apiGetCampaign,
+  apiListCampaignRecipients,
+  apiListCampaigns,
+  apiPauseCampaign,
+} from './campaigns';
+import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import { allowedNetworksSchema, bearerToken, generateApiToken, networkEntryProblem } from './keys';
 import {
   apiAddressRefusal,
@@ -25,8 +38,23 @@ import {
   apiNoteListQuerySchema,
   apiUpdateConversation,
   apiUpdateConversationSchema,
+  apiUpdateManyConversations,
+  apiUpdateManyConversationsSchema,
 } from './conversations';
 import { apiListMembers, apiListTeams, apiMemberListQuerySchema } from './members';
+import { apiContactSchema } from './contact-view';
+import {
+  API_CONTACT_SEARCH_WINDOW,
+  apiContactFieldsSchema,
+  apiContactListFilters,
+  apiContactUpdateSchema,
+  apiListContactFields,
+  apiTags,
+  apiUpdateContact,
+  apiUpdateManyContacts,
+  apiUpdateManyContactsSchema,
+  contactListQuery,
+} from './contacts';
 import {
   API_LIMITS,
   API_SCOPE_INFO,
@@ -55,6 +83,8 @@ import {
   type AnswerTarget,
 } from '../messaging/reply-context';
 import {
+  apiContactListQuerySchema,
+  apiListContacts,
   apiSendButtonsSchema,
   apiSendCatalogSchema,
   apiSendListSchema,
@@ -72,6 +102,13 @@ import {
   createApiWebhookEndpoints,
   endpointAnnouncement,
 } from './webhook-endpoints';
+import {
+  WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
+  WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
+} from '../webhooks/service';
 
 describe('API tokens', () => {
   it('have a public prefix, a 256-bit secret and only their SHA-256 is kept', () => {
@@ -128,10 +165,12 @@ describe('API scopes', () => {
     const writes = API_SCOPE_KEYS.filter((s) => API_SCOPE_INFO[s].writes);
     expect(writes).toEqual([
       'contacts.write',
+      'contact_fields.manage',
       'messages.send',
       'messages.send_marketing',
       'messages.reply',
       'conversations.write',
+      'campaigns.stop',
       'automations.start',
       'webhooks.manage',
     ]);
@@ -143,6 +182,10 @@ describe('API scopes', () => {
     expect(API_SCOPE_INFO['messages.send_marketing'].permission).toBe('campaigns.send');
     expect(API_SCOPE_INFO['messages.reply'].permission).toBe('inbox.reply');
     expect(API_SCOPE_INFO['contacts.write'].permission).toBe('contacts.write');
+    // Members define fields in Settings with tenant.settings.manage (ADR-115).
+    expect(API_SCOPE_INFO['contact_fields.manage'].permission).toBe('tenant.settings.manage');
+    // Members pause and cancel campaigns with campaigns.send (ADR-128).
+    expect(API_SCOPE_INFO['campaigns.stop'].permission).toBe('campaigns.send');
     expect(API_SCOPE_INFO['conversations.read'].permission).toBe('inbox.read_all');
     expect(API_SCOPE_INFO['conversations.write'].permission).toBe('inbox.supervise');
     expect(API_SCOPE_INFO['automations.start'].permission).toBe('automations.publish');
@@ -344,6 +387,50 @@ describe('conversation changes (ADR-075, ADR-093)', () => {
     }
     for (const body of [{ status: 'pending' }, {}, { assigneeId: 'none' }]) {
       expect(await set(ctx(['conversations.write']), id, body)).toBe('validation_failed');
+    }
+  });
+
+  it('change 1 to 100 conversations at once, each named once, with the same fields (ADR-120)', async () => {
+    expect(API_LIMITS.conversationsPerChange).toBe(100);
+    const ids = (n: number) =>
+      Array.from({ length: n }, (_, i) => `0192f0c4-8e2b-7c1d-9a3e-${String(i).padStart(12, '0')}`);
+    for (const body of [
+      { conversationIds: [id], status: 'resolved' },
+      { conversationIds: [id, other], assigneeId: id },
+      { conversationIds: ids(API_LIMITS.conversationsPerChange), teamId: null },
+      { conversationIds: [other, id], status: 'open', assigneeId: null, teamId: other },
+    ]) {
+      expect(apiUpdateManyConversationsSchema.parse(body)).toEqual(body);
+    }
+    for (const bad of [
+      { conversationIds: [], status: 'resolved' },
+      { conversationIds: ids(API_LIMITS.conversationsPerChange + 1), status: 'resolved' },
+      { conversationIds: [id, id], status: 'resolved' },
+      { conversationIds: ['not-a-uuid'], status: 'resolved' },
+      { conversationIds: id, status: 'resolved' },
+      { conversationIds: [id] },
+      { status: 'resolved' },
+      { conversationIds: [id], status: 'pending' },
+      { conversationIds: [id], assigneeId: 'none' },
+      { conversationIds: [id], status: 'resolved', note: 'Closing' },
+    ]) {
+      expect(
+        apiUpdateManyConversationsSchema.safeParse(bad).success,
+        JSON.stringify(bad).slice(0, 80),
+      ).toBe(false);
+    }
+    const many = (c: ApiContext, body: unknown) =>
+      code(apiUpdateManyConversations({} as never, c, body));
+    const body = { conversationIds: [id, other], status: 'resolved' };
+    expect(await many(ctx(['conversations.read']), body)).toBe('forbidden');
+    for (const status of ['suspended', 'restricted']) {
+      expect(await many(ctx(['conversations.write'], status), body)).toBe('tenant_suspended');
+    }
+    for (const bad of [
+      { conversationIds: [id, id], status: 'resolved' },
+      { conversationIds: [id] },
+    ]) {
+      expect(await many(ctx(['conversations.write']), bad)).toBe('validation_failed');
     }
   });
 
@@ -1232,8 +1319,282 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       properties: Record<string, unknown>;
       additionalProperties: unknown;
     };
-    expect(Object.keys(update.properties).sort()).toEqual(['description', 'enabled', 'events']);
+    expect(Object.keys(update.properties).sort()).toEqual([
+      'automationIds',
+      'campaignStatuses',
+      'contactParts',
+      'conversationStatuses',
+      'description',
+      'enabled',
+      'events',
+      'headers',
+      'messageStatuses',
+      'orderStatuses',
+      'templateStatuses',
+    ]);
     expect(update.additionalProperties).toBe(false);
+    // Headers are given with their values, at most 5, and answered by name only (ADR-118).
+    type HeaderList = {
+      maxItems?: number;
+      items?: { properties?: Record<string, unknown>; required?: string[] };
+    };
+    const given = (schemas.CreateWebhookEndpoint as { properties: { headers?: HeaderList } })
+      .properties.headers;
+    expect(given?.maxItems).toBe(5);
+    expect([...(given?.items?.required ?? [])].sort()).toEqual(['name', 'value']);
+    const answered = schemas.WebhookEndpoint as {
+      properties: { headers?: HeaderList };
+      required?: string[];
+    };
+    expect(Object.keys(answered.properties.headers?.items?.properties ?? {})).toEqual(['name']);
+    expect(answered.required).toContain('headers');
+    // The message statuses an endpoint receives (ADR-119): a list, or null for every status.
+    const statuses = (answered.properties as Record<string, { anyOf?: unknown[] }>).messageStatuses;
+    expect(statuses?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('messageStatuses');
+    const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
+    expect(webhooks['message.status']?.post?.description).toContain(
+      'An endpoint receives every status unless it names the ones it takes',
+    );
+    // The contact parts an endpoint receives as contact.updated (ADR-123): a list, or null.
+    const parts = (answered.properties as Record<string, { anyOf?: unknown[] }>).contactParts;
+    expect(parts?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('contactParts');
+    const createBody = schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> };
+    expect(Object.keys(createBody.properties)).toContain('contactParts');
+    expect(webhooks['contact.updated']?.post?.description).toContain(
+      'An endpoint receives every change unless it names the parts it takes',
+    );
+    // The automations whose runs an endpoint receives (ADR-145): a list, or null.
+    const chosen = (answered.properties as Record<string, { anyOf?: unknown[] }>).automationIds;
+    expect(chosen?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('automationIds');
+    expect(Object.keys(createBody.properties)).toContain('automationIds');
+    expect(webhooks['automation.run_started']?.post?.description).toContain(
+      "An endpoint receives every automation's runs unless it names the automations it takes",
+    );
+    expect(webhooks['automation.run_ended']?.post?.description).toContain(
+      'An endpoint that names the automations it takes receives only their runs',
+    );
+    // The campaign statuses an endpoint receives (ADR-146): a list, or null.
+    const campaignStatuses = (answered.properties as Record<string, { anyOf?: unknown[] }>)
+      .campaignStatuses;
+    expect(campaignStatuses?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('campaignStatuses');
+    expect(Object.keys(createBody.properties)).toContain('campaignStatuses');
+    expect(webhooks['campaign.status_changed']?.post?.description).toContain(
+      'An endpoint receives every status unless it names the statuses it takes',
+    );
+    // The order statuses an endpoint receives (ADR-147): a list, or null.
+    const orderStatuses = (answered.properties as Record<string, { anyOf?: unknown[] }>)
+      .orderStatuses;
+    expect(orderStatuses?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('orderStatuses');
+    expect(Object.keys(createBody.properties)).toContain('orderStatuses');
+    expect(webhooks['order.status_changed']?.post?.description).toContain(
+      'An endpoint receives every status unless it names the statuses it takes (its `orderStatuses`',
+    );
+    // The template statuses an endpoint receives (ADR-148): a list, or null.
+    const templateStatuses = (answered.properties as Record<string, { anyOf?: unknown[] }>)
+      .templateStatuses;
+    expect(templateStatuses?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('templateStatuses');
+    expect(Object.keys(createBody.properties)).toContain('templateStatuses');
+    expect(webhooks['template.status_changed']?.post?.description).toContain(
+      'An endpoint receives every status unless it names the statuses it takes (its `templateStatuses`',
+    );
+    // The conversation statuses an endpoint receives (ADR-149): a list, or null.
+    const conversationStatuses = (answered.properties as Record<string, { anyOf?: unknown[] }>)
+      .conversationStatuses;
+    expect(conversationStatuses?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('conversationStatuses');
+    expect(Object.keys(createBody.properties)).toContain('conversationStatuses');
+    expect(webhooks['conversation.status_changed']?.post?.description).toContain(
+      'An endpoint receives every status unless it names the statuses it takes (its `conversationStatuses`',
+    );
+  });
+
+  it('take conversation statuses only with conversation.status_changed, and a list of them alone is a change (ADR-149)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['conversation.status_changed'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        conversationStatuses: ['resolved', 'open'],
+      }).conversationStatuses,
+    ).toEqual(['open', 'resolved']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['conversation.team_changed'],
+      conversationStatuses: ['resolved'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['conversationStatuses', WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, conversationStatuses: [] },
+      { ...base, conversationStatuses: ['pending'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ conversationStatuses: null })).toEqual({
+      conversationStatuses: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ conversationStatuses: ['resolved'] })).toEqual({
+      conversationStatuses: ['resolved'],
+    });
+  });
+
+  it('take template statuses only with template.status_changed, and a list of them alone is a change (ADR-148)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['template.status_changed'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        templateStatuses: ['paused', 'rejected', 'paused'],
+      }).templateStatuses,
+    ).toEqual(['rejected', 'paused']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.status'],
+      templateStatuses: ['rejected'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['templateStatuses', WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, templateStatuses: [] },
+      { ...base, templateStatuses: ['draft'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ templateStatuses: null })).toEqual({
+      templateStatuses: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ templateStatuses: ['disabled'] })).toEqual({
+      templateStatuses: ['disabled'],
+    });
+  });
+
+  it('take order statuses only with order.status_changed, and a list of them alone is a change (ADR-147)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['order.status_changed'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        orderStatuses: ['cancelled', 'paid', 'cancelled'],
+      }).orderStatuses,
+    ).toEqual(['paid', 'cancelled']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['order.received'],
+      orderStatuses: ['paid'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['orderStatuses', WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, orderStatuses: [] },
+      { ...base, orderStatuses: ['received'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ orderStatuses: null })).toEqual({
+      orderStatuses: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ orderStatuses: ['fulfilled'] })).toEqual({
+      orderStatuses: ['fulfilled'],
+    });
+  });
+
+  it('take campaign statuses only with campaign.status_changed, and a list of them alone is a change (ADR-146)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['campaign.status_changed'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        campaignStatuses: ['completed', 'paused', 'completed'],
+      }).campaignStatuses,
+    ).toEqual(['paused', 'completed']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.status'],
+      campaignStatuses: ['paused'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['campaignStatuses', WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, campaignStatuses: [] },
+      { ...base, campaignStatuses: ['sending'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ campaignStatuses: null })).toEqual({
+      campaignStatuses: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ campaignStatuses: ['canceled'] })).toEqual({
+      campaignStatuses: ['canceled'],
+    });
+  });
+
+  it('take automations only with an automation run event, and a list of them alone is a change (ADR-145)', () => {
+    const greeter = '0E1A2B3C-4D5E-4F60-8172-8394A5B6C7D8';
+    const farewell = '1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9';
+    for (const events of [
+      ['automation.run_started'],
+      ['automation.run_ended', 'consent.changed'],
+    ]) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          url: 'https://hooks.example.com/w360',
+          events,
+          automationIds: [greeter, farewell, greeter.toLowerCase()],
+        }).automationIds,
+        JSON.stringify(events),
+      ).toEqual([greeter.toLowerCase(), farewell]);
+    }
+    const base = { url: 'https://hooks.example.com/w360', events: ['automation.run_ended'] };
+    expect(apiCreateWebhookEndpointSchema.parse({ ...base, automationIds: null })).toEqual({
+      ...base,
+      automationIds: null,
+    });
+    const tooMany = Array.from(
+      { length: 21 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(
+      apiCreateWebhookEndpointSchema.safeParse({ ...base, automationIds: tooMany.slice(1) })
+        .success,
+    ).toBe(true);
+    for (const body of [
+      { ...base, events: ['consent.changed'], automationIds: [greeter] },
+      { ...base, automationIds: [] },
+      { ...base, automationIds: ['greeter'] },
+      { ...base, automationIds: tooMany },
+      { ...base, automationIds: greeter },
+    ]) {
+      const parsed = apiCreateWebhookEndpointSchema.safeParse(body);
+      expect(parsed.success, JSON.stringify(body)).toBe(false);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['consent.changed'],
+      automationIds: [greeter],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['automationIds', WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS],
+    ]);
+    expect(apiUpdateWebhookEndpointSchema.parse({ automationIds: null })).toEqual({
+      automationIds: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ automationIds: [farewell] })).toEqual({
+      automationIds: [farewell],
+    });
   });
 });
 
@@ -1576,6 +1937,19 @@ describe('OpenAPI document', () => {
     );
   });
 
+  it('says which messages were too large to keep and how many contacts a card left out (ADR-132)', () => {
+    type Shape = { required?: string[]; properties?: Record<string, Shape>; type?: string };
+    const schemas = doc.components.schemas as Record<string, Shape>;
+    const received = schemas.WebhookMessageReceived?.properties?.data?.properties?.message;
+    for (const message of [schemas.ConversationMessage, schemas.FeedMessage, received]) {
+      expect(message?.required).toEqual(
+        expect.arrayContaining(['contentTooLarge', 'contactsLeftOut']),
+      );
+      expect(message?.properties?.contentTooLarge).toMatchObject({ type: 'boolean' });
+      expect(message?.properties?.contactsLeftOut).toMatchObject({ type: 'integer', minimum: 0 });
+    }
+  });
+
   it('names the plan refusals in the 403 and 429 responses and the error reason', () => {
     const responses = paths['/contacts']?.get?.responses as Record<string, { description: string }>;
     expect(responses['403']?.description).toContain('not_in_plan');
@@ -1660,6 +2034,92 @@ describe('OpenAPI document', () => {
     expect(send.responses['412']?.description).toContain('window_closed');
     const read = paths['/messages/{id}']?.get as unknown as { description: string };
     for (const scope of API_SEND_SCOPES) expect(read.description).toContain(`\`${scope}\``);
+  });
+
+  it('changes many conversations in one call, all or none (ADR-120)', () => {
+    const post = paths['/conversations/update-many']?.post as unknown as {
+      operationId: string;
+      description: string;
+      parameters?: unknown[];
+      requestBody: { content: { 'application/json': { schema: unknown } } };
+      responses: Record<string, unknown>;
+    };
+    expect(post.operationId).toBe('updateManyConversations');
+    expect(post.description).toContain('`conversations.write`');
+    expect(post.description).toContain('All of them or none');
+    expect(post.description).toContain('counts as one request');
+    expect(post.parameters ?? []).toEqual([]);
+    expect(post.requestBody.content['application/json'].schema).toEqual({
+      $ref: '#/components/schemas/UpdateManyConversations',
+    });
+    expect(Object.keys(post.responses)).toEqual(expect.arrayContaining(['200', '422', '423']));
+    expect(Object.keys(post.responses)).not.toContain('404');
+    const schema = (
+      doc.components.schemas as Record<
+        string,
+        {
+          required?: string[];
+          additionalProperties?: unknown;
+          properties?: Record<string, { maxItems?: number; minItems?: number }>;
+        }
+      >
+    ).UpdateManyConversations;
+    expect(schema?.required).toEqual(['conversationIds']);
+    expect(schema?.additionalProperties).toBe(false);
+    expect(Object.keys(schema?.properties ?? {})).toEqual([
+      'conversationIds',
+      'status',
+      'assigneeId',
+      'teamId',
+    ]);
+    expect(schema?.properties?.conversationIds).toMatchObject({
+      minItems: 1,
+      maxItems: API_LIMITS.conversationsPerChange,
+    });
+  });
+
+  it('changes many contacts in one call, all or none (ADR-122)', () => {
+    const post = paths['/contacts/update-many']?.post as unknown as {
+      operationId: string;
+      description: string;
+      requestBody: { content: { 'application/json': { schema: unknown } } };
+      responses: Record<string, unknown>;
+    };
+    expect(post.operationId).toBe('updateManyContacts');
+    expect(post.description).toContain('`contacts.write`');
+    expect(post.description).toContain('All of them or none');
+    expect(post.description).toContain('`contacts.3.fields.plan`');
+    expect(post.description).toContain('counts as one request');
+    expect(post.requestBody.content['application/json'].schema).toEqual({
+      $ref: '#/components/schemas/UpdateManyContacts',
+    });
+    expect(Object.keys(post.responses)).toEqual(expect.arrayContaining(['200', '422', '423']));
+    expect(Object.keys(post.responses)).not.toContain('404');
+    type Items = {
+      minItems?: number;
+      maxItems?: number;
+      items?: { required?: string[]; additionalProperties?: unknown; properties?: object };
+    };
+    const schema = (
+      doc.components.schemas as Record<
+        string,
+        { required?: string[]; additionalProperties?: unknown; properties?: { contacts?: Items } }
+      >
+    ).UpdateManyContacts;
+    expect(schema?.required).toEqual(['contacts']);
+    expect(schema?.additionalProperties).toBe(false);
+    const items = schema?.properties?.contacts;
+    expect(items).toMatchObject({ minItems: 1, maxItems: API_LIMITS.contactsPerChange });
+    expect(items?.items?.required).toEqual(['id']);
+    expect(items?.items?.additionalProperties).toBe(false);
+    expect(Object.keys(items?.items?.properties ?? {})).toEqual([
+      'id',
+      'name',
+      'email',
+      'fields',
+      'addTags',
+      'removeTags',
+    ]);
   });
 
   it('resolves, reopens, assigns or moves a conversation with any of the three fields (ADR-093)', () => {
@@ -1759,5 +2219,769 @@ describe('OpenAPI document', () => {
         new RegExp(`export (async )?function ${method.toUpperCase()}\\(`),
       );
     }
+  });
+});
+
+describe('contact custom fields and changes (ADR-112)', () => {
+  const ctx = (scopes: string[], status = 'active') =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: null,
+    }) as unknown as ApiContext;
+  const id = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+
+  it('take field values as strings, numbers or booleans, null only to clear one in a change', () => {
+    expect(apiContactFieldsSchema.parse({ city: 'Chennai', orders: 3, vip: true })).toEqual({
+      city: 'Chennai',
+      orders: 3,
+      vip: true,
+    });
+    for (const bad of [
+      { city: null },
+      { city: ['a'] },
+      { city: { a: 1 } },
+      { ['k'.repeat(41)]: 'x' },
+    ]) {
+      expect(apiContactFieldsSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+    const fifty = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`f${i}`, 'x']));
+    expect(apiContactFieldsSchema.safeParse(fifty).success).toBe(true);
+    expect(apiContactFieldsSchema.safeParse({ ...fifty, f50: 'x' }).success).toBe(false);
+    expect(apiContactUpdateSchema.parse({ fields: { city: null, orders: 4 } })).toEqual({
+      fields: { city: null, orders: 4 },
+    });
+    expect(apiContactUpdateSchema.safeParse({ fields: { ...fifty, f50: null } }).success).toBe(
+      false,
+    );
+  });
+
+  it('keep each tag once, as the app writes it', () => {
+    expect(apiTags(['VIP', ' vip ', 'New', 'new'], 'addTags')).toEqual(['vip', 'new']);
+    expect(apiTags([], 'removeTags')).toEqual([]);
+  });
+
+  it('change at least one of name, email, fields and tags, and nothing else', () => {
+    expect(apiContactUpdateSchema.parse({ name: '  Priya  ', email: null })).toEqual({
+      name: 'Priya',
+      email: null,
+    });
+    expect(apiContactUpdateSchema.parse({ addTags: ['vip'], removeTags: ['new'] })).toEqual({
+      addTags: ['vip'],
+      removeTags: ['new'],
+    });
+    for (const bad of [
+      {},
+      { phone: '+919876543210' },
+      { name: 'x'.repeat(201) },
+      { email: 7 },
+      { addTags: Array.from({ length: 21 }, (_, i) => `t${i}`) },
+      { tags: ['vip'] },
+      'Priya',
+      null,
+    ]) {
+      expect(apiContactUpdateSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it('are refused before anything is read: without the scope, while the company is not active, for ids that are not ids, and for other bodies', async () => {
+    const update = (c: ApiContext, contactId: string, body: unknown) =>
+      code(apiUpdateContact({} as never, c, contactId, body));
+    const body = { name: 'Priya' };
+    expect(await update(ctx(['contacts.read']), id, body)).toBe('forbidden');
+    for (const status of ['suspended', 'restricted']) {
+      expect(await update(ctx(['contacts.write'], status), id, body)).toBe('tenant_suspended');
+    }
+    expect(await update(ctx(['contacts.write']), 'not-a-uuid', body)).toBe('not_found');
+    expect(await update(ctx(['contacts.write']), id, {})).toBe('validation_failed');
+    expect(await update(ctx(['contacts.write']), id, { email: 'not an address' })).toBe(
+      'validation_failed',
+    );
+    expect(await update(ctx(['contacts.write']), id, { addTags: ['a,b'] })).toBe(
+      'validation_failed',
+    );
+    // A tag both added and removed, however it is written.
+    const both = await apiUpdateContact({} as never, ctx(['contacts.write']), id, {
+      addTags: ['VIP'],
+      removeTags: [' vip '],
+    }).catch((error: unknown) => error);
+    expect(isAppError(both) && both.issues).toEqual([
+      { path: 'removeTags', message: 'The tag vip cannot be both added and removed.' },
+    ]);
+    expect(await code(apiListContactFields({} as never, ctx(['contacts.write'])))).toBe(
+      'forbidden',
+    );
+  });
+
+  it('change 1 to 100 contacts at once, each named once with what PATCH takes (ADR-122)', async () => {
+    expect(API_LIMITS.contactsPerChange).toBe(100);
+    const ids = (n: number) =>
+      Array.from({ length: n }, (_, i) => `0192f0c4-8e2b-7c1d-9a3e-${String(i).padStart(12, '0')}`);
+    const other = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';
+    for (const body of [
+      { contacts: [{ id, name: 'Priya' }] },
+      {
+        contacts: [
+          { id, addTags: ['vip'] },
+          { id: other, fields: { city: null }, email: null },
+        ],
+      },
+      { contacts: ids(API_LIMITS.contactsPerChange).map((c) => ({ id: c, removeTags: ['new'] })) },
+    ]) {
+      expect(apiUpdateManyContactsSchema.parse(body)).toEqual(body);
+    }
+    for (const bad of [
+      { contacts: [] },
+      { contacts: ids(API_LIMITS.contactsPerChange + 1).map((c) => ({ id: c, name: 'x' })) },
+      {
+        contacts: [
+          { id, name: 'A' },
+          { id, name: 'B' },
+        ],
+      },
+      { contacts: [{ id: 'not-a-uuid', name: 'A' }] },
+      { contacts: [{ name: 'A' }] },
+      { contacts: [{ id }] },
+      { contacts: [{ id, phone: '+919876543210' }] },
+      { contacts: [{ id, name: 'A', phone: '+919876543210' }] },
+      { contacts: { id, name: 'A' } },
+      { contacts: [{ id, name: 'A' }], dryRun: true },
+      {},
+    ]) {
+      expect(
+        apiUpdateManyContactsSchema.safeParse(bad).success,
+        JSON.stringify(bad).slice(0, 80),
+      ).toBe(false);
+    }
+    // Refused before anything is read: without the scope, while the company is not active, and for
+    // a bad change, naming its place.
+    const many = (c: ApiContext, body: unknown) =>
+      apiUpdateManyContacts({} as never, c, body).catch((error: unknown) => error);
+    const body = { contacts: [{ id, name: 'Priya' }] };
+    expect(await code(apiUpdateManyContacts({} as never, ctx(['contacts.read']), body))).toBe(
+      'forbidden',
+    );
+    for (const status of ['suspended', 'restricted']) {
+      expect(
+        await code(apiUpdateManyContacts({} as never, ctx(['contacts.write'], status), body)),
+      ).toBe('tenant_suspended');
+    }
+    const issues = async (change: Record<string, unknown>) => {
+      const error = await many(ctx(['contacts.write']), {
+        contacts: [
+          { id, name: 'Priya' },
+          { id: other, ...change },
+        ],
+      });
+      return isAppError(error) ? error.issues : error;
+    };
+    expect(await issues({ email: 'not an address' })).toEqual([
+      { path: 'contacts.1.email', message: 'Email address is not valid.' },
+    ]);
+    expect(await issues({ addTags: ['a,b'] })).toEqual([
+      { path: 'contacts.1.addTags', message: expect.any(String) as unknown },
+    ]);
+    expect(await issues({ addTags: ['VIP'], removeTags: [' vip '] })).toEqual([
+      { path: 'contacts.1.removeTags', message: 'The tag vip cannot be both added and removed.' },
+    ]);
+    expect(await issues({})).toEqual([
+      { path: 'contacts.1', message: 'Give name, email, fields, addTags or removeTags.' },
+    ]);
+  });
+
+  it('are described: the fields in every contact, their definitions, and the change', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const paths = doc.paths as unknown as Record<
+      string,
+      Record<string, { operationId: string; description: string; requestBody?: unknown }>
+    >;
+    expect(paths['/contacts/{id}']?.patch?.operationId).toBe('updateContact');
+    expect(paths['/contacts/{id}']?.patch?.description).toContain('`contacts.write`');
+    expect(paths['/contacts/{id}']?.patch?.description).toContain('`fields.<key>`');
+    expect(paths['/contacts/{id}']?.patch?.description).toContain(
+      'The phone number is not changed through the API.',
+    );
+    expect(paths['/contact-fields']?.get?.operationId).toBe('listContactFields');
+    expect(paths['/contact-fields']?.get?.description).toContain('`contacts.read`');
+    const schemas = doc.components.schemas as Record<
+      string,
+      { required?: string[]; additionalProperties?: unknown; properties?: Record<string, unknown> }
+    >;
+    expect(schemas.ContactUpdate?.additionalProperties).toBe(false);
+    expect(schemas.ContactUpdate?.required ?? []).toEqual([]);
+    expect(Object.keys(schemas.ContactUpdate?.properties ?? {}).sort()).toEqual([
+      'addTags',
+      'email',
+      'fields',
+      'name',
+      'removeTags',
+    ]);
+    expect(schemas.ContactCreate?.properties).toHaveProperty('fields');
+    expect(schemas.ContactField?.required).toEqual(
+      expect.arrayContaining(['key', 'label', 'type', 'createdAt']),
+    );
+    expect(schemas.Contact?.required).toContain('fields');
+    expect(Object.keys(apiContactSchema.shape)).toContain('fields');
+    expect(API_SCOPE_INFO['contacts.write'].label).toBe(
+      'Create and change contacts and record consent',
+    );
+  });
+});
+
+describe('finding contacts (ADR-113)', () => {
+  const ctx = (scopes: string[]) =>
+    ({
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: null,
+    }) as unknown as ApiContext;
+  const refusal = (fn: () => unknown) => {
+    try {
+      fn();
+    } catch (error) {
+      if (isAppError(error)) return { code: error.code, issues: error.issues };
+      throw error;
+    }
+    throw new Error('expected a refusal');
+  };
+
+  it('read fields[<key>] parameters as the fields filter, leaving everything else as it is', () => {
+    expect(
+      contactListQuery({ limit: '10', 'fields[city]': 'Pune', 'fields[orders]': '3', tag: 'vip' }),
+    ).toEqual({ limit: '10', tag: 'vip', fields: { city: 'Pune', orders: '3' } });
+    expect(contactListQuery({ phone: '+919800000000' })).toEqual({ phone: '+919800000000' });
+    // A bracket with no key stays a parameter the schema refuses.
+    expect(contactListQuery({ 'fields[]': 'x' })).toEqual({ 'fields[]': 'x' });
+    for (const raw of [null, 'x', ['a']]) expect(contactListQuery(raw)).toBe(raw);
+  });
+
+  it('take at most 5 field filters of strings, besides number, email and tag', () => {
+    const parse = (query: Record<string, unknown>) =>
+      apiContactListQuerySchema.safeParse(contactListQuery(query)).success;
+    const five = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`fields[f${i}]`, 'x']));
+    expect(parse({ ...five, email: 'a@example.test', tag: 'vip', phone: '+919800000000' })).toBe(
+      true,
+    );
+    // A name holds at most 200 characters, so a longer text finds nothing (ADR-124).
+    expect(parse({ name: 'x'.repeat(200) })).toBe(true);
+    expect(parse({ name: 'x'.repeat(201) })).toBe(false);
+    expect(parse({ ...five, 'fields[f5]': 'x' })).toBe(false);
+    expect(parse({ [`fields[${'k'.repeat(41)}]`]: 'x' })).toBe(false);
+    expect(parse({ 'fields[city]': 'x'.repeat(501) })).toBe(false);
+    expect(parse({ fields: 'city' })).toBe(false);
+    expect(parse({ 'fields[]': 'x' })).toBe(false);
+    expect(parse({ sort: 'name' })).toBe(false);
+  });
+
+  it('write the email address and tag as the app keeps them, and refuse bad ones by name', () => {
+    expect(apiContactListFilters({ email: ' Asha@Example.test ', tag: ' VIP ' })).toEqual({
+      email: 'Asha@Example.test',
+      tag: 'vip',
+      name: null,
+    });
+    expect(apiContactListFilters({})).toEqual({ email: null, tag: null, name: null });
+    expect(refusal(() => apiContactListFilters({ email: 'not an address' }))).toEqual({
+      code: 'validation_failed',
+      issues: [{ path: 'email', message: 'Email address is not valid.' }],
+    });
+    expect(refusal(() => apiContactListFilters({ email: ' ' }))).toEqual({
+      code: 'validation_failed',
+      issues: [{ path: 'email', message: 'Give an email address to find.' }],
+    });
+    expect(refusal(() => apiContactListFilters({ tag: 'a,b' }))).toEqual({
+      code: 'validation_failed',
+      issues: [{ path: 'tag', message: 'Tags cannot contain commas or control characters.' }],
+    });
+  });
+
+  it('are refused before anything is read without contacts.read or with a bad filter', async () => {
+    const code = (query: Record<string, string>, scopes = ['contacts.read']) =>
+      apiListContacts({} as never, ctx(scopes), query).then(
+        () => 'done',
+        (error: unknown) => (isAppError(error) ? error.code : String(error)),
+      );
+    expect(await code({}, ['contacts.write'])).toBe('forbidden');
+    expect(await code({ email: 'nope' })).toBe('validation_failed');
+    expect(await code({ tag: ',' })).toBe('validation_failed');
+    expect(await code({ name: '  ' })).toBe('validation_failed');
+    expect(await code({ 'fields[a]': '1', unknown: 'x' })).toBe('validation_failed');
+  });
+
+  it('are described: the filters, the window and the refusals', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const get = (
+      doc.paths as unknown as Record<
+        string,
+        Record<string, { description: string; parameters: Record<string, unknown>[] }>
+      >
+    )['/contacts']?.get;
+    expect(get?.parameters.map((p) => p.name)).toEqual([
+      'limit',
+      'cursor',
+      'phone',
+      'email',
+      'name',
+      'tag',
+      'fields',
+    ]);
+    expect(get?.parameters.find((p) => p.name === 'fields')).toMatchObject({
+      in: 'query',
+      style: 'deepObject',
+      explode: true,
+      schema: { type: 'object', maxProperties: 5 },
+    });
+    expect(get?.description).toContain('a contact matches all of them');
+    expect(get?.description).toContain(API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US'));
+    expect(String(get?.parameters.find((p) => p.name === 'fields')?.description)).toContain(
+      '`fields.<key>`',
+    );
+  });
+});
+
+describe('finding contacts by name, and text with the NUL character (ADR-124)', () => {
+  const refusal = (fn: () => unknown) => {
+    try {
+      fn();
+    } catch (error) {
+      if (isAppError(error))
+        return { code: error.code, status: error.httpStatus, issues: error.issues };
+      throw error;
+    }
+    throw new Error('expected a refusal');
+  };
+
+  it('read part of a name as written, without the spaces at its ends, and refuse an empty one', () => {
+    expect(apiContactListFilters({ name: '  Asha Rao ' }).name).toBe('Asha Rao');
+    // Wildcards stay characters here; the query escapes them.
+    expect(apiContactListFilters({ name: '100%_x' }).name).toBe('100%_x');
+    for (const name of ['', ' ', '\t\n']) {
+      expect(refusal(() => apiContactListFilters({ name }))).toEqual({
+        code: 'validation_failed',
+        status: 422,
+        issues: [{ path: 'name', message: 'Give part of a name to find.' }],
+      });
+    }
+  });
+
+  it('are described: the name filter, its window and the rule on the NUL character', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const get = (
+      doc.paths as unknown as Record<
+        string,
+        Record<string, { description: string; parameters: Record<string, unknown>[] }>
+      >
+    )['/contacts']?.get;
+    const name = get?.parameters.find((p) => p.name === 'name');
+    expect(name).toMatchObject({
+      in: 'query',
+      schema: { type: 'string', minLength: 1, maxLength: 200 },
+    });
+    expect(String(name?.description)).toContain('letters whatever their case');
+    expect(String(name?.description)).toContain('`%` and `_` are characters, not patterns');
+    expect(get?.description).toContain(
+      'A page filtered by `name`, `tag` or `fields` reads at most',
+    );
+    expect(doc.info.description).toContain(
+      'Text cannot hold the NUL character (U+0000): a request with it anywhere in its query string or body is refused with 422, naming where it is.',
+    );
+  });
+
+  it('find the NUL character wherever a request holds it, and name where, in order', () => {
+    expect(nulCharacterPath({}, undefined)).toBeNull();
+    expect(nulCharacterPath({ limit: '10', name: 'Asha' }, { name: 'Asha' })).toBeNull();
+    // A parameter by its name as sent, the name itself holding it written out.
+    expect(nulCharacterPath({ limit: '10', name: 'a\u0000' }, undefined)).toBe('name');
+    expect(nulCharacterPath({ 'fields[city]': '\u0000' }, undefined)).toBe('fields[city]');
+    expect(nulCharacterPath({ 'a\u0000b': 'x' }, undefined)).toBe('a\\u0000b');
+    // The body by the path validation issues use; the query is read first.
+    expect(nulCharacterPath({}, { phone: '+919800000000', name: 'A\u0000' })).toBe('name');
+    expect(
+      nulCharacterPath({}, { contacts: [{ name: 'ok' }, { fields: { city: 'x\u0000' } }] }),
+    ).toBe('contacts.1.fields.city');
+    expect(nulCharacterPath({}, { fields: { 'ci\u0000ty': 'Pune' } })).toBe('fields.ci\\u0000ty');
+    expect(nulCharacterPath({}, 'a\u0000')).toBe('');
+    expect(nulCharacterPath({}, { a: ['x', 'y\u0000'], b: 'z\u0000' })).toBe('a.1');
+    expect(nulCharacterPath({ q: '\u0000' }, { name: '\u0000' })).toBe('q');
+    // Other control characters, the escape written out as text and other values are kept.
+    expect(
+      nulCharacterPath(
+        { q: 'a\u0001\u001f' },
+        { text: 'a\u0001\u007f b', note: '\\u0000', n: 0, ok: false, gone: null },
+      ),
+    ).toBeNull();
+    // No nesting a body can have exhausts the stack.
+    let deep: unknown = 'x\u0000';
+    for (let i = 0; i < 50_000; i += 1) deep = [deep];
+    expect(nulCharacterPath({}, deep)?.split('.')).toHaveLength(50_000);
+  });
+
+  it('refuse a request holding it with 422, naming where, as the API answers', () => {
+    expect(() => assertNoNulCharacter({ name: 'Asha' }, { name: 'ok' })).not.toThrow();
+    let thrown: unknown;
+    try {
+      assertNoNulCharacter({}, { contacts: [{}, { name: 'B\u0000' }] });
+    } catch (error) {
+      thrown = error;
+    }
+    const answer = apiErrorResponse(thrown, 'req');
+    expect([answer.status, answer.internal, answer.body.error]).toEqual([
+      422,
+      false,
+      {
+        code: 'validation_failed',
+        message: NUL_CHARACTER_MESSAGE,
+        issues: [{ path: 'contacts.1.name', message: NUL_CHARACTER_MESSAGE }],
+      },
+    ]);
+  });
+});
+
+describe('reading campaigns (ADR-125)', () => {
+  const ctx = (scopes: string[]) =>
+    ({
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+
+  it('have their own reading scope, which members who see campaigns grant', () => {
+    expect(API_SCOPE_KEYS).toContain('campaigns.read');
+    expect(API_SCOPE_INFO['campaigns.read']).toMatchObject({
+      label: 'Read campaigns',
+      permission: 'campaigns.read',
+      writes: false,
+    });
+    expect(API_SCOPE_INFO['campaigns.read'].description).toContain(
+      "A key that also reads contacts lists each campaign's recipients and what happened to each. Never members or costs.",
+    );
+  });
+
+  it('take a page and one status, and nothing else', () => {
+    const parse = (query: Record<string, unknown>) =>
+      apiCampaignListQuerySchema.safeParse(query).success;
+    for (const status of CAMPAIGN_STATUSES) expect(parse({ status })).toBe(true);
+    expect(parse({ limit: '100', cursor: 'x' })).toBe(true);
+    expect(parse({ status: 'finished' })).toBe(false);
+    expect(parse({ limit: '0' })).toBe(false);
+    expect(parse({ limit: '101' })).toBe(false);
+    expect(parse({ name: 'Festive' })).toBe(false);
+    expect(apiCampaignListQuerySchema.parse({}).limit).toBe(50);
+  });
+
+  it('are refused before anything is read without the scope, and a bad id is not found', async () => {
+    expect(await code(apiListCampaigns({} as never, ctx(['contacts.read']), {}))).toBe('forbidden');
+    expect(await code(apiGetCampaign({} as never, ctx(['contacts.read']), 'x'))).toBe('forbidden');
+    expect(
+      await code(apiListCampaigns({} as never, ctx(['campaigns.read']), { status: 'x' })),
+    ).toBe('validation_failed');
+    expect(await code(apiGetCampaign({} as never, ctx(['campaigns.read']), 'not-an-id'))).toBe(
+      'not_found',
+    );
+  });
+
+  it('are described: the list with its status filter, the campaign with its results, counts only', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    type Operation = {
+      description: string;
+      parameters: Record<string, unknown>[];
+      responses: Record<string, { content?: Record<string, { schema: unknown }> }>;
+    };
+    const paths = doc.paths as unknown as Record<string, Record<string, Operation>>;
+    const list = paths['/campaigns']?.get;
+    expect(list?.parameters.map((p) => p.name ?? p.$ref)).toEqual(['limit', 'cursor', 'status']);
+    expect(list?.parameters.find((p) => p.name === 'status')).toMatchObject({
+      in: 'query',
+      schema: { enum: [...CAMPAIGN_STATUSES] },
+    });
+    expect(JSON.stringify(list?.responses['200'])).toContain('#/components/schemas/Campaign"');
+    const one = paths['/campaigns/{id}']?.get;
+    expect(JSON.stringify(one?.responses['200'])).toContain('CampaignWithResults');
+    expect(Object.keys(one?.responses ?? {})).toContain('404');
+    expect(one?.description).toContain(
+      'Counts only (GET /campaigns/{id}/recipients lists the recipients): never members or costs.',
+    );
+    const schemas = doc.components.schemas as unknown as Record<
+      string,
+      { properties: Record<string, { description?: string }>; required: string[] }
+    >;
+    expect(schemas.CampaignWithResults?.required).toContain('results');
+    expect(schemas.Campaign?.properties).not.toHaveProperty('results');
+    // Null for a draft: the schema allows null, whatever its description says.
+    expect(schemas.CampaignWithResults?.properties.results).toMatchObject({
+      anyOf: expect.arrayContaining([{ type: 'null' }]),
+    });
+    // Counts only: no recipients, members, costs or the draft's settings.
+    expect(Object.keys(schemas.CampaignWithResults?.properties ?? {}).sort()).toEqual(
+      [...Object.keys(schemas.Campaign?.properties ?? {}), 'results'].sort(),
+    );
+    for (const hidden of ['recipients', 'variables', 'budgetMicros', 'launchedBy', 'segmentId']) {
+      expect(Object.keys(schemas.CampaignWithResults?.properties ?? {})).not.toContain(hidden);
+    }
+    expect(doc.info.description).toContain('read campaigns, their results and their recipients');
+    expect(API_ROUTES).toEqual(
+      expect.arrayContaining([
+        ['get', '/campaigns'],
+        ['get', '/campaigns/{id}'],
+      ]),
+    );
+  });
+});
+
+describe('listing a campaign’s recipients (ADR-127)', () => {
+  const ctx = (scopes: string[]) =>
+    ({
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const id = '0190a000-0000-7000-8000-000000000001';
+
+  it('leave other scopes’ labels out of the scope’s description, so each checkbox has its own name', () => {
+    for (const scope of API_SCOPE_KEYS) {
+      for (const other of API_SCOPE_KEYS.filter((k) => k !== scope)) {
+        expect([scope, API_SCOPE_INFO[scope].description]).not.toEqual([
+          scope,
+          expect.stringContaining(API_SCOPE_INFO[other].label),
+        ]);
+      }
+    }
+  });
+
+  it('name each outcome after the count of the results it lists', () => {
+    const camel = (outcome: string) =>
+      outcome === 'message_canceled'
+        ? 'messagesCanceled'
+        : outcome.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+    const counts = Object.keys(apiCampaignResultsSchema.shape);
+    for (const outcome of RECIPIENT_OUTCOMES) expect(counts).toContain(camel(outcome));
+    // Every count of recipients has its outcome, less the audience (every recipient: no outcome).
+    expect(
+      counts.filter((k) => !['audience', 'skipReasons', 'failureCodes'].includes(k)).sort(),
+    ).toEqual(RECIPIENT_OUTCOMES.map(camel).sort());
+  });
+
+  it('take a page and one outcome, and nothing else', () => {
+    const parse = (query: Record<string, unknown>) =>
+      apiCampaignRecipientQuerySchema.safeParse(query);
+    for (const outcome of RECIPIENT_OUTCOMES) expect(parse({ outcome }).success).toBe(true);
+    expect(parse({ limit: '100', cursor: id }).success).toBe(true);
+    expect(parse({ outcome: 'all' }).success).toBe(false);
+    expect(parse({ outcome: 'clicked' }).success).toBe(false);
+    expect(parse({ limit: '0' }).success).toBe(false);
+    expect(parse({ limit: '101' }).success).toBe(false);
+    expect(parse({ state: 'queued' }).success).toBe(false);
+    expect(parse({ cursor: 'eyJhdCI6IjIwMjYifQ' }).error?.issues[0]).toMatchObject({
+      path: ['cursor'],
+      message: 'Invalid cursor: give the nextCursor of the previous page.',
+    });
+    expect(apiCampaignRecipientQuerySchema.parse({}).limit).toBe(50);
+  });
+
+  it('need both scopes, checked before anything is read, and a bad id is not found', async () => {
+    const list = (scopes: string[], campaignId: string, query: unknown = {}) =>
+      code(apiListCampaignRecipients({} as never, ctx(scopes), campaignId, query));
+    expect(await list(['contacts.read'], id)).toBe('forbidden');
+    expect(await list(['campaigns.read'], id)).toBe('forbidden');
+    await expect(
+      apiListCampaignRecipients({} as never, ctx(['campaigns.read']), id, {}),
+    ).rejects.toThrow('This API key does not have the contacts.read scope.');
+    await expect(
+      apiListCampaignRecipients({} as never, ctx(['contacts.read']), id, {}),
+    ).rejects.toThrow('This API key does not have the campaigns.read scope.');
+    const both = ['campaigns.read', 'contacts.read'];
+    expect(await list(both, 'not-an-id')).toBe('not_found');
+    expect(await list(both, id, { outcome: 'clicked' })).toBe('validation_failed');
+    expect(await list(both, id, { cursor: 'x' })).toBe('validation_failed');
+    // A plan without either scope refuses it, naming the plan.
+    const planless = { ...ctx(both), planScopes: new Set(['campaigns.read']) } as ApiContext;
+    await expect(apiListCampaignRecipients({} as never, planless, id, {})).rejects.toMatchObject({
+      code: 'forbidden',
+      details: { apiReason: 'not_in_plan' },
+    });
+  });
+
+  it('are described: both scopes, the outcomes, the recipient without costs', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    type Operation = {
+      operationId: string;
+      description: string;
+      parameters: Record<string, unknown>[];
+      responses: Record<string, unknown>;
+    };
+    const paths = doc.paths as unknown as Record<string, Record<string, Operation>>;
+    const op = paths['/campaigns/{id}/recipients']?.get;
+    expect(op?.operationId).toBe('listCampaignRecipients');
+    expect(op?.description).toContain('Scope: `campaigns.read`. Also needs `contacts.read`');
+    expect(op?.description).toContain('the API never lists erased contacts');
+    expect(op?.parameters.map((p) => p.name ?? p.$ref)).toEqual([
+      '#/components/parameters/Id',
+      'limit',
+      'cursor',
+      'outcome',
+    ]);
+    expect(op?.parameters.find((p) => p.name === 'outcome')).toMatchObject({
+      in: 'query',
+      schema: { enum: [...RECIPIENT_OUTCOMES] },
+    });
+    expect(JSON.stringify(op?.responses['200'])).toContain(
+      '#/components/schemas/CampaignRecipient"',
+    );
+    expect(Object.keys(op?.responses ?? {})).toEqual(expect.arrayContaining(['403', '404', '422']));
+    const schemas = doc.components.schemas as unknown as Record<
+      string,
+      {
+        properties: Record<
+          string,
+          { properties?: Record<string, unknown>; enum?: string[]; anyOf?: unknown[] }
+        >;
+      }
+    >;
+    const recipient = schemas.CampaignRecipient?.properties ?? {};
+    expect(Object.keys(recipient).sort()).toEqual(
+      [
+        'id',
+        'contact',
+        'state',
+        'skipReason',
+        'message',
+        'queuedAt',
+        'repliedAt',
+        'optedOutAt',
+      ].sort(),
+    );
+    expect(Object.keys(recipient.contact?.properties ?? {}).sort()).toEqual([
+      'id',
+      'name',
+      'phone',
+    ]);
+    expect(recipient.state?.enum).toEqual([...RECIPIENT_STATES]);
+    expect(JSON.stringify(recipient.message)).toContain(JSON.stringify([...MESSAGE_STATUSES]));
+    expect(recipient.message?.anyOf).toEqual(expect.arrayContaining([{ type: 'null' }]));
+    for (const hidden of ['market', 'estimatedCostMicros', 'cost', 'email', 'tags']) {
+      expect(JSON.stringify(schemas.CampaignRecipient)).not.toContain(`"${hidden}"`);
+    }
+    expect(API_ROUTES).toEqual(expect.arrayContaining([['get', '/campaigns/{id}/recipients']]));
+  });
+});
+
+describe('pausing and cancelling campaigns (ADR-128)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const id = '0190a000-0000-7000-8000-000000000001';
+
+  it('have their own writing scope, which members who pause and cancel campaigns grant', () => {
+    expect(API_SCOPE_INFO['campaigns.stop']).toMatchObject({
+      label: 'Pause and cancel campaigns',
+      permission: 'campaigns.send',
+      writes: true,
+    });
+    expect(API_SCOPE_INFO['campaigns.stop'].description).toContain(
+      "Resuming, approving, scheduling and editing stay in the app, under a member's authority.",
+    );
+    // Reading them stays its own scope: stopping does not read results or recipients.
+    expect(API_SCOPE_INFO['campaigns.read'].writes).toBe(false);
+  });
+
+  it('are refused before anything is read: without the scope, outside the plan, while the company is not active, and a bad id is not found', async () => {
+    for (const stop of [apiPauseCampaign, apiCancelCampaign]) {
+      expect(await code(stop({} as never, ctx(['campaigns.read']), id))).toBe('forbidden');
+      await expect(stop({} as never, ctx(['campaigns.read']), id)).rejects.toThrow(
+        'This API key does not have the campaigns.stop scope.',
+      );
+      await expect(
+        stop({} as never, ctx(['campaigns.stop'], 'active', ['campaigns.read']), id),
+      ).rejects.toMatchObject({ code: 'forbidden', details: { apiReason: 'not_in_plan' } });
+      for (const status of ['suspended', 'restricted']) {
+        expect(await code(stop({} as never, ctx(['campaigns.stop'], status), id))).toBe(
+          'tenant_suspended',
+        );
+      }
+      expect(await code(stop({} as never, ctx(['campaigns.stop']), 'not-an-id'))).toBe('not_found');
+    }
+  });
+
+  it('are described: the scope, what each changes and refuses, and the campaign as the answer', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    type Operation = {
+      operationId: string;
+      description: string;
+      parameters: Record<string, unknown>[];
+      requestBody?: unknown;
+      responses: Record<string, unknown>;
+    };
+    const paths = doc.paths as unknown as Record<string, Record<string, Operation>>;
+    const pause = paths['/campaigns/{id}/pause']?.post;
+    const cancel = paths['/campaigns/{id}/cancel']?.post;
+    expect(pause?.operationId).toBe('pauseCampaign');
+    expect(cancel?.operationId).toBe('cancelCampaign');
+    for (const op of [pause, cancel]) {
+      expect(op?.description).toContain('Scope: `campaigns.stop`.');
+      expect(op?.description).toContain('so a retry is harmless');
+      expect(op?.description).toContain('No `Idempotency-Key` is needed.');
+      expect(op?.description).toContain('`campaign.status_changed` webhooks report the change.');
+      expect(op?.parameters.map((p) => p.$ref)).toEqual(['#/components/parameters/Id']);
+      // No body: the call names the campaign and nothing else.
+      expect(op?.requestBody).toBeUndefined();
+      expect(JSON.stringify(op?.responses['200'])).toContain('#/components/schemas/Campaign"');
+      expect(Object.keys(op?.responses ?? {})).toEqual(
+        expect.arrayContaining(['403', '404', '409', '423']),
+      );
+    }
+    expect(pause?.description).toContain('its `pauseReason` is `api`');
+    expect(pause?.description).toContain('Members resume the campaign in the app; a key cannot.');
+    expect(pause?.description).toContain(
+      'A draft, a campaign waiting for approval, a completed and a cancelled one are refused with 409',
+    );
+    expect(cancel?.description).toContain('A draft is refused with 409');
+    expect(cancel?.description).toContain('A cancelled campaign is never resumed.');
+    const responses = paths['/campaigns/{id}/pause']?.post?.responses as Record<
+      string,
+      { description: string }
+    >;
+    expect(responses['409']?.description).toContain(
+      'Pausing or cancelling a campaign: its status does not allow it, and the message names the status.',
+    );
+    expect(doc.info.description).toContain('pause and cancel campaigns');
+    const schemas = doc.components.schemas as unknown as Record<
+      string,
+      { properties: Record<string, { description?: string }> }
+    >;
+    expect(schemas.Campaign?.properties.pauseReason?.description).toContain(
+      'a member paused it (manual), an API key did (api)',
+    );
+    // campaign.status_changed says so too.
+    expect(JSON.stringify(schemas.WebhookCampaignStatusChanged)).toContain(
+      'a member paused it (manual), an API key did (api)',
+    );
+    expect(API_ROUTES).toEqual(
+      expect.arrayContaining([
+        ['post', '/campaigns/{id}/pause'],
+        ['post', '/campaigns/{id}/cancel'],
+      ]),
+    );
   });
 });

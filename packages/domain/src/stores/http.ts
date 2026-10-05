@@ -1,3 +1,4 @@
+import { clipText, parseExternalJson } from '@w360/core';
 import { EgressError, type EgressClient, type EgressMethod } from '@w360/core/egress';
 
 /**
@@ -86,7 +87,8 @@ export async function storeRequest(
   let json: unknown = null;
   if (response.body.length > 0) {
     try {
-      json = JSON.parse(response.body.toString('utf8')) as unknown;
+      // Product, order and customer text keeps any NUL character as U+FFFD (ADR-130).
+      json = parseExternalJson(response.body.toString('utf8'));
     } catch {
       json = null;
     }
@@ -98,7 +100,7 @@ export async function storeRequest(
 export function storeErrorText(json: unknown): string | null {
   const pick = (value: unknown): string | null =>
     typeof value === 'string' && value.trim()
-      ? value.replace(/\s+/g, ' ').trim().slice(0, 200)
+      ? clipText(value.replace(/\s+/g, ' ').trim(), 200)
       : null;
   if (typeof json !== 'object' || json === null) return null;
   const record = json as Record<string, unknown>;

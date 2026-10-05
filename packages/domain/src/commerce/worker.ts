@@ -1,4 +1,4 @@
-import { uuidv7, type Clock, type Keyring } from '@w360/core';
+import { clipText, uuidv7, type Clock, type Keyring } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -842,7 +842,7 @@ async function queueLinkMessage(
     .update(conversations)
     .set({
       lastMessageAt: now,
-      lastMessagePreview: text.slice(0, 200),
+      lastMessagePreview: clipText(text, 200),
       version: sql`${conversations.version} + 1`,
     })
     .where(and(eq(conversations.tenantId, tenantId), eq(conversations.id, conversation.id)));
@@ -900,6 +900,37 @@ export async function processPaymentAccountCheck(
       ),
   );
   return 'done';
+}
+
+/**
+ * Sweep: ends a check of the keys whose job ran out of retries (ADR-111). Keys still being checked
+ * become `failed`, so payment requests say why they are refused and saving the keys again checks
+ * them. Keys saved again since have a check of their own, which the sweep waits for. False when
+ * nothing was left to end.
+ */
+export async function settlePaymentAccountCheck(
+  tx: Tx,
+  tenantId: string,
+  accountId: string,
+  at: Date,
+): Promise<boolean> {
+  const ended = await tx
+    .update(commercePaymentAccounts)
+    .set({
+      status: 'failed',
+      statusError:
+        'Razorpay could not be reached to check the keys after repeated attempts. Save them again to check them.',
+      checkedAt: at,
+    })
+    .where(
+      and(
+        eq(commercePaymentAccounts.tenantId, tenantId),
+        eq(commercePaymentAccounts.id, accountId),
+        eq(commercePaymentAccounts.status, 'checking'),
+      ),
+    )
+    .returning({ id: commercePaymentAccounts.id });
+  return ended.length > 0;
 }
 
 /** Work the minute sweep should signal (active companies only). */

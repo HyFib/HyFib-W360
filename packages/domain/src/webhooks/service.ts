@@ -5,9 +5,13 @@ import { EgressError, parseEgressUrl, type EgressPolicy } from '@w360/core/egres
 import {
   and,
   apiKeys,
+  asc,
+  automationVersions,
+  automations,
   desc,
   eq,
   gt,
+  inArray,
   isNotNull,
   sql,
   users,
@@ -23,11 +27,385 @@ import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import { parseInput } from '../validation';
-import { WEBHOOK_EVENT_KEYS, WEBHOOK_LIMITS, WEBHOOK_REPLAY_PERIODS, webhookHost } from './model';
+import {
+  WEBHOOK_CAMPAIGN_STATUSES,
+  WEBHOOK_CONTACT_PARTS,
+  WEBHOOK_CONVERSATION_STATUSES,
+  WEBHOOK_EVENT_KEYS,
+  WEBHOOK_LIMITS,
+  WEBHOOK_ORDER_STATUSES,
+  WEBHOOK_MESSAGE_STATUSES,
+  WEBHOOK_REPLAY_PERIODS,
+  WEBHOOK_TEMPLATE_STATUSES,
+  webhookHost,
+  webhookTakesAutomationRuns,
+  type WebhookAutomationChoice,
+  type WebhookCampaignStatus,
+  type WebhookContactPart,
+  type WebhookConversationStatus,
+  type WebhookEndpointAutomation,
+  type WebhookMessageStatus,
+  type WebhookOrderStatus,
+  type WebhookTemplateStatus,
+} from './model';
 
 /** Binds an endpoint's secret to its company, the endpoint and the secret's version. */
 export const webhookSecretAad = (tenantId: string, endpointId: string, version: number) =>
   `webhook-secret:${tenantId}:${endpointId}:${version}`;
+
+/** Binds an endpoint's own headers to its company and the endpoint (ADR-118). */
+export const webhookHeadersAad = (tenantId: string, endpointId: string) =>
+  `webhook-headers:${tenantId}:${endpointId}`;
+
+/** A header an endpoint's receiver asks for (ADR-118); the value is a secret. */
+export interface WebhookHeader {
+  name: string;
+  value: string;
+}
+
+const HEADER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,59}$/;
+// Printable ASCII; an empty value is refused by its own message.
+const HEADER_VALUE_RE = /^[\x20-\x7e]*$/;
+/**
+ * Headers HyFib sets on a delivery or that describe its body or connection; with `proxy-*` and
+ * HyFib's own `w360-*`. An endpoint's headers never replace these.
+ */
+const RESERVED_WEBHOOK_HEADERS: ReadonlySet<string> = new Set([
+  'content-type',
+  'content-encoding',
+  'user-agent',
+  'host',
+  'content-length',
+  'transfer-encoding',
+  'connection',
+  'keep-alive',
+  'upgrade',
+  'te',
+  'trailer',
+  'expect',
+  'accept-encoding',
+]);
+
+/** Whether a header name is one an endpoint cannot set. */
+export function reservedWebhookHeader(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (
+    RESERVED_WEBHOOK_HEADERS.has(lower) || lower.startsWith('proxy-') || lower.startsWith('w360-')
+  );
+}
+
+/** The headers an endpoint sends with each delivery: replaces the list it had (ADR-118). */
+export const webhookHeadersSchema = z
+  .array(
+    z
+      .object({
+        name: z
+          .string()
+          .trim()
+          .regex(HEADER_NAME_RE, 'Header names use letters, digits and - (at most 60).')
+          .refine((name) => !reservedWebhookHeader(name), 'HyFib sets this header itself.'),
+        value: z
+          .string()
+          .trim()
+          .min(1, 'Enter the header’s value.')
+          .max(
+            WEBHOOK_LIMITS.headerValueLength,
+            `Header values are limited to ${WEBHOOK_LIMITS.headerValueLength} characters.`,
+          )
+          .regex(
+            HEADER_VALUE_RE,
+            'Header values use printable ASCII characters, without line breaks.',
+          ),
+      })
+      .strict(),
+  )
+  .max(WEBHOOK_LIMITS.headers, `An endpoint can have at most ${WEBHOOK_LIMITS.headers} headers.`)
+  .refine(
+    (headers) => new Set(headers.map((h) => h.name.toLowerCase())).size === headers.length,
+    'Give each header once.',
+  );
+
+/**
+ * The columns that keep an endpoint's headers: the names as written, and names and values sealed
+ * with the keyring, bound to the company and the endpoint. No headers keep nothing sealed.
+ */
+export function sealWebhookHeaders(
+  keyring: Keyring,
+  tenantId: string,
+  endpointId: string,
+  headers: readonly WebhookHeader[],
+): { headerNames: string[]; headersCiphertext: string | null } {
+  if (headers.length === 0) return { headerNames: [], headersCiphertext: null };
+  return {
+    headerNames: headers.map((h) => h.name),
+    headersCiphertext: keyring.encrypt(
+      JSON.stringify(headers.map((h) => [h.name, h.value])),
+      webhookHeadersAad(tenantId, endpointId),
+    ),
+  };
+}
+
+/**
+ * An endpoint's headers, opened for a delivery. Throws when the keyring cannot open them (a key
+ * the platform no longer holds) or they are not what `sealWebhookHeaders` keeps.
+ */
+export function openWebhookHeaders(
+  keyring: Keyring,
+  tenantId: string,
+  endpointId: string,
+  ciphertext: string | null,
+): Record<string, string> {
+  if (ciphertext === null) return {};
+  const pairs: unknown = JSON.parse(
+    keyring.decryptString(ciphertext, webhookHeadersAad(tenantId, endpointId)),
+  );
+  const headers: Record<string, string> = {};
+  if (!Array.isArray(pairs)) throw new Error('Sealed webhook headers are not a list');
+  for (const pair of pairs) {
+    if (
+      !Array.isArray(pair) ||
+      pair.length !== 2 ||
+      typeof pair[0] !== 'string' ||
+      typeof pair[1] !== 'string' ||
+      reservedWebhookHeader(pair[0])
+    ) {
+      throw new Error('Sealed webhook headers hold something other than headers');
+    }
+    headers[pair[0]] = pair[1];
+  }
+  return headers;
+}
+
+/**
+ * The `message.status` statuses an endpoint takes (ADR-119), in the order a message reaches them;
+ * null takes every status, including statuses added later.
+ */
+export const webhookMessageStatusesSchema = z
+  .array(z.enum(WEBHOOK_MESSAGE_STATUSES, { error: 'Choose message statuses from the list.' }))
+  .min(1, 'Choose at least one message status, or take every status.')
+  .max(WEBHOOK_MESSAGE_STATUSES.length, 'Give each message status once.')
+  .transform((chosen) => WEBHOOK_MESSAGE_STATUSES.filter((status) => chosen.includes(status)))
+  .nullable();
+
+export const WEBHOOK_STATUSES_NEED_THE_EVENT =
+  'Choose message statuses only for an endpoint that receives Message status.';
+
+/**
+ * The statuses an endpoint keeps after it is added or changed: every status (null) unless it takes
+ * `message.status`; then those given, or else the ones it had.
+ */
+export function webhookMessageStatusesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookMessageStatus[] | null | undefined,
+  current: readonly WebhookMessageStatus[] | null,
+): WebhookMessageStatus[] | null {
+  if (!eventTypes.includes('message.status')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * The statuses a campaign reaches that an endpoint takes as `campaign.status_changed` (ADR-146), in
+ * the order a campaign reaches them; null takes every status.
+ */
+export const webhookCampaignStatusesSchema = z
+  .array(z.enum(WEBHOOK_CAMPAIGN_STATUSES, { error: 'Choose campaign statuses from the list.' }))
+  .min(1, 'Choose at least one campaign status, or take every status.')
+  .max(WEBHOOK_CAMPAIGN_STATUSES.length, 'Give each campaign status once.')
+  .transform((chosen) => WEBHOOK_CAMPAIGN_STATUSES.filter((status) => chosen.includes(status)))
+  .nullable();
+
+export const WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT =
+  'Choose campaign statuses only for an endpoint that receives Campaign status.';
+
+/**
+ * The campaign statuses an endpoint keeps after it is added or changed: every status (null) unless
+ * it takes `campaign.status_changed`; then those given, or else the ones it had.
+ */
+export function webhookCampaignStatusesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookCampaignStatus[] | null | undefined,
+  current: readonly WebhookCampaignStatus[] | null,
+): WebhookCampaignStatus[] | null {
+  if (!eventTypes.includes('campaign.status_changed')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * The statuses an order reaches that an endpoint takes as `order.status_changed` (ADR-147), in the
+ * order an order reaches them; null takes every status.
+ */
+export const webhookOrderStatusesSchema = z
+  .array(z.enum(WEBHOOK_ORDER_STATUSES, { error: 'Choose order statuses from the list.' }))
+  .min(1, 'Choose at least one order status, or take every status.')
+  .max(WEBHOOK_ORDER_STATUSES.length, 'Give each order status once.')
+  .transform((chosen) => WEBHOOK_ORDER_STATUSES.filter((status) => chosen.includes(status)))
+  .nullable();
+
+export const WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT =
+  'Choose order statuses only for an endpoint that receives Order status.';
+
+/**
+ * The order statuses an endpoint keeps after it is added or changed: every status (null) unless it
+ * takes `order.status_changed`; then those given, or else the ones it had.
+ */
+export function webhookOrderStatusesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookOrderStatus[] | null | undefined,
+  current: readonly WebhookOrderStatus[] | null,
+): WebhookOrderStatus[] | null {
+  if (!eventTypes.includes('order.status_changed')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * The template statuses an endpoint takes as `template.status_changed` (ADR-148), in the order
+ * Templates lists them; null takes every status.
+ */
+export const webhookTemplateStatusesSchema = z
+  .array(z.enum(WEBHOOK_TEMPLATE_STATUSES, { error: 'Choose template statuses from the list.' }))
+  .min(1, 'Choose at least one template status, or take every status.')
+  .max(WEBHOOK_TEMPLATE_STATUSES.length, 'Give each template status once.')
+  .transform((chosen) => WEBHOOK_TEMPLATE_STATUSES.filter((status) => chosen.includes(status)))
+  .nullable();
+
+export const WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT =
+  'Choose template statuses only for an endpoint that receives Template status.';
+
+/**
+ * The template statuses an endpoint keeps after it is added or changed: every status (null) unless
+ * it takes `template.status_changed`; then those given, or else the ones it had.
+ */
+export function webhookTemplateStatusesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookTemplateStatus[] | null | undefined,
+  current: readonly WebhookTemplateStatus[] | null,
+): WebhookTemplateStatus[] | null {
+  if (!eventTypes.includes('template.status_changed')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * The statuses a conversation reaches that an endpoint takes as `conversation.status_changed`
+ * (ADR-149), in the order the inbox lists them; null takes every status.
+ */
+export const webhookConversationStatusesSchema = z
+  .array(
+    z.enum(WEBHOOK_CONVERSATION_STATUSES, { error: 'Choose conversation statuses from the list.' }),
+  )
+  .min(1, 'Choose at least one conversation status, or take every status.')
+  .max(WEBHOOK_CONVERSATION_STATUSES.length, 'Give each conversation status once.')
+  .transform((chosen) => WEBHOOK_CONVERSATION_STATUSES.filter((status) => chosen.includes(status)))
+  .nullable();
+
+export const WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT =
+  'Choose conversation statuses only for an endpoint that receives Conversation status.';
+
+/**
+ * The conversation statuses an endpoint keeps after it is added or changed: every status (null)
+ * unless it takes `conversation.status_changed`; then those given, or else the ones it had.
+ */
+export function webhookConversationStatusesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookConversationStatus[] | null | undefined,
+  current: readonly WebhookConversationStatus[] | null,
+): WebhookConversationStatus[] | null {
+  if (!eventTypes.includes('conversation.status_changed')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * The parts of a contact whose change an endpoint takes as `contact.updated` (ADR-123), in the
+ * order Settings lists them; null takes every change, including parts added later.
+ */
+export const webhookContactPartsSchema = z
+  .array(z.enum(WEBHOOK_CONTACT_PARTS, { error: 'Choose contact parts from the list.' }))
+  .min(1, 'Choose at least one contact part, or take every change.')
+  .max(WEBHOOK_CONTACT_PARTS.length, 'Give each contact part once.')
+  .transform((chosen) => WEBHOOK_CONTACT_PARTS.filter((part) => chosen.includes(part)))
+  .nullable();
+
+export const WEBHOOK_PARTS_NEED_THE_EVENT =
+  'Choose contact parts only for an endpoint that receives Contact changed.';
+
+/**
+ * The parts an endpoint keeps after it is added or changed: every change (null) unless it takes
+ * `contact.updated`; then those given, or else the ones it had.
+ */
+export function webhookContactPartsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookContactPart[] | null | undefined,
+  current: readonly WebhookContactPart[] | null,
+): WebhookContactPart[] | null {
+  if (!eventTypes.includes('contact.updated')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * The automations whose runs an endpoint takes as `automation.run_started` and
+ * `automation.run_ended` (ADR-145), each once; null takes every automation, including automations
+ * published later.
+ */
+export const webhookAutomationIdsSchema = z
+  .array(z.uuid({ error: 'Choose automations from the list.' }))
+  .min(1, 'Choose at least one automation, or take every automation.')
+  .max(WEBHOOK_LIMITS.automations, `Choose at most ${WEBHOOK_LIMITS.automations} automations.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS =
+  'Choose automations only for an endpoint that receives Automation started or Automation ended.';
+
+export const WEBHOOK_AUTOMATIONS_NOT_PUBLISHED =
+  'Choose automations of this company that have been published.';
+
+/**
+ * The automations an endpoint keeps after it is added or changed: every automation (null) unless it
+ * takes an automation run event; then those given, or else the ones it had.
+ */
+export function webhookAutomationIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesAutomationRuns(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses automations given for an endpoint unless each is the company's and has a published
+ * version (ADR-145). Such an automation cannot be deleted (its versions keep it), only archived, so
+ * a list never names an automation that is gone. `tx` is in the company's scope.
+ */
+export async function assertWebhookAutomations(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+): Promise<void> {
+  if (!ids || ids.length === 0) return;
+  const rows = await tx
+    .selectDistinct({ id: automationVersions.automationId })
+    .from(automationVersions)
+    .where(
+      and(
+        eq(automationVersions.tenantId, tenantId),
+        inArray(automationVersions.automationId, [...ids]),
+        eq(automationVersions.kind, 'published'),
+      ),
+    );
+  const published = new Set(rows.map((r) => r.id));
+  const index = ids.findIndex((id) => !published.has(id));
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_AUTOMATIONS_NOT_PUBLISHED, {
+    issues: [{ path: `automationIds.${index}`, message: WEBHOOK_AUTOMATIONS_NOT_PUBLISHED }],
+  });
+}
 
 /** A new signing secret: `whsec_` and 32 random bytes. */
 export function generateWebhookSecret(): string {
@@ -39,7 +417,7 @@ export const webhookEventTypesSchema = z
   .min(1, 'Choose at least one event')
   .transform((chosen) => WEBHOOK_EVENT_KEYS.filter((e) => chosen.includes(e)));
 
-const endpointSchema = z.object({
+const endpointFields = z.object({
   url: z
     .string({ error: 'Enter the endpoint URL' })
     .trim()
@@ -52,9 +430,96 @@ const endpointSchema = z.object({
     .optional()
     .default(''),
   eventTypes: webhookEventTypesSchema,
+  /** Given, the endpoint's headers become these; left out, a change keeps them. */
+  headers: webhookHeadersSchema.optional(),
+  /** Given, the `message.status` statuses it takes (null: every status); left out, they stay. */
+  messageStatuses: webhookMessageStatusesSchema.optional(),
+  /**
+   * Given, the contact parts it takes as `contact.updated` (null: every change); left out, they
+   * stay.
+   */
+  contactParts: webhookContactPartsSchema.optional(),
+  /**
+   * Given, the automations whose runs it takes (null: every automation, ADR-145); left out, they
+   * stay.
+   */
+  automationIds: webhookAutomationIdsSchema.optional(),
+  /**
+   * Given, the campaign statuses it takes (null: every status, ADR-146); left out, they stay.
+   */
+  campaignStatuses: webhookCampaignStatusesSchema.optional(),
+  /** Given, the order statuses it takes (null: every status, ADR-147); left out, they stay. */
+  orderStatuses: webhookOrderStatusesSchema.optional(),
+  /** Given, the template statuses it takes (null: every status, ADR-148); left out, they stay. */
+  templateStatuses: webhookTemplateStatusesSchema.optional(),
+  /**
+   * Given, the conversation statuses it takes (null: every status, ADR-149); left out, they stay.
+   */
+  conversationStatuses: webhookConversationStatusesSchema.optional(),
 });
+/** Statuses are chosen only for an endpoint that takes `message.status`. */
+const statusesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; messageStatuses?: unknown }) =>
+    !data.messageStatuses || data.eventTypes.includes('message.status'),
+  options: { path: ['messageStatuses'], message: WEBHOOK_STATUSES_NEED_THE_EVENT },
+};
+/** Contact parts are chosen only for an endpoint that takes `contact.updated` (ADR-123). */
+const partsNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; contactParts?: unknown }) =>
+    !data.contactParts || data.eventTypes.includes('contact.updated'),
+  options: { path: ['contactParts'], message: WEBHOOK_PARTS_NEED_THE_EVENT },
+};
+/** Automations are chosen only for an endpoint that takes automation runs (ADR-145). */
+const automationsNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; automationIds?: unknown }) =>
+    !data.automationIds || webhookTakesAutomationRuns(data.eventTypes),
+  options: { path: ['automationIds'], message: WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS },
+};
+/** Campaign statuses are chosen only for an endpoint that takes campaign changes (ADR-146). */
+const campaignStatusesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; campaignStatuses?: unknown }) =>
+    !data.campaignStatuses || data.eventTypes.includes('campaign.status_changed'),
+  options: { path: ['campaignStatuses'], message: WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT },
+};
+/** Order statuses are chosen only for an endpoint that takes order changes (ADR-147). */
+const orderStatusesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; orderStatuses?: unknown }) =>
+    !data.orderStatuses || data.eventTypes.includes('order.status_changed'),
+  options: { path: ['orderStatuses'], message: WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT },
+};
+/** Template statuses are chosen only for an endpoint that takes template changes (ADR-148). */
+const templateStatusesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; templateStatuses?: unknown }) =>
+    !data.templateStatuses || data.eventTypes.includes('template.status_changed'),
+  options: { path: ['templateStatuses'], message: WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT },
+};
+/** Conversation statuses are chosen only for an endpoint that takes their changes (ADR-149). */
+const conversationStatusesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; conversationStatuses?: unknown }) =>
+    !data.conversationStatuses || data.eventTypes.includes('conversation.status_changed'),
+  options: {
+    path: ['conversationStatuses'],
+    message: WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
+  },
+};
+const endpointSchema = endpointFields
+  .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
+  .refine(partsNeedTheEvent.check, partsNeedTheEvent.options)
+  .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options)
+  .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
+  .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
+  .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
+  .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options);
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
-const updateSchema = endpointSchema.extend({ endpointId: z.uuid() });
+const updateSchema = endpointFields
+  .extend({ endpointId: z.uuid() })
+  .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
+  .refine(partsNeedTheEvent.check, partsNeedTheEvent.options)
+  .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options)
+  .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
+  .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
+  .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
+  .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
 const replayFailedSchema = endpointIdSchema.extend({
@@ -78,6 +543,25 @@ export interface WebhookEndpointView {
   secretVersion: number;
   /** Until when the previous secret also signs; null when it no longer does. */
   previousSecretExpiresAt: Date | null;
+  /** The names of the endpoint's own headers (ADR-118); their values are never shown. */
+  headerNames: string[];
+  /** The `message.status` statuses it takes (ADR-119); null takes every status. */
+  messageStatuses: WebhookMessageStatus[] | null;
+  /** The contact parts it takes as `contact.updated` (ADR-123); null takes every change. */
+  contactParts: WebhookContactPart[] | null;
+  /**
+   * The automations whose runs it takes (ADR-145), as stored, with their names and whether they
+   * are archived; null takes every automation.
+   */
+  automations: WebhookEndpointAutomation[] | null;
+  /** The campaign statuses it takes (ADR-146); null takes every status. */
+  campaignStatuses: WebhookCampaignStatus[] | null;
+  /** The order statuses it takes (ADR-147); null takes every status. */
+  orderStatuses: WebhookOrderStatus[] | null;
+  /** The template statuses it takes (ADR-148); null takes every status. */
+  templateStatuses: WebhookTemplateStatus[] | null;
+  /** The conversation statuses it takes (ADR-149); null takes every status. */
+  conversationStatuses: WebhookConversationStatus[] | null;
   createdAt: Date;
   /** The member who added the endpoint in settings (null once their account is gone). */
   createdBy: string | null;
@@ -152,6 +636,14 @@ export async function lockWebhookEndpoint(
       state: webhookEndpoints.state,
       secretVersion: webhookEndpoints.secretVersion,
       secretCiphertext: webhookEndpoints.secretCiphertext,
+      eventTypes: webhookEndpoints.eventTypes,
+      messageStatuses: webhookEndpoints.messageStatuses,
+      contactParts: webhookEndpoints.contactParts,
+      automationIds: webhookEndpoints.automationIds,
+      campaignStatuses: webhookEndpoints.campaignStatuses,
+      orderStatuses: webhookEndpoints.orderStatuses,
+      templateStatuses: webhookEndpoints.templateStatuses,
+      conversationStatuses: webhookEndpoints.conversationStatuses,
     })
     .from(webhookEndpoints)
     .where(
@@ -183,6 +675,14 @@ export async function insertWebhookEndpoint(
     url: string;
     description: string | null;
     eventTypes: WebhookEventType[];
+    headers: readonly WebhookHeader[];
+    messageStatuses: WebhookMessageStatus[] | null;
+    contactParts: WebhookContactPart[] | null;
+    automationIds: string[] | null;
+    campaignStatuses: WebhookCampaignStatus[] | null;
+    orderStatuses: WebhookOrderStatus[] | null;
+    templateStatuses: WebhookTemplateStatus[] | null;
+    conversationStatuses: WebhookConversationStatus[] | null;
     creator: WebhookEndpointCreator;
   },
 ): Promise<{ id: string; secret: string }> {
@@ -206,6 +706,14 @@ export async function insertWebhookEndpoint(
     description: input.description,
     eventTypes: input.eventTypes,
     secretCiphertext: keyring.encrypt(secret, webhookSecretAad(tenantId, id, 1)),
+    ...sealWebhookHeaders(keyring, tenantId, id, input.headers),
+    messageStatuses: input.messageStatuses,
+    contactParts: input.contactParts,
+    automationIds: input.automationIds,
+    campaignStatuses: input.campaignStatuses,
+    orderStatuses: input.orderStatuses,
+    templateStatuses: input.templateStatuses,
+    conversationStatuses: input.conversationStatuses,
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
   });
@@ -490,6 +998,14 @@ export function createWebhooksService(deps: {
               lastFailureAt: webhookEndpoints.lastFailureAt,
               secretVersion: webhookEndpoints.secretVersion,
               previousSecretExpiresAt: webhookEndpoints.previousSecretExpiresAt,
+              headerNames: webhookEndpoints.headerNames,
+              messageStatuses: webhookEndpoints.messageStatuses,
+              contactParts: webhookEndpoints.contactParts,
+              automationIds: webhookEndpoints.automationIds,
+              campaignStatuses: webhookEndpoints.campaignStatuses,
+              orderStatuses: webhookEndpoints.orderStatuses,
+              templateStatuses: webhookEndpoints.templateStatuses,
+              conversationStatuses: webhookEndpoints.conversationStatuses,
               createdAt: webhookEndpoints.createdAt,
               createdBy: users.name,
               keyName: apiKeys.name,
@@ -520,6 +1036,22 @@ export function createWebhooksService(deps: {
               ),
             )
             .groupBy(webhookDeliveries.endpointId, webhookDeliveries.state);
+          // The names of the automations endpoints chose (ADR-145).
+          const chosen = [...new Set(rows.flatMap((r) => r.automationIds ?? []))];
+          const named =
+            chosen.length === 0
+              ? []
+              : await tx
+                  .select({
+                    id: automations.id,
+                    name: automations.name,
+                    status: automations.status,
+                  })
+                  .from(automations)
+                  .where(
+                    and(eq(automations.tenantId, ctx.tenant.id), inArray(automations.id, chosen)),
+                  );
+          const byId = new Map(named.map((a) => [a.id, a]));
           return rows.map((r) => {
             const recent: Record<WebhookDeliveryState, number> = {
               pending: 0,
@@ -529,15 +1061,60 @@ export function createWebhooksService(deps: {
             };
             for (const c of counts) if (c.endpointId === r.id) recent[c.state] = c.n;
             const previousSigns = r.previousSecretExpiresAt && r.previousSecretExpiresAt > now;
-            const { keyName, keyPrefix, ...endpoint } = r;
+            const { keyName, keyPrefix, automationIds, ...endpoint } = r;
             return {
               ...endpoint,
+              automations: automationIds
+                ? automationIds.map((id) => {
+                    const automation = byId.get(id);
+                    return {
+                      id,
+                      name: automation?.name ?? 'Unknown automation',
+                      archived: automation?.status === 'archived',
+                    };
+                  })
+                : null,
               createdByKey: keyName && keyPrefix ? { name: keyName, keyPrefix } : null,
               previousSecretExpiresAt: previousSigns ? r.previousSecretExpiresAt : null,
               recent,
             };
           });
         },
+        { accessMode: 'read only' },
+      );
+    },
+
+    /**
+     * The automations an endpoint can choose to take the runs of (ADR-145): the company's
+     * automations with a published version, by name. Archived ones are listed too, so a list that
+     * holds one is shown and kept.
+     */
+    async automationChoices(ctx: TenantContext): Promise<WebhookAutomationChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      return db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({ id: automations.id, name: automations.name, status: automations.status })
+            .from(automations)
+            .where(
+              and(
+                eq(automations.tenantId, ctx.tenant.id),
+                inArray(
+                  automations.id,
+                  tx
+                    .select({ id: automationVersions.automationId })
+                    .from(automationVersions)
+                    .where(
+                      and(
+                        eq(automationVersions.tenantId, ctx.tenant.id),
+                        eq(automationVersions.kind, 'published'),
+                      ),
+                    ),
+                ),
+              ),
+            )
+            .orderBy(asc(automations.name), asc(automations.id)),
         { accessMode: 'read only' },
       );
     },
@@ -549,10 +1126,43 @@ export function createWebhooksService(deps: {
       const data = parseInput(endpointSchema, input);
       const { url, host } = checkedWebhookUrl(data.url, deps.egressPolicy);
       return db.run(ctx.scope, async (tx) => {
+        const headers = data.headers ?? [];
+        const messageStatuses = webhookMessageStatusesFor(
+          data.eventTypes,
+          data.messageStatuses,
+          null,
+        );
+        const contactParts = webhookContactPartsFor(data.eventTypes, data.contactParts, null);
+        const automationIds = webhookAutomationIdsFor(data.eventTypes, data.automationIds, null);
+        await assertWebhookAutomations(tx, ctx.tenant.id, automationIds);
+        const campaignStatuses = webhookCampaignStatusesFor(
+          data.eventTypes,
+          data.campaignStatuses,
+          null,
+        );
+        const orderStatuses = webhookOrderStatusesFor(data.eventTypes, data.orderStatuses, null);
+        const templateStatuses = webhookTemplateStatusesFor(
+          data.eventTypes,
+          data.templateStatuses,
+          null,
+        );
+        const conversationStatuses = webhookConversationStatusesFor(
+          data.eventTypes,
+          data.conversationStatuses,
+          null,
+        );
         const { id, secret } = await insertWebhookEndpoint(tx, keyring, ctx.tenant.id, {
           url,
           description: data.description || null,
           eventTypes: data.eventTypes,
+          headers,
+          messageStatuses,
+          contactParts,
+          automationIds,
+          campaignStatuses,
+          orderStatuses,
+          templateStatuses,
+          conversationStatuses,
           creator: { userId: ctx.user.id },
         });
         await recordAudit(
@@ -562,7 +1172,18 @@ export function createWebhooksService(deps: {
             action: 'webhook.endpoint_created',
             subjectType: 'webhook_endpoint',
             subjectId: id,
-            metadata: { host, eventTypes: data.eventTypes },
+            metadata: {
+              host,
+              eventTypes: data.eventTypes,
+              ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
+              ...(messageStatuses ? { messageStatuses } : {}),
+              ...(contactParts ? { contactParts } : {}),
+              ...(automationIds ? { automationIds } : {}),
+              ...(campaignStatuses ? { campaignStatuses } : {}),
+              ...(orderStatuses ? { orderStatuses } : {}),
+              ...(templateStatuses ? { templateStatuses } : {}),
+              ...(conversationStatuses ? { conversationStatuses } : {}),
+            },
           },
           meta,
         );
@@ -576,13 +1197,62 @@ export function createWebhooksService(deps: {
       const data = parseInput(updateSchema, input);
       const { url, host } = checkedWebhookUrl(data.url, deps.egressPolicy);
       await db.run(ctx.scope, async (tx) => {
-        await lockWebhookEndpoint(tx, ctx.tenant.id, data.endpointId);
+        const endpoint = await lockWebhookEndpoint(tx, ctx.tenant.id, data.endpointId);
+        const messageStatuses = webhookMessageStatusesFor(
+          data.eventTypes,
+          data.messageStatuses,
+          endpoint.messageStatuses,
+        );
+        const contactParts = webhookContactPartsFor(
+          data.eventTypes,
+          data.contactParts,
+          endpoint.contactParts,
+        );
+        const automationIds = webhookAutomationIdsFor(
+          data.eventTypes,
+          data.automationIds,
+          endpoint.automationIds,
+        );
+        // Only a list given now is checked: the automations kept were checked when chosen.
+        if (data.automationIds !== undefined) {
+          await assertWebhookAutomations(tx, ctx.tenant.id, automationIds);
+        }
+        const campaignStatuses = webhookCampaignStatusesFor(
+          data.eventTypes,
+          data.campaignStatuses,
+          endpoint.campaignStatuses,
+        );
+        const orderStatuses = webhookOrderStatusesFor(
+          data.eventTypes,
+          data.orderStatuses,
+          endpoint.orderStatuses,
+        );
+        const templateStatuses = webhookTemplateStatusesFor(
+          data.eventTypes,
+          data.templateStatuses,
+          endpoint.templateStatuses,
+        );
+        const conversationStatuses = webhookConversationStatusesFor(
+          data.eventTypes,
+          data.conversationStatuses,
+          endpoint.conversationStatuses,
+        );
         await tx
           .update(webhookEndpoints)
           .set({
             url,
             description: data.description || null,
             eventTypes: data.eventTypes,
+            messageStatuses,
+            contactParts,
+            automationIds,
+            campaignStatuses,
+            orderStatuses,
+            templateStatuses,
+            conversationStatuses,
+            ...(data.headers
+              ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
+              : {}),
             updatedAt: clock.now(),
           })
           .where(
@@ -598,7 +1268,18 @@ export function createWebhooksService(deps: {
             action: 'webhook.endpoint_updated',
             subjectType: 'webhook_endpoint',
             subjectId: data.endpointId,
-            metadata: { host, eventTypes: data.eventTypes },
+            metadata: {
+              host,
+              eventTypes: data.eventTypes,
+              ...(data.headers ? { headers: data.headers.map((h) => h.name) } : {}),
+              ...(messageStatuses ? { messageStatuses } : {}),
+              ...(contactParts ? { contactParts } : {}),
+              ...(automationIds ? { automationIds } : {}),
+              ...(campaignStatuses ? { campaignStatuses } : {}),
+              ...(orderStatuses ? { orderStatuses } : {}),
+              ...(templateStatuses ? { templateStatuses } : {}),
+              ...(conversationStatuses ? { conversationStatuses } : {}),
+            },
           },
           meta,
         );

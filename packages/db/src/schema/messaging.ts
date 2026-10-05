@@ -4,12 +4,12 @@ import {
   customType,
   doublePrecision,
   integer,
-  jsonb,
   smallint,
   text,
   timestamp,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { jsonb } from './columns';
 import { appSchema } from './tenancy';
 import { opsSchema } from './ops';
 
@@ -47,6 +47,21 @@ export const whatsappAccounts = appSchema.table('whatsapp_accounts', {
   connectedByUserId: text('connected_by_user_id'),
   templatesSyncRequestedAt: tz('templates_sync_requested_at'),
   templatesSyncedAt: tz('templates_synced_at'),
+  /** The access checks of ADR-137 (migration 0104). */
+  tokenCheckAttemptedAt: tz('token_check_attempted_at'),
+  tokenCheckRequestedAt: tz('token_check_requested_at'),
+  tokenCheckError: text('token_check_error'),
+  tokenExpiresAt: tz('token_expires_at'),
+  tokenExpiryRemindedAt: tz('token_expiry_reminded_at'),
+  tokenProblem: text('token_problem', {
+    enum: ['invalid', 'other_app', 'missing_permission', 'account_not_shared'],
+  }),
+  tokenProblemAt: tz('token_problem_at'),
+  /** The app's webhook subscription to the account (ADR-138). */
+  webhooksCheckedAt: tz('webhooks_checked_at'),
+  webhooksCheckError: text('webhooks_check_error'),
+  webhooksMissingSince: tz('webhooks_missing_since'),
+  webhooksRestoredAt: tz('webhooks_restored_at'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
@@ -223,6 +238,17 @@ export const messages = appSchema.table('messages', {
   /** The API key that sent it (sender_type 'api', migration 0024). */
   apiKeyId: uuid('api_key_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
+});
+
+/**
+ * Each message's latest change (migration 0093, ADR-116): the transaction that last changed how the
+ * API describes it. Only the trigger on `app.messages` writes it; keys read it in order.
+ */
+export const messageChanges = appSchema.table('message_changes', {
+  id: bigint('id', { mode: 'bigint' }).notNull(),
+  tenantId: uuid('tenant_id').notNull(),
+  messageId: uuid('message_id').notNull(),
+  xact: xid8('xact').notNull(),
 });
 
 export const messageStatusEvents = appSchema.table('message_status_events', {
