@@ -1249,6 +1249,101 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
   });
 
+  it('choose the WhatsApp numbers whose events an endpoint receives, kept by changes that leave them out and cleared with the events (ADR-170)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const main = c.channelAccountId;
+    const outlet = (await fx.addNumber(c, { phone: '+91 90000 54321', name: 'Outlet' }))
+      .channelAccountId;
+    const elsewhere = (await fx.company()).channelAccountId;
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Numbers need an event that happens on one, at least one, each an id of the company's
+    // numbers (named by place).
+    const refusals = [
+      [['consent.changed', 'contact.created', 'template.status_changed'], [main], 'channelIds'],
+      [['message.received'], [], 'channelIds'],
+      [['message.received'], [main, 'outlet'], 'channelIds.1'],
+      [['order.received'], [main, elsewhere], 'channelIds.1'],
+      [['campaign.status_changed'], [uuidv7()], 'channelIds.0'],
+    ] as const;
+    for (const [index, [events, channelIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, channelIds },
+            idem(`numbers-bad-${index}`, JSON.stringify(channelIds)),
+          ),
+        ),
+        JSON.stringify(channelIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'numbers-1', {
+      url: receiverUrl(),
+      events: ['message.received', 'contact.created'],
+      channelIds: [outlet, main.toUpperCase(), outlet],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.channelIds).toEqual([outlet, main]);
+    expect((await api().get(key.ctx, id)).channelIds).toEqual([outlet, main]);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ channelIds: [outlet, main] });
+    // Settings names them.
+    const owner = await fx.ctx(c, c.owner);
+    expect((await settings().list(owner)).find((e) => e.id === id)?.channels).toEqual([
+      { id: outlet, label: '+91 90000 54321 · Outlet', status: 'active' },
+      { id: main, label: '+91 90000 00000', status: 'active' },
+    ]);
+
+    expect(await api().update(key.ctx, id, { description: 'Outlet' })).toMatchObject({
+      channelIds: [outlet, main],
+    });
+    expect(await api().update(key.ctx, id, { channelIds: [outlet] })).toMatchObject({
+      channelIds: [outlet],
+    });
+    const updates = await fx.query<{ metadata: { channelIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.channelIds)).toEqual([[outlet, main], [outlet]]);
+    // Any event of a number keeps the list; events of none clear it.
+    expect(
+      await api().update(key.ctx, id, { events: ['conversation.team_changed'] }),
+    ).toMatchObject({ channelIds: [outlet] });
+    expect(await api().update(key.ctx, id, { events: ['contact.created'] })).toMatchObject({
+      events: ['contact.created'],
+      channelIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { channelIds: [main] }))).toMatchObject({
+      path: 'channelIds',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['automation.run_ended'], channelIds: [main] }),
+    ).toMatchObject({ channelIds: [main] });
+    // A list given again is checked again, changing nothing when it is refused.
+    expect(await issueOf(api().update(key.ctx, id, { channelIds: [elsewhere] }))).toMatchObject({
+      path: 'channelIds.0',
+    });
+    expect((await api().get(key.ctx, id)).channelIds).toEqual([main]);
+    expect(await api().update(key.ctx, id, { channelIds: null })).toMatchObject({
+      channelIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { channelIds: [] }))).toMatchObject({
+      path: 'channelIds',
+    });
+  });
+
   it('refuse keys without the scope, suspended and restricted companies, bad input, addresses the egress guard refuses and an eleventh endpoint, changing nothing', async () => {
     const c = await fx.company();
     const key = await apiKey(c, ['webhooks.manage']);

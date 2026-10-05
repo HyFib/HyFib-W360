@@ -115,8 +115,8 @@ const contactsService = () => createContactsService({ db: fx.dbs.app, clock: sys
 /**
  * An endpoint of the company taking `eventTypes` (and only the contact parts given, ADR-123, the
  * runs of the automations given, ADR-145, the campaign statuses given, ADR-146, the order statuses
- * given, ADR-147, the conversation statuses given, ADR-149, and the ends of runs given, ADR-151), on
- * a path of the receiver of its own.
+ * given, ADR-147, the conversation statuses given, ADR-149, the ends of runs given, ADR-151, and the
+ * events of the numbers given, ADR-170), on a path of the receiver of its own.
  */
 async function addEndpoint(
   c: Company,
@@ -127,6 +127,7 @@ async function addEndpoint(
   orderStatuses: string[] | null = null,
   conversationStatuses: string[] | null = null,
   runEndStatuses: string[] | null = null,
+  channelIds: string[] | null = null,
 ) {
   const path = `/ok/${randomBytes(6).toString('hex')}`;
   const owner = await fx.ctx(c, c.owner);
@@ -139,9 +140,27 @@ async function addEndpoint(
     orderStatuses,
     conversationStatuses,
     runEndStatuses,
+    channelIds,
   });
   return { ...created, path };
 }
+
+/** An endpoint of the company taking `eventTypes` from the numbers given only (ADR-170). */
+const addNumberEndpoint = (c: Company, eventTypes: WebhookEventType[], channelIds: string[]) =>
+  addEndpoint(c, eventTypes, null, null, null, null, null, null, channelIds);
+
+/**
+ * The bodies the receiver got on a path, as [type, the id of what changed, the number it happened
+ * on] (ADR-170), sorted. `subject` names the part of the payload that changed.
+ */
+const numbersAt = (path: string, subject: 'conversation' | 'run' | 'order' | 'campaign') =>
+  bodiesAt(path)
+    .map((b) => [
+      b.type,
+      (b.data[subject] as { id: string }).id,
+      (b.data.channel as { id: string } | null)?.id ?? null,
+    ])
+    .sort();
 
 /** Delivers what is due for the company through the egress client, names resolving locally. */
 async function deliverDue(c: Company) {
@@ -567,6 +586,63 @@ describe('conversation events', () => {
       assigneeId: agent.membership.id,
       teamId: support,
     });
+  });
+});
+
+describe('conversation events on chosen numbers (ADR-170)', () => {
+  it('sends an endpoint that names numbers only the changes of conversations on them, and the events stay as they were stored', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const outlet = await fx.addNumber(c, { phone: '+91 90000 54321' });
+    const types: WebhookEventType[] = [
+      'conversation.status_changed',
+      'conversation.assignment_changed',
+      'conversation.team_changed',
+    ];
+    const onMain = await addNumberEndpoint(c, types, [c.channelAccountId]);
+    const onOutlet = await addNumberEndpoint(c, types, [outlet.channelAccountId]);
+    const { teamId: sales } = await createTeamsService({
+      db: fx.dbs.app,
+      clock: systemClock,
+    }).createTeam(owner, { name: 'Sales' });
+    const agents = await membershipOf(c, c.agent.id);
+    // A conversation on the first number resolved, given to a member and moved to a team: one
+    // event of each, for the first number's endpoint.
+    const { conversation_id: main } = await inbound(c, waId(), 'Hello');
+    await setStatus(c, main, 'resolved');
+    await assign(c, main, agents);
+    await inbox().setTeam(owner, {
+      conversationId: main,
+      teamId: sales,
+      expectedVersion: await versionOf(main),
+    });
+    // One on the outlet resolved, for the outlet's.
+    const { conversation_id: shop } = await inbound(outlet, waId(), 'Hi');
+    await setStatus(c, shop, 'resolved');
+    const events = await eventsOf(c, 'conversation.');
+    expect(events.map((e) => [e.type, e.conversation_id, e.detail, e.deliveries])).toEqual([
+      ['conversation.status_changed', main, { previousStatus: 'open' }, 1],
+      [
+        'conversation.assignment_changed',
+        main,
+        { assigned: true, assigneeId: agents, previousAssigneeId: null },
+        1,
+      ],
+      ['conversation.team_changed', main, { teamId: sales, previousTeamId: null }, 1],
+      ['conversation.status_changed', shop, { previousStatus: 'open' }, 1],
+    ]);
+
+    await deliverDue(c);
+    expect(numbersAt(onMain.path, 'conversation')).toEqual(
+      [
+        ['conversation.status_changed', main, c.channelAccountId],
+        ['conversation.assignment_changed', main, c.channelAccountId],
+        ['conversation.team_changed', main, c.channelAccountId],
+      ].sort(),
+    );
+    expect(numbersAt(onOutlet.path, 'conversation')).toEqual([
+      ['conversation.status_changed', shop, outlet.channelAccountId],
+    ]);
   });
 });
 
@@ -1552,6 +1628,44 @@ describe('automation run events (ADR-078)', () => {
     expect(runsAt(greeterOnly.path)).toHaveLength(2);
   });
 
+  it('sends an endpoint that names numbers only the runs on them (ADR-170)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const outlet = await fx.addNumber(c, { phone: '+91 90000 54321' });
+    // An automation for every number.
+    await publishAutomation(owner, 'Greeter', keyword('hello'), sayGraph('Hello there.'));
+    const runs: WebhookEventType[] = ['automation.run_started', 'automation.run_ended'];
+    const onMain = await addNumberEndpoint(c, runs, [c.channelAccountId]);
+    const onOutlet = await addNumberEndpoint(c, runs, [outlet.channelAccountId]);
+    const runOn = async (at: Company) => {
+      const { conversation_id: conversationId } = await inbound(at, waId(), 'hello');
+      const [run] = await runsIn(conversationId);
+      if (!run) throw new Error('no run started');
+      expect(await driveRun(c, run.id)).toBe('ended');
+      return run.id;
+    };
+    const main = await runOn(c);
+    const shop = await runOn(outlet);
+    expect(
+      (await eventsOf(c, 'automation.')).map((e) => [e.type, e.detail.runId, e.deliveries]),
+    ).toEqual([
+      ['automation.run_started', main, 1],
+      ['automation.run_ended', main, 1],
+      ['automation.run_started', shop, 1],
+      ['automation.run_ended', shop, 1],
+    ]);
+
+    await deliverDue(c);
+    expect(numbersAt(onMain.path, 'run')).toEqual([
+      ['automation.run_ended', main, c.channelAccountId],
+      ['automation.run_started', main, c.channelAccountId],
+    ]);
+    expect(numbersAt(onOutlet.path, 'run')).toEqual([
+      ['automation.run_ended', shop, outlet.channelAccountId],
+      ['automation.run_started', shop, outlet.channelAccountId],
+    ]);
+  });
+
   it('sends an endpoint that names how runs ended only those ends, others every end, and captures no end nobody takes (ADR-151)', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
@@ -2194,6 +2308,40 @@ describe('order events (ADR-085)', () => {
     );
   });
 
+  it('sends an endpoint that names numbers only the orders sent to them (ADR-170)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const outlet = await fx.addNumber(c, { phone: '+91 90000 54321' });
+    await syncedCatalog(c, '5558570');
+    const orders: WebhookEventType[] = ['order.received', 'order.status_changed'];
+    const onMain = await addNumberEndpoint(c, orders, [c.channelAccountId]);
+    const onOutlet = await addNumberEndpoint(c, orders, [outlet.channelAccountId]);
+    // A cart sent to the first number, then confirmed, and one sent to the outlet.
+    const main = await sendCart(c, waId(), '5558570', [
+      { retailerId: 'sku-1', quantity: 1, price: 10 },
+    ]);
+    await setOrderStatus(owner, main.id, 'confirmed');
+    const shop = await sendCart(outlet, waId(), '5558570', [
+      { retailerId: 'sku-2', quantity: 2, price: 20 },
+    ]);
+    expect(
+      (await eventsOf(c, 'order.')).map((e) => [e.type, e.detail.orderId, e.deliveries]),
+    ).toEqual([
+      ['order.received', main.id, 1],
+      ['order.status_changed', main.id, 1],
+      ['order.received', shop.id, 1],
+    ]);
+
+    await deliverDue(c);
+    expect(numbersAt(onMain.path, 'order')).toEqual([
+      ['order.received', main.id, c.channelAccountId],
+      ['order.status_changed', main.id, c.channelAccountId],
+    ]);
+    expect(numbersAt(onOutlet.path, 'order')).toEqual([
+      ['order.received', shop.id, outlet.channelAccountId],
+    ]);
+  });
+
   it('sends an erased contact’s orders without their number, name or note, captures nothing without an endpoint for orders, and fails a delivery whose order is gone', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
@@ -2740,6 +2888,36 @@ describe('campaign events (ADR-087)', () => {
         .sort(),
     ).toEqual(['accepted', 'canceled']);
     expect(statusesAt(every.path)).toEqual([]);
+  });
+
+  it('sends an endpoint that names numbers only the campaigns that send from them; a campaign without a number is on none (ADR-170)', async () => {
+    const s = await campaignCompany(0);
+    const { c } = s;
+    const owner = await fx.ctx(c, c.owner);
+    const outlet = await fx.addNumber(c, { phone: '+91 90000 54321' });
+    const types: WebhookEventType[] = ['campaign.status_changed'];
+    const onMain = await addNumberEndpoint(c, types, [c.channelAccountId]);
+    const onOutlet = await addNumberEndpoint(c, types, [outlet.channelAccountId]);
+    const every = await addEndpoint(c, types);
+    // A draft sending from the first number, cancelled, and one without a number yet, cancelled.
+    const fromMain = await s.draft(owner, 'Festive sale');
+    await s.campaigns.cancelCampaign(owner, fromMain, {});
+    const { id: unnumbered } = await s.campaigns.createDraft(owner, { name: 'Undecided' }, {});
+    await s.campaigns.cancelCampaign(owner, unnumbered, {});
+    expect(await changesOf(fromMain)).toEqual([['canceled', 'draft', null, null, 2]]);
+    expect(await changesOf(unnumbered)).toEqual([['canceled', 'draft', null, null, 1]]);
+
+    await deliverDue(c);
+    expect(numbersAt(onMain.path, 'campaign')).toEqual([
+      ['campaign.status_changed', fromMain, c.channelAccountId],
+    ]);
+    expect(numbersAt(onOutlet.path, 'campaign')).toEqual([]);
+    expect(numbersAt(every.path, 'campaign')).toEqual(
+      [
+        ['campaign.status_changed', fromMain, c.channelAccountId],
+        ['campaign.status_changed', unnumbered, null],
+      ].sort(),
+    );
   });
 
   it('sends pauses by the runner and cancellations, captures nothing without an endpoint for campaigns, and fails a delivery whose campaign is gone', async () => {

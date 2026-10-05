@@ -36,9 +36,11 @@ import {
   WEBHOOK_LIMITS,
   webhookHost,
   webhookTakesAutomationRuns,
+  webhookTakesChannelEvents,
 } from '../webhooks/model';
 import {
   assertWebhookAutomations,
+  assertWebhookChannels,
   checkedWebhookUrl,
   deliveryEventJoin,
   insertWebhookEndpoint,
@@ -52,6 +54,7 @@ import {
   setWebhookEndpointEnabled,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_CHANNELS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
@@ -60,6 +63,8 @@ import {
   webhookAutomationIdsSchema,
   webhookCampaignStatusesFor,
   webhookCampaignStatusesSchema,
+  webhookChannelIdsFor,
+  webhookChannelIdsSchema,
   webhookContactPartsFor,
   webhookConversationStatusesFor,
   webhookConversationStatusesSchema,
@@ -185,6 +190,16 @@ const invalidRunEndStatuses = () =>
     issues: [{ path: 'runEndStatuses', message: WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT }],
   });
 
+const channelIdsField = webhookChannelIdsSchema.describe(
+  `The WhatsApp numbers whose events the endpoint receives: 1 to ${WEBHOOK_LIMITS.channels} ids of the company's numbers (messages, conversations and orders give a number's id as \`channelId\`, templates in \`channels\` and webhook events as \`channel.id\`), only with an event that happens on a number: message.received, message.status, conversation.status_changed, conversation.assignment_changed, conversation.team_changed, automation.run_started, automation.run_ended, order.received, order.status_changed or campaign.status_changed. A campaign's events are those of the number it sends from; a campaign without a number yet is on none. Consent, contact and template events belong to no number: an endpoint that names numbers still receives every one of them it takes. null receives the events of every number, including numbers connected later.`,
+);
+
+/** Numbers are chosen only for an endpoint that receives events of numbers (ADR-170). */
+const invalidChannels = () =>
+  new AppError('validation_failed', WEBHOOK_CHANNELS_NEED_THE_EVENTS, {
+    issues: [{ path: 'channelIds', message: WEBHOOK_CHANNELS_NEED_THE_EVENTS }],
+  });
+
 export const apiCreateWebhookEndpointSchema = z
   .object({
     url: z
@@ -206,6 +221,7 @@ export const apiCreateWebhookEndpointSchema = z
     templateStatuses: templateStatusesField.optional(),
     conversationStatuses: conversationStatusesField.optional(),
     runEndStatuses: runEndStatusesField.optional(),
+    channelIds: channelIdsField.optional(),
   })
   .strict()
   .refine((data) => !data.messageStatuses || data.events.includes('message.status'), {
@@ -239,6 +255,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.runEndStatuses || data.events.includes('automation.run_ended'), {
     path: ['runEndStatuses'],
     message: WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.channelIds || webhookTakesChannelEvents(data.events), {
+    path: ['channelIds'],
+    message: WEBHOOK_CHANNELS_NEED_THE_EVENTS,
   });
 
 export const apiUpdateWebhookEndpointSchema = z
@@ -298,6 +318,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'The statuses a run ended with that the endpoint receives as automation.run_ended; null receives every end. Left out, they stay, unless the events no longer include automation.run_ended, which clears them.',
       ),
+    channelIds: channelIdsField
+      .optional()
+      .describe(
+        "The WhatsApp numbers whose events the endpoint receives (the company's numbers); null receives the events of every number. Left out, they stay, unless the events no longer include an event that happens on a number, which clears them.",
+      ),
   })
   .strict()
   .refine(
@@ -313,8 +338,9 @@ export const apiUpdateWebhookEndpointSchema = z
       data.orderStatuses !== undefined ||
       data.templateStatuses !== undefined ||
       data.conversationStatuses !== undefined ||
-      data.runEndStatuses !== undefined,
-    'Give the events, the description, the headers, the message statuses, the contact parts, the automations, the campaign statuses, the order statuses, the template statuses, the conversation statuses, the run end statuses or whether the endpoint is enabled',
+      data.runEndStatuses !== undefined ||
+      data.channelIds !== undefined,
+    'Give the events, the description, the headers, the message statuses, the contact parts, the automations, the campaign statuses, the order statuses, the template statuses, the conversation statuses, the run end statuses, the numbers or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -349,6 +375,8 @@ export interface ApiWebhookEndpoint {
   conversationStatuses: WebhookConversationStatus[] | null;
   /** How the runs it receives as `automation.run_ended` ended (ADR-151); null receives every end. */
   runEndStatuses: WebhookRunEndStatus[] | null;
+  /** The numbers whose events it receives (ADR-170); null receives every number's. */
+  channelIds: string[] | null;
   /** The key that added the endpoint. */
   apiKeyId: string;
   createdAt: string;
@@ -448,6 +476,7 @@ const columns = {
   templateStatuses: webhookEndpoints.templateStatuses,
   conversationStatuses: webhookEndpoints.conversationStatuses,
   runEndStatuses: webhookEndpoints.runEndStatuses,
+  channelAccountIds: webhookEndpoints.channelAccountIds,
   apiKeyId: webhookEndpoints.createdByApiKeyId,
   createdAt: webhookEndpoints.createdAt,
   updatedAt: webhookEndpoints.updatedAt,
@@ -475,6 +504,7 @@ type EndpointRow = Pick<
   | 'templateStatuses'
   | 'conversationStatuses'
   | 'runEndStatuses'
+  | 'channelAccountIds'
   | 'createdAt'
   | 'updatedAt'
 > & { apiKeyId: string | null };
@@ -507,6 +537,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     templateStatuses: row.templateStatuses,
     conversationStatuses: row.conversationStatuses,
     runEndStatuses: row.runEndStatuses,
+    channelIds: row.channelAccountIds,
     apiKeyId: row.apiKeyId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -724,6 +755,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               null,
             );
             const runEndStatuses = webhookRunEndStatusesFor(data.events, data.runEndStatuses, null);
+            const channelIds = webhookChannelIdsFor(data.events, data.channelIds, null);
+            await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
             const { id, secret } = await insertWebhookEndpoint(tx, deps.keyring, ctx.tenant.id, {
               url,
               description: data.description || null,
@@ -737,6 +770,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               templateStatuses,
               conversationStatuses,
               runEndStatuses,
+              channelAccountIds: channelIds,
               creator: { apiKeyId: ctx.key.id },
             });
             await audit(tx, ctx, 'webhook.endpoint_created', id, {
@@ -751,6 +785,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(templateStatuses ? { templateStatuses } : {}),
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
+              ...(channelIds ? { channelIds } : {}),
             });
             await announce(tx, ctx, { host, events: data.events, at: now });
             const endpoint = await readEndpoint(tx, ctx, id, now);
@@ -794,9 +829,14 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         if (data.runEndStatuses && !events.includes('automation.run_ended')) {
           throw invalidRunEndStatuses();
         }
+        if (data.channelIds && !webhookTakesChannelEvents(events)) throw invalidChannels();
         // Only a list given now is checked: the automations kept were checked when chosen.
         if (data.automationIds !== undefined) {
           await assertWebhookAutomations(tx, ctx.tenant.id, data.automationIds);
+        }
+        // And the numbers likewise (ADR-170).
+        if (data.channelIds !== undefined) {
+          await assertWebhookChannels(tx, ctx.tenant.id, data.channelIds);
         }
         if (
           data.events !== undefined ||
@@ -809,7 +849,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.orderStatuses !== undefined ||
           data.templateStatuses !== undefined ||
           data.conversationStatuses !== undefined ||
-          data.runEndStatuses !== undefined
+          data.runEndStatuses !== undefined ||
+          data.channelIds !== undefined
         ) {
           const [changed] = await tx
             .update(webhookEndpoints)
@@ -859,6 +900,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.runEndStatuses,
                 endpoint.runEndStatuses,
               ),
+              channelAccountIds: webhookChannelIdsFor(
+                events,
+                data.channelIds,
+                endpoint.channelAccountIds,
+              ),
               updatedAt: now,
             })
             .where(and(eq(webhookEndpoints.tenantId, ctx.tenant.id), eq(webhookEndpoints.id, id)))
@@ -872,6 +918,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               templateStatuses: webhookEndpoints.templateStatuses,
               conversationStatuses: webhookEndpoints.conversationStatuses,
               runEndStatuses: webhookEndpoints.runEndStatuses,
+              channelAccountIds: webhookEndpoints.channelAccountIds,
             });
           if (!changed) throw new Error('A locked endpoint was not updated');
           await audit(tx, ctx, 'webhook.endpoint_updated', id, {
@@ -888,6 +935,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ? { conversationStatuses: changed.conversationStatuses }
               : {}),
             ...(changed.runEndStatuses ? { runEndStatuses: changed.runEndStatuses } : {}),
+            ...(changed.channelAccountIds ? { channelIds: changed.channelAccountIds } : {}),
           });
         }
         if (data.enabled !== undefined) {

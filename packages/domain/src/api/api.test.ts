@@ -107,12 +107,18 @@ import {
 import {
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_CHANNELS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
 } from '../webhooks/service';
-import { WEBHOOK_FAILURE_KINDS, WEBHOOK_LIMITS } from '../webhooks/model';
+import {
+  WEBHOOK_CHANNEL_EVENTS,
+  WEBHOOK_EVENT_KEYS,
+  WEBHOOK_FAILURE_KINDS,
+  WEBHOOK_LIMITS,
+} from '../webhooks/model';
 import {
   apiStartManyAutomationRuns,
   apiStartManyAutomationRunsSchema,
@@ -1336,6 +1342,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(Object.keys(update.properties).sort()).toEqual([
       'automationIds',
       'campaignStatuses',
+      'channelIds',
       'contactParts',
       'conversationStatuses',
       'description',
@@ -1436,6 +1443,70 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(webhooks['automation.run_ended']?.post?.description).toContain(
       'an endpoint receives every end unless it names the statuses it takes (its `runEndStatuses`',
     );
+    // The numbers whose events an endpoint receives (ADR-170): a list, or null.
+    const channelIds = (answered.properties as Record<string, { anyOf?: unknown[] }>).channelIds;
+    expect(channelIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('channelIds');
+    expect(Object.keys(createBody.properties)).toContain('channelIds');
+    expect(doc.info.description).toContain(
+      'An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its `channelIds`',
+    );
+  });
+
+  it('take numbers only with an event that happens on one, each once, and a list of them alone is a change (ADR-170)', () => {
+    const a = '0190e9a1-0000-7000-8000-00000000000a';
+    const b = '0190e9a1-0000-7000-8000-00000000000b';
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    // Each event that happens on a number allows a list, alongside events that do not.
+    for (const event of WEBHOOK_CHANNEL_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          channelIds: [b, a.toUpperCase(), b],
+        }).channelIds,
+        event,
+      ).toEqual([b, a]);
+    }
+    // Consent, contact and template events happen on no number.
+    expect(WEBHOOK_EVENT_KEYS.filter((e) => !WEBHOOK_CHANNEL_EVENTS.some((c) => c === e))).toEqual([
+      'consent.changed',
+      'template.status_changed',
+      'contact.created',
+      'contact.updated',
+      'contact.erased',
+    ]);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['consent.changed', 'template.status_changed', 'contact.updated'],
+      channelIds: [a],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['channelIds', WEBHOOK_CHANNELS_NEED_THE_EVENTS],
+    ]);
+    const message = { ...base, events: ['message.received'] };
+    for (const body of [
+      { ...message, channelIds: [] },
+      { ...message, channelIds: ['not-a-number'] },
+      {
+        ...message,
+        channelIds: Array.from(
+          { length: WEBHOOK_LIMITS.channels + 1 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiCreateWebhookEndpointSchema.parse({ ...message, channelIds: null }).channelIds).toBe(
+      null,
+    );
+    expect(apiUpdateWebhookEndpointSchema.parse({ channelIds: null })).toEqual({
+      channelIds: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ channelIds: [a] })).toEqual({ channelIds: [a] });
   });
 
   it('take run end statuses only with automation.run_ended, and a list of them alone is a change (ADR-151)', () => {

@@ -1462,6 +1462,17 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   with, and writes no event when none does; run starts, other types, replays and test events are
   unchanged. Settings (the same status control) and the API (`runEndStatuses`) set it; a change that
   drops the event clears it.
+- **Number filters** (migration 0118, ADR-170): `channel_account_ids` on an endpoint lists the
+  WhatsApp numbers whose events it takes: the message, conversation, automation run, order and
+  campaign events (`WEBHOOK_CHANNEL_EVENTS`; consent, contact and template events happen on no
+  number and are not narrowed), null for every number; a check keeps it to 1 to 100 ids without
+  nulls and to endpoints that take such an event. The trigger functions of those events pass the
+  changed row's number as `channelId` in the detail; `app.capture_webhook_event` (replaced with the
+  same signature) takes it out before storing the event, creates such an event's delivery only for
+  endpoints whose list is null or holds the number, and writes no event when none does; replays and
+  test events are unchanged. Settings (a choice between every number and the numbers ticked, from
+  `channelChoices`) and the API (`channelIds`) set it, the services checking that each id is a
+  number of the company (`assertWebhookChannels`); a change that drops every such event clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and
@@ -1472,8 +1483,8 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   on; deleting. Each endpoint's page lists its latest 100 deliveries (or only failed ones) with
   attempts, result and timings, replays finished ones (a new delivery of the same event, audited)
   and edits the URL, description, events, the message statuses, contact parts, automations,
-  campaign, order, template and conversation statuses and the run ends it takes and headers (names
-  shown, values never; replacing gives each again).
+  campaign, order, template and conversation statuses, the run ends and the numbers it takes and
+  headers (names shown, values never; replacing gives each again).
   The OpenAPI document describes every event under `webhooks`. Audit entries name the endpoint's
   host, never its full URL or secret.
 - **Not built yet:** filters on a message's

@@ -8,6 +8,7 @@ import {
   CAMPAIGN_COMPLETION_REASONS,
   CAMPAIGN_PAUSE_REASONS,
   CAMPAIGN_STATUSES,
+  CHANNEL_STATUSES,
   CONVERSATION_STATUSES,
   ORDER_STATUSES,
   TEMPLATE_STATUSES,
@@ -25,6 +26,8 @@ import {
   WEBHOOK_AUTOMATION_EVENTS,
   WEBHOOK_CAMPAIGN_STATUS_LABELS,
   WEBHOOK_CAMPAIGN_STATUSES,
+  WEBHOOK_CHANNEL_EVENTS,
+  WEBHOOK_CHANNEL_STATUS_NOTES,
   WEBHOOK_CONTACT_PART_LABELS,
   WEBHOOK_CONTACT_PARTS,
   WEBHOOK_CONVERSATION_STATUS_LABELS,
@@ -46,8 +49,10 @@ import {
   webhookHost,
   webhookReplayAllSummary,
   webhookReplaySummary,
+  webhookChannelText,
   webhookRetryDelaySeconds,
   webhookTakesAutomationRuns,
+  webhookTakesChannelEvents,
 } from './model';
 import {
   automationRunEndedPayloadSchema,
@@ -80,6 +85,9 @@ import {
   webhookAutomationIdsSchema,
   webhookCampaignStatusesFor,
   webhookCampaignStatusesSchema,
+  webhookChannelIdsFor,
+  webhookChannelIdsSchema,
+  webhookChannelLabel,
   webhookContactPartsFor,
   webhookContactPartsSchema,
   webhookConversationStatusesFor,
@@ -1553,5 +1561,109 @@ describe('run end filters (ADR-151)', () => {
       webhookRunEndStatusesFor(['automation.run_started'], ['failed'], ['completed']),
     ).toBeNull();
     expect(webhookRunEndStatusesFor(['order.status_changed'], undefined, ['completed'])).toBeNull();
+  });
+});
+
+describe('number filters (ADR-170)', () => {
+  const shop = '0e1a2b3c-4d5e-4f60-8172-8394a5b6c7d8';
+  const outlet = '1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9';
+
+  it('take 1 to 100 numbers, once each and in lower case, in the order given; null takes every number', () => {
+    expect(webhookChannelIdsSchema.parse([outlet, shop.toUpperCase(), outlet, shop])).toEqual([
+      outlet,
+      shop,
+    ]);
+    expect(webhookChannelIdsSchema.parse(null)).toBeNull();
+    const ids = Array.from(
+      { length: WEBHOOK_LIMITS.channels + 1 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(WEBHOOK_LIMITS.channels).toBe(100);
+    expect(webhookChannelIdsSchema.parse(ids.slice(1))).toEqual(ids.slice(1));
+    for (const refused of [[], ids, ['shop'], [shop, null], shop, [42]]) {
+      expect(webhookChannelIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookChannelIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one number, or take every number.',
+    );
+    expect(webhookChannelIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 100 numbers.',
+    );
+  });
+
+  it('apply to the events that happen on a number, each of which names its number, and no other', () => {
+    expect(WEBHOOK_CHANNEL_EVENTS).toEqual([
+      'message.received',
+      'message.status',
+      'conversation.status_changed',
+      'conversation.assignment_changed',
+      'conversation.team_changed',
+      'automation.run_started',
+      'automation.run_ended',
+      'order.received',
+      'order.status_changed',
+      'campaign.status_changed',
+    ]);
+    const payloads = {
+      'message.received': messageReceivedPayloadSchema,
+      'message.status': messageStatusPayloadSchema,
+      'consent.changed': consentChangedPayloadSchema,
+      'template.status_changed': templateStatusPayloadSchema,
+      'conversation.status_changed': conversationStatusPayloadSchema,
+      'conversation.assignment_changed': conversationAssignmentPayloadSchema,
+      'conversation.team_changed': conversationTeamPayloadSchema,
+      'contact.created': contactCreatedPayloadSchema,
+      'contact.updated': contactUpdatedPayloadSchema,
+      'contact.erased': contactErasedPayloadSchema,
+      'automation.run_started': automationRunStartedPayloadSchema,
+      'automation.run_ended': automationRunEndedPayloadSchema,
+      'order.received': orderReceivedPayloadSchema,
+      'order.status_changed': orderStatusChangedPayloadSchema,
+      'campaign.status_changed': campaignStatusChangedPayloadSchema,
+    } satisfies Record<(typeof WEBHOOK_EVENT_KEYS)[number], unknown>;
+    for (const type of WEBHOOK_EVENT_KEYS) {
+      const onANumber = WEBHOOK_CHANNEL_EVENTS.some((t) => t === type);
+      expect(webhookTakesChannelEvents([type]), type).toBe(onANumber);
+      // The payload of an event that happens on a number says which (`channel`); others do not.
+      expect('channel' in payloads[type].shape.data.shape, type).toBe(onANumber);
+    }
+    expect(webhookTakesChannelEvents(['consent.changed', 'order.received'])).toBe(true);
+    expect(webhookTakesChannelEvents([])).toBe(false);
+  });
+
+  it('are kept only while the endpoint takes an event of a number: given, kept, or cleared', () => {
+    expect(webhookChannelIdsFor(['message.received'], [shop], null)).toEqual([shop]);
+    expect(webhookChannelIdsFor(['campaign.status_changed'], undefined, [outlet])).toEqual([
+      outlet,
+    ]);
+    expect(webhookChannelIdsFor(['message.received'], null, [outlet])).toBeNull();
+    expect(webhookChannelIdsFor(['message.received'], undefined, null)).toBeNull();
+    expect(
+      webhookChannelIdsFor(['consent.changed', 'contact.updated'], [shop], [outlet]),
+    ).toBeNull();
+    expect(webhookChannelIdsFor(['template.status_changed'], undefined, [outlet])).toBeNull();
+  });
+
+  it('name a number by its number and verified name, noting one that is not active', () => {
+    const label = (displayPhoneNumber: string | null, verifiedName: string | null) =>
+      webhookChannelLabel({ displayPhoneNumber, verifiedName, phoneNumberId: '106540352242922' });
+    expect(label('+91 90000 54321', 'E2E Outlet')).toBe('+91 90000 54321 · E2E Outlet');
+    expect(label('+91 90000 54321', null)).toBe('+91 90000 54321');
+    expect(label(null, 'E2E Outlet')).toBe('E2E Outlet');
+    // Until Meta reports the number, Meta's id for it.
+    expect(label(null, null)).toBe('Phone number ID 106540352242922');
+    const text = (status: (typeof CHANNEL_STATUSES)[number] | null) =>
+      webhookChannelText({ label: '+91 90000 54321', status });
+    expect(CHANNEL_STATUSES.map(text)).toEqual([
+      '+91 90000 54321 (setting up)',
+      '+91 90000 54321',
+      '+91 90000 54321 (reconnect needed)',
+      '+91 90000 54321 (disconnected)',
+      '+91 90000 54321 (setup failed)',
+    ]);
+    expect(CHANNEL_STATUSES).toEqual(Object.keys(WEBHOOK_CHANNEL_STATUS_NOTES));
+    expect(text(null)).toBe('+91 90000 54321');
   });
 });

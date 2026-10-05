@@ -136,6 +136,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * every end. Set only while `automation.run_ended` is among its events.
    */
   runEndStatuses: text('run_end_statuses').array().$type<WebhookRunEndStatus[]>(),
+  /**
+   * The WhatsApp numbers (channel accounts) whose events it takes (ADR-170): message,
+   * conversation, automation run, order and campaign events; null takes every number. Set only
+   * while one of those is among its events.
+   */
+  channelAccountIds: uuid('channel_account_ids').array(),
   state: text('state', { enum: ['active', 'disabled'] })
     .notNull()
     .default('active'),

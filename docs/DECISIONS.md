@@ -5806,7 +5806,7 @@ Decision:
 
 Not built: filters on other facts of a run (its trigger, how it ended (built by ADR-151), the key
 that started it), choosing automations by tag or folder, and filters for campaigns, templates,
-orders or conversations by team or channel.
+orders or conversations by team or channel (by number: built by ADR-170).
 
 ## ADR-146 Choosing the campaign statuses a webhook endpoint receives (P5-09) (2026-10-04)
 
@@ -6747,3 +6747,67 @@ Decision:
 
 Not built: acknowledging receipts, quarantine entries and late queues; assigning a dead letter to
 someone; filtering the list by acknowledgement; deleting a note (a new acknowledgement replaces it).
+
+## ADR-170 Choosing the WhatsApp numbers whose events a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint receives the events of every WhatsApp number its company has. A company with a
+number per shop, brand or team often has a receiver per number (each shop's helpdesk, each brand's
+CRM), and every receiver was sent every number's messages, conversations, runs, orders and
+campaigns, read the number in each payload (`channel.id`) and dropped the rest. ADR-145 left filters
+by channel unbuilt.
+
+Decision:
+
+- **What an endpoint chooses:** `channelIds`, null for every number's events (as before, including
+  numbers connected later), or 1 to 100 of the company's numbers (channel accounts), in the order
+  given with repeats merged (compared in lower case), only while the endpoint takes an event that
+  happens on a number: `message.received`, `message.status`, the three conversation events, both
+  automation run events, both order events and `campaign.status_changed` (a campaign's events are
+  those of the number it sends from). Consent, contact and template events belong to no number: an
+  endpoint that names numbers still receives every one of them it takes. It is chosen in Settings →
+  Webhooks under "WhatsApp numbers", shown while such an event is ticked: "Every number’s events" or
+  "Only the events of the numbers ticked", from every number of the company in the order they were
+  connected, each named by its number and verified name (Meta's id for it until Meta reports them)
+  and marked when it is not active. The endpoint shows "Numbers whose events are sent: …". Through
+  the API it is `channelIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in
+  every endpoint the API answers: ids only, those messages, conversations and orders give as
+  `channelId`.
+- **Only the company's numbers:** each id must be a number of the endpoint's company, whatever its
+  status (a disconnected number may be chosen; it has no events until it is connected again).
+  Anything else is refused as `validation_failed`, the issue naming its place (`channelIds.<n>`; 422
+  through the API); another company's number gets the same message as an unknown id (the lookup runs
+  in the company's scope). A company's numbers are never deleted (the runtime role has no delete on
+  them; a number is disconnected), so a list never names one that is gone. A list given again is
+  checked again; one kept by a change is not (it was checked when it was chosen).
+- **Kept with its events:** a change that removes every such event clears the list, and a list given
+  without one is refused (`channelIds`). A `PATCH` that leaves it out keeps it; Settings always
+  sends it. A check in the database holds the same rule (null, or 1 to 100 ids without nulls while
+  one of those events is among the endpoint's). The ids are not foreign keys (an array cannot
+  reference rows); the services check them as above.
+- **Applied when the event is captured:** the triggers of those events (0025's for messages, 0070's
+  for conversations, 0055's for runs, 0063's for orders, 0065's for campaigns) now pass the number
+  of the row that changed as `channelId` in the event's detail. `app.capture_webhook_event` reads it
+  and takes it out before the event is stored, so stored events and payloads are unchanged (the
+  payload's `channel` is read from the row when it is delivered), and creates a delivery of such an
+  event only for the active endpoints that take it, pass its other filters and whose list is null or
+  holds the number. It writes no event when none takes it, as for the other filters. A campaign
+  without a number yet is on no list. The capture runs in the transaction that makes the change, so
+  whether a delivery exists is settled then: a change of the list applies to events captured after
+  it, and deliveries already created are still sent. Replays and test events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `channelIds` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` choose numbers in Settings, where they
+  are named and their status shown as Settings → Channels shows them; keys with `webhooks.manage`
+  choose them through the API, which answers and audits ids only. Deliveries of those events already
+  carry each event's number (`channel.id` and `channel.phone`) to the company's receivers.
+- **Migration 0118:** `channel_account_ids uuid[]` on `app.webhook_endpoints` with the check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role (it inserts it with its table grant), `app.capture_webhook_event` replaced with the
+  same signature (0114's, with the number condition), and the five trigger functions replaced with
+  the same names, so their owners, grants and triggers stay. Existing endpoints keep null; nothing
+  is backfilled.
+
+Not built: filters by team or by the member assigned, numbers chosen per event type (one list
+applies to every event of a number the endpoint takes), and a `GET /channels` listing a company's
+numbers through the API (keys read their ids from messages, conversations, orders, templates and
+events).

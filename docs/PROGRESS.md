@@ -1,5 +1,62 @@
 # Progress
 
+## 2026-10-05 — Phase 5: webhook endpoints for chosen WhatsApp numbers (P5-09, ADR-170)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every
+endpoint received every number's events. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so migration 0118, the integration tests and the e2e test below were written but not run
+here.
+
+### Completed
+
+- **Design (ADR-170):** `channelIds`, null for every number or 1 to 100 of the company's numbers,
+  only with an event that happens on a number (messages, conversations, automation runs, orders,
+  campaigns); applied where events are captured; consent, contact and template events not narrowed.
+- **Database:** migration 0118 (the column and its check, the column grant,
+  `app.capture_webhook_event` and the five trigger functions of number events passing the number,
+  which is not stored); the schema's column (`packages/db`).
+- **Domain:** the list's schema, keeping and checking (`webhookChannelIdsSchema`,
+  `webhookChannelIdsFor`, `assertWebhookChannels`), the endpoint view naming the numbers,
+  `channelChoices`, create and update with the audit; `WEBHOOK_CHANNEL_EVENTS` and the labels in the
+  model; `channelIds` in the API (create, update, answers) and the OpenAPI document; the export
+  column.
+- **Web:** "WhatsApp numbers" in the endpoint form (every number, or the numbers ticked) and
+  "Numbers whose events are sent: …" on the endpoints list.
+- **Tests:**
+  - Unit (4 new in `webhooks.test.ts`, 1 new and 1 changed in `api.test.ts`): the list's rules,
+    keeping and clearing, which events happen on a number and that each of their payloads names it,
+    the labels, the API schemas and the OpenAPI entries.
+  - Integration (3 new in `webhooks.test.ts`, 4 new in `webhook-events.test.ts`, 1 new in
+    `api-webhook-endpoints.test.ts`; `addNumber` in the WhatsApp fixture): refusals, keeping and
+    clearing, audits, the check and the grant, the choices, and capture per number for every event
+    of a number. Written for CI; not run here.
+  - E2E (`webhook-events.spec.ts`, 1 new; `connectTestChannel` takes the number's display): an
+    endpoint for one of two numbers, then for every number. Written for CI; not run here.
+- **Docs:** ADR-170 (and ADR-145's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T165; DEPLOYMENT and RUNBOOKS (migration 0118, a receiver missing a number's events); BACKLOG
+  P5-09; feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 23 deliberate regressions tried, all caught on the unit-tested parts (an
+  empty or long list, repeats or case kept, any text taken, a list kept without its events or by a
+  null, labels and status notes, the events of a number, the limit, the API's refinement, change
+  rule and field, the OpenAPI field and overview). The services' checks, the capture and the form
+  need the database or a browser, so their regressions are left to the integration and e2e tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 764 passed (78 files)                                                |
+| `pnpm test:integration`, e2e, migration 0118       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 23 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Filters by team or assigned member; numbers per event type; `GET /channels`.
+
 ## 2026-10-05 — Phase 5: acknowledging dead letters on the operations console (P5-10, ADR-169)
 
 Status: **Implemented; its database tests run in CI only (test data only).** Administrators could

@@ -888,6 +888,16 @@ Phase 5 rules (outgoing webhooks, P5-09):
   and applied in `app.capture_webhook_event` together with the automations the endpoint names
   (ADR-145), in the transaction that ends the run: it narrows what one endpoint receives and never
   adds an event or a delivery for another endpoint or company. Audited with the list. Tested.
+- An endpoint can take the events of chosen WhatsApp numbers only (ADR-170), chosen the same way.
+  Each id must be a number of the endpoint's company, looked up in the company's scope (another
+  company's number is refused like an unknown id, by its place); the list is kept only while the
+  endpoint takes an event that happens on a number (a database check too, which also refuses a null
+  entry and more than 100 ids); and it is applied in `app.capture_webhook_event` with the number of
+  the row the change itself made, passed by that table's trigger in the transaction that makes the
+  change: it narrows what one endpoint receives and never adds an event or a delivery for another
+  endpoint or company. Consent, contact and template events are not narrowed, and the number passed
+  is not stored with the event. Audited with the list (unit tests; integration and e2e tests, run in
+  CI only).
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

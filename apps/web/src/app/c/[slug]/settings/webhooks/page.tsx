@@ -13,6 +13,7 @@ import {
   WEBHOOK_RUN_END_STATUS_LABELS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
+  webhookChannelText,
   webhookHost,
   type WebhookEndpointView,
 } from '@w360/domain';
@@ -43,9 +44,10 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'developer.manage')) notFound();
   const { webhooks } = await getRuntime();
-  const [endpoints, automationChoices] = await Promise.all([
+  const [endpoints, automationChoices, channelChoices] = await Promise.all([
     webhooks.list(ctx),
     webhooks.automationChoices(ctx),
+    webhooks.channelChoices(ctx),
   ]);
   const tz = ctx.tenant.timezone;
   const base = `/c/${ctx.tenant.slug}/settings/webhooks`;
@@ -177,6 +179,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.runEndStatuses.map((s) => WEBHOOK_RUN_END_STATUS_LABELS[s]).join(', ')}
                       </p>
                     ) : null}
+                    {e.channels ? (
+                      <p className="text-xs text-muted-foreground">
+                        Numbers whose events are sent:{' '}
+                        {e.channels.map(webhookChannelText).join(', ')}
+                      </p>
+                    ) : null}
                     {e.headerNames.length > 0 ? (
                       <p className="text-xs text-muted-foreground">
                         Headers sent: {e.headerNames.join(', ')} (values hidden)
@@ -291,6 +299,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
           <WebhookEndpointForm
             slug={ctx.tenant.slug}
             automationChoices={automationChoices}
+            channelChoices={channelChoices}
             atLimit={endpoints.length >= WEBHOOK_LIMITS.endpoints}
           />
         </CardContent>

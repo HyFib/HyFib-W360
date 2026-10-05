@@ -1646,6 +1646,230 @@ describe('automation filters (ADR-145)', () => {
   });
 });
 
+describe('number filters (ADR-170)', () => {
+  it('are refused without an event that happens on a number, empty, over 100 or naming a number of another company; kept by a change that leaves them out and cleared with the events; the database keeps them to those events', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const main = c.channelAccountId;
+    const outlet = (await fx.addNumber(c, { phone: '+91 90000 54321', name: 'Outlet' }))
+      .channelAccountId;
+    const closed = (await fx.addNumber(c, { phone: '+91 90000 11111', status: 'disconnected' }))
+      .channelAccountId;
+    const elsewhere = (await fx.company()).channelAccountId;
+    const url = 'https://hooks.example.com/in';
+    const refused = async (
+      eventTypes: string[],
+      channelIds: unknown,
+      message: RegExp,
+      path = 'channelIds',
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes, channelIds }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(channelIds)).toBe(path);
+    };
+    const needsTheEvents =
+      /only for an endpoint that receives message, conversation, automation, order or campaign events/;
+    await refused(
+      ['consent.changed', 'contact.updated', 'template.status_changed'],
+      [main],
+      needsTheEvents,
+    );
+    await refused(['message.received'], [], /at least one number/);
+    await refused(['message.received'], ['outlet'], /from the list/, 'channelIds.0');
+    await refused(
+      ['message.received'],
+      Array.from({ length: 101 }, () => uuidv7()),
+      /at most 100 numbers/,
+    );
+    // Only the company's numbers: not another company's or an unknown id.
+    await refused(['order.received'], [main, elsewhere], /of this company/, 'channelIds.1');
+    await refused(['campaign.status_changed'], [uuidv7()], /of this company/, 'channelIds.0');
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['message.received', 'consent.changed'],
+      channelIds: [outlet, main.toUpperCase(), outlet],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ channelIds: [outlet, main] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['message.received', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.channels;
+    expect(await current()).toEqual([
+      { id: outlet, label: '+91 90000 54321 · Outlet', status: 'active' },
+      { id: main, label: '+91 90000 00000', status: 'active' },
+    ]);
+    await change({ description: 'kept' });
+    expect((await current())?.map((n) => n.id)).toEqual([outlet, main]);
+    // A disconnected number can be chosen, and is named with its status.
+    await change({ channelIds: [closed] });
+    expect(await current()).toEqual([
+      { id: closed, label: '+91 90000 11111', status: 'disconnected' },
+    ]);
+    const updates = await fx.query<{ metadata: { channelIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.channelIds)).toEqual([[outlet, main], [closed]]);
+    // A list given again is checked again, changing nothing when it is refused.
+    await expectAppError(
+      change({ channelIds: [main, elsewhere] }),
+      'validation_failed',
+      /of this company/,
+    );
+    expect((await current())?.map((n) => n.id)).toEqual([closed]);
+    await change({ channelIds: null });
+    expect(await current()).toBeNull();
+    await change({ channelIds: [main] });
+    // Any event that happens on a number keeps the list.
+    await change({ eventTypes: ['campaign.status_changed', 'contact.created'] });
+    expect((await current())?.map((n) => n.id)).toEqual([main]);
+    // The database refuses an empty list, more than 100 or a missing id from an endpoint taking
+    // such an event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET channel_account_ids = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    const many = `ARRAY[${Array.from({ length: 101 }, () => `'${uuidv7()}'`).join(',')}]::uuid[]`;
+    for (const bad of [`'{}'`, many, `ARRAY['${main}', NULL]::uuid[]`]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_channel_account_ids/,
+      );
+    }
+    await change({ eventTypes: ['contact.created', 'consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['contact.created'], channelIds: [main] }),
+      'validation_failed',
+      needsTheEvents,
+    );
+    // …and any list for an endpoint that takes none.
+    await expect(setInDatabase(`ARRAY['${main}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_channel_account_ids/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'channel_account_ids',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('offer every number of the company in the order they were connected, whatever their status, to developers only', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const outlet = await fx.addNumber(c, { phone: '+91 90000 54321', name: 'Outlet' });
+    const pending = await fx.addNumber(c, { phone: null, status: 'onboarding' });
+    const d = await fx.company();
+    await fx.addNumber(d, { phone: '+91 90000 99999' });
+    expect(await webhooks().channelChoices(owner)).toEqual([
+      { id: c.channelAccountId, label: '+91 90000 00000', status: 'active' },
+      { id: outlet.channelAccountId, label: '+91 90000 54321 · Outlet', status: 'active' },
+      {
+        id: pending.channelAccountId,
+        label: `Phone number ID ${pending.phoneNumberId}`,
+        status: 'onboarding',
+      },
+    ]);
+    for (const user of [c.agent, c.marketer]) {
+      await expectAppError(webhooks().channelChoices(await fx.ctx(c, user)), 'forbidden');
+    }
+  });
+
+  it('send an endpoint that names numbers only the message events on them, another every number’s, events of no number to both, and capture none nobody takes', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const outlet = await fx.addNumber(c, { phone: '+91 90000 54321', name: 'Outlet' });
+    const add = async (eventTypes: WebhookEventType[], channelIds: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        channelIds,
+      });
+      return { ...created, path };
+    };
+    // The outlet's messages and their statuses, and every consent change.
+    const outletOnly = await add(
+      ['message.received', 'message.status', 'consent.changed'],
+      [outlet.channelAccountId],
+    );
+    const from = waId();
+    // A message to the first number: no endpoint takes it, so nothing is captured.
+    const main = await inbound(c, from, 'Hello main');
+    expect(await eventsOf(c)).toEqual([]);
+    // A message to the outlet is captured for it, stored as events always were.
+    const shop = await inbound(outlet, from, 'Hello outlet');
+    expect((await eventsOf(c)).map((e) => [e.type, e.detail])).toEqual([
+      ['message.received', { messageType: 'text' }],
+    ]);
+    // A reply from the outlet is captured when WhatsApp accepts it; one from the first number is
+    // not.
+    await sendReply(c, main.conversation_id, 'Reply from main');
+    await sendReply(c, shop.conversation_id, 'Reply from the outlet');
+    expect((await eventsOf(c)).map((e) => [e.type, e.status, e.detail])).toEqual([
+      ['message.received', null, { messageType: 'text' }],
+      ['message.status', 'accepted', {}],
+    ]);
+    // A consent change happens on no number: the endpoint takes it.
+    await createConsentService({ db: fx.dbs.app, clock: systemClock }).recordConsent(owner, {
+      contactId: main.contact_id,
+      purpose: 'marketing',
+      action: 'opt_in',
+    });
+    // An endpoint for every number's messages hears both numbers.
+    const everyNumber = await add(['message.received'], null);
+    await inbound(c, from, 'Main again');
+    await inbound(outlet, from, 'Outlet again');
+    const typesTo = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).map((d) => [d.type, d.status]);
+    expect(await typesTo(outletOnly.id)).toEqual([
+      ['message.received', null],
+      ['message.status', 'accepted'],
+      ['consent.changed', null],
+      ['message.received', null],
+    ]);
+    expect(await typesTo(everyNumber.id)).toEqual([
+      ['message.received', null],
+      ['message.received', null],
+    ]);
+    // Each delivery names the number its event happened on.
+    expect(await deliverDue(c)).toMatchObject({ attempted: 6, succeeded: 6 });
+    const numbersAt = (path: string) =>
+      requestsTo(path)
+        .map((r) => JSON.parse(r.body) as { type: string; data: { channel?: { id: string } } })
+        .filter((b) => b.data.channel)
+        .map((b) => [b.type, b.data.channel?.id])
+        .sort();
+    expect(numbersAt(outletOnly.path)).toEqual([
+      ['message.received', outlet.channelAccountId],
+      ['message.received', outlet.channelAccountId],
+      ['message.status', outlet.channelAccountId],
+    ]);
+    expect(numbersAt(everyNumber.path)).toEqual(
+      [
+        ['message.received', c.channelAccountId],
+        ['message.received', outlet.channelAccountId],
+      ].sort(),
+    );
+  });
+});
+
 describe('event capture', () => {
   it('records an event only for subscribed types, with one delivery per active subscribed endpoint, and none from a rolled-back change', async () => {
     const c = await fx.company();

@@ -689,11 +689,16 @@ verification, app review, Embedded Signup configuration).
   **[Replays of every endpoint built; their database tests run only in CI]** (ADR-160: one replay
   for every endpoint that is on, 500 across them in the order they were added, in Settings or
   `POST /webhook-endpoints/replay-failed` for the endpoints keys added, audited once per endpoint).
-  Remaining: filters for other event types and on a message's or contact's values (such as by
-  campaign, template, tag or field key, or a run's trigger or end reason), which tags were added or
-  removed, other authentication (OAuth client credentials, headers computed per delivery), mutual
-  TLS, fixed egress addresses, events for store orders, Payment Links and each step of a run,
-  `createdAt` finer than the millisecond, load tests.
+  **[Number filters built; their database tests run only in CI]** (ADR-170: an endpoint takes the
+  message, conversation, automation run, order and campaign events of the WhatsApp numbers it
+  chooses, 1 to 100 of the company's numbers, in Settings or through the API, or every number's as
+  before; applied where events are captured, with the number the changed row has; consent, contact
+  and template events are not narrowed). Remaining: filters for other event types and on a message's
+  or contact's values (such as by campaign, template, team, assigned member, tag or field key, or a
+  run's trigger or end reason), which tags were added or removed, other authentication (OAuth client
+  credentials, headers computed per delivery), mutual TLS, fixed egress addresses, events for store
+  orders, Payment Links and each step of a run, `createdAt` finer than the millisecond, a
+  `GET /channels` listing the company's numbers, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

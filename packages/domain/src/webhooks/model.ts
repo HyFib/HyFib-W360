@@ -1,4 +1,5 @@
 import type {
+  ChannelStatus,
   WebhookCampaignStatus,
   WebhookContactPart,
   WebhookConversationStatus,
@@ -298,6 +299,8 @@ export const WEBHOOK_LIMITS = {
   headerValueLength: 1000,
   /** The automations an endpoint can choose to take the runs of (ADR-145). */
   automations: 20,
+  /** The WhatsApp numbers an endpoint can choose to take the events of (ADR-170). */
+  channels: 100,
 } as const;
 
 /** The events of automation runs, which an endpoint can take for chosen automations (ADR-145). */
@@ -323,6 +326,66 @@ export interface WebhookAutomationChoice {
 /** Whether an endpoint with these events takes automation runs, and can choose automations. */
 export function webhookTakesAutomationRuns(eventTypes: readonly WebhookEventType[]): boolean {
   return WEBHOOK_AUTOMATION_EVENTS.some((type) => eventTypes.includes(type));
+}
+
+/**
+ * The events that happen on a WhatsApp number, which an endpoint can take for chosen numbers
+ * (ADR-170): a campaign's are on the number it sends from. Consent, contact and template events
+ * belong to no number.
+ */
+export const WEBHOOK_CHANNEL_EVENTS = [
+  'message.received',
+  'message.status',
+  'conversation.status_changed',
+  'conversation.assignment_changed',
+  'conversation.team_changed',
+  'automation.run_started',
+  'automation.run_ended',
+  'order.received',
+  'order.status_changed',
+  'campaign.status_changed',
+] as const satisfies readonly WebhookEventType[];
+
+/**
+ * A WhatsApp number of the company, which an endpoint can choose to take the events of (ADR-170).
+ * Any of its numbers can be chosen: they are never deleted, only disconnected.
+ */
+export interface WebhookChannelChoice {
+  id: string;
+  /** Its verified name and number as WhatsApp shows them; Meta's id for it until they are known. */
+  label: string;
+  status: ChannelStatus;
+}
+
+/** A WhatsApp number an endpoint takes the events of (ADR-170). */
+export interface WebhookEndpointChannel {
+  id: string;
+  label: string;
+  /** Null only for a number the company no longer had, which cannot happen: numbers are kept. */
+  status: ChannelStatus | null;
+}
+
+/** How Settings → Webhooks notes a number that is not active, as Settings → Channels names it. */
+export const WEBHOOK_CHANNEL_STATUS_NOTES: Record<ChannelStatus, string | null> = {
+  onboarding: 'setting up',
+  active: null,
+  needs_reconnect: 'reconnect needed',
+  disconnected: 'disconnected',
+  failed: 'setup failed',
+};
+
+/** A number as Settings → Webhooks lists it: its label, and its status unless it is active. */
+export function webhookChannelText(channel: {
+  label: string;
+  status: ChannelStatus | null;
+}): string {
+  const note = channel.status ? WEBHOOK_CHANNEL_STATUS_NOTES[channel.status] : null;
+  return note ? `${channel.label} (${note})` : channel.label;
+}
+
+/** Whether an endpoint with these events takes events of numbers, and can choose numbers. */
+export function webhookTakesChannelEvents(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_CHANNEL_EVENTS.some((type) => eventTypes.includes(type));
 }
 
 /**

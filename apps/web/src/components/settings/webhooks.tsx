@@ -23,11 +23,14 @@ import {
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUSES,
+  webhookChannelText,
   webhookReplayAllSummary,
   webhookReplaySummary,
   webhookTakesAutomationRuns,
+  webhookTakesChannelEvents,
   type WebhookAutomationChoice,
   type WebhookCampaignStatus,
+  type WebhookChannelChoice,
   type WebhookContactPart,
   type WebhookConversationStatus,
   type WebhookEventType,
@@ -318,6 +321,97 @@ function AutomationChoices({
   );
 }
 
+/**
+ * The WhatsApp numbers whose events an endpoint takes (ADR-170), shown while it takes an event that
+ * happens on a number: every number, including numbers connected later, or only those ticked. Any
+ * of the company's numbers can be chosen, whatever its status.
+ */
+function ChannelChoices({
+  prefix,
+  choices,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  choices: WebhookChannelChoice[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">WhatsApp numbers</legend>
+      <p className="text-xs text-muted-foreground">
+        Message, conversation, automation, order and campaign events happen on a number. Consent,
+        contact and template events are sent whichever numbers are chosen.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-channels`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every number’s events
+          <span className="block text-xs text-muted-foreground">
+            Including numbers connected later.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-channels`}
+          className="mt-1"
+          checked={!every}
+          disabled={choices.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only the events of the numbers ticked
+          {choices.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">
+              No WhatsApp number has been connected yet.
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid gap-1">
+          {choices.map((c) => {
+            const id = `${prefix}-channel-${c.id}`;
+            return (
+              <div key={c.id} className="flex items-center gap-2">
+                <Checkbox
+                  id={id}
+                  checked={chosen.includes(c.id)}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? choices
+                            .filter((l) => l.id === c.id || chosen.includes(l.id))
+                            .map((l) => l.id)
+                        : chosen.filter((x) => x !== c.id),
+                    )
+                  }
+                />
+                <Label htmlFor={id} className="font-normal">
+                  {webhookChannelText(c)}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
 function EventChoices({
   prefix,
   chosen,
@@ -522,6 +616,7 @@ export function WebhookEndpointForm({
   slug,
   endpoint,
   automationChoices,
+  channelChoices,
   atLimit = false,
 }: {
   slug: string;
@@ -539,9 +634,12 @@ export function WebhookEndpointForm({
     templateStatuses: WebhookTemplateStatus[] | null;
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
+    channelIds: string[] | null;
   };
   /** The company's published automations, which an endpoint can choose (ADR-145). */
   automationChoices: WebhookAutomationChoice[];
+  /** The company's WhatsApp numbers, which an endpoint can choose (ADR-170). */
+  channelChoices: WebhookChannelChoice[];
   atLimit?: boolean;
 }) {
   const prefix = useId();
@@ -571,6 +669,8 @@ export function WebhookEndpointForm({
   );
   const [everyAutomation, setEveryAutomation] = useState(!endpoint?.automationIds);
   const [automationIds, setAutomationIds] = useState<string[]>(endpoint?.automationIds ?? []);
+  const [everyChannel, setEveryChannel] = useState(!endpoint?.channelIds);
+  const [channelIds, setChannelIds] = useState<string[]>(endpoint?.channelIds ?? []);
   const [headers, setHeaders] = useState<HeaderRow[]>([]);
   // Changing an endpoint keeps its headers unless they are given again.
   const [replaceHeaders, setReplaceHeaders] = useState(false);
@@ -641,6 +741,9 @@ export function WebhookEndpointForm({
           runEndStatuses.length < WEBHOOK_RUN_END_STATUSES.length
             ? runEndStatuses
             : null;
+        // Every number's events unless the numbers ticked are chosen (ADR-170).
+        const chosenChannels =
+          webhookTakesChannelEvents(eventTypes) && !everyChannel ? channelIds : null;
         const input = {
           url,
           description,
@@ -653,6 +756,7 @@ export function WebhookEndpointForm({
           templateStatuses: chosenTemplateStatuses,
           conversationStatuses: chosenConversationStatuses,
           runEndStatuses: chosenRunEndStatuses,
+          channelIds: chosenChannels,
         };
         const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
           setBusy(false);
@@ -688,6 +792,8 @@ export function WebhookEndpointForm({
               setRunEndStatuses([...WEBHOOK_RUN_END_STATUSES]);
               setEveryAutomation(true);
               setAutomationIds([]);
+              setEveryChannel(true);
+              setChannelIds([]);
               setHeaders([]);
             }
           });
@@ -760,6 +866,16 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryAutomation}
           chosen={automationIds}
           onChange={setAutomationIds}
+        />
+      ) : null}
+      {webhookTakesChannelEvents(eventTypes) ? (
+        <ChannelChoices
+          prefix={prefix}
+          choices={channelChoices}
+          every={everyChannel}
+          onEveryChange={setEveryChannel}
+          chosen={channelIds}
+          onChange={setChannelIds}
         />
       ) : null}
       <fieldset className="grid gap-2">

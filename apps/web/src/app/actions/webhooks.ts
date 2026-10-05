@@ -33,6 +33,8 @@ export async function createWebhookEndpointAction(
     conversationStatuses: string[] | null;
     /** How the runs it takes as `automation.run_ended` ended (ADR-151); null takes every end. */
     runEndStatuses: string[] | null;
+    /** The WhatsApp numbers whose events it takes (ADR-170); null takes every number. */
+    channelIds: string[] | null;
   },
 ): Promise<ActionResult<{ endpointId: string; secret: string }>> {
   return runAction(async () => {
@@ -69,6 +71,8 @@ export async function updateWebhookEndpointAction(
     conversationStatuses: string[] | null;
     /** How the runs it takes as `automation.run_ended` ended (ADR-151); null takes every end. */
     runEndStatuses: string[] | null;
+    /** The WhatsApp numbers whose events it takes (ADR-170); null takes every number. */
+    channelIds: string[] | null;
   },
 ): Promise<ActionResult> {
   return runAction(async () => {

@@ -2153,6 +2153,18 @@ ended" on the endpoint's page (every end ticked takes them all, as a new endpoin
 `PATCH /webhook-endpoints/{id}` with `runEndStatuses` (null for every end). Removing the
 `automation.run_ended` event clears the list.
 
+**A receiver gets no events of some numbers (ADR-170).** An endpoint can take the events of chosen
+WhatsApp numbers only: the endpoints list shows them ("Numbers whose events are sent: …"), and the
+API answers `channelIds` (null takes every number's). Messages, message statuses, conversation
+changes, automation runs, orders and campaigns of another number are never queued for it, and when
+no endpoint of the company takes such an event, no event is recorded at all, so there is nothing to
+replay: events from before an edit are not sent afterwards. A campaign's events are those of the
+number it sends from; a campaign without a number yet is on no list. Consent, contact and template
+events are not filtered by number. To take more, tick the numbers under "WhatsApp numbers" on the
+endpoint's page or choose "Every number’s events" (which also takes numbers connected later), or
+`PATCH /webhook-endpoints/{id}` with `channelIds` (null for every number). Removing every event of a
+number clears the list.
+
 **A campaign event's results differ from the campaign page (ADR-150).** `campaign.results` are
 counted when the request is built (the `t` of its `W360-Signature`), as `GET /campaigns/{id}` counts
 them, and a retry or a replay counts again: an event delivered while the campaign's messages were on
@@ -2570,6 +2582,15 @@ after the runner updated the queues.
 `ops.platform_acknowledge_dead_letter`, in one transaction; a failure rolls it all back (usually the
 bootstrap roles: fix them and run the migrations again). Web servers of this release need it before
 they start, or the Queues tab fails to load; web servers and workers of the previous release work
+with it.
+
+**Migration 0118 failed.** It adds `channel_account_ids` to `app.webhook_endpoints` with the check
+`webhook_endpoints_channel_account_ids`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event` and the trigger functions of message, conversation, automation run,
+order and campaign events, in one transaction; a failure rolls it all back (usually the bootstrap
+roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
+release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
+endpoints name the column); workers of either release and web servers of the previous release work
 with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of

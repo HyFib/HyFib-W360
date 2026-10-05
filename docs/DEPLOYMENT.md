@@ -215,6 +215,14 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    lock on a table of at most 30 days of dead letters) and the acknowledging function. Web servers
    from before it neither show nor write acknowledgements, and their Queues CSV has no "Acknowledged
    (UTC)" column; web servers of this release need it, or the Queues tab fails to load.
+   Migration 0118 (ADR-170) adds `channel_account_ids` to `app.webhook_endpoints` with a check
+   validated by reading the table, and replaces `app.capture_webhook_event` (keeping 0109's to
+   0114's filters) and the trigger functions of message, conversation, automation run, order and
+   campaign events with the same signatures; every endpoint starts with none. Web servers of this
+   release need it, as their reads of endpoints name the column; workers do not read it. Web servers
+   from before it neither show nor change the column: until the web rollout ends, an old server's
+   change that drops every event of a number from an endpoint with a list fails on the check, and
+   its other changes keep it.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
