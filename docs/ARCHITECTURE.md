@@ -940,6 +940,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   campaigns named; `segmentCondition` checks each one as before, naming its place; and
   `contactSearchSql` joins the search's items by its `match`, compiling a group with
   `segmentConditionsSql` as a segment of its own and a single condition as a segment of one.
+- **Changing the contacts a search finds (ADR-165):** `POST /contacts/update-matching`
+  (`apiUpdateMatchingContacts`) reads one page through the search's own steps (`searchPage`, shared
+  with `apiSearchContacts`), then `changeContactsAlike` (`api/contacts.ts`) checks the change's
+  fields once (`lockFields`, `checkFieldChanges`), locks the page's contacts `FOR UPDATE` in id
+  order and runs `changeLockedContact`, `PATCH /contacts/{id}`'s step, for each, in one repeatable
+  read transaction; it answers the contacts as they now are with the page's cursor.
 - **Following contact changes (0091, ADR-114):** triggers on `contacts` (insert, and an update of
   the columns the API describes), `contact_tags` (insert, delete) and `contact_consents` (set, status
   changed) call `app.capture_contact_change`, which inserts one `app.contact_changes` row per contact

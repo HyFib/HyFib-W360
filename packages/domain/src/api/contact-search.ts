@@ -32,7 +32,12 @@ import { normalizeTag, validDate } from '../contacts/fields';
 import type { OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, parseInput } from '../validation';
 import type { ApiContact } from './contact-view';
-import { apiContactPage } from './contacts';
+import {
+  apiContactPage,
+  apiContactsAlikeChangeSchema,
+  changeContactsAlike,
+  prepareContactsAlikeChange,
+} from './contacts';
 import { assertScope, type ApiContext } from './context';
 import { API_LIMITS } from './model';
 
@@ -174,25 +179,55 @@ const conditionCount = (items: readonly ApiSearchItem[]) =>
  * A search: 1 to 20 conditions or groups of them, at most 20 conditions in all, which a contact
  * matches all of or any of, and the page to read.
  */
+const searchFields = {
+  match: z
+    .enum(['all', 'any'])
+    .default('all')
+    .describe('all: a contact matches every condition; any: at least one of them.'),
+  conditions: z
+    .array(apiSearchItemSchema)
+    .min(1)
+    .max(SEGMENT_LIMITS.conditions)
+    .refine(
+      (items) => conditionCount(items) <= SEGMENT_LIMITS.conditions,
+      `At most ${SEGMENT_LIMITS.conditions} conditions in all, those in groups included.`,
+    )
+    .describe(
+      `Conditions, or groups of conditions a contact matches together (all of them or any): at most ${SEGMENT_LIMITS.conditions} conditions in all, those in groups included. A group holds conditions, not groups.`,
+    ),
+  cursor: z.string().max(200).optional().describe('`nextCursor` from the previous page.'),
+};
+
 export const apiContactSearchSchema = z
   .object({
-    match: z
-      .enum(['all', 'any'])
-      .default('all')
-      .describe('all: a contact matches every condition; any: at least one of them.'),
-    conditions: z
-      .array(apiSearchItemSchema)
-      .min(1)
-      .max(SEGMENT_LIMITS.conditions)
-      .refine(
-        (items) => conditionCount(items) <= SEGMENT_LIMITS.conditions,
-        `At most ${SEGMENT_LIMITS.conditions} conditions in all, those in groups included.`,
-      )
-      .describe(
-        `Conditions, or groups of conditions a contact matches together (all of them or any): at most ${SEGMENT_LIMITS.conditions} conditions in all, those in groups included. A group holds conditions, not groups.`,
-      ),
+    match: searchFields.match,
+    conditions: searchFields.conditions,
     limit: z.number().int().min(1).max(API_LIMITS.pageSize).default(50),
-    cursor: z.string().max(200).optional().describe('`nextCursor` from the previous page.'),
+    cursor: searchFields.cursor,
+  })
+  .strict();
+
+/**
+ * Changing the contacts a search finds, a page at a time (ADR-165): the search's conditions, the
+ * change each contact of the page gets, and the page.
+ */
+export const apiUpdateMatchingContactsSchema = z
+  .object({
+    match: searchFields.match,
+    conditions: searchFields.conditions,
+    change: apiContactsAlikeChangeSchema.describe(
+      'What each contact of the page gets, as PATCH /contacts/{id} takes it: custom field values and tags, at least one.',
+    ),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(API_LIMITS.contactsPerChange)
+      .default(50)
+      .describe(
+        `The contacts one call changes, at most ${API_LIMITS.contactsPerChange}; a page can hold fewer.`,
+      ),
+    cursor: searchFields.cursor,
   })
   .strict();
 
@@ -356,41 +391,89 @@ export async function apiSearchContacts(
   assertScope(ctx, 'contacts.read');
   const q = parseInput(apiContactSearchSchema, input);
   const placed = placedConditions(q.conditions);
+  assertConditionScopes(ctx, placed);
+  const cursor = decodeKeysetCursor(q.cursor);
+  return deps.db.run(ctx.scope, (tx) => searchPage(tx, ctx, q, placed, cursor), {
+    isolationLevel: 'repeatable read',
+    accessMode: 'read only',
+  });
+}
+
+/**
+ * Changes the contacts a search with the same conditions finds, a page at a time (ADR-165): the
+ * page is read as `POST /contacts/search` reads it and each of its contacts changed as
+ * `PATCH /contacts/{id}` changes one, in one transaction that sees one snapshot, so a contact
+ * changed by someone else meanwhile refuses the call (409) rather than being changed as it was.
+ * Needs `contacts.read` and `contacts.write`. What a contact already has changes nothing, and a
+ * contact the change took out of the search is not found again, so a call sent again after a lost
+ * answer is safe: the pages still reach every contact the search finds, each changed once.
+ */
+export async function apiUpdateMatchingContacts(
+  deps: Pick<OutboundDeps, 'db'>,
+  ctx: ApiContext,
+  input: unknown,
+): Promise<{ data: ApiContact[]; nextCursor: string | null }> {
+  assertScope(ctx, 'contacts.read');
+  assertScope(ctx, 'contacts.write');
+  const q = parseInput(apiUpdateMatchingContactsSchema, input);
+  const placed = placedConditions(q.conditions);
+  assertConditionScopes(ctx, placed);
+  const change = prepareContactsAlikeChange(q.change);
+  const cursor = decodeKeysetCursor(q.cursor);
+  return deps.db.run(
+    ctx.scope,
+    async (tx) => {
+      const page = await searchPage(tx, ctx, q, placed, cursor);
+      const ids = page.data.map((contact) => contact.id);
+      return { data: await changeContactsAlike(tx, ctx, ids, change), nextCursor: page.nextCursor };
+    },
+    { isolationLevel: 'repeatable read' },
+  );
+}
+
+/**
+ * A `last_message` condition, in a group or not, also needs `conversations.read`, and a
+ * `campaign` condition `campaigns.read` (ADR-126).
+ */
+function assertConditionScopes(ctx: ApiContext, placed: readonly PlacedCondition[]): void {
   if (placed.some(({ condition }) => condition.type === 'last_message')) {
     assertScope(ctx, 'conversations.read');
   }
   if (placed.some(({ condition }) => condition.type === 'campaign')) {
     assertScope(ctx, 'campaigns.read');
   }
-  const cursor = decodeKeysetCursor(q.cursor);
-  return deps.db.run(
-    ctx.scope,
-    async (tx) => {
-      const fields = await loadFieldTypes(tx, ctx.tenant.id);
-      const items = q.conditions.map((item, i) =>
-        item.type === 'group'
-          ? {
-              match: item.match,
-              conditions: item.conditions.map((c, j) =>
-                segmentCondition(c, `conditions.${i}.conditions.${j}`, fields),
-              ),
-            }
-          : segmentCondition(item, `conditions.${i}`, fields),
-      );
-      await assertCampaignsExist(tx, ctx.tenant.id, placed);
-      // `created` days are the company's, as in segments.
-      const [company] = await tx
-        .select({ timezone: tenants.timezone })
-        .from(tenants)
-        .where(eq(tenants.id, ctx.tenant.id));
-      if (!company) throw notFound('Company');
-      return apiContactPage(tx, ctx.tenant.id, {
-        cursor,
-        limit: q.limit,
-        narrow: [],
-        filters: [contactSearchSql(q.match, items, company.timezone, fields)],
-      });
-    },
-    { isolationLevel: 'repeatable read', accessMode: 'read only' },
+}
+
+/** One page of the contacts the conditions find, checked against the company's fields first. */
+async function searchPage(
+  tx: Tx,
+  ctx: ApiContext,
+  q: { match: 'all' | 'any'; conditions: ApiSearchItem[]; limit: number },
+  placed: readonly PlacedCondition[],
+  cursor: { at: string; id: string } | null,
+): Promise<{ data: ApiContact[]; nextCursor: string | null }> {
+  const fields = await loadFieldTypes(tx, ctx.tenant.id);
+  const items = q.conditions.map((item, i) =>
+    item.type === 'group'
+      ? {
+          match: item.match,
+          conditions: item.conditions.map((c, j) =>
+            segmentCondition(c, `conditions.${i}.conditions.${j}`, fields),
+          ),
+        }
+      : segmentCondition(item, `conditions.${i}`, fields),
   );
+  await assertCampaignsExist(tx, ctx.tenant.id, placed);
+  // `created` days are the company's, as in segments.
+  const [company] = await tx
+    .select({ timezone: tenants.timezone })
+    .from(tenants)
+    .where(eq(tenants.id, ctx.tenant.id));
+  if (!company) throw notFound('Company');
+  return apiContactPage(tx, ctx.tenant.id, {
+    cursor,
+    limit: q.limit,
+    narrow: [],
+    filters: [contactSearchSql(q.match, items, company.timezone, fields)],
+  });
 }

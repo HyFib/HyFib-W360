@@ -6529,3 +6529,46 @@ Decision:
 Not built: groups in segments, groups inside groups, the opposite of a group (most conditions have
 their own, like `not_has` and `not_within_days`), counting the matches, and orders other than newest
 first.
+
+## ADR-165 Changing the contacts a search finds, a page at a time (P5-08) (2026-10-05)
+
+Context: a key finds contacts with segments' conditions (ADR-117, ADR-164) and changes up to 100
+contacts it names in one call (ADR-122). Tagging every contact in Pune, or setting a field for
+everyone who opted in to marketing, meant reading the search page by page and sending each page's
+ids back to change them: twice the calls, and a contact changed in between by someone else was
+changed as the search had found it. P5-08's Remaining listed choosing contacts to change by a
+filter.
+
+Decision:
+
+- **Endpoint:** `POST /api/v1/contacts/update-matching` (`updateMatchingContacts`) takes a search's
+  `match` and `conditions` (groups included), a `change`, and a page: `limit` (1 to 100, 50 by
+  default) and `cursor`. The change holds custom field values (`fields`) and tags (`addTags`,
+  `removeTags`), at least one, the same for every contact; names and emails are a contact's own and
+  are not set for many at once.
+- **Both contact scopes:** `contacts.read` and `contacts.write`. The call finds contacts as a search
+  does and answers them, so a key that may only write contacts cannot use it to read the company's
+  contacts. `last_message` and `campaign` conditions need their scopes, as in a search, and
+  `contacts.write`, a writing scope, is refused while the company is suspended or restricted.
+- **A search page, changed:** each call reads one page as `POST /contacts/search` reads it (newest
+  first, in windows of 2,000, on exact keyset pages) and changes each of its contacts as
+  `PATCH /contacts/{id}` changes one, with the locks changing many contacts takes (ADR-122: the
+  fields' definitions shared, the contacts `FOR UPDATE` in id order), an audit entry as the key and
+  `contact.updated` for each contact the change changes. It answers the page's contacts as they now
+  are, with the next cursor.
+- **One snapshot:** the page is read and changed in one repeatable read transaction, so the change
+  reaches exactly the contacts the page found. A contact someone else changed after the page was
+  read refuses the call (409, changing nothing), and it can be sent again with the same cursor.
+- **Pages follow the conditions as they are:** a contact the change takes out of the search is not
+  read again (the cursor has passed it).
+- **All or none in a call:** a field the company does not have, a value of another type, or a
+  contact the change would give more than 50 tags refuses the call (422, naming the part, as
+  `change.fields.plan`).
+- **No `Idempotency-Key`:** what a contact already has changes nothing, and a contact the change took
+  out of the search is not found again, so a call sent again after a lost answer is safe: the pages
+  still reach every contact the search finds, each changed once. A call counts as one request.
+- **No migration.**
+
+Not built: names and emails for many contacts, consent for many contacts (consent needs each
+contact's evidence), erasing the contacts a search finds, counting the contacts a change would
+reach, and every page in one call.

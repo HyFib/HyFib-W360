@@ -121,6 +121,29 @@ test('a key finds contacts with segment conditions: comparisons, tags, all or an
     ),
   ).toEqual(['conditions.1.conditions.0.op']);
 
+  // The contacts a search finds, changed a page at a time (ADR-165).
+  const changed = await request.post('/api/v1/contacts/update-matching', {
+    headers: auth,
+    data: {
+      conditions: [{ type: 'field', key: 'city', op: 'equals', value: 'pune' }],
+      change: { addTags: ['pune'] },
+    },
+  });
+  expect(changed.status()).toBe(200);
+  const changedPage = (await changed.json()) as {
+    data: { name: string; tags: string[] }[];
+    nextCursor: string | null;
+  };
+  expect([changedPage.data.map((c) => [c.name, c.tags]), changedPage.nextCursor]).toEqual([
+    [
+      ['Bina', ['pune']],
+      ['Asha', ['pune', 'vip']],
+    ],
+    null,
+  ]);
+  const inPune = await search({ conditions: [{ type: 'tag', op: 'has', tag: 'pune' }] });
+  expect(inPune.data.map((c) => c.name)).toEqual(['Bina', 'Asha']);
+
   // A comparison the field's type does not take is refused, naming it.
   const refused = await request.post('/api/v1/contacts/search', {
     headers: auth,

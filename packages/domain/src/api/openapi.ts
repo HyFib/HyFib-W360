@@ -59,7 +59,7 @@ import {
   apiCampaignWithResultsSchema,
 } from './campaigns';
 import { apiContactFieldCreateSchema, apiContactFieldUpdateSchema } from './contact-fields';
-import { apiContactSearchSchema } from './contact-search';
+import { apiContactSearchSchema, apiUpdateMatchingContactsSchema } from './contact-search';
 import { apiContactSchema } from './contact-view';
 import {
   API_CONTACT_SEARCH_WINDOW,
@@ -788,6 +788,25 @@ export function buildOpenApiDocument(serverUrl: string) {
               }),
             },
             ...errors(400, 401, 403, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/contacts/update-matching': {
+        post: {
+          operationId: 'updateMatchingContacts',
+          summary: 'Change the contacts a search finds, a page at a time',
+          description: [
+            `Scopes: \`contacts.read\` and \`contacts.write\`; a \`last_message\` condition also needs \`conversations.read\`, and a \`campaign\` condition \`campaigns.read\`, as for POST /contacts/search. Takes a search's conditions, groups included, and a change: custom field values (\`fields\`) and tags (\`addTags\`, \`removeTags\`), the same for every contact.`,
+            `Each call reads one page of the contacts POST /contacts/search finds with the same conditions (newest first, at most ${API_LIMITS.contactsPerChange} contacts, read in windows of ${API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US')}), changes each of them as PATCH /contacts/{id} changes one and answers them as they now are with \`nextCursor\`: send the same conditions and change with it until it is \`null\`. A page is found by the conditions as they are when it is read, so a contact the change takes out of the search is not read again.`,
+            'A field the company does not have, a value of another type, or a contact the change would give more than 50 tags refuses the call (422, naming the part, as `change.fields.plan`), and nothing is changed. The page is read and changed in one transaction: when a contact on it is changed by someone else at the same moment, the call can be refused as a whole (409, changing nothing): send it again with the same cursor. What a contact already has changes nothing, and a contact the change took out of the search is not found again, so a call sent again after a lost answer is safe without an `Idempotency-Key`: the pages still reach every contact the search finds, each changed once. A call counts as one request against the rate and monthly limits.',
+          ].join('\n\n'),
+          requestBody: { required: true, content: json(ref('UpdateMatchingContacts')) },
+          responses: {
+            '200': {
+              description: 'The page’s contacts, as they now are, and where the next page starts.',
+              content: pageOf('Contact'),
+            },
+            ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -1799,6 +1818,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         ContactUpdate: jsonSchema(apiContactUpdateSchema, 'input'),
         UpdateManyContacts: jsonSchema(apiUpdateManyContactsSchema, 'input'),
         ContactSearch: jsonSchema(apiContactSearchSchema, 'input'),
+        UpdateMatchingContacts: jsonSchema(apiUpdateMatchingContactsSchema, 'input'),
         ContactField: jsonSchema(apiContactFieldSchema),
         ContactFieldCreate: jsonSchema(apiContactFieldCreateSchema, 'input'),
         ContactFieldUpdate: jsonSchema(apiContactFieldUpdateSchema, 'input'),
@@ -1898,6 +1918,7 @@ export const API_ROUTES = [
   ['post', '/contacts'],
   ['post', '/contacts/search'],
   ['post', '/contacts/update-many'],
+  ['post', '/contacts/update-matching'],
   ['get', '/contacts/{id}'],
   ['patch', '/contacts/{id}'],
   ['post', '/contacts/{id}/consent'],

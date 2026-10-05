@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { isAppError } from '@w360/core';
 import type { Database } from '@w360/db';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { apiContactSearchSchema, apiSearchContacts, contactSearchSql } from './contact-search';
+import {
+  apiContactSearchSchema,
+  apiSearchContacts,
+  apiUpdateMatchingContacts,
+  apiUpdateMatchingContactsSchema,
+  contactSearchSql,
+} from './contact-search';
 import type { ApiContext } from './context';
 import { API_ROUTES, buildOpenApiDocument } from './openapi';
 
@@ -376,5 +382,157 @@ describe('groups of conditions in contact searches (ADR-164)', () => {
     expect(groupShape?.properties.match?.enum).toEqual(['all', 'any']);
     expect(groupShape?.properties.conditions).toMatchObject({ minItems: 1, maxItems: 20 });
     expect(groupShape?.properties.conditions?.items.oneOf).toHaveLength(9);
+  });
+});
+
+describe('changing the contacts a search finds (ADR-165)', () => {
+  const vip = { addTags: ['vip'] };
+  const body = (extra: Record<string, unknown> = {}) => ({
+    conditions: [isSet],
+    change: vip,
+    ...extra,
+  });
+
+  it('takes a search’s conditions, a change of fields or tags, and a page of at most 100', () => {
+    const parse = (input: unknown) => apiUpdateMatchingContactsSchema.safeParse(input);
+    const parsed = parse(body());
+    expect(parsed.success && [parsed.data.match, parsed.data.limit]).toEqual(['all', 50]);
+    for (const input of [
+      body({ limit: 100 }),
+      body({ change: { removeTags: ['old'] } }),
+      body({ change: { fields: { city: 'Pune' } } }),
+      body({ change: { fields: { city: null }, addTags: ['a'], removeTags: ['b'] } }),
+      body({ match: 'any', cursor: 'abc' }),
+      body({ conditions: [{ type: 'group', match: 'any', conditions: [isSet, isSet] }] }),
+    ]) {
+      expect(parse(input).success, JSON.stringify(input)).toBe(true);
+    }
+    for (const input of [
+      body({ limit: 101 }),
+      body({ limit: 0 }),
+      body({ change: {} }),
+      body({ change: { name: 'Asha' } }),
+      body({ change: { email: 'a@example.com' } }),
+      body({ change: { ...vip, extra: true } }),
+      body({ conditions: [] }),
+      body({ order: 'name' }),
+      { conditions: [isSet] },
+    ]) {
+      expect(parse(input).success, JSON.stringify(input)).toBe(false);
+    }
+  });
+
+  it('needs contacts.read and contacts.write, and refuses a bad change, before it reads anything', async () => {
+    const refused = async (scopes: string[], input: unknown, status = 'active') => {
+      try {
+        await apiUpdateMatchingContacts({ db: untouched }, ctx(scopes, status), input);
+      } catch (error) {
+        if (isAppError(error)) {
+          return [error.code, error.publicMessage, (error.issues ?? []).map((i) => i.path)];
+        }
+        throw error;
+      }
+      throw new Error('expected a refusal');
+    };
+    expect(await refused(['contacts.write'], body())).toEqual([
+      'forbidden',
+      'This API key does not have the contacts.read scope.',
+      [],
+    ]);
+    expect(await refused(['contacts.read'], body())).toEqual([
+      'forbidden',
+      'This API key does not have the contacts.write scope.',
+      [],
+    ]);
+    expect((await refused(['contacts.read', 'contacts.write'], body(), 'suspended'))[0]).toBe(
+      'tenant_suspended',
+    );
+    expect(
+      (
+        await refused(['contacts.read', 'contacts.write'], {
+          conditions: [{ type: 'last_message', op: 'within_days', days: 7 }],
+          change: vip,
+        })
+      )[1],
+    ).toBe('This API key does not have the conversations.read scope.');
+    expect(
+      (
+        await refused(['contacts.read', 'contacts.write'], body({ change: { addTags: ['a,b'] } }))
+      )[2],
+    ).toEqual(['change.addTags']);
+    expect(
+      (
+        await refused(
+          ['contacts.read', 'contacts.write'],
+          body({ change: { addTags: ['vip'], removeTags: ['VIP'] } }),
+        )
+      )[2],
+    ).toEqual(['change.removeTags']);
+  });
+
+  it('reads and changes the page in one transaction that sees one snapshot', async () => {
+    const { db, reads } = reached();
+    await expect(
+      apiUpdateMatchingContacts({ db }, ctx(['contacts.read', 'contacts.write']), body()),
+    ).rejects.toThrow('reached the database');
+    expect(reads).toEqual([{ isolationLevel: 'repeatable read' }]);
+  });
+
+  it('is described: both scopes, pages of the search, the change, refusals and retries', () => {
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      paths: Record<string, Record<string, Record<string, unknown>>>;
+      components: { schemas: Record<string, unknown> };
+    };
+    expect(API_ROUTES).toContainEqual(['post', '/contacts/update-matching']);
+    const op = doc.paths['/contacts/update-matching']?.post as {
+      operationId: string;
+      description: string;
+      requestBody: unknown;
+      responses: Record<string, { content?: unknown }>;
+    };
+    expect(op.operationId).toBe('updateMatchingContacts');
+    expect(op.requestBody).toEqual({
+      required: true,
+      content: {
+        'application/json': { schema: { $ref: '#/components/schemas/UpdateMatchingContacts' } },
+      },
+    });
+    expect(op.responses['200']?.content).toEqual(
+      (doc.paths['/contacts/search']?.post as { responses: Record<string, { content?: unknown }> })
+        .responses['200']?.content,
+    );
+    expect(Object.keys(op.responses)).toEqual(
+      expect.arrayContaining(['200', '403', '409', '422', '423', '429']),
+    );
+    for (const words of [
+      'Scopes: `contacts.read` and `contacts.write`',
+      'the same for every contact',
+      'changes each of them as PATCH /contacts/{id} changes one',
+      'send the same conditions and change with it until it is `null`',
+      'a contact the change takes out of the search is not read again',
+      '(422, naming the part, as `change.fields.plan`)',
+      'the call can be refused as a whole (409, changing nothing): send it again with the same cursor',
+      'a call sent again after a lost answer is safe without an `Idempotency-Key`',
+      'A call counts as one request',
+    ]) {
+      expect(op.description).toContain(words);
+    }
+    const schema = doc.components.schemas.UpdateMatchingContacts as {
+      properties: {
+        change: { properties: Record<string, unknown>; additionalProperties: boolean };
+        limit: { maximum: number; default: number };
+      };
+      required: string[];
+      additionalProperties: boolean;
+    };
+    expect(schema.required).toEqual(expect.arrayContaining(['conditions', 'change']));
+    expect(schema.additionalProperties).toBe(false);
+    expect(Object.keys(schema.properties.change.properties)).toEqual([
+      'fields',
+      'addTags',
+      'removeTags',
+    ]);
+    expect(schema.properties.change.additionalProperties).toBe(false);
+    expect([schema.properties.limit.maximum, schema.properties.limit.default]).toEqual([100, 50]);
   });
 });

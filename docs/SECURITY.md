@@ -721,6 +721,11 @@ Phase 5 rules (Public API, P5-08):
   outside them (a `last_message` or `campaign` condition in a group needs its scope, checked before
   anything is read), hold no groups and count toward the search's 20 conditions, so a search reads
   no more than before.
+- Changing the contacts a search finds (ADR-165, `POST /contacts/update-matching`) needs
+  `contacts.read` and `contacts.write` both, so a key that may only write contacts cannot read them
+  through it, and the conditions' own scopes; it changes custom field values and tags only, each
+  contact as `PATCH /contacts/{id}` changes one (audited as the key), at most 100 a call, in one
+  snapshot, all or none.
 - Only the token's SHA-256 is stored; the runtime role cannot read it. The token is shown once in
   the browser and kept only in the page's memory; it is never logged, and audit entries carry the
   public prefix only.

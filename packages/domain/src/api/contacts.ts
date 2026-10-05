@@ -125,6 +125,22 @@ export const apiUpdateManyContactsSchema = z
   })
   .strict();
 
+/**
+ * What `POST /contacts/update-matching` changes in each contact a search finds (ADR-165): custom
+ * field values and tags, the same for every contact, at least one of them.
+ */
+export const apiContactsAlikeChangeSchema = z
+  .object({
+    fields: contactChange.fields,
+    addTags: contactChange.addTags,
+    removeTags: contactChange.removeTags,
+  })
+  .strict()
+  .refine(
+    (v) => v.fields !== undefined || v.addTags !== undefined || v.removeTags !== undefined,
+    'Give fields, addTags or removeTags.',
+  );
+
 export interface ApiContactField {
   key: string;
   label: string;
@@ -405,7 +421,7 @@ export async function apiListContactFields(
 }
 
 /** A change checked before its transaction: the email normalized and the tags as the app keeps them. */
-interface ContactChange {
+export interface ContactChange {
   name: string | null | undefined;
   email: string | null | undefined;
   fields: Record<string, unknown> | undefined;
@@ -545,6 +561,56 @@ async function changeLockedContact(
       apiActor(ctx),
     );
   }
+}
+
+/** The change of `POST /contacts/update-matching`, checked as far as it can be without reading. */
+export function prepareContactsAlikeChange(
+  input: z.infer<typeof apiContactsAlikeChangeSchema>,
+): ContactChange {
+  return prepareContactChange(input, 'change.');
+}
+
+/**
+ * Applies one change to each of these contacts (ADR-165): the fields it sets checked once, the
+ * contacts locked `FOR UPDATE` in id order, as changing many contacts locks them (ADR-122), then each
+ * changed as `PATCH /contacts/{id}` changes one. A refusal names `change.<part>` and changes
+ * nothing. Answers the contacts as they now are, in the order given; an erased one is left out.
+ */
+export async function changeContactsAlike(
+  tx: Tx,
+  ctx: ApiContext,
+  ids: readonly string[],
+  change: ContactChange,
+): Promise<ApiContact[]> {
+  if (ids.length === 0) return [];
+  const keys = Object.keys(change.fields ?? {}).sort();
+  const defined = await lockFields(tx, ctx.tenant.id, keys);
+  const fieldChanges = change.fields ? checkFieldChanges(defined, change.fields, 'change.') : {};
+  const locked = await tx
+    .select(lockedContactColumns)
+    .from(contacts)
+    .where(and(eq(contacts.tenantId, ctx.tenant.id), inArray(contacts.id, [...ids])))
+    .orderBy(asc(contacts.id))
+    .for('update');
+  for (const row of locked) {
+    if (row.erasedAt) continue;
+    await changeLockedContact(tx, ctx, row, change, fieldChanges, 'change.');
+  }
+  const rows = await tx
+    .select(apiContactColumns)
+    .from(contacts)
+    .where(
+      and(
+        eq(contacts.tenantId, ctx.tenant.id),
+        inArray(contacts.id, [...ids]),
+        isNull(contacts.erasedAt),
+      ),
+    );
+  const after = new Map(rows.map((row) => [row.id, row]));
+  return ids.flatMap((id) => {
+    const row = after.get(id);
+    return row ? [toApiContact(row)] : [];
+  });
 }
 
 /**

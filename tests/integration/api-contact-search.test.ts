@@ -4,6 +4,7 @@ import {
   API_CONTACT_SEARCH_WINDOW,
   apiRecordConsent,
   apiSearchContacts,
+  apiUpdateMatchingContacts,
   authenticateApiToken,
   createApiKeysService,
   createContactsService,
@@ -743,6 +744,101 @@ describe('groups of conditions (ADR-164)', () => {
       }),
     );
     expect(missing.paths).toEqual(['conditions.0.conditions.1.campaignId']);
+  });
+});
+
+describe('changing the contacts a search finds (ADR-165)', () => {
+  it('changes each page of the contacts a search finds as PATCH changes one, until the cursor is null', async () => {
+    const c = await fx.company();
+    await defineFields(c);
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    for (const [displayName, city] of [
+      ['Asha', 'Pune'],
+      ['Bina', 'Delhi'],
+      ['Chitra', 'Pune'],
+      ['Dev', 'Pune'],
+      ['Esha', null],
+    ] as const) {
+      await service.createContact(owner, {
+        displayName,
+        phone: nextPhone(),
+        attributes: city ? { city } : {},
+      });
+    }
+    // Another company's contact matches the same conditions and is never changed.
+    const other = await fx.company();
+    await defineFields(other);
+    const theirs = await contactsService().createContact(await fx.ctx(other, other.owner), {
+      displayName: 'Theirs',
+      phone: nextPhone(),
+      attributes: { city: 'Pune' },
+    });
+
+    const ctx = await apiKey(c, ['contacts.read', 'contacts.write']);
+    const call = (cursor?: string | null) =>
+      apiUpdateMatchingContacts(deps(), ctx, {
+        conditions: [
+          { type: 'field', key: 'city', op: 'equals', value: 'pune' },
+          { type: 'tag', op: 'not_has', tag: 'local' },
+        ],
+        change: { addTags: ['local'], fields: { orders: 1 } },
+        limit: 2,
+        ...(cursor ? { cursor } : {}),
+      });
+    const first = await call();
+    expect(names(first)).toEqual(['Dev', 'Chitra']);
+    expect(first.data.map((contact) => [contact.tags, contact.fields])).toEqual([
+      [['local'], { city: 'Pune', orders: 1 }],
+      [['local'], { city: 'Pune', orders: 1 }],
+    ]);
+    expect(first.nextCursor).not.toBeNull();
+    const second = await call(first.nextCursor);
+    expect([names(second), second.nextCursor]).toEqual([['Asha'], null]);
+    // From the start again, nothing matches: the change took every contact out of the search.
+    expect(await call()).toEqual({ data: [], nextCursor: null });
+
+    const tagged = await apiSearchContacts(deps(), ctx, {
+      conditions: [{ type: 'tag', op: 'has', tag: 'local' }],
+    });
+    expect(names(tagged)).toEqual(['Dev', 'Chitra', 'Asha']);
+    expect(
+      await fx.query('SELECT 1 FROM app.contact_tags WHERE contact_id = $1', [theirs.id]),
+    ).toHaveLength(0);
+    // Each contact changed is audited as the key, as PATCH /contacts/{id} audits one.
+    const audits = await fx.query<{ actor_type: string; changed: string[] }>(
+      `SELECT actor_type, metadata->'changed' AS changed FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'contact.updated' ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(audits).toEqual(
+      Array.from({ length: 3 }, () => ({ actor_type: 'api_key', changed: ['fields', 'tags'] })),
+    );
+
+    // A field the company does not have refuses the call by its part, changing nothing.
+    const refused = await refusal(
+      apiUpdateMatchingContacts(deps(), ctx, {
+        conditions: [{ type: 'field', key: 'city', op: 'is_set' }],
+        change: { addTags: ['checked'], fields: { plan: 'gold' } },
+      }),
+    );
+    expect([refused.code, refused.paths]).toEqual(['validation_failed', ['change.fields.plan']]);
+    const checked = await apiSearchContacts(deps(), ctx, {
+      conditions: [{ type: 'tag', op: 'has', tag: 'checked' }],
+    });
+    expect(checked.data).toEqual([]);
+    // A key that can only write contacts cannot search them to change them.
+    const writer = await apiKey(c, ['contacts.write']);
+    expect(
+      (
+        await refusal(
+          apiUpdateMatchingContacts(deps(), writer, {
+            conditions: [{ type: 'field', key: 'city', op: 'is_set' }],
+            change: { addTags: ['x'] },
+          }),
+        )
+      ).code,
+    ).toBe('forbidden');
   });
 });
 

@@ -580,11 +580,14 @@ verification, app review, Embedded Signup configuration).
   (ADR-164: `POST /contacts/search` takes groups of conditions a contact matches together, all of a
   group's conditions or any, one level deep, 20 conditions in all; a refusal inside a group names
   its place).
+  **[Changing the contacts a search finds built; its database tests run only in CI]** (ADR-165:
+  `POST /contacts/update-matching` changes the contacts of one search page per call, each as
+  `PATCH /contacts/{id}` changes one, custom field values and tags only, in one snapshot; it needs
+  `contacts.read` and `contacts.write`).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   choosing conversations to change by a filter, media downloads, a contact card's contacts (Meta's
   contact object is not confirmed), changing a field's type, changing
-  numbers, choosing
-  contacts to change by a filter,
+  numbers,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
   resuming, approving, scheduling, creating and editing campaigns through the API, campaign
   recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose

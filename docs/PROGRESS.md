@@ -1,5 +1,58 @@
 # Progress
 
+## 2026-10-05 — Phase 5: changing the contacts a search finds (P5-08, ADR-165)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A key changed contacts
+it named, up to 100 per call. The local PostgreSQL is unavailable (its Docker daemon stopped), so
+the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-165):** `POST /contacts/update-matching` changes the contacts of one search page per
+  call (custom field values and tags, the same for each), each as `PATCH /contacts/{id}` changes
+  one, in one repeatable read transaction; `contacts.read` and `contacts.write` both; pages follow
+  the conditions as they are; all or none in a call.
+- **Domain:** `api/contacts.ts` (`apiContactsAlikeChangeSchema`, `prepareContactsAlikeChange`,
+  `changeContactsAlike`); `api/contact-search.ts` (`searchPage` and `assertConditionScopes` shared
+  with the search, `apiUpdateMatchingContacts` and its schema); `api/openapi.ts` (the operation,
+  `UpdateMatchingContacts`, the route list).
+- **Web:** the route `api/v1/contacts/update-matching`.
+- **Tests:**
+  - Unit (4 new in `contact-search.test.ts`): the body (a search, a change of fields or tags only,
+    at least one, pages of 1 to 100); both contact scopes, the conditions' scopes and the change's
+    refusals before anything is read; one repeatable read transaction; the operation, its body and
+    its words.
+  - Integration (1 new in `api-contact-search.test.ts`): two pages changed until the cursor is null,
+    each contact as one change, audited as the key; the first page again finding nothing; another
+    company's contact untouched; a field the company does not have refusing the call by its part and
+    changing nothing; a key that only writes contacts refused. Written for CI; not run here.
+  - E2E (`api-contact-search.spec.ts` extended): a page changed over HTTP and found by its new tag.
+    Written for CI; not run here.
+- **Docs:** ADR-165; SECURITY (contact searches); ARCHITECTURE; BACKLOG P5-08; feature matrix H-033
+  and W-134.
+- **Mutation checks:** 13 tried, all caught on the unit-tested parts (either contact scope or the
+  conditions' scopes not needed, the change's refusals unnamed, the page's maximum or default, an
+  empty change, a name or another part taken, no shared snapshot, the 409 left out of the words, the
+  route unlisted or answering another method). The page's changes, the locks and the audit entries
+  need the database, so their regressions are left to the integration and e2e tests, which run in
+  CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 741 passed (75 files; 4 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 13 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Names, emails and consent for many contacts, erasing the contacts a search finds, counting the
+  contacts a change would reach, every page in one call.
+
 ## 2026-10-05 — Phase 5: groups of conditions in contact searches (P5-08, ADR-164)
 
 Status: **Implemented; its database tests run in CI only (test data only).** A search matched all of
