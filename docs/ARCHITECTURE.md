@@ -1047,6 +1047,16 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   through the single stop's step (`stopRunIfActive`: the active run locked with `lockActiveRun`, its
   step, `endRun` as `stopped_by_api`, the audit entry as the key), leaving a run that has ended as
   it is. The answer reads the runs again, in the order given.
+- **Template sends to many numbers through the API (ADR-163):** `POST /messages/send-many`
+  (`apiSendManyTemplates`, up to `API_LIMITS.messagesPerSend` (50) numbers) shares the single send's
+  steps in `api/resources.ts`: `loadSendableTemplate` (the company's approved template the key's
+  scope may send), `assertTemplateVariables` (each send's values, named by place),
+  `templateSendingNumber` (the number of the template's account, active), `lockMarketingSends` (the
+  campaign runner's company lock for a marketing template, taken before any contact or conversation,
+  by both calls) and `queueTemplateFor` (the contact, eligibility, the frequency cap, the
+  conversation `FOR UPDATE`, the message, its send intent, the event and the job). Each number's
+  `queueTemplateFor` runs in a savepoint, and a `precondition_failed` refusal is answered in its
+  place. The answer is stored with the `Idempotency-Key`, as one send's is.
 - **Buttons and lists through the API (ADR-080):** `POST /messages` with `type` `buttons` or `list`
   (`apiSendButtons`, `apiSendList`) takes the same path as a text reply (`sendReply`: the contact
   who wrote in the last 24 hours, the conversation locked `FOR UPDATE`, the automation ended as

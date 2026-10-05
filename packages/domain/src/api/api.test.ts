@@ -88,6 +88,8 @@ import {
   apiSendButtonsSchema,
   apiSendCatalogSchema,
   apiSendListSchema,
+  apiSendManyTemplates,
+  apiSendManyTemplatesSchema,
   apiSendMessage,
   apiSendProductListSchema,
   apiSendProductSchema,
@@ -3424,5 +3426,160 @@ describe('stopping many runs in one call (ADR-162)', () => {
     expect(body.additionalProperties).toBe(false);
     expect(body.properties.runIds.minItems).toBe(1);
     expect(body.properties.runIds.maxItems).toBe(API_LIMITS.runsPerStop);
+  });
+});
+
+describe('sending a template to many numbers in one call (ADR-163)', () => {
+  const ctx = (scopes: string[]) =>
+    ({
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: null,
+      requestId: 'r',
+    }) as unknown as ApiContext;
+  const templateId = '0192a1b2-0000-7000-8000-000000000001';
+  const message = (to: string) => ({ to, variables: { body: ['Asha', 'A-1001'] } });
+  // Every refusal here comes before anything is read: the dependencies are never used.
+  const send = (scopes: string[], body: unknown) =>
+    apiSendManyTemplates({} as never, ctx(scopes), body, { key: 'k-1', requestHash: 'h' })
+      .then(() => null)
+      .catch((caught: unknown) => caught);
+
+  it('takes one template and 1 to 50 numbers, each with the values of its variables', () => {
+    const parse = (body: unknown) => apiSendManyTemplatesSchema.safeParse(body);
+    expect(API_LIMITS.messagesPerSend).toBe(50);
+    const many = (n: number) =>
+      Array.from({ length: n }, (_, i) => message(`+9198111${String(i).padStart(5, '0')}`));
+    expect(parse({ templateId, messages: many(1) }).success).toBe(true);
+    expect(parse({ templateId, messages: many(API_LIMITS.messagesPerSend) }).success).toBe(true);
+    expect(parse({ templateId, from: templateId, messages: many(2) }).success).toBe(true);
+    // Values left out are none, as for one send.
+    expect(parse({ templateId, messages: [{ to: '+919811100001' }] }).data?.messages).toEqual([
+      { to: '+919811100001', variables: { header: [], body: [] } },
+    ]);
+    for (const body of [
+      { templateId, messages: [] },
+      { templateId, messages: many(API_LIMITS.messagesPerSend + 1) },
+      { messages: many(1) },
+      { templateId: 'x', messages: many(1) },
+      { templateId, messages: many(1), type: 'template' },
+      { templateId, messages: [{ ...message('+919811100001'), templateId }] },
+      { templateId, messages: [{ to: '+919811100001', variables: { header: ['a', 'b'] } }] },
+      { templateId, messages: [{ to: '+919811100001', variables: { body: [' '] } }] },
+      { templateId, messages: message('+919811100001') },
+      {},
+    ]) {
+      expect(parse(body).success, JSON.stringify(body).slice(0, 80)).toBe(false);
+    }
+  });
+
+  it('refuses before anything is read: the scope, an empty list, a number that is not one or given twice', async () => {
+    const forbidden = await send(['messages.reply'], {
+      templateId,
+      messages: [message('+919811100001')],
+    });
+    expect(isAppError(forbidden) && forbidden.code).toBe('forbidden');
+    const empty = await send(['messages.send'], { templateId, messages: [] });
+    expect(isAppError(empty) && empty.code).toBe('validation_failed');
+    const notANumber = await send(['messages.send_marketing'], {
+      templateId,
+      messages: [message('+919811100001'), message('+919811100002'), message('12345')],
+    });
+    expect(isAppError(notANumber) && notANumber.code).toBe('validation_failed');
+    expect(isAppError(notANumber) && notANumber.issues?.map((i) => i.path)).toEqual([
+      'messages.2.to',
+    ]);
+    // The same number twice, however it is written.
+    const twice = await send(['messages.send'], {
+      templateId,
+      messages: [message('+91 98111 00001'), message('+919811100002'), message('+919811100001')],
+    });
+    expect(isAppError(twice) && twice.code).toBe('validation_failed');
+    expect(isAppError(twice) && twice.issues).toEqual([
+      {
+        path: 'messages.2.to',
+        message: 'Give each number once: messages.2.to is the number of messages.0.to.',
+      },
+    ]);
+  });
+
+  it('is described: each number answered in its place, the call refused as a whole only for what cannot send at all', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const op = (
+      doc.paths as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            description: string;
+            parameters: unknown[];
+            requestBody: unknown;
+            responses: Record<string, { content?: unknown }>;
+          }
+        >
+      >
+    )['/messages/send-many']?.post;
+    expect(op?.operationId).toBe('sendManyTemplates');
+    expect(op?.parameters).toEqual([{ $ref: '#/components/parameters/IdempotencyKey' }]);
+    expect(op?.requestBody).toEqual({
+      required: true,
+      content: {
+        'application/json': { schema: { $ref: '#/components/schemas/SendManyTemplates' } },
+      },
+    });
+    expect(op?.responses['200']?.content).toEqual({
+      'application/json': {
+        schema: {
+          type: 'object',
+          properties: {
+            data: { type: 'array', items: { $ref: '#/components/schemas/TemplateSend' } },
+          },
+          required: ['data'],
+        },
+      },
+    });
+    expect(Object.keys(op?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '403', '404', '409', '412', '422', '423']),
+    );
+    for (const words of [
+      'Utility templates need `messages.send`, marketing templates `messages.send_marketing`.',
+      'Sends the template to up to 50 numbers',
+      'consent, the suppression list and the marketing frequency cap are checked for each',
+      'The call counts as one request against the rate and monthly limits',
+      'a refused number changes nothing, a contact created for it included, and the others are still sent',
+      'a number that is not valid or given twice',
+      'naming the place, as `messages.3.variables`',
+      'One call per `Idempotency-Key`',
+      'it can be refused as a whole (409, sending nothing): send it again with the same `Idempotency-Key`',
+    ]) {
+      expect(op?.description).toContain(words);
+    }
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const body = schemas.SendManyTemplates as {
+      properties: { messages: { minItems?: number; maxItems?: number } };
+      required: string[];
+      additionalProperties: boolean;
+    };
+    expect(body.required).toEqual(['templateId', 'messages']);
+    expect(body.additionalProperties).toBe(false);
+    expect(body.properties.messages.minItems).toBe(1);
+    expect(body.properties.messages.maxItems).toBe(API_LIMITS.messagesPerSend);
+    const answer = schemas.TemplateSend as {
+      properties: Record<
+        string,
+        { anyOf?: { properties?: Record<string, { const?: string; enum?: string[] }> }[] }
+      >;
+      required: string[];
+    };
+    expect(Object.keys(answer.properties)).toEqual(['to', 'message', 'error']);
+    expect(answer.required).toEqual(['to', 'message', 'error']);
+    const error = answer.properties.error?.anyOf?.find((o) => o.properties);
+    expect(error?.properties?.code?.const).toBe('precondition_failed');
+    const queued = answer.properties.message?.anyOf?.find((o) => o.properties);
+    expect(Object.keys(queued?.properties ?? {})).toEqual(
+      expect.arrayContaining(['id', 'status', 'contactId', 'channelId', 'templateId']),
+    );
   });
 });

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AppError, clipText, jsonbText, notFound, uuidv7 } from '@w360/core';
+import { AppError, clipText, isAppError, jsonbText, notFound, uuidv7 } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -58,6 +58,8 @@ import {
   fromMetaComponents,
   sendSpecFor,
   TEMPLATE_LIMITS,
+  type SendSpec,
+  type TemplateParams,
 } from '../templates/definition';
 import { decodeKeysetCursor, likePattern, parseInput } from '../validation';
 import { apiContactById, toApiContact, type ApiContact } from './contact-view';
@@ -133,25 +135,49 @@ export const apiConsentSchema = z
 
 const variableValue = z.string().trim().min(1).max(TEMPLATE_LIMITS.parameterValue);
 
+/** The values of a template's variables, as a send gives them. */
+const templateVariablesField = z
+  .object({
+    header: z.array(variableValue).max(1).default([]),
+    body: z.array(variableValue).max(TEMPLATE_LIMITS.bodyVariables).default([]),
+  })
+  .strict()
+  .default({ header: [], body: [] })
+  .describe('Values for the template’s {{1}}, {{2}}… in order.');
+
+/** The number a template is sent from. */
+const templateFromField = z
+  .uuid()
+  .optional()
+  .describe(
+    'The id of the WhatsApp number to send from; optional when the company has one active number.',
+  );
+
 export const apiSendMessageSchema = z
   .object({
     type: z.literal('template').optional().describe('`template`, the default.'),
     to: phoneField,
     templateId: z.uuid().describe('A template id from GET /api/v1/templates.'),
-    from: z
-      .uuid()
-      .optional()
+    from: templateFromField,
+    variables: templateVariablesField,
+  })
+  .strict();
+
+/** Sending one template to many numbers in one call (ADR-163), each with its own variables. */
+export const apiSendManyTemplatesSchema = z
+  .object({
+    templateId: z.uuid().describe('A template id from GET /api/v1/templates.'),
+    from: templateFromField,
+    messages: z
+      .array(z.object({ to: phoneField, variables: templateVariablesField }).strict())
+      .min(1, 'Give at least one number to send to')
+      .max(
+        API_LIMITS.messagesPerSend,
+        `At most ${API_LIMITS.messagesPerSend} messages are sent in one call`,
+      )
       .describe(
-        'The id of the WhatsApp number to send from; optional when the company has one active number.',
+        `The numbers to send the template to, each with the values of its variables, at most ${API_LIMITS.messagesPerSend}; each number once.`,
       ),
-    variables: z
-      .object({
-        header: z.array(variableValue).max(1).default([]),
-        body: z.array(variableValue).max(TEMPLATE_LIMITS.bodyVariables).default([]),
-      })
-      .strict()
-      .default({ header: [], body: [] })
-      .describe('Values for the template’s {{1}}, {{2}}… in order.'),
   })
   .strict();
 
@@ -521,6 +547,35 @@ export const explicitPhone = (raw: string) => {
   return phone.e164;
 };
 
+/** A number in a list of starts or sends, refused at its place in the list when it is not one. */
+export function phoneAt(raw: string, path: string): string {
+  const phone = normalizePhone(raw, { kind: 'explicit' });
+  if (!phone.ok) {
+    throw new AppError('validation_failed', phone.message, {
+      issues: [{ path, message: phone.message }],
+    });
+  }
+  return phone.e164;
+}
+
+/**
+ * Refuses a list of starts or sends that gives a number twice, naming the later place
+ * (ADR-161, ADR-163).
+ */
+export function assertEachNumberOnce(items: readonly { place: string; phone: string }[]): void {
+  const firstAt = new Map<string, string>();
+  for (const item of items) {
+    const earlier = firstAt.get(item.phone);
+    if (earlier !== undefined) {
+      const message = `Give each number once: ${item.place}.to is the number of ${earlier}.to.`;
+      throw new AppError('validation_failed', message, {
+        issues: [{ path: `${item.place}.to`, message }],
+      });
+    }
+    firstAt.set(item.phone, item.place);
+  }
+}
+
 /** Runs work once per idempotency key (when given) in one transaction with it. */
 export async function idempotent(
   tx: Tx,
@@ -864,6 +919,23 @@ async function sendingNumber(tx: Tx, ctx: ApiContext, from: string | undefined) 
   return channel;
 }
 
+/** A template message as a send queues it (ADR-052). */
+export interface ApiQueuedTemplate {
+  id: string;
+  type: 'template';
+  status: 'queued';
+  contactId: string;
+  channelId: string;
+  templateId: string;
+}
+
+/** What a send to many numbers answers for one number (ADR-163). */
+export interface ApiTemplateSend {
+  to: string;
+  message: ApiQueuedTemplate | null;
+  error: { code: 'precondition_failed'; message: string } | null;
+}
+
 /**
  * Sends an approved template to a number (the contact is created when new) with the same checks as
  * members' template sends: erasure, suppression, consent for the template's category, the
@@ -884,187 +956,298 @@ export async function apiSendTemplate(
   const now = deps.clock.now();
   return deps.db.run(ctx.scope, (tx) =>
     idempotent(tx, ctx, idempotency, now, async () => {
-      const [template] = await tx
-        .select()
-        .from(messageTemplates)
-        .where(
-          and(
-            eq(messageTemplates.tenantId, ctx.tenant.id),
-            eq(messageTemplates.id, data.templateId),
-          ),
-        );
-      if (!template) throw notFound('Template');
-      assertScope(
-        ctx,
-        template.category === 'MARKETING' ? 'messages.send_marketing' : 'messages.send',
-      );
-      if (template.status !== 'approved') {
-        throw new AppError('precondition_failed', 'Only templates approved by Meta can be sent.');
-      }
-      const spec = sendSpecFor(template.category, template.components);
-      if (!spec.supported) throw new AppError('unsupported', spec.reason);
-      if (
-        data.variables.header.length !== spec.headerParams ||
-        data.variables.body.length !== spec.bodyParams
-      ) {
-        throw new AppError(
-          'validation_failed',
-          `This template needs ${spec.headerParams} header and ${spec.bodyParams} body variables.`,
-        );
-      }
-
-      const channel = await sendingNumber(tx, ctx, data.from);
-      if (channel.whatsappAccountId !== template.whatsappAccountId) {
-        throw new AppError(
-          'validation_failed',
-          'This template belongs to another WhatsApp account than the number it would be sent from.',
-        );
-      }
-      if (channel.status !== 'active') {
-        throw new AppError('precondition_failed', 'This WhatsApp number is not active.');
-      }
-
-      // Erasure, suppression and consent; a refusal rolls back the contact created for the number.
-      const contactId = await contactForPhone(tx, ctx.tenant.id, {
-        phoneE164: phone,
-        displayName: null,
-        source: 'api',
-      });
-      const eligibility = await checkTemplateEligibility(tx, {
-        tenantId: ctx.tenant.id,
-        contactId,
-        recipientPhones: [phone],
-        category: template.category,
-      });
-      if (!eligibility.ok) throw new AppError('precondition_failed', eligibility.message);
-      if (template.category === 'MARKETING') {
-        // Counted under the campaign runner's company lock, before any conversation is locked.
-        await lockCampaignSends(tx, ctx.tenant.id, 'wait');
-        if (await marketingCapReached(tx, ctx.tenant.id, contactId, now)) {
-          throw new AppError(
-            'precondition_failed',
-            'The contact already received as many marketing messages as the company allows in the period.',
-          );
-        }
-      }
-      const [identity] = await tx
-        .select({ waId: contactIdentities.waId })
-        .from(contactIdentities)
-        .where(
-          and(
-            eq(contactIdentities.tenantId, ctx.tenant.id),
-            eq(contactIdentities.contactId, contactId),
-            eq(contactIdentities.whatsappAccountId, channel.whatsappAccountId),
-            isNotNull(contactIdentities.waId),
-          ),
-        )
-        .limit(1);
-      const recipient = phoneFromWaId(identity?.waId) ?? phone;
-      const built = buildTemplateSend(template, spec, data.variables);
-
-      // A conversation this message starts is resolved, like a campaign's; the reply opens it.
-      await tx
-        .insert(conversations)
-        .values({
-          id: uuidv7(),
-          tenantId: ctx.tenant.id,
-          channelAccountId: channel.id,
-          contactId,
-          status: 'resolved',
-          resolvedAt: now,
-        })
-        .onConflictDoNothing();
-      const [conversation] = await tx
-        .select({ id: conversations.id })
-        .from(conversations)
-        .where(
-          and(
-            eq(conversations.tenantId, ctx.tenant.id),
-            eq(conversations.channelAccountId, channel.id),
-            eq(conversations.contactId, contactId),
-          ),
-        )
-        .for('update');
-      if (!conversation) throw new Error('Conversation upsert failed');
-      const messageId = uuidv7();
-      const intentId = uuidv7();
-      await tx.insert(messages).values({
-        id: messageId,
-        tenantId: ctx.tenant.id,
-        conversationId: conversation.id,
-        channelAccountId: channel.id,
-        direction: 'outbound',
-        type: 'template',
-        content: {
-          template: {
-            id: template.id,
-            name: template.name,
-            language: template.language,
-            category: template.category,
-          },
-          rendered: built.rendered,
-        },
-        status: 'queued',
-        statusRank: STATUS_RANK.queued,
-        senderType: 'api',
-        apiKeyId: ctx.key.id,
-        templateId: template.id,
-      });
-      await tx.insert(sendIntents).values({
-        id: intentId,
-        tenantId: ctx.tenant.id,
-        messageId,
-        channelAccountId: channel.id,
-        request: {
-          messaging_product: 'whatsapp',
-          recipient_type: 'individual',
-          to: waRecipientFromPhone(recipient),
-          type: 'template',
-          template: built.template,
-        },
-        actorUserId: null,
-      });
-      await tx
-        .update(conversations)
-        .set({
-          lastMessageAt: now,
-          lastMessagePreview: clipText(built.rendered.body, 200),
-          version: sql`${conversations.version} + 1`,
-        })
-        .where(
-          and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, conversation.id)),
-        );
-      await emitTenantEvent(tx, ctx.tenant.id, {
-        type: 'message.created',
-        conversationId: conversation.id,
-        payload: { messageId },
-      });
-      await deps.jobs.enqueue(
+      const sendable = await loadSendableTemplate(tx, ctx, data.templateId);
+      assertTemplateVariables(sendable.spec, data.variables);
+      const channel = await templateSendingNumber(tx, ctx, sendable.template, data.from);
+      await lockMarketingSends(tx, ctx, sendable.template);
+      const message = await queueTemplateFor(
+        deps,
         tx,
-        QUEUES.messageSend.name,
-        deps.signer.sign({
-          kind: 'message.send',
-          tenantId: ctx.tenant.id,
-          actorUserId: null,
-          ref: intentId,
-        }),
-        { singletonKey: intentId, group: { id: channel.id } },
+        ctx,
+        sendable,
+        channel,
+        phone,
+        data.variables,
+        now,
       );
-      return {
-        status: 201,
-        body: {
-          data: {
-            id: messageId,
-            type: 'template',
-            status: 'queued',
-            contactId,
-            channelId: channel.id,
-            templateId: template.id,
-          },
-        },
-      };
+      return { status: 201, body: { data: message } };
     }),
   );
+}
+
+/**
+ * Sends an approved template to up to 50 numbers in one call (ADR-163), each with its own
+ * variables. The template, every send's variables and the number sent from are checked once, then
+ * each number is sent to as a send to one number is, in a savepoint: a refusal for its contact rolls
+ * back to it and is answered in its place while the others are sent. Once per idempotency key.
+ */
+export async function apiSendManyTemplates(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertAnyScope(ctx, ['messages.send', 'messages.send_marketing']);
+  const data = parseInput(apiSendManyTemplatesSchema, input);
+  const sends = data.messages.map((message, i) => ({
+    place: `messages.${i}`,
+    phone: phoneAt(message.to, `messages.${i}.to`),
+    variables: message.variables,
+  }));
+  assertEachNumberOnce(sends);
+  const now = deps.clock.now();
+  return deps.db.run(ctx.scope, (tx) =>
+    idempotent(tx, ctx, idempotency, now, async () => {
+      const sendable = await loadSendableTemplate(tx, ctx, data.templateId);
+      for (const send of sends) {
+        assertTemplateVariables(sendable.spec, send.variables, `${send.place}.variables`);
+      }
+      const channel = await templateSendingNumber(tx, ctx, sendable.template, data.from);
+      await lockMarketingSends(tx, ctx, sendable.template);
+      const answers: ApiTemplateSend[] = [];
+      for (const { phone, variables } of sends) {
+        try {
+          const message = await tx.transaction((sp) =>
+            queueTemplateFor(deps, sp, ctx, sendable, channel, phone, variables, now),
+          );
+          answers.push({ to: phone, message, error: null });
+        } catch (error) {
+          // Consent, the suppression list and the frequency cap refuse one number; anything else
+          // refuses the call.
+          if (!isAppError(error) || error.code !== 'precondition_failed') throw error;
+          answers.push({
+            to: phone,
+            message: null,
+            error: { code: 'precondition_failed', message: error.publicMessage },
+          });
+        }
+      }
+      return { status: 200, body: { data: answers } };
+    }),
+  );
+}
+
+/** An approved template a key may send, with what a send of it needs. */
+interface SendableTemplate {
+  template: typeof messageTemplates.$inferSelect;
+  spec: Extract<SendSpec, { supported: true }>;
+}
+
+/**
+ * The template, when it is the company's, approved and one HyFib can send; its category decides the
+ * scope the key needs.
+ */
+async function loadSendableTemplate(
+  tx: Tx,
+  ctx: ApiContext,
+  templateId: string,
+): Promise<SendableTemplate> {
+  const [template] = await tx
+    .select()
+    .from(messageTemplates)
+    .where(and(eq(messageTemplates.tenantId, ctx.tenant.id), eq(messageTemplates.id, templateId)));
+  if (!template) throw notFound('Template');
+  assertScope(ctx, template.category === 'MARKETING' ? 'messages.send_marketing' : 'messages.send');
+  if (template.status !== 'approved') {
+    throw new AppError('precondition_failed', 'Only templates approved by Meta can be sent.');
+  }
+  const spec = sendSpecFor(template.category, template.components);
+  if (!spec.supported) throw new AppError('unsupported', spec.reason);
+  return { template, spec };
+}
+
+/** Refuses values that do not fill the template's variables, naming `path` in a list of sends. */
+function assertTemplateVariables(
+  spec: SendableTemplate['spec'],
+  variables: TemplateParams,
+  path?: string,
+): void {
+  if (variables.header.length === spec.headerParams && variables.body.length === spec.bodyParams) {
+    return;
+  }
+  const message = `This template needs ${spec.headerParams} header and ${spec.bodyParams} body variables.`;
+  throw new AppError('validation_failed', message, path ? { issues: [{ path, message }] } : {});
+}
+
+/** The number the template is sent from: of the template's WhatsApp account, and active. */
+async function templateSendingNumber(
+  tx: Tx,
+  ctx: ApiContext,
+  template: SendableTemplate['template'],
+  from: string | undefined,
+) {
+  const channel = await sendingNumber(tx, ctx, from);
+  if (channel.whatsappAccountId !== template.whatsappAccountId) {
+    throw new AppError(
+      'validation_failed',
+      'This template belongs to another WhatsApp account than the number it would be sent from.',
+    );
+  }
+  if (channel.status !== 'active') {
+    throw new AppError('precondition_failed', 'This WhatsApp number is not active.');
+  }
+  return channel;
+}
+
+/**
+ * A marketing template is counted under the campaign runner's company lock (ADR-049), taken before
+ * any contact is created or conversation locked, by a send to one number as by a send to many
+ * (ADR-163), so the two take their locks in one order.
+ */
+async function lockMarketingSends(
+  tx: Tx,
+  ctx: ApiContext,
+  template: SendableTemplate['template'],
+): Promise<void> {
+  if (template.category === 'MARKETING') await lockCampaignSends(tx, ctx.tenant.id, 'wait');
+}
+
+/**
+ * Queues the template for the number: the contact (created when new), erasure, suppression and
+ * consent, the marketing frequency cap, then the message, its send intent and its job. A refusal
+ * throws; the caller's transaction or savepoint rolls back what it wrote, a contact created for the
+ * number included. For a marketing template the caller holds the campaign runner's company lock.
+ */
+async function queueTemplateFor(
+  deps: OutboundDeps,
+  tx: Tx,
+  ctx: ApiContext,
+  { template, spec }: SendableTemplate,
+  channel: { id: string; whatsappAccountId: string },
+  phone: string,
+  variables: TemplateParams,
+  now: Date,
+): Promise<ApiQueuedTemplate> {
+  const contactId = await contactForPhone(tx, ctx.tenant.id, {
+    phoneE164: phone,
+    displayName: null,
+    source: 'api',
+  });
+  const eligibility = await checkTemplateEligibility(tx, {
+    tenantId: ctx.tenant.id,
+    contactId,
+    recipientPhones: [phone],
+    category: template.category,
+  });
+  if (!eligibility.ok) throw new AppError('precondition_failed', eligibility.message);
+  if (
+    template.category === 'MARKETING' &&
+    (await marketingCapReached(tx, ctx.tenant.id, contactId, now))
+  ) {
+    throw new AppError(
+      'precondition_failed',
+      'The contact already received as many marketing messages as the company allows in the period.',
+    );
+  }
+  const [identity] = await tx
+    .select({ waId: contactIdentities.waId })
+    .from(contactIdentities)
+    .where(
+      and(
+        eq(contactIdentities.tenantId, ctx.tenant.id),
+        eq(contactIdentities.contactId, contactId),
+        eq(contactIdentities.whatsappAccountId, channel.whatsappAccountId),
+        isNotNull(contactIdentities.waId),
+      ),
+    )
+    .limit(1);
+  const recipient = phoneFromWaId(identity?.waId) ?? phone;
+  const built = buildTemplateSend(template, spec, variables);
+
+  // A conversation this message starts is resolved, like a campaign's; the reply opens it.
+  await tx
+    .insert(conversations)
+    .values({
+      id: uuidv7(),
+      tenantId: ctx.tenant.id,
+      channelAccountId: channel.id,
+      contactId,
+      status: 'resolved',
+      resolvedAt: now,
+    })
+    .onConflictDoNothing();
+  const [conversation] = await tx
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(
+      and(
+        eq(conversations.tenantId, ctx.tenant.id),
+        eq(conversations.channelAccountId, channel.id),
+        eq(conversations.contactId, contactId),
+      ),
+    )
+    .for('update');
+  if (!conversation) throw new Error('Conversation upsert failed');
+  const messageId = uuidv7();
+  const intentId = uuidv7();
+  await tx.insert(messages).values({
+    id: messageId,
+    tenantId: ctx.tenant.id,
+    conversationId: conversation.id,
+    channelAccountId: channel.id,
+    direction: 'outbound',
+    type: 'template',
+    content: {
+      template: {
+        id: template.id,
+        name: template.name,
+        language: template.language,
+        category: template.category,
+      },
+      rendered: built.rendered,
+    },
+    status: 'queued',
+    statusRank: STATUS_RANK.queued,
+    senderType: 'api',
+    apiKeyId: ctx.key.id,
+    templateId: template.id,
+  });
+  await tx.insert(sendIntents).values({
+    id: intentId,
+    tenantId: ctx.tenant.id,
+    messageId,
+    channelAccountId: channel.id,
+    request: {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: waRecipientFromPhone(recipient),
+      type: 'template',
+      template: built.template,
+    },
+    actorUserId: null,
+  });
+  await tx
+    .update(conversations)
+    .set({
+      lastMessageAt: now,
+      lastMessagePreview: clipText(built.rendered.body, 200),
+      version: sql`${conversations.version} + 1`,
+    })
+    .where(and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, conversation.id)));
+  await emitTenantEvent(tx, ctx.tenant.id, {
+    type: 'message.created',
+    conversationId: conversation.id,
+    payload: { messageId },
+  });
+  await deps.jobs.enqueue(
+    tx,
+    QUEUES.messageSend.name,
+    deps.signer.sign({
+      kind: 'message.send',
+      tenantId: ctx.tenant.id,
+      actorUserId: null,
+      ref: intentId,
+    }),
+    { singletonKey: intentId, group: { id: channel.id } },
+  );
+  return {
+    id: messageId,
+    type: 'template',
+    status: 'queued',
+    contactId,
+    channelId: channel.id,
+    templateId: template.id,
+  };
 }
 
 /** The refusal for a number the reply cannot reach (ADR-070). */

@@ -29,6 +29,7 @@ import {
   apiListTeams,
   apiListTemplates,
   apiRecordConsent,
+  apiSendManyTemplates,
   apiSendMessage,
   apiSendTemplate,
   apiUpdateConversation,
@@ -1177,6 +1178,213 @@ describe('template sends', () => {
     const failed = await apiGetMessage(deps(), ctx, (mine.body.data as { id: string }).id);
     expect(failed.status).toBe('failed');
     expect(failed.error).toMatchObject({ code: '131026' });
+  });
+
+  it('send one template to many numbers in one call, each refusal answered in its place (ADR-163)', async () => {
+    const { ctx, id: keyId } = await apiKey(c, ['messages.send', 'contacts.write']);
+    const owner = await fx.ctx(c, c.owner);
+    await createConsentService({ db: fx.dbs.app, clock: systemClock }).addSuppression(owner, {
+      phone: '+919811100402',
+      reason: 'legal',
+    });
+    const optedOut = await apiCreateContact(deps(), ctx, { phone: '+919811100403' }, null);
+    await apiRecordConsent(deps(), ctx, (optedOut.body.data as { id: string }).id, {
+      purpose: 'utility',
+      action: 'opt_out',
+      evidence: 'Asked us by email to stop order updates',
+    });
+    const to = (n: number, name: string) => ({
+      to: `+91981110040${n}`,
+      variables: { body: [name, `A-40${n}`] },
+    });
+    const input = {
+      templateId: utility.id,
+      messages: [
+        { ...to(1, 'Asha'), to: '+91 98111 00401' },
+        to(2, 'Ravi'),
+        to(3, 'Mina'),
+        to(4, 'Dev'),
+      ],
+    };
+    type Answer = {
+      to: string;
+      message: { id: string; status: string } | null;
+      error: { code: string; message: string } | null;
+    };
+    const first = await apiSendManyTemplates(deps(), ctx, input, idem('many-1', 'many-1'));
+    expect(first).toMatchObject({ status: 200, replayed: false });
+    const answers = first.body.data as Answer[];
+    expect(answers.map((a) => a.to)).toEqual([
+      '+919811100401',
+      '+919811100402',
+      '+919811100403',
+      '+919811100404',
+    ]);
+    expect(answers[0]).toMatchObject({
+      message: {
+        type: 'template',
+        status: 'queued',
+        channelId: c.channelAccountId,
+        templateId: utility.id,
+      },
+      error: null,
+    });
+    expect(answers.slice(1, 3)).toEqual([
+      {
+        to: '+919811100402',
+        message: null,
+        error: {
+          code: 'precondition_failed',
+          message: 'This number is on the company’s suppression list.',
+        },
+      },
+      {
+        to: '+919811100403',
+        message: null,
+        error: {
+          code: 'precondition_failed',
+          message: 'This contact has opted out of these messages.',
+        },
+      },
+    ]);
+    expect(answers[3]).toMatchObject({ message: { status: 'queued' }, error: null });
+    // A refused number gets no contact; each queued message is the key's, to its own contact.
+    expect(
+      await fx.query('SELECT 1 FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2', [
+        c.tenant.id,
+        '+919811100402',
+      ]),
+    ).toHaveLength(0);
+    const rows = await fx.query<{ sender_type: string; api_key_id: string; phone_e164: string }>(
+      `SELECT m.sender_type, m.api_key_id, ct.phone_e164
+         FROM app.messages m
+         JOIN app.conversations cv ON cv.tenant_id = m.tenant_id AND cv.id = m.conversation_id
+         JOIN app.contacts ct ON ct.tenant_id = cv.tenant_id AND ct.id = cv.contact_id
+        WHERE m.id = ANY($1::uuid[])
+        ORDER BY ct.phone_e164`,
+      [[answers[0]?.message?.id, answers[3]?.message?.id]],
+    );
+    expect(rows).toEqual([
+      { sender_type: 'api', api_key_id: keyId, phone_e164: '+919811100401' },
+      { sender_type: 'api', api_key_id: keyId, phone_e164: '+919811100404' },
+    ]);
+    // One call per key: a retry answers as the first call did and queues nothing.
+    expect(await apiSendManyTemplates(deps(), ctx, input, idem('many-1', 'many-1'))).toEqual({
+      ...first,
+      replayed: true,
+    });
+
+    // Refused as a whole before any number is sent to: values that do not fill the variables.
+    const short = await expectAppError(
+      apiSendManyTemplates(
+        deps(),
+        ctx,
+        {
+          templateId: utility.id,
+          messages: [to(5, 'Asha'), { to: '+919811100406', variables: { body: ['Ravi'] } }],
+        },
+        idem('many-2', 'many-2'),
+      ),
+      'validation_failed',
+      /2 body variables/,
+    );
+    expect(isAppError(short) && short.issues?.map((i) => i.path)).toEqual(['messages.1.variables']);
+    expect(
+      await fx.query(
+        'SELECT 1 FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = ANY($2::text[])',
+        [c.tenant.id, ['+919811100405', '+919811100406']],
+      ),
+    ).toHaveLength(0);
+    // A marketing template needs the marketing scope, as for one send.
+    await expectAppError(
+      apiSendManyTemplates(
+        deps(),
+        ctx,
+        {
+          templateId: marketing.id,
+          messages: [{ to: '+919811100407', variables: { body: ['Asha'] } }],
+        },
+        idem('many-3', 'many-3'),
+      ),
+      'forbidden',
+      /messages\.send_marketing/,
+    );
+
+    expect(await sendAll(c)).toEqual(['accepted', 'accepted']);
+    expect(templatesTo('919811100401')).toHaveLength(1);
+    expect(templatesTo('919811100402')).toHaveLength(0);
+    expect(templatesTo('919811100403')).toHaveLength(0);
+    const sent = templatesTo('919811100404');
+    expect(sent).toHaveLength(1);
+    expect(JSON.stringify(sent[0]?.body)).toContain('A-404');
+  });
+
+  it('check each marketing send to many numbers for the opt-in and against the frequency cap (ADR-163)', async () => {
+    const { ctx } = await apiKey(c, ['messages.send_marketing', 'contacts.write']);
+    const optIn = async (phone: string) => {
+      const created = await apiCreateContact(deps(), ctx, { phone }, null);
+      await apiRecordConsent(deps(), ctx, (created.body.data as { id: string }).id, {
+        purpose: 'marketing',
+        action: 'opt_in',
+        evidence: 'Signed up at the store counter',
+      });
+    };
+    await optIn('+919811100411');
+    await optIn('+919811100412');
+    const owner = await fx.ctx(c, c.owner);
+    const campaigns = createCampaignsService(deps());
+    await campaigns.updateSettings(
+      owner,
+      { approvalRequired: false, cap: { count: 1, days: 7 }, costCurrency: null },
+      {},
+    );
+    try {
+      const sale = (to: string) => ({ to, variables: { body: ['Asha'] } });
+      const earlier = await apiSendTemplate(
+        deps(),
+        ctx,
+        { ...sale('+919811100412'), templateId: marketing.id },
+        idem('mk-1', 'mk-1'),
+      );
+      expect(earlier.status).toBe(201);
+      const many = await apiSendManyTemplates(
+        deps(),
+        ctx,
+        {
+          templateId: marketing.id,
+          messages: [sale('+919811100411'), sale('+919811100412'), sale('+919811100413')],
+        },
+        idem('mk-2', 'mk-2'),
+      );
+      const answers = many.body.data as {
+        to: string;
+        message: { id: string } | null;
+        error: { code: string; message: string } | null;
+      }[];
+      expect(answers.map((a) => [a.to, a.message === null, a.error?.code ?? null])).toEqual([
+        ['+919811100411', false, null],
+        ['+919811100412', true, 'precondition_failed'],
+        ['+919811100413', true, 'precondition_failed'],
+      ]);
+      expect(answers[1]?.error?.message).toMatch(
+        /as many marketing messages as the company allows/,
+      );
+      expect(answers[2]?.error?.message).toMatch(/not opted in to marketing messages/);
+      // The number refused for its opt-in got no contact.
+      expect(
+        await fx.query('SELECT 1 FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2', [
+          c.tenant.id,
+          '+919811100413',
+        ]),
+      ).toHaveLength(0);
+    } finally {
+      await campaigns.updateSettings(
+        owner,
+        { approvalRequired: false, cap: null, costCurrency: null },
+        {},
+      );
+    }
+    expect(await sendAll(c)).toEqual(['accepted', 'accepted']);
   });
 });
 

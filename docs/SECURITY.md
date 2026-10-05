@@ -554,6 +554,13 @@ Phase 5 rules (Public API, P5-08):
   naming its place in the list, and stops nothing (an integration test, run in CI), so a call never
   stops or reveals another company's runs beyond saying an id is not one of the company's. A call
   counts as one request against the key's limits.
+- Template sends to many numbers (ADR-163, `POST /messages/send-many`) need the scopes one send
+  needs and check each number as one send does (erasure, the suppression list, consent for the
+  template's category, the marketing frequency cap under the campaign runner's company lock), so a
+  call never sends where one send would be refused; a refused number changes nothing, not even the
+  contact it would have created (integration tests, run in CI). At most 50 numbers per call, once
+  per `Idempotency-Key`; a call counts as one request against the key's limits, within the 64 KB a
+  body holds, and the send worker paces each WhatsApp number's messages as it paces every send.
 - Buttons and lists through the API (ADR-080) follow every rule of text replies (`messages.reply`,
   an active company, only contacts who wrote in the last 24 hours with one answer for every
   refusal, the window checked again at send). Their ids cannot start with `w360`: HyFib's own

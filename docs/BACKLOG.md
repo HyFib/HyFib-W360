@@ -571,9 +571,14 @@ verification, app review, Embedded Signup configuration).
   `POST /automation-runs/stop-many` stops up to 100 runs keys started, each as one stop does, all of
   them or none: an id that names no run a key of the company started refuses the call, naming its
   place; the conversations are locked in id order).
+  **[Sending a template to many numbers built; its database tests run only in CI]** (ADR-163:
+  `POST /messages/send-many` sends one approved template to up to 50 numbers, each with its own
+  values and each checked as one send is, in a savepoint, so a refused number is answered in its
+  place and changes nothing while the others are sent; numbers that are not valid or given twice and
+  values that do not fill the variables refuse the call).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   choosing conversations to change by a filter, media downloads, a contact card's contacts (Meta's
-  contact object is not confirmed), bulk sends in one call, changing a field's type, changing
+  contact object is not confirmed), changing a field's type, changing
   numbers, choosing
   contacts to change by a filter, groups of conditions,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),

@@ -6445,3 +6445,54 @@ Decision:
 - **No migration:** the single stop and this call share one step.
 
 Not built: stopping every run of an automation, or of a contact, without listing them.
+
+## ADR-163 Sending a template to many numbers in one call (P5-08) (2026-10-05)
+
+Context: a key sends an approved template to one number per call (ADR-052). An integration that
+tells many customers the same thing at once (a delay on every order of a route, the day's
+appointment reminders) needed one request per number, each against the key's rate limit. P5-08's
+Remaining listed bulk sends in one call.
+
+Decision:
+
+- **One template, up to 50 numbers:** `POST /api/v1/messages/send-many` takes `templateId`, an
+  optional `from` and `messages`, 1 to 50, each a number (`to`) with the values of the template's
+  variables; the scopes of one send (`messages.send`, and `messages.send_marketing` for a marketing
+  template), once per `Idempotency-Key`, and one request against the key's limits.
+- **Each as one send:** the template (the company's, approved, one HyFib can send), every send's
+  values and the number sent from are checked once for the call; then each number is sent to through
+  the steps a send to one number takes (`queueTemplateFor`): the contact, created when new; erasure,
+  the suppression list and consent for the template's category; the marketing frequency cap; then
+  the message, its send intent and its job, which the send pipeline delivers as any API send,
+  checking consent again before dispatch.
+- **Refusals in place:** each send runs in a savepoint (`tx.transaction`). A refusal for its contact
+  (`precondition_failed`: erased, opted out, on the suppression list, without the marketing opt-in
+  the company asks for, or at the frequency cap) rolls back to it, a contact created for it
+  included, and is answered in its place with its code and message while the others are sent;
+  anything else refuses the call.
+- **Refused as a whole, before any send:** a number that is not valid or is given twice (before
+  anything is read), and values that do not fill the template's variables, naming the place
+  (`messages.2.to`, `messages.1.variables`); a template or a WhatsApp number that cannot send, as
+  for one send.
+- **50 per call,** as ADR-161: each send keeps its savepoint's transaction id until the call
+  commits, and PostgreSQL caches 64 per transaction.
+- **One lock order:** a marketing template is counted under the campaign runner's company lock
+  (ADR-049), which the call takes once, before any contact is created or conversation locked. A send
+  to one number now takes it at the same point, before creating the contact (it took it after), so
+  the two wait for each other instead of deadlocking over a new number both create.
+- **Collisions:** the call keeps the conversations it sends in from its first send until it commits.
+  Another call taking several of them in another order at the same moment (another send to many
+  numbers, a start of many runs, a change of many conversations) can deadlock with it; PostgreSQL
+  ends one of the two, and when it is this call, it is refused as a whole (409, sending nothing) and
+  can be sent again with the same key. The operation documents it.
+- **The answer:** 200 with each number in the order given, in E.164: its message, queued, as a send
+  to one number answers it, or its refusal. Messages queued together may leave in any order, as
+  messages queued one after the other may.
+- **One implementation:** the single send and this call share the template, variables, number, lock
+  and queueing steps; this call and the start of many runs (ADR-161) share the checks of a list's
+  numbers (`phoneAt`, `assertEachNumberOnce`).
+- **No migration.**
+
+Not built: different templates in one call, reasons beside a refusal's message, more than 50 numbers
+per call, and a send to every contact of a segment through the API (campaigns do that, with approval
+and pacing).

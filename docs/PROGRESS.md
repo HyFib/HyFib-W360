@@ -1,5 +1,63 @@
 # Progress
 
+## 2026-10-05 — Phase 5: sending a template to many numbers in one call (P5-08, ADR-163)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A key sent a template
+to one number per call. The local PostgreSQL is unavailable (its Docker daemon stopped), so the
+integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-163):** `POST /messages/send-many` sends one approved template to up to 50 numbers,
+  each with its own values and each as one send, in a savepoint: a refused number is answered in its
+  place and changes nothing while the others are sent; numbers that are not valid or given twice and
+  values that do not fill the variables refuse the call; one request against the key's limits, once
+  per `Idempotency-Key`. A send to one number now takes the campaign runner's company lock before
+  creating the contact, as the new call does.
+- **Domain:** `api/resources.ts` (the single send split into `loadSendableTemplate`,
+  `assertTemplateVariables`, `templateSendingNumber`, `lockMarketingSends` and `queueTemplateFor`;
+  `apiSendManyTemplates` and its schema; `phoneAt` and `assertEachNumberOnce`, now shared with the
+  start of many runs in `api/automations.ts`); `api/model.ts` (`API_LIMITS.messagesPerSend`);
+  `api/openapi.ts` (the operation, `SendManyTemplates`, `TemplateSend`, the route list).
+- **Web:** the route `api/v1/messages/send-many`.
+- **Tests:**
+  - Unit (3 new in `api.test.ts`): the body takes one template and 1 to 50 numbers, each with its
+    values, and nothing else; the scope, an empty list, a number that is not valid or given twice
+    refused before anything is read and named by its place; the operation, its body, its answer, its
+    words and the 409 of a collision.
+  - Integration (2 new in `api.test.ts`): a suppressed number and an opted-out contact answered in
+    their places, writing no contact, while two numbers are queued as the key and sent through the
+    Graph stand-in; a retry answering the same; values that do not fill the variables refusing the
+    call by place before any contact; the marketing scope; a marketing call answering the frequency
+    cap and a missing opt-in in place. Written for CI; not run here.
+  - E2E (`api.spec.ts` extended, its timeout raised to two minutes): an opted-out contact answered
+    in its place over HTTP while two numbers are sent, and a retry replayed. Written for CI; not run
+    here.
+- **Docs:** ADR-163; SECURITY (the API send rules); THREAT-MODEL T8 and T69; ARCHITECTURE; BACKLOG
+  P5-08; feature matrix H-033 and W-134.
+- **Mutation checks:** 20 tried, all caught on the unit-tested parts (the scope not checked, the
+  list without a minimum or a maximum, closed shapes opened, a number refused without its place,
+  repeats taken or named the wrong way round, values left out refused, the limit raised, the route
+  unlisted or answering another method, the operation's body, answer, words, 409 and refusal code).
+  The savepoints, the lock and the sends need the database, so their regressions are left to the
+  integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 733 passed (75 files; 3 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 20 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Different templates in one call, reasons beside a refusal's message, more than 50 numbers per
+  call.
+
 ## 2026-10-05 — Phase 5: stopping many runs in one call (P5-08, ADR-162)
 
 Status: **Implemented; its database tests run in CI only (test data only).** A key stopped one run

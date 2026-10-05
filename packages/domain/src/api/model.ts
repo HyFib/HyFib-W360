@@ -166,6 +166,11 @@ export const API_LIMITS = {
   runsPerStart: 50,
   /** Runs one call to POST /automation-runs/stop-many stops (ADR-162). */
   runsPerStop: 100,
+  /**
+   * Numbers one call to POST /messages/send-many sends to (ADR-163): each send keeps its
+   * savepoint's transaction id until the call commits, as each start of runsPerStart does.
+   */
+  messagesPerSend: 50,
   keyRate: { capacity: 50, refillPerSecond: 10 },
   companyRate: { capacity: 200, refillPerSecond: 30 },
   authFailureRate: { capacity: 20, refillPerSecond: 0.2 },

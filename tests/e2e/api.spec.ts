@@ -22,6 +22,8 @@ test('an API key created in settings sends an approved template once, and stops 
   page,
   request,
 }) => {
+  // Two sends wait for WhatsApp after the template's review: more than the default minute.
+  test.setTimeout(120_000);
   const email = uniqueEmail('api');
   const slug = `api-${Date.now().toString(36)}`;
   await signUpAndVerify(page, { name: 'Arun Api', email, password: PASSWORD });
@@ -168,6 +170,67 @@ test('an API key created in settings sends an approved template once, and stops 
       ],
     },
   });
+
+  // The template to several numbers in one call (ADR-163): a number whose contact opted out is
+  // answered in its place and the others are sent, once per key.
+  const optedOutWaId = randomWaId();
+  const optedOut = await request.post('/api/v1/contacts', {
+    headers: auth,
+    data: { phone: `+${optedOutWaId}` },
+  });
+  expect(optedOut.status()).toBe(201);
+  const optedOutId = ((await optedOut.json()) as { data: { id: string } }).data.id;
+  const optOut = await request.post(`/api/v1/contacts/${optedOutId}/consent`, {
+    headers: auth,
+    data: {
+      purpose: 'utility',
+      action: 'opt_out',
+      evidence: 'Asked us by email to stop order updates',
+    },
+  });
+  expect(optOut.status()).toBe(200);
+  const manyWaIds = [randomWaId(), randomWaId()];
+  const manyKey = randomUUID();
+  const sendMany = () =>
+    request.post('/api/v1/messages/send-many', {
+      headers: { ...auth, 'Idempotency-Key': manyKey },
+      data: {
+        templateId: template!.id,
+        messages: [
+          { to: `+${manyWaIds[0]}`, variables: { body: ['Ravi', 'A-1002'] } },
+          { to: `+${optedOutWaId}`, variables: { body: ['Mina', 'A-1003'] } },
+          { to: `+${manyWaIds[1]}`, variables: { body: ['Dev', 'A-1004'] } },
+        ],
+      },
+    });
+  type TemplateSend = {
+    to: string;
+    message: { id: string; status: string } | null;
+    error: { code: string } | null;
+  };
+  const many = await sendMany();
+  expect(many.status()).toBe(200);
+  const answers = ((await many.json()) as { data: TemplateSend[] }).data;
+  expect(answers.map((a) => [a.to, a.message?.status ?? null, a.error?.code ?? null])).toEqual([
+    [`+${manyWaIds[0]}`, 'queued', null],
+    [`+${optedOutWaId}`, null, 'precondition_failed'],
+    [`+${manyWaIds[1]}`, 'queued', null],
+  ]);
+  const manyRetry = await sendMany();
+  expect(manyRetry.status()).toBe(200);
+  expect(manyRetry.headers()['idempotent-replayed']).toBe('true');
+  expect(((await manyRetry.json()) as { data: TemplateSend[] }).data).toEqual(answers);
+  for (const id of [answers[0]?.message?.id, answers[2]?.message?.id]) {
+    await expect(async () => {
+      const status = await request.get(`/api/v1/messages/${id}`, { headers: auth });
+      expect((await status.json()).data.status).toBe('accepted');
+    }).toPass({ timeout: 30_000 });
+  }
+  const sentMany = (await standInRequests(request))
+    .filter((r) => r.path === `/v26.0/${phoneNumberId}/messages`)
+    .map((r) => (r.body as { to?: string }).to)
+    .filter((to) => to === optedOutWaId || manyWaIds.includes(to ?? ''));
+  expect(sentMany.sort()).toEqual([...manyWaIds].sort());
 
   // Revoked in settings: the next request is refused.
   await page.getByRole('button', { name: 'Revoke Order system' }).click();

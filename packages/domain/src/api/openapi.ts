@@ -83,6 +83,7 @@ import {
   apiSendProductListSchema,
   apiSendProductSchema,
   apiSendReactionSchema,
+  apiSendManyTemplatesSchema,
   apiSendMessageSchema,
   apiSendTextSchema,
 } from './resources';
@@ -125,6 +126,20 @@ export const apiQueuedMessageSchema = z.object({
   contactId: z.uuid(),
   channelId: z.uuid(),
   templateId: z.uuid().optional().describe('The template sent, for templates.'),
+});
+
+/** What a send of a template to many numbers answers for one number (ADR-163). */
+export const apiTemplateSendSchema = z.object({
+  to: z.string().describe('The number, in E.164 form.'),
+  message: apiQueuedMessageSchema
+    .nullable()
+    .describe('The message, as it is queued; null when it was not.'),
+  error: z
+    .object({ code: z.literal('precondition_failed'), message: z.string() })
+    .nullable()
+    .describe(
+      'Why the message was not queued, as a send to the number alone would refuse it (the contact erased, opted out, on the suppression list or without the marketing opt-in the company asks for, or at the marketing frequency cap), in the message’s words; null when it was.',
+    ),
 });
 
 /** The states of an outbound message (the `received` state is for inbound messages only). */
@@ -964,6 +979,27 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/messages/send-many': {
+        post: {
+          operationId: 'sendManyTemplates',
+          summary: 'Send an approved template to many numbers',
+          description: [
+            `${scopeNote('messages.send', 'messages.send_marketing')} Utility templates need \`messages.send\`, marketing templates \`messages.send_marketing\`. Sends the template to up to ${API_LIMITS.messagesPerSend} numbers, each with the values of its variables and each as POST /messages sends a template: the contact is created when new, and consent, the suppression list and the marketing frequency cap are checked for each. The call counts as one request against the rate and monthly limits, within the 64 KB a body may hold.`,
+            'Each number is answered in its place, in the order given, with its message, queued, or with why it was not (the contact erased, opted out, on the suppression list or without the marketing opt-in the company asks for, or at the marketing frequency cap): a refused number changes nothing, a contact created for it included, and the others are still sent. Messages queued together may leave in any order.',
+            'Refused as a whole, sending nothing: a template or a WhatsApp number that cannot send (as for one message), a number that is not valid or given twice, or values that do not fill the template’s variables (422, naming the place, as `messages.3.variables`). One call per `Idempotency-Key`: a retry answers as the first request did.',
+            'The call is one transaction holding the conversations it sends in until it ends. When it collides with another call taking several of them at the same moment in another order (another send to many numbers, say), it can be refused as a whole (409, sending nothing): send it again with the same `Idempotency-Key`.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],
+          requestBody: { required: true, content: json(ref('SendManyTemplates')) },
+          responses: {
+            '200': {
+              description: 'Each number, in the order given: its message, or why it was not sent.',
+              content: json(dataOf({ type: 'array', items: ref('TemplateSend') })),
+            },
+            ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
+          },
+        },
+      },
       '/conversations': {
         get: {
           operationId: 'listConversations',
@@ -1780,6 +1816,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         Consent: jsonSchema(apiConsentSchema, 'input'),
         Template: jsonSchema(apiTemplateSchema),
         SendTemplate: jsonSchema(apiSendMessageSchema, 'input'),
+        SendManyTemplates: jsonSchema(apiSendManyTemplatesSchema, 'input'),
+        TemplateSend: jsonSchema(apiTemplateSendSchema),
         SendText: jsonSchema(apiSendTextSchema, 'input'),
         SendButtons: jsonSchema(apiSendButtonsSchema, 'input'),
         SendList: jsonSchema(apiSendListSchema, 'input'),
@@ -1868,6 +1906,7 @@ export const API_ROUTES = [
   ['delete', '/contact-fields/{key}'],
   ['get', '/contact-changes'],
   ['post', '/messages'],
+  ['post', '/messages/send-many'],
   ['get', '/messages'],
   ['get', '/messages/{id}'],
   ['get', '/message-changes'],
