@@ -49,6 +49,7 @@ import {
   WEBHOOK_RETRY_SECONDS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUSES,
+  webhookAssigneeText,
   webhookErrorLabel,
   webhookHost,
   webhookReplayAllSummary,
@@ -101,6 +102,8 @@ import {
   webhookOAuthAudit,
   webhookOAuthColumns,
   webhookOAuthSchema,
+  webhookAssigneeIdsFor,
+  webhookAssigneeIdsSchema,
   webhookAutomationIdsFor,
   webhookAutomationIdsSchema,
   webhookCampaignStatusesFor,
@@ -2135,6 +2138,72 @@ describe('template filters (ADR-175)', () => {
   it('name a template by its name and language', () => {
     expect(webhookTemplateText({ name: 'order_update', language: 'en_US' })).toBe(
       'order_update (en_US)',
+    );
+  });
+});
+
+describe('assignee filters (ADR-181)', () => {
+  const mira = '6e7f8091-a2b3-44c5-96e7-f8091a2b3c4d';
+  const ravi = '7f8091a2-b3c4-45d6-a7f8-091a2b3c4d5e';
+
+  it('take 1 to 50 members, once each and in lower case, in the order given; null takes every conversation', () => {
+    expect(webhookAssigneeIdsSchema.parse([ravi, mira.toUpperCase(), ravi, mira])).toEqual([
+      ravi,
+      mira,
+    ]);
+    expect(webhookAssigneeIdsSchema.parse(null)).toBeNull();
+    const ids = Array.from(
+      { length: WEBHOOK_LIMITS.assignees + 1 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(WEBHOOK_LIMITS.assignees).toBe(50);
+    expect(webhookAssigneeIdsSchema.parse(ids.slice(1))).toEqual(ids.slice(1));
+    for (const refused of [[], ids, ['mira@example.com'], [mira, null], mira, [42]]) {
+      expect(webhookAssigneeIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookAssigneeIdsSchema.safeParse(['mira']).error?.issues[0]?.message).toBe(
+      'Choose members from the list.',
+    );
+    expect(webhookAssigneeIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one member, or take every conversation.',
+    );
+    expect(webhookAssigneeIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 50 members.',
+    );
+  });
+
+  it("apply to the events teams narrow, and an assignment's payload names both members", () => {
+    for (const type of WEBHOOK_EVENT_KEYS) {
+      const ofAConversation = WEBHOOK_TEAM_EVENTS.some((t) => t === type);
+      expect(webhookAssigneeIdsFor([type], [mira], null), type).toEqual(
+        ofAConversation ? [mira] : null,
+      );
+    }
+    // The member it went to and the member it left, as GET /members lists them.
+    const assignment = conversationAssignmentPayloadSchema.shape.data.shape.conversation.shape;
+    expect('assigneeId' in assignment && 'previousAssigneeId' in assignment).toBe(true);
+  });
+
+  it('are kept only while the endpoint takes an event of a conversation: given, kept, or cleared', () => {
+    expect(webhookAssigneeIdsFor(['message.received'], [mira], null)).toEqual([mira]);
+    expect(webhookAssigneeIdsFor(['conversation.assignment_changed'], undefined, [ravi])).toEqual([
+      ravi,
+    ]);
+    expect(webhookAssigneeIdsFor(['message.status'], null, [ravi])).toBeNull();
+    expect(webhookAssigneeIdsFor(['message.received'], undefined, null)).toBeNull();
+    expect(webhookAssigneeIdsFor(['consent.changed', 'order.received'], [mira], [ravi])).toBeNull();
+    expect(webhookAssigneeIdsFor(['automation.run_ended'], undefined, [ravi])).toBeNull();
+  });
+
+  it('name a member, and say when one no longer takes conversations', () => {
+    expect(webhookAssigneeText({ id: mira, name: 'Mira', assignable: true })).toBe('Mira');
+    expect(webhookAssigneeText({ id: ravi, name: 'Ravi', assignable: false })).toBe(
+      'Ravi (no longer takes conversations)',
+    );
+    expect(webhookAssigneeText({ id: ravi, name: null, assignable: false })).toBe(
+      'Unknown member (no longer takes conversations)',
     );
   });
 });

@@ -14,6 +14,7 @@ import {
   WEBHOOK_MESSAGE_SENDER_LABELS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
+  webhookAssigneeText,
   webhookChannelText,
   webhookOAuthText,
   webhookHost,
@@ -48,14 +49,21 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'developer.manage')) notFound();
   const { webhooks } = await getRuntime();
-  const [endpoints, automationChoices, channelChoices, teamChoices, templateChoices] =
-    await Promise.all([
-      webhooks.list(ctx),
-      webhooks.automationChoices(ctx),
-      webhooks.channelChoices(ctx),
-      webhooks.teamChoices(ctx),
-      webhooks.templateChoices(ctx),
-    ]);
+  const [
+    endpoints,
+    automationChoices,
+    channelChoices,
+    teamChoices,
+    templateChoices,
+    assigneeChoices,
+  ] = await Promise.all([
+    webhooks.list(ctx),
+    webhooks.automationChoices(ctx),
+    webhooks.channelChoices(ctx),
+    webhooks.teamChoices(ctx),
+    webhooks.templateChoices(ctx),
+    webhooks.assigneeChoices(ctx),
+  ]);
   const tz = ctx.tenant.timezone;
   const base = `/c/${ctx.tenant.slug}/settings/webhooks`;
   // A replay of every endpoint (ADR-160) offers the events the endpoints that are on receive.
@@ -210,6 +218,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.teams.map(webhookTeamText).join(', ')}
                       </p>
                     ) : null}
+                    {e.assignees ? (
+                      <p className="text-xs text-muted-foreground">
+                        Members whose conversations’ events are sent:{' '}
+                        {e.assignees.map(webhookAssigneeText).join(', ')}
+                      </p>
+                    ) : null}
                     {e.headerNames.length > 0 ? (
                       <p className="text-xs text-muted-foreground">
                         Headers sent: {e.headerNames.join(', ')} (values hidden)
@@ -332,6 +346,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
             channelChoices={channelChoices}
             teamChoices={teamChoices}
             templateChoices={templateChoices}
+            assigneeChoices={assigneeChoices}
             atLimit={endpoints.length >= WEBHOOK_LIMITS.endpoints}
           />
         </CardContent>

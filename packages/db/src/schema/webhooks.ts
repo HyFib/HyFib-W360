@@ -167,6 +167,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   templateIds: uuid('template_ids').array(),
   /**
+   * The members (memberships) whose assigned conversations' message and conversation events it
+   * takes (ADR-181); null takes every conversation's. Set only while one of those events is among
+   * its events.
+   */
+  assigneeIds: uuid('assignee_ids').array(),
+  /**
    * The endpoint's OAuth client (ADR-173): its authorization server's token endpoint, the client
    * identifier, the secret encrypted by the keyring and the scope to ask for (null: none). All
    * null without OAuth; the scope alone is optional.

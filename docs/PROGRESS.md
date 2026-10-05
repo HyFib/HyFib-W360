@@ -1,5 +1,63 @@
 # Progress
 
+## 2026-10-05 — Phase 5: choosing the members whose assigned conversations' events a webhook endpoint receives (P5-09, ADR-181)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers only).** An
+endpoint could narrow conversations by team, not by the member they are assigned to. The local
+PostgreSQL is unavailable (its Docker daemon stopped), so migration 0128, the integration tests and
+the e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-181):** `assigneeIds`, null for every conversation or 1 to 50 members who take
+  conversations, only with a message or conversation event; a conversation's events go by the member
+  it is assigned to when they happen, a change of assignee also reaching the member it left; a
+  member who stops taking conversations stays on the list.
+- **Database:** migration 0128 (the column and its check, the column grant,
+  `app.capture_webhook_event` reading the conversation's member with its team); the schema's column
+  (`packages/db`).
+- **Domain:** the list's schema, keeping and checking (`webhookAssigneeIdsSchema`,
+  `webhookAssigneeIdsFor`, `assertWebhookAssignees`), the endpoint view naming the members and
+  whether they still take conversations, `assigneeChoices`, create and update with the audit; the
+  limit, types and label in the model; `assigneeIds` in the API (create, update, answers) and the
+  OpenAPI document; the export column.
+- **Web:** "Members" in the endpoint form (every conversation's, or those of the members ticked; a
+  member who stopped stays listed until unticked) and "Members whose conversations’ events are sent:
+  …" on the endpoints list.
+- **Tests:**
+  - Unit (4 new in `webhooks.test.ts`, 1 new and 1 changed in `api.test.ts`): the list's rules, the
+    events it narrows, keeping and clearing, the label, the API schemas and the OpenAPI entries.
+  - Integration (3 new in `webhooks.test.ts`, 1 new and 1 changed in
+    `api-webhook-endpoints.test.ts`): refusals, keeping and clearing, a member who stopped, audits,
+    the check and the grant, the choices, and capture by member. Written for CI; not run here.
+  - E2E (1 new in `webhook-events.spec.ts`): an endpoint for one member, assigned, released and
+    assigned again; ADR-174's test now waits for its messages in the thread rather than anywhere on
+    the page, where the list's preview repeats them. Written for CI; not run here.
+- **Docs:** ADR-181 (and ADR-174's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T175; DEPLOYMENT and RUNBOOKS (migration 0128, a receiver missing a member's conversations);
+  DATA-RETENTION; BACKLOG P5-09; feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 16 deliberate regressions tried, all caught on the unit-tested parts (an
+  empty or long list, repeats or case kept, any text taken, a list kept without its events or by a
+  null, the limit, the labels, the API's refinement, change rule, fields and description, the
+  OpenAPI field and overview). The services' checks, the capture and the form need the database or a
+  browser, so their regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 813 passed (82 files)                                                |
+| `pnpm test:integration`, e2e, migration 0128       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 16 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Members for automation run and order events; filters by who sent a message; members per event
+  type.
+
 ## 2026-10-05 — Phase 5: changing a contact's typed number through the public API (P5-08, ADR-180)
 
 Status: **Implemented; its database test runs in CI only.** A key could not fix a mistyped number.

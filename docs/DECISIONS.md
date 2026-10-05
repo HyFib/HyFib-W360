@@ -7011,8 +7011,9 @@ Decision:
   its owner and grants stay. The triggers are unchanged. Existing endpoints keep null; nothing is
   backfilled.
 
-Not built: filters by the member a conversation is assigned to, teams for automation run and order
-events (which can belong to a conversation too), and teams chosen per event type.
+Not built: filters by the member a conversation is assigned to (built by ADR-181), teams for
+automation run and order events (which can belong to a conversation too), and teams chosen per event
+type.
 
 ## ADR-175 Choosing the templates whose message statuses and changes a webhook endpoint receives (P5-09) (2026-10-05)
 
@@ -7242,3 +7243,60 @@ Decision:
 
 Not built: numbers in calls that change many contacts, clearing a number, and moving a WhatsApp
 identity to another contact.
+
+## ADR-181 Choosing the members whose assigned conversations' events a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint can take the message and conversation events of chosen teams' conversations
+(ADR-174), but some receivers follow members, not teams: a sales representative's own CRM, the
+dashboard of a supervisor who looks after a few members, an outsourced agent's tool that should see
+that agent's conversations only. Each was sent every conversation of the team or the company and had
+to look the assignee up and drop the rest. ADR-174 left filters by the member a conversation is
+assigned to unbuilt.
+
+Decision:
+
+- **A list of members per endpoint,** for the events teams narrow: `message.received`,
+  `message.status`, `conversation.status_changed`, `conversation.assignment_changed` and
+  `conversation.team_changed`. Null receives every conversation's events, as before; a list holds 1
+  to 50 members, by the ids `GET /members` lists them by (and conversation events name them by), in
+  the order given with repeats merged. It is chosen in Settings → Webhooks ("Members": every
+  conversation's events, or only those of the conversations assigned to the members ticked) and
+  shown on the endpoint as "Members whose conversations’ events are sent: …", and through the API as
+  `assigneeIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every
+  endpoint the API answers.
+- **Only with those events:** a list given for an endpoint that takes none of them is refused
+  (`assigneeIds`; 422 through the API). A change that removes them clears it, and a `PATCH` that
+  leaves it out keeps it; Settings always sends it. A check in the database holds the same rule
+  (null, or 1 to 50 ids without a null while one of the five events is among the endpoint's).
+- **A conversation's member is the one it is assigned to when the event is captured,** read from the
+  conversation with its team (after the change, for the conversation's own events), so an unassigned
+  conversation is on no list, and `conversation.assignment_changed` reaches the endpoints of the
+  member the conversation left (its stored `previousAssigneeId`) as well as of the member it went
+  to. Applied in `app.capture_webhook_event` with the endpoints' other filters, so an endpoint that
+  names teams and members receives the events of those members' conversations in those teams; the
+  member is read only when an active endpoint of the company that takes the event names teams or
+  members, and no event is written when none takes it. Stored events and payloads are unchanged;
+  replays and test events too. Other events are not narrowed: an endpoint that names members still
+  receives every other event it takes.
+- **Members who take conversations:** a list given now may add only members conversations can be
+  assigned to: active members of the endpoint's company whose role reads and answers conversations,
+  those `GET /members` lists and routing gives conversations to. A member who later leaves, is
+  suspended or removed, or loses that role stays on the lists that held them: their conversations
+  are released then (`conversation.assignment_changed` events, which those endpoints receive), and
+  they match nothing while they hold none; a list given again may keep them but not add them back
+  until they take conversations again. Settings names such a member "… (no longer takes
+  conversations)". Memberships are never deleted, so a list never names one that is gone.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `assigneeIds` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The choices list the members conversations can be assigned to,
+  by name, to members with `developer.manage` (owners and administrators, who can read members
+  anyway); a refusal tells a key only whether an id it gives is such a member of its company.
+- **Migration 0128:** `assignee_ids uuid[]` on `app.webhook_endpoints` with the check, validated at
+  once (a company has at most 10 endpoints), an update grant on the column for the runtime role, and
+  `app.capture_webhook_event` replaced with the same signature (0123's, with the member condition),
+  so its owner and grants stay. The definer role already reads a conversation's member (0009). The
+  triggers are unchanged. Existing endpoints keep null; nothing is backfilled.
+
+Not built: members for automation run and order events, filters by who sent a message (a list names
+whom a conversation is assigned to, not who wrote in it), and members chosen per event type.

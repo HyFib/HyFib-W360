@@ -25,6 +25,7 @@ import {
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUSES,
+  webhookAssigneeText,
   webhookChannelText,
   webhookOAuthText,
   webhookReplayAllSummary,
@@ -35,11 +36,13 @@ import {
   webhookTakesTemplateEvents,
   webhookTeamText,
   webhookTemplateText,
+  type WebhookAssigneeChoice,
   type WebhookAutomationChoice,
   type WebhookCampaignStatus,
   type WebhookChannelChoice,
   type WebhookContactPart,
   type WebhookConversationStatus,
+  type WebhookEndpointAssignee,
   type WebhookEndpointOAuth,
   type WebhookEndpointTeam,
   type WebhookEventType,
@@ -568,6 +571,107 @@ function TeamChoices({
 }
 
 /**
+ * The members whose assigned conversations' events an endpoint takes (ADR-181): every
+ * conversation's, or those of the conversations assigned to the members ticked. A member who no
+ * longer takes conversations stays listed, ticked, until unticked: they hold none.
+ */
+function AssigneeChoices({
+  prefix,
+  choices,
+  stored,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  choices: WebhookAssigneeChoice[];
+  /** The members the endpoint names now, so one who stopped stays listed until saved without. */
+  stored: readonly WebhookEndpointAssignee[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const listed = [
+    ...choices.map((c) => ({ id: c.id, text: c.name })),
+    ...stored
+      .filter((m) => !choices.some((c) => c.id === m.id))
+      .map((m) => ({ id: m.id, text: webhookAssigneeText(m) })),
+  ];
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Members</legend>
+      <p className="text-xs text-muted-foreground">
+        Message and conversation events belong to the member the conversation is assigned to when
+        they happen, and a change of assignee to the member it left as well. Other events are sent
+        whichever members are chosen.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-assignees`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every conversation’s events
+          <span className="block text-xs text-muted-foreground">
+            Including unassigned conversations, and members who join later.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-assignees`}
+          className="mt-1"
+          checked={!every}
+          disabled={listed.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only the events of the conversations assigned to the members ticked
+          {listed.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">
+              No member takes conversations yet.
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid max-h-64 gap-1 overflow-y-auto">
+          {listed.map((m) => {
+            const id = `${prefix}-assignee-${m.id}`;
+            return (
+              <div key={m.id} className="flex items-center gap-2">
+                <Checkbox
+                  id={id}
+                  checked={chosen.includes(m.id)}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? listed
+                            .filter((l) => l.id === m.id || chosen.includes(l.id))
+                            .map((l) => l.id)
+                        : chosen.filter((x) => x !== m.id),
+                    )
+                  }
+                />
+                <Label htmlFor={id} className="font-normal break-all">
+                  {m.text}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
+/**
  * The templates whose messages' statuses and changes an endpoint takes (ADR-175): every
  * template's, or those of the templates ticked.
  */
@@ -1029,6 +1133,7 @@ export function WebhookEndpointForm({
   channelChoices,
   teamChoices,
   templateChoices,
+  assigneeChoices,
   atLimit = false,
 }: {
   slug: string;
@@ -1052,6 +1157,8 @@ export function WebhookEndpointForm({
     teams: WebhookEndpointTeam[] | null;
     /** The templates it names (ADR-175); null for every template. */
     templateIds: string[] | null;
+    /** The members it names (ADR-181), with whether they still take conversations; null: all. */
+    assignees: WebhookEndpointAssignee[] | null;
     oauth: WebhookEndpointOAuth | null;
   };
   /** The company's published automations, which an endpoint can choose (ADR-145). */
@@ -1062,6 +1169,8 @@ export function WebhookEndpointForm({
   teamChoices: WebhookTeamChoice[];
   /** The company's templates, which an endpoint can choose (ADR-175). */
   templateChoices: WebhookTemplateChoice[];
+  /** The company's members who take conversations, whom an endpoint can choose (ADR-181). */
+  assigneeChoices: WebhookAssigneeChoice[];
   atLimit?: boolean;
 }) {
   const prefix = useId();
@@ -1100,6 +1209,10 @@ export function WebhookEndpointForm({
   const [teamIds, setTeamIds] = useState<string[]>(endpoint?.teams?.map((t) => t.id) ?? []);
   const [everyTemplate, setEveryTemplate] = useState(!endpoint?.templateIds);
   const [templateIds, setTemplateIds] = useState<string[]>(endpoint?.templateIds ?? []);
+  const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
+  const [assigneeIds, setAssigneeIds] = useState<string[]>(
+    endpoint?.assignees?.map((m) => m.id) ?? [],
+  );
   const [headers, setHeaders] = useState<HeaderRow[]>([]);
   // Changing an endpoint keeps its headers unless they are given again.
   const [replaceHeaders, setReplaceHeaders] = useState(false);
@@ -1186,6 +1299,9 @@ export function WebhookEndpointForm({
         // Every template's statuses and changes unless the templates ticked are chosen (ADR-175).
         const chosenTemplates =
           webhookTakesTemplateEvents(eventTypes) && !everyTemplate ? templateIds : null;
+        // Every conversation's events unless the members ticked are chosen (ADR-181).
+        const chosenAssignees =
+          webhookTakesTeamEvents(eventTypes) && !everyAssignee ? assigneeIds : null;
         const input = {
           url,
           description,
@@ -1202,6 +1318,7 @@ export function WebhookEndpointForm({
           channelIds: chosenChannels,
           teamIds: chosenTeams,
           templateIds: chosenTemplates,
+          assigneeIds: chosenAssignees,
         };
         const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
           setBusy(false);
@@ -1262,6 +1379,8 @@ export function WebhookEndpointForm({
               setTeamIds([]);
               setEveryTemplate(true);
               setTemplateIds([]);
+              setEveryAssignee(true);
+              setAssigneeIds([]);
               setHeaders([]);
               setOAuthChange('keep');
               setOAuthFields(oauthFieldsOf(null));
@@ -1369,6 +1488,17 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryTeam}
           chosen={teamIds}
           onChange={setTeamIds}
+        />
+      ) : null}
+      {webhookTakesTeamEvents(eventTypes) ? (
+        <AssigneeChoices
+          prefix={prefix}
+          choices={assigneeChoices}
+          stored={endpoint?.assignees ?? []}
+          every={everyAssignee}
+          onEveryChange={setEveryAssignee}
+          chosen={assigneeIds}
+          onChange={setAssigneeIds}
         />
       ) : null}
       <fieldset className="grid gap-2">

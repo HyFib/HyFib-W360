@@ -722,8 +722,12 @@ verification, app review, Embedded Signup configuration).
   their database tests run only in CI]** (ADR-175: an endpoint takes `message.status` for the
   messages sent with the templates it chooses and `template.status_changed` for their changes, 1
   to 50 of the company's templates, in Settings or through the API, or every template's as
-  before). Remaining: filters for other event types and on a message's
-  or contact's values (such as by campaign, assigned member, tag or field key, or a
+  before). **[Assignee filters built; their database tests run only in CI]** (ADR-181: an endpoint
+  takes the message and conversation events of the conversations assigned to the members it chooses,
+  1 to 50 members who take conversations, in Settings or through the API, or every conversation's as
+  before; by the member a conversation is assigned to when the event is captured, a change of
+  assignee also reaching the member it left). Remaining: filters for other event types and on a
+  message's or contact's values (such as by campaign, tag or field key, or a
   run's trigger or end reason), which tags were added or removed, other authentication (headers
   computed per delivery, other OAuth grants), mutual TLS, fixed egress addresses, events for store
   orders, Payment Links and each step of a run, `createdAt` finer than the millisecond, load tests.

@@ -2235,6 +2235,20 @@ to replay. To take more, tick the templates under "Templates" on the endpoint's 
 `templateIds` (null for every template). Removing both Message status and Template status clears the
 list.
 
+**A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
+message and conversation events of the conversations assigned to chosen members only. The endpoints
+list shows them ("Members whose conversations’ events are sent: …"), and the API answers
+`assigneeIds` (null takes every conversation's). A conversation's events go by the member it is
+assigned to when they happen: an unassigned conversation, or one assigned to someone else, is never
+queued for the endpoint (a change of assignee reaches the member it left as well as the one it went
+to), and when no endpoint of the company takes an event, it is not recorded at all, so there is
+nothing to replay. An endpoint that names teams too receives only those members' conversations in
+those teams. A member who left, was suspended or lost the role that answers conversations shows as
+"(no longer takes conversations)" and matches nothing until they hold conversations again. To take
+more, tick the members under "Members" on the endpoint's page or choose "Every conversation’s
+events", or `PATCH /webhook-endpoints/{id}` with `assigneeIds` (null for every conversation).
+Removing every message and conversation event clears the list.
+
 **A campaign event's results differ from the campaign page (ADR-150).** `campaign.results` are
 counted when the request is built (the `t` of its `W360-Signature`), as `GET /campaigns/{id}` counts
 them, and a retry or a replay counts again: an event delivered while the campaign's messages were on
@@ -2751,6 +2765,14 @@ they start (their sweep reads the column); workers of the previous release work 
 `ops.platform_acknowledge_webhook_receipt`, in one transaction; a failure rolls it all back (usually
 the bootstrap roles: fix them and run the migrations again). Web servers of this release need it
 before they show the Integrations tab; workers and web servers of the previous release work with it.
+
+**Migration 0128 failed.** It adds `assignee_ids` to `app.webhook_endpoints` with the check
+`webhook_endpoints_assignee_ids`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event`, in one transaction; a failure rolls it all back (usually the bootstrap
+roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
+release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
+endpoints name the column); workers of either release and web servers of the previous release work
+with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

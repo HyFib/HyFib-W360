@@ -328,6 +328,8 @@ export const WEBHOOK_LIMITS = {
   teams: 50,
   /** The templates an endpoint can choose to take the statuses and changes of (ADR-175). */
   templates: 50,
+  /** The members an endpoint can choose to take the assigned conversations' events of (ADR-181). */
+  assignees: 50,
   /**
    * An endpoint's OAuth client (ADR-173): its identifier, secret and scope, short enough that the
    * Basic header stays within what the egress client sends, and the longest token kept.
@@ -433,6 +435,36 @@ export const webhookTeamText = (team: WebhookEndpointTeam): string => team.name 
 export function webhookTakesTeamEvents(eventTypes: readonly WebhookEventType[]): boolean {
   return WEBHOOK_TEAM_EVENTS.some((type) => eventTypes.includes(type));
 }
+
+/**
+ * A member conversations can be assigned to (active, with a role that reads and answers them), whom
+ * an endpoint can choose to take the events of the conversations assigned to (ADR-181): the events
+ * of `WEBHOOK_TEAM_EVENTS`. A conversation's member is the one it is assigned to when the event
+ * happens; `conversation.assignment_changed` belongs to the member it left as well.
+ */
+export interface WebhookAssigneeChoice {
+  id: string;
+  name: string;
+}
+
+/** A member an endpoint takes the assigned conversations' events of (ADR-181), as stored. */
+export interface WebhookEndpointAssignee {
+  id: string;
+  /** Null only for a membership the company no longer had, which cannot happen: they are kept. */
+  name: string | null;
+  /**
+   * Whether conversations can be assigned to the member now. One who left, was suspended or
+   * removed, or lost the role that answers them stays chosen, and matches nothing while holding no
+   * conversation.
+   */
+  assignable: boolean;
+}
+
+/** A member as Settings → Webhooks lists them. */
+export const webhookAssigneeText = (assignee: WebhookEndpointAssignee): string => {
+  const name = assignee.name ?? 'Unknown member';
+  return assignee.assignable ? name : `${name} (no longer takes conversations)`;
+};
 
 /**
  * The events of a template, which an endpoint can take for chosen templates (ADR-175): the statuses

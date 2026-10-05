@@ -14,6 +14,7 @@ import {
   gt,
   inArray,
   isNotNull,
+  memberships,
   messageTemplates,
   sql,
   teams,
@@ -29,6 +30,7 @@ import {
 import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
+import { INBOX_WORKER_ROLES } from '../inbox/routing';
 import { parseInput } from '../validation';
 import {
   WEBHOOK_CAMPAIGN_STATUSES,
@@ -49,11 +51,13 @@ import {
   webhookTakesChannelEvents,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
+  type WebhookAssigneeChoice,
   type WebhookAutomationChoice,
   type WebhookCampaignStatus,
   type WebhookChannelChoice,
   type WebhookContactPart,
   type WebhookConversationStatus,
+  type WebhookEndpointAssignee,
   type WebhookEndpointAutomation,
   type WebhookEndpointChannel,
   type WebhookEndpointOAuth,
@@ -735,6 +739,69 @@ export async function assertWebhookTeams(
   });
 }
 
+/**
+ * The members whose assigned conversations' message and conversation events an endpoint takes
+ * (ADR-181), each once; null takes every conversation's, including unassigned ones.
+ */
+export const webhookAssigneeIdsSchema = z
+  .array(z.uuid({ error: 'Choose members from the list.' }))
+  .min(1, 'Choose at least one member, or take every conversation.')
+  .max(WEBHOOK_LIMITS.assignees, `Choose at most ${WEBHOOK_LIMITS.assignees} members.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_ASSIGNEES_NEED_THE_EVENTS =
+  'Choose members only for an endpoint that receives message or conversation events.';
+
+export const WEBHOOK_ASSIGNEES_NOT_FOUND = 'Choose members of this company who take conversations.';
+
+/**
+ * The members an endpoint keeps after it is added or changed: every conversation (null) unless it
+ * takes an event of a conversation; then those given, or else the ones it had.
+ */
+export function webhookAssigneeIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesTeamEvents(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/** Whether conversations can be assigned to a member: active, with a role that answers them. */
+const takesConversations = () =>
+  sql<boolean>`(${memberships.status} = 'active'
+    and ${memberships.roles} && ${sql.param([...INBOX_WORKER_ROLES])}::text[])`;
+
+/**
+ * Refuses members a list adds to an endpoint unless conversations can be assigned to each now: a
+ * member of the company, active, with a role that reads and answers them (ADR-181). Members the
+ * endpoint's list already held may have left or lost that role since, and stay: their conversations
+ * were released, and they match nothing while holding none. `tx` is in the company's scope.
+ */
+export async function assertWebhookAssignees(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+  held: readonly string[] | null = null,
+): Promise<void> {
+  const added = (ids ?? []).filter((id) => !held?.includes(id));
+  if (added.length === 0) return;
+  const rows = await tx
+    .select({ id: memberships.id })
+    .from(memberships)
+    .where(
+      and(eq(memberships.tenantId, tenantId), inArray(memberships.id, added), takesConversations()),
+    );
+  const found = new Set(rows.map((r) => r.id));
+  const index = (ids ?? []).findIndex((id) => added.includes(id) && !found.has(id));
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_ASSIGNEES_NOT_FOUND, {
+    issues: [{ path: `assigneeIds.${index}`, message: WEBHOOK_ASSIGNEES_NOT_FOUND }],
+  });
+}
+
 /** A new signing secret: `whsec_` and 32 random bytes. */
 export function generateWebhookSecret(): string {
   return `whsec_${randomBytes(32).toString('base64url')}`;
@@ -811,6 +878,11 @@ const endpointFields = z.object({
    * ADR-175); left out, they stay.
    */
   templateIds: webhookTemplateIdsSchema.optional(),
+  /**
+   * Given, the members whose assigned conversations' events it takes (null: every conversation's,
+   * ADR-181); left out, they stay.
+   */
+  assigneeIds: webhookAssigneeIdsSchema.optional(),
   /** Given, its OAuth client (null: none, ADR-173); left out, it stays. */
   oauth: webhookOAuthSchema.nullable().optional(),
 });
@@ -889,6 +961,12 @@ const templatesNeedTheEvents = {
     !data.templateIds || webhookTakesTemplateEvents(data.eventTypes),
   options: { path: ['templateIds'], message: WEBHOOK_TEMPLATES_NEED_THE_EVENTS },
 };
+/** Members are chosen only for an endpoint that takes events of conversations (ADR-181). */
+const assigneesNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; assigneeIds?: unknown }) =>
+    !data.assigneeIds || webhookTakesTeamEvents(data.eventTypes),
+  options: { path: ['assigneeIds'], message: WEBHOOK_ASSIGNEES_NEED_THE_EVENTS },
+};
 const endpointSchema = endpointFields
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
   .refine(sendersNeedTheEvent.check, sendersNeedTheEvent.options)
@@ -901,7 +979,8 @@ const endpointSchema = endpointFields
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
   .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
   .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
-  .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options);
+  .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options)
+  .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options);
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointFields
   .extend({ endpointId: z.uuid() })
@@ -916,7 +995,8 @@ const updateSchema = endpointFields
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
   .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
   .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
-  .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options);
+  .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options)
+  .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
 const replayAllFailedSchema = z.object({
@@ -978,6 +1058,11 @@ export interface WebhookEndpointView {
    * takes every template's.
    */
   templates: WebhookTemplateChoice[] | null;
+  /**
+   * The members whose assigned conversations' events it takes (ADR-181), as stored, named, with
+   * whether conversations can still be assigned to them; null takes every conversation's.
+   */
+  assignees: WebhookEndpointAssignee[] | null;
   /** Where it gets OAuth tokens and as which client (ADR-173); the secret is never shown. */
   oauth: WebhookEndpointOAuth | null;
   createdAt: Date;
@@ -1206,6 +1291,7 @@ export async function lockWebhookEndpoint(
       channelAccountIds: webhookEndpoints.channelAccountIds,
       teamIds: webhookEndpoints.teamIds,
       templateIds: webhookEndpoints.templateIds,
+      assigneeIds: webhookEndpoints.assigneeIds,
       headerNames: webhookEndpoints.headerNames,
       oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
       oauthClientId: webhookEndpoints.oauthClientId,
@@ -1255,6 +1341,7 @@ export async function insertWebhookEndpoint(
     channelAccountIds: string[] | null;
     teamIds: string[] | null;
     templateIds: string[] | null;
+    assigneeIds: string[] | null;
     /** Its OAuth client (ADR-173), checked by `checkedWebhookOAuth` with nothing stored. */
     oauth: CheckedWebhookOAuth | null;
     creator: WebhookEndpointCreator;
@@ -1293,6 +1380,7 @@ export async function insertWebhookEndpoint(
     channelAccountIds: input.channelAccountIds,
     teamIds: input.teamIds,
     templateIds: input.templateIds,
+    assigneeIds: input.assigneeIds,
     ...webhookOAuthColumns(keyring, tenantId, id, input.oauth, NO_WEBHOOK_OAUTH),
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
@@ -1680,6 +1768,7 @@ export function createWebhooksService(deps: {
               channelAccountIds: webhookEndpoints.channelAccountIds,
               teamIds: webhookEndpoints.teamIds,
               templateIds: webhookEndpoints.templateIds,
+              assigneeIds: webhookEndpoints.assigneeIds,
               oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
               oauthClientId: webhookEndpoints.oauthClientId,
               oauthScope: webhookEndpoints.oauthScope,
@@ -1769,6 +1858,26 @@ export function createWebhooksService(deps: {
                     ),
                   );
           const templateById = new Map(namedTemplates.map((t) => [t.id, t]));
+          // The members endpoints chose (ADR-181), and whether they still take conversations.
+          const assigneeIds = [...new Set(rows.flatMap((r) => r.assigneeIds ?? []))];
+          const namedAssignees =
+            assigneeIds.length === 0
+              ? []
+              : await tx
+                  .select({
+                    id: memberships.id,
+                    name: users.name,
+                    assignable: takesConversations(),
+                  })
+                  .from(memberships)
+                  .innerJoin(users, eq(users.id, memberships.userId))
+                  .where(
+                    and(
+                      eq(memberships.tenantId, ctx.tenant.id),
+                      inArray(memberships.id, assigneeIds),
+                    ),
+                  );
+          const assigneeById = new Map(namedAssignees.map((m) => [m.id, m]));
           return rows.map((r) => {
             const recent: Record<WebhookDeliveryState, number> = {
               pending: 0,
@@ -1785,6 +1894,7 @@ export function createWebhooksService(deps: {
               channelAccountIds,
               teamIds: chosenTeams,
               templateIds: chosenTemplates,
+              assigneeIds: chosenAssignees,
               oauthTokenUrl,
               oauthClientId,
               oauthScope,
@@ -1810,6 +1920,12 @@ export function createWebhooksService(deps: {
               templates: chosenTemplates
                 ? chosenTemplates.map(
                     (id) => templateById.get(id) ?? { id, name: 'Unknown template', language: '-' },
+                  )
+                : null,
+              assignees: chosenAssignees
+                ? chosenAssignees.map(
+                    (id): WebhookEndpointAssignee =>
+                      assigneeById.get(id) ?? { id, name: null, assignable: false },
                   )
                 : null,
               automations: automationIds
@@ -1927,6 +2043,26 @@ export function createWebhooksService(deps: {
       );
     },
 
+    /**
+     * The members an endpoint can choose to take the assigned conversations' events of (ADR-181):
+     * those conversations can be assigned to (active, with a role that reads and answers them), by
+     * name.
+     */
+    async assigneeChoices(ctx: TenantContext): Promise<WebhookAssigneeChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      return db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({ id: memberships.id, name: users.name })
+            .from(memberships)
+            .innerJoin(users, eq(users.id, memberships.userId))
+            .where(and(eq(memberships.tenantId, ctx.tenant.id), takesConversations()))
+            .orderBy(asc(users.name), asc(memberships.id)),
+        { accessMode: 'read only' },
+      );
+    },
+
     /** A new endpoint; its secret is returned once. */
     async create(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
@@ -1967,6 +2103,8 @@ export function createWebhooksService(deps: {
         await assertWebhookTeams(tx, ctx.tenant.id, teamIds);
         const templateIds = webhookTemplateIdsFor(data.eventTypes, data.templateIds, null);
         await assertWebhookTemplates(tx, ctx.tenant.id, templateIds);
+        const assigneeIds = webhookAssigneeIdsFor(data.eventTypes, data.assigneeIds, null);
+        await assertWebhookAssignees(tx, ctx.tenant.id, assigneeIds);
         const oauth = data.oauth
           ? checkedWebhookOAuth(data.oauth, NO_WEBHOOK_OAUTH, deps.egressPolicy)
           : null;
@@ -1992,6 +2130,7 @@ export function createWebhooksService(deps: {
           channelAccountIds: channelIds,
           teamIds,
           templateIds,
+          assigneeIds,
           oauth,
           creator: { userId: ctx.user.id },
         });
@@ -2018,6 +2157,7 @@ export function createWebhooksService(deps: {
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),
+              ...(assigneeIds ? { assigneeIds } : {}),
               ...(oauth ? { oauthTokenHost: oauth.host } : {}),
             },
           },
@@ -2106,6 +2246,15 @@ export function createWebhooksService(deps: {
         if (data.templateIds !== undefined) {
           await assertWebhookTemplates(tx, ctx.tenant.id, templateIds);
         }
+        const assigneeIds = webhookAssigneeIdsFor(
+          data.eventTypes,
+          data.assigneeIds,
+          endpoint.assigneeIds,
+        );
+        // And the members it adds: those it held may no longer take conversations (ADR-181).
+        if (data.assigneeIds !== undefined) {
+          await assertWebhookAssignees(tx, ctx.tenant.id, assigneeIds, endpoint.assigneeIds);
+        }
         // Left out, the OAuth client stays as it is (ADR-173).
         const oauth = data.oauth
           ? checkedWebhookOAuth(data.oauth, endpoint, deps.egressPolicy)
@@ -2133,6 +2282,7 @@ export function createWebhooksService(deps: {
             channelAccountIds: channelIds,
             teamIds,
             templateIds,
+            assigneeIds,
             ...(data.headers
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
               : {}),
@@ -2170,6 +2320,7 @@ export function createWebhooksService(deps: {
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),
+              ...(assigneeIds ? { assigneeIds } : {}),
               ...webhookOAuthAudit(oauth, endpoint),
             },
           },

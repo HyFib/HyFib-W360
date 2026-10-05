@@ -1542,6 +1542,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'channel_account_ids',
       'team_ids',
       'template_ids',
+      'assignee_ids',
       'oauth_token_url',
       'oauth_client_id',
       'oauth_scope',

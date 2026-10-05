@@ -106,6 +106,7 @@ import {
   endpointAnnouncement,
 } from './webhook-endpoints';
 import {
+  WEBHOOK_ASSIGNEES_NEED_THE_EVENTS,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
   WEBHOOK_CHANNELS_NEED_THE_EVENTS,
@@ -1351,6 +1352,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       additionalProperties: unknown;
     };
     expect(Object.keys(update.properties).sort()).toEqual([
+      'assigneeIds',
       'automationIds',
       'campaignStatuses',
       'channelIds',
@@ -1614,6 +1616,73 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     ).toContain('templateIds');
     expect(doc.info.description).toContain(
       'And it can name templates (its `templateIds`): then it receives the statuses of the messages sent with them and their changes only.',
+    );
+  });
+
+  it('take members only with an event of a conversation, each once, and a list of them alone is a change (ADR-181)', () => {
+    const a = '0190e9a1-0000-7000-8000-00000000003a';
+    const b = '0190e9a1-0000-7000-8000-00000000003b';
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    // Each event of a conversation allows a list, alongside events of none.
+    for (const event of WEBHOOK_TEAM_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          assigneeIds: [b, a.toUpperCase(), b],
+        }).assigneeIds,
+        event,
+      ).toEqual([b, a]);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['order.received', 'automation.run_started', 'template.status_changed'],
+      assigneeIds: [a],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['assigneeIds', WEBHOOK_ASSIGNEES_NEED_THE_EVENTS],
+    ]);
+    const message = { ...base, events: ['message.received'] };
+    for (const body of [
+      { ...message, assigneeIds: [] },
+      { ...message, assigneeIds: ['agent@example.com'] },
+      {
+        ...message,
+        assigneeIds: Array.from(
+          { length: WEBHOOK_LIMITS.assignees + 1 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...message, assigneeIds: null }).assigneeIds,
+    ).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ assigneeIds: null })).toEqual({
+      assigneeIds: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ assigneeIds: [a] })).toEqual({
+      assigneeIds: [a],
+    });
+    // Answered as a list or null, given as GET /members lists members, and in the overview.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.assigneeIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('assigneeIds');
+    const created = schemas.CreateWebhookEndpoint as {
+      properties: Record<string, { description?: string }>;
+    };
+    expect(created.properties.assigneeIds?.description).toContain('as GET /members lists them');
+    expect(doc.info.description).toContain(
+      'or members (its `assigneeIds`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens.',
     );
   });
 

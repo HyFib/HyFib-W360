@@ -959,6 +959,17 @@ Phase 5 rules (outgoing webhooks, P5-09):
   company. A refusal tells a key with `webhooks.manage` only whether an id it gives is one of its
   company's templates. Audited with the list (unit tests; integration and e2e tests, run in CI
   only).
+- An endpoint can take the events of the conversations assigned to chosen members only (ADR-181),
+  chosen the same way. A list may add only members of the endpoint's company who take conversations
+  (active, with a role that reads and answers them; checked in its scope), is kept only while the
+  endpoint takes a message or conversation event (a database check too, which also refuses a null
+  entry), and is applied in `app.capture_webhook_event`, which reads the conversation's member in
+  the company's scope (the definer role through its column grant): it narrows what one endpoint
+  receives and never adds an event or a delivery for another endpoint or company. A member who stops
+  taking conversations stays on the list and matches nothing while holding none, so a list never
+  widens by itself. Settings names the members to members with `developer.manage` only, and a
+  refusal tells a key with `webhooks.manage` only whether an id it gives is such a member. Audited
+  with the list (unit tests; integration and e2e tests, run in CI only).
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

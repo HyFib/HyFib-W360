@@ -265,6 +265,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       channelIds: null,
       teamIds: null,
       templateIds: null,
+      assigneeIds: null,
       oauth: null,
       apiKeyId: key.id,
       createdAt: expect.any(String),
@@ -1740,6 +1741,106 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { templateIds: [] }))).toMatchObject({
       path: 'templateIds',
+    });
+  });
+
+  it("choose the members whose assigned conversations' events an endpoint receives, kept by changes that leave them out, one who stopped taking conversations included, and cleared with the events (ADR-181)", async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const owner = await fx.ctx(c, c.owner);
+    const agent = (await fx.ctx(c, c.agent)).membership.id;
+    const ownerId = owner.membership.id;
+    const marketer = (await fx.ctx(c, c.marketer)).membership.id;
+    const other = await fx.company();
+    const elsewhere = (await fx.ctx(other, other.agent)).membership.id;
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Members need an event of a conversation, at least one, each a member of the company who
+    // takes conversations, as GET /members lists them (named by place).
+    const refusals = [
+      [['order.received', 'automation.run_started'], [agent], 'assigneeIds'],
+      [['message.received'], [], 'assigneeIds'],
+      [['message.received'], [agent, 'agent'], 'assigneeIds.1'],
+      [['message.status'], [agent, marketer], 'assigneeIds.1'],
+      [['message.status'], [agent, elsewhere], 'assigneeIds.1'],
+      [['conversation.assignment_changed'], [uuidv7()], 'assigneeIds.0'],
+    ] as const;
+    for (const [index, [events, assigneeIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, assigneeIds },
+            idem(`assignees-bad-${index}`, JSON.stringify(assigneeIds)),
+          ),
+        ),
+        JSON.stringify(assigneeIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'assignees-1', {
+      url: receiverUrl(),
+      events: ['message.received', 'contact.created'],
+      assigneeIds: [agent, ownerId.toUpperCase(), agent],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.assigneeIds).toEqual([agent, ownerId]);
+    expect((await api().get(key.ctx, id)).assigneeIds).toEqual([agent, ownerId]);
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { assigneeIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => a.metadata.assigneeIds);
+    expect(await audits('webhook.endpoint_created')).toEqual([[agent, ownerId]]);
+    // A member who stops taking conversations stays on the list, and settings says so.
+    await fx.query(`UPDATE app.memberships SET status = 'suspended' WHERE id = $1`, [agent]);
+    expect((await settings().list(owner)).find((e) => e.id === id)?.assignees).toEqual([
+      { id: agent, name: 'Agent', assignable: false },
+      { id: ownerId, name: 'Owner', assignable: true },
+    ]);
+    expect(await api().update(key.ctx, id, { description: 'Agent desk' })).toMatchObject({
+      assigneeIds: [agent, ownerId],
+    });
+    expect(await api().update(key.ctx, id, { assigneeIds: [ownerId, agent] })).toMatchObject({
+      assigneeIds: [ownerId, agent],
+    });
+    expect(await api().update(key.ctx, id, { assigneeIds: [ownerId] })).toMatchObject({
+      assigneeIds: [ownerId],
+    });
+    // Once off the list, they are refused like any member who takes no conversations.
+    expect(
+      await issueOf(api().update(key.ctx, id, { assigneeIds: [ownerId, agent] })),
+    ).toMatchObject({ path: 'assigneeIds.1' });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [agent, ownerId],
+      [ownerId, agent],
+      [ownerId],
+    ]);
+    // Any event of a conversation keeps the list; events of none clear it.
+    expect(
+      await api().update(key.ctx, id, { events: ['conversation.team_changed'] }),
+    ).toMatchObject({ assigneeIds: [ownerId] });
+    expect(await api().update(key.ctx, id, { events: ['contact.created'] })).toMatchObject({
+      events: ['contact.created'],
+      assigneeIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { assigneeIds: [ownerId] }))).toMatchObject({
+      path: 'assigneeIds',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['message.status'], assigneeIds: [ownerId] }),
+    ).toMatchObject({ assigneeIds: [ownerId] });
+    expect(await api().update(key.ctx, id, { assigneeIds: null })).toMatchObject({
+      assigneeIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { assigneeIds: [] }))).toMatchObject({
+      path: 'assigneeIds',
     });
   });
 

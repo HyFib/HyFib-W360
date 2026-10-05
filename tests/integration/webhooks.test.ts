@@ -2850,6 +2850,271 @@ describe('template filters (ADR-175)', () => {
   });
 });
 
+describe('assignee filters (ADR-181)', () => {
+  /** Assigns a conversation to a member (or to nobody), as the inbox and routing do. */
+  const assign = (conversationId: string, membershipId: string | null) =>
+    fx.query('UPDATE app.conversations SET assigned_membership_id = $2 WHERE id = $1', [
+      conversationId,
+      membershipId,
+    ]);
+  const setMember = (membershipId: string, change: string) =>
+    fx.query(`UPDATE app.memberships SET ${change} WHERE id = $1`, [membershipId]);
+
+  it('are refused without an event of a conversation, empty, over 50 or naming a member who takes no conversations; kept by a change that leaves them out, a member who stopped included, and cleared with the events; the database keeps them to those events', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = (await fx.ctx(c, c.agent)).membership.id;
+    const ownerId = owner.membership.id;
+    // A marketer answers no conversations, and another company's member is not this one's.
+    const marketer = (await fx.ctx(c, c.marketer)).membership.id;
+    const other = await fx.company();
+    const elsewhere = (await fx.ctx(other, other.agent)).membership.id;
+    const url = 'https://hooks.example.com/in';
+    const refused = async (
+      eventTypes: string[],
+      assigneeIds: unknown,
+      message: RegExp,
+      path = 'assigneeIds',
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes, assigneeIds }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(assigneeIds)).toBe(path);
+    };
+    const needsTheEvents =
+      /Choose members only for an endpoint that receives message or conversation events/;
+    await refused(
+      ['consent.changed', 'order.received', 'automation.run_started', 'template.status_changed'],
+      [agent],
+      needsTheEvents,
+    );
+    await refused(['message.received'], [], /at least one member/);
+    await refused(['message.received'], ['agent'], /from the list/, 'assigneeIds.0');
+    await refused(
+      ['message.received'],
+      Array.from({ length: 51 }, () => uuidv7()),
+      /at most 50/,
+    );
+    const takesNone = /members of this company who take conversations/;
+    await refused(['message.status'], [agent, marketer], takesNone, 'assigneeIds.1');
+    await refused(['message.status'], [agent, elsewhere], takesNone, 'assigneeIds.1');
+    await refused(['conversation.assignment_changed'], [uuidv7()], takesNone, 'assigneeIds.0');
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['message.received', 'consent.changed'],
+      assigneeIds: [agent, ownerId.toUpperCase(), agent],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { assigneeIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => a.metadata.assigneeIds);
+    expect(await audits('webhook.endpoint_created')).toEqual([[agent, ownerId]]);
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['message.received', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.assignees;
+    expect(await current()).toEqual([
+      { id: agent, name: 'Agent', assignable: true },
+      { id: ownerId, name: 'Owner', assignable: true },
+    ]);
+    await change({ description: 'kept' });
+    expect((await current())?.map((m) => m.id)).toEqual([agent, ownerId]);
+    await change({ assigneeIds: [ownerId] });
+    // A suspended member is refused when a list adds them, and accepted once reinstated.
+    await setMember(agent, `status = 'suspended'`);
+    await expectAppError(change({ assigneeIds: [ownerId, agent] }), 'validation_failed', takesNone);
+    expect((await current())?.map((m) => m.id)).toEqual([ownerId]);
+    await setMember(agent, `status = 'active'`);
+    await change({ assigneeIds: [ownerId, agent] });
+    // A member who stops taking conversations stays on the list, and a list given again may keep
+    // them.
+    await setMember(agent, `roles = '{marketer}'`);
+    expect(await current()).toEqual([
+      { id: ownerId, name: 'Owner', assignable: true },
+      { id: agent, name: 'Agent', assignable: false },
+    ]);
+    await change({ assigneeIds: [agent, ownerId] });
+    expect((await current())?.map((m) => m.id)).toEqual([agent, ownerId]);
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [agent, ownerId],
+      [ownerId],
+      [ownerId, agent],
+      [agent, ownerId],
+    ]);
+    await change({ assigneeIds: null });
+    expect(await current()).toBeNull();
+    await change({ assigneeIds: [ownerId] });
+    // Any event of a conversation keeps the list.
+    await change({ eventTypes: ['conversation.team_changed', 'order.received'] });
+    expect((await current())?.map((m) => m.id)).toEqual([ownerId]);
+    // The database refuses an empty list, more than 50 or a missing id from an endpoint taking
+    // such an event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET assignee_ids = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    const many = `ARRAY[${Array.from({ length: 51 }, () => `'${uuidv7()}'`).join(',')}]::uuid[]`;
+    for (const bad of [`'{}'`, many, `ARRAY['${ownerId}', NULL]::uuid[]`]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_assignee_ids/);
+    }
+    await change({ eventTypes: ['order.received', 'consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['order.received'], assigneeIds: [ownerId] }),
+      'validation_failed',
+      needsTheEvents,
+    );
+    // …and any list for an endpoint that takes none.
+    await expect(setInDatabase(`ARRAY['${ownerId}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_assignee_ids/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'assignee_ids', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('offer the members conversations can be assigned to, by name, to developers only', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = (await fx.ctx(c, c.agent)).membership.id;
+    await fx.company();
+    // Not the marketer, who answers no conversations, nor another company's members.
+    expect(await webhooks().assigneeChoices(owner)).toEqual([
+      { id: agent, name: 'Agent' },
+      { id: owner.membership.id, name: 'Owner' },
+    ]);
+    await setMember(agent, `status = 'suspended'`);
+    expect(await webhooks().assigneeChoices(owner)).toEqual([
+      { id: owner.membership.id, name: 'Owner' },
+    ]);
+    for (const user of [c.agent, c.marketer]) {
+      await expectAppError(webhooks().assigneeChoices(await fx.ctx(c, user)), 'forbidden');
+    }
+  });
+
+  it("send an endpoint that names members only their conversations' events, a change of assignee to the member left and given, events of no conversation to both, and capture none nobody takes", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = (await fx.ctx(c, c.agent)).membership.id;
+    const ownerId = owner.membership.id;
+    const add = async (
+      eventTypes: WebhookEventType[],
+      assigneeIds: string[] | null,
+      teamIds: string[] | null = null,
+    ) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        assigneeIds,
+        teamIds,
+      });
+      return { ...created, path };
+    };
+    const agentOnly = await add(
+      ['message.received', 'message.status', 'conversation.assignment_changed', 'consent.changed'],
+      [agent],
+    );
+    const from = waId();
+    // A message in an unassigned conversation: no endpoint takes it, so nothing is captured.
+    const first = await inbound(c, from, 'Hello');
+    expect(await eventsOf(c)).toEqual([]);
+    // Assigned to the agent: the change and the next messages are captured, stored as events
+    // always were.
+    await assign(first.conversation_id, agent);
+    await inbound(c, from, 'Still there?');
+    await sendReply(c, first.conversation_id, 'Agent here');
+    expect((await eventsOf(c)).map((e) => [e.type, e.status, e.detail])).toEqual([
+      [
+        'conversation.assignment_changed',
+        null,
+        { assigned: true, assigneeId: agent, previousAssigneeId: null },
+      ],
+      ['message.received', null, { messageType: 'text' }],
+      ['message.status', 'accepted', {}],
+    ]);
+    // Given to the owner: the change reaches the agent, whom it left; the next message does not.
+    await assign(first.conversation_id, ownerId);
+    await inbound(c, from, 'Thanks, Owner');
+    // A consent change belongs to no conversation: the endpoint takes it.
+    await createConsentService({ db: fx.dbs.app, clock: systemClock }).recordConsent(owner, {
+      contactId: first.contact_id,
+      purpose: 'marketing',
+      action: 'opt_in',
+    });
+    // An endpoint for every conversation's messages hears every member's and unassigned ones; one
+    // that names a team as well hears only the members' conversations in that team.
+    const everyone = await add(['message.received'], null);
+    const team = uuidv7();
+    await fx.query('INSERT INTO app.teams (id, tenant_id, name) VALUES ($1, $2, $3)', [
+      team,
+      c.tenant.id,
+      'Support',
+    ]);
+    const ownerInTeam = await add(['message.received'], [ownerId], [team]);
+    await inbound(c, from, 'Owner again');
+    await fx.query('UPDATE app.conversations SET team_id = $2 WHERE id = $1', [
+      first.conversation_id,
+      team,
+    ]);
+    await inbound(c, from, 'In Support');
+    // Unassigned: the change left the owner, whom no endpoint of those events names.
+    await assign(first.conversation_id, null);
+    await inbound(c, from, 'Nobody now');
+    const typesTo = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).map((d) => [d.type, d.status]);
+    expect(await typesTo(agentOnly.id)).toEqual([
+      ['conversation.assignment_changed', null],
+      ['message.received', null],
+      ['message.status', 'accepted'],
+      ['conversation.assignment_changed', null],
+      ['consent.changed', null],
+    ]);
+    expect(await typesTo(everyone.id)).toEqual([
+      ['message.received', null],
+      ['message.received', null],
+      ['message.received', null],
+    ]);
+    expect(await typesTo(ownerInTeam.id)).toEqual([['message.received', null]]);
+    // The assignment changes name the members, as GET /members lists them.
+    expect(await deliverDue(c)).toMatchObject({ attempted: 9, succeeded: 9 });
+    const bodies = (path: string) =>
+      requestsTo(path).map(
+        (r) => JSON.parse(r.body) as { type: string; data: Record<string, unknown> },
+      );
+    expect(
+      bodies(agentOnly.path)
+        .filter((b) => b.type === 'conversation.assignment_changed')
+        .map((b) => b.data.conversation),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ assigneeId: agent, previousAssigneeId: null }),
+        expect.objectContaining({ assigneeId: ownerId, previousAssigneeId: agent }),
+      ]),
+    );
+    expect(
+      bodies(ownerInTeam.path).map((b) => (b.data.message as { text?: string } | undefined)?.text),
+    ).toEqual(['In Support']);
+  });
+});
+
 describe('event capture', () => {
   it('records an event only for subscribed types, with one delivery per active subscribed endpoint, and none from a rolled-back change', async () => {
     const c = await fx.company();

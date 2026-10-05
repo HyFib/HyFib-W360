@@ -1524,6 +1524,16 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   changed), and writes no event when none does. Settings (radio buttons and checkboxes under
   "Templates") and the API (`templateIds`) set it; the services check the templates a list gives; a
   change that drops both events clears it.
+- **Assignee filters** (migration 0128, ADR-181): `assignee_ids` on an endpoint lists the members
+  (membership ids) whose assigned conversations' message and conversation events it takes, null for
+  every conversation's; a check keeps it to 1 to 50 ids and to endpoints that take such an event.
+  `app.capture_webhook_event` (replaced with the same signature) reads the conversation's member
+  with its team when an active endpoint of the company that takes the event names teams or members,
+  and creates a delivery only for endpoints whose list is null or holds that member or, for
+  `conversation.assignment_changed`, the member the conversation left; it writes no event when none
+  does. Settings (radio buttons and checkboxes under "Members") and the API (`assigneeIds`) set it;
+  the services check that the members a list adds take conversations; a change that drops the events
+  clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and
