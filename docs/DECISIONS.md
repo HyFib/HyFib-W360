@@ -4481,8 +4481,8 @@ Decision:
   names, and update grants on both columns for the runtime role (it inserts them with its table
   grant). Existing endpoints have no headers; nothing is backfilled.
 
-Not built: other authentication schemes (OAuth client credentials, mutual TLS), headers computed
-per delivery (a signed token), headers per event type, values outside printable ASCII, and showing
+Not built: other authentication schemes (OAuth client credentials, built by ADR-173; mutual TLS),
+headers computed per delivery (a signed token), headers per event type, values outside printable ASCII, and showing
 a value again.
 
 ## ADR-119 Choosing the message statuses a webhook endpoint receives (2026-10-03)
@@ -6887,3 +6887,75 @@ Decision:
 Not built: statuses of the messages one API key, campaign, automation or template sent (an endpoint
 chooses kinds of senders only), and a sender filter for received messages (a contact sends them
 all).
+
+## ADR-173 OAuth 2.0 client credentials for webhook endpoints (P5-09) (2026-10-05)
+
+Context: a receiver may protect its webhook URL with OAuth 2.0 rather than a fixed key: it accepts
+only requests carrying an access token its authorization server issued for the client credentials
+grant (RFC 6749 section 4.4), and those tokens expire within minutes or hours. An endpoint's own
+headers (ADR-118) send a fixed value, so such a receiver needed a proxy that fetched tokens; ADR-118
+left other authentication schemes unbuilt.
+
+Decision:
+
+- **An OAuth client per endpoint, optional:** the token URL of the receiver's authorization server,
+  a client ID and secret it issued, and the scope to ask for, if any. It is set in Settings →
+  Webhooks ("OAuth 2.0": "Get an OAuth access token for each delivery"; on an endpoint's page the
+  client is kept, changed or removed) and through the API as `oauth` on `POST /webhook-endpoints`
+  and `PATCH /webhook-endpoints/{id}`; endpoints are shown and answered with the token URL, the
+  client ID and the scope, never the secret. The client ID and secret are printable ASCII, up to 200
+  and 500 characters, so that the HTTP Basic header stays within the 4,096 characters the egress
+  client sends; the scope is space-separated values without quotes or backslashes (RFC 6749 section
+  3.3), up to 500, empty for none.
+- **The token URL is held to the endpoint URL's rules:** https, no credentials, port 443 or an
+  unprivileged one, checked when it is saved; the token request goes through the egress client
+  (public addresses only, the name resolved once and the connection pinned to it, no redirects, the
+  same deadline and size limits).
+- **The secret is sealed and sent only to its token URL:** sealed with the keyring, bound to the
+  company and the endpoint (`webhook-oauth-secret:<company>:<endpoint>`), never shown again, logged,
+  audited, exported or kept in an API key's idempotency record; the keyring sweep re-encrypts it
+  (`webhook_oauth_secret`, in `ops.sealed_value_keys`). A change may leave the secret out to keep it
+  only while the token URL stays the same: a new token URL needs the secret again, so whoever
+  changes an endpoint without knowing the secret cannot have it sent elsewhere.
+- **Tokens:** before sending an endpoint's deliveries, the worker asks the token URL for a token as
+  RFC 6749 section 4.4.2 says (`grant_type=client_credentials` and the scope in a form; the client
+  in an HTTP Basic header, its identifier and secret each form-encoded, section 2.3.1), and takes a
+  200 holding a JSON `access_token` of type `Bearer` (any case), up to 4,000 characters of RFC
+  6750's token characters, so that it cannot inject a header. Each delivery sends it as
+  `Authorization: Bearer <token>`, after the endpoint's own headers. Tokens are kept in the worker
+  process's memory only, never stored, logged or shown: for the company's endpoint and its client as
+  configured (a changed token URL, identifier, secret or scope gets a new token), until a minute
+  before `expires_in` ends and for at most a day; a token without a lifetime of more than two
+  minutes serves only the deliveries sent with it. The deliveries of an endpoint that need a token
+  at once share one request; a process keeps the tokens of at most 1,000 endpoints, the least
+  recently used going first. A token the endpoint answers 401 to is dropped, so the next attempt
+  asks for a new one.
+- **A delivery without a token fails its attempt without calling the endpoint,** retried on the
+  usual schedule and counting toward the endpoint's 72 hours of failures:
+  `oauth_token_refused_<status>` (any answer but a 200, redirects included), `oauth_token_invalid`
+  (a 200 without a usable bearer token) or `oauth_token_` and the code of a request that failed
+  (`oauth_token_timeout`, `oauth_token_address_blocked`, …). Members read them in words, and
+  replaying failures by kind counts them as no valid answer ("No valid answer (timeouts, connection
+  errors, no access token)"). A secret the keyring cannot open ends the delivery without an attempt
+  (`payload_failed`, logged with the stage `oauth`), as headers that do not open do. The lease of a
+  delivery with a client covers a token request and the delivery.
+- **Either tokens or an Authorization header of the endpoint's own:** a change that would leave an
+  endpoint with both is refused, naming the header given or the client (`oauth`).
+- **Audited:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry the token URL's host
+  (`oauthTokenHost`) and, on a change, whether a new secret was given (`oauthSecretReplaced`), or
+  `oauthRemoved`; never the token URL's path, the client ID or the secret. The company data export
+  carries the token URL, the client ID and the scope.
+- **Permissions unchanged:** members with `developer.manage` (with a recent sign-in, as adding or
+  editing an endpoint needs) and keys with `webhooks.manage` for the endpoints keys added.
+- **Migration 0121:** `oauth_token_url`, `oauth_client_id`, `oauth_client_secret_ciphertext` and
+  `oauth_scope` on `app.webhook_endpoints`, with a check validated at once (all four null, or the
+  first three set within their lengths, each named as not null, and the scope optional); update
+  grants on the four columns for the runtime role; `ops.sealed_value_keys()` dropped as its owner
+  and created again with the OAuth secrets. Existing endpoints have no client; nothing is
+  backfilled.
+
+Not built: other grants and client authentication (authorization code, JWT assertions,
+`private_key_jwt`, mutual TLS), the client in the request body instead of HTTP Basic (RFC 6749
+allows it; Basic is the method servers must support for a client with a password), token revocation,
+one token shared by several endpoints, refreshing a token before it is needed, and sending a
+delivery again within its attempt after a 401.

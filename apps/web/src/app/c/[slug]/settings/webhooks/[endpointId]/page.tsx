@@ -192,6 +192,7 @@ export default async function WebhookEndpointPage({
               conversationStatuses: endpoint.conversationStatuses,
               runEndStatuses: endpoint.runEndStatuses,
               channelIds: endpoint.channels?.map((c) => c.id) ?? null,
+              oauth: endpoint.oauth,
             }}
             automationChoices={automationChoices}
             channelChoices={channelChoices}

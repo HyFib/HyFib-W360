@@ -1486,6 +1486,16 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   for endpoints whose list is null or holds the sender, and writes no event when none does. Settings
   (checkboxes under "Message status") and the API (`messageSenders`) set it; a change that drops the
   event clears it.
+- **OAuth clients** (migration 0121, ADR-173): an endpoint may name its receiver's token URL, a
+  client ID, a secret (sealed, `webhook-oauth-secret:<company>:<endpoint>`) and a scope; a check
+  keeps them set together or not at all. Settings ("OAuth 2.0") and the API (`oauth`) set it; the
+  token URL is checked like the endpoint's URL, and a new token URL needs the secret again. After a
+  batch's claim commits, `sendDelivery` gets a token from the worker's `WebhookOAuthTokenCache` (in
+  memory, keyed by the company, the endpoint and a hash of the client; deliveries needing one at
+  once share the request) or asks the token URL through the egress client (`fetchWebhookOAuthToken`:
+  the client credentials grant with HTTP Basic, RFC 6749 section 4.4), sends it as a bearer token,
+  and drops it when the endpoint answers 401. A delivery that gets no token fails its attempt with
+  an `oauth_token_…` code and no status. The lease of such a delivery covers both requests.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and
@@ -1496,13 +1506,14 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   on; deleting. Each endpoint's page lists its latest 100 deliveries (or only failed ones) with
   attempts, result and timings, replays finished ones (a new delivery of the same event, audited)
   and edits the URL, description, events, the message statuses, contact parts, automations,
-  campaign, order, template and conversation statuses, the run ends and the numbers it takes and
-  headers (names shown, values never; replacing gives each again).
+  campaign, order, template and conversation statuses, the run ends and the numbers it takes,
+  headers (names shown, values never; replacing gives each again) and its OAuth client (the secret
+  never shown).
   The OpenAPI document describes every event under `webhooks`. Audit entries name the endpoint's
   host, never its full URL or secret.
 - **Not built yet:** filters on a message's
   or contact's values, ordering,
-  other authentication (OAuth client credentials, headers computed per delivery), mutual TLS, fixed
+  other authentication (headers computed per delivery, other OAuth grants), mutual TLS, fixed
   egress addresses for receivers' allowlists, endpoints per number, and events for conversations
   started, notes or merges.
 

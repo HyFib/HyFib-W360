@@ -1540,6 +1540,9 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'conversation_statuses',
       'run_end_statuses',
       'channel_account_ids',
+      'oauth_token_url',
+      'oauth_client_id',
+      'oauth_scope',
       'state',
       'disabled_reason',
       'disabled_at',
@@ -1555,6 +1558,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       secret_ciphertext: 'The signing secret.',
       previous_secret_ciphertext: 'The previous signing secret.',
       headers_ciphertext: 'The endpoint’s own headers, whose values are secrets (ADR-118).',
+      oauth_client_secret_ciphertext: 'The endpoint’s OAuth client secret (ADR-173).',
     },
   },
   {

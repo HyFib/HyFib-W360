@@ -30,6 +30,7 @@ import {
   pgBossErrorContext,
   RazorpayClient,
   SmtpEmailSender,
+  WebhookOAuthTokenCache,
   type BillingNoticeDeps,
   type EmailSender,
   type JobQueue,
@@ -65,6 +66,11 @@ export interface WorkerRuntime {
   storeEgress: EgressClient;
   /** HyFib's Shopify app; null until configured (Shopify stores then cannot connect or sync). */
   shopify: ShopifyConfig | null;
+  /**
+   * The OAuth access tokens webhook deliveries send (ADR-173), kept in this process's memory only,
+   * across jobs.
+   */
+  webhookOAuthTokens: WebhookOAuthTokenCache;
   close(): Promise<void>;
 }
 
@@ -166,6 +172,7 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
       maxResponseBytes: 4 * 1024 * 1024,
     }),
     shopify,
+    webhookOAuthTokens: new WebhookOAuthTokenCache(),
     async close() {
       await pool.end();
     },

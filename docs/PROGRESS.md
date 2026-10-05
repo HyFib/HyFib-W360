@@ -1,5 +1,69 @@
 # Progress
 
+## 2026-10-05 — Phase 5: OAuth 2.0 client credentials for webhook endpoints (P5-09, ADR-173)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers and
+authorization servers only).** A receiver protected by OAuth 2.0 needed a proxy that fetched tokens.
+The local PostgreSQL is unavailable (its Docker daemon stopped), so migration 0121, the integration
+tests and the e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-173):** an optional OAuth client per endpoint (token URL, client ID, sealed secret,
+  scope); the worker asks for a token with the client credentials grant through the egress client,
+  sends it as a bearer token and keeps it in memory only; the secret needed again for a new token
+  URL; no `Authorization` header of the endpoint's own beside a client.
+- **Database:** migration 0121 (the four columns and their check, the column grants,
+  `ops.sealed_value_keys()` with the OAuth secrets); the schema's columns (`packages/db`).
+- **Domain:** `webhooks/oauth.ts` (the token request and answer, `fetchWebhookOAuthToken`,
+  `WebhookOAuthTokenCache`); in the service the client's schema, checks, sealing and opening
+  (`webhookOAuthSchema`, `checkedWebhookOAuth`, `webhookOAuthColumns`, `openWebhookOAuthClient`,
+  `assertWebhookAuthorization`, `webhookOAuthAudit`), create, update and the view; the delivery job
+  (`sendDelivery`, the stage `oauth`, the longer lease); the error labels and the failure kind's
+  words; `oauth` in the API and the OpenAPI document; the sealed kind `webhook_oauth_secret`; the
+  export columns.
+- **Worker:** one `WebhookOAuthTokenCache` per process, passed to every delivery job.
+- **Web:** "OAuth 2.0" in the endpoint form (a new client, or keep, change or remove the stored one,
+  the secret left empty to keep it) and "OAuth access tokens from …" on the endpoints list.
+- **Tests:**
+  - Unit (9 new in `oauth.test.ts`, 7 new in `webhooks.test.ts`, 1 new and 1 changed in
+    `api.test.ts`, 1 changed in `reseal.test.ts`): the request, the answer, the lifetime, the egress
+    errors, the tokens kept, the client's rules, sealing, the header conflict, the audit, the
+    labels, the API schemas, the OpenAPI entries and the sealed kinds of the latest migration.
+  - Integration (7 new in `webhooks.test.ts`, 1 new in `api-webhook-endpoints.test.ts`;
+    `keyring-reseal.test.ts` and `company-data.test.ts` extended; the delivery jobs of the other
+    files given a token cache): see H-014. Written for CI; not run here.
+  - E2E (1 new in `webhooks.spec.ts`, the failures' words updated there): a client set in Settings
+    and delivered with its token, changed with the secret given again, removed, and given by an API
+    key. Written for CI; not run here.
+- **Docs:** ADR-173 (and ADR-118's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T168; DEPLOYMENT and RUNBOOKS (migration 0121, token failures); DATA-RETENTION; BACKLOG P5-09;
+  feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 39 deliberate regressions tried, all caught on the unit-tested parts (the
+  request's scope and encoding, other statuses, any token text or length, the type's case, the
+  lifetime's limit, margin and text form, when it is timed, egress errors thrown, the tokens kept,
+  shared, dropped and evicted, the client's rules, the secret kept for another token URL, the field
+  named, the binding, the scope opened, the header conflict and its field, the audit, the labels,
+  the API's schemas, the OpenAPI answer and overview, the sealed kind). The delivery job and the
+  form need the database or a browser, so their regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 789 passed (80 files)                                                |
+| `pnpm test:integration`, e2e, migration 0121       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 39 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Other grants and client authentication methods, the client in the request body, token revocation,
+  tokens shared by endpoints, refreshing ahead of need.
+
 ## 2026-10-05 — Fixes found by CI: six integration tests of ADR-163 to ADR-172
 
 Status: **Fixed; the integration suite runs in CI only.** The first CI run of the ten slices (PR

@@ -235,6 +235,14 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    it. Web servers from before it neither show nor change the column: until the web rollout ends, an
    old server's change that drops `message.status` from an endpoint with a list fails on the check,
    and its other changes keep it.
+   Migration 0121 (ADR-173) adds the four OAuth columns to `app.webhook_endpoints` with a check
+   validated by reading the table, grants their updates, and replaces `ops.sealed_value_keys()` with
+   the OAuth secrets. Workers and web servers of this release need it: the workers' claims and the
+   web servers' reads of endpoints name the columns. Workers roll out first, so no client can be set
+   while a worker from before it runs; workers from before it ignore clients, and their keyring
+   sweep leaves the OAuth secrets for the new ones. Rolling workers back while endpoints have
+   clients sends their deliveries without a token: receivers refuse them, and they are retried until
+   the new workers return or the endpoints have failed for 72 hours.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

@@ -11,7 +11,7 @@ import type { WorkerRuntime } from '../runtime';
  * Delivers one company's due webhook deliveries (see webhooks/delivery). Every attempt is recorded
  * on its delivery, so a duplicate or retried job repeats nothing that finished; logs carry counts,
  * and ids with an error's class and code for a delivery that could not be prepared, never URLs,
- * payloads, secrets or error messages.
+ * payloads, secrets, access tokens or error messages.
  */
 export function webhookDeliverHandler(rt: WorkerRuntime) {
   return async ([job]: Job<unknown>[]): Promise<void> => {
@@ -41,6 +41,7 @@ export function webhookDeliverHandler(rt: WorkerRuntime) {
         timeoutMs: rt.egressPolicy.timeoutMs,
         notices: rt.notices,
         logger: rt.logger,
+        oauthTokens: rt.webhookOAuthTokens,
       },
       auth.scope,
     );

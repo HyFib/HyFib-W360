@@ -52,6 +52,7 @@ import {
   type WebhookConversationStatus,
   type WebhookEndpointAutomation,
   type WebhookEndpointChannel,
+  type WebhookEndpointOAuth,
   type WebhookFailureKind,
   type WebhookMessageSender,
   type WebhookMessageStatus,
@@ -59,6 +60,12 @@ import {
   type WebhookRunEndStatus,
   type WebhookTemplateStatus,
 } from './model';
+import {
+  webhookOAuthSecretAad,
+  WEBHOOK_OAUTH_CLIENT_RE,
+  WEBHOOK_OAUTH_SCOPE_RE,
+  type WebhookOAuthClient,
+} from './oauth';
 
 /** Binds an endpoint's secret to its company, the endpoint and the secret's version. */
 export const webhookSecretAad = (tenantId: string, endpointId: string, version: number) =>
@@ -135,6 +142,62 @@ export const webhookHeadersSchema = z
     (headers) => new Set(headers.map((h) => h.name.toLowerCase())).size === headers.length,
     'Give each header once.',
   );
+
+/**
+ * An endpoint's OAuth client (ADR-173): the token endpoint of its receiver's authorization server,
+ * the client identifier and secret that server issued, and the scope to ask for, if any (empty or
+ * left out: none). A change may leave the secret out to keep the stored one while the token URL
+ * stays the same.
+ */
+export const webhookOAuthSchema = z
+  .object({
+    tokenUrl: z
+      .string({ error: 'Enter the token URL' })
+      .trim()
+      .min(1, 'Enter the token URL')
+      .max(WEBHOOK_LIMITS.urlLength, 'The token URL is too long'),
+    clientId: z
+      .string({ error: 'Enter the client ID' })
+      .trim()
+      .min(1, 'Enter the client ID')
+      .max(
+        WEBHOOK_LIMITS.oauthClientIdLength,
+        `Client IDs are limited to ${WEBHOOK_LIMITS.oauthClientIdLength} characters.`,
+      )
+      .regex(WEBHOOK_OAUTH_CLIENT_RE, 'Client IDs use printable ASCII characters.'),
+    clientSecret: z
+      .string({ error: 'Enter the client secret.' })
+      .trim()
+      .min(1, 'Enter the client secret.')
+      .max(
+        WEBHOOK_LIMITS.oauthClientSecretLength,
+        `Client secrets are limited to ${WEBHOOK_LIMITS.oauthClientSecretLength} characters.`,
+      )
+      .regex(WEBHOOK_OAUTH_CLIENT_RE, 'Client secrets use printable ASCII characters.')
+      .optional(),
+    scope: z
+      .string()
+      .trim()
+      .max(
+        WEBHOOK_LIMITS.oauthScopeLength,
+        `Scopes are limited to ${WEBHOOK_LIMITS.oauthScopeLength} characters.`,
+      )
+      .refine(
+        (scope) => scope === '' || WEBHOOK_OAUTH_SCOPE_RE.test(scope),
+        'Separate the scope’s values with single spaces; they cannot hold quotes or backslashes.',
+      )
+      .transform((scope) => scope || null)
+      .nullable()
+      .optional(),
+  })
+  .strict();
+export type WebhookOAuthInput = z.output<typeof webhookOAuthSchema>;
+
+export const WEBHOOK_OAUTH_SECRET_NEEDED = 'Enter the client secret.';
+export const WEBHOOK_OAUTH_SECRET_FOR_NEW_URL =
+  'Enter the client secret again: it is sent to the token URL, which changed.';
+export const WEBHOOK_OAUTH_AUTHORIZATION =
+  'An endpoint that gets OAuth tokens sends them as its Authorization header: remove that header, or the OAuth client.';
 
 /**
  * The columns that keep an endpoint's headers: the names as written, and names and values sealed
@@ -616,6 +679,8 @@ const endpointFields = z.object({
    * Given, the numbers whose events it takes (null: every number, ADR-170); left out, they stay.
    */
   channelIds: webhookChannelIdsSchema.optional(),
+  /** Given, its OAuth client (null: none, ADR-173); left out, it stays. */
+  oauth: webhookOAuthSchema.nullable().optional(),
 });
 /** Statuses are chosen only for an endpoint that takes `message.status`. */
 const statusesNeedTheEvent = {
@@ -755,6 +820,8 @@ export interface WebhookEndpointView {
   runEndStatuses: WebhookRunEndStatus[] | null;
   /** The numbers whose events it takes (ADR-170), as stored, named; null takes every number. */
   channels: WebhookEndpointChannel[] | null;
+  /** Where it gets OAuth tokens and as which client (ADR-173); the secret is never shown. */
+  oauth: WebhookEndpointOAuth | null;
   createdAt: Date;
   /** The member who added the endpoint in settings (null once their account is gone). */
   createdBy: string | null;
@@ -781,26 +848,165 @@ export interface WebhookDeliveryView {
   createdAt: Date;
 }
 
-const invalidUrl = (message: string) =>
-  new AppError('validation_failed', message, { issues: [{ path: 'url', message }] });
-
-/** The URL as it will be called, after the egress guard's rules (https, no credentials, ports). */
+/**
+ * The URL as it will be called, after the egress guard's rules (https, no credentials, ports): an
+ * endpoint's (`url`), or its OAuth token URL (`oauth.tokenUrl`, ADR-173), which is held to the
+ * same rules.
+ */
 export function checkedWebhookUrl(
   raw: string,
   policy: Pick<EgressPolicy, 'allowLoopbackForTests'>,
+  path: 'url' | 'oauth.tokenUrl' = 'url',
 ) {
+  const invalid = (message: string) =>
+    new AppError('validation_failed', message, { issues: [{ path, message }] });
   let target: ReturnType<typeof parseEgressUrl>;
   try {
     target = parseEgressUrl(raw, policy);
   } catch (error) {
-    if (error instanceof EgressError) throw invalidUrl(error.message);
+    if (error instanceof EgressError) throw invalid(error.message);
     throw error;
   }
   target.url.hash = '';
   const url = target.url.toString();
   // Normalising (percent-encoding) can lengthen what was entered.
-  if (url.length > WEBHOOK_LIMITS.urlLength) throw invalidUrl('The URL is too long');
+  if (url.length > WEBHOOK_LIMITS.urlLength) {
+    throw invalid(path === 'url' ? 'The URL is too long' : 'The token URL is too long');
+  }
   return { url, host: target.hostname };
+}
+
+/** An endpoint's OAuth columns (ADR-173): all null without an OAuth client. */
+export interface WebhookOAuthColumns {
+  oauthTokenUrl: string | null;
+  oauthClientId: string | null;
+  oauthClientSecretCiphertext: string | null;
+  oauthScope: string | null;
+}
+
+export const NO_WEBHOOK_OAUTH: WebhookOAuthColumns = {
+  oauthTokenUrl: null,
+  oauthClientId: null,
+  oauthClientSecretCiphertext: null,
+  oauthScope: null,
+};
+
+/**
+ * An OAuth client given for an endpoint, its token URL checked; a null secret keeps the stored one.
+ */
+export interface CheckedWebhookOAuth extends Omit<WebhookOAuthClient, 'clientSecret'> {
+  clientSecret: string | null;
+  /** The token URL's host, the only part of it audit entries name. */
+  host: string;
+}
+
+/**
+ * Checks an OAuth client given for an endpoint (ADR-173): its token URL like an endpoint's URL, and
+ * that a secret is given unless the endpoint keeps the one it has, which it can only while the token
+ * URL stays the same, since the secret is sent there.
+ */
+export function checkedWebhookOAuth(
+  given: WebhookOAuthInput,
+  current: WebhookOAuthColumns,
+  policy: Pick<EgressPolicy, 'allowLoopbackForTests'>,
+): CheckedWebhookOAuth {
+  const { url, host } = checkedWebhookUrl(given.tokenUrl, policy, 'oauth.tokenUrl');
+  const keeps = current.oauthClientSecretCiphertext !== null && current.oauthTokenUrl === url;
+  if (given.clientSecret === undefined && !keeps) {
+    const message = current.oauthTokenUrl
+      ? WEBHOOK_OAUTH_SECRET_FOR_NEW_URL
+      : WEBHOOK_OAUTH_SECRET_NEEDED;
+    throw new AppError('validation_failed', message, {
+      issues: [{ path: 'oauth.clientSecret', message }],
+    });
+  }
+  return {
+    tokenUrl: url,
+    host,
+    clientId: given.clientId,
+    clientSecret: given.clientSecret ?? null,
+    scope: given.scope ?? null,
+  };
+}
+
+/**
+ * The OAuth columns an endpoint keeps (ADR-173): none without a client; else the client, its secret
+ * sealed with the keyring, bound to the company and the endpoint, or the one it has kept.
+ */
+export function webhookOAuthColumns(
+  keyring: Keyring,
+  tenantId: string,
+  endpointId: string,
+  oauth: CheckedWebhookOAuth | null,
+  current: WebhookOAuthColumns,
+): WebhookOAuthColumns {
+  if (!oauth) return NO_WEBHOOK_OAUTH;
+  let sealed = current.oauthClientSecretCiphertext;
+  if (oauth.clientSecret !== null) {
+    sealed = keyring.encrypt(oauth.clientSecret, webhookOAuthSecretAad(tenantId, endpointId));
+  }
+  if (!sealed) throw new Error('An OAuth client kept its secret without one stored');
+  return {
+    oauthTokenUrl: oauth.tokenUrl,
+    oauthClientId: oauth.clientId,
+    oauthClientSecretCiphertext: sealed,
+    oauthScope: oauth.scope,
+  };
+}
+
+/**
+ * An endpoint's OAuth client, opened for its token requests, or null without one. Throws when the
+ * keyring cannot open the secret (a key the platform no longer holds).
+ */
+export function openWebhookOAuthClient(
+  keyring: Keyring,
+  tenantId: string,
+  endpointId: string,
+  columns: WebhookOAuthColumns,
+): WebhookOAuthClient | null {
+  const { oauthTokenUrl, oauthClientId, oauthClientSecretCiphertext } = columns;
+  if (!oauthTokenUrl || !oauthClientId || !oauthClientSecretCiphertext) return null;
+  return {
+    tokenUrl: oauthTokenUrl,
+    clientId: oauthClientId,
+    clientSecret: keyring.decryptString(
+      oauthClientSecretCiphertext,
+      webhookOAuthSecretAad(tenantId, endpointId),
+    ),
+    scope: columns.oauthScope,
+  };
+}
+
+/**
+ * An endpoint either gets OAuth tokens or sends an Authorization header of its own, since the token
+ * goes in that header (ADR-173). `headersGiven`: the headers the request gave, to name the one at
+ * fault; else the OAuth client is.
+ */
+export function assertWebhookAuthorization(
+  headerNames: readonly string[],
+  oauth: boolean,
+  headersGiven: readonly WebhookHeader[] | undefined,
+): void {
+  if (!oauth) return;
+  const index = headerNames.findIndex((name) => name.toLowerCase() === 'authorization');
+  if (index === -1) return;
+  const path = headersGiven ? `headers.${index}.name` : 'oauth';
+  throw new AppError('validation_failed', WEBHOOK_OAUTH_AUTHORIZATION, {
+    issues: [{ path, message: WEBHOOK_OAUTH_AUTHORIZATION }],
+  });
+}
+
+/**
+ * What a change's audit entry says of the endpoint's OAuth client (ADR-173): the token URL's host
+ * and whether a new secret was given, or that the client was removed; nothing when it was left out.
+ */
+export function webhookOAuthAudit(
+  oauth: CheckedWebhookOAuth | null | undefined,
+  current: WebhookOAuthColumns,
+): Record<string, unknown> {
+  if (oauth === undefined) return {};
+  if (oauth === null) return current.oauthTokenUrl ? { oauthRemoved: true } : {};
+  return { oauthTokenHost: oauth.host, oauthSecretReplaced: oauth.clientSecret !== null };
 }
 
 /** Takes the company's endpoint lock, so two creations cannot pass the endpoint limit together. */
@@ -840,6 +1046,11 @@ export async function lockWebhookEndpoint(
       conversationStatuses: webhookEndpoints.conversationStatuses,
       runEndStatuses: webhookEndpoints.runEndStatuses,
       channelAccountIds: webhookEndpoints.channelAccountIds,
+      headerNames: webhookEndpoints.headerNames,
+      oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
+      oauthClientId: webhookEndpoints.oauthClientId,
+      oauthClientSecretCiphertext: webhookEndpoints.oauthClientSecretCiphertext,
+      oauthScope: webhookEndpoints.oauthScope,
     })
     .from(webhookEndpoints)
     .where(
@@ -882,6 +1093,8 @@ export async function insertWebhookEndpoint(
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
     channelAccountIds: string[] | null;
+    /** Its OAuth client (ADR-173), checked by `checkedWebhookOAuth` with nothing stored. */
+    oauth: CheckedWebhookOAuth | null;
     creator: WebhookEndpointCreator;
   },
 ): Promise<{ id: string; secret: string }> {
@@ -916,6 +1129,7 @@ export async function insertWebhookEndpoint(
     conversationStatuses: input.conversationStatuses,
     runEndStatuses: input.runEndStatuses,
     channelAccountIds: input.channelAccountIds,
+    ...webhookOAuthColumns(keyring, tenantId, id, input.oauth, NO_WEBHOOK_OAUTH),
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
   });
@@ -1300,6 +1514,9 @@ export function createWebhooksService(deps: {
               conversationStatuses: webhookEndpoints.conversationStatuses,
               runEndStatuses: webhookEndpoints.runEndStatuses,
               channelAccountIds: webhookEndpoints.channelAccountIds,
+              oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
+              oauthClientId: webhookEndpoints.oauthClientId,
+              oauthScope: webhookEndpoints.oauthScope,
               createdAt: webhookEndpoints.createdAt,
               createdBy: users.name,
               keyName: apiKeys.name,
@@ -1370,9 +1587,22 @@ export function createWebhooksService(deps: {
             };
             for (const c of counts) if (c.endpointId === r.id) recent[c.state] = c.n;
             const previousSigns = r.previousSecretExpiresAt && r.previousSecretExpiresAt > now;
-            const { keyName, keyPrefix, automationIds, channelAccountIds, ...endpoint } = r;
+            const {
+              keyName,
+              keyPrefix,
+              automationIds,
+              channelAccountIds,
+              oauthTokenUrl,
+              oauthClientId,
+              oauthScope,
+              ...endpoint
+            } = r;
             return {
               ...endpoint,
+              oauth:
+                oauthTokenUrl && oauthClientId
+                  ? { tokenUrl: oauthTokenUrl, clientId: oauthClientId, scope: oauthScope }
+                  : null,
               channels: channelAccountIds
                 ? channelAccountIds.map((id): WebhookEndpointChannel => {
                     const number = numberById.get(id);
@@ -1492,6 +1722,14 @@ export function createWebhooksService(deps: {
         const runEndStatuses = webhookRunEndStatusesFor(data.eventTypes, data.runEndStatuses, null);
         const channelIds = webhookChannelIdsFor(data.eventTypes, data.channelIds, null);
         await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
+        const oauth = data.oauth
+          ? checkedWebhookOAuth(data.oauth, NO_WEBHOOK_OAUTH, deps.egressPolicy)
+          : null;
+        assertWebhookAuthorization(
+          headers.map((h) => h.name),
+          oauth !== null,
+          data.headers,
+        );
         const { id, secret } = await insertWebhookEndpoint(tx, keyring, ctx.tenant.id, {
           url,
           description: data.description || null,
@@ -1507,6 +1745,7 @@ export function createWebhooksService(deps: {
           conversationStatuses,
           runEndStatuses,
           channelAccountIds: channelIds,
+          oauth,
           creator: { userId: ctx.user.id },
         });
         await recordAudit(
@@ -1530,6 +1769,7 @@ export function createWebhooksService(deps: {
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
               ...(channelIds ? { channelIds } : {}),
+              ...(oauth ? { oauthTokenHost: oauth.host } : {}),
             },
           },
           meta,
@@ -1603,6 +1843,15 @@ export function createWebhooksService(deps: {
         if (data.channelIds !== undefined) {
           await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
         }
+        // Left out, the OAuth client stays as it is (ADR-173).
+        const oauth = data.oauth
+          ? checkedWebhookOAuth(data.oauth, endpoint, deps.egressPolicy)
+          : data.oauth;
+        assertWebhookAuthorization(
+          data.headers ? data.headers.map((h) => h.name) : endpoint.headerNames,
+          oauth === undefined ? endpoint.oauthTokenUrl !== null : oauth !== null,
+          data.headers,
+        );
         await tx
           .update(webhookEndpoints)
           .set({
@@ -1621,6 +1870,9 @@ export function createWebhooksService(deps: {
             channelAccountIds: channelIds,
             ...(data.headers
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
+              : {}),
+            ...(oauth !== undefined
+              ? webhookOAuthColumns(keyring, ctx.tenant.id, data.endpointId, oauth, endpoint)
               : {}),
             updatedAt: clock.now(),
           })
@@ -1651,6 +1903,7 @@ export function createWebhooksService(deps: {
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
               ...(channelIds ? { channelIds } : {}),
+              ...webhookOAuthAudit(oauth, endpoint),
             },
           },
           meta,

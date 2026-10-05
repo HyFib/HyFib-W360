@@ -22,6 +22,7 @@ import {
   createContactsService,
   createWebhooksService,
   processWebhookDeliveries,
+  WebhookOAuthTokenCache,
   type ApiContext,
   type ApiScope,
 } from '@w360/domain';
@@ -796,6 +797,7 @@ describe('contact.updated for custom field values (ADR-112)', () => {
           appBaseUrl: 'https://app.w360.test',
         },
         logger: failOnLog,
+        oauthTokens: new WebhookOAuthTokenCache(),
       },
       authorizedTenantScope(c.tenant.id, null),
     );

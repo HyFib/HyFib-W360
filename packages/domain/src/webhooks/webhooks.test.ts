@@ -1,6 +1,6 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { Keyring } from '@w360/core';
+import { isAppError, Keyring } from '@w360/core';
 import {
   ACTIVE_RUN_STATUSES,
   AUTOMATION_END_REASONS,
@@ -52,6 +52,7 @@ import {
   webhookReplayAllSummary,
   webhookReplaySummary,
   webhookChannelText,
+  webhookOAuthText,
   webhookRetryDelaySeconds,
   webhookTakesAutomationRuns,
   webhookTakesChannelEvents,
@@ -79,10 +80,21 @@ import {
   templateStatusPayloadSchema,
 } from './payloads';
 import { webhookSignature, webhookSignatureHeader, verifyWebhookSignature } from './signing';
+import { webhookOAuthSecretAad } from './oauth';
 import {
+  assertWebhookAuthorization,
+  checkedWebhookOAuth,
+  NO_WEBHOOK_OAUTH,
   openWebhookHeaders,
+  openWebhookOAuthClient,
   reservedWebhookHeader,
   sealWebhookHeaders,
+  WEBHOOK_OAUTH_AUTHORIZATION,
+  WEBHOOK_OAUTH_SECRET_FOR_NEW_URL,
+  WEBHOOK_OAUTH_SECRET_NEEDED,
+  webhookOAuthAudit,
+  webhookOAuthColumns,
+  webhookOAuthSchema,
   webhookAutomationIdsFor,
   webhookAutomationIdsSchema,
   webhookCampaignStatusesFor,
@@ -1721,5 +1733,271 @@ describe('message sender filters (ADR-172)', () => {
     expect(webhookMessageSendersFor(['message.status'], undefined, null)).toBeNull();
     expect(webhookMessageSendersFor(['message.received'], ['api'], ['campaign'])).toBeNull();
     expect(webhookMessageSendersFor(['campaign.status_changed'], undefined, ['api'])).toBeNull();
+  });
+});
+
+describe('endpoint OAuth clients (ADR-173)', () => {
+  const ring = new Keyring({ primaryKeyId: 'k1', keys: { k1: randomBytes(32) } });
+  const tenant = '0192a1b2-0000-7000-8000-00000000000a';
+  const endpoint = '0192a1b2-0000-7000-8000-00000000000b';
+  const other = '0192a1b2-0000-7000-8000-00000000000c';
+  const policy = { allowLoopbackForTests: false };
+  const base = { tokenUrl: 'https://auth.example.com/oauth2/token', clientId: 'hyfib' };
+  const problems = (input: unknown) => {
+    const result = webhookOAuthSchema.safeParse(input);
+    return result.success
+      ? []
+      : result.error.issues.map((issue) => [issue.path.join('.'), issue.message]);
+  };
+  /** The field and message of the validation error `run` throws. */
+  const refusal = (run: () => unknown) => {
+    try {
+      run();
+    } catch (error) {
+      if (isAppError(error) && error.code === 'validation_failed') return error.issues;
+      throw error;
+    }
+    throw new Error('expected a validation error');
+  };
+
+  it('take a token URL, a client ID and secret in printable ASCII, and a scope, trimmed', () => {
+    expect(
+      webhookOAuthSchema.parse({
+        tokenUrl: ' https://auth.example.com/t ',
+        clientId: ' hyfib ',
+        clientSecret: ' s3 cr~et ',
+        scope: ' read events.write ',
+      }),
+    ).toEqual({
+      tokenUrl: 'https://auth.example.com/t',
+      clientId: 'hyfib',
+      clientSecret: 's3 cr~et',
+      scope: 'read events.write',
+    });
+    // An empty scope is none; a change may leave the secret, and the scope, out.
+    expect(webhookOAuthSchema.parse({ ...base, clientSecret: 's', scope: ' ' })).toEqual({
+      ...base,
+      clientSecret: 's',
+      scope: null,
+    });
+    expect(webhookOAuthSchema.parse({ ...base, scope: null })).toEqual({ ...base, scope: null });
+    expect(webhookOAuthSchema.parse(base)).toEqual(base);
+    expect(
+      problems({
+        ...base,
+        clientId: 'i'.repeat(WEBHOOK_LIMITS.oauthClientIdLength),
+        clientSecret: 's'.repeat(WEBHOOK_LIMITS.oauthClientSecretLength),
+        scope: 's'.repeat(WEBHOOK_LIMITS.oauthScopeLength),
+      }),
+    ).toEqual([]);
+  });
+
+  it('refuse missing, long or unprintable parts, a malformed scope and other keys', () => {
+    const client = { ...base, clientSecret: 's' };
+    expect(problems({ ...client, tokenUrl: ' ' })).toEqual([['tokenUrl', 'Enter the token URL']]);
+    expect(problems({ ...client, tokenUrl: 'u'.repeat(WEBHOOK_LIMITS.urlLength + 1) })).toEqual([
+      ['tokenUrl', 'The token URL is too long'],
+    ]);
+    expect(problems({ ...client, clientId: ' ' })).toEqual([['clientId', 'Enter the client ID']]);
+    expect(problems({ ...client, clientSecret: ' ' })).toEqual([
+      ['clientSecret', 'Enter the client secret.'],
+    ]);
+    expect(
+      problems({ ...client, clientId: 'i'.repeat(WEBHOOK_LIMITS.oauthClientIdLength + 1) }),
+    ).toEqual([['clientId', 'Client IDs are limited to 200 characters.']]);
+    expect(
+      problems({ ...client, clientSecret: 's'.repeat(WEBHOOK_LIMITS.oauthClientSecretLength + 1) }),
+    ).toEqual([['clientSecret', 'Client secrets are limited to 500 characters.']]);
+    for (const bad of ['café', 'line\nbreak', 'tab\there']) {
+      expect(problems({ ...client, clientId: bad }), bad).toEqual([
+        ['clientId', 'Client IDs use printable ASCII characters.'],
+      ]);
+      expect(problems({ ...client, clientSecret: bad }), bad).toEqual([
+        ['clientSecret', 'Client secrets use printable ASCII characters.'],
+      ]);
+    }
+    for (const scope of ['a  b', 'quote"d', 'back\\slash', 'é']) {
+      expect(problems({ ...client, scope }), scope).toEqual([
+        [
+          'scope',
+          'Separate the scope’s values with single spaces; they cannot hold quotes or backslashes.',
+        ],
+      ]);
+    }
+    expect(problems({ ...client, scope: 's'.repeat(WEBHOOK_LIMITS.oauthScopeLength + 1) })).toEqual(
+      [['scope', 'Scopes are limited to 500 characters.']],
+    );
+    expect(problems({ ...client, grantType: 'password' })).toHaveLength(1);
+  });
+
+  it('hold the token URL to an endpoint URL’s rules, and need a secret unless the same URL keeps it', () => {
+    expect(
+      checkedWebhookOAuth(
+        {
+          ...base,
+          tokenUrl: 'https://auth.example.com/oauth2/token?tenant=7#part',
+          clientSecret: 's',
+        },
+        NO_WEBHOOK_OAUTH,
+        policy,
+      ),
+    ).toEqual({
+      tokenUrl: 'https://auth.example.com/oauth2/token?tenant=7',
+      host: 'auth.example.com',
+      clientId: 'hyfib',
+      clientSecret: 's',
+      scope: null,
+    });
+    for (const [tokenUrl, message] of [
+      ['http://auth.example.com/t', 'Only https:// addresses can be called.'],
+      ['https://user:pw@auth.example.com/t', 'Put credentials in a header, not in the address.'],
+      ['https://auth.example.com:80/t', 'Use port 443 or a port from 1024 up.'],
+      ['not a url', 'Enter a valid URL.'],
+    ] as const) {
+      expect(
+        refusal(() =>
+          checkedWebhookOAuth({ ...base, tokenUrl, clientSecret: 's' }, NO_WEBHOOK_OAUTH, policy),
+        ),
+        tokenUrl,
+      ).toEqual([{ path: 'oauth.tokenUrl', message }]);
+    }
+    // A new client needs its secret.
+    expect(refusal(() => checkedWebhookOAuth(base, NO_WEBHOOK_OAUTH, policy))).toEqual([
+      { path: 'oauth.clientSecret', message: WEBHOOK_OAUTH_SECRET_NEEDED },
+    ]);
+    const stored = webhookOAuthColumns(
+      ring,
+      tenant,
+      endpoint,
+      checkedWebhookOAuth({ ...base, clientSecret: 's' }, NO_WEBHOOK_OAUTH, policy),
+      NO_WEBHOOK_OAUTH,
+    );
+    // The same token URL keeps the stored secret, with a new identifier and scope.
+    const kept = checkedWebhookOAuth(
+      { ...base, clientId: 'renamed', scope: 'read' },
+      stored,
+      policy,
+    );
+    expect(kept.clientSecret).toBeNull();
+    expect(webhookOAuthColumns(ring, tenant, endpoint, kept, stored)).toEqual({
+      oauthTokenUrl: base.tokenUrl,
+      oauthClientId: 'renamed',
+      oauthClientSecretCiphertext: stored.oauthClientSecretCiphertext,
+      oauthScope: 'read',
+    });
+    // Another token URL would receive the secret: it is needed again.
+    expect(
+      refusal(() =>
+        checkedWebhookOAuth(
+          { ...base, tokenUrl: 'https://elsewhere.example.com/t' },
+          stored,
+          policy,
+        ),
+      ),
+    ).toEqual([{ path: 'oauth.clientSecret', message: WEBHOOK_OAUTH_SECRET_FOR_NEW_URL }]);
+  });
+
+  it('seal the secret bound to the company and the endpoint, and open it only there', () => {
+    const columns = webhookOAuthColumns(
+      ring,
+      tenant,
+      endpoint,
+      checkedWebhookOAuth(
+        { ...base, clientSecret: 's3cret', scope: 'read' },
+        NO_WEBHOOK_OAUTH,
+        policy,
+      ),
+      NO_WEBHOOK_OAUTH,
+    );
+    expect(columns.oauthClientSecretCiphertext).not.toContain('s3cret');
+    expect(
+      ring.decryptString(
+        columns.oauthClientSecretCiphertext!,
+        webhookOAuthSecretAad(tenant, endpoint),
+      ),
+    ).toBe('s3cret');
+    expect(openWebhookOAuthClient(ring, tenant, endpoint, columns)).toEqual({
+      tokenUrl: base.tokenUrl,
+      clientId: 'hyfib',
+      clientSecret: 's3cret',
+      scope: 'read',
+    });
+    expect(() => openWebhookOAuthClient(ring, other, endpoint, columns)).toThrow();
+    expect(() => openWebhookOAuthClient(ring, tenant, other, columns)).toThrow();
+    // No client keeps nothing, and opens as none.
+    expect(webhookOAuthColumns(ring, tenant, endpoint, null, columns)).toEqual(NO_WEBHOOK_OAUTH);
+    expect(openWebhookOAuthClient(ring, tenant, endpoint, NO_WEBHOOK_OAUTH)).toBeNull();
+  });
+
+  it('refuse an Authorization header of the endpoint’s own beside a client, naming what was given', () => {
+    const headers = [
+      { name: 'X-Api-Key', value: 'k' },
+      { name: 'authorization', value: 'Bearer fixed' },
+    ];
+    const names = headers.map((h) => h.name);
+    expect(refusal(() => assertWebhookAuthorization(names, true, headers))).toEqual([
+      { path: 'headers.1.name', message: WEBHOOK_OAUTH_AUTHORIZATION },
+    ]);
+    // Headers kept from before: the client given now is at fault.
+    expect(refusal(() => assertWebhookAuthorization(['AUTHORIZATION'], true, undefined))).toEqual([
+      { path: 'oauth', message: WEBHOOK_OAUTH_AUTHORIZATION },
+    ]);
+    expect(() => assertWebhookAuthorization(names, false, headers)).not.toThrow();
+    expect(() => assertWebhookAuthorization(['X-Api-Key'], true, undefined)).not.toThrow();
+  });
+
+  it('are audited by the token URL’s host and whether a secret was given, or as removed', () => {
+    const stored = webhookOAuthColumns(
+      ring,
+      tenant,
+      endpoint,
+      checkedWebhookOAuth({ ...base, clientSecret: 's' }, NO_WEBHOOK_OAUTH, policy),
+      NO_WEBHOOK_OAUTH,
+    );
+    expect(webhookOAuthAudit(undefined, stored)).toEqual({});
+    expect(webhookOAuthAudit(checkedWebhookOAuth(base, stored, policy), stored)).toEqual({
+      oauthTokenHost: 'auth.example.com',
+      oauthSecretReplaced: false,
+    });
+    expect(
+      webhookOAuthAudit(
+        checkedWebhookOAuth({ ...base, clientSecret: 'new' }, stored, policy),
+        stored,
+      ),
+    ).toEqual({ oauthTokenHost: 'auth.example.com', oauthSecretReplaced: true });
+    expect(webhookOAuthAudit(null, stored)).toEqual({ oauthRemoved: true });
+    // Removing a client the endpoint did not have changes nothing worth saying.
+    expect(webhookOAuthAudit(null, NO_WEBHOOK_OAUTH)).toEqual({});
+  });
+
+  it('are described by the token URL’s host, and their failures named for members', () => {
+    expect(webhookOAuthText({ ...base, scope: null })).toBe(
+      'OAuth access tokens from auth.example.com, as client hyfib',
+    );
+    expect(webhookOAuthText({ ...base, scope: 'read write' })).toBe(
+      'OAuth access tokens from auth.example.com, as client hyfib, scope read write',
+    );
+    expect(webhookErrorLabel('oauth_token_refused_401', null)).toBe(
+      'The authorization server refused an access token (HTTP 401)',
+    );
+    expect(webhookErrorLabel('oauth_token_refused', null)).toBe(
+      'The authorization server refused an access token',
+    );
+    expect(webhookErrorLabel('oauth_token_invalid', null)).toBe(
+      'The authorization server gave no usable access token',
+    );
+    expect(webhookErrorLabel('oauth_token_timeout', null)).toBe(
+      'No access token: no answer within 10 seconds',
+    );
+    expect(webhookErrorLabel('oauth_token_address_blocked', null)).toBe(
+      'No access token: the address is private or reserved',
+    );
+    expect(webhookErrorLabel('oauth_token_scheme_not_allowed', null)).toBe(
+      'No access token (scheme_not_allowed)',
+    );
+    // The endpoint was not called, so no earlier status says more.
+    expect(webhookErrorLabel('oauth_token_refused_400', 500)).toBe(
+      'The authorization server refused an access token (HTTP 400)',
+    );
   });
 });

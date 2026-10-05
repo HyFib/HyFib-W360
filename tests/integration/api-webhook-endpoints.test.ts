@@ -14,7 +14,9 @@ import {
   createWebhooksService,
   outboxAad,
   processWebhookDeliveries,
+  WebhookOAuthTokenCache,
   verifyWebhookSignature,
+  webhookOAuthSecretAad,
   type ApiContext,
   type ApiKeysService,
   type ApiScope,
@@ -112,6 +114,7 @@ async function deliverDue(c: Company) {
         appBaseUrl: APP_BASE_URL,
       },
       logger: failOnLog,
+      oauthTokens: new WebhookOAuthTokenCache(),
     },
     authorizedTenantScope(c.tenant.id, null),
   );
@@ -260,6 +263,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       conversationStatuses: null,
       runEndStatuses: null,
       channelIds: null,
+      oauth: null,
       apiKeyId: key.id,
       createdAt: expect.any(String),
       updatedAt: expect.any(String),
@@ -603,6 +607,118 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     }
     expect((await api().list(key.ctx)).data).toHaveLength(1);
     expect((await api().get(key.ctx, endpoint.id)).headers).toEqual([]);
+  });
+
+  it('set, change and remove the OAuth client an endpoint gets tokens as, without ever answering its secret (ADR-173)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const SECRET = `oauth-${randomBytes(12).toString('hex')}`;
+    const tokenUrl = `http://${HOST}:${port}/token/${randomBytes(6).toString('hex')}`;
+    const body = {
+      url: receiverUrl(),
+      events: ['contact.created'],
+      oauth: { tokenUrl, clientId: 'crm-client', clientSecret: SECRET, scope: 'hooks.write' },
+    };
+    const created = await addThroughApi(key.ctx, 'oauth-1', body);
+    expect(created.status).toBe(201);
+    const { secret: _signing, ...endpoint } = created.body.data;
+    expect(endpoint.oauth).toEqual({ tokenUrl, clientId: 'crm-client', scope: 'hooks.write' });
+    expect((await addThroughApi(key.ctx, 'oauth-1', body)).body.data.oauth).toEqual(endpoint.oauth);
+    expect(await api().get(key.ctx, endpoint.id)).toEqual(endpoint);
+    const audits = async () =>
+      (
+        await fx.query<{ metadata: Record<string, unknown> }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, endpoint.id],
+        )
+      ).map((row) => row.metadata);
+    expect(await audits()).toEqual([
+      { host: HOST, eventTypes: ['contact.created'], oauthTokenHost: HOST, source: 'api' },
+    ]);
+
+    // The same token URL keeps the secret; another needs it again, since the secret goes there.
+    expect(
+      await api().update(key.ctx, endpoint.id, {
+        oauth: { tokenUrl, clientId: 'renamed-client' },
+      }),
+    ).toMatchObject({ oauth: { tokenUrl, clientId: 'renamed-client', scope: null } });
+    const [row] = await fx.query<{ oauth_client_secret_ciphertext: string }>(
+      'SELECT oauth_client_secret_ciphertext FROM app.webhook_endpoints WHERE id = $1',
+      [endpoint.id],
+    );
+    expect(
+      fx.keyring.decryptString(
+        row!.oauth_client_secret_ciphertext,
+        webhookOAuthSecretAad(c.tenant.id, endpoint.id),
+      ),
+    ).toBe(SECRET);
+    const issue = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    expect(
+      await issue(
+        api().update(key.ctx, endpoint.id, {
+          oauth: { tokenUrl: `http://elsewhere.test:${port}/token`, clientId: 'renamed-client' },
+        }),
+      ),
+    ).toMatchObject({ path: 'oauth.clientSecret', message: expect.stringMatching(/again/) });
+    expect(
+      await issue(
+        api().update(key.ctx, endpoint.id, {
+          headers: [{ name: 'Authorization', value: 'Bearer fixed' }],
+        }),
+      ),
+    ).toMatchObject({ path: 'headers.0.name' });
+    expect(
+      await issue(
+        api().create(
+          key.ctx,
+          { ...body, oauth: { ...body.oauth, tokenUrl: 'ftp://auth.example.com/token' } },
+          idem('oauth-bad-url', 'x'),
+        ),
+      ),
+    ).toMatchObject({ path: 'oauth.tokenUrl' });
+    expect(
+      await issue(
+        api().create(
+          key.ctx,
+          { ...body, oauth: { tokenUrl, clientId: 'no-secret' } },
+          idem('oauth-no-secret', 'y'),
+        ),
+      ),
+    ).toMatchObject({ path: 'oauth.clientSecret' });
+
+    // null removes it.
+    expect(await api().update(key.ctx, endpoint.id, { oauth: null })).toMatchObject({
+      oauth: null,
+    });
+    expect((await audits()).slice(1)).toEqual([
+      {
+        host: HOST,
+        eventTypes: ['contact.created'],
+        oauthTokenHost: HOST,
+        oauthSecretReplaced: false,
+        source: 'api',
+      },
+      { host: HOST, eventTypes: ['contact.created'], oauthRemoved: true, source: 'api' },
+    ]);
+    // Neither the answers, the kept replay, the audit nor the owners' notice holds the secret.
+    const kept = await fx.query(
+      `SELECT response FROM app.api_idempotency_keys WHERE tenant_id = $1 AND api_key_id = $2`,
+      [c.tenant.id, key.id],
+    );
+    expect(
+      JSON.stringify([
+        created.body,
+        kept,
+        await api().list(key.ctx),
+        await audits(),
+        await companyNotices(c.tenant.id),
+      ]),
+    ).not.toContain(SECRET);
+    expect((await api().list(key.ctx)).data).toHaveLength(1);
   });
 
   it('choose the message statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-119)', async () => {

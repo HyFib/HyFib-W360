@@ -39,6 +39,8 @@ let port = 0;
 const received: { path: string; headers: IncomingHttpHeaders; body: string }[] = [];
 /** Paths the receiver answers with 500, as a receiver that is down. */
 const down = new Set<string>();
+/** Paths the receiver answers as an OAuth authorization server, with the token it gives (ADR-173). */
+const tokenPaths = new Map<string, string>();
 
 test.beforeAll(async () => {
   receiver = createServer((req, res) => {
@@ -47,6 +49,12 @@ test.beforeAll(async () => {
     req.on('data', (chunk: string) => (body += chunk));
     req.on('end', () => {
       received.push({ path: req.url ?? '', headers: req.headers, body });
+      const token = tokenPaths.get(req.url ?? '');
+      if (token) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ access_token: token, token_type: 'Bearer', expires_in: 3600 }));
+        return;
+      }
       res.writeHead(down.has(req.url ?? '') ? 500 : 204);
       res.end();
     });
@@ -268,7 +276,7 @@ test('a receiver that was down gets its failed events again with one replay from
     'Server errors (HTTP 5xx)',
     'Refused (HTTP 4xx)',
     'Other answers (HTTP 1xx or 3xx)',
-    'No valid answer (timeouts, connection errors)',
+    'No valid answer (timeouts, connection errors, no access token)',
     'Not attempted (endpoint off, request not prepared)',
   ]);
   await replayFailures.selectOption({ label: 'Server errors (HTTP 5xx)' });
@@ -613,6 +621,140 @@ test('an endpoint sends its own headers with every delivery: set in settings and
   expect((await sendTest()).status()).toBe(201);
   await expect(async () => expect(viaApi()).toHaveLength(2)).toPass({ timeout: 30_000 });
   expect(viaApi()[1]!.headers['x-gateway-token']).toBeUndefined();
+});
+
+test('an endpoint gets OAuth access tokens as its client and sends them as a bearer token: set in settings with the secret never shown again, changed on its page, removed, and given by an API key (ADR-173)', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const email = uniqueEmail('oauthhooks');
+  const slug = `oauthhooks-${Date.now().toString(36)}`;
+  const path = `/hooks/${slug}/oauth`;
+  const forUs = () => received.filter((r) => r.path === path);
+  const firstTokenPath = `/hooks/${slug}/token-1`;
+  const secondTokenPath = `/hooks/${slug}/token-2`;
+  const asked = (tokenPath: string) => received.filter((r) => r.path === tokenPath);
+  const clientSecret = `e2e-${randomUUID()}`;
+  tokenPaths.set(firstTokenPath, `tok1-${randomUUID()}`);
+  tokenPaths.set(secondTokenPath, `tok2-${randomUUID()}`);
+  await signUpAndVerify(page, { name: 'Omar OAuth', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('OAuth Works');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+
+  // Settings → Webhooks: an endpoint whose receiver wants a token from its authorization server.
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${path}`);
+  await page.getByRole('checkbox', { name: /Consent changed/ }).check();
+  await page.getByRole('checkbox', { name: 'Get an OAuth access token for each delivery' }).check();
+  await page
+    .getByLabel('Token URL', { exact: true })
+    .fill(`http://${HOST}:${port}${firstTokenPath}`);
+  await page.getByLabel('Client ID', { exact: true }).fill('e2e-client');
+  await page.getByLabel('Client secret', { exact: true }).fill(clientSecret);
+  await page.getByLabel('Scope', { exact: true }).fill('hooks.write');
+  await expectNoHorizontalOverflow(page);
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  const secretField = page.getByLabel('Signing secret');
+  await expect(secretField).toBeVisible();
+  const secret = await secretField.inputValue();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+
+  // The client is shown by its token URL's host; the secret never reaches the browser again.
+  await page.reload();
+  await expect(
+    page.getByText(`OAuth access tokens from ${HOST}, as client e2e-client, scope hooks.write`),
+  ).toBeVisible();
+  expect(await page.content()).not.toContain(clientSecret);
+
+  // A test event: the worker asks for a token as the client, then sends it as a bearer token.
+  await page.getByRole('button', { name: `Send test event to ${HOST}` }).click();
+  await expect(async () => expect(forUs()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(asked(firstTokenPath)).toHaveLength(1);
+  expect(asked(firstTokenPath)[0]!.headers.authorization).toBe(
+    `Basic ${Buffer.from(`e2e-client:${clientSecret}`).toString('base64')}`,
+  );
+  expect(asked(firstTokenPath)[0]!.body).toBe('grant_type=client_credentials&scope=hooks.write');
+  expect(forUs()[0]!.headers.authorization).toBe(`Bearer ${tokenPaths.get(firstTokenPath)}`);
+  expect(signatureValid(forUs()[0]!.headers, forUs()[0]!.body, secret)).toBe(true);
+
+  // On the endpoint's page: another token URL needs the secret again, since it is sent there.
+  await page.getByRole('link', { name: `Deliveries and settings for ${HOST}` }).click();
+  await expect(page.getByText(/OAuth access tokens from .*, as client e2e-client/)).toBeVisible();
+  expect(await page.content()).not.toContain(clientSecret);
+  await page.getByRole('radio', { name: 'Change the OAuth client' }).check();
+  await page
+    .getByLabel('Token URL', { exact: true })
+    .fill(`http://${HOST}:${port}${secondTokenPath}`);
+  await page.getByRole('button', { name: 'Save endpoint' }).click();
+  await expect(
+    page.getByText('Enter the client secret again: it is sent to the token URL, which changed.'),
+  ).toBeVisible();
+  await page.getByLabel('Client secret', { exact: true }).fill(`${clientSecret}-2`);
+  await expectNoHorizontalOverflow(page);
+  await page.getByRole('button', { name: 'Save endpoint' }).click();
+  await expect(page.getByText('Endpoint saved.')).toBeVisible();
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByRole('button', { name: `Send test event to ${HOST}` }).click();
+  await expect(async () => expect(forUs()).toHaveLength(2)).toPass({ timeout: 30_000 });
+  expect(asked(secondTokenPath)).toHaveLength(1);
+  expect(forUs()[1]!.headers.authorization).toBe(`Bearer ${tokenPaths.get(secondTokenPath)}`);
+
+  // Removed: deliveries go without a token.
+  await page.getByRole('link', { name: `Deliveries and settings for ${HOST}` }).click();
+  await page.getByRole('radio', { name: /Remove the OAuth client/ }).check();
+  await page.getByRole('button', { name: 'Save endpoint' }).click();
+  await expect(page.getByText('Endpoint saved.')).toBeVisible();
+  await page.reload();
+  await expect(
+    page.getByRole('checkbox', { name: 'Get an OAuth access token for each delivery' }),
+  ).not.toBeChecked();
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await expect(page.getByText(/OAuth access tokens from/)).toHaveCount(0);
+  await page.getByRole('button', { name: `Send test event to ${HOST}` }).click();
+  await expect(async () => expect(forUs()).toHaveLength(3)).toPass({ timeout: 30_000 });
+  expect(forUs()[2]!.headers.authorization).toBeUndefined();
+
+  // An API key gives its own endpoint a client, answered without the secret.
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('OAuth connector');
+  await page.getByRole('checkbox', { name: /Manage webhook endpoints/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const apiToken = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${apiToken}` };
+  const apiPath = `/hooks/${slug}/api-oauth`;
+  const apiTokenPath = `/hooks/${slug}/api-token`;
+  tokenPaths.set(apiTokenPath, `tok3-${randomUUID()}`);
+  const created = await request.post('/api/v1/webhook-endpoints', {
+    headers: { ...auth, 'Idempotency-Key': randomUUID() },
+    data: {
+      url: `http://${HOST}:${port}${apiPath}`,
+      events: ['message.received'],
+      oauth: {
+        tokenUrl: `http://${HOST}:${port}${apiTokenPath}`,
+        clientId: 'api-client',
+        clientSecret: `${clientSecret}-api`,
+      },
+    },
+  });
+  expect(created.status()).toBe(201);
+  const endpoint = ((await created.json()) as { data: { id: string; oauth: unknown } }).data;
+  expect(endpoint.oauth).toEqual({
+    tokenUrl: `http://${HOST}:${port}${apiTokenPath}`,
+    clientId: 'api-client',
+    scope: null,
+  });
+  expect(JSON.stringify(endpoint)).not.toContain(clientSecret);
+  const testEvent = await request.post(`/api/v1/webhook-endpoints/${endpoint.id}/test`, {
+    headers: { ...auth, 'Idempotency-Key': randomUUID() },
+  });
+  expect(testEvent.status()).toBe(201);
+  const viaApi = () => received.filter((r) => r.path === apiPath);
+  await expect(async () => expect(viaApi()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(viaApi()[0]!.headers.authorization).toBe(`Bearer ${tokenPaths.get(apiTokenPath)}`);
 });
 
 test('an endpoint receives only the message statuses it takes: chosen in settings and on its page, and by an API key (ADR-119)', async ({

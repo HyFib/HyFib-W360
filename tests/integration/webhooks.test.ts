@@ -44,6 +44,8 @@ import {
   WEBHOOK_TEMPLATE_STATUSES,
   WEBHOOK_USER_AGENT,
   webhookHeadersAad,
+  WebhookOAuthTokenCache,
+  webhookOAuthSecretAad,
   webhookSecretAad,
   type TenantContext,
   type WebhookDeliveryLogger,
@@ -58,8 +60,8 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * receiver (reached through the loopback allowance that exists for tests only): endpoints and their
  * secrets, capture by the database triggers for every event type, signed at-least-once delivery,
  * the retry schedule, interrupted attempts, deliveries that cannot be prepared, automatic
- * disabling with its notice, replays and test events, secret rotation, the address guard, dispatch
- * and retention, and isolation.
+ * disabling with its notice, replays and test events, secret rotation, OAuth clients and their
+ * tokens, the address guard, dispatch and retention, and isolation.
  */
 let fx: WhatsAppFixture;
 let receiver: Server;
@@ -71,6 +73,10 @@ interface Received {
   body: string;
 }
 const received: Received[] = [];
+/** What the authorization server answers at each /token/ path, for OAuth clients (ADR-173). */
+const tokenAnswers = new Map<string, { status: number; body: unknown }>();
+/** The bearer token each /bearer/ endpoint takes (ADR-173). */
+const acceptedTokens = new Map<string, string>();
 
 beforeAll(async () => {
   fx = await startWhatsAppFixture();
@@ -92,6 +98,18 @@ beforeAll(async () => {
         res.end();
       } else if (path.startsWith('/hang')) {
         // Never answers: the egress deadline ends the attempt.
+      } else if (path.startsWith('/token/')) {
+        const answer = tokenAnswers.get(path) ?? { status: 404, body: { error: 'not_found' } };
+        res.writeHead(answer.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(answer.body));
+      } else if (path.startsWith('/bearer/')) {
+        const accepted = acceptedTokens.get(path);
+        if (accepted && req.headers.authorization === `Bearer ${accepted}`) {
+          res.writeHead(204);
+        } else {
+          res.writeHead(401, { 'www-authenticate': 'Bearer error="invalid_token"' });
+        }
+        res.end();
       } else {
         res.writeHead(404);
         res.end();
@@ -122,10 +140,12 @@ const egress = (resolveTo: ResolvedAddress[] = [{ address: '127.0.0.1', family: 
     { resolve: async () => resolveTo },
   );
 
+/** The worker's delivery dependencies; each run keeps OAuth tokens of its own unless given some. */
 function deliveryDeps(
   clock: Clock = systemClock,
   client: EgressClient = egress(),
   logger: WebhookDeliveryLogger = failOnLog,
+  oauthTokens: WebhookOAuthTokenCache = new WebhookOAuthTokenCache(),
 ) {
   const jobs = fx.jobs();
   return {
@@ -138,6 +158,7 @@ function deliveryDeps(
     signer: fx.signer,
     notices: { outbox: { keyring: fx.keyring, jobs, signer: fx.signer }, appBaseUrl: APP_BASE_URL },
     logger,
+    oauthTokens,
   };
 }
 
@@ -146,9 +167,10 @@ const deliverDue = (
   clock?: Clock,
   client?: EgressClient,
   logger?: WebhookDeliveryLogger,
+  oauthTokens?: WebhookOAuthTokenCache,
 ) =>
   processWebhookDeliveries(
-    deliveryDeps(clock, client, logger),
+    deliveryDeps(clock, client, logger, oauthTokens),
     authorizedTenantScope(c.tenant.id, null),
   );
 
@@ -620,6 +642,307 @@ describe('endpoint headers (ADR-118)', () => {
         [e.id],
       ),
     ).rejects.toThrow(/webhook_endpoints_headers/);
+  });
+});
+
+describe('OAuth clients (ADR-173)', () => {
+  const auditsOf = async (c: Company, action: string) =>
+    (
+      await fx.query<{ metadata: Record<string, unknown> }>(
+        'SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id',
+        [c.tenant.id, action],
+      )
+    ).map((row) => row.metadata);
+  const SECRET = 's3cr:et/+';
+
+  /** An endpoint on a /bearer/ path of its own, getting tokens from a /token/ path of its own. */
+  async function addOAuthEndpoint(c: Company, scope: string | null = 'events.write read') {
+    const id = randomBytes(6).toString('hex');
+    const bearer = `/bearer/${id}`;
+    const token = `/token/${id}`;
+    const owner = await fx.ctx(c, c.owner);
+    const created = await webhooks().create(owner, {
+      url: `http://${HOST}:${port}${bearer}`,
+      eventTypes: ['consent.changed'],
+      oauth: {
+        tokenUrl: `http://${HOST}:${port}${token}`,
+        clientId: 'hyfib-test',
+        clientSecret: SECRET,
+        scope,
+      },
+    });
+    return { ...created, owner, bearer, token, tokenUrl: `http://${HOST}:${port}${token}` };
+  }
+  const issue = (path: string, accessToken: string, expiresIn: unknown = 3600) =>
+    tokenAnswers.set(path, {
+      status: 200,
+      body: { access_token: accessToken, token_type: 'Bearer', expires_in: expiresIn },
+    });
+  const authorizations = (path: string) => requestsTo(path).map((r) => r.headers.authorization);
+
+  it('get a token as the endpoint’s client, send it as a bearer token and keep it for the next deliveries', async () => {
+    const c = await fx.company();
+    const e = await addOAuthEndpoint(c);
+    issue(e.token, 'tok-1');
+    acceptedTokens.set(e.bearer, 'tok-1');
+    const tokens = new WebhookOAuthTokenCache();
+    const first = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(await deliverDue(c, systemClock, egress(), failOnLog, tokens)).toMatchObject({
+      attempted: 1,
+      succeeded: 1,
+    });
+    // The token request of RFC 6749 section 4.4.2: the client in a Basic header, its identifier
+    // and secret each form-encoded, and the grant and the scope in a form; nothing of the delivery.
+    const [asked] = requestsTo(e.token);
+    expect(asked?.headers.authorization).toBe(
+      `Basic ${Buffer.from('hyfib-test:s3cr%3Aet%2F%2B').toString('base64')}`,
+    );
+    expect(asked?.headers['content-type']).toBe('application/x-www-form-urlencoded');
+    expect(asked?.headers.accept).toBe('application/json');
+    expect(asked?.headers['user-agent']).toBe(WEBHOOK_USER_AGENT);
+    expect(Object.keys(asked?.headers ?? {}).filter((name) => name.startsWith('w360-'))).toEqual(
+      [],
+    );
+    expect(asked?.body).toBe('grant_type=client_credentials&scope=events.write+read');
+    const [delivered] = requestsTo(e.bearer);
+    expect(delivered?.headers.authorization).toBe('Bearer tok-1');
+    expect(delivered?.headers['w360-delivery-id']).toBe(first.deliveryId);
+    expect(signedWith(delivered!, e.secret)).toBe(true);
+
+    // The next deliveries, three sent together, use the token the process kept.
+    for (let i = 0; i < 3; i += 1) await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(await deliverDue(c, systemClock, egress(), failOnLog, tokens)).toMatchObject({
+      attempted: 3,
+      succeeded: 3,
+    });
+    expect(requestsTo(e.token)).toHaveLength(1);
+    // Another process keeps none yet: one request serves the deliveries it sends together.
+    for (let i = 0; i < 3; i += 1) await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(await deliverDue(c)).toMatchObject({ attempted: 3, succeeded: 3 });
+    expect(requestsTo(e.token)).toHaveLength(2);
+    expect(authorizations(e.bearer)).toEqual(Array.from({ length: 7 }, () => 'Bearer tok-1'));
+  });
+
+  it('fail an attempt without calling the endpoint when no token comes, and ask again at the next one', async () => {
+    const c = await fx.company();
+    const e = await addOAuthEndpoint(c, null);
+    acceptedTokens.set(e.bearer, 'tok-2');
+    tokenAnswers.set(e.token, { status: 401, body: { error: 'invalid_client' } });
+    const tokens = new WebhookOAuthTokenCache();
+    const test = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(await deliverDue(c, systemClock, egress(), failOnLog, tokens)).toMatchObject({
+      attempted: 1,
+      retrying: 1,
+    });
+    expect(requestsTo(e.token).map((r) => r.body)).toEqual(['grant_type=client_credentials']);
+    expect(requestsTo(e.bearer)).toHaveLength(0);
+    expect(await deliveriesOf(e.id)).toMatchObject([
+      {
+        id: test.deliveryId,
+        state: 'pending',
+        attempts: 1,
+        last_status_code: null,
+        last_error: 'oauth_token_refused_401',
+      },
+    ]);
+    // A 200 without a bearer token is none either, and a failure is not kept.
+    tokenAnswers.set(e.token, { status: 200, body: { access_token: 'tok-2', token_type: 'mac' } });
+    expect(await deliverDue(c, later(61_000), egress(), failOnLog, tokens)).toMatchObject({
+      attempted: 1,
+      retrying: 1,
+    });
+    expect(await deliveriesOf(e.id)).toMatchObject([
+      { attempts: 2, last_status_code: null, last_error: 'oauth_token_invalid' },
+    ]);
+    // Once the server gives one, the next attempt gets it and is delivered.
+    issue(e.token, 'tok-2');
+    expect(await deliverDue(c, later(362_000), egress(), failOnLog, tokens)).toMatchObject({
+      attempted: 1,
+      succeeded: 1,
+    });
+    expect(await deliveriesOf(e.id)).toMatchObject([
+      { state: 'succeeded', attempts: 3, last_status_code: 204, last_error: null },
+    ]);
+    expect(requestsTo(e.token)).toHaveLength(3);
+    expect(requestsTo(e.bearer).map((r) => r.headers['w360-delivery-attempt'])).toEqual(['3']);
+  });
+
+  it('replace a token the endpoint refuses at the next attempt', async () => {
+    const c = await fx.company();
+    const e = await addOAuthEndpoint(c);
+    issue(e.token, 'tok-old');
+    acceptedTokens.set(e.bearer, 'tok-old');
+    const tokens = new WebhookOAuthTokenCache();
+    await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(await deliverDue(c, systemClock, egress(), failOnLog, tokens)).toMatchObject({
+      succeeded: 1,
+    });
+    // The receiver revoked it: the token kept is answered 401 and dropped, and the attempt fails.
+    acceptedTokens.set(e.bearer, 'tok-new');
+    issue(e.token, 'tok-new');
+    const second = await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(await deliverDue(c, systemClock, egress(), failOnLog, tokens)).toMatchObject({
+      attempted: 1,
+      retrying: 1,
+    });
+    expect(requestsTo(e.token)).toHaveLength(1);
+    expect((await deliveriesOf(e.id)).find((d) => d.id === second.deliveryId)).toMatchObject({
+      state: 'pending',
+      last_status_code: 401,
+      last_error: null,
+    });
+    expect(await deliverDue(c, later(61_000), egress(), failOnLog, tokens)).toMatchObject({
+      attempted: 1,
+      succeeded: 1,
+    });
+    expect(requestsTo(e.token)).toHaveLength(2);
+    expect(authorizations(e.bearer)).toEqual([
+      'Bearer tok-old',
+      'Bearer tok-old',
+      'Bearer tok-new',
+    ]);
+  });
+
+  it('hold the token URL to the address guard', async () => {
+    const c = await fx.company();
+    const e = await addOAuthEndpoint(c);
+    issue(e.token, 'tok-3');
+    await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(
+      await deliverDue(c, systemClock, egress([{ address: '10.0.0.7', family: 4 }])),
+    ).toMatchObject({
+      attempted: 1,
+      retrying: 1,
+    });
+    expect(await deliveriesOf(e.id)).toMatchObject([
+      { attempts: 1, last_status_code: null, last_error: 'oauth_token_address_blocked' },
+    ]);
+    expect(requestsTo(e.token)).toHaveLength(0);
+    expect(requestsTo(e.bearer)).toHaveLength(0);
+  });
+
+  it('keep the secret sealed, need it again for another token URL, refuse an Authorization header beside it, and are audited by host only', async () => {
+    const c = await fx.company();
+    const e = await addOAuthEndpoint(c);
+    const columns = async () => {
+      const [row] = await fx.query<{
+        oauth_token_url: string | null;
+        oauth_client_id: string | null;
+        oauth_client_secret_ciphertext: string | null;
+        oauth_scope: string | null;
+      }>(
+        `SELECT oauth_token_url, oauth_client_id, oauth_client_secret_ciphertext, oauth_scope
+           FROM app.webhook_endpoints WHERE id = $1`,
+        [e.id],
+      );
+      if (!row) throw new Error('endpoint missing');
+      return row;
+    };
+    const stored = await columns();
+    expect(stored).toMatchObject({
+      oauth_token_url: e.tokenUrl,
+      oauth_client_id: 'hyfib-test',
+      oauth_scope: 'events.write read',
+    });
+    expect(stored.oauth_client_secret_ciphertext).not.toContain(SECRET);
+    expect(
+      fx.keyring.decryptString(
+        stored.oauth_client_secret_ciphertext!,
+        webhookOAuthSecretAad(c.tenant.id, e.id),
+      ),
+    ).toBe(SECRET);
+    const [listed] = await webhooks().list(e.owner);
+    expect(listed?.oauth).toEqual({
+      tokenUrl: e.tokenUrl,
+      clientId: 'hyfib-test',
+      scope: 'events.write read',
+    });
+    expect(JSON.stringify(await webhooks().list(e.owner))).not.toContain(SECRET);
+    expect(await auditsOf(c, 'webhook.endpoint_created')).toEqual([
+      { host: HOST, eventTypes: ['consent.changed'], oauthTokenHost: HOST },
+    ]);
+
+    const change = (more: Record<string, unknown>) =>
+      webhooks().update(e.owner, {
+        endpointId: e.id,
+        url: `http://${HOST}:${port}${e.bearer}`,
+        description: '',
+        eventTypes: ['consent.changed'],
+        ...more,
+      });
+    // The same token URL keeps the secret; another needs it again, since the secret goes there.
+    await change({ oauth: { tokenUrl: e.tokenUrl, clientId: 'renamed', scope: null } });
+    expect(await columns()).toEqual({ ...stored, oauth_client_id: 'renamed', oauth_scope: null });
+    expect((await auditsOf(c, 'webhook.endpoint_updated')).at(-1)).toEqual({
+      host: HOST,
+      eventTypes: ['consent.changed'],
+      oauthTokenHost: HOST,
+      oauthSecretReplaced: false,
+    });
+    await expectAppError(
+      change({ oauth: { tokenUrl: `http://elsewhere.test:${port}/token/x`, clientId: 'renamed' } }),
+      'validation_failed',
+      /Enter the client secret again/,
+    );
+    // The endpoint cannot send an Authorization header of its own beside its client.
+    await expectAppError(
+      change({ headers: [{ name: 'Authorization', value: 'Bearer fixed' }] }),
+      'validation_failed',
+      /sends them as its Authorization header/,
+    );
+    expect(await columns()).toEqual({ ...stored, oauth_client_id: 'renamed', oauth_scope: null });
+    expect((await webhooks().list(e.owner))[0]?.headerNames).toEqual([]);
+    // Removed, the header may be given; then a client may not.
+    await change({ oauth: null, headers: [{ name: 'Authorization', value: 'Bearer fixed' }] });
+    expect(await columns()).toEqual({
+      oauth_token_url: null,
+      oauth_client_id: null,
+      oauth_client_secret_ciphertext: null,
+      oauth_scope: null,
+    });
+    expect((await auditsOf(c, 'webhook.endpoint_updated')).at(-1)).toEqual({
+      host: HOST,
+      eventTypes: ['consent.changed'],
+      headers: ['Authorization'],
+      oauthRemoved: true,
+    });
+    await expectAppError(
+      change({ oauth: { tokenUrl: e.tokenUrl, clientId: 'again', clientSecret: 'x' } }),
+      'validation_failed',
+      /sends them as its Authorization header/,
+    );
+    const audits = await fx.query<{ metadata: unknown }>(
+      'SELECT metadata FROM app.audit_events WHERE tenant_id = $1',
+      [c.tenant.id],
+    );
+    expect(JSON.stringify(audits)).not.toContain('s3cr');
+  });
+
+  it('are kept by the database together or not at all, with the scope alone optional', async () => {
+    const c = await fx.company();
+    const e = await addOAuthEndpoint(c);
+    for (const set of [
+      'oauth_token_url = NULL',
+      'oauth_client_id = NULL',
+      'oauth_client_secret_ciphertext = NULL',
+      "oauth_client_id = ''",
+      `oauth_client_id = repeat('i', ${WEBHOOK_LIMITS.oauthClientIdLength + 1})`,
+      `oauth_scope = repeat('s', ${WEBHOOK_LIMITS.oauthScopeLength + 1})`,
+      "oauth_scope = ''",
+      // A scope alone.
+      'oauth_token_url = NULL, oauth_client_id = NULL, oauth_client_secret_ciphertext = NULL',
+    ]) {
+      await expect(
+        fx.query(`UPDATE app.webhook_endpoints SET ${set} WHERE id = $1`, [e.id]),
+        set,
+      ).rejects.toThrow(/webhook_endpoints_oauth/);
+    }
+    await fx.query('UPDATE app.webhook_endpoints SET oauth_scope = NULL WHERE id = $1', [e.id]);
+    await fx.query(
+      `UPDATE app.webhook_endpoints SET oauth_token_url = NULL, oauth_client_id = NULL,
+         oauth_client_secret_ciphertext = NULL WHERE id = $1`,
+      [e.id],
+    );
   });
 });
 
@@ -2802,6 +3125,89 @@ describe('deliveries that cannot be prepared', () => {
     expect(
       requestsTo(broken.path).map((r) => [r.headers['w360-delivery-id'], r.headers.authorization]),
     ).toEqual([[replay.deliveryId, 'Bearer given-again']]);
+  });
+
+  it('an OAuth client the keyring cannot open fails each delivery to its endpoint alone, until given again (ADR-173)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const add = async (secret: string) => {
+      const id = randomBytes(6).toString('hex');
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}/bearer/${id}`,
+        eventTypes: ['consent.changed'],
+        oauth: {
+          tokenUrl: `http://${HOST}:${port}/token/${id}`,
+          clientId: 'hyfib-test',
+          clientSecret: secret,
+        },
+      });
+      tokenAnswers.set(`/token/${id}`, {
+        status: 200,
+        body: { access_token: `tok-${id}`, token_type: 'Bearer', expires_in: 3600 },
+      });
+      acceptedTokens.set(`/bearer/${id}`, `tok-${id}`);
+      return { ...created, bearer: `/bearer/${id}`, token: `/token/${id}` };
+    };
+    const broken = await add('broken-secret');
+    const fine = await add('fine-secret');
+    // The broken endpoint holds the other endpoint's sealed secret (as after a botched restore):
+    // bound to that endpoint, it does not open for this one.
+    await fx.query(
+      `UPDATE app.webhook_endpoints b
+          SET oauth_client_secret_ciphertext = f.oauth_client_secret_ciphertext
+         FROM app.webhook_endpoints f WHERE b.id = $1 AND f.id = $2`,
+      [broken.id, fine.id],
+    );
+    const first = await webhooks().sendTest(owner, { endpointId: broken.id });
+    await webhooks().sendTest(owner, { endpointId: fine.id });
+
+    const log = capturedLog();
+    expect(await deliverDue(c, systemClock, egress(), log.logger)).toMatchObject({
+      attempted: 1,
+      succeeded: 1,
+      failed: 1,
+    });
+    expect(await deliveriesOf(broken.id)).toMatchObject([
+      { id: first.deliveryId, state: 'failed', attempts: 0, last_error: 'payload_failed' },
+    ]);
+    expect(requestsTo(broken.token)).toHaveLength(0);
+    expect(requestsTo(broken.bearer)).toHaveLength(0);
+    expect(requestsTo(fine.bearer).map((r) => r.headers.authorization)).toEqual([
+      `Bearer tok-${fine.token.slice('/token/'.length)}`,
+    ]);
+    expect(log.lines.map((line) => line.fields)).toEqual([
+      {
+        tenantId: c.tenant.id,
+        deliveryId: first.deliveryId,
+        endpointId: broken.id,
+        eventType: 'ping',
+        stage: 'oauth',
+        errorClass: 'Error',
+        errorCode: null,
+      },
+    ]);
+    expect(JSON.stringify(log.lines)).not.toMatch(/secret|tok-/);
+
+    // Given again, the secret is sealed for this endpoint, and a replay delivers.
+    await webhooks().update(owner, {
+      endpointId: broken.id,
+      url: `http://${HOST}:${port}${broken.bearer}`,
+      description: '',
+      eventTypes: ['consent.changed'],
+      oauth: {
+        tokenUrl: `http://${HOST}:${port}${broken.token}`,
+        clientId: 'hyfib-test',
+        clientSecret: 'given-again',
+      },
+    });
+    const replay = await webhooks().replay(owner, { deliveryId: first.deliveryId });
+    expect(await deliverDue(c)).toMatchObject({ attempted: 1, succeeded: 1, failed: 0 });
+    expect(requestsTo(broken.bearer).map((r) => r.headers['w360-delivery-id'])).toEqual([
+      replay.deliveryId,
+    ]);
+    expect(requestsTo(broken.token)[0]?.headers.authorization).toBe(
+      `Basic ${Buffer.from('hyfib-test:given-again').toString('base64')}`,
+    );
   });
 
   it('a database error while building fails only its delivery: the claim goes on after its savepoint', async () => {

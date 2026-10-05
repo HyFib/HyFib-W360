@@ -48,6 +48,7 @@ import {
   processSendIntent,
   processTemplateSubmit,
   processWebhookDeliveries,
+  WebhookOAuthTokenCache,
   runCampaignTick,
   syncTemplates,
   WEBHOOK_EVENT_KEYS,
@@ -182,6 +183,7 @@ async function deliverDue(c: Company) {
         appBaseUrl: 'https://app.w360.test',
       },
       logger: failOnLog,
+      oauthTokens: new WebhookOAuthTokenCache(),
     },
     authorizedTenantScope(c.tenant.id, null),
   );

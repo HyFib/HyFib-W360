@@ -1354,6 +1354,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'headers',
       'messageSenders',
       'messageStatuses',
+      'oauth',
       'orderStatuses',
       'runEndStatuses',
       'templateStatuses',
@@ -1498,6 +1499,48 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(apiUpdateWebhookEndpointSchema.parse({ messageSenders: ['bot'] })).toEqual({
       messageSenders: ['bot'],
     });
+  });
+
+  it('take an OAuth client with its secret and answer it without, and a client alone is a change (ADR-173)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['message.status'] };
+    const oauth = {
+      tokenUrl: 'https://auth.example.com/oauth2/token',
+      clientId: 'hyfib',
+      clientSecret: 's3cret',
+      scope: '',
+    };
+    expect(apiCreateWebhookEndpointSchema.parse({ ...base, oauth }).oauth).toEqual({
+      ...oauth,
+      scope: null,
+    });
+    expect(apiCreateWebhookEndpointSchema.parse({ ...base, oauth: null }).oauth).toBeNull();
+    expect(
+      apiCreateWebhookEndpointSchema.safeParse({ ...base, oauth: { ...oauth, grant: 'password' } })
+        .success,
+    ).toBe(false);
+    // A change may remove the client, or leave its secret out to keep the stored one.
+    expect(apiUpdateWebhookEndpointSchema.parse({ oauth: null })).toEqual({ oauth: null });
+    const kept = { tokenUrl: oauth.tokenUrl, clientId: oauth.clientId, scope: '' };
+    expect(apiUpdateWebhookEndpointSchema.parse({ oauth: kept })).toEqual({
+      oauth: { ...kept, scope: null },
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    type Client = { anyOf?: { properties?: Record<string, unknown> }[] };
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const given = (schemas.CreateWebhookEndpoint as { properties: { oauth?: Client } }).properties
+      .oauth;
+    const answered = schemas.WebhookEndpoint as {
+      properties: { oauth?: Client };
+      required?: string[];
+    };
+    const keys = (client: Client | undefined) =>
+      Object.keys(client?.anyOf?.find((s) => s.properties)?.properties ?? {}).sort();
+    expect(keys(given)).toEqual(['clientId', 'clientSecret', 'scope', 'tokenUrl']);
+    // The secret is never answered.
+    expect(keys(answered.properties.oauth)).toEqual(['clientId', 'scope', 'tokenUrl']);
+    expect(answered.required).toContain('oauth');
+    expect(doc.info.description).toContain('send it as `Authorization: Bearer <token>`');
   });
 
   it('take numbers only with an event that happens on one, each once, and a list of them alone is a change (ADR-170)', () => {

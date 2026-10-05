@@ -26,6 +26,7 @@ import {
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUSES,
   webhookChannelText,
+  webhookOAuthText,
   webhookReplayAllSummary,
   webhookReplaySummary,
   webhookTakesAutomationRuns,
@@ -35,6 +36,7 @@ import {
   type WebhookChannelChoice,
   type WebhookContactPart,
   type WebhookConversationStatus,
+  type WebhookEndpointOAuth,
   type WebhookEventType,
   type WebhookFailureKind,
   type WebhookMessageSender,
@@ -662,6 +664,164 @@ function HeaderRows({
   );
 }
 
+/** An endpoint's OAuth client as entered here (ADR-173); the secret never comes back. */
+interface OAuthFields {
+  tokenUrl: string;
+  clientId: string;
+  clientSecret: string;
+  scope: string;
+}
+
+/**
+ * What a change does to the endpoint's OAuth client: keeps it (or, without one, adds none), sets
+ * it (adds or changes it) or removes it.
+ */
+type OAuthChange = 'keep' | 'set' | 'remove';
+
+/**
+ * The OAuth client an endpoint gets access tokens as (ADR-173): its receiver's authorization server
+ * and the client it issued. A change shows the stored client, without its secret, which a member
+ * gives again only to replace it or when the token URL changes.
+ */
+function OAuthClientFields({
+  prefix,
+  stored,
+  change,
+  onChangeChange,
+  fields,
+  onFieldsChange,
+}: {
+  prefix: string;
+  /** The endpoint's client; null for a new endpoint or one without a client. */
+  stored: WebhookEndpointOAuth | null;
+  change: OAuthChange;
+  onChangeChange: (next: OAuthChange) => void;
+  fields: OAuthFields;
+  onFieldsChange: (next: OAuthFields) => void;
+}) {
+  const set = (part: Partial<OAuthFields>) => onFieldsChange({ ...fields, ...part });
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">OAuth 2.0</legend>
+      <p className="text-xs text-muted-foreground">
+        Optional: if your receiver wants an access token from its authorization server (the OAuth
+        2.0 client credentials grant), HyFib gets one as the client below and sends it as an
+        Authorization header with every delivery. The client secret is stored encrypted and never
+        shown again.
+      </p>
+      {stored ? (
+        <>
+          <p className="text-sm break-all">{webhookOAuthText(stored)}.</p>
+          {(
+            [
+              ['keep', 'Keep the OAuth client'],
+              ['set', 'Change the OAuth client'],
+              ['remove', 'Remove the OAuth client (stop getting tokens)'],
+            ] as const
+          ).map(([value, label]) => (
+            <label key={value} className="flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name={`${prefix}-oauth-change`}
+                checked={change === value}
+                onChange={() => onChangeChange(value)}
+              />
+              {label}
+            </label>
+          ))}
+        </>
+      ) : (
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id={`${prefix}-oauth`}
+            checked={change === 'set'}
+            onChange={(e) => onChangeChange(e.target.checked ? 'set' : 'keep')}
+          />
+          <Label htmlFor={`${prefix}-oauth`} className="font-normal">
+            Get an OAuth access token for each delivery
+          </Label>
+        </div>
+      )}
+      {change === 'set' ? (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field
+            id={`${prefix}-oauth-token-url`}
+            label="Token URL"
+            description="The authorization server’s https:// token endpoint."
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                type="url"
+                inputMode="url"
+                maxLength={WEBHOOK_LIMITS.urlLength}
+                autoComplete="off"
+                placeholder="https://auth.example.com/oauth2/token"
+                value={fields.tokenUrl}
+                onChange={(e) => set({ tokenUrl: e.target.value })}
+              />
+            )}
+          </Field>
+          <Field id={`${prefix}-oauth-client-id`} label="Client ID">
+            {(aria) => (
+              <Input
+                {...aria}
+                maxLength={WEBHOOK_LIMITS.oauthClientIdLength}
+                autoComplete="off"
+                value={fields.clientId}
+                onChange={(e) => set({ clientId: e.target.value })}
+              />
+            )}
+          </Field>
+          <Field
+            id={`${prefix}-oauth-client-secret`}
+            label="Client secret"
+            description={
+              stored
+                ? 'Leave empty to keep the stored secret, unless the token URL changes.'
+                : undefined
+            }
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                type="password"
+                maxLength={WEBHOOK_LIMITS.oauthClientSecretLength}
+                autoComplete="new-password"
+                value={fields.clientSecret}
+                onChange={(e) => set({ clientSecret: e.target.value })}
+              />
+            )}
+          </Field>
+          <Field
+            id={`${prefix}-oauth-scope`}
+            label="Scope"
+            description="Optional: the values the server expects, separated by spaces."
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                maxLength={WEBHOOK_LIMITS.oauthScopeLength}
+                autoComplete="off"
+                value={fields.scope}
+                onChange={(e) => set({ scope: e.target.value })}
+              />
+            )}
+          </Field>
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
+/** The fields for a client: the stored one's, without its secret, or empty. */
+const oauthFieldsOf = (stored: WebhookEndpointOAuth | null | undefined): OAuthFields => ({
+  tokenUrl: stored?.tokenUrl ?? '',
+  clientId: stored?.clientId ?? '',
+  clientSecret: '',
+  scope: stored?.scope ?? '',
+});
+
 /**
  * Adds an endpoint, or edits one (`endpoint` given). A new endpoint's secret is shown here once,
  * and stays on screen after the list updates.
@@ -690,6 +850,7 @@ export function WebhookEndpointForm({
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
     channelIds: string[] | null;
+    oauth: WebhookEndpointOAuth | null;
   };
   /** The company's published automations, which an endpoint can choose (ADR-145). */
   automationChoices: WebhookAutomationChoice[];
@@ -732,6 +893,9 @@ export function WebhookEndpointForm({
   const [headers, setHeaders] = useState<HeaderRow[]>([]);
   // Changing an endpoint keeps its headers unless they are given again.
   const [replaceHeaders, setReplaceHeaders] = useState(false);
+  // And its OAuth client unless it is changed or removed (ADR-173).
+  const [oauthChange, setOAuthChange] = useState<OAuthChange>('keep');
+  const [oauthFields, setOAuthFields] = useState<OAuthFields>(oauthFieldsOf(endpoint?.oauth));
   const [error, setError] = useState<ActionFailureState | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -826,21 +990,39 @@ export function WebhookEndpointForm({
           setBusy(false);
           if (!r.ok) setError(r);
         };
+        // The OAuth client to set (ADR-173); an empty secret keeps the stored one.
+        const oauth = {
+          tokenUrl: oauthFields.tokenUrl,
+          clientId: oauthFields.clientId,
+          scope: oauthFields.scope,
+          ...(oauthFields.clientSecret ? { clientSecret: oauthFields.clientSecret } : {}),
+        };
         if (endpoint) {
           void updateWebhookEndpointAction(slug, {
             ...input,
             endpointId: endpoint.id,
             ...(replaceHeaders ? { headers } : {}),
+            ...(oauthChange === 'set'
+              ? { oauth }
+              : oauthChange === 'remove'
+                ? { oauth: null }
+                : {}),
           }).then((r) => {
             done(r);
             if (r.ok) {
               setSaved('Endpoint saved.');
               setHeaders([]);
               setReplaceHeaders(false);
+              setOAuthChange('keep');
+              setOAuthFields((fields) => ({ ...fields, clientSecret: '' }));
             }
           });
         } else {
-          void createWebhookEndpointAction(slug, { ...input, headers }).then((r) => {
+          void createWebhookEndpointAction(slug, {
+            ...input,
+            headers,
+            oauth: oauthChange === 'set' ? oauth : null,
+          }).then((r) => {
             done(r);
             if (r.ok) {
               setSecret(r.data.secret);
@@ -860,6 +1042,8 @@ export function WebhookEndpointForm({
               setEveryChannel(true);
               setChannelIds([]);
               setHeaders([]);
+              setOAuthChange('keep');
+              setOAuthFields(oauthFieldsOf(null));
             }
           });
         }
@@ -980,6 +1164,14 @@ export function WebhookEndpointForm({
           <HeaderRows prefix={prefix} rows={headers} onChange={setHeaders} />
         )}
       </fieldset>
+      <OAuthClientFields
+        prefix={prefix}
+        stored={endpoint?.oauth ?? null}
+        change={oauthChange}
+        onChangeChange={setOAuthChange}
+        fields={oauthFields}
+        onFieldsChange={setOAuthFields}
+      />
       <div>
         <Button type="submit" disabled={busy || !url.trim() || eventTypes.length === 0}>
           {endpoint ? (busy ? 'Saving…' : 'Save endpoint') : busy ? 'Adding…' : 'Add endpoint'}

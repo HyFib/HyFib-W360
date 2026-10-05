@@ -87,7 +87,10 @@ export type WebhookRunEndStatus = 'completed' | 'handed_off' | 'taken_over' | 's
 export const WEBHOOK_DELIVERY_STATES = ['pending', 'delivering', 'succeeded', 'failed'] as const;
 export type WebhookDeliveryState = (typeof WEBHOOK_DELIVERY_STATES)[number];
 
-/** A company's webhook endpoint (migration 0025); the secret is encrypted by the keyring. */
+/**
+ * A company's webhook endpoint (migration 0025); its secrets (signing, headers, OAuth client) are
+ * encrypted by the keyring.
+ */
 export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   id: uuid('id').primaryKey(),
   tenantId: uuid('tenant_id').notNull(),
@@ -153,6 +156,15 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * while one of those is among its events.
    */
   channelAccountIds: uuid('channel_account_ids').array(),
+  /**
+   * The endpoint's OAuth client (ADR-173): its authorization server's token endpoint, the client
+   * identifier, the secret encrypted by the keyring and the scope to ask for (null: none). All
+   * null without OAuth; the scope alone is optional.
+   */
+  oauthTokenUrl: text('oauth_token_url'),
+  oauthClientId: text('oauth_client_id'),
+  oauthClientSecretCiphertext: text('oauth_client_secret_ciphertext'),
+  oauthScope: text('oauth_scope'),
   state: text('state', { enum: ['active', 'disabled'] })
     .notNull()
     .default('active'),

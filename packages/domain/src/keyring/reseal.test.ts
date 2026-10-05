@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { Keyring } from '@w360/core';
@@ -29,11 +29,16 @@ const ring = (primary: string, ...ids: string[]) =>
 const clock = { now: () => new Date('2026-10-03T12:00:00Z') };
 
 describe('the sealed values the sweep re-encrypts (ADR-134)', () => {
-  it('lists the same kinds as the migration that finds and counts them', () => {
-    const migration = readFileSync(
-      new URL('../../../db/migrations/0101_keyring_reseal.sql', import.meta.url),
-      'utf8',
-    );
+  it('lists the same kinds as the latest migration that finds and counts them', () => {
+    const migrations = new URL('../../../db/migrations/', import.meta.url);
+    const defining = readdirSync(migrations)
+      .filter((name) => name.endsWith('.sql'))
+      .sort()
+      .map((name) => readFileSync(new URL(name, migrations), 'utf8'))
+      .filter((sql) => sql.includes('CREATE FUNCTION ops.sealed_value_keys()'));
+    // 0101 and 0121 (the OAuth client secrets) so far.
+    expect(defining.length).toBeGreaterThanOrEqual(2);
+    const migration = defining.at(-1)!;
     const body = migration.slice(migration.indexOf('CREATE FUNCTION ops.sealed_value_keys()'));
     const kinds = [...body.matchAll(/^\s+SELECT '([a-z_]+)'(?:::text)?,/gm)].map((m) => m[1]);
     expect(kinds).toEqual([...SEALED_VALUE_KINDS]);

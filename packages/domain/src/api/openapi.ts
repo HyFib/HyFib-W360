@@ -530,6 +530,16 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       "The WhatsApp numbers whose message, conversation, automation run, order and campaign events the endpoint receives; null receives every number's, including numbers connected later. Consent, contact and template events are not narrowed.",
     ),
+  oauth: z
+    .object({
+      tokenUrl: z.string().describe('Where HyFib asks for access tokens.'),
+      clientId: z.string(),
+      scope: z.string().nullable().describe('The scope it asks for; null: none.'),
+    })
+    .nullable()
+    .describe(
+      'The OAuth 2.0 client whose access tokens are sent as `Authorization: Bearer <token>` with every delivery (the client credentials grant); null: none. The secret is never shown.',
+    ),
   apiKeyId: z.uuid().describe('The API key that added the endpoint.'),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
@@ -545,7 +555,7 @@ export const apiWebhookDeliverySchema = z.object({
   status: z
     .enum(WEBHOOK_DELIVERY_STATES)
     .describe(
-      'pending: waiting for its next attempt; delivering: an attempt is under way; succeeded: the endpoint answered 2xx; failed: every attempt failed, the endpoint was turned off, the event is gone, or HyFib could not prepare the request (build or sign it, or open the endpoint’s headers).',
+      'pending: waiting for its next attempt; delivering: an attempt is under way; succeeded: the endpoint answered 2xx; failed: every attempt failed, the endpoint was turned off, the event is gone, or HyFib could not prepare the request (build or sign it, or open the endpoint’s headers or OAuth client).',
     ),
   attempts: z.number().int(),
   nextAttemptAt: z.iso
@@ -558,7 +568,7 @@ export const apiWebhookDeliverySchema = z.object({
     .string()
     .nullable()
     .describe(
-      'Why the last attempt failed, or why the delivery ended without one, as a code (for example `invalid_status`, `timeout`, `endpoint_disabled`, `event_gone`, or `payload_failed`: HyFib could not prepare the request (build or sign it, or open the endpoint’s headers), which a replay sends once the cause is fixed).',
+      'Why the last attempt failed, or why the delivery ended without one, as a code (for example `invalid_status`, `timeout`, `endpoint_disabled`, `event_gone`, or `payload_failed`: HyFib could not prepare the request (build or sign it, or open the endpoint’s headers or OAuth client), which a replay sends once the cause is fixed). An endpoint with an OAuth client that got no access token fails the attempt without sending it: `oauth_token_refused_<status>` (the authorization server answered with that status), `oauth_token_invalid` (it answered 200 without a usable bearer token), or `oauth_token_` and the code of the request that failed (such as `oauth_token_timeout`).',
     ),
   lastDurationMs: z.number().int().nullable(),
   deliveredAt: z.iso.datetime().nullable(),
@@ -723,7 +733,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         '',
         `POST /messages needs an \`Idempotency-Key\` header: a retry with the same key and body returns the first response (header \`Idempotent-Replayed: true\`) and never sends twice; responses are kept ${API_LIMITS.idempotencyHours} hours. Delivery itself follows WhatsApp: read the status with GET /messages/{id}.`,
         '',
-        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact and template event it takes.`,
+        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact and template event it takes.`,
       ].join('\n'),
     },
     servers: [{ url: serverUrl }],

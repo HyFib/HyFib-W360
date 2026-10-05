@@ -15,6 +15,7 @@ import {
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   webhookChannelText,
+  webhookOAuthText,
   webhookHost,
   type WebhookEndpointView,
 } from '@w360/domain';
@@ -195,6 +196,11 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                     {e.headerNames.length > 0 ? (
                       <p className="text-xs text-muted-foreground">
                         Headers sent: {e.headerNames.join(', ')} (values hidden)
+                      </p>
+                    ) : null}
+                    {e.oauth ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        {webhookOAuthText(e.oauth)}
                       </p>
                     ) : null}
                     <p className="flex flex-wrap gap-1">

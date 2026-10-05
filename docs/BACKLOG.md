@@ -701,10 +701,14 @@ verification, app review, Embedded Signup configuration).
   only in CI]** (ADR-172: an endpoint takes `message.status` only for the messages members,
   automations, campaigns, the API or HyFib sent, as it chooses, in Settings or through the API, or
   every message's as before; applied where events are captured, with the statuses and numbers it
-  names). Remaining: filters for other event types and on a message's
+  names). **[OAuth client credentials built; their database tests run only in CI]** (ADR-173: an
+  endpoint gets an access token from its receiver's authorization server as the client a member or
+  key sets, and sends it as a bearer token with every delivery; the secret sealed and needed again
+  for a new token URL, tokens kept in the worker's memory only). Remaining: filters for other event
+  types and on a message's
   or contact's values (such as by campaign, template, team, assigned member, tag or field key, or a
-  run's trigger or end reason), which tags were added or removed, other authentication (OAuth client
-  credentials, headers computed per delivery), mutual TLS, fixed egress addresses, events for store
+  run's trigger or end reason), which tags were added or removed, other authentication (headers
+  computed per delivery, other OAuth grants), mutual TLS, fixed egress addresses, events for store
   orders, Payment Links and each step of a run, `createdAt` finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number

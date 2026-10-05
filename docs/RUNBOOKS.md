@@ -2183,6 +2183,20 @@ senders under "Message status" on the endpoint's page (every sender ticked takes
 or `PATCH /webhook-endpoints/{id}` with `messageSenders` (null for every sender). Removing the
 `message.status` event clears the list.
 
+**Deliveries fail with `oauth_token_…`, or a receiver keeps answering 401 (ADR-173).** An endpoint
+with an OAuth client gets an access token from its token URL before its deliveries; when none comes,
+the attempt fails without calling the endpoint and is retried on the usual schedule.
+`oauth_token_refused_401` or `_400`: the authorization server refused the client ID, the secret or
+the scope; `oauth_token_refused_404` or a 3xx: the token URL is wrong (redirects are not followed);
+`oauth_token_invalid`: it answered 200 without a bearer token (an HTML page, or a token type other
+than Bearer); `oauth_token_timeout`, `_dns_failed`, `_connect_failed` or `_address_blocked`: the
+token URL cannot be reached, or is not a public https address. Check the client with the receiver's
+owner and change it on the endpoint's page ("Change the OAuth client"; a new token URL needs the
+secret again), or `PATCH /webhook-endpoints/{id}` with `oauth`. A token the endpoint answers 401 to
+is dropped and a new one is asked for at the next attempt; a 401 every time means the receiver does
+not accept the server's tokens (often the scope). Tokens live in each worker's memory, so restarting
+workers makes them ask again. Replay what failed meanwhile with the "No valid answer" failures.
+
 **A campaign event's results differ from the campaign page (ADR-150).** `campaign.results` are
 counted when the request is built (the `t` of its `W360-Signature`), as `GET /campaigns/{id}` counts
 them, and a retry or a replay counts again: an event delivered while the campaign's messages were on
@@ -2624,6 +2638,14 @@ all back (usually the bootstrap roles, or a lock held on the table: fix it and r
 again). Web servers of this release need it before they start, or Settings → Webhooks and the
 endpoints API fail (their reads of endpoints name the column); workers of either release and web
 servers of the previous release work with it.
+
+**Migration 0121 failed.** It adds the four OAuth columns to `app.webhook_endpoints` with the check
+`webhook_endpoints_oauth`, grants their updates to the runtime role, and drops and creates
+`ops.sealed_value_keys()` as the definer role, in one transaction; a failure rolls it all back
+(usually the bootstrap roles: the migration role must be able to `SET ROLE w360_definer`; or a lock
+held on the table: fix it and run the migrations again). Workers and web servers of this release
+need it before they start (their reads of endpoints name the columns); those of the previous release
+work with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates
