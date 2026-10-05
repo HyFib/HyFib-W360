@@ -256,6 +256,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       messageStatuses: null,
       messageSenders: null,
       contactParts: null,
+      contactFieldKeys: null,
       automationIds: null,
       campaignStatuses: null,
       orderStatuses: null,
@@ -1443,6 +1444,106 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { messageSenders: [] }))).toMatchObject({
       path: 'messageSenders',
+    });
+  });
+
+  it('choose the custom fields whose changes an endpoint receives, kept by changes that leave them out, a deleted one included, and cleared with the parts (ADR-184)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const fieldOf = async (company: Company, fieldKey: string, label: string) => {
+      await fx.query(
+        `INSERT INTO app.contact_fields (id, tenant_id, key, label, type) VALUES ($1, $2, $3, $4, 'text')`,
+        [uuidv7(), company.tenant.id, fieldKey, label],
+      );
+      return fieldKey;
+    };
+    const city = await fieldOf(c, 'city', 'City');
+    const tier = await fieldOf(c, 'tier', 'Tier');
+    await fieldOf(await fx.company(), 'zone', 'Zone');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Fields need contact.updated for every part or for fields, at least one, each a key of the
+    // company's fields (named by place).
+    const refusals = [
+      [{ events: ['contact.created'], contactFieldKeys: [city] }, 'contactFieldKeys'],
+      [
+        { events: ['contact.updated'], contactParts: ['email'], contactFieldKeys: [city] },
+        'contactFieldKeys',
+      ],
+      [{ events: ['contact.updated'], contactFieldKeys: [] }, 'contactFieldKeys'],
+      [{ events: ['contact.updated'], contactFieldKeys: [city, 'City'] }, 'contactFieldKeys.1'],
+      [{ events: ['contact.updated'], contactFieldKeys: [city, 'zone'] }, 'contactFieldKeys.1'],
+    ] as const;
+    for (const [index, [fields, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), ...fields },
+            idem(`fields-bad-${index}`, JSON.stringify(fields)),
+          ),
+        ),
+        JSON.stringify(fields),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'fields-1', {
+      url: receiverUrl(),
+      events: ['contact.updated'],
+      contactFieldKeys: [tier, city, tier],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.contactFieldKeys).toEqual([tier, city]);
+    expect((await api().get(key.ctx, id)).contactFieldKeys).toEqual([tier, city]);
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { contactFieldKeys?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => a.metadata.contactFieldKeys);
+    expect(await audits('webhook.endpoint_created')).toEqual([[tier, city]]);
+    // A field deleted since stays, and Settings says so; once off the list it is refused.
+    await fx.query('DELETE FROM app.contact_fields WHERE tenant_id = $1 AND key = $2', [
+      c.tenant.id,
+      tier,
+    ]);
+    const owner = await fx.ctx(c, c.owner);
+    expect((await settings().list(owner)).find((e) => e.id === id)?.contactFields).toEqual([
+      { key: tier, label: null },
+      { key: city, label: 'City' },
+    ]);
+    expect(await api().update(key.ctx, id, { description: 'Field sync' })).toMatchObject({
+      contactFieldKeys: [tier, city],
+    });
+    expect(await api().update(key.ctx, id, { contactFieldKeys: [city] })).toMatchObject({
+      contactFieldKeys: [city],
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { contactFieldKeys: [city, tier] })),
+    ).toMatchObject({ path: 'contactFieldKeys.1' });
+    expect(await audits('webhook.endpoint_updated')).toEqual([[tier, city], [city]]);
+    // Parts with fields keep the list; parts without clear it, and fields given with them are
+    // refused.
+    expect(await api().update(key.ctx, id, { contactParts: ['name', 'fields'] })).toMatchObject({
+      contactFieldKeys: [city],
+    });
+    expect(await api().update(key.ctx, id, { contactParts: ['name'] })).toMatchObject({
+      contactParts: ['name'],
+      contactFieldKeys: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { contactFieldKeys: [city] }))).toMatchObject({
+      path: 'contactFieldKeys',
+    });
+    expect(
+      await api().update(key.ctx, id, { contactParts: null, contactFieldKeys: [city] }),
+    ).toMatchObject({ contactParts: null, contactFieldKeys: [city] });
+    expect(await api().update(key.ctx, id, { contactFieldKeys: null })).toMatchObject({
+      contactFieldKeys: null,
     });
   });
 

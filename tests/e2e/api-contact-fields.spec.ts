@@ -92,6 +92,19 @@ test('a key sets and changes a contact’s custom fields, the contact page shows
   await expect(secretField).toBeVisible();
   const secret = await secretField.inputValue();
   await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  // And one for the changes of the Orders field only (ADR-184).
+  const ordersPath = `${path}/orders`;
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${ordersPath}`);
+  await page.getByRole('checkbox', { name: /Contact changed/ }).check();
+  await page.getByRole('radio', { name: /Only the changes of the fields ticked/ }).check();
+  await page.getByRole('checkbox', { name: 'Orders (orders)', exact: true }).check();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await expect(page.getByLabel('Signing secret')).toBeVisible();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  await page.reload();
+  await expect(
+    page.getByText('Custom fields whose changes are sent: Orders (orders)'),
+  ).toBeVisible();
 
   // A key that reads and changes contacts.
   await page.goto(`/c/${slug}/settings/api-keys`);
@@ -184,6 +197,17 @@ test('a key sets and changes a contact’s custom fields, the contact page shows
     expect(r.json.data.contact.id).toBe(contact.id);
   }
   expect(forUs().at(-1)?.json.data.contact.fields).toEqual({ city: 'Delhi', orders: 3 });
+  // The Orders endpoint hears the key's change of orders (and the tag saved with it), not the
+  // member's change of the city.
+  const forOrders = () =>
+    received
+      .filter((r) => r.path === ordersPath)
+      .map((r) => JSON.parse(r.body) as { type: string; data: { changes: string[] } });
+  await expect(async () => expect(forOrders()).toHaveLength(1)).toPass({ timeout: 60_000 });
+  expect(forOrders()[0]).toMatchObject({
+    type: 'contact.updated',
+    data: { changes: ['fields.orders', 'tags'] },
+  });
 
   // The key reads the member's change.
   const read = await request.get(`/api/v1/contacts/${contact.id}`, { headers: auth });

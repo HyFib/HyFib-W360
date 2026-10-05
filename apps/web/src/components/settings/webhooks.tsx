@@ -29,11 +29,13 @@ import {
   WEBHOOK_TEMPLATE_STATUSES,
   webhookAssigneeText,
   webhookChannelText,
+  webhookFieldText,
   webhookOAuthText,
   webhookReplayAllSummary,
   webhookReplaySummary,
   webhookTakesAutomationRuns,
   webhookTakesChannelEvents,
+  webhookTakesFieldChanges,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   webhookTeamText,
@@ -45,10 +47,12 @@ import {
   type WebhookContactPart,
   type WebhookConversationStatus,
   type WebhookEndpointAssignee,
+  type WebhookEndpointField,
   type WebhookEndpointOAuth,
   type WebhookEndpointTeam,
   type WebhookEventType,
   type WebhookFailureKind,
+  type WebhookFieldChoice,
   type WebhookMessageSender,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
@@ -329,6 +333,104 @@ function PartChoices({
           </div>
         );
       })}
+    </fieldset>
+  );
+}
+
+/**
+ * The custom fields whose changes an endpoint takes as `contact.updated` (ADR-184), shown while it
+ * takes field changes: every field's, or those of the fields ticked. A field deleted since it was
+ * chosen stays listed, ticked, until it is unticked.
+ */
+function FieldChoices({
+  prefix,
+  choices,
+  stored,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  choices: WebhookFieldChoice[];
+  /** The fields the endpoint names now, so a deleted one stays listed until it is saved without. */
+  stored: readonly WebhookEndpointField[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const listed = [
+    ...choices.map((c) => ({ key: c.key, text: webhookFieldText(c) })),
+    ...stored
+      .filter((f) => f.label === null)
+      .map((f) => ({ key: f.key, text: webhookFieldText(f) })),
+  ];
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Custom fields</legend>
+      <p className="text-xs text-muted-foreground">
+        A change of a custom field is sent only for the fields ticked; changes of the other parts of
+        a contact are sent as chosen under Contact changed.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-fields`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every custom field’s changes
+          <span className="block text-xs text-muted-foreground">Including fields added later.</span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-fields`}
+          className="mt-1"
+          checked={!every}
+          disabled={listed.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only the changes of the fields ticked
+          {listed.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">
+              The company has no custom field yet.
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid max-h-64 gap-1 overflow-y-auto">
+          {listed.map((f) => {
+            const id = `${prefix}-field-${f.key}`;
+            return (
+              <div key={f.key} className="flex items-center gap-2">
+                <Checkbox
+                  id={id}
+                  checked={chosen.includes(f.key)}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? listed
+                            .filter((l) => l.key === f.key || chosen.includes(l.key))
+                            .map((l) => l.key)
+                        : chosen.filter((x) => x !== f.key),
+                    )
+                  }
+                />
+                <Label htmlFor={id} className="font-normal break-all">
+                  {f.text}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
     </fieldset>
   );
 }
@@ -1183,6 +1285,7 @@ export function WebhookEndpointForm({
   teamChoices,
   templateChoices,
   assigneeChoices,
+  contactFieldChoices,
   atLimit = false,
 }: {
   slug: string;
@@ -1195,6 +1298,8 @@ export function WebhookEndpointForm({
     messageStatuses: WebhookMessageStatus[] | null;
     messageSenders: WebhookMessageSender[] | null;
     contactParts: WebhookContactPart[] | null;
+    /** The custom fields it names (ADR-184), deleted ones without a label; null for every field. */
+    contactFields: WebhookEndpointField[] | null;
     automationIds: string[] | null;
     campaignStatuses: WebhookCampaignStatus[] | null;
     orderStatuses: WebhookOrderStatus[] | null;
@@ -1222,6 +1327,8 @@ export function WebhookEndpointForm({
   templateChoices: WebhookTemplateChoice[];
   /** The company's members who take conversations, whom an endpoint can choose (ADR-181). */
   assigneeChoices: WebhookAssigneeChoice[];
+  /** The company's custom fields, which an endpoint can choose (ADR-184). */
+  contactFieldChoices: WebhookFieldChoice[];
   atLimit?: boolean;
 }) {
   const prefix = useId();
@@ -1264,6 +1371,10 @@ export function WebhookEndpointForm({
   const [everyTemplate, setEveryTemplate] = useState(!endpoint?.templateIds);
   const [templateIds, setTemplateIds] = useState<string[]>(endpoint?.templateIds ?? []);
   const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
+  const [everyField, setEveryField] = useState(!endpoint?.contactFields);
+  const [fieldKeys, setFieldKeys] = useState<string[]>(
+    endpoint?.contactFields?.map((f) => f.key) ?? [],
+  );
   const [assigneeIds, setAssigneeIds] = useState<string[]>(
     endpoint?.assignees?.map((m) => m.id) ?? [],
   );
@@ -1312,6 +1423,9 @@ export function WebhookEndpointForm({
           eventTypes.includes('contact.updated') && parts.length < WEBHOOK_CONTACT_PARTS.length
             ? parts
             : null;
+        // Every custom field's changes unless the fields ticked are chosen (ADR-184).
+        const chosenFields =
+          webhookTakesFieldChanges(eventTypes, contactParts) && !everyField ? fieldKeys : null;
         // Every automation's runs unless the automations ticked are chosen (ADR-145).
         const chosenAutomations =
           webhookTakesAutomationRuns(eventTypes) && !everyAutomation ? automationIds : null;
@@ -1368,6 +1482,7 @@ export function WebhookEndpointForm({
           messageStatuses,
           messageSenders,
           contactParts,
+          contactFieldKeys: chosenFields,
           automationIds: chosenAutomations,
           campaignStatuses: chosenCampaignStatuses,
           orderStatuses: chosenOrderStatuses,
@@ -1442,6 +1557,8 @@ export function WebhookEndpointForm({
               setTemplateIds([]);
               setEveryAssignee(true);
               setAssigneeIds([]);
+              setEveryField(true);
+              setFieldKeys([]);
               setHeaders([]);
               setOAuthChange('keep');
               setOAuthFields(oauthFieldsOf(null));
@@ -1509,6 +1626,17 @@ export function WebhookEndpointForm({
         runEndStatuses={runEndStatuses}
         onRunEndStatusesChange={setRunEndStatuses}
       />
+      {webhookTakesFieldChanges(eventTypes, parts) ? (
+        <FieldChoices
+          prefix={prefix}
+          choices={contactFieldChoices}
+          stored={endpoint?.contactFields ?? []}
+          every={everyField}
+          onEveryChange={setEveryField}
+          chosen={fieldKeys}
+          onChange={setFieldKeys}
+        />
+      ) : null}
       {webhookTakesAutomationRuns(eventTypes) ? (
         <AutomationChoices
           prefix={prefix}

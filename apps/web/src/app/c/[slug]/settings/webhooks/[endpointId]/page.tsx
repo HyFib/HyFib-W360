@@ -49,6 +49,7 @@ export default async function WebhookEndpointPage({
     teamChoices,
     templateChoices,
     assigneeChoices,
+    contactFieldChoices,
   ] = await Promise.all([
     webhooks.deliveries(ctx, { endpointId, failedOnly }),
     webhooks.automationChoices(ctx),
@@ -56,6 +57,7 @@ export default async function WebhookEndpointPage({
     webhooks.teamChoices(ctx),
     webhooks.templateChoices(ctx),
     webhooks.assigneeChoices(ctx),
+    webhooks.contactFieldChoices(ctx),
   ]);
   const tz = ctx.tenant.timezone;
   const host = webhookHost(endpoint.url) ?? endpoint.url;
@@ -195,6 +197,7 @@ export default async function WebhookEndpointPage({
               messageStatuses: endpoint.messageStatuses,
               messageSenders: endpoint.messageSenders,
               contactParts: endpoint.contactParts,
+              contactFields: endpoint.contactFields,
               automationIds: endpoint.automations?.map((a) => a.id) ?? null,
               campaignStatuses: endpoint.campaignStatuses,
               orderStatuses: endpoint.orderStatuses,
@@ -213,6 +216,7 @@ export default async function WebhookEndpointPage({
             teamChoices={teamChoices}
             templateChoices={templateChoices}
             assigneeChoices={assigneeChoices}
+            contactFieldChoices={contactFieldChoices}
           />
         </CardContent>
       </Card>

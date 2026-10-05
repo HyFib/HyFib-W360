@@ -489,6 +489,12 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       'The parts of a contact whose change the endpoint receives as contact.updated (fields: a change of any custom field); null receives every change, including parts added later.',
     ),
+  contactFieldKeys: z
+    .array(z.string())
+    .nullable()
+    .describe(
+      'The custom fields (their keys, as GET /contact-fields lists them) whose value changes the endpoint receives as contact.updated; null receives every field’s, including fields added later. Changes of the other parts are not narrowed.',
+    ),
   automationIds: z
     .array(z.uuid())
     .nullable()

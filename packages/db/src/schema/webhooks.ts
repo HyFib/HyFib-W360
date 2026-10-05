@@ -128,6 +128,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   contactParts: text('contact_parts').array().$type<WebhookContactPart[]>(),
   /**
+   * The custom fields (keys) whose changes it takes as `contact.updated` (ADR-184); null takes every
+   * field's. Set only while it takes `contact.updated` for every part or for `fields`.
+   */
+  contactFieldKeys: text('contact_field_keys').array(),
+  /**
    * The automations whose runs it takes as `automation.run_started` and `automation.run_ended`
    * (ADR-145); null takes every automation. Set only while one of those is among its events.
    */

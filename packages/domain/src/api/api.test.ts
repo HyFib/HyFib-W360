@@ -106,6 +106,7 @@ import {
   endpointAnnouncement,
 } from './webhook-endpoints';
 import {
+  WEBHOOK_FIELDS_NEED_THE_PART,
   WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
   WEBHOOK_ASSIGNEES_NEED_THE_EVENTS,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
@@ -1357,6 +1358,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'automationIds',
       'campaignStatuses',
       'channelIds',
+      'contactFieldKeys',
       'contactParts',
       'conversationStatuses',
       'description',
@@ -1619,6 +1621,57 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(doc.info.description).toContain(
       'And it can name templates (its `templateIds`): then it receives the statuses of the messages sent with them and their changes only.',
     );
+  });
+
+  it('take custom fields only with contact.updated for every part or for fields, each once, and a list of them alone is a change (ADR-184)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.updated'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, contactFieldKeys: ['tier', 'city', 'tier'] })
+        .contactFieldKeys,
+    ).toEqual(['tier', 'city']);
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        contactParts: ['email', 'fields'],
+        contactFieldKeys: ['city'],
+      }).contactFieldKeys,
+    ).toEqual(['city']);
+    // Parts without fields, or no contact.updated, take no field changes to narrow.
+    for (const body of [
+      { ...base, contactParts: ['email', 'tags'], contactFieldKeys: ['city'] },
+      { ...base, events: ['contact.created'], contactFieldKeys: ['city'] },
+    ]) {
+      const refused = apiCreateWebhookEndpointSchema.safeParse(body);
+      expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toContainEqual([
+        'contactFieldKeys',
+        WEBHOOK_FIELDS_NEED_THE_PART,
+      ]);
+    }
+    for (const contactFieldKeys of [[], ['City'], ['fields.city']]) {
+      expect(
+        apiCreateWebhookEndpointSchema.safeParse({ ...base, contactFieldKeys }).success,
+        JSON.stringify(contactFieldKeys),
+      ).toBe(false);
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ contactFieldKeys: null })).toEqual({
+      contactFieldKeys: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ contactFieldKeys: ['tier'] })).toEqual({
+      contactFieldKeys: ['tier'],
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.contactFieldKeys?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('contactFieldKeys');
+    const created = schemas.CreateWebhookEndpoint as {
+      properties: Record<string, { description?: string }>;
+    };
+    expect(created.properties.contactFieldKeys?.description).toContain('GET /contact-fields');
   });
 
   it('take what started the runs only with a run event, each once, and a list of them alone is a change (ADR-183)', () => {

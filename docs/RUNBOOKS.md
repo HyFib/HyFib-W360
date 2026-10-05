@@ -2105,6 +2105,16 @@ every change, including parts added later), or `PATCH /webhook-endpoints/{id}` w
 for a contact's whole transaction and names every part it changed, so an endpoint taking only
 emails also receives an event that changed the email and the tags, naming both.
 
+**A receiver misses a custom field's changes (ADR-184).** An endpoint can take the changes of chosen
+custom fields only. The endpoints list shows them ("Custom fields whose changes are sent: …"), and
+the API answers `contactFieldKeys` (null takes every field's). A change of another field is never
+queued for the endpoint (one that also changed a part the endpoint takes is, naming every part), and
+when no endpoint of the company takes a change, it is not recorded for it, so there is nothing to
+replay. A field deleted since it was chosen shows as "… (deleted)". To take more, tick the fields
+under "Custom fields" on the endpoint's page or choose "Every custom field’s changes", or
+`PATCH /webhook-endpoints/{id}` with `contactFieldKeys` (null for every field). Leaving out Contact
+changed, or its custom field values, clears the list.
+
 **A receiver gets no automation run events for an automation (ADR-145).** An endpoint can take
 the runs of chosen automations only; the endpoints list shows them ("Automation runs sent: …",
 archived ones marked), and the API answers `automationIds` (null takes every automation's runs). A
@@ -2807,6 +2817,14 @@ rolls it all back (usually the bootstrap roles, or a lock held on the table: fix
 migrations again). Web servers of this release need it before they start, or Settings → Webhooks and
 the endpoints API fail (their reads of endpoints name the column); workers of either release and web
 servers of the previous release work with it.
+
+**Migration 0132 failed.** It adds `contact_field_keys` to `app.webhook_endpoints` with the check
+`webhook_endpoints_contact_field_keys`, grants its update to the runtime role, and replaces
+`app.capture_contact_webhook_event`, in one transaction; a failure rolls it all back (usually the
+bootstrap roles, or a lock held on the table: fix it and run the migrations again). Web servers of
+this release need it before they start, or Settings → Webhooks and the endpoints API fail (their
+reads of endpoints name the column); workers of either release and web servers of the previous
+release work with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

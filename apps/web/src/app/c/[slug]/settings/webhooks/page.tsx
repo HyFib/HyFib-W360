@@ -17,6 +17,7 @@ import {
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   webhookAssigneeText,
   webhookChannelText,
+  webhookFieldText,
   webhookOAuthText,
   webhookHost,
   webhookTeamText,
@@ -57,6 +58,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
     teamChoices,
     templateChoices,
     assigneeChoices,
+    contactFieldChoices,
   ] = await Promise.all([
     webhooks.list(ctx),
     webhooks.automationChoices(ctx),
@@ -64,6 +66,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
     webhooks.teamChoices(ctx),
     webhooks.templateChoices(ctx),
     webhooks.assigneeChoices(ctx),
+    webhooks.contactFieldChoices(ctx),
   ]);
   const tz = ctx.tenant.timezone;
   const base = `/c/${ctx.tenant.slug}/settings/webhooks`;
@@ -171,6 +174,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Contact changes sent:{' '}
                         {e.contactParts.map((p) => WEBHOOK_CONTACT_PART_LABELS[p]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.contactFields ? (
+                      <p className="text-xs text-muted-foreground">
+                        Custom fields whose changes are sent:{' '}
+                        {e.contactFields.map(webhookFieldText).join(', ')}
                       </p>
                     ) : null}
                     {e.orderStatuses ? (
@@ -354,6 +363,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
             teamChoices={teamChoices}
             templateChoices={templateChoices}
             assigneeChoices={assigneeChoices}
+            contactFieldChoices={contactFieldChoices}
             atLimit={endpoints.length >= WEBHOOK_LIMITS.endpoints}
           />
         </CardContent>

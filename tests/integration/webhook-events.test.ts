@@ -130,6 +130,7 @@ async function addEndpoint(
   runEndStatuses: string[] | null = null,
   channelIds: string[] | null = null,
   runTriggers: string[] | null = null,
+  contactFieldKeys: string[] | null = null,
 ) {
   const path = `/ok/${randomBytes(6).toString('hex')}`;
   const owner = await fx.ctx(c, c.owner);
@@ -144,6 +145,7 @@ async function addEndpoint(
     runEndStatuses,
     channelIds,
     runTriggers,
+    contactFieldKeys,
   });
   return { ...created, path };
 }
@@ -1250,6 +1252,76 @@ describe('contact part filters (ADR-123)', () => {
     );
     expect(bodiesAt(tags.path)).toHaveLength(2);
     expect(await eventsOf(other, 'contact.')).toEqual([]);
+  });
+});
+
+describe('custom field filters (ADR-184)', () => {
+  it('queue a field change only for the endpoints whose fields hold its key, other parts by the parts alone, and a later change in the transaction for those it newly concerns', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    await service.createField(owner, { label: 'City', key: 'city', type: 'text' });
+    await service.createField(owner, { label: 'Tier', key: 'tier', type: 'text' });
+    /** An endpoint for contact.updated with the parts and fields given. */
+    const add = (parts: WebhookContactPart[] | null, fields: string[] | null) =>
+      addEndpoint(c, ['contact.updated'], parts, null, null, null, null, null, null, null, fields);
+    const tierOnly = await add(['fields'], ['tier']);
+    const everyPartButTier = await add(null, ['tier']);
+    const every = await add(null, null);
+    const names = new Map([
+      [tierOnly.id, 'tierOnly'],
+      [everyPartButTier.id, 'everyPartButTier'],
+      [every.id, 'every'],
+    ]);
+    const { id: contactId } = await service.createContact(owner, {
+      displayName: 'Esha',
+      phone: '+919811100101',
+    });
+    const save = (change: Record<string, unknown>) =>
+      service.updateContact(owner, contactId, { displayName: 'Esha', ...change });
+    // The city alone, the tier alone, the email alone, then the city and the email in one save.
+    await save({ attributes: { city: 'Pune' } });
+    await save({ attributes: { city: 'Pune', tier: 'gold' } });
+    await save({ attributes: { city: 'Pune', tier: 'gold' }, email: 'esha@example.test' });
+    await save({ attributes: { city: 'Delhi', tier: 'gold' }, email: 'esha@example.org' });
+    // The city, then the tier, in one transaction: the tier's endpoints are queued with it.
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(sql`update app.contacts set attributes = attributes || '{"city": "Agra"}'
+        where id = ${contactId}::uuid`);
+      await tx.execute(sql`update app.contacts set attributes = attributes || '{"tier": "silver"}'
+        where id = ${contactId}::uuid`);
+    });
+    const updates = await fx.query<{ changes: string[]; endpoints: string[] }>(
+      `SELECT e.contact_changes AS changes,
+              coalesce((SELECT array_agg(d.endpoint_id::text) FROM app.webhook_deliveries d
+                         WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id), '{}') AS endpoints
+         FROM app.webhook_events e
+        WHERE e.tenant_id = $1 AND e.type = 'contact.updated' ORDER BY e.created_at, e.id`,
+      [c.tenant.id],
+    );
+    expect(
+      updates.map((u) => [u.changes, u.endpoints.map((id) => names.get(id) ?? id).sort()]),
+    ).toEqual([
+      [['fields.city'], ['every']],
+      [['fields.tier'], ['every', 'everyPartButTier', 'tierOnly']],
+      [['email'], ['every', 'everyPartButTier']],
+      [
+        ['email', 'fields.city'],
+        ['every', 'everyPartButTier'],
+      ],
+      [
+        ['fields.city', 'fields.tier'],
+        ['every', 'everyPartButTier', 'tierOnly'],
+      ],
+    ]);
+    // Each delivery still names every part that changed.
+    await deliverDue(c);
+    const changesAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) => (b.data.changes as string[]).join('+'))
+        .sort();
+    expect(changesAt(tierOnly.path)).toEqual(['fields.city+fields.tier', 'fields.tier']);
   });
 });
 

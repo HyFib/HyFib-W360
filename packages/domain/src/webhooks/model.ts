@@ -182,6 +182,34 @@ export const WEBHOOK_CONTACT_PARTS = [
   'fields',
 ] as const satisfies readonly WebhookContactPart[];
 
+/**
+ * Whether an endpoint with these events and parts takes changes of custom fields (ADR-184): it takes
+ * `contact.updated` for every part (null) or for `fields` among others, and can choose fields.
+ */
+export function webhookTakesFieldChanges(
+  eventTypes: readonly WebhookEventType[],
+  parts: readonly WebhookContactPart[] | null,
+): boolean {
+  return eventTypes.includes('contact.updated') && (parts === null || parts.includes('fields'));
+}
+
+/** A custom field of the company, which an endpoint can choose to take the changes of (ADR-184). */
+export interface WebhookFieldChoice {
+  key: string;
+  label: string;
+}
+
+/** A custom field an endpoint takes the changes of (ADR-184), as stored. */
+export interface WebhookEndpointField {
+  key: string;
+  /** The field's label; null for a field deleted since it was chosen. */
+  label: string | null;
+}
+
+/** A field as Settings → Webhooks lists it: its label and key. */
+export const webhookFieldText = (field: WebhookEndpointField): string =>
+  field.label === null ? `${field.key} (deleted)` : `${field.label} (${field.key})`;
+
 /** How Settings names each part an endpoint can choose (ADR-123). */
 export const WEBHOOK_CONTACT_PART_LABELS: Record<WebhookContactPart, string> = {
   name: 'Name',
@@ -353,6 +381,8 @@ export const WEBHOOK_LIMITS = {
   templates: 50,
   /** The members an endpoint can choose to take the assigned conversations' events of (ADR-181). */
   assignees: 50,
+  /** The custom fields an endpoint can choose to take the changes of (ADR-184): every field. */
+  contactFields: 50,
   /**
    * An endpoint's OAuth client (ADR-173): its identifier, secret and scope, short enough that the
    * Basic header stays within what the egress client sends, and the longest token kept.

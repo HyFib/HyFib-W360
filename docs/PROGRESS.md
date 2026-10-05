@@ -1,5 +1,61 @@
 # Progress
 
+## 2026-10-05 — Phase 5: choosing the custom fields whose changes a webhook endpoint receives (P5-09, ADR-184)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers only).** An
+endpoint could take every custom field's changes or none. The local PostgreSQL is unavailable (its
+Docker daemon stopped), so migration 0132, the integration tests and the changed e2e test below were
+written but not run here.
+
+### Completed
+
+- **Design (ADR-184):** `contactFieldKeys`, null for every field or 1 to 50 of the company's field
+  keys, only while the endpoint takes field changes; a field change counts only when its key is
+  listed, other parts by the parts alone.
+- **Database:** migration 0132 (the column and its check, the column grant,
+  `app.capture_contact_webhook_event` matching parts and fields); the schema's column
+  (`packages/db`).
+- **Domain:** the list's schema, keeping and checking (`webhookContactFieldKeysSchema`,
+  `webhookContactFieldKeysFor`, `assertWebhookContactFields`), when it applies and the label in the
+  model, the endpoint view naming the fields, `contactFieldChoices`, create and update with the
+  audit; `contactFieldKeys` in the API (create, update, answers) and the OpenAPI document; the
+  export column.
+- **Web:** "Custom fields" in the endpoint form (every field's changes, or those of the fields
+  ticked; a deleted field stays listed until unticked) and "Custom fields whose changes are sent: …"
+  on the endpoints list.
+- **Tests:**
+  - Unit (3 new in `webhooks.test.ts`, 1 new and 1 changed in `api.test.ts`): the list's rules, when
+    it applies, keeping and clearing, the label, the API schemas and the OpenAPI entries.
+  - Integration (2 new in `webhooks.test.ts`, 1 new and 1 changed in `webhook-events.test.ts`, 1 new
+    and 1 changed in `api-webhook-endpoints.test.ts`): refusals, keeping and clearing, a deleted
+    field, audits, the check and the grant, the choices, capture by field, the API. Written for CI;
+    not run here.
+  - E2E (1 changed in `api-contact-fields.spec.ts`): an endpoint for one field hears a key's change
+    of it and not a member's change of another. Written for CI; not run here.
+- **Docs:** ADR-184 (and ADR-123's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T178; DEPLOYMENT and RUNBOOKS (migration 0132, a receiver missing a field's changes);
+  DATA-RETENTION; BACKLOG P5-09; feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 15 deliberate regressions tried, all caught on the unit-tested parts (an
+  empty or long list, repeats kept, any text taken, a list kept without field changes or by a null,
+  when it applies, the limit, the label, the API's refinement, change rule, field and description,
+  the OpenAPI field). The services' checks, the capture and the form need the database or a browser,
+  so their regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 823 passed (82 files)                                                |
+| `pnpm test:integration`, e2e, migration 0132       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 15 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Filters on a field's value; fields for `contact.created`; fields chosen by type.
+
 ## 2026-10-05 — Phase 5: choosing what started the runs a webhook endpoint receives (P5-09, ADR-183)
 
 Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every

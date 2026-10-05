@@ -9,6 +9,7 @@ import {
   automationVersions,
   automations,
   channelAccounts,
+  contactFields,
   desc,
   eq,
   gt,
@@ -30,6 +31,7 @@ import {
 import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
+import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { INBOX_WORKER_ROLES } from '../inbox/routing';
 import { parseInput } from '../validation';
 import {
@@ -50,6 +52,7 @@ import {
   webhookHost,
   webhookTakesAutomationRuns,
   webhookTakesChannelEvents,
+  webhookTakesFieldChanges,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   type WebhookAssigneeChoice,
@@ -61,6 +64,8 @@ import {
   type WebhookEndpointAssignee,
   type WebhookEndpointAutomation,
   type WebhookEndpointChannel,
+  type WebhookEndpointField,
+  type WebhookFieldChoice,
   type WebhookEndpointOAuth,
   type WebhookEndpointTeam,
   type WebhookFailureKind,
@@ -518,6 +523,73 @@ export function webhookContactPartsFor(
 }
 
 /**
+ * The custom fields whose changes an endpoint takes as `contact.updated` (ADR-184), by key (as
+ * GET /contact-fields lists them), each once; null takes every field's, including fields added
+ * later.
+ */
+export const webhookContactFieldKeysSchema = z
+  .array(
+    z
+      .string({ error: 'Choose fields from the list.' })
+      .regex(CONTACT_FIELD_KEY_RE, 'Choose fields from the list.'),
+  )
+  .min(1, 'Choose at least one field, or take every field.')
+  .max(WEBHOOK_LIMITS.contactFields, `Choose at most ${WEBHOOK_LIMITS.contactFields} fields.`)
+  .transform((keys) => [...new Set(keys)])
+  .nullable();
+
+export const WEBHOOK_FIELDS_NEED_THE_PART =
+  'Choose fields only for an endpoint that receives Contact changed with custom field values.';
+
+export const WEBHOOK_FIELDS_NOT_FOUND = 'Choose fields of this company.';
+
+/** A list of fields given for an endpoint that takes no field changes is refused (ADR-184). */
+export const webhookFieldsNeedThePart = () =>
+  new AppError('validation_failed', WEBHOOK_FIELDS_NEED_THE_PART, {
+    issues: [{ path: 'contactFieldKeys', message: WEBHOOK_FIELDS_NEED_THE_PART }],
+  });
+
+/**
+ * The fields an endpoint keeps after it is added or changed, given the parts it keeps: every field
+ * (null) unless it takes field changes; then those given, or else the ones it had.
+ */
+export function webhookContactFieldKeysFor(
+  eventTypes: readonly WebhookEventType[],
+  parts: readonly WebhookContactPart[] | null,
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesFieldChanges(eventTypes, parts)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses fields a list adds to an endpoint unless each is one of the company's (ADR-184). Fields
+ * the endpoint's list already held may have been deleted since, and stay. `tx` is in the company's
+ * scope.
+ */
+export async function assertWebhookContactFields(
+  tx: Tx,
+  tenantId: string,
+  keys: readonly string[] | null | undefined,
+  held: readonly string[] | null = null,
+): Promise<void> {
+  const added = (keys ?? []).filter((key) => !held?.includes(key));
+  if (added.length === 0) return;
+  const rows = await tx
+    .select({ key: contactFields.key })
+    .from(contactFields)
+    .where(and(eq(contactFields.tenantId, tenantId), inArray(contactFields.key, added)));
+  const found = new Set(rows.map((r) => r.key));
+  const index = (keys ?? []).findIndex((key) => added.includes(key) && !found.has(key));
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_FIELDS_NOT_FOUND, {
+    issues: [{ path: `contactFieldKeys.${index}`, message: WEBHOOK_FIELDS_NOT_FOUND }],
+  });
+}
+
+/**
  * The automations whose runs an endpoint takes as `automation.run_started` and
  * `automation.run_ended` (ADR-145), each once; null takes every automation, including automations
  * published later.
@@ -876,6 +948,11 @@ const endpointFields = z.object({
    */
   contactParts: webhookContactPartsSchema.optional(),
   /**
+   * Given, the custom fields whose changes it takes (null: every field, ADR-184); left out, they
+   * stay.
+   */
+  contactFieldKeys: webhookContactFieldKeysSchema.optional(),
+  /**
    * Given, the automations whose runs it takes (null: every automation, ADR-145); left out, they
    * stay.
    */
@@ -1071,6 +1148,11 @@ export interface WebhookEndpointView {
   messageSenders: WebhookMessageSender[] | null;
   /** The contact parts it takes as `contact.updated` (ADR-123); null takes every change. */
   contactParts: WebhookContactPart[] | null;
+  /**
+   * The custom fields whose changes it takes (ADR-184), as stored, labelled; null takes every
+   * field's.
+   */
+  contactFields: WebhookEndpointField[] | null;
   /**
    * The automations whose runs it takes (ADR-145), as stored, with their names and whether they
    * are archived; null takes every automation.
@@ -1324,6 +1406,7 @@ export async function lockWebhookEndpoint(
       messageStatuses: webhookEndpoints.messageStatuses,
       messageSenders: webhookEndpoints.messageSenders,
       contactParts: webhookEndpoints.contactParts,
+      contactFieldKeys: webhookEndpoints.contactFieldKeys,
       automationIds: webhookEndpoints.automationIds,
       campaignStatuses: webhookEndpoints.campaignStatuses,
       orderStatuses: webhookEndpoints.orderStatuses,
@@ -1375,6 +1458,7 @@ export async function insertWebhookEndpoint(
     messageStatuses: WebhookMessageStatus[] | null;
     messageSenders: WebhookMessageSender[] | null;
     contactParts: WebhookContactPart[] | null;
+    contactFieldKeys: string[] | null;
     automationIds: string[] | null;
     campaignStatuses: WebhookCampaignStatus[] | null;
     orderStatuses: WebhookOrderStatus[] | null;
@@ -1415,6 +1499,7 @@ export async function insertWebhookEndpoint(
     messageStatuses: input.messageStatuses,
     messageSenders: input.messageSenders,
     contactParts: input.contactParts,
+    contactFieldKeys: input.contactFieldKeys,
     automationIds: input.automationIds,
     campaignStatuses: input.campaignStatuses,
     orderStatuses: input.orderStatuses,
@@ -1804,6 +1889,7 @@ export function createWebhooksService(deps: {
               messageStatuses: webhookEndpoints.messageStatuses,
               messageSenders: webhookEndpoints.messageSenders,
               contactParts: webhookEndpoints.contactParts,
+              contactFieldKeys: webhookEndpoints.contactFieldKeys,
               automationIds: webhookEndpoints.automationIds,
               campaignStatuses: webhookEndpoints.campaignStatuses,
               orderStatuses: webhookEndpoints.orderStatuses,
@@ -1924,6 +2010,21 @@ export function createWebhooksService(deps: {
                     ),
                   );
           const assigneeById = new Map(namedAssignees.map((m) => [m.id, m]));
+          // The custom fields endpoints chose (ADR-184); one deleted since is named by its absence.
+          const fieldKeys = [...new Set(rows.flatMap((r) => r.contactFieldKeys ?? []))];
+          const namedFields =
+            fieldKeys.length === 0
+              ? []
+              : await tx
+                  .select({ key: contactFields.key, label: contactFields.label })
+                  .from(contactFields)
+                  .where(
+                    and(
+                      eq(contactFields.tenantId, ctx.tenant.id),
+                      inArray(contactFields.key, fieldKeys),
+                    ),
+                  );
+          const fieldLabelByKey = new Map(namedFields.map((f) => [f.key, f.label]));
           return rows.map((r) => {
             const recent: Record<WebhookDeliveryState, number> = {
               pending: 0,
@@ -1941,6 +2042,7 @@ export function createWebhooksService(deps: {
               teamIds: chosenTeams,
               templateIds: chosenTemplates,
               assigneeIds: chosenAssignees,
+              contactFieldKeys: chosenFields,
               oauthTokenUrl,
               oauthClientId,
               oauthScope,
@@ -1967,6 +2069,12 @@ export function createWebhooksService(deps: {
                 ? chosenTemplates.map(
                     (id) => templateById.get(id) ?? { id, name: 'Unknown template', language: '-' },
                   )
+                : null,
+              contactFields: chosenFields
+                ? chosenFields.map((key): WebhookEndpointField => ({
+                    key,
+                    label: fieldLabelByKey.get(key) ?? null,
+                  }))
                 : null,
               assignees: chosenAssignees
                 ? chosenAssignees.map(
@@ -2109,6 +2217,24 @@ export function createWebhooksService(deps: {
       );
     },
 
+    /**
+     * The custom fields an endpoint can choose to take the changes of (ADR-184): every field of the
+     * company, by label.
+     */
+    async contactFieldChoices(ctx: TenantContext): Promise<WebhookFieldChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      return db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({ key: contactFields.key, label: contactFields.label })
+            .from(contactFields)
+            .where(eq(contactFields.tenantId, ctx.tenant.id))
+            .orderBy(asc(contactFields.label), asc(contactFields.key)),
+        { accessMode: 'read only' },
+      );
+    },
+
     /** A new endpoint; its secret is returned once. */
     async create(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
@@ -2124,6 +2250,17 @@ export function createWebhooksService(deps: {
         );
         const messageSenders = webhookMessageSendersFor(data.eventTypes, data.messageSenders, null);
         const contactParts = webhookContactPartsFor(data.eventTypes, data.contactParts, null);
+        // Fields narrow field changes only: refused for parts that take none (ADR-184).
+        if (data.contactFieldKeys && !webhookTakesFieldChanges(data.eventTypes, contactParts)) {
+          throw webhookFieldsNeedThePart();
+        }
+        const contactFieldKeys = webhookContactFieldKeysFor(
+          data.eventTypes,
+          contactParts,
+          data.contactFieldKeys,
+          null,
+        );
+        await assertWebhookContactFields(tx, ctx.tenant.id, contactFieldKeys);
         const automationIds = webhookAutomationIdsFor(data.eventTypes, data.automationIds, null);
         await assertWebhookAutomations(tx, ctx.tenant.id, automationIds);
         const campaignStatuses = webhookCampaignStatusesFor(
@@ -2168,6 +2305,7 @@ export function createWebhooksService(deps: {
           messageStatuses,
           messageSenders,
           contactParts,
+          contactFieldKeys,
           automationIds,
           campaignStatuses,
           orderStatuses,
@@ -2196,6 +2334,7 @@ export function createWebhooksService(deps: {
               ...(messageStatuses ? { messageStatuses } : {}),
               ...(messageSenders ? { messageSenders } : {}),
               ...(contactParts ? { contactParts } : {}),
+              ...(contactFieldKeys ? { contactFieldKeys } : {}),
               ...(automationIds ? { automationIds } : {}),
               ...(campaignStatuses ? { campaignStatuses } : {}),
               ...(orderStatuses ? { orderStatuses } : {}),
@@ -2238,6 +2377,25 @@ export function createWebhooksService(deps: {
           data.contactParts,
           endpoint.contactParts,
         );
+        // Fields narrow field changes only: refused for parts that take none (ADR-184).
+        if (data.contactFieldKeys && !webhookTakesFieldChanges(data.eventTypes, contactParts)) {
+          throw webhookFieldsNeedThePart();
+        }
+        const contactFieldKeys = webhookContactFieldKeysFor(
+          data.eventTypes,
+          contactParts,
+          data.contactFieldKeys,
+          endpoint.contactFieldKeys,
+        );
+        // And the fields it adds: those it held may have been deleted since (ADR-184).
+        if (data.contactFieldKeys !== undefined) {
+          await assertWebhookContactFields(
+            tx,
+            ctx.tenant.id,
+            contactFieldKeys,
+            endpoint.contactFieldKeys,
+          );
+        }
         const automationIds = webhookAutomationIdsFor(
           data.eventTypes,
           data.automationIds,
@@ -2327,6 +2485,7 @@ export function createWebhooksService(deps: {
             messageStatuses,
             messageSenders,
             contactParts,
+            contactFieldKeys,
             automationIds,
             campaignStatuses,
             orderStatuses,
@@ -2366,6 +2525,7 @@ export function createWebhooksService(deps: {
               ...(messageStatuses ? { messageStatuses } : {}),
               ...(messageSenders ? { messageSenders } : {}),
               ...(contactParts ? { contactParts } : {}),
+              ...(contactFieldKeys ? { contactFieldKeys } : {}),
               ...(automationIds ? { automationIds } : {}),
               ...(campaignStatuses ? { campaignStatuses } : {}),
               ...(orderStatuses ? { orderStatuses } : {}),

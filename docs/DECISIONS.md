@@ -4680,8 +4680,8 @@ Decision:
   endpoints per company), the runtime role's update of the column, and
   `app.capture_contact_webhook_event` replaced with the same signature.
 
-Not built: field keys chosen one by one, filters for `contact.created` or `contact.erased`, and
-filters on a contact's values (a tag, a field's value).
+Not built: field keys chosen one by one (built by ADR-184), filters for `contact.created` or
+`contact.erased`, and filters on a contact's values (a tag, a field's value).
 
 ## ADR-124 Finding contacts by name through the public API (2026-10-03)
 
@@ -7385,3 +7385,50 @@ Decision:
 Not built: filters on the key that started a run, on a store event's kind (placed, shipped,
 delivered, cancelled), on a run's end reason, and triggers chosen per event (one list serves both
 run events).
+
+## ADR-184 Choosing the custom fields whose changes a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint can take `contact.updated` only for some parts of a contact (ADR-123), `fields`
+standing for a change of any custom field. A receiver that keeps a few fields in step (a loyalty
+tier its own system sets, a city for delivery zones) was sent every field's change and had to read
+`changes` and drop the rest; ADR-123 left choosing fields one by one unbuilt.
+
+Decision:
+
+- **A list of fields per endpoint,** by key (as `GET /contact-fields` lists them): null receives
+  every field's changes, as before; a list holds 1 to 50 keys (a company has at most 50 fields), in
+  the order given with repeats merged. It narrows field changes only: a change of a custom field
+  (`fields.<key>` in `changes`) counts for the endpoint only when its key is listed, while changes
+  of the name, number, email and tags are narrowed by the parts alone. An event still names every
+  part its change changed. Chosen in Settings → Webhooks ("Custom fields": every custom field's
+  changes, or only those of the fields ticked, named by label and key), shown on the endpoint as
+  "Custom fields whose changes are sent: …", and through the API as `contactFieldKeys` on
+  `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every endpoint the API
+  answers.
+- **Only while field changes are taken:** a list given for an endpoint that does not take
+  `contact.updated`, or whose parts leave out `fields`, is refused (`contactFieldKeys`; 422 through
+  the API), checked against the parts the endpoint keeps. A change that drops the event or `fields`
+  clears it, and a `PATCH` that leaves it out keeps it; Settings always sends it. A check in the
+  database holds the same rule (null, or 1 to 50 well-formed keys without a null, with
+  `contact.updated` and every part or `fields`).
+- **Applied at capture:** `app.capture_contact_webhook_event` creates a delivery for an endpoint
+  when one of the parts the change names passes both its parts and its fields; a later change of the
+  contact in the same transaction queues the endpoints it newly concerns, as before. Stored events
+  and payloads are unchanged.
+- **The company's fields:** a list given now may add only keys of the company's fields. A field
+  deleted later stays on the lists that held it, and a list given again may keep it but not add it
+  back; keys never change, so a field added later with the same key matches it again. Settings names
+  a deleted field "… (deleted)"; the API answers its key.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `contactFieldKeys` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The choices list the company's fields by label to members with
+  `developer.manage`.
+- **Migration 0132:** `contact_field_keys text[]` on `app.webhook_endpoints` with the check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role, and `app.capture_contact_webhook_event` replaced with the same signature (0129's,
+  with the field condition), so its owner and grants stay. Existing endpoints keep null; nothing is
+  backfilled.
+
+Not built: filters on a field's value (a tier becoming `gold`), fields for `contact.created`, and
+fields chosen by type.

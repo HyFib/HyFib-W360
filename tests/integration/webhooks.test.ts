@@ -3208,6 +3208,160 @@ describe('run trigger filters (ADR-183)', () => {
   });
 });
 
+describe('custom field filters (ADR-184)', () => {
+  /** A custom field of the company, written as the contacts settings write one. */
+  async function fieldOf(c: Company, key: string, label: string) {
+    await fx.query(
+      `INSERT INTO app.contact_fields (id, tenant_id, key, label, type) VALUES ($1, $2, $3, $4, 'text')`,
+      [uuidv7(), c.tenant.id, key, label],
+    );
+    return key;
+  }
+
+  it("are refused without field changes, empty, over 50 or naming another company's field; kept by a change that leaves them out, a deleted field included, and cleared with the parts; the database keeps them to field changes", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const city = await fieldOf(c, 'city', 'City');
+    const tier = await fieldOf(c, 'tier', 'Tier');
+    await fieldOf(await fx.company(), 'zone', 'Zone');
+    const url = 'https://hooks.example.com/in';
+    const refused = async (
+      fields: Record<string, unknown>,
+      message: RegExp,
+      path = 'contactFieldKeys',
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes: ['contact.updated'], ...fields }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(fields)).toBe(path);
+    };
+    const needsThePart =
+      /only for an endpoint that receives Contact changed with custom field values/;
+    await refused({ eventTypes: ['contact.created'], contactFieldKeys: [city] }, needsThePart);
+    await refused({ contactParts: ['email', 'tags'], contactFieldKeys: [city] }, needsThePart);
+    await refused({ contactFieldKeys: [] }, /at least one field/);
+    await refused({ contactFieldKeys: ['City'] }, /from the list/, 'contactFieldKeys.0');
+    await refused(
+      { contactFieldKeys: Array.from({ length: 51 }, (_, i) => `f${i}`) },
+      /at most 50/,
+    );
+    // Only the company's fields: not another company's or an unknown key.
+    await refused({ contactFieldKeys: [city, 'zone'] }, /of this company/, 'contactFieldKeys.1');
+    await refused({ contactFieldKeys: ['plan'] }, /of this company/, 'contactFieldKeys.0');
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['contact.updated', 'consent.changed'],
+      contactParts: ['email', 'fields'],
+      contactFieldKeys: [tier, city, tier],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { contactFieldKeys?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => a.metadata.contactFieldKeys);
+    expect(await audits('webhook.endpoint_created')).toEqual([[tier, city]]);
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['contact.updated', 'consent.changed'],
+        contactParts: ['email', 'fields'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.contactFields;
+    expect(await current()).toEqual([
+      { key: tier, label: 'Tier' },
+      { key: city, label: 'City' },
+    ]);
+    await change({ description: 'kept' });
+    expect((await current())?.map((f) => f.key)).toEqual([tier, city]);
+    // A field deleted since it was chosen stays on the list, unlabelled, and a list given again may
+    // keep it; a deleted field the list did not hold is refused like any unknown one.
+    await fx.query('DELETE FROM app.contact_fields WHERE tenant_id = $1 AND key = $2', [
+      c.tenant.id,
+      tier,
+    ]);
+    expect(await current()).toEqual([
+      { key: tier, label: null },
+      { key: city, label: 'City' },
+    ]);
+    await change({ contactFieldKeys: [city, tier] });
+    expect((await current())?.map((f) => f.key)).toEqual([city, tier]);
+    await change({ contactFieldKeys: [city] });
+    await expectAppError(
+      change({ contactFieldKeys: [city, tier] }),
+      'validation_failed',
+      /of this company/,
+    );
+    expect(await audits('webhook.endpoint_updated')).toEqual([[tier, city], [city, tier], [city]]);
+    // Every part takes field changes too; parts without fields clear the list, and fields given
+    // with them are refused.
+    await change({ contactParts: null });
+    expect((await current())?.map((f) => f.key)).toEqual([city]);
+    await change({ contactParts: ['name'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ contactParts: ['name'], contactFieldKeys: [city] }),
+      'validation_failed',
+      needsThePart,
+    );
+    await change({ contactFieldKeys: [city] });
+    // The database refuses an empty list, more than 50, a malformed key or a missing one…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET contact_field_keys = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    const many = `ARRAY[${Array.from({ length: 51 }, (_, i) => `'f${i}'`).join(',')}]::text[]`;
+    for (const bad of [
+      `'{}'`,
+      many,
+      `'{City}'`,
+      `'{fields.city}'`,
+      `ARRAY['city', NULL]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_contact_field_keys/);
+    }
+    // …and any list for an endpoint whose parts take no field changes, or without contact.updated.
+    await expect(
+      fx.query(`UPDATE app.webhook_endpoints SET contact_parts = '{name}' WHERE id = $1`, [
+        created.id,
+      ]),
+    ).rejects.toThrow(/webhook_endpoints_contact_field_keys/);
+    await change({ eventTypes: ['consent.changed'], contactParts: null });
+    expect(await current()).toBeNull();
+    await expect(setInDatabase(`'{city}'`)).rejects.toThrow(/webhook_endpoints_contact_field_keys/);
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'contact_field_keys',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it("offer the company's custom fields by label, to developers only", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await fieldOf(c, 'tier', 'Tier');
+    await fieldOf(c, 'city', 'City');
+    await fieldOf(await fx.company(), 'zone', 'Zone');
+    expect(await webhooks().contactFieldChoices(owner)).toEqual([
+      { key: 'city', label: 'City' },
+      { key: 'tier', label: 'Tier' },
+    ]);
+    for (const user of [c.agent, c.marketer]) {
+      await expectAppError(webhooks().contactFieldChoices(await fx.ctx(c, user)), 'forbidden');
+    }
+  });
+});
+
 describe('event capture', () => {
   it('records an event only for subscribed types, with one delivery per active subscribed endpoint, and none from a rolled-back change', async () => {
     const c = await fx.company();

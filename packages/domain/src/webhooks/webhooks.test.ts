@@ -53,6 +53,8 @@ import {
   WEBHOOK_TEMPLATE_STATUSES,
   webhookAssigneeText,
   webhookErrorLabel,
+  webhookFieldText,
+  webhookTakesFieldChanges,
   webhookHost,
   webhookReplayAllSummary,
   webhookReplaySummary,
@@ -113,6 +115,8 @@ import {
   webhookChannelIdsFor,
   webhookChannelIdsSchema,
   webhookChannelLabel,
+  webhookContactFieldKeysFor,
+  webhookContactFieldKeysSchema,
   webhookContactPartsFor,
   webhookContactPartsSchema,
   webhookConversationStatusesFor,
@@ -2349,5 +2353,62 @@ describe('run trigger filters (ADR-183)', () => {
     expect(
       webhookRunTriggersFor(['message.received', 'order.received'], ['api'], ['api']),
     ).toBeNull();
+  });
+});
+
+describe('custom field filters (ADR-184)', () => {
+  it('take 1 to 50 field keys, once each in the order given; null takes every field', () => {
+    expect(webhookContactFieldKeysSchema.parse(['tier', 'city', 'tier'])).toEqual(['tier', 'city']);
+    expect(webhookContactFieldKeysSchema.parse(null)).toBeNull();
+    const keys = Array.from({ length: WEBHOOK_LIMITS.contactFields + 1 }, (_, i) => `f${i}`);
+    expect(WEBHOOK_LIMITS.contactFields).toBe(50);
+    expect(webhookContactFieldKeysSchema.parse(keys.slice(1))).toEqual(keys.slice(1));
+    // Keys as GET /contact-fields lists them: no labels, parts or a whole `fields.<key>`.
+    for (const refused of [
+      [],
+      keys,
+      ['City'],
+      ['fields.city'],
+      ['1st'],
+      ['city', null],
+      'city',
+      [7],
+    ]) {
+      expect(
+        webhookContactFieldKeysSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookContactFieldKeysSchema.safeParse(['City']).error?.issues[0]?.message).toBe(
+      'Choose fields from the list.',
+    );
+    expect(webhookContactFieldKeysSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one field, or take every field.',
+    );
+    expect(webhookContactFieldKeysSchema.safeParse(keys).error?.issues[0]?.message).toBe(
+      'Choose at most 50 fields.',
+    );
+  });
+
+  it('apply while an endpoint takes contact.updated for every part or for fields, and are kept or cleared with them', () => {
+    expect(webhookTakesFieldChanges(['contact.updated'], null)).toBe(true);
+    expect(webhookTakesFieldChanges(['contact.updated'], ['email', 'fields'])).toBe(true);
+    expect(webhookTakesFieldChanges(['contact.updated'], ['email', 'tags'])).toBe(false);
+    expect(webhookTakesFieldChanges(['contact.created', 'contact.erased'], null)).toBe(false);
+    expect(webhookContactFieldKeysFor(['contact.updated'], null, ['city'], null)).toEqual(['city']);
+    expect(
+      webhookContactFieldKeysFor(['contact.updated'], ['fields'], undefined, ['tier']),
+    ).toEqual(['tier']);
+    expect(webhookContactFieldKeysFor(['contact.updated'], null, null, ['tier'])).toBeNull();
+    // Parts without fields, or no contact.updated, clear them.
+    expect(
+      webhookContactFieldKeysFor(['contact.updated'], ['name'], undefined, ['tier']),
+    ).toBeNull();
+    expect(webhookContactFieldKeysFor(['contact.created'], null, ['city'], ['tier'])).toBeNull();
+  });
+
+  it('name a field by its label and key, or say it was deleted', () => {
+    expect(webhookFieldText({ key: 'city', label: 'City' })).toBe('City (city)');
+    expect(webhookFieldText({ key: 'tier', label: null })).toBe('tier (deleted)');
   });
 });

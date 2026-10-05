@@ -1545,6 +1545,14 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   same signature) creates a delivery of a run event only for endpoints whose list is null or holds
   it, taking it out of the detail before the event is stored. Settings (checkboxes under "Runs
   started by") and the API (`runTriggers`) set it; a change that drops both events clears it.
+- **Custom field filters** (migration 0132, ADR-184): `contact_field_keys` on an endpoint lists the
+  custom fields whose changes it takes as `contact.updated`, null for every field's; a check keeps
+  it to 1 to 50 well-formed keys and to endpoints taking `contact.updated` for every part or for
+  `fields`. `app.capture_contact_webhook_event` (replaced with the same signature) creates a
+  delivery only when one of the parts a change names passes the endpoint's parts and, for
+  `fields.<key>`, its fields. Settings (radio buttons and checkboxes under "Custom fields") and the
+  API (`contactFieldKeys`) set it; the services check the keys a list adds; a change that drops the
+  event or `fields` clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and
