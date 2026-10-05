@@ -1039,6 +1039,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   log and the audit entry (as the key) follow in the same transaction; a run that has ended is
   answered as it is. 0057 replaces `automation_runs_end` `NOT VALID` to allow the reason; 0058
   validates it.
+- **Stopping many runs through the API (ADR-162):** `POST /automation-runs/stop-many`
+  (`apiStopManyAutomationRuns`, `automations.start`, up to `API_LIMITS.runsPerStop` (100) ids) reads
+  the runs keys of the company started with those ids in one statement and refuses the call, naming
+  the place, when one is missing; it then locks their conversations `FOR UPDATE` in id order in one
+  statement (`lockConversations`, as ADR-120 locks them) and stops each run in the order given
+  through the single stop's step (`stopRunIfActive`: the active run locked with `lockActiveRun`, its
+  step, `endRun` as `stopped_by_api`, the audit entry as the key), leaving a run that has ended as
+  it is. The answer reads the runs again, in the order given.
 - **Buttons and lists through the API (ADR-080):** `POST /messages` with `type` `buttons` or `list`
   (`apiSendButtons`, `apiSendList`) takes the same path as a text reply (`sendReply`: the contact
   who wrote in the last 24 hours, the conversation locked `FOR UPDATE`, the automation ended as

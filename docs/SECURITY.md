@@ -547,6 +547,13 @@ Phase 5 rules (Public API, P5-08):
   by writing, members' test runs or another company's runs (404). The stop runs under the
   conversation's and the run's locks like a member's, cancels what the run queued, hands nothing to
   people, is audited as the key and changes nothing for a run that has ended.
+- Stopping many runs in one call (ADR-162, `POST /automation-runs/stop-many`) needs
+  `automations.start` and stops each run as a single stop does, under the same locks, audited as the
+  key; at most 100 per call, all or none. An id that names no run a key of the company started
+  (another company's, one customers started by writing, a member's test run) refuses the whole call,
+  naming its place in the list, and stops nothing (an integration test, run in CI), so a call never
+  stops or reveals another company's runs beyond saying an id is not one of the company's. A call
+  counts as one request against the key's limits.
 - Buttons and lists through the API (ADR-080) follow every rule of text replies (`messages.reply`,
   an active company, only contacts who wrote in the last 24 hours with one answer for every
   refusal, the window checked again at send). Their ids cannot start with `w360`: HyFib's own

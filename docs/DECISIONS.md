@@ -6415,3 +6415,33 @@ Decision:
 - **No migration:** a start of one run is now four steps that both calls share.
 
 Not built: stopping runs for many contacts in one call, starting many automations in one call.
+
+## ADR-162 Stopping many runs in one call (P5-08) (2026-10-05)
+
+Context: since ADR-079 a key stops one run per call. An integration that started an automation for
+many contacts in one call (ADR-161) and then calls them off (the appointments moved, the offer was
+withdrawn) needed one call per run. P5-08's Remaining listed stopping runs for many contacts in one
+call.
+
+Decision:
+
+- **Up to 100 runs in one call:** `POST /api/v1/automation-runs/stop-many` takes `runIds`, 1 to 100,
+  each once; scope `automations.start`, one request against the key's limits, and no
+  `Idempotency-Key`: a run that has ended stays as it is, so a retry answers the same.
+- **Each as one stop:** each run is stopped through the step `POST /automation-runs/{id}/stop` uses
+  (ADR-079): a running or waiting run ends as `stopped` with the reason `stopped_by_api`, with its
+  step and an audit entry as the key, and a run that has ended is answered as it is.
+- **All of them or none:** an id that names no run a key of the company started (another company's,
+  one customers started by writing, one that does not exist) refuses the call (422, naming the
+  place, as `runIds.3`) before anything is locked, and nothing is stopped. Unlike ADR-161's starts,
+  such an id is a mistake in the call, so it is refused as changing many conversations refuses one
+  (ADR-120).
+- **Locks:** the runs' conversations are locked in id order in one statement, as ADR-120 locks them,
+  then each run in the order given, so calls stopping the same runs take turns. Stopping counts
+  nothing against the plan, so no shared counter is held across runs.
+- **100, not 50:** nothing is answered in place, so the call opens no savepoint per run and the
+  subtransaction limit behind ADR-161's 50 does not apply.
+- **The answer:** 200 with each run as it now is, in the order given.
+- **No migration:** the single stop and this call share one step.
+
+Not built: stopping every run of an automation, or of a contact, without listing them.

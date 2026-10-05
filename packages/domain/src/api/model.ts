@@ -164,6 +164,8 @@ export const API_LIMITS = {
    * beyond them, every snapshot taken while the call runs looks subtransactions up on disk.
    */
   runsPerStart: 50,
+  /** Runs one call to POST /automation-runs/stop-many stops (ADR-162). */
+  runsPerStop: 100,
   keyRate: { capacity: 50, refillPerSecond: 10 },
   companyRate: { capacity: 200, refillPerSecond: 30 },
   authFailureRate: { capacity: 20, refillPerSecond: 0.2 },

@@ -1,5 +1,55 @@
 # Progress
 
+## 2026-10-05 — Phase 5: stopping many runs in one call (P5-08, ADR-162)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A key stopped one run
+per call. The local PostgreSQL is unavailable (its Docker daemon stopped), so the integration and
+e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-162):** `POST /automation-runs/stop-many` stops up to 100 runs keys started, each as
+  one stop does, all of them or none: an id that names no run a key of the company started refuses
+  the call, naming its place; the conversations are locked in id order in one statement, then each
+  run in the order given.
+- **Domain:** `api/automations.ts` (the single stop's step shared as `stopRunIfActive`, with
+  `startedByKey` and `lockConversations`; `apiStopManyAutomationRuns` and its schema);
+  `api/model.ts` (`API_LIMITS.runsPerStop`); `api/openapi.ts` (the operation,
+  `StopManyAutomationRuns`, the route list).
+- **Web:** the route `api/v1/automation-runs/stop-many`.
+- **Tests:**
+  - Unit (3 new in `api.test.ts`): the body takes 1 to 100 run ids, each once, and nothing else; the
+    scope and the company's status checked, and an empty list, a repeat and an id that is not one
+    refused, before anything is read; the operation, its body, its answer and its words.
+  - Integration (1 new in `api.test.ts`): an unknown id and another company's key refuse the call by
+    place and stop nothing; a waiting, a running, a stopped and a newer run in one call, in the
+    order given, each stopped with its step and an audit entry as the key, the stopped one answered
+    as it was; a retry answers the same and records nothing. Written for CI; not run here.
+  - E2E (`api.spec.ts` extended): two runs started in one call are stopped over HTTP in one call,
+    and the call answers the same again. Written for CI; not run here.
+- **Docs:** ADR-162; SECURITY (the automation rules); THREAT-MODEL T95; ARCHITECTURE; BACKLOG P5-08;
+  feature matrix H-033 and W-086.
+- **Mutation checks:** 15 tried, all caught on the unit-tested parts (the scope not checked, the
+  list without a minimum, a maximum, its once-each rule, its id format or its closed shape, the
+  limit raised, the route unlisted or answering another method, the operation's body, answer, words
+  and an unknown id described as 404). The read, the locks and the stops need the database, so their
+  regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 730 passed (75 files; 3 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 15 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Stopping every run of an automation, or of a contact, without listing them.
+
 ## 2026-10-05 — Fix: the Onboarding tab's new companies without a number, and three new integration tests
 
 Status: **Fixed; the integration tests run in CI only (the local PostgreSQL is unavailable).** PR

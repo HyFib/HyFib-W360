@@ -47,7 +47,11 @@ import {
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
-import { apiStartAutomationSchema, apiStartManyAutomationRunsSchema } from './automations';
+import {
+  apiStartAutomationSchema,
+  apiStartManyAutomationRunsSchema,
+  apiStopManyAutomationRunsSchema,
+} from './automations';
 import {
   apiCampaignRecipientSchema,
   apiCampaignSchema,
@@ -1313,6 +1317,24 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/automation-runs/stop-many': {
+        post: {
+          operationId: 'stopManyAutomationRuns',
+          summary: 'Stop many runs started through the API',
+          description: [
+            `${scopeNote('automations.start')} Up to ${API_LIMITS.runsPerStop} runs keys of the company started, each stopped as POST /automation-runs/{id}/stop stops one: a running or waiting run ends as \`stopped\` with the reason \`stopped_by_api\`, and a run that has already ended is answered as it is. All of them or none: an id that names no run a key of the company started refuses the call (422, naming the field, as \`runIds.3\`), and nothing is stopped.`,
+            'The runs are stopped in the order given and answered in it. A call counts as one request against the rate and monthly limits. A run that has ended stays as it is, so a retry is safe without an `Idempotency-Key`.',
+          ].join('\n\n'),
+          requestBody: { required: true, content: json(ref('StopManyAutomationRuns')) },
+          responses: {
+            '200': {
+              description: 'The runs, as they now are, in the order given.',
+              content: json(dataOf({ type: 'array', items: ref('AutomationRun') })),
+            },
+            ...errors(400, 401, 403, 415, 422, 423, 429, 500),
+          },
+        },
+      },
       '/webhook-endpoints': {
         get: {
           operationId: 'listWebhookEndpoints',
@@ -1798,6 +1820,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         AutomationRun: jsonSchema(apiAutomationRunSchema),
         StartAutomationRun: jsonSchema(apiStartAutomationSchema, 'input'),
         StartManyAutomationRuns: jsonSchema(apiStartManyAutomationRunsSchema, 'input'),
+        StopManyAutomationRuns: jsonSchema(apiStopManyAutomationRunsSchema, 'input'),
         AutomationRunStart: jsonSchema(apiAutomationRunStartSchema),
         WebhookEndpoint: jsonSchema(apiWebhookEndpointSchema),
         WebhookEndpointWithSecret: jsonSchema(apiWebhookEndpointWithSecretSchema),
@@ -1867,6 +1890,7 @@ export const API_ROUTES = [
   ['post', '/automations/{id}/runs/start-many'],
   ['get', '/automation-runs/{id}'],
   ['post', '/automation-runs/{id}/stop'],
+  ['post', '/automation-runs/stop-many'],
   ['get', '/webhook-endpoints'],
   ['post', '/webhook-endpoints'],
   ['post', '/webhook-endpoints/replay-failed'],

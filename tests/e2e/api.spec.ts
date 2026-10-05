@@ -1125,7 +1125,8 @@ test('a key starts an automation made to start through the API: its template goe
   ];
   const many = await startMany(firstMany, manyKey);
   expect(many.status()).toBe(200);
-  const manyStarts = (await many.json()).data as unknown[];
+  type RunStart = { to: string; run: { id: string } | null; error: unknown };
+  const manyStarts = (await many.json()).data as RunStart[];
   expect(manyStarts).toEqual([
     { to: `+${third}`, run: startedRun, error: null },
     { to: `+${fourth}`, run: startedRun, error: null },
@@ -1141,7 +1142,8 @@ test('a key starts an automation made to start through the API: its template goe
     randomUUID(),
   );
   expect(later.status()).toBe(200);
-  expect((await later.json()).data).toEqual([
+  const laterStarts = (await later.json()).data as RunStart[];
+  expect(laterStarts).toEqual([
     {
       to: `+${fourth}`,
       run: null,
@@ -1170,4 +1172,20 @@ test('a key starts an automation made to start through the API: its template goe
       { timeout: 60_000 },
     )
     .toEqual([`${third}: Meera`, `${fourth}: Kiran`, `${fifth}: Farah`].sort());
+
+  // It stops the runs it started for Meera and Farah in one call (ADR-162); a retry answers the
+  // same.
+  const stopIds = [manyStarts[0]?.run?.id ?? '', laterStarts[1]?.run?.id ?? ''];
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const stoppedMany = await request.post('/api/v1/automation-runs/stop-many', {
+      headers: auth,
+      data: { runIds: stopIds },
+    });
+    expect(stoppedMany.status()).toBe(200);
+    expect((await stoppedMany.json()).data).toEqual(
+      stopIds.map((id) =>
+        expect.objectContaining({ id, status: 'stopped', endReason: 'stopped_by_api' }),
+      ),
+    );
+  }
 });

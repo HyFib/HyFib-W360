@@ -111,7 +111,12 @@ import {
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
 } from '../webhooks/service';
 import { WEBHOOK_FAILURE_KINDS, WEBHOOK_LIMITS } from '../webhooks/model';
-import { apiStartManyAutomationRuns, apiStartManyAutomationRunsSchema } from './automations';
+import {
+  apiStartManyAutomationRuns,
+  apiStartManyAutomationRunsSchema,
+  apiStopManyAutomationRuns,
+  apiStopManyAutomationRunsSchema,
+} from './automations';
 
 describe('API tokens', () => {
   it('have a public prefix, a 256-bit secret and only their SHA-256 is kept', () => {
@@ -3301,5 +3306,123 @@ describe('starting an automation for many contacts in one call (ADR-161)', () =>
     expect(answer.required).toEqual(['to', 'run', 'error']);
     const error = answer.properties.error?.anyOf?.find((o) => o.properties);
     expect(error?.properties?.code?.enum).toEqual(['conflict', 'precondition_failed']);
+  });
+});
+
+describe('stopping many runs in one call (ADR-162)', () => {
+  const ctx = (scopes: string[]) =>
+    ({
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: null,
+      requestId: 'r',
+    }) as unknown as ApiContext;
+  const runId = (i: number) => `0192a1b2-0000-7000-8000-${String(i).padStart(12, '0')}`;
+  // Every refusal here comes before anything is read: the dependencies are never used.
+  const stop = (scopes: string[], body: unknown) =>
+    apiStopManyAutomationRuns({} as never, ctx(scopes), body)
+      .then(() => null)
+      .catch((caught: unknown) => caught);
+
+  it('takes 1 to 100 run ids, each once, and nothing else', () => {
+    const parse = (body: unknown) => apiStopManyAutomationRunsSchema.safeParse(body).success;
+    expect(API_LIMITS.runsPerStop).toBe(100);
+    expect(parse({ runIds: [runId(1)] })).toBe(true);
+    expect(
+      parse({ runIds: Array.from({ length: API_LIMITS.runsPerStop }, (_, i) => runId(i)) }),
+    ).toBe(true);
+    for (const body of [
+      { runIds: [] },
+      { runIds: Array.from({ length: API_LIMITS.runsPerStop + 1 }, (_, i) => runId(i)) },
+      { runIds: [runId(1), runId(2), runId(1)] },
+      { runIds: ['not-a-run'] },
+      { runIds: [runId(1)], reason: 'done' },
+      { runIds: runId(1) },
+      {},
+    ]) {
+      expect(parse(body), JSON.stringify(body).slice(0, 80)).toBe(false);
+    }
+  });
+
+  it('refuses before anything is read: the scope, an empty list, a repeat, an id that is not one', async () => {
+    const forbidden = await stop(['contacts.read'], { runIds: [runId(1)] });
+    expect(isAppError(forbidden) && forbidden.code).toBe('forbidden');
+    const suspended = await apiStopManyAutomationRuns(
+      {} as never,
+      { ...ctx(['automations.start']), tenant: { id: 't', status: 'suspended' } } as ApiContext,
+      { runIds: [runId(1)] },
+    ).catch((caught: unknown) => caught);
+    expect(isAppError(suspended) && suspended.code).toBe('tenant_suspended');
+    for (const body of [
+      { runIds: [] },
+      { runIds: [runId(1), runId(1)] },
+      { runIds: [runId(1), 'x'] },
+    ]) {
+      const refused = await stop(['automations.start'], body);
+      expect(isAppError(refused) && refused.code, JSON.stringify(body)).toBe('validation_failed');
+    }
+  });
+
+  it('is described: all or none, in the order given, a retry safe without a key', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const op = (
+      doc.paths as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            description: string;
+            parameters?: unknown[];
+            requestBody: unknown;
+            responses: Record<string, { content?: unknown }>;
+          }
+        >
+      >
+    )['/automation-runs/stop-many']?.post;
+    expect(op?.operationId).toBe('stopManyAutomationRuns');
+    expect(op?.parameters).toBeUndefined();
+    expect(op?.requestBody).toEqual({
+      required: true,
+      content: {
+        'application/json': { schema: { $ref: '#/components/schemas/StopManyAutomationRuns' } },
+      },
+    });
+    expect(op?.responses['200']?.content).toEqual({
+      'application/json': {
+        schema: {
+          type: 'object',
+          properties: {
+            data: { type: 'array', items: { $ref: '#/components/schemas/AutomationRun' } },
+          },
+          required: ['data'],
+        },
+      },
+    });
+    expect(Object.keys(op?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '403', '422', '423']),
+    );
+    expect(Object.keys(op?.responses ?? {})).not.toContain('404');
+    for (const words of [
+      'Up to 100 runs keys of the company started',
+      'a run that has already ended is answered as it is',
+      'All of them or none',
+      '(422, naming the field, as `runIds.3`)',
+      'The runs are stopped in the order given and answered in it.',
+      'A call counts as one request',
+      'a retry is safe without an `Idempotency-Key`',
+    ]) {
+      expect(op?.description).toContain(words);
+    }
+    const body = (doc.components as { schemas: Record<string, Record<string, unknown>> }).schemas
+      .StopManyAutomationRuns as {
+      properties: { runIds: { minItems?: number; maxItems?: number } };
+      required: string[];
+      additionalProperties: boolean;
+    };
+    expect(body.required).toEqual(['runIds']);
+    expect(body.additionalProperties).toBe(false);
+    expect(body.properties.runIds.minItems).toBe(1);
+    expect(body.properties.runIds.maxItems).toBe(API_LIMITS.runsPerStop);
   });
 });

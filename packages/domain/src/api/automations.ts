@@ -81,6 +81,20 @@ export const apiStartManyAutomationRunsSchema = z
   })
   .strict();
 
+/** Stopping many runs in one call (ADR-162): the runs, each as POST /automation-runs/{id}/stop takes it. */
+export const apiStopManyAutomationRunsSchema = z
+  .object({
+    runIds: z
+      .array(z.uuid({ error: 'Give the ids of runs keys started (POST /automations/{id}/runs).' }))
+      .min(1, 'Give at least one run.')
+      .max(API_LIMITS.runsPerStop, `Give at most ${API_LIMITS.runsPerStop} runs.`)
+      .refine((ids) => new Set(ids).size === ids.length, 'Give each run once.')
+      .describe(
+        `The runs to stop, 1 to ${API_LIMITS.runsPerStop}, each once; they are stopped in this order.`,
+      ),
+  })
+  .strict();
+
 export interface ApiAutomation {
   id: string;
   name: string;
@@ -695,52 +709,132 @@ export async function apiStopAutomationRun(
   assertScope(ctx, 'automations.start');
   if (!z.uuid().safeParse(runId).success) throw notFound('Automation run');
   return deps.db.run(ctx.scope, async (tx) => {
-    const startedByKey = and(
-      eq(automationRuns.tenantId, ctx.tenant.id),
-      eq(automationRuns.id, runId),
-      eq(automationRuns.triggerType, 'api'),
-      isNotNull(automationRuns.apiKeyId),
-    );
     const [peek] = await tx
-      .select({
-        conversationId: automationRuns.conversationId,
-        automationId: automationRuns.automationId,
-      })
+      .select(stopColumns)
       .from(automationRuns)
-      .where(startedByKey);
+      .where(startedByKey(ctx.tenant.id, [runId]));
     if (!peek) throw notFound('Automation run');
     // The conversation row first, as for every change to its run.
-    await tx
-      .select({ id: conversations.id })
-      .from(conversations)
-      .where(
-        and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, peek.conversationId)),
-      )
-      .for('update');
-    const run = await lockActiveRun(tx, ctx.tenant.id, peek.conversationId);
-    if (run?.id === runId) {
-      await appendRunStep(tx, ctx.tenant.id, run.id, {
-        nodeId: run.currentNodeId,
-        nodeType: null,
-        outcome: 'stopped',
-        detail: 'stopped_by_api',
-      });
-      await endRun(tx, run, { status: 'stopped', reason: 'stopped_by_api', now: deps.clock.now() });
-      await recordSystemAudit(
-        tx,
-        ctx.tenant.id,
-        {
-          action: 'automation.run_stopped',
-          subjectType: 'automation_run',
-          subjectId: run.id,
-          metadata: { automationId: peek.automationId, source: 'api' },
-          correlationId: ctx.requestId,
-        },
-        apiActor(ctx),
-      );
-    }
-    const [row] = await tx.select(runColumns).from(automationRuns).where(startedByKey);
+    await lockConversations(tx, ctx.tenant.id, [peek.conversationId]);
+    await stopRunIfActive(tx, ctx, peek, deps.clock.now());
+    const [row] = await tx
+      .select(runColumns)
+      .from(automationRuns)
+      .where(startedByKey(ctx.tenant.id, [runId]));
     if (!row) throw new Error('The run was not found after stopping it');
     return toApiRun(row);
   });
+}
+
+/**
+ * Stops many runs keys started in one call (ADR-162), each as POST /automation-runs/{id}/stop stops
+ * one, in one transaction: all of them or none. An id that names no run a key of the company
+ * started refuses the call, naming its place, before anything is locked. The runs' conversations are
+ * then locked in id order in one statement, as changing many conversations locks them (ADR-120), so
+ * calls stopping the same runs take turns instead of deadlocking; each run is stopped in the order
+ * given, or answered as it is when it has ended.
+ */
+export async function apiStopManyAutomationRuns(
+  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+  ctx: ApiContext,
+  input: unknown,
+): Promise<ApiAutomationRun[]> {
+  assertScope(ctx, 'automations.start');
+  const { runIds } = parseInput(apiStopManyAutomationRunsSchema, input);
+  return deps.db.run(ctx.scope, async (tx) => {
+    const found = new Map(
+      (
+        await tx.select(stopColumns).from(automationRuns).where(startedByKey(ctx.tenant.id, runIds))
+      ).map((run) => [run.id, run]),
+    );
+    const runs = runIds.map((id, index) => {
+      const run = found.get(id);
+      if (!run) throw unknownRun(index);
+      return run;
+    });
+    await lockConversations(
+      tx,
+      ctx.tenant.id,
+      runs.map((run) => run.conversationId),
+    );
+    const now = deps.clock.now();
+    for (const run of runs) await stopRunIfActive(tx, ctx, run, now);
+    const rows = new Map(
+      (
+        await tx.select(runColumns).from(automationRuns).where(startedByKey(ctx.tenant.id, runIds))
+      ).map((row) => [row.id, row]),
+    );
+    return runIds.map((id) => {
+      const row = rows.get(id);
+      if (!row) throw new Error('A run was not found after stopping it');
+      return toApiRun(row);
+    });
+  });
+}
+
+/** The runs with these ids that keys of the company started (ADR-077). */
+const startedByKey = (tenantId: string, ids: string[]) =>
+  and(
+    eq(automationRuns.tenantId, tenantId),
+    inArray(automationRuns.id, ids),
+    eq(automationRuns.triggerType, 'api'),
+    isNotNull(automationRuns.apiKeyId),
+  );
+
+const stopColumns = {
+  id: automationRuns.id,
+  conversationId: automationRuns.conversationId,
+  automationId: automationRuns.automationId,
+};
+
+const unknownRun = (index: number) => {
+  const message =
+    'Give the id of a run a key of the company started (POST /automations/{id}/runs).';
+  return new AppError('validation_failed', message, {
+    issues: [{ path: `runIds.${index}`, message }],
+  });
+};
+
+/** Locks the conversations' rows for update, in id order, in one statement. */
+async function lockConversations(tx: Tx, tenantId: string, ids: string[]): Promise<void> {
+  await tx
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(and(eq(conversations.tenantId, tenantId), inArray(conversations.id, [...new Set(ids)])))
+    .orderBy(asc(conversations.id))
+    .for('update');
+}
+
+/**
+ * Ends the run as `stopped_by_api` when it is still its conversation's active run (ADR-079), with
+ * its step and the audit entry as the key; a run that has ended is left as it is. The caller holds
+ * the conversation's row lock, which every change to its run takes first.
+ */
+async function stopRunIfActive(
+  tx: Tx,
+  ctx: ApiContext,
+  run: { id: string; automationId: string; conversationId: string },
+  now: Date,
+): Promise<void> {
+  const active = await lockActiveRun(tx, ctx.tenant.id, run.conversationId);
+  if (active?.id !== run.id) return;
+  await appendRunStep(tx, ctx.tenant.id, active.id, {
+    nodeId: active.currentNodeId,
+    nodeType: null,
+    outcome: 'stopped',
+    detail: 'stopped_by_api',
+  });
+  await endRun(tx, active, { status: 'stopped', reason: 'stopped_by_api', now });
+  await recordSystemAudit(
+    tx,
+    ctx.tenant.id,
+    {
+      action: 'automation.run_stopped',
+      subjectType: 'automation_run',
+      subjectId: active.id,
+      metadata: { automationId: run.automationId, source: 'api' },
+      correlationId: ctx.requestId,
+    },
+    apiActor(ctx),
+  );
 }

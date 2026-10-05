@@ -567,10 +567,14 @@ verification, app review, Embedded Signup configuration).
   refused for its contact is answered in its place and changes nothing while the others start;
   numbers that are not valid or given twice and inputs the automation does not take refuse the
   call).
+  **[Stopping many runs built; its database tests run only in CI]** (ADR-162:
+  `POST /automation-runs/stop-many` stops up to 100 runs keys started, each as one stop does, all of
+  them or none: an id that names no run a key of the company started refuses the call, naming its
+  place; the conversations are locked in id order).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   choosing conversations to change by a filter, media downloads, a contact card's contacts (Meta's
-  contact object is not confirmed), stopping runs for many
-  contacts in one call, bulk sends in one call, changing a field's type, changing numbers, choosing
+  contact object is not confirmed), bulk sends in one call, changing a field's type, changing
+  numbers, choosing
   contacts to change by a filter, groups of conditions,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
   resuming, approving, scheduling, creating and editing campaigns through the API, campaign
