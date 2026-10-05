@@ -342,7 +342,9 @@ as `templates.sync_failed`.
 
 **Template statuses look stale.** Press "Refresh from Meta" on the Templates page. If the account
 shows as not connected, reconnect it in Settings → Channels. Verify that the Meta app is subscribed
-to the template webhook fields (docs/META-SETUP.md).
+to the template webhook fields (docs/META-SETUP.md). A refresh, and a sync Meta's template webhook
+asks for, is queued ahead of routine syncs (ADR-178): if statuses still take more than a few
+minutes, look at the template.sync queue's oldest wait on Operations → Queues.
 
 **A template send failed with 132015 / 132016.** Meta paused or disabled the template; HyFib marks it
 and requests a sync. Improve the template (quality) or use another one; do not resend blindly.
@@ -2721,6 +2723,11 @@ replaces the worker role's read of the table with a read of the check's columns,
 failure rolls it all back (usually the bootstrap roles, or a lock held on the table by a sweep: run
 the migrations again). Web servers of this release need it before they show the Queues tab; workers
 of either release and web servers of the previous release work with it.
+
+**Migration 0126 failed.** It drops `ops.template_sync_due` as its owner and creates it again with
+the `requested` column and the new order, in one transaction; a failure rolls it all back (usually
+the bootstrap roles: fix them and run the migrations again). Workers of this release need it before
+they start (their sweep reads the column); workers of the previous release work with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

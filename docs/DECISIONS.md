@@ -7150,3 +7150,30 @@ Decision:
 Not built: acknowledging receipts and quarantine entries, assigning a late queue to someone, a
 reminder while an acknowledged queue stays late, and deleting a note (a new acknowledgement replaces
 it).
+
+## ADR-178 Template syncs asked for go first (2026-10-05)
+
+Context: a member's "Refresh from Meta" promises statuses "within a minute", and Meta's template
+webhooks (an approval, a rejection, a pause) only mark the account as asking for a sync, which the
+minute sweep then queues. The sweep lists at most 100 accounts a minute, never synced first and then
+the oldest sync (0005), and queued their syncs in that order; a member's refresh was queued at once
+but behind every sync queued before it. With many newly connected accounts, a refresh or an approval
+could wait behind syncs nobody was waiting for. Found when the template webhook test could not find
+its account in the sweep's list, which the suite's shared database fills with accounts that never
+synced (fixed then by reading the account's row instead).
+
+Decision:
+
+- **Asked for first:** `ops.template_sync_due` (migration 0126) lists the accounts asked for since
+  their last sync first, oldest request first, then the rest as before, and says which they are
+  (`requested`). Which accounts are due is unchanged.
+- **Queued ahead:** a member's refresh, and the sweep's sync of an account asked for, are queued at
+  a higher pg-boss priority (10) than routine syncs (0), and the template.sync queue fetches higher
+  priorities first, so they run before syncs queued earlier. A sync already queued or running for
+  the account still stands for the request (one per account, 0005), and a request made while a sync
+  runs is queued by the next sweep, as before.
+- **Migration 0126:** the function is created again with the new column and order (dropped by its
+  owner and recreated, as 0011 explains), its owner and grant restored.
+
+Not built: a refresh for one template rather than the account's whole list, and showing on the
+Templates page when the refresh ran.

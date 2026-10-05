@@ -7,6 +7,7 @@ import {
   processTemplateDelete,
   processTemplateSubmit,
   syncTemplates,
+  TEMPLATE_SYNC_PRIORITY,
   type TemplateJobOutcome,
   type TemplateWorkerDeps,
 } from '@w360/domain';
@@ -54,7 +55,11 @@ export const templateDeleteHandler = (rt: WorkerRuntime) =>
 export const templateSyncHandler = (rt: WorkerRuntime) =>
   templateHandler(rt, 'template.sync', syncTemplates);
 
-/** Signals a sync for every WABA that needs one (called from the messaging sweep). */
+/**
+ * Signals a sync for every WABA that needs one (called from the messaging sweep). One asked for
+ * since its last sync (a member's refresh, or Meta's template webhook) goes before routine syncs
+ * (ADR-178).
+ */
 export async function signalDueTemplateSyncs(rt: WorkerRuntime): Promise<number> {
   if (!rt.graph) return 0;
   const due = await findTemplateSyncsDue(rt.db);
@@ -69,7 +74,12 @@ export async function signalDueTemplateSyncs(rt: WorkerRuntime): Promise<number>
         actorUserId: null,
         ref: item.whatsappAccountId,
       }),
-      { singletonKey: `sync:${item.whatsappAccountId}` },
+      {
+        singletonKey: `sync:${item.whatsappAccountId}`,
+        priority: item.requested
+          ? TEMPLATE_SYNC_PRIORITY.requested
+          : TEMPLATE_SYNC_PRIORITY.routine,
+      },
     );
   }
   return due.length;

@@ -237,8 +237,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `template_status_events`. Worker queues: `template.submit` (write-ahead create),
   `template.delete`, `template.sync` (paged listing, reconcile by id then by name and language).
   Syncs are signalled by template webhooks (`whatsapp_accounts.templates_sync_requested_at`), by the
-  per-minute messaging sweep (`ops.template_sync_due`: requested, in review every 5 minutes, or older
-  than 6 hours) and by members.
+  per-minute messaging sweep (`ops.template_sync_due`: requested, in review every 5 minutes, or
+  older than 6 hours) and by members. The sweep lists the accounts asked for first, and their syncs,
+  like members' refreshes, are queued at a higher pg-boss priority than routine ones (ADR-178).
 - **Template sends** reuse the Phase 2 pipeline: `queueTemplateMessage` writes the message and send
   intent (type `template`, rendered text stored for the thread, request body without secrets); the
   worker skips the 24-hour window check for templates but re-checks template approval, consent and

@@ -270,6 +270,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    reads only those columns and calls the function as before. Web servers of this release need it,
    as the Queues tab reads the new columns; web servers from before it show no acknowledgements, and
    a note written meanwhile stays for the new ones.
+   Migration 0126 (ADR-178) creates `ops.template_sync_due` again with a `requested` column and the
+   accounts asked for first. Workers of this release read the column, so it must run before they
+   start (this step does); workers from before it select the columns they know and queue every sync
+   at the default priority, as before. Web servers are not involved beyond queueing a member's
+   refresh at the higher priority, which workers of either release run.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

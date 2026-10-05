@@ -139,6 +139,12 @@ async function insertStatusEvent(
   });
 }
 
+/**
+ * The template.sync queue's priorities (pg-boss fetches higher first): a refresh a member asked for
+ * goes before the sweep's routine syncs, which keep the default (ADR-178).
+ */
+export const TEMPLATE_SYNC_PRIORITY = { requested: 10, routine: 0 } as const;
+
 async function requestSyncTx(tx: Tx, tenantId: string, whatsappAccountId: string, at: Date) {
   await tx
     .update(whatsappAccounts)
@@ -187,6 +193,7 @@ export function createTemplatesService(deps: TemplateDeps) {
     actorUserId: string | null,
     ref: string,
     singletonKey: string,
+    priority?: number,
   ) {
     const queue =
       kind === 'template.submit'
@@ -196,6 +203,7 @@ export function createTemplatesService(deps: TemplateDeps) {
           : QUEUES.templateSync.name;
     await deps.jobs.enqueue(tx, queue, deps.signer.sign({ kind, tenantId, actorUserId, ref }), {
       singletonKey,
+      ...(priority !== undefined ? { priority } : {}),
     });
   }
 
@@ -554,6 +562,7 @@ export function createTemplatesService(deps: TemplateDeps) {
           throw new AppError('precondition_failed', 'Reconnect this WhatsApp account first.');
         }
         await requestSyncTx(tx, ctx.tenant.id, whatsappAccountId, clock.now());
+        // A member waits for it, so it goes before the sweep's routine syncs (ADR-178).
         await enqueue(
           tx,
           'template.sync',
@@ -561,6 +570,7 @@ export function createTemplatesService(deps: TemplateDeps) {
           null,
           whatsappAccountId,
           `sync:${whatsappAccountId}`,
+          TEMPLATE_SYNC_PRIORITY.requested,
         );
       });
     },
@@ -1203,20 +1213,29 @@ export async function syncTemplates(
   return 'done';
 }
 
-/** Sweep input: WABAs whose templates need a sync (ids from a SECURITY DEFINER query). */
+/**
+ * Sweep input: WABAs whose templates need a sync (ids from a SECURITY DEFINER query), those asked
+ * for since their last sync first (`requested`: a member's refresh, or Meta's template webhook,
+ * ADR-178).
+ */
 export async function findTemplateSyncsDue(
   db: Database,
   limit = 100,
-): Promise<{ tenantId: string; whatsappAccountId: string }[]> {
+): Promise<{ tenantId: string; whatsappAccountId: string; requested: boolean }[]> {
   return db.run(
     systemScope,
     async (tx) => {
-      const res = await tx.execute<{ tenant_id: string; whatsapp_account_id: string }>(
-        sql`select tenant_id, whatsapp_account_id from ops.template_sync_due(${limit})`,
+      const res = await tx.execute<{
+        tenant_id: string;
+        whatsapp_account_id: string;
+        requested: boolean;
+      }>(
+        sql`select tenant_id, whatsapp_account_id, requested from ops.template_sync_due(${limit})`,
       );
       return res.rows.map((r) => ({
         tenantId: r.tenant_id,
         whatsappAccountId: r.whatsapp_account_id,
+        requested: r.requested === true,
       }));
     },
     { accessMode: 'read only' },

@@ -1,5 +1,35 @@
 # Progress
 
+## 2026-10-05 — Template syncs asked for go first (ADR-178)
+
+Status: **Implemented; its database tests run in CI only (Graph stand-in only).** A member's
+refresh, or a sync Meta's template webhook asked for, waited behind routine syncs. The local
+PostgreSQL is unavailable (its Docker daemon stopped), so migration 0126 and the integration tests
+below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0126 (`ops.template_sync_due` lists the accounts asked for first and says
+  which they are).
+- **Domain and worker:** `TEMPLATE_SYNC_PRIORITY`; a member's refresh queued at priority 10;
+  `findTemplateSyncsDue` returns `requested`, and the sweep queues those syncs at priority 10.
+- **Tests:** integration (1 new and 1 changed in `templates.test.ts`): the refresh's job priority,
+  the sweep's order with the account asked for found among the suite's never-synced accounts, and
+  the account no longer due once synced. Written for CI; not run here. No unit test covers the
+  change: the order and the priority live in the database and pg-boss.
+- **Docs:** ADR-178; ARCHITECTURE; DEPLOYMENT and RUNBOOKS (migration 0126, stale template
+  statuses).
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 805 passed (81 files)                                           |
+| `pnpm test:integration`, migration 0126            | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
 ## 2026-10-05 — Phase 5: acknowledging late queues on the operations console (P5-10, ADR-177)
 
 Status: **Implemented; its database tests run in CI only (test data only).** Nothing on the Queues

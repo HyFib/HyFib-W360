@@ -365,8 +365,6 @@ describe('template sync', () => {
     const c = await fx.company();
     await syncTemplates(workerDeps(), scopeOf(c), c.whatsappAccountId);
     // Whether the account asks for a sync since its last one, as `ops.template_sync_due` reads it.
-    // Its list is not searched for the account: it holds at most 500, those never synced first, and
-    // the suite's shared database holds more connected accounts that never synced.
     const syncRequested = async () => {
       const [row] = await fx.query<{ requested: boolean }>(
         `SELECT coalesce(templates_sync_requested_at >= templates_synced_at, false) AS requested
@@ -384,6 +382,17 @@ describe('template sync', () => {
     );
     expect(result.outcome).toBe('processed');
     expect(await syncRequested()).toBe(true);
+    // The sweep lists the accounts asked for first (ADR-178), so this one is found although the
+    // suite's shared database holds hundreds of connected accounts that never synced, and the
+    // worker queues its sync ahead of routine ones.
+    const due = await findTemplateSyncsDue(fx.dbs.app, 500);
+    expect(due.find((d) => d.whatsappAccountId === c.whatsappAccountId)).toEqual({
+      tenantId: c.tenant.id,
+      whatsappAccountId: c.whatsappAccountId,
+      requested: true,
+    });
+    const firstRoutine = due.findIndex((d) => !d.requested);
+    if (firstRoutine !== -1) expect(due.slice(firstRoutine).some((d) => d.requested)).toBe(false);
     const unknown = await fx.deliver(fx.fieldBody('123456789012', 'template_category_update', {}));
     expect(unknown.outcome).toBe('quarantined');
     // Suspended companies are left out of the sweep until they are reactivated.
@@ -394,6 +403,31 @@ describe('template sync', () => {
       ),
     ).toBe(false);
     await fx.query(`UPDATE app.tenants SET status = 'active' WHERE id = $1`, [c.tenant.id]);
+  });
+
+  it('queues a refresh a member asks for ahead of the sweep’s routine syncs, and lists it first in the sweep (ADR-178)', async () => {
+    const c = await fx.company();
+    await syncTemplates(workerDeps(), scopeOf(c), c.whatsappAccountId);
+    const jobOf = async () =>
+      fx.query<{ priority: number }>(
+        `SELECT priority FROM pgboss.job
+          WHERE name = 'template.sync' AND singleton_key = $1 AND state = 'created'`,
+        [`sync:${c.whatsappAccountId}`],
+      );
+    expect(await jobOf()).toEqual([]);
+    await templates.requestSync(await fx.ctx(c, c.owner), c.whatsappAccountId);
+    expect(await jobOf()).toEqual([{ priority: 10 }]);
+    const due = await findTemplateSyncsDue(fx.dbs.app, 500);
+    const index = due.findIndex((d) => d.whatsappAccountId === c.whatsappAccountId);
+    expect(due[index]?.requested).toBe(true);
+    expect(due.slice(0, index).every((d) => d.requested)).toBe(true);
+    // Once a sync has started after the request, it is no longer asked for.
+    await syncTemplates(workerDeps(), scopeOf(c), c.whatsappAccountId);
+    expect(
+      (await findTemplateSyncsDue(fx.dbs.app, 500)).some(
+        (d) => d.whatsappAccountId === c.whatsappAccountId,
+      ),
+    ).toBe(false);
   });
 
   it('deletes a template at Meta and marks it deleted', async () => {
