@@ -511,6 +511,14 @@ Phase 5 rules (Public API, P5-08):
   included) refuses the whole call, naming its place in the list, and changes nothing (tested), so
   a call never reveals or touches another company's conversations beyond saying an id is not one of
   the company's. A call counts as one request against the key's limits.
+- Changing the conversations a filter finds (ADR-166, `POST /conversations/update-matching`) needs
+  `conversations.read` and `conversations.write` both, so a key that may only change conversations
+  cannot list them through it. It takes at least one of the list's filters, so no call changes every
+  conversation by mistake, and changes each conversation of a page, at most 100, through the
+  function `PATCH` uses, under the locks of ADR-120, audited as the key. The filter is applied again
+  to the locked rows, so a conversation someone else took out of it meanwhile is left out rather
+  than changed (tested), and only the company's conversations are found (the company condition and
+  row security; another company's key changed nothing, tested).
 - Changing many contacts in one call (ADR-122, `POST /contacts/update-many`) needs
   `contacts.write` and changes each contact through the function `PATCH /contacts/{id}` uses, with
   the same checks of every value against its field's type, the 50-tag limit and the audit as the

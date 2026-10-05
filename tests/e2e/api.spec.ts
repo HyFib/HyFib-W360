@@ -651,8 +651,50 @@ test('a key assigns and resolves several conversations in one call, all of them 
     await request.get('/api/v1/conversations?status=open', { headers: auth })
   ).json();
   expect(open.data).toEqual([]);
+
+  // Reopened and unassigned by a filter, two at a time; the second page is the last (ADR-166).
+  const updateMatching = (data: Record<string, unknown>) =>
+    request.post('/api/v1/conversations/update-matching', { headers: auth, data });
+  const unfiltered = await updateMatching({ filter: {}, change: { status: 'resolved' } });
+  expect(unfiltered.status()).toBe(422);
+  expect((await unfiltered.json()).error.issues).toEqual([
+    { path: 'filter', message: expect.any(String) },
+  ]);
+  const owners = {
+    filter: { status: 'resolved', assigneeId: memberId },
+    change: { status: 'open', assigneeId: null },
+    limit: 2,
+  };
+  const firstPage = await updateMatching(owners);
+  expect(firstPage.status()).toBe(200);
+  const first = (await firstPage.json()) as {
+    data: { id: string; status: string; assigneeId: string | null }[];
+    nextCursor: string | null;
+  };
+  expect(first.data.map((v) => [v.status, v.assigneeId])).toEqual([
+    ['open', null],
+    ['open', null],
+  ]);
+  expect(first.nextCursor).toEqual(expect.any(String));
+  const second = (await (await updateMatching({ ...owners, cursor: first.nextCursor })).json()) as {
+    data: { id: string }[];
+    nextCursor: string | null;
+  };
+  expect(second.nextCursor).toBeNull();
+  expect([...first.data, ...second.data].map((v) => v.id).sort()).toEqual([...ids].sort());
+  const waitingAgain = await (
+    await request.get('/api/v1/conversations?assigneeId=none&status=open', { headers: auth })
+  ).json();
+  expect(waitingAgain.data).toHaveLength(3);
+  await page.reload();
+  await expect(items).toHaveCount(3);
+  for (let i = 0; i < 3; i++) await expect(items.nth(i)).not.toContainText('Assigned to');
+
   const doc = await (await request.get('/api/v1/openapi.json')).json();
   expect(doc.paths['/conversations/update-many'].post.operationId).toBe('updateManyConversations');
+  expect(doc.paths['/conversations/update-matching'].post.operationId).toBe(
+    'updateMatchingConversations',
+  );
 });
 
 test('a key sends reply buttons and a list to a customer who wrote: the inbox shows them, and a picked row comes back through the API', async ({

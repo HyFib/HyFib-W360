@@ -73,6 +73,7 @@ import {
   apiAddNoteSchema,
   apiUpdateConversationSchema,
   apiUpdateManyConversationsSchema,
+  apiUpdateMatchingConversationsSchema,
 } from './conversations';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
 import {
@@ -1091,7 +1092,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           description: [
             `${scopeNote('conversations.write')} As members do in the inbox, with any of \`status\`, \`assigneeId\` and \`teamId\`, applied together: the team, then the member, then the status.`,
             "Resolving stops an automation answering the conversation and ends the wait for a reply; the contact's next message opens the conversation again. No satisfaction survey is sent: surveys follow a member's resolve.",
-            'Assigning a member (one from GET /members) stops an automation answering the conversation; `null` unassigns it, and a round-robin team gives it out again within a minute. Moving it to a team (one from GET /teams) gives it to the team’s next available member when the team assigns in turn and the conversation is open with no member. A member who cannot answer conversations, or a team of another company, is refused (422, naming the field).',
+            'Assigning a member (one from GET /members) stops an automation answering the conversation; `null` unassigns it, and a round-robin team gives it out again within a minute. Moving it to a team (one from GET /teams) gives it to the team’s next available member when the team assigns in turn and the conversation is open with no member. A member who cannot answer conversations, or a team of another company, is refused (422, naming the field). When routing hands the conversation out at the same moment as a move into a team, the request can be refused (409, changing nothing): send it again.',
             'What the conversation already has changes nothing, so a retry is safe without an `Idempotency-Key`. Conversations of erased contacts are not found.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/Id' }],
@@ -1101,7 +1102,7 @@ export function buildOpenApiDocument(serverUrl: string) {
               description: 'The conversation, as it now is.',
               content: json(dataOf(ref('Conversation'))),
             },
-            ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -1111,7 +1112,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           summary: 'Resolve, reopen, assign or move many conversations at once',
           description: [
             `${scopeNote('conversations.write')} Up to ${API_LIMITS.conversationsPerChange} conversations, each changed as PATCH /conversations/{id} changes one, with any of \`status\`, \`assigneeId\` and \`teamId\`. All of them or none: an id that names none of the company's conversations (an erased contact's included), a member who cannot answer conversations or a team of another company refuses the call (422, naming the field, as \`conversationIds.3\`), and nothing is changed.`,
-            'The conversations are changed in the order given (a team that assigns in turn gives them out in that order) and answered in it. A call counts as one request against the rate and monthly limits. What a conversation already has changes nothing, so a retry is safe without an `Idempotency-Key`.',
+            'The conversations are changed in the order given (a team that assigns in turn gives them out in that order) and answered in it. When routing hands one of them out at the same moment as a move into a team, the call can be refused as a whole (409, changing nothing): send it again. A call counts as one request against the rate and monthly limits. What a conversation already has changes nothing, so a retry is safe without an `Idempotency-Key`.',
           ].join('\n\n'),
           requestBody: { required: true, content: json(ref('UpdateManyConversations')) },
           responses: {
@@ -1123,7 +1124,28 @@ export function buildOpenApiDocument(serverUrl: string) {
                 required: ['data'],
               }),
             },
-            ...errors(400, 401, 403, 415, 422, 423, 429, 500),
+            ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/conversations/update-matching': {
+        post: {
+          operationId: 'updateMatchingConversations',
+          summary: 'Change the conversations a filter finds, a page at a time',
+          description: [
+            'Scopes: `conversations.read` and `conversations.write`. Takes the filters of GET /conversations (`filter`, at least one) and a change (`change`): any of `status`, `assigneeId` and `teamId`, the same for every conversation, applied as PATCH /conversations/{id} applies them: the team, then the member, then the status.',
+            `Each call reads one page of the conversations GET /conversations lists with the same filters (newest first, at most ${API_LIMITS.conversationsPerChange}), changes each of them as PATCH /conversations/{id} changes one, in that order, and answers them as they now are with \`nextCursor\`: send the same filter and change with it until it is \`null\`. Pages go from newer conversations to older ones, each found by the filters as they are when it is read, so a conversation the change takes out of the filter is not read again. One someone else takes out of the filter between the read and the change is left out, so a page can hold fewer conversations than the limit while more follow. Conversations of erased contacts are left out.`,
+            'A member who cannot answer conversations or a team of another company refuses the call (422, naming the field, as `change.teamId`), even when no conversation matches, and nothing is changed. When the call moves conversations into a team while routing hands out one of them, it can be refused as a whole (409, changing nothing): send it again with the same cursor.',
+            'What a conversation already has changes nothing, and one the change took out of the filter is not found again, so a call sent again after a lost answer is safe without an `Idempotency-Key`: the pages still reach every conversation the filter finds, each changed once. A call counts as one request against the rate and monthly limits.',
+          ].join('\n\n'),
+          requestBody: { required: true, content: json(ref('UpdateMatchingConversations')) },
+          responses: {
+            '200': {
+              description:
+                'The page’s conversations, as they now are, and where the next page starts.',
+              content: pageOf('Conversation'),
+            },
+            ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -1868,6 +1890,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         },
         UpdateConversation: jsonSchema(apiUpdateConversationSchema, 'input'),
         UpdateManyConversations: jsonSchema(apiUpdateManyConversationsSchema, 'input'),
+        UpdateMatchingConversations: jsonSchema(apiUpdateMatchingConversationsSchema, 'input'),
         Member: jsonSchema(apiMemberSchema),
         Team: jsonSchema(apiTeamSchema),
         AddConversationNote: jsonSchema(apiAddNoteSchema, 'input'),
@@ -1936,6 +1959,7 @@ export const API_ROUTES = [
   ['get', '/conversations/{id}'],
   ['patch', '/conversations/{id}'],
   ['post', '/conversations/update-many'],
+  ['post', '/conversations/update-matching'],
   ['post', '/conversations/{id}/notes'],
   ['get', '/conversations/{id}/notes'],
   ['get', '/conversations/{id}/messages'],

@@ -1176,6 +1176,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the function `PATCH` uses, to each in the order given, which locks the team as a conversation
   moves into it (after the conversations, as a team's deletion does); it answers the conversations
   in that order.
+- **Conversations a filter finds (ADR-166):** `POST /conversations/update-matching`
+  (`apiUpdateMatchingConversations`) reads one page through `conversationPage`, the list's own read
+  (`apiListConversations` uses it, with `conversationFilterSql` for the filters), in a read
+  committed transaction: it checks the member (`lockAssignableMember`, first) and the team
+  (`isCompanyTeam`, a plain read) before the page, locks the page's rows `FOR UPDATE` in id order
+  with the filter's conditions again, so rows someone else took out of the filter are skipped, drops
+  erased contacts' conversations (`visibleConversations`, shared with `update-many`) and applies
+  `changeLockedConversation` to each in the page's order; it answers them as they now are with the
+  page's cursor.
 - **Many contacts at once (ADR-122):** `POST /contacts/update-many` (`apiUpdateManyContacts`,
   `api/contacts.ts`) takes 1 to 100 contacts, each with its id and `PATCH`'s fields. It checks each
   change before the transaction (`prepareContactChange`: email, tags), then locks every field any

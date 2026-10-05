@@ -584,8 +584,12 @@ verification, app review, Embedded Signup configuration).
   `POST /contacts/update-matching` changes the contacts of one search page per call, each as
   `PATCH /contacts/{id}` changes one, custom field values and tags only, in one snapshot; it needs
   `contacts.read` and `contacts.write`).
+  **[Changing the conversations a filter finds built; its database tests run only in CI]** (ADR-166:
+  `POST /conversations/update-matching` changes the conversations of one page of
+  `GET /conversations` per call, at least one filter, each as `PATCH` changes one, with the filter
+  checked again under the rows' locks; it needs `conversations.read` and `conversations.write`).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
-  choosing conversations to change by a filter, media downloads, a contact card's contacts (Meta's
+  media downloads, a contact card's contacts (Meta's
   contact object is not confirmed), changing a field's type, changing
   numbers,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),

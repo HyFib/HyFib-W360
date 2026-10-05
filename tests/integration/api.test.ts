@@ -34,6 +34,7 @@ import {
   apiSendTemplate,
   apiUpdateConversation,
   apiUpdateManyConversations,
+  apiUpdateMatchingConversations,
   apiStartAutomationRun,
   apiStartManyAutomationRuns,
   apiStopAutomationRun,
@@ -4293,6 +4294,257 @@ describe('assigning conversations (ADR-093)', () => {
     ).toBe('teamId');
     expect((await conversationRow(inSales.id)).team_id).toBeNull();
     expect((await conversationRow(elsewhere.id)).team_id).toBeNull();
+  });
+
+  it('change the conversations a filter finds, a page at a time, each as PATCH changes it, audited as the key (ADR-166)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const supervisor = await joined(c, 'supervisor', 'Sam Supervisor');
+    const { teamId: support } = await teams().createTeam(owner, {
+      name: 'Support',
+      assignment: 'round_robin',
+      memberIds: [agent.membership.id, supervisor.membership.id],
+    });
+    await teams().setAvailability(agent, { available: true });
+    await teams().setAvailability(supervisor, { available: true });
+    const writer = await apiKey(c, ['conversations.read', 'conversations.write'], 'Bulk tidy');
+    const matching = (body: unknown) => apiUpdateMatchingConversations(deps(), writer.ctx, body);
+    const other = await fx.company();
+    const theirs = await conversationWith(other, '919811100500');
+    const [first, second, third, fourth, fifth] = [
+      await conversationWith(c, '919811100501'),
+      await conversationWith(c, '919811100502'),
+      await conversationWith(c, '919811100503'),
+      await conversationWith(c, '919811100504'),
+      await conversationWith(c, '919811100505'),
+    ];
+    await apiUpdateManyConversations(deps(), writer.ctx, {
+      conversationIds: [first.id, second.id, third.id],
+      assigneeId: agent.membership.id,
+    });
+
+    // The agent's open conversations go to the supervisor, newest first, two at a time.
+    const byAgent = {
+      filter: { status: 'open', assigneeId: agent.membership.id },
+      change: { assigneeId: supervisor.membership.id },
+      limit: 2,
+    };
+    const page = await matching(byAgent);
+    expect(page.data.map((v) => [v.id, v.assigneeId])).toEqual([
+      [third.id, supervisor.membership.id],
+      [second.id, supervisor.membership.id],
+    ]);
+    expect(page.nextCursor).toEqual(expect.any(String));
+    const last = await matching({ ...byAgent, cursor: page.nextCursor });
+    expect(last.data.map((v) => [v.id, v.assigneeId])).toEqual([
+      [first.id, supervisor.membership.id],
+    ]);
+    expect(last.nextCursor).toBeNull();
+    for (const conv of [first, second, third]) {
+      const audited = await changes(c, conv.id);
+      expect(audited.map((a) => [a.action, a.actor_type, a.actor_id])).toEqual([
+        ['conversation.assigned', 'api_key', writer.id],
+        ['conversation.assigned', 'api_key', writer.id],
+      ]);
+      expect(audited[1]?.metadata).toMatchObject({
+        from: agent.membership.id,
+        to: supervisor.membership.id,
+        source: 'api',
+      });
+    }
+    for (const conv of [fourth, fifth])
+      expect((await conversationRow(conv.id)).assigned).toBeNull();
+    // The filter finds none of them any more.
+    expect(await matching(byAgent)).toEqual({ data: [], nextCursor: null });
+
+    // Every open conversation without a team resolved in one page; another company's untouched.
+    const resolved = await matching({
+      filter: { status: 'open', teamId: 'none' },
+      change: { status: 'resolved' },
+      limit: 100,
+    });
+    expect(resolved.data.map((v) => [v.id, v.status])).toEqual(
+      [fifth, fourth, third, second, first].map((v) => [v.id, 'resolved']),
+    );
+    expect(resolved.nextCursor).toBeNull();
+    expect((await conversationRow(theirs.id)).status).toBe('open');
+
+    // The unassigned ones reopened, then moved into the round-robin team, given out in turn.
+    const reopened = await matching({
+      filter: { status: 'resolved', assigneeId: 'none' },
+      change: { status: 'open' },
+    });
+    expect(reopened.data.map((v) => [v.id, v.status])).toEqual([
+      [fifth.id, 'open'],
+      [fourth.id, 'open'],
+    ]);
+    const moved = await matching({
+      filter: { status: 'open', assigneeId: 'none' },
+      change: { teamId: support },
+    });
+    expect(moved.data.map((v) => [v.id, v.teamId, v.assigneeId])).toEqual([
+      [fifth.id, support, agent.membership.id],
+      [fourth.id, support, supervisor.membership.id],
+    ]);
+    for (const conv of [fourth, fifth]) {
+      expect((await changes(c, conv.id)).map((a) => a.action)).toEqual([
+        'conversation.status_changed',
+        'conversation.status_changed',
+        'conversation.team_changed',
+        'conversation.routed',
+      ]);
+    }
+  });
+
+  it('refuse a member or a team it may not take before reading the page, even when nothing matches, changing nothing (ADR-166)', async () => {
+    const c = await fx.company();
+    const marketer = await fx.ctx(c, c.marketer);
+    const other = await fx.company();
+    const { teamId: foreign } = await teams().createTeam(await fx.ctx(other, other.owner), {
+      name: 'Foreign',
+    });
+    const writer = await apiKey(c, ['conversations.read', 'conversations.write']);
+    const conv = await conversationWith(c, '919811100511');
+    const before = await conversationRow(conv.id);
+    const refused = async (
+      ctx: typeof writer.ctx,
+      body: unknown,
+      code: string,
+      paths: string[],
+    ) => {
+      const error = await expectAppError(apiUpdateMatchingConversations(deps(), ctx, body), code);
+      expect(isAppError(error) && (error.issues ?? []).map((i) => i.path)).toEqual(paths);
+    };
+    const open = { status: 'open' };
+    for (const filter of [open, { contactId: uuidv7() }]) {
+      await refused(
+        writer.ctx,
+        { filter, change: { assigneeId: marketer.membership.id } },
+        'validation_failed',
+        ['change.assigneeId'],
+      );
+      await refused(
+        writer.ctx,
+        { filter, change: { status: 'resolved', teamId: foreign } },
+        'validation_failed',
+        ['change.teamId'],
+      );
+      await refused(writer.ctx, { filter, change: { teamId: uuidv7() } }, 'validation_failed', [
+        'change.teamId',
+      ]);
+    }
+    await refused(writer.ctx, { filter: {}, change: { status: 'resolved' } }, 'validation_failed', [
+      'filter',
+    ]);
+    for (const scopes of [['conversations.write'], ['conversations.read']] as const) {
+      await refused(
+        (await apiKey(c, [...scopes])).ctx,
+        { filter: open, change: { status: 'resolved' } },
+        'forbidden',
+        [],
+      );
+    }
+    for (const status of ['suspended', 'restricted'] as const) {
+      const ctx = { ...writer.ctx, tenant: { ...writer.ctx.tenant, status } };
+      await refused(ctx, { filter: open, change: { status: 'resolved' } }, 'tenant_suspended', []);
+    }
+    expect(await conversationRow(conv.id)).toEqual(before);
+    expect(await changes(c, conv.id)).toEqual([]);
+
+    // Another company's key finds none of the company's conversations.
+    const theirs = await apiKey(other, ['conversations.read', 'conversations.write']);
+    expect(
+      await apiUpdateMatchingConversations(deps(), theirs.ctx, {
+        filter: open,
+        change: { status: 'resolved' },
+      }),
+    ).toEqual({ data: [], nextCursor: null });
+    expect(await conversationRow(conv.id)).toEqual(before);
+  });
+
+  it('leave out a conversation someone else takes out of the filter meanwhile, and change one still matching as it now is (ADR-166)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { teamId: sales } = await teams().createTeam(owner, { name: 'Sales' });
+    const writer = await apiKey(c, ['conversations.read', 'conversations.write']);
+    const [taken, kept, moved] = [
+      await conversationWith(c, '919811100521'),
+      await conversationWith(c, '919811100522'),
+      await conversationWith(c, '919811100523'),
+    ];
+    const holder = await fx.dbs.adminPool.connect();
+    let call: ReturnType<typeof apiUpdateMatchingConversations> | undefined;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('UPDATE app.conversations SET assigned_membership_id = $2 WHERE id = $1', [
+        taken.id,
+        owner.membership.id,
+      ]);
+      await holder.query('UPDATE app.conversations SET team_id = $2 WHERE id = $1', [
+        moved.id,
+        sales,
+      ]);
+      const [held] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
+      // The page is read before the other transaction commits, so all three are on it; their rows
+      // are then locked with the filter again, after it commits.
+      call = apiUpdateMatchingConversations(deps(), writer.ctx, {
+        filter: { assigneeId: 'none' },
+        change: { status: 'resolved' },
+      });
+      call.catch(() => undefined);
+      await vi.waitFor(
+        async () => {
+          const [waiting] = await fx.query<{ n: number }>(
+            'SELECT count(*)::int AS n FROM pg_stat_activity a WHERE $1 = ANY (pg_blocking_pids(a.pid))',
+            [held!.pid],
+          );
+          if (waiting!.n < 1) throw new Error('the call is not waiting yet');
+        },
+        { timeout: 4_000, interval: 20 },
+      );
+    } finally {
+      await holder.query('COMMIT');
+      holder.release();
+    }
+    const result = await call;
+    expect(result?.data.map((v) => [v.id, v.status, v.teamId])).toEqual([
+      [moved.id, 'resolved', sales],
+      [kept.id, 'resolved', null],
+    ]);
+    expect(result?.nextCursor).toBeNull();
+    expect(await conversationRow(taken.id)).toMatchObject({
+      status: 'open',
+      assigned: owner.membership.id,
+    });
+    expect(await changes(c, taken.id)).toEqual([]);
+  });
+
+  it('reach every conversation a filter finds, each changed once, when a call is sent again after a lost answer (ADR-166)', async () => {
+    const c = await fx.company();
+    const writer = await apiKey(c, ['conversations.read', 'conversations.write']);
+    const ids: string[] = [];
+    for (let i = 1; i <= 5; i++) ids.push((await conversationWith(c, `91981110053${i}`)).id);
+    const call = (cursor?: string | null) =>
+      apiUpdateMatchingConversations(deps(), writer.ctx, {
+        filter: { status: 'open' },
+        change: { status: 'resolved' },
+        limit: 2,
+        ...(cursor ? { cursor } : {}),
+      });
+    const first = await call();
+    expect(first.data.map((v) => v.id)).toEqual([ids[4], ids[3]]);
+    // The answer to the next call is lost. Sent again with the same cursor, it finds the
+    // conversations still open past it: those it resolved are not found again.
+    const lost = await call(first.nextCursor);
+    expect(lost.data.map((v) => v.id)).toEqual([ids[2], ids[1]]);
+    const again = await call(first.nextCursor);
+    expect(again.data.map((v) => [v.id, v.status])).toEqual([[ids[0], 'resolved']]);
+    expect(again.nextCursor).toBeNull();
+    for (const id of ids) {
+      expect((await changes(c, id)).map((a) => a.action)).toEqual(['conversation.status_changed']);
+    }
+    expect(await call()).toEqual({ data: [], nextCursor: null });
   });
 });
 

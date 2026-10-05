@@ -6572,3 +6572,57 @@ Decision:
 Not built: names and emails for many contacts, consent for many contacts (consent needs each
 contact's evidence), erasing the contacts a search finds, counting the contacts a change would
 reach, and every page in one call.
+
+## ADR-166 Changing the conversations a filter finds, a page at a time (P5-08) (2026-10-05)
+
+Context: a key lists conversations by status, contact, number, member, team and time of change
+(ADR-072, ADR-093) and changes up to 100 conversations it names in one call (ADR-120). Resolving
+every open conversation of a team, or handing a member's conversations to another, meant listing
+them page by page and sending each page's ids back: twice the calls, and a conversation changed in
+between by someone else was changed as the list had found it. P5-08's Remaining listed choosing
+conversations to change by a filter; ADR-165 did it for contacts.
+
+Decision:
+
+- **Endpoint:** `POST /api/v1/conversations/update-matching` (`updateMatchingConversations`) takes
+  `filter`, the filters of `GET /conversations` (`status`, `contactId`, `channelId`, `assigneeId`
+  and `teamId`, these two with `none`, and `updatedSince`), at least one, so that no call changes
+  every conversation by mistake; `change`, any of `status`, `assigneeId` and `teamId` as
+  `PATCH /conversations/{id}` takes them, the same for every conversation; and a page: `limit` (1 to
+  100, 50 by default) and `cursor`.
+- **Both conversation scopes:** `conversations.read` and `conversations.write`. The call finds
+  conversations as the list does and answers them, so a key that may only change conversations
+  cannot list them through it; `conversations.write`, a writing scope, is refused while the company
+  is suspended or restricted.
+- **A page of the list, changed:** each call reads one page as `GET /conversations` reads it (newest
+  first, on exact keyset pages, erased contacts' conversations left out) and changes each of its
+  conversations as `PATCH` changes one, in that order (a team that assigns in turn gives them out in
+  it), with the locks changing many conversations takes (ADR-120): the member first, then the page's
+  rows `FOR UPDATE` in id order, the team as a conversation moves into it. It answers the page's
+  conversations as they now are, with the next cursor.
+- **The filter checked again under the locks, not one snapshot:** unlike ADR-165, the call runs read
+  committed, as every change of a conversation does. Routing, which a move into a team runs, takes
+  the company's routing lock and then counts each member's open conversations; a snapshot taken
+  before that lock would count without the conversations given out meanwhile and could push a member
+  past the team's limit. Instead the page's rows are locked with the filter again: a conversation
+  someone else took out of the filter after the page was read is left out (a page can then hold
+  fewer conversations than the limit while more follow), and one that still matches is changed as it
+  now is.
+- **Refused before the page is read:** a member who cannot answer conversations or a team that is
+  not the company's refuses the call (422, `change.assigneeId` or `change.teamId`), even when
+  nothing matches. The member is locked for share then, as `update-many` locks it; the team is only
+  read (teams are locked after conversations, as a team's deletion takes them) and locked as a
+  conversation moves into it.
+- **409 when routing crosses a move:** routing's sweeps take the routing lock before a
+  conversation's row, and a move into a team takes the rows first, so a call moving conversations
+  into a team while routing hands one of them out can be refused as a whole (409, changing nothing)
+  and sent again with the same cursor. `PATCH` and `update-many` meet the same refusal; their
+  descriptions now say so too.
+- **No `Idempotency-Key`:** what a conversation already has changes nothing, and one the change took
+  out of the filter is not found again, so a call sent again after a lost answer is safe: the pages
+  still reach every conversation the filter finds, each changed once. A call counts as one request.
+- **No migration.**
+
+Not built: filters `GET /conversations` does not have (such as the time of the last message),
+counting the conversations a change would reach, every page in one call, and notes for many
+conversations.

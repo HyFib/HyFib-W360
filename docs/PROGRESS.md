@@ -1,5 +1,71 @@
 # Progress
 
+## 2026-10-05 — Phase 5: changing the conversations a filter finds (P5-08, ADR-166)
+
+Status: **Implemented; its database tests run in CI only (test data only).** A key changed
+conversations it named, up to 100 per call. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-166):** `POST /conversations/update-matching` changes the conversations of one page
+  of `GET /conversations` per call (at least one filter; the change as `PATCH` takes it, the same
+  for each), each as `PATCH` changes one, read committed with the filter checked again under the
+  rows' locks; `conversations.read` and `conversations.write` both; a member or team it may not take
+  refused before the page is read.
+- **Domain:** `api/conversations.ts` (the list's filters shared with the new body,
+  `conversationFilterSql`, `conversationPage` shared with the list, `visibleConversations` shared
+  with `update-many`, `isCompanyTeam`, `apiUpdateMatchingConversations` and its schema;
+  `changeLockedConversation` names a refused field after its place); `api/openapi.ts` (the
+  operation, `UpdateMatchingConversations`, the route list, and the 409 that routing can cause on
+  `PATCH` and `update-many`).
+- **Web:** the route `api/v1/conversations/update-matching`.
+- **Tests:**
+  - Unit (5 new in `conversations.test.ts`): the body (the list's filters, at least one, a change as
+    `PATCH` takes it, pages of 1 to 100); both conversation scopes and the body's refusals before
+    anything is read; one read committed transaction; the filters' SQL, in the company; the
+    operation, its body and its words, and the 409 of `PATCH` and `update-many`.
+  - Integration (4 new in `api.test.ts`, assigning conversations): a member's conversations handed
+    to another, two pages until the cursor is null, audited as the key; every open conversation
+    without a team resolved in one page, another company's untouched; reopened and moved into a
+    round-robin team, given out in turn; refusals before the page even when nothing matches; a
+    conversation taken out of the filter behind a held row lock left out and one still matching
+    changed as it now is; a call sent again after a lost answer reaching every conversation once.
+    Written for CI; not run here.
+  - E2E (`api.spec.ts`, the test of ADR-120 extended): reopened and unassigned by a filter over
+    HTTP, two pages, shown in the inbox; an empty filter refused. Written for CI; not run here.
+- **ADR-165 corrected before its push:** a call sent again after a lost answer is safe because a
+  contact the change took out of the search is not found again, not because "a page sent again
+  changes nothing more", which is untrue when the change takes contacts out of the search; and a
+  change cannot bring other contacts into a search, so that sentence was dropped (ADR, OpenAPI, unit
+  test).
+- **Docs:** ADR-166; SECURITY (conversation changes); ARCHITECTURE; BACKLOG P5-08; feature matrix
+  H-033 and W-134.
+- **Mutation checks:** 24 tried, all caught on the unit-tested parts (either conversation scope not
+  needed, a call without a filter or with other parts of a filter or change, an empty change, the
+  page's maximum or default, the cursor not read, the company or a filter's condition left out or on
+  the wrong column, `none` matching every conversation, `updatedSince` leaving out its own time, the
+  call in one snapshot, the 409 left out of the words or the responses, here or on `PATCH` and
+  `update-many`, the route or its body unlisted, the route answering another method). The member and
+  team checks, the filter under the locks, the changes and the audit entries need the database, so
+  their regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 746 passed (76 files; 5 new)                                    |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 24 tried, all caught on the unit-tested parts                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Filters the list does not have (the last message's time, say), counting the conversations a change
+  would reach, every page in one call, notes for many conversations.
+
 ## 2026-10-05 — Phase 5: changing the contacts a search finds (P5-08, ADR-165)
 
 Status: **Implemented; its database tests run in CI only (test data only).** A key changed contacts
