@@ -190,6 +190,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   assigneeIds: uuid('assignee_ids').array(),
   /**
+   * The campaigns whose messages' statuses and changes it takes (ADR-185); null takes every
+   * campaign's. Set only while `message.status` or `campaign.status_changed` is among its events.
+   */
+  campaignIds: uuid('campaign_ids').array(),
+  /**
    * The endpoint's OAuth client (ADR-173): its authorization server's token endpoint, the client
    * identifier, the secret encrypted by the keyring and the scope to ask for (null: none). All
    * null without OAuth; the scope alone is optional.

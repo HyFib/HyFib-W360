@@ -2245,6 +2245,18 @@ to replay. To take more, tick the templates under "Templates" on the endpoint's 
 `templateIds` (null for every template). Removing both Message status and Template status clears the
 list.
 
+**A receiver misses a campaign's message statuses or changes (ADR-185).** An endpoint can take the
+statuses and changes of chosen campaigns only. The endpoints list shows them ("Campaigns whose
+statuses and changes are sent: …"), and the API answers `campaignIds` (null takes every campaign's).
+A message's statuses go by the campaign that sent it: those of a message no campaign sent (a
+member's reply, an automation's message) or another campaign sent are never queued for the endpoint,
+and when no endpoint of the company takes an event, it is not recorded at all, so there is nothing
+to replay. Settings lists the 200 newest campaigns; an older one can be chosen through the API. To
+take more, tick the campaigns under "Campaigns" on the endpoint's page or choose "Every message’s
+statuses and every campaign’s changes", or `PATCH /webhook-endpoints/{id}` with `campaignIds` (null
+for every campaign). Removing both Message status and Campaign status clears the list. Each status
+names its campaign as `message.campaignId`, null for a message no campaign sent.
+
 **A receiver misses a run's events (ADR-183).** An endpoint can take the run events of the runs
 started by chosen triggers only. The endpoints list shows them ("Automation runs started by: …"),
 and the API answers `runTriggers` (null takes every run). A run's events go by what started it, as
@@ -2825,6 +2837,14 @@ bootstrap roles, or a lock held on the table: fix it and run the migrations agai
 this release need it before they start, or Settings → Webhooks and the endpoints API fail (their
 reads of endpoints name the column); workers of either release and web servers of the previous
 release work with it.
+
+**Migration 0133 failed.** It adds `campaign_ids` to `app.webhook_endpoints` with the check
+`webhook_endpoints_campaign_ids`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event` and `app.webhook_capture_message`, in one transaction; a failure rolls
+it all back (usually the bootstrap roles, or a lock held on the table: fix it and run the migrations
+again). Web servers of this release need it before they start, or Settings → Webhooks and the
+endpoints API fail (their reads of endpoints name the column); workers of either release and web
+servers of the previous release work with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

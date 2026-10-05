@@ -36,6 +36,7 @@ import {
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_RUN_TRIGGER_LABELS,
   WEBHOOK_RUN_TRIGGERS,
+  WEBHOOK_CAMPAIGN_EVENTS,
   WEBHOOK_TEAM_EVENTS,
   WEBHOOK_TEMPLATE_EVENTS,
   WEBHOOK_EVENT_INFO,
@@ -52,6 +53,7 @@ import {
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUSES,
   webhookAssigneeText,
+  webhookCampaignText,
   webhookErrorLabel,
   webhookFieldText,
   webhookTakesFieldChanges,
@@ -62,6 +64,7 @@ import {
   webhookOAuthText,
   webhookRetryDelaySeconds,
   webhookTakesAutomationRuns,
+  webhookTakesCampaignEvents,
   webhookTakesChannelEvents,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
@@ -137,6 +140,8 @@ import {
   webhookTeamIdsSchema,
   webhookTemplateIdsFor,
   webhookTemplateIdsSchema,
+  webhookCampaignIdsFor,
+  webhookCampaignIdsSchema,
   webhookTemplateStatusesFor,
   webhookTemplateStatusesSchema,
 } from './service';
@@ -335,6 +340,7 @@ describe('webhook payload schemas', () => {
             templateName: null,
             sentBy: 'api',
             apiKeyId: base.id,
+            campaignId: null,
           },
           error: { code: '131026', title: 'Message undeliverable' },
           conversation,
@@ -343,6 +349,32 @@ describe('webhook payload schemas', () => {
         },
       }).success,
     ).toBe(true);
+    // A campaign's message names its campaign (ADR-185); the field is always there.
+    const campaignMessage = {
+      id: base.id,
+      status: 'delivered',
+      templateId: base.id,
+      templateName: 'autumn_sale',
+      sentBy: 'campaign',
+      apiKeyId: null,
+      campaignId: base.id,
+    };
+    const campaignStatus = {
+      ...base,
+      type: 'message.status',
+      data: { message: campaignMessage, error: null, conversation, contact, channel },
+    };
+    expect(messageStatusPayloadSchema.safeParse(campaignStatus).success).toBe(true);
+    const { campaignId: _left, ...withoutCampaign } = campaignMessage;
+    for (const message of [withoutCampaign, { ...campaignMessage, campaignId: 'autumn' }]) {
+      expect(
+        messageStatusPayloadSchema.safeParse({
+          ...campaignStatus,
+          data: { ...campaignStatus.data, message },
+        }).success,
+        JSON.stringify(message),
+      ).toBe(false);
+    }
     expect(
       consentChangedPayloadSchema.safeParse({
         ...base,
@@ -916,6 +948,7 @@ describe('webhook payload schemas', () => {
             templateName: null,
             sentBy: 'agent',
             apiKeyId: null,
+            campaignId: null,
           },
           error: null,
           conversation,
@@ -2219,6 +2252,76 @@ describe('template filters (ADR-175)', () => {
   it('name a template by its name and language', () => {
     expect(webhookTemplateText({ name: 'order_update', language: 'en_US' })).toBe(
       'order_update (en_US)',
+    );
+  });
+});
+
+describe('campaign filters (ADR-185)', () => {
+  const autumn = '8091a2b3-c4d5-46e7-b8f9-0a1b2c3d4e5f';
+  const diwali = '91a2b3c4-d5e6-47f8-89a0-b1c2d3e4f5a6';
+
+  it('take 1 to 50 campaigns, once each and in lower case, in the order given; null takes every campaign', () => {
+    expect(webhookCampaignIdsSchema.parse([diwali, autumn.toUpperCase(), diwali, autumn])).toEqual([
+      diwali,
+      autumn,
+    ]);
+    expect(webhookCampaignIdsSchema.parse(null)).toBeNull();
+    const ids = Array.from(
+      { length: WEBHOOK_LIMITS.campaigns + 1 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(WEBHOOK_LIMITS.campaigns).toBe(50);
+    expect(webhookCampaignIdsSchema.parse(ids.slice(1))).toEqual(ids.slice(1));
+    for (const refused of [[], ids, ['autumn_launch'], [autumn, null], autumn, [42]]) {
+      expect(webhookCampaignIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookCampaignIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one campaign, or take every campaign.',
+    );
+    expect(webhookCampaignIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 50 campaigns.',
+    );
+    expect(webhookCampaignIdsSchema.safeParse(['autumn_launch']).error?.issues[0]?.message).toBe(
+      'Choose campaigns from the list.',
+    );
+    // Settings offers the 200 newest; the API takes any of the company's.
+    expect(WEBHOOK_LIMITS.campaignChoices).toBe(200);
+  });
+
+  it('apply to message statuses and campaign changes, whose payloads name the campaign, and no other event', () => {
+    expect(WEBHOOK_CAMPAIGN_EVENTS).toEqual(['message.status', 'campaign.status_changed']);
+    for (const type of WEBHOOK_EVENT_KEYS) {
+      const ofACampaign = WEBHOOK_CAMPAIGN_EVENTS.some((t) => t === type);
+      expect(webhookTakesCampaignEvents([type]), type).toBe(ofACampaign);
+    }
+    // Each names its campaign, so a receiver can tell them apart.
+    expect('campaignId' in messageStatusPayloadSchema.shape.data.shape.message.shape).toBe(true);
+    expect('id' in campaignStatusChangedPayloadSchema.shape.data.shape.campaign.shape).toBe(true);
+    expect(webhookTakesCampaignEvents(['message.received', 'campaign.status_changed'])).toBe(true);
+    expect(webhookTakesCampaignEvents(['message.received', 'template.status_changed'])).toBe(false);
+  });
+
+  it('are kept only while the endpoint takes an event of a campaign: given, kept, or cleared', () => {
+    expect(webhookCampaignIdsFor(['message.status'], [autumn], null)).toEqual([autumn]);
+    expect(webhookCampaignIdsFor(['campaign.status_changed'], undefined, [diwali])).toEqual([
+      diwali,
+    ]);
+    expect(webhookCampaignIdsFor(['message.status'], null, [diwali])).toBeNull();
+    expect(webhookCampaignIdsFor(['message.status'], undefined, null)).toBeNull();
+    expect(webhookCampaignIdsFor(['template.status_changed'], [autumn], [diwali])).toBeNull();
+  });
+
+  it('name a campaign by its name and status, as Campaigns does', () => {
+    expect(webhookCampaignText({ id: autumn, name: 'Autumn launch', status: 'running' })).toBe(
+      'Autumn launch (Sending)',
+    );
+    expect(
+      webhookCampaignText({ id: autumn, name: 'Autumn launch', status: 'pending_approval' }),
+    ).toBe('Autumn launch (Waiting for approval)');
+    expect(webhookCampaignText({ id: autumn, name: 'Autumn launch', status: null })).toBe(
+      'Autumn launch',
     );
   });
 });

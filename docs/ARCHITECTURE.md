@@ -1553,6 +1553,16 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `fields.<key>`, its fields. Settings (radio buttons and checkboxes under "Custom fields") and the
   API (`contactFieldKeys`) set it; the services check the keys a list adds; a change that drops the
   event or `fields` clears it.
+- **Campaign filters** (migration 0133, ADR-185): `campaign_ids` on an endpoint lists the campaigns
+  whose messages' statuses (`message.status`) and changes (`campaign.status_changed`) it takes, null
+  for every campaign's; a check keeps it to 1 to 50 ids and to endpoints taking one of those events.
+  The message trigger passes the message's `campaign_id` as `campaignId` in the detail, and
+  `app.capture_webhook_event` (replaced with the same signature) matches it, or a campaign event's
+  stored `campaignId`, against the list, then takes the message's out before storing the event.
+  `message.status` payloads name the campaign (`message.campaignId`), read from the message when
+  prepared. Settings (radio buttons and checkboxes under "Campaigns", the 200 newest campaigns) and
+  the API (`campaignIds`) set it; the services check the campaigns of a list given; a change that
+  drops both events clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and

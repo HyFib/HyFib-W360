@@ -8,6 +8,7 @@ import {
   asc,
   automationVersions,
   automations,
+  campaigns,
   channelAccounts,
   contactFields,
   desc,
@@ -51,18 +52,21 @@ import {
   WEBHOOK_UNATTEMPTED_ERRORS,
   webhookHost,
   webhookTakesAutomationRuns,
+  webhookTakesCampaignEvents,
   webhookTakesChannelEvents,
   webhookTakesFieldChanges,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   type WebhookAssigneeChoice,
   type WebhookAutomationChoice,
+  type WebhookCampaignChoice,
   type WebhookCampaignStatus,
   type WebhookChannelChoice,
   type WebhookContactPart,
   type WebhookConversationStatus,
   type WebhookEndpointAssignee,
   type WebhookEndpointAutomation,
+  type WebhookEndpointCampaign,
   type WebhookEndpointChannel,
   type WebhookEndpointField,
   type WebhookFieldChoice,
@@ -724,6 +728,13 @@ const templateChoiceColumns = {
   language: messageTemplates.language,
 };
 
+/** A campaign as Settings → Webhooks names it (ADR-185). */
+const campaignChoiceColumns = {
+  id: campaigns.id,
+  name: campaigns.name,
+  status: campaigns.status,
+};
+
 /** The columns `webhookChannelLabel` reads, with the number's id and status. */
 const channelChoiceColumns = {
   id: channelAccounts.id,
@@ -783,6 +794,59 @@ export async function assertWebhookTemplates(
   if (index === -1) return;
   throw new AppError('validation_failed', WEBHOOK_TEMPLATES_NOT_FOUND, {
     issues: [{ path: `templateIds.${index}`, message: WEBHOOK_TEMPLATES_NOT_FOUND }],
+  });
+}
+
+/**
+ * The campaigns whose messages' statuses and changes an endpoint takes (ADR-185), each once; null
+ * takes every campaign's, including campaigns added later.
+ */
+export const webhookCampaignIdsSchema = z
+  .array(z.uuid({ error: 'Choose campaigns from the list.' }))
+  .min(1, 'Choose at least one campaign, or take every campaign.')
+  .max(WEBHOOK_LIMITS.campaigns, `Choose at most ${WEBHOOK_LIMITS.campaigns} campaigns.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS =
+  'Choose campaigns only for an endpoint that receives Message status or Campaign status.';
+
+export const WEBHOOK_CAMPAIGNS_NOT_FOUND = 'Choose campaigns of this company.';
+
+/**
+ * The campaigns an endpoint keeps after it is added or changed: every campaign (null) unless it
+ * takes an event of a campaign; then those given, or else the ones it had.
+ */
+export function webhookCampaignIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesCampaignEvents(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses campaigns given for an endpoint unless each is the company's (ADR-185). A company's
+ * campaigns are kept until the company is deleted, so a list never names one that is gone. `tx` is
+ * in the company's scope.
+ */
+export async function assertWebhookCampaigns(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+): Promise<void> {
+  if (!ids || ids.length === 0) return;
+  const rows = await tx
+    .select({ id: campaigns.id })
+    .from(campaigns)
+    .where(and(eq(campaigns.tenantId, tenantId), inArray(campaigns.id, [...ids])));
+  const found = new Set(rows.map((r) => r.id));
+  const index = ids.findIndex((id) => !found.has(id));
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_CAMPAIGNS_NOT_FOUND, {
+    issues: [{ path: `campaignIds.${index}`, message: WEBHOOK_CAMPAIGNS_NOT_FOUND }],
   });
 }
 
@@ -988,6 +1052,11 @@ const endpointFields = z.object({
    */
   templateIds: webhookTemplateIdsSchema.optional(),
   /**
+   * Given, the campaigns whose messages' statuses and changes it takes (null: every campaign's,
+   * ADR-185); left out, they stay.
+   */
+  campaignIds: webhookCampaignIdsSchema.optional(),
+  /**
    * Given, the members whose assigned conversations' events it takes (null: every conversation's,
    * ADR-181); left out, they stay.
    */
@@ -1076,6 +1145,12 @@ const templatesNeedTheEvents = {
     !data.templateIds || webhookTakesTemplateEvents(data.eventTypes),
   options: { path: ['templateIds'], message: WEBHOOK_TEMPLATES_NEED_THE_EVENTS },
 };
+/** Campaigns are chosen only for an endpoint that takes events of campaigns (ADR-185). */
+const campaignsNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; campaignIds?: unknown }) =>
+    !data.campaignIds || webhookTakesCampaignEvents(data.eventTypes),
+  options: { path: ['campaignIds'], message: WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS },
+};
 /** Members are chosen only for an endpoint that takes events of conversations (ADR-181). */
 const assigneesNeedTheEvents = {
   check: (data: { eventTypes: WebhookEventType[]; assigneeIds?: unknown }) =>
@@ -1096,6 +1171,7 @@ const endpointSchema = endpointFields
   .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
   .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
   .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options)
+  .refine(campaignsNeedTheEvents.check, campaignsNeedTheEvents.options)
   .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options);
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointFields
@@ -1113,6 +1189,7 @@ const updateSchema = endpointFields
   .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
   .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
   .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options)
+  .refine(campaignsNeedTheEvents.check, campaignsNeedTheEvents.options)
   .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
@@ -1182,6 +1259,11 @@ export interface WebhookEndpointView {
    * takes every template's.
    */
   templates: WebhookTemplateChoice[] | null;
+  /**
+   * The campaigns whose messages' statuses and changes it takes (ADR-185), as stored, named; null
+   * takes every campaign's.
+   */
+  campaigns: WebhookEndpointCampaign[] | null;
   /**
    * The members whose assigned conversations' events it takes (ADR-181), as stored, named, with
    * whether conversations can still be assigned to them; null takes every conversation's.
@@ -1417,6 +1499,7 @@ export async function lockWebhookEndpoint(
       channelAccountIds: webhookEndpoints.channelAccountIds,
       teamIds: webhookEndpoints.teamIds,
       templateIds: webhookEndpoints.templateIds,
+      campaignIds: webhookEndpoints.campaignIds,
       assigneeIds: webhookEndpoints.assigneeIds,
       headerNames: webhookEndpoints.headerNames,
       oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
@@ -1469,6 +1552,7 @@ export async function insertWebhookEndpoint(
     channelAccountIds: string[] | null;
     teamIds: string[] | null;
     templateIds: string[] | null;
+    campaignIds: string[] | null;
     assigneeIds: string[] | null;
     /** Its OAuth client (ADR-173), checked by `checkedWebhookOAuth` with nothing stored. */
     oauth: CheckedWebhookOAuth | null;
@@ -1510,6 +1594,7 @@ export async function insertWebhookEndpoint(
     channelAccountIds: input.channelAccountIds,
     teamIds: input.teamIds,
     templateIds: input.templateIds,
+    campaignIds: input.campaignIds,
     assigneeIds: input.assigneeIds,
     ...webhookOAuthColumns(keyring, tenantId, id, input.oauth, NO_WEBHOOK_OAUTH),
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
@@ -1900,6 +1985,7 @@ export function createWebhooksService(deps: {
               channelAccountIds: webhookEndpoints.channelAccountIds,
               teamIds: webhookEndpoints.teamIds,
               templateIds: webhookEndpoints.templateIds,
+              campaignIds: webhookEndpoints.campaignIds,
               assigneeIds: webhookEndpoints.assigneeIds,
               oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
               oauthClientId: webhookEndpoints.oauthClientId,
@@ -1990,6 +2076,18 @@ export function createWebhooksService(deps: {
                     ),
                   );
           const templateById = new Map(namedTemplates.map((t) => [t.id, t]));
+          // The campaigns endpoints chose (ADR-185).
+          const campaignIds = [...new Set(rows.flatMap((r) => r.campaignIds ?? []))];
+          const namedCampaigns =
+            campaignIds.length === 0
+              ? []
+              : await tx
+                  .select(campaignChoiceColumns)
+                  .from(campaigns)
+                  .where(
+                    and(eq(campaigns.tenantId, ctx.tenant.id), inArray(campaigns.id, campaignIds)),
+                  );
+          const campaignById = new Map(namedCampaigns.map((c) => [c.id, c]));
           // The members endpoints chose (ADR-181), and whether they still take conversations.
           const assigneeIds = [...new Set(rows.flatMap((r) => r.assigneeIds ?? []))];
           const namedAssignees =
@@ -2041,6 +2139,7 @@ export function createWebhooksService(deps: {
               channelAccountIds,
               teamIds: chosenTeams,
               templateIds: chosenTemplates,
+              campaignIds: chosenCampaigns,
               assigneeIds: chosenAssignees,
               contactFieldKeys: chosenFields,
               oauthTokenUrl,
@@ -2068,6 +2167,12 @@ export function createWebhooksService(deps: {
               templates: chosenTemplates
                 ? chosenTemplates.map(
                     (id) => templateById.get(id) ?? { id, name: 'Unknown template', language: '-' },
+                  )
+                : null,
+              campaigns: chosenCampaigns
+                ? chosenCampaigns.map(
+                    (id): WebhookEndpointCampaign =>
+                      campaignById.get(id) ?? { id, name: 'Unknown campaign', status: null },
                   )
                 : null,
               contactFields: chosenFields
@@ -2180,6 +2285,32 @@ export function createWebhooksService(deps: {
     },
 
     /**
+     * The campaigns an endpoint can choose to take the statuses and changes of (ADR-185): the
+     * company's newest campaigns, whatever their status, at most `WEBHOOK_LIMITS.campaignChoices`;
+     * `more` says whether older ones exist (the API takes any of the company's).
+     */
+    async campaignChoices(
+      ctx: TenantContext,
+    ): Promise<{ campaigns: WebhookCampaignChoice[]; more: boolean }> {
+      assertCan(ctx, 'developer.manage');
+      const rows = await db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select(campaignChoiceColumns)
+            .from(campaigns)
+            .where(eq(campaigns.tenantId, ctx.tenant.id))
+            .orderBy(desc(campaigns.createdAt), desc(campaigns.id))
+            .limit(WEBHOOK_LIMITS.campaignChoices + 1),
+        { accessMode: 'read only' },
+      );
+      return {
+        campaigns: rows.slice(0, WEBHOOK_LIMITS.campaignChoices),
+        more: rows.length > WEBHOOK_LIMITS.campaignChoices,
+      };
+    },
+
+    /**
      * The teams an endpoint can choose to take the conversations' events of (ADR-174): every team
      * of the company, by name.
      */
@@ -2287,6 +2418,8 @@ export function createWebhooksService(deps: {
         await assertWebhookTeams(tx, ctx.tenant.id, teamIds);
         const templateIds = webhookTemplateIdsFor(data.eventTypes, data.templateIds, null);
         await assertWebhookTemplates(tx, ctx.tenant.id, templateIds);
+        const campaignIds = webhookCampaignIdsFor(data.eventTypes, data.campaignIds, null);
+        await assertWebhookCampaigns(tx, ctx.tenant.id, campaignIds);
         const assigneeIds = webhookAssigneeIdsFor(data.eventTypes, data.assigneeIds, null);
         await assertWebhookAssignees(tx, ctx.tenant.id, assigneeIds);
         const oauth = data.oauth
@@ -2316,6 +2449,7 @@ export function createWebhooksService(deps: {
           channelAccountIds: channelIds,
           teamIds,
           templateIds,
+          campaignIds,
           assigneeIds,
           oauth,
           creator: { userId: ctx.user.id },
@@ -2345,6 +2479,7 @@ export function createWebhooksService(deps: {
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),
+              ...(campaignIds ? { campaignIds } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
               ...(oauth ? { oauthTokenHost: oauth.host } : {}),
             },
@@ -2458,6 +2593,15 @@ export function createWebhooksService(deps: {
         if (data.templateIds !== undefined) {
           await assertWebhookTemplates(tx, ctx.tenant.id, templateIds);
         }
+        const campaignIds = webhookCampaignIdsFor(
+          data.eventTypes,
+          data.campaignIds,
+          endpoint.campaignIds,
+        );
+        // Likewise the campaigns: those kept were checked when chosen (ADR-185).
+        if (data.campaignIds !== undefined) {
+          await assertWebhookCampaigns(tx, ctx.tenant.id, campaignIds);
+        }
         const assigneeIds = webhookAssigneeIdsFor(
           data.eventTypes,
           data.assigneeIds,
@@ -2496,6 +2640,7 @@ export function createWebhooksService(deps: {
             channelAccountIds: channelIds,
             teamIds,
             templateIds,
+            campaignIds,
             assigneeIds,
             ...(data.headers
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
@@ -2536,6 +2681,7 @@ export function createWebhooksService(deps: {
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),
+              ...(campaignIds ? { campaignIds } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
               ...webhookOAuthAudit(oauth, endpoint),
             },

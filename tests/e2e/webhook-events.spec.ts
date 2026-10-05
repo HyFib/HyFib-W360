@@ -1071,6 +1071,31 @@ test('campaign events reach an endpoint: a member starts a campaign, and the run
   await page.getByRole('button', { name: 'Save draft' }).click();
   await expect(page.getByText('Draft saved. The review below is updated.')).toBeVisible();
   expect(forUs()).toEqual([]);
+
+  // A third endpoint takes this campaign's message statuses and changes only (ADR-185).
+  const campaignPage = page.url();
+  const launchPath = `${path}/launch`;
+  const forLaunch = () =>
+    received
+      .filter((r) => r.path === launchPath)
+      .map((r) => JSON.parse(r.body) as { type: string; data: Record<string, unknown> });
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${launchPath}`);
+  await page.getByRole('checkbox', { name: /Message status/ }).check();
+  await page.getByRole('checkbox', { name: /Campaign status/ }).check();
+  await expect(
+    page.getByRole('radio', { name: /Every message’s statuses and every campaign’s changes/ }),
+  ).toBeChecked();
+  await page.getByRole('radio', { name: /Only those of the campaigns ticked/ }).check();
+  await page.getByRole('checkbox', { name: 'Autumn launch (Draft)', exact: true }).check();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await expect(page.getByLabel('Signing secret')).toBeVisible();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  await page.reload();
+  await expect(
+    page.getByText('Campaigns whose statuses and changes are sent: Autumn launch (Draft)'),
+  ).toBeVisible();
+  await page.goto(campaignPage);
   await page.getByRole('button', { name: 'Start campaign' }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: 'Start campaign' }).click();
 
@@ -1125,7 +1150,20 @@ test('campaign events reach an endpoint: a member starts a campaign, and the run
   expect(forCompleted().map((e) => [e.data.campaign.id, e.data.campaign.status])).toEqual([
     [campaignId, 'completed'],
   ]);
-  await page.reload();
+  // The third heard each change of the campaign it names and its message's statuses, which name
+  // the campaign.
+  await expect(async () => {
+    expect(forLaunch().filter((b) => b.type === 'campaign.status_changed')).toHaveLength(3);
+    expect(forLaunch().some((b) => b.type === 'message.status')).toBe(true);
+  }).toPass({ timeout: 30_000 });
+  for (const body of forLaunch().filter((b) => b.type === 'message.status')) {
+    expect(body.data.message).toMatchObject({
+      sentBy: 'campaign',
+      campaignId,
+      templateName: 'autumn_sale',
+    });
+  }
+  await page.goto(campaignPage);
   await expect(page.getByText('Completed', { exact: true }).first()).toBeVisible();
 });
 

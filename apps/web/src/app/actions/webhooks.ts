@@ -54,6 +54,8 @@ export async function createWebhookEndpointAction(
     teamIds: string[] | null;
     /** The templates whose statuses and changes it takes (ADR-175); null takes every one's. */
     templateIds: string[] | null;
+    /** The campaigns whose messages' statuses and changes it takes (ADR-185); null: every one's. */
+    campaignIds: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /** Its OAuth client (ADR-173); null: none. */
@@ -106,6 +108,8 @@ export async function updateWebhookEndpointAction(
     teamIds: string[] | null;
     /** The templates whose statuses and changes it takes (ADR-175); null takes every one's. */
     templateIds: string[] | null;
+    /** The campaigns whose messages' statuses and changes it takes (ADR-185); null: every one's. */
+    campaignIds: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /**

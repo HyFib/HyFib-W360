@@ -733,9 +733,12 @@ verification, app review, Embedded Signup configuration).
   started by the triggers it chooses, in Settings or through the API, or every run's as before).
   **[Custom field filters built; their database tests run only in CI]** (ADR-184: an endpoint takes
   the changes of the custom fields it chooses, 1 to 50 of the company's fields, alongside the parts
-  it takes, or every field's as before). Remaining: filters for other event types and on a message's
-  or contact's values (such as by campaign, tag or a field's value, or a run's end reason or key),
-  other authentication (headers computed
+  it takes, or every field's as before). **[Campaign filters built; their database tests run only in
+  CI]** (ADR-185: `message.status` names the campaign that sent the message, and an endpoint takes
+  the statuses of the messages of the campaigns it chooses and their changes, 1 to 50 of the
+  company's campaigns, in Settings or through the API, or every campaign's as before). Remaining:
+  filters for other event types and on a message's or contact's values (such as by tag or a field's
+  value, or a run's end reason or key), other authentication (headers computed
   per delivery, other OAuth grants),
   mutual TLS, fixed egress addresses, events for store orders, Payment Links and each step of a run,
   `createdAt` finer than the millisecond, load tests.

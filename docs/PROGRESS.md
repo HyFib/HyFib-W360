@@ -1,5 +1,65 @@
 # Progress
 
+## 2026-10-05 — Phase 5: choosing the campaigns whose message statuses and changes a webhook endpoint receives (P5-09, ADR-185)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers only).** An
+endpoint could take every campaign's message statuses and changes or none, and a message's status
+never said which campaign sent it. The local PostgreSQL is unavailable (its Docker daemon stopped),
+so migration 0133, the integration tests and the changed e2e test below were written but not run
+here.
+
+### Completed
+
+- **Design (ADR-185):** `message.campaignId` in `message.status` payloads; `campaignIds`, null for
+  every campaign or 1 to 50 of the company's campaigns, only while the endpoint takes
+  `message.status` or `campaign.status_changed`; a message no campaign sent is on no list.
+- **Database:** migration 0133 (the column and its check, the column grant,
+  `app.capture_webhook_event` matching the campaign, the message trigger passing it); the schema's
+  column (`packages/db`).
+- **Domain:** the list's schema, keeping and checking (`webhookCampaignIdsSchema`,
+  `webhookCampaignIdsFor`, `assertWebhookCampaigns`), when it applies and the label in the model,
+  the endpoint view naming the campaigns, `campaignChoices` (the 200 newest), create and update with
+  the audit; the payload's `campaignId`; `campaignIds` in the API (create, update, answers) and the
+  OpenAPI document; the export column.
+- **Web:** "Campaigns" in the endpoint form (every campaign's statuses and changes, or those of the
+  campaigns ticked; an older campaign the endpoint names stays listed) and "Campaigns whose statuses
+  and changes are sent: …" on the endpoints list.
+- **Tests:**
+  - Unit (4 new and 1 changed in `webhooks.test.ts`, 1 new and 2 changed in `api.test.ts`): the
+    list's rules, when it applies, keeping and clearing, the label, the payload's campaign, the API
+    schemas and the OpenAPI entries.
+  - Integration (3 new and 1 changed in `webhooks.test.ts`, 1 new in `webhook-events.test.ts`, 1 new
+    and 1 changed in `api-webhook-endpoints.test.ts`): refusals, keeping and clearing, audits, the
+    check and the grant, the choices, capture by campaign with the detail not stored, the runner's
+    messages, the API. Written for CI; not run here.
+  - E2E (1 changed in `webhook-events.spec.ts`): an endpoint for one campaign hears its changes and
+    its message's status, which names the campaign. Written for CI; not run here.
+- **Docs:** ADR-185 (and the "Not built" of ADR-172 and ADR-175 annotated); SECURITY; ARCHITECTURE;
+  THREAT-MODEL T179; DEPLOYMENT and RUNBOOKS (migration 0133, a receiver missing a campaign's
+  statuses); DATA-RETENTION; BACKLOG P5-09; feature matrix H-014, W-138 and W-139.
+- **Mutation checks:** 18 deliberate regressions tried, all caught on the unit-tested parts (an
+  empty or long list, repeats and capitals kept, any text taken, a list kept without its events or
+  by a null, the events it applies to, the limits, the label, the payload field, the API's
+  refinement, change rule and field, the OpenAPI field and description). The services' checks, the
+  capture and the form need the database or a browser, so their regressions are left to the
+  integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 828 passed (82 files)                                                |
+| `pnpm test:integration`, e2e, migration 0133       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 18 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- The campaign a reply is attributed to in `message.received`; filters by a campaign's template or
+  audience; campaigns chosen per event type.
+
 ## 2026-10-05 — Phase 5: choosing the custom fields whose changes a webhook endpoint receives (P5-09, ADR-184)
 
 Status: **Implemented; its database and browser tests run in CI only (test receivers only).** An

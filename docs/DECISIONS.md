@@ -6890,9 +6890,9 @@ Decision:
   and the message trigger function with the same name, so owners, grants and triggers stay. Existing
   endpoints keep null; nothing is backfilled.
 
-Not built: statuses of the messages one API key, campaign, automation or template (built by ADR-175)
-sent (an endpoint chooses kinds of senders only), and a sender filter for received messages (a
-contact sends them all).
+Not built: statuses of the messages one API key, campaign (built by ADR-185), automation or template
+(built by ADR-175) sent (an endpoint chooses kinds of senders only), and a sender filter for
+received messages (a contact sends them all).
 
 ## ADR-173 OAuth 2.0 client credentials for webhook endpoints (P5-09) (2026-10-05)
 
@@ -7061,8 +7061,9 @@ Decision:
   condition), so its owner and grants stay. The triggers are unchanged. Existing endpoints keep
   null; nothing is backfilled.
 
-Not built: filters by a template's category or language, by campaign or automation (a list names
-templates, not who sent them), and templates chosen per event type (one list serves both events).
+Not built: filters by a template's category or language, by campaign (built by ADR-185) or
+automation (a list names templates, not who sent them), and templates chosen per event type (one
+list serves both events).
 
 ## ADR-176 Resuming through the public API the campaigns keys paused (P5-08) (2026-10-05)
 
@@ -7432,3 +7433,56 @@ Decision:
 
 Not built: filters on a field's value (a tier becoming `gold`), fields for `contact.created`, and
 fields chosen by type.
+
+## ADR-185 Choosing the campaigns whose message statuses and changes a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint can take the statuses of the messages campaigns send (`sentBy` `campaign`,
+ADR-172) and every campaign's changes, or those of chosen statuses (ADR-146), but not one
+campaign's. A receiver that reports on some campaigns only (one market's, an agency client's) was
+sent every campaign's and could not tell them apart: a message's status named its template and that
+a campaign sent it, never which campaign. ADR-172 and ADR-175 left filters by campaign unbuilt.
+
+Decision:
+
+- **The campaign in each message status:** `message.status` payloads gain `message.campaignId`, the
+  campaign that sent the message as `GET /campaigns` lists it, or null for a message no campaign
+  sent. It is read from the message when the delivery is prepared (a message's campaign never
+  changes), so a replay of an event captured before this change names it too.
+- **A list of campaigns per endpoint,** for `message.status` and `campaign.status_changed`: null
+  receives every campaign's, as before; a list holds 1 to 50 of the company's campaigns, by id, in
+  the order given with repeats merged. It narrows message statuses to those of the messages a listed
+  campaign sent (a message no campaign sent, such as a member's reply or an automation's, is on no
+  list) and campaign changes to those of a listed campaign; other events are not narrowed. Chosen in
+  Settings → Webhooks ("Campaigns": every message's statuses and every campaign's changes, or only
+  those of the campaigns ticked, named by name and status), shown on the endpoint as "Campaigns
+  whose statuses and changes are sent: …", and through the API as `campaignIds` on
+  `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every endpoint the API
+  answers.
+- **Only while one of those events is taken:** a list given for an endpoint that takes neither is
+  refused (`campaignIds`; 422 through the API). A change that drops both clears it, and a `PATCH`
+  that leaves it out keeps it; Settings always sends it. A check in the database holds the same rule
+  (null, or 1 to 50 ids in one dimension without a null, with one of the two events).
+- **Applied at capture:** the message trigger passes the message's campaign in the event's detail,
+  and `app.capture_webhook_event` matches it, or the campaign a campaign's event names, against each
+  endpoint's list, then takes the message's out of the detail before the event is stored, so stored
+  events are unchanged. With the other filters (numbers, teams, templates, members, statuses and
+  senders) an event reaches an endpoint only when it passes them all, and no event is written when
+  no endpoint takes it.
+- **The company's campaigns:** a list given now may hold only campaigns of the company, which are
+  kept until the company is deleted, so a list never names one that is gone. Settings offers the
+  company's 200 newest campaigns, whatever their status (a draft can be chosen before it starts),
+  says when there are more, and keeps listing an older one the endpoint already names; the API takes
+  any of the company's.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `campaignIds` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The choices list the company's campaigns by name and status to
+  members with `developer.manage`.
+- **Migration 0133:** `campaign_ids uuid[]` on `app.webhook_endpoints` with the check, validated at
+  once (a company has at most 10 endpoints), an update grant on the column for the runtime role, and
+  `app.capture_webhook_event` and `app.webhook_capture_message` replaced with the same signatures
+  (0131's and 0120's, with the campaign), so their owners, grants and triggers stay. Existing
+  endpoints keep null; nothing is backfilled.
+
+Not built: the campaign a reply is attributed to (ADR-025) in `message.received`, filters by a
+campaign's template or audience, and campaigns chosen per event type (one list serves both events).

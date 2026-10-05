@@ -267,6 +267,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       channelIds: null,
       teamIds: null,
       templateIds: null,
+      campaignIds: null,
       assigneeIds: null,
       oauth: null,
       apiKeyId: key.id,
@@ -1925,6 +1926,105 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { templateIds: [] }))).toMatchObject({
       path: 'templateIds',
+    });
+  });
+
+  it("choose the campaigns whose messages' statuses and changes an endpoint receives, kept by changes that leave them out and cleared with the events (ADR-185)", async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const campaignOf = async (company: Company, name: string) => {
+      const id = uuidv7();
+      await fx.query(
+        `INSERT INTO app.campaigns (id, tenant_id, name, timezone)
+         VALUES ($1, $2, $3, 'Asia/Kolkata')`,
+        [id, company.tenant.id, name],
+      );
+      return id;
+    };
+    const autumn = await campaignOf(c, 'Autumn launch');
+    const diwali = await campaignOf(c, 'Diwali offer');
+    const elsewhere = await campaignOf(await fx.company(), 'Autumn launch');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Campaigns need message.status or campaign.status_changed, at least one, each an id of the
+    // company's campaigns (named by place).
+    const refusals = [
+      [['message.received', 'template.status_changed'], [autumn], 'campaignIds'],
+      [['message.status'], [], 'campaignIds'],
+      [['message.status'], [autumn, 'diwali_offer'], 'campaignIds.1'],
+      [['campaign.status_changed'], [autumn, elsewhere], 'campaignIds.1'],
+      [['message.status'], [uuidv7()], 'campaignIds.0'],
+    ] as const;
+    for (const [index, [events, campaignIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, campaignIds },
+            idem(`campaigns-bad-${index}`, JSON.stringify(campaignIds)),
+          ),
+        ),
+        JSON.stringify(campaignIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'campaigns-1', {
+      url: receiverUrl(),
+      events: ['message.status', 'contact.created'],
+      campaignIds: [diwali, autumn.toUpperCase(), diwali],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.campaignIds).toEqual([diwali, autumn]);
+    expect((await api().get(key.ctx, id)).campaignIds).toEqual([diwali, autumn]);
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { campaignIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => a.metadata.campaignIds);
+    expect(await audits('webhook.endpoint_created')).toEqual([[diwali, autumn]]);
+    // Settings names them by name and status.
+    const owner = await fx.ctx(c, c.owner);
+    expect((await settings().list(owner)).find((e) => e.id === id)?.campaigns).toEqual([
+      { id: diwali, name: 'Diwali offer', status: 'draft' },
+      { id: autumn, name: 'Autumn launch', status: 'draft' },
+    ]);
+    expect(await api().update(key.ctx, id, { description: 'Campaign reports' })).toMatchObject({
+      campaignIds: [diwali, autumn],
+    });
+    expect(await api().update(key.ctx, id, { campaignIds: [autumn] })).toMatchObject({
+      campaignIds: [autumn],
+    });
+    expect(await audits('webhook.endpoint_updated')).toEqual([[diwali, autumn], [autumn]]);
+    // Either event of a campaign keeps the list; events of neither clear it.
+    expect(await api().update(key.ctx, id, { events: ['campaign.status_changed'] })).toMatchObject({
+      campaignIds: [autumn],
+    });
+    expect(await api().update(key.ctx, id, { events: ['contact.created'] })).toMatchObject({
+      events: ['contact.created'],
+      campaignIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { campaignIds: [autumn] }))).toMatchObject({
+      path: 'campaignIds',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['message.status'], campaignIds: [diwali] }),
+    ).toMatchObject({ campaignIds: [diwali] });
+    // A list given again is checked again, changing nothing when it is refused.
+    expect(await issueOf(api().update(key.ctx, id, { campaignIds: [elsewhere] }))).toMatchObject({
+      path: 'campaignIds.0',
+    });
+    expect((await api().get(key.ctx, id)).campaignIds).toEqual([diwali]);
+    expect(await api().update(key.ctx, id, { campaignIds: null })).toMatchObject({
+      campaignIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { campaignIds: [] }))).toMatchObject({
+      path: 'campaignIds',
     });
   });
 

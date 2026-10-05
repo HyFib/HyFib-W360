@@ -383,6 +383,10 @@ export const WEBHOOK_LIMITS = {
   assignees: 50,
   /** The custom fields an endpoint can choose to take the changes of (ADR-184): every field. */
   contactFields: 50,
+  /** The campaigns an endpoint can choose to take the statuses and changes of (ADR-185). */
+  campaigns: 50,
+  /** The newest campaigns Settings offers to choose from (ADR-185); the API takes any of them. */
+  campaignChoices: 200,
   /**
    * An endpoint's OAuth client (ADR-173): its identifier, secret and scope, short enough that the
    * Basic header stays within what the egress client sends, and the longest token kept.
@@ -545,6 +549,45 @@ export const webhookTemplateText = (template: { name: string; language: string }
 /** Whether an endpoint with these events takes events of templates, and can choose templates. */
 export function webhookTakesTemplateEvents(eventTypes: readonly WebhookEventType[]): boolean {
   return WEBHOOK_TEMPLATE_EVENTS.some((type) => eventTypes.includes(type));
+}
+
+/**
+ * The events of a campaign, which an endpoint can take for chosen campaigns (ADR-185): the statuses
+ * of the messages it sent, and its own changes.
+ */
+export const WEBHOOK_CAMPAIGN_EVENTS = [
+  'message.status',
+  'campaign.status_changed',
+] as const satisfies readonly WebhookEventType[];
+
+/**
+ * A campaign of the company, which an endpoint can choose to take the statuses and changes of
+ * (ADR-185). Campaigns are kept until the company is deleted, so a list never names one that is
+ * gone.
+ */
+export interface WebhookCampaignChoice {
+  id: string;
+  name: string;
+  status: WebhookCampaignStatus;
+}
+
+/** A campaign an endpoint takes the events of (ADR-185), as stored. */
+export interface WebhookEndpointCampaign {
+  id: string;
+  name: string;
+  /** Null only for a campaign that could not be read, which keeping campaigns rules out. */
+  status: WebhookCampaignStatus | null;
+}
+
+/** A campaign as Settings → Webhooks names it: its name and status. */
+export const webhookCampaignText = (campaign: WebhookEndpointCampaign): string =>
+  campaign.status === null
+    ? campaign.name
+    : `${campaign.name} (${WEBHOOK_CAMPAIGN_STATUS_LABELS[campaign.status]})`;
+
+/** Whether an endpoint with these events takes events of campaigns, and can choose campaigns. */
+export function webhookTakesCampaignEvents(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_CAMPAIGN_EVENTS.some((type) => eventTypes.includes(type));
 }
 
 /**

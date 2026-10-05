@@ -110,6 +110,7 @@ import {
   WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
   WEBHOOK_ASSIGNEES_NEED_THE_EVENTS,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
+  WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
   WEBHOOK_CHANNELS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
@@ -121,6 +122,7 @@ import {
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
 } from '../webhooks/service';
 import {
+  WEBHOOK_CAMPAIGN_EVENTS,
   WEBHOOK_CHANNEL_EVENTS,
   WEBHOOK_TEAM_EVENTS,
   WEBHOOK_TEMPLATE_EVENTS,
@@ -1356,6 +1358,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(Object.keys(update.properties).sort()).toEqual([
       'assigneeIds',
       'automationIds',
+      'campaignIds',
       'campaignStatuses',
       'channelIds',
       'contactFieldKeys',
@@ -1619,7 +1622,72 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
     ).toContain('templateIds');
     expect(doc.info.description).toContain(
-      'And it can name templates (its `templateIds`): then it receives the statuses of the messages sent with them and their changes only.',
+      'And it can name templates (its `templateIds`): then it receives the statuses of the messages sent with them and their changes only',
+    );
+  });
+
+  it('take campaigns only with message.status or campaign.status_changed, each once, and a list of them alone is a change (ADR-185)', () => {
+    const a = '0190e9a1-0000-7000-8000-00000000003a';
+    const b = '0190e9a1-0000-7000-8000-00000000003b';
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    for (const event of WEBHOOK_CAMPAIGN_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          campaignIds: [b, a.toUpperCase(), b],
+        }).campaignIds,
+        event,
+      ).toEqual([b, a]);
+    }
+    // Template changes are not a campaign's.
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.received', 'template.status_changed'],
+      campaignIds: [a],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['campaignIds', WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS],
+    ]);
+    const statuses = { ...base, events: ['campaign.status_changed'] };
+    for (const body of [
+      { ...statuses, campaignIds: [] },
+      { ...statuses, campaignIds: ['autumn_launch'] },
+      {
+        ...statuses,
+        campaignIds: Array.from(
+          { length: WEBHOOK_LIMITS.campaigns + 1 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...statuses, campaignIds: null }).campaignIds,
+    ).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ campaignIds: null })).toEqual({
+      campaignIds: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ campaignIds: [a] })).toEqual({
+      campaignIds: [a],
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.campaignIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('campaignIds');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('campaignIds');
+    expect(doc.info.description).toContain(
+      'or campaigns (its `campaignIds`): then the statuses of the messages they sent and their changes only.',
     );
   });
 

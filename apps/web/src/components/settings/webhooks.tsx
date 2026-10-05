@@ -28,12 +28,14 @@ import {
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUSES,
   webhookAssigneeText,
+  webhookCampaignText,
   webhookChannelText,
   webhookFieldText,
   webhookOAuthText,
   webhookReplayAllSummary,
   webhookReplaySummary,
   webhookTakesAutomationRuns,
+  webhookTakesCampaignEvents,
   webhookTakesChannelEvents,
   webhookTakesFieldChanges,
   webhookTakesTeamEvents,
@@ -44,9 +46,11 @@ import {
   type WebhookAutomationChoice,
   type WebhookCampaignStatus,
   type WebhookChannelChoice,
+  type WebhookCampaignChoice,
   type WebhookContactPart,
   type WebhookConversationStatus,
   type WebhookEndpointAssignee,
+  type WebhookEndpointCampaign,
   type WebhookEndpointField,
   type WebhookEndpointOAuth,
   type WebhookEndpointTeam,
@@ -912,6 +916,115 @@ function TemplateChoices({
   );
 }
 
+/**
+ * The campaigns whose messages' statuses and changes an endpoint takes (ADR-185): every campaign's,
+ * or those of the campaigns ticked. The company's newest campaigns are offered; one the endpoint
+ * already names stays listed, ticked, until it is unticked.
+ */
+function CampaignChoices({
+  prefix,
+  choices,
+  more,
+  stored,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  choices: WebhookCampaignChoice[];
+  /** Whether the company has campaigns older than those offered. */
+  more: boolean;
+  /** The campaigns the endpoint names now, so an older one stays listed until it is saved without. */
+  stored: readonly WebhookEndpointCampaign[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const listed: WebhookEndpointCampaign[] = [
+    ...choices,
+    ...stored.filter((s) => !choices.some((c) => c.id === s.id)),
+  ];
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Campaigns</legend>
+      <p className="text-xs text-muted-foreground">
+        Message statuses and campaign changes belong to a campaign; a message no campaign sent, such
+        as a member’s reply, belongs to none. Other events are sent whichever campaigns are chosen.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-campaigns`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every message’s statuses and every campaign’s changes
+          <span className="block text-xs text-muted-foreground">
+            Including campaigns added later.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-campaigns`}
+          className="mt-1"
+          checked={!every}
+          disabled={listed.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only those of the campaigns ticked
+          {listed.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">
+              The company has no campaign yet.
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid gap-1">
+          <div className="grid max-h-64 gap-1 overflow-y-auto">
+            {listed.map((c) => {
+              const id = `${prefix}-campaign-${c.id}`;
+              return (
+                <div key={c.id} className="flex items-center gap-2">
+                  <Checkbox
+                    id={id}
+                    checked={chosen.includes(c.id)}
+                    onChange={(e) =>
+                      onChange(
+                        e.target.checked
+                          ? listed
+                              .filter((l) => l.id === c.id || chosen.includes(l.id))
+                              .map((l) => l.id)
+                          : chosen.filter((x) => x !== c.id),
+                      )
+                    }
+                  />
+                  <Label htmlFor={id} className="font-normal break-all">
+                    {webhookCampaignText(c)}
+                  </Label>
+                </div>
+              );
+            })}
+          </div>
+          {more ? (
+            <p className="text-xs text-muted-foreground">
+              The {WEBHOOK_LIMITS.campaignChoices} newest campaigns are listed; an older one can be
+              chosen through the API.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
 function EventChoices({
   prefix,
   chosen,
@@ -1284,6 +1397,7 @@ export function WebhookEndpointForm({
   channelChoices,
   teamChoices,
   templateChoices,
+  campaignChoices,
   assigneeChoices,
   contactFieldChoices,
   atLimit = false,
@@ -1313,6 +1427,8 @@ export function WebhookEndpointForm({
     teams: WebhookEndpointTeam[] | null;
     /** The templates it names (ADR-175); null for every template. */
     templateIds: string[] | null;
+    /** The campaigns it names (ADR-185), with their names and statuses; null for every campaign. */
+    campaigns: WebhookEndpointCampaign[] | null;
     /** The members it names (ADR-181), with whether they still take conversations; null: all. */
     assignees: WebhookEndpointAssignee[] | null;
     oauth: WebhookEndpointOAuth | null;
@@ -1325,6 +1441,8 @@ export function WebhookEndpointForm({
   teamChoices: WebhookTeamChoice[];
   /** The company's templates, which an endpoint can choose (ADR-175). */
   templateChoices: WebhookTemplateChoice[];
+  /** The company's newest campaigns, which an endpoint can choose, and whether there are more. */
+  campaignChoices: { campaigns: WebhookCampaignChoice[]; more: boolean };
   /** The company's members who take conversations, whom an endpoint can choose (ADR-181). */
   assigneeChoices: WebhookAssigneeChoice[];
   /** The company's custom fields, which an endpoint can choose (ADR-184). */
@@ -1370,6 +1488,10 @@ export function WebhookEndpointForm({
   const [teamIds, setTeamIds] = useState<string[]>(endpoint?.teams?.map((t) => t.id) ?? []);
   const [everyTemplate, setEveryTemplate] = useState(!endpoint?.templateIds);
   const [templateIds, setTemplateIds] = useState<string[]>(endpoint?.templateIds ?? []);
+  const [everyCampaign, setEveryCampaign] = useState(!endpoint?.campaigns);
+  const [campaignIds, setCampaignIds] = useState<string[]>(
+    endpoint?.campaigns?.map((c) => c.id) ?? [],
+  );
   const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
   const [everyField, setEveryField] = useState(!endpoint?.contactFields);
   const [fieldKeys, setFieldKeys] = useState<string[]>(
@@ -1472,6 +1594,9 @@ export function WebhookEndpointForm({
         // Every template's statuses and changes unless the templates ticked are chosen (ADR-175).
         const chosenTemplates =
           webhookTakesTemplateEvents(eventTypes) && !everyTemplate ? templateIds : null;
+        // Every campaign's statuses and changes unless the campaigns ticked are chosen (ADR-185).
+        const chosenCampaigns =
+          webhookTakesCampaignEvents(eventTypes) && !everyCampaign ? campaignIds : null;
         // Every conversation's events unless the members ticked are chosen (ADR-181).
         const chosenAssignees =
           webhookTakesTeamEvents(eventTypes) && !everyAssignee ? assigneeIds : null;
@@ -1493,6 +1618,7 @@ export function WebhookEndpointForm({
           channelIds: chosenChannels,
           teamIds: chosenTeams,
           templateIds: chosenTemplates,
+          campaignIds: chosenCampaigns,
           assigneeIds: chosenAssignees,
         };
         const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
@@ -1555,6 +1681,8 @@ export function WebhookEndpointForm({
               setTeamIds([]);
               setEveryTemplate(true);
               setTemplateIds([]);
+              setEveryCampaign(true);
+              setCampaignIds([]);
               setEveryAssignee(true);
               setAssigneeIds([]);
               setEveryField(true);
@@ -1669,6 +1797,18 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryTemplate}
           chosen={templateIds}
           onChange={setTemplateIds}
+        />
+      ) : null}
+      {webhookTakesCampaignEvents(eventTypes) ? (
+        <CampaignChoices
+          prefix={prefix}
+          choices={campaignChoices.campaigns}
+          more={campaignChoices.more}
+          stored={endpoint?.campaigns ?? []}
+          every={everyCampaign}
+          onEveryChange={setEveryCampaign}
+          chosen={campaignIds}
+          onChange={setCampaignIds}
         />
       ) : null}
       {webhookTakesTeamEvents(eventTypes) ? (

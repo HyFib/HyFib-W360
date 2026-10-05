@@ -3362,6 +3362,263 @@ describe('custom field filters (ADR-184)', () => {
   });
 });
 
+describe('campaign filters (ADR-185)', () => {
+  /** A campaign of the company, written as the campaigns service keeps a draft. */
+  async function campaignOf(c: Company, name: string, createdAt = new Date()) {
+    const id = uuidv7();
+    await fx.query(
+      `INSERT INTO app.campaigns (id, tenant_id, name, timezone, created_at)
+       VALUES ($1, $2, $3, 'Asia/Kolkata', $4)`,
+      [id, c.tenant.id, name, createdAt],
+    );
+    return { id, name };
+  }
+  /** A draft cancelled, as members cancel one: its campaign.status_changed. */
+  const cancel = (campaignId: string) =>
+    fx.query(`UPDATE app.campaigns SET status = 'canceled', canceled_at = now() WHERE id = $1`, [
+      campaignId,
+    ]);
+
+  it("are refused without message.status or campaign.status_changed, empty, over 50 or naming another company's campaign; kept by a change that leaves them out and cleared with the events; the database keeps them to those events", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const autumn = await campaignOf(c, 'Autumn launch');
+    const diwali = await campaignOf(c, 'Diwali offer');
+    const elsewhere = await campaignOf(await fx.company(), 'Autumn launch');
+    const url = 'https://hooks.example.com/in';
+    const refused = async (
+      eventTypes: string[],
+      campaignIds: unknown,
+      message: RegExp,
+      path = 'campaignIds',
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes, campaignIds }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(campaignIds)).toBe(path);
+    };
+    const needsTheEvents = /only for an endpoint that receives Message status or Campaign status/;
+    await refused(['message.received', 'template.status_changed'], [autumn.id], needsTheEvents);
+    await refused(['message.status'], [], /at least one campaign/);
+    await refused(['message.status'], ['autumn_launch'], /from the list/, 'campaignIds.0');
+    await refused(
+      ['message.status'],
+      Array.from({ length: 51 }, () => uuidv7()),
+      /at most 50/,
+    );
+    await refused(
+      ['campaign.status_changed'],
+      [autumn.id, elsewhere.id],
+      /of this company/,
+      'campaignIds.1',
+    );
+    await refused(['message.status'], [uuidv7()], /of this company/, 'campaignIds.0');
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['message.status', 'consent.changed'],
+      campaignIds: [diwali.id, autumn.id.toUpperCase(), diwali.id],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { campaignIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => a.metadata.campaignIds);
+    expect(await audits('webhook.endpoint_created')).toEqual([[diwali.id, autumn.id]]);
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['message.status', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.campaigns;
+    // Named as they are now: the status a campaign has when the list is read.
+    await cancel(diwali.id);
+    expect(await current()).toEqual([
+      { id: diwali.id, name: 'Diwali offer', status: 'canceled' },
+      { id: autumn.id, name: 'Autumn launch', status: 'draft' },
+    ]);
+    await change({ description: 'kept' });
+    expect((await current())?.map((x) => x.id)).toEqual([diwali.id, autumn.id]);
+    await change({ campaignIds: [autumn.id] });
+    expect(await audits('webhook.endpoint_updated')).toEqual([[diwali.id, autumn.id], [autumn.id]]);
+    // A list given again is checked again, changing nothing when it is refused.
+    await expectAppError(
+      change({ campaignIds: [autumn.id, elsewhere.id] }),
+      'validation_failed',
+      /of this company/,
+    );
+    expect((await current())?.map((x) => x.id)).toEqual([autumn.id]);
+    await change({ campaignIds: null });
+    expect(await current()).toBeNull();
+    await change({ campaignIds: [diwali.id] });
+    // Either event of a campaign keeps the list.
+    await change({ eventTypes: ['campaign.status_changed', 'contact.created'] });
+    expect((await current())?.map((x) => x.id)).toEqual([diwali.id]);
+    // The database refuses an empty list, more than 50, a missing id or a list of lists from an
+    // endpoint taking such an event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET campaign_ids = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    const many = `ARRAY[${Array.from({ length: 51 }, () => `'${uuidv7()}'`).join(',')}]::uuid[]`;
+    for (const bad of [
+      `'{}'`,
+      many,
+      `ARRAY['${diwali.id}', NULL]::uuid[]`,
+      `ARRAY[ARRAY['${diwali.id}'::uuid], ARRAY['${autumn.id}'::uuid]]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_campaign_ids/);
+    }
+    await change({ eventTypes: ['message.received', 'consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['message.received'], campaignIds: [diwali.id] }),
+      'validation_failed',
+      needsTheEvents,
+    );
+    // …and any list for an endpoint that takes neither.
+    await expect(setInDatabase(`ARRAY['${diwali.id}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_campaign_ids/,
+    );
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'campaign_ids', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it("offer the company's newest campaigns, whatever their status, at most 200, saying whether there are more, to developers only", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const hour = 3_600_000;
+    const older = await campaignOf(c, 'Older', new Date(Date.now() - 2 * hour));
+    const newer = await campaignOf(c, 'Newer', new Date(Date.now() - hour));
+    await cancel(older.id);
+    await campaignOf(await fx.company(), 'Elsewhere');
+    expect(await webhooks().campaignChoices(owner)).toEqual({
+      campaigns: [
+        { id: newer.id, name: 'Newer', status: 'draft' },
+        { id: older.id, name: 'Older', status: 'canceled' },
+      ],
+      more: false,
+    });
+    // 199 more, newer still: the oldest drops out of the 200 offered.
+    await fx.query(
+      `INSERT INTO app.campaigns (id, tenant_id, name, timezone, created_at)
+       SELECT gen_random_uuid(), $1, 'Weekly ' || n, 'Asia/Kolkata', now() - n * interval '1 second'
+         FROM generate_series(1, 199) AS n`,
+      [c.tenant.id],
+    );
+    const choices = await webhooks().campaignChoices(owner);
+    expect(choices.campaigns).toHaveLength(200);
+    expect(choices.more).toBe(true);
+    expect(choices.campaigns[0]?.name).toBe('Weekly 1');
+    expect(choices.campaigns.at(-1)?.id).toBe(newer.id);
+    for (const user of [c.agent, c.marketer]) {
+      await expectAppError(webhooks().campaignChoices(await fx.ctx(c, user)), 'forbidden');
+    }
+  });
+
+  it("send an endpoint that names campaigns only their messages' statuses and their changes, another every campaign's, other events to both, and name the campaign in each message status", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const autumn = await campaignOf(c, 'Autumn launch');
+    const diwali = await campaignOf(c, 'Diwali offer');
+    const add = async (eventTypes: WebhookEventType[], campaignIds: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        campaignIds,
+      });
+      return { ...created, path };
+    };
+    const autumnOnly = await add(
+      ['message.status', 'campaign.status_changed', 'message.received'],
+      [autumn.id],
+    );
+    const from = waId();
+    const first = await inbound(c, from, 'Is the sale on?');
+    // A member's reply belongs to no campaign: its status is not captured.
+    const reply = await sendReply(c, first.conversation_id, 'Yes, until Sunday.');
+    const typesOf = async () => (await eventsOf(c)).map((e) => [e.type, e.status]);
+    expect(await typesOf()).toEqual([['message.received', null]]);
+    /** A message of a campaign reaching a status, as a campaign send's status updates do. */
+    const statusOf = async (messageId: string, campaignId: string, status: string) => {
+      await fx.query('UPDATE app.messages SET campaign_id = $2 WHERE id = $1', [
+        messageId,
+        campaignId,
+      ]);
+      await fx.query('UPDATE app.messages SET status = $2 WHERE id = $1', [messageId, status]);
+    };
+    await statusOf(reply.messageId, autumn.id, 'delivered');
+    const second = await sendReply(c, first.conversation_id, 'Here is the Diwali offer.');
+    await statusOf(second.messageId, diwali.id, 'delivered');
+    // Campaign changes: the autumn launch's is captured, the Diwali offer's is not.
+    await cancel(autumn.id);
+    await cancel(diwali.id);
+    expect(await typesOf()).toEqual([
+      ['message.received', null],
+      ['message.status', 'delivered'],
+      ['campaign.status_changed', 'canceled'],
+    ]);
+    // The message's campaign is not stored with its event; the campaign's change keeps its own.
+    const stored = await eventsOf(c);
+    expect(stored[1]?.detail).not.toHaveProperty('campaignId');
+    expect(stored[2]?.detail).toMatchObject({ campaignId: autumn.id });
+    // An endpoint for every campaign hears every message's statuses from now on.
+    const every = await add(['message.status', 'campaign.status_changed'], null);
+    const third = await sendReply(c, first.conversation_id, 'Anything else?');
+    await fx.query(`UPDATE app.messages SET status = 'read' WHERE id = $1`, [third.messageId]);
+    await fx.query(`UPDATE app.messages SET status = 'read' WHERE id = $1`, [second.messageId]);
+    const typesTo = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).map((d) => [d.type, d.status]);
+    expect(await typesTo(autumnOnly.id)).toEqual([
+      ['message.received', null],
+      ['message.status', 'delivered'],
+      ['campaign.status_changed', 'canceled'],
+    ]);
+    expect(await typesTo(every.id)).toEqual([
+      ['message.status', 'accepted'],
+      ['message.status', 'read'],
+      ['message.status', 'read'],
+    ]);
+    // Each status names its message's campaign, or none.
+    expect(await deliverDue(c)).toMatchObject({ attempted: 6, succeeded: 6 });
+    const campaignsAt = (path: string) =>
+      requestsTo(path)
+        .map((r) => JSON.parse(r.body) as { type: string; data: Record<string, unknown> })
+        .filter((b) => b.type !== 'message.received')
+        .map((b) =>
+          b.type === 'message.status'
+            ? [b.type, messageStatusPayloadSchema.parse(b).data.message.campaignId]
+            : [b.type, (b.data.campaign as { id: string }).id],
+        )
+        .sort();
+    expect(campaignsAt(autumnOnly.path)).toEqual([
+      ['campaign.status_changed', autumn.id],
+      ['message.status', autumn.id],
+    ]);
+    expect(campaignsAt(every.path)).toEqual(
+      [
+        ['message.status', null],
+        ['message.status', null],
+        ['message.status', diwali.id],
+      ].sort(),
+    );
+  });
+});
+
 describe('event capture', () => {
   it('records an event only for subscribed types, with one delivery per active subscribed endpoint, and none from a rolled-back change', async () => {
     const c = await fx.company();
@@ -3568,6 +3825,7 @@ describe('delivery', () => {
         templateName: null,
         sentBy: 'agent',
         apiKeyId: null,
+        campaignId: null,
       },
       error: null,
       conversation: { id: msg.conversation_id },

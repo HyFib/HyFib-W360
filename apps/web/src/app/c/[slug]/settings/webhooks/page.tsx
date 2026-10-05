@@ -16,6 +16,7 @@ import {
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   webhookAssigneeText,
+  webhookCampaignText,
   webhookChannelText,
   webhookFieldText,
   webhookOAuthText,
@@ -57,6 +58,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
     channelChoices,
     teamChoices,
     templateChoices,
+    campaignChoices,
     assigneeChoices,
     contactFieldChoices,
   ] = await Promise.all([
@@ -65,6 +67,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
     webhooks.channelChoices(ctx),
     webhooks.teamChoices(ctx),
     webhooks.templateChoices(ctx),
+    webhooks.campaignChoices(ctx),
     webhooks.assigneeChoices(ctx),
     webhooks.contactFieldChoices(ctx),
   ]);
@@ -228,6 +231,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.templates.map(webhookTemplateText).join(', ')}
                       </p>
                     ) : null}
+                    {e.campaigns ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Campaigns whose statuses and changes are sent:{' '}
+                        {e.campaigns.map(webhookCampaignText).join(', ')}
+                      </p>
+                    ) : null}
                     {e.teams ? (
                       <p className="text-xs text-muted-foreground">
                         Teams whose conversations’ events are sent:{' '}
@@ -362,6 +371,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
             channelChoices={channelChoices}
             teamChoices={teamChoices}
             templateChoices={templateChoices}
+            campaignChoices={campaignChoices}
             assigneeChoices={assigneeChoices}
             contactFieldChoices={contactFieldChoices}
             atLimit={endpoints.length >= WEBHOOK_LIMITS.endpoints}

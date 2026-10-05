@@ -48,6 +48,7 @@ export default async function WebhookEndpointPage({
     channelChoices,
     teamChoices,
     templateChoices,
+    campaignChoices,
     assigneeChoices,
     contactFieldChoices,
   ] = await Promise.all([
@@ -56,6 +57,7 @@ export default async function WebhookEndpointPage({
     webhooks.channelChoices(ctx),
     webhooks.teamChoices(ctx),
     webhooks.templateChoices(ctx),
+    webhooks.campaignChoices(ctx),
     webhooks.assigneeChoices(ctx),
     webhooks.contactFieldChoices(ctx),
   ]);
@@ -208,6 +210,7 @@ export default async function WebhookEndpointPage({
               channelIds: endpoint.channels?.map((c) => c.id) ?? null,
               teams: endpoint.teams,
               templateIds: endpoint.templates?.map((t) => t.id) ?? null,
+              campaigns: endpoint.campaigns,
               assignees: endpoint.assignees,
               oauth: endpoint.oauth,
             }}
@@ -215,6 +218,7 @@ export default async function WebhookEndpointPage({
             channelChoices={channelChoices}
             teamChoices={teamChoices}
             templateChoices={templateChoices}
+            campaignChoices={campaignChoices}
             assigneeChoices={assigneeChoices}
             contactFieldChoices={contactFieldChoices}
           />

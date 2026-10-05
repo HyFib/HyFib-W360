@@ -38,6 +38,7 @@ import {
   WEBHOOK_LIMITS,
   webhookHost,
   webhookTakesAutomationRuns,
+  webhookTakesCampaignEvents,
   webhookTakesChannelEvents,
   webhookTakesFieldChanges,
   webhookTakesTeamEvents,
@@ -48,6 +49,7 @@ import {
   assertWebhookAssignees,
   assertWebhookAuthorization,
   assertWebhookAutomations,
+  assertWebhookCampaigns,
   assertWebhookChannels,
   assertWebhookTeams,
   assertWebhookTemplates,
@@ -74,6 +76,7 @@ import {
   WEBHOOK_SENDERS_NEED_THE_EVENT,
   WEBHOOK_TEAMS_NEED_THE_EVENTS,
   WEBHOOK_TEMPLATES_NEED_THE_EVENTS,
+  WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS,
   WEBHOOK_ASSIGNEES_NEED_THE_EVENTS,
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
   webhookAutomationIdsFor,
@@ -98,6 +101,8 @@ import {
   webhookTeamIdsSchema,
   webhookTemplateIdsFor,
   webhookTemplateIdsSchema,
+  webhookCampaignIdsFor,
+  webhookCampaignIdsSchema,
   webhookAssigneeIdsFor,
   webhookAssigneeIdsSchema,
   webhookContactPartsSchema,
@@ -279,6 +284,16 @@ const invalidTemplates = () =>
     issues: [{ path: 'templateIds', message: WEBHOOK_TEMPLATES_NEED_THE_EVENTS }],
   });
 
+const campaignIdsField = webhookCampaignIdsSchema.describe(
+  `The campaigns whose messages' statuses and changes the endpoint receives: 1 to ${WEBHOOK_LIMITS.campaigns} ids of the company's campaigns (as GET /campaigns lists them, and as \`message.status\` and \`campaign.status_changed\` events name them), only with one of those two events. message.status is then sent only for messages one of them sent, so a message no campaign sent, such as a member's reply, is left out; campaign.status_changed only for their changes. Other events are not narrowed. null receives every campaign's, including campaigns added later.`,
+);
+
+/** Campaigns are chosen only for an endpoint that receives events of campaigns (ADR-185). */
+const invalidCampaigns = () =>
+  new AppError('validation_failed', WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS, {
+    issues: [{ path: 'campaignIds', message: WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS }],
+  });
+
 const assigneeIdsField = webhookAssigneeIdsSchema.describe(
   `The members whose assigned conversations' events the endpoint receives: 1 to ${WEBHOOK_LIMITS.assignees} member ids (as GET /members lists them: active members who take conversations), only with an event of a conversation: message.received, message.status, conversation.status_changed, conversation.assignment_changed or conversation.team_changed. A conversation's member is the one it is assigned to when the event happens, so an unassigned conversation is on no list; conversation.assignment_changed reaches the endpoints of the member the conversation left as well as of the member it went to. A member who later stops taking conversations stays on the list: their conversations are released then. Other events are not narrowed. null receives every conversation's events.`,
 );
@@ -320,6 +335,7 @@ export const apiCreateWebhookEndpointSchema = z
     channelIds: channelIdsField.optional(),
     teamIds: teamIdsField.optional(),
     templateIds: templateIdsField.optional(),
+    campaignIds: campaignIdsField.optional(),
     assigneeIds: assigneeIdsField.optional(),
     oauth: oauthField.nullable().optional(),
   })
@@ -380,6 +396,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.templateIds || webhookTakesTemplateEvents(data.events), {
     path: ['templateIds'],
     message: WEBHOOK_TEMPLATES_NEED_THE_EVENTS,
+  })
+  .refine((data) => !data.campaignIds || webhookTakesCampaignEvents(data.events), {
+    path: ['campaignIds'],
+    message: WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS,
   })
   .refine((data) => !data.assigneeIds || webhookTakesTeamEvents(data.events), {
     path: ['assigneeIds'],
@@ -473,6 +493,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         "The templates whose messages' statuses and changes the endpoint receives (the company's templates); null receives every template's. Left out, they stay, unless the events no longer include message.status or template.status_changed, which clears them.",
       ),
+    campaignIds: campaignIdsField
+      .optional()
+      .describe(
+        "The campaigns whose messages' statuses and changes the endpoint receives (the company's campaigns); null receives every campaign's. Left out, they stay, unless the events no longer include message.status or campaign.status_changed, which clears them.",
+      ),
     assigneeIds: assigneeIdsField
       .optional()
       .describe(
@@ -506,9 +531,10 @@ export const apiUpdateWebhookEndpointSchema = z
       data.channelIds !== undefined ||
       data.teamIds !== undefined ||
       data.templateIds !== undefined ||
+      data.campaignIds !== undefined ||
       data.assigneeIds !== undefined ||
       data.oauth !== undefined,
-    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the custom fields, the automations, the campaign statuses, the order statuses, the template statuses, the conversation statuses, the run end statuses, what started the runs, the numbers, the teams, the templates, the members, the OAuth client or whether the endpoint is enabled',
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the custom fields, the automations, the campaign statuses, the order statuses, the template statuses, the conversation statuses, the run end statuses, what started the runs, the numbers, the teams, the templates, the campaigns, the members, the OAuth client or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -555,6 +581,8 @@ export interface ApiWebhookEndpoint {
   teamIds: string[] | null;
   /** The templates whose statuses and changes it receives (ADR-175); null receives every one's. */
   templateIds: string[] | null;
+  /** The campaigns whose statuses and changes it receives (ADR-185); null receives every one's. */
+  campaignIds: string[] | null;
   /** The members whose assigned conversations' events it receives (ADR-181); null: every one's. */
   assigneeIds: string[] | null;
   /** Where it gets OAuth tokens and as which client (ADR-173); the secret is never shown. */
@@ -664,6 +692,7 @@ const columns = {
   channelAccountIds: webhookEndpoints.channelAccountIds,
   teamIds: webhookEndpoints.teamIds,
   templateIds: webhookEndpoints.templateIds,
+  campaignIds: webhookEndpoints.campaignIds,
   assigneeIds: webhookEndpoints.assigneeIds,
   oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
   oauthClientId: webhookEndpoints.oauthClientId,
@@ -701,6 +730,7 @@ type EndpointRow = Pick<
   | 'channelAccountIds'
   | 'teamIds'
   | 'templateIds'
+  | 'campaignIds'
   | 'assigneeIds'
   | 'oauthTokenUrl'
   | 'oauthClientId'
@@ -743,6 +773,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     channelIds: row.channelAccountIds,
     teamIds: row.teamIds,
     templateIds: row.templateIds,
+    campaignIds: row.campaignIds,
     assigneeIds: row.assigneeIds,
     oauth:
       row.oauthTokenUrl && row.oauthClientId
@@ -988,6 +1019,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             await assertWebhookTeams(tx, ctx.tenant.id, teamIds);
             const templateIds = webhookTemplateIdsFor(data.events, data.templateIds, null);
             await assertWebhookTemplates(tx, ctx.tenant.id, templateIds);
+            const campaignIds = webhookCampaignIdsFor(data.events, data.campaignIds, null);
+            await assertWebhookCampaigns(tx, ctx.tenant.id, campaignIds);
             const assigneeIds = webhookAssigneeIdsFor(data.events, data.assigneeIds, null);
             await assertWebhookAssignees(tx, ctx.tenant.id, assigneeIds);
             const { id, secret } = await insertWebhookEndpoint(tx, deps.keyring, ctx.tenant.id, {
@@ -1009,6 +1042,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               channelAccountIds: channelIds,
               teamIds,
               templateIds,
+              campaignIds,
               assigneeIds,
               oauth,
               creator: { apiKeyId: ctx.key.id },
@@ -1031,6 +1065,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),
+              ...(campaignIds ? { campaignIds } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
               ...(oauth ? { oauthTokenHost: oauth.host } : {}),
             });
@@ -1086,6 +1121,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         if (data.channelIds && !webhookTakesChannelEvents(events)) throw invalidChannels();
         if (data.teamIds && !webhookTakesTeamEvents(events)) throw invalidTeams();
         if (data.templateIds && !webhookTakesTemplateEvents(events)) throw invalidTemplates();
+        if (data.campaignIds && !webhookTakesCampaignEvents(events)) throw invalidCampaigns();
         if (data.assigneeIds && !webhookTakesTeamEvents(events)) throw invalidAssignees();
         // Only a list given now is checked: the automations kept were checked when chosen.
         if (data.automationIds !== undefined) {
@@ -1111,6 +1147,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         // And the templates given now (ADR-175).
         if (data.templateIds !== undefined) {
           await assertWebhookTemplates(tx, ctx.tenant.id, data.templateIds);
+        }
+        // And the campaigns given now (ADR-185).
+        if (data.campaignIds !== undefined) {
+          await assertWebhookCampaigns(tx, ctx.tenant.id, data.campaignIds);
         }
         // And the members it adds: those it held may no longer take conversations (ADR-181).
         if (data.assigneeIds !== undefined) {
@@ -1143,6 +1183,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.channelIds !== undefined ||
           data.teamIds !== undefined ||
           data.templateIds !== undefined ||
+          data.campaignIds !== undefined ||
           data.assigneeIds !== undefined ||
           oauth !== undefined
         ) {
@@ -1212,6 +1253,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ),
               teamIds: webhookTeamIdsFor(events, data.teamIds, endpoint.teamIds),
               templateIds: webhookTemplateIdsFor(events, data.templateIds, endpoint.templateIds),
+              campaignIds: webhookCampaignIdsFor(events, data.campaignIds, endpoint.campaignIds),
               assigneeIds: webhookAssigneeIdsFor(events, data.assigneeIds, endpoint.assigneeIds),
               updatedAt: now,
             })
@@ -1232,6 +1274,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               channelAccountIds: webhookEndpoints.channelAccountIds,
               teamIds: webhookEndpoints.teamIds,
               templateIds: webhookEndpoints.templateIds,
+              campaignIds: webhookEndpoints.campaignIds,
               assigneeIds: webhookEndpoints.assigneeIds,
             });
           if (!changed) throw new Error('A locked endpoint was not updated');
@@ -1255,6 +1298,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(changed.channelAccountIds ? { channelIds: changed.channelAccountIds } : {}),
             ...(changed.teamIds ? { teamIds: changed.teamIds } : {}),
             ...(changed.templateIds ? { templateIds: changed.templateIds } : {}),
+            ...(changed.campaignIds ? { campaignIds: changed.campaignIds } : {}),
             ...(changed.assigneeIds ? { assigneeIds: changed.assigneeIds } : {}),
             ...webhookOAuthAudit(oauth, endpoint),
           });

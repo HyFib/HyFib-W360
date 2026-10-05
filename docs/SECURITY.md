@@ -984,6 +984,15 @@ Phase 5 rules (outgoing webhooks, P5-09):
   name: it narrows what one endpoint receives and never adds an event or a delivery for another
   endpoint or company. Audited with the list (unit tests; integration and e2e tests, run in CI
   only).
+- An endpoint can take the message statuses and changes of chosen campaigns only (ADR-185), chosen
+  the same way. A list given may hold only campaigns of the endpoint's company (checked in its
+  scope), is kept only while the endpoint takes `message.status` or `campaign.status_changed` (a
+  database check too), and is applied in `app.capture_webhook_event` to the campaign the triggers
+  pass: it narrows what one endpoint receives and never adds an event or a delivery for another
+  endpoint or company. A message's campaign travels in the detail to the capture only and is not
+  stored with the event; the payload's `campaignId` is read from the message in the company's scope
+  when the delivery is prepared, an id without personal data. Audited with the list (unit tests;
+  integration and e2e tests, run in CI only).
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

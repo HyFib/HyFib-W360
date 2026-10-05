@@ -40,6 +40,7 @@ import {
   createTemplatesService,
   createWebhooksService,
   messageReceivedPayloadSchema,
+  messageStatusPayloadSchema,
   orderReceivedPayloadSchema,
   orderStatusChangedPayloadSchema,
   processCommerceSync,
@@ -131,6 +132,7 @@ async function addEndpoint(
   channelIds: string[] | null = null,
   runTriggers: string[] | null = null,
   contactFieldKeys: string[] | null = null,
+  campaignIds: string[] | null = null,
 ) {
   const path = `/ok/${randomBytes(6).toString('hex')}`;
   const owner = await fx.ctx(c, c.owner);
@@ -146,6 +148,7 @@ async function addEndpoint(
     channelIds,
     runTriggers,
     contactFieldKeys,
+    campaignIds,
   });
   return { ...created, path };
 }
@@ -3226,6 +3229,72 @@ describe('campaign events (ADR-087)', () => {
         .sort(),
     ).toEqual(['accepted', 'canceled']);
     expect(statusesAt(every.path)).toEqual([]);
+  });
+
+  it("sends an endpoint that names campaigns only their messages' statuses and their changes, and names the campaign in each message status (ADR-185)", async () => {
+    const s = await campaignCompany(1);
+    const { c } = s;
+    const owner = await fx.ctx(c, c.owner);
+    const weekend = await s.draft(owner, 'Weekend sale');
+    const monday = await s.draft(owner, 'Monday sale');
+    const types: WebhookEventType[] = ['campaign.status_changed', 'message.status'];
+    const chosen = await addEndpoint(
+      c,
+      types,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      [weekend],
+    );
+    const every = await addEndpoint(c, types);
+    expect((await webhooks().list(owner)).find((e) => e.id === chosen.id)?.campaigns).toEqual([
+      { id: weekend, name: 'Weekend sale', status: 'draft' },
+    ]);
+
+    // The weekend sale reaches its one contact; the Monday sale is cancelled before it starts.
+    await s.campaigns.submitCampaign(owner, weekend, { expectedVersion: 1 }, {});
+    expect(await s.tick(weekend)).toMatchObject({ outcome: 'progress', queued: 1 });
+    expect(await s.dispatch(weekend)).toEqual(['accepted']);
+    await s.campaigns.cancelCampaign(owner, monday, {});
+    expect(await changesOf(weekend)).toEqual([
+      ['scheduled', 'draft', null, null, 2],
+      ['running', 'scheduled', null, null, 2],
+    ]);
+    expect(await changesOf(monday)).toEqual([['canceled', 'draft', null, null, 1]]);
+
+    await deliverDue(c);
+    const campaignsAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) =>
+          b.type === 'message.status'
+            ? [b.type, messageStatusPayloadSchema.parse(b).data.message.campaignId]
+            : [b.type, campaignStatusChangedPayloadSchema.parse(b).data.campaign.id],
+        )
+        .sort();
+    // The runner's message names its campaign; the accepted status reached both endpoints.
+    expect(campaignsAt(chosen.path)).toEqual([
+      ['campaign.status_changed', weekend],
+      ['campaign.status_changed', weekend],
+      ['message.status', weekend],
+    ]);
+    expect(campaignsAt(every.path)).toEqual(
+      [
+        ['campaign.status_changed', weekend],
+        ['campaign.status_changed', weekend],
+        ['campaign.status_changed', monday],
+        ['message.status', weekend],
+      ].sort(),
+    );
+    const [status] = bodiesAt(chosen.path)
+      .filter((b) => b.type === 'message.status')
+      .map((b) => messageStatusPayloadSchema.parse(b).data.message);
+    expect(status).toMatchObject({ status: 'accepted', sentBy: 'campaign', campaignId: weekend });
   });
 
   it('sends an endpoint that names numbers only the campaigns that send from them; a campaign without a number is on none (ADR-170)', async () => {
