@@ -2122,6 +2122,18 @@ the statuses under "Conversation status" on the endpoint's page (both ticked tak
 a new endpoint does), or `PATCH /webhook-endpoints/{id}` with `conversationStatuses` (null for every
 status). Removing the `conversation.status_changed` event clears the list.
 
+**A receiver gets fewer automation.run_ended events than expected (ADR-151).** An endpoint can take
+only the ends it chose of the runs it takes: completed, handed off, taken over, stopped or failed;
+the endpoints list shows them ("Automation ends sent: …"), and the API answers `runEndStatuses`
+(null takes every end). Its automations ("Automation runs sent: …", ADR-145) apply as well: an end
+is sent only for a run of an automation it takes and with a status it chose. An end of another
+status is never queued for it, and when no endpoint of the company takes an end, no event is
+recorded at all, so there is nothing to replay: runs that ended before an edit are not sent
+afterwards. Starts are not filtered by the list. To take more, tick the ends under "Automation
+ended" on the endpoint's page (every end ticked takes them all, as a new endpoint does), or
+`PATCH /webhook-endpoints/{id}` with `runEndStatuses` (null for every end). Removing the
+`automation.run_ended` event clears the list.
+
 **A campaign event's results differ from the campaign page (ADR-150).** `campaign.results` are
 counted when the request is built (the `t` of its `W360-Signature`), as `GET /campaigns/{id}` counts
 them, and a retry or a replay counts again: an event delivered while the campaign's messages were on

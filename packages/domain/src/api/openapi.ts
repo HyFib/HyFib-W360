@@ -19,6 +19,7 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUSES,
+  WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_RETRY_SECONDS,
   WEBHOOK_TEMPLATE_STATUSES,
 } from '../webhooks/model';
@@ -372,6 +373,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The statuses a conversation reaches that the endpoint receives as conversation.status_changed; null receives every status.',
+    ),
+  runEndStatuses: z
+    .array(z.enum(WEBHOOK_RUN_END_STATUSES))
+    .nullable()
+    .describe(
+      'The statuses a run ended with that the endpoint receives as automation.run_ended; null receives every end.',
     ),
   apiKeyId: z.uuid().describe('The API key that added the endpoint.'),
   createdAt: z.iso.datetime(),
@@ -1565,7 +1572,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'automation.run_ended': webhook(
         'webhookAutomationRunEnded',
         WEBHOOK_EVENT_INFO['automation.run_ended'].label,
-        `${WEBHOOK_EVENT_INFO['automation.run_ended'].description} Deliveries are not ordered: the end of a short run can arrive before its start, so compare run.startedAt and run.endedAt. An endpoint that names the automations it takes receives only their runs, as for automation.run_started.`,
+        `${WEBHOOK_EVENT_INFO['automation.run_ended'].description} Deliveries are not ordered: the end of a short run can arrive before its start, so compare run.startedAt and run.endedAt. An endpoint that names the automations it takes receives only their runs, as for automation.run_started, and an endpoint receives every end unless it names the statuses it takes (its \`runEndStatuses\`, or the endings ticked in Settings → Webhooks).`,
         'WebhookAutomationRunEnded',
       ),
       'order.received': webhook(

@@ -17,6 +17,8 @@ import {
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
+  WEBHOOK_RUN_END_STATUS_LABELS,
+  WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUSES,
   webhookReplaySummary,
@@ -29,6 +31,7 @@ import {
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookReplayPeriod,
+  type WebhookRunEndStatus,
   type WebhookTemplateStatus,
 } from '@w360/domain/webhook-model';
 import {
@@ -120,9 +123,9 @@ function StatusChoices({
 /**
  * The statuses a campaign (`campaign.status_changed`, ADR-146), an order
  * (`order.status_changed`, ADR-147), a template (`template.status_changed`, ADR-148) or a
- * conversation (`conversation.status_changed`, ADR-149) reaches that an endpoint takes, shown while
- * it takes the event; `statuses` come in the order their pages list them, and a status ticked again
- * keeps that order.
+ * conversation (`conversation.status_changed`, ADR-149) reaches, or a run ends with
+ * (`automation.run_ended`, ADR-151), that an endpoint takes, shown while it takes the event;
+ * `statuses` come in the order their pages list them, and a status ticked again keeps that order.
  */
 function ReachedStatusChoices<S extends string>({
   prefix,
@@ -133,7 +136,7 @@ function ReachedStatusChoices<S extends string>({
   onChange,
 }: {
   prefix: string;
-  kind: 'campaign' | 'order' | 'template' | 'conversation';
+  kind: 'campaign' | 'order' | 'template' | 'conversation' | 'run';
   statuses: readonly S[];
   labels: Record<S, string>;
   chosen: S[];
@@ -143,7 +146,7 @@ function ReachedStatusChoices<S extends string>({
     <fieldset className="ml-6 grid gap-1">
       <legend className="mb-1 text-xs text-muted-foreground">
         Statuses sent (all of them unless you untick some; an event is the status{' '}
-        {kind === 'order' ? 'an order' : `a ${kind}`} reached)
+        {kind === 'order' ? 'an order' : `a ${kind}`} {kind === 'run' ? 'ended with' : 'reached'})
       </legend>
       {statuses.map((status) => {
         const id = `${prefix}-${kind}-status-${status}`;
@@ -326,6 +329,8 @@ function EventChoices({
   onTemplateStatusesChange,
   conversationStatuses,
   onConversationStatusesChange,
+  runEndStatuses,
+  onRunEndStatusesChange,
 }: {
   prefix: string;
   chosen: WebhookEventType[];
@@ -342,6 +347,8 @@ function EventChoices({
   onTemplateStatusesChange: (next: WebhookTemplateStatus[]) => void;
   conversationStatuses: WebhookConversationStatus[];
   onConversationStatusesChange: (next: WebhookConversationStatus[]) => void;
+  runEndStatuses: WebhookRunEndStatus[];
+  onRunEndStatusesChange: (next: WebhookRunEndStatus[]) => void;
 }) {
   return (
     <fieldset className="grid gap-2">
@@ -388,6 +395,16 @@ function EventChoices({
                 labels={WEBHOOK_CONVERSATION_STATUS_LABELS}
                 chosen={conversationStatuses}
                 onChange={onConversationStatusesChange}
+              />
+            ) : null}
+            {type === 'automation.run_ended' && chosen.includes(type) ? (
+              <ReachedStatusChoices
+                prefix={prefix}
+                kind="run"
+                statuses={WEBHOOK_RUN_END_STATUSES}
+                labels={WEBHOOK_RUN_END_STATUS_LABELS}
+                chosen={runEndStatuses}
+                onChange={onRunEndStatusesChange}
               />
             ) : null}
             {type === 'contact.updated' && chosen.includes(type) ? (
@@ -516,6 +533,7 @@ export function WebhookEndpointForm({
     orderStatuses: WebhookOrderStatus[] | null;
     templateStatuses: WebhookTemplateStatus[] | null;
     conversationStatuses: WebhookConversationStatus[] | null;
+    runEndStatuses: WebhookRunEndStatus[] | null;
   };
   /** The company's published automations, which an endpoint can choose (ADR-145). */
   automationChoices: WebhookAutomationChoice[];
@@ -542,6 +560,9 @@ export function WebhookEndpointForm({
   );
   const [conversationStatuses, setConversationStatuses] = useState<WebhookConversationStatus[]>(
     endpoint?.conversationStatuses ?? [...WEBHOOK_CONVERSATION_STATUSES],
+  );
+  const [runEndStatuses, setRunEndStatuses] = useState<WebhookRunEndStatus[]>(
+    endpoint?.runEndStatuses ?? [...WEBHOOK_RUN_END_STATUSES],
   );
   const [everyAutomation, setEveryAutomation] = useState(!endpoint?.automationIds);
   const [automationIds, setAutomationIds] = useState<string[]>(endpoint?.automationIds ?? []);
@@ -609,6 +630,12 @@ export function WebhookEndpointForm({
           conversationStatuses.length < WEBHOOK_CONVERSATION_STATUSES.length
             ? conversationStatuses
             : null;
+        // Every way a run ends ticked takes every end (null, ADR-151).
+        const chosenRunEndStatuses =
+          eventTypes.includes('automation.run_ended') &&
+          runEndStatuses.length < WEBHOOK_RUN_END_STATUSES.length
+            ? runEndStatuses
+            : null;
         const input = {
           url,
           description,
@@ -620,6 +647,7 @@ export function WebhookEndpointForm({
           orderStatuses: chosenOrderStatuses,
           templateStatuses: chosenTemplateStatuses,
           conversationStatuses: chosenConversationStatuses,
+          runEndStatuses: chosenRunEndStatuses,
         };
         const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
           setBusy(false);
@@ -652,6 +680,7 @@ export function WebhookEndpointForm({
               setOrderStatuses([...WEBHOOK_ORDER_STATUSES]);
               setTemplateStatuses([...WEBHOOK_TEMPLATE_STATUSES]);
               setConversationStatuses([...WEBHOOK_CONVERSATION_STATUSES]);
+              setRunEndStatuses([...WEBHOOK_RUN_END_STATUSES]);
               setEveryAutomation(true);
               setAutomationIds([]);
               setHeaders([]);
@@ -714,6 +743,8 @@ export function WebhookEndpointForm({
         onTemplateStatusesChange={setTemplateStatuses}
         conversationStatuses={conversationStatuses}
         onConversationStatusesChange={setConversationStatuses}
+        runEndStatuses={runEndStatuses}
+        onRunEndStatusesChange={setRunEndStatuses}
       />
       {webhookTakesAutomationRuns(eventTypes) ? (
         <AutomationChoices

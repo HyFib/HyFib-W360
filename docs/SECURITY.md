@@ -814,6 +814,13 @@ Phase 5 rules (outgoing webhooks, P5-09):
   applied in `app.capture_webhook_event`, in the transaction that changes the conversation: it
   narrows what one endpoint receives and never adds an event or a delivery for another endpoint or
   company. Audited with the list. Tested.
+- An endpoint can take `automation.run_ended` only for some of the ways a run ends (ADR-151), chosen
+  the same way. The list is checked against the five statuses a run ends with (`completed`,
+  `handed_off`, `taken_over`, `stopped`, `failed`; a run still going ends nothing), kept only while
+  the endpoint takes `automation.run_ended` (a database check too, which also refuses a null entry),
+  and applied in `app.capture_webhook_event` together with the automations the endpoint names
+  (ADR-145), in the transaction that ends the run: it narrows what one endpoint receives and never
+  adds an event or a delivery for another endpoint or company. Audited with the list. Tested.
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

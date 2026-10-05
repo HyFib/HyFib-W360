@@ -257,6 +257,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       orderStatuses: null,
       templateStatuses: null,
       conversationStatuses: null,
+      runEndStatuses: null,
       apiKeyId: key.id,
       createdAt: expect.any(String),
       updatedAt: expect.any(String),
@@ -1066,6 +1067,87 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { conversationStatuses: [] }))).toMatchObject({
       path: 'conversationStatuses',
+    });
+  });
+
+  it('choose how the runs an endpoint receives ended, kept by changes that leave them out and cleared with the event (ADR-151)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The statuses need the event, at least one, and each from the list (a status a run has while
+    // it goes on, or an unknown one, by place).
+    const refusals = [
+      [['automation.run_started'], ['failed'], 'runEndStatuses'],
+      [['automation.run_ended'], [], 'runEndStatuses'],
+      [['automation.run_ended'], ['failed', 'running'], 'runEndStatuses.1'],
+      [['automation.run_ended'], ['crashed'], 'runEndStatuses.0'],
+    ] as const;
+    for (const [index, [events, runEndStatuses, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, runEndStatuses },
+            idem(`run-end-statuses-bad-${index}`, JSON.stringify(runEndStatuses)),
+          ),
+        ),
+        JSON.stringify(runEndStatuses),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'run-end-statuses-1', {
+      url: receiverUrl(),
+      events: ['automation.run_ended', 'message.status'],
+      runEndStatuses: ['failed', 'taken_over'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.runEndStatuses).toEqual(['taken_over', 'failed']);
+    expect((await api().get(key.ctx, id)).runEndStatuses).toEqual(['taken_over', 'failed']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ runEndStatuses: ['taken_over', 'failed'] });
+
+    expect(await api().update(key.ctx, id, { description: 'Run ends' })).toMatchObject({
+      runEndStatuses: ['taken_over', 'failed'],
+    });
+    expect(await api().update(key.ctx, id, { runEndStatuses: ['failed'] })).toMatchObject({
+      runEndStatuses: ['failed'],
+    });
+    const updates = await fx.query<{ metadata: { runEndStatuses?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.runEndStatuses)).toEqual([
+      ['taken_over', 'failed'],
+      ['failed'],
+    ]);
+    expect(await api().update(key.ctx, id, { events: ['message.status'] })).toMatchObject({
+      events: ['message.status'],
+      runEndStatuses: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { runEndStatuses: ['failed'] }))).toMatchObject({
+      path: 'runEndStatuses',
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['automation.run_ended'],
+        runEndStatuses: ['stopped'],
+      }),
+    ).toMatchObject({ runEndStatuses: ['stopped'] });
+    expect(await api().update(key.ctx, id, { runEndStatuses: null })).toMatchObject({
+      runEndStatuses: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { runEndStatuses: [] }))).toMatchObject({
+      path: 'runEndStatuses',
     });
   });
 

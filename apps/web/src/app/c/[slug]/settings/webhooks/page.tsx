@@ -9,6 +9,7 @@ import {
   WEBHOOK_EVENT_INFO,
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUS_LABELS,
+  WEBHOOK_RUN_END_STATUS_LABELS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   webhookHost,
@@ -153,6 +154,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.automations
                           .map((a) => (a.archived ? `${a.name} (archived)` : a.name))
                           .join(', ')}
+                      </p>
+                    ) : null}
+                    {e.runEndStatuses ? (
+                      <p className="text-xs text-muted-foreground">
+                        Automation ends sent:{' '}
+                        {e.runEndStatuses.map((s) => WEBHOOK_RUN_END_STATUS_LABELS[s]).join(', ')}
                       </p>
                     ) : null}
                     {e.headerNames.length > 0 ? (

@@ -34,6 +34,7 @@ import {
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUSES,
+  WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_TEMPLATE_STATUSES,
@@ -46,6 +47,7 @@ import {
   type WebhookEndpointAutomation,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
+  type WebhookRunEndStatus,
   type WebhookTemplateStatus,
 } from './model';
 
@@ -319,6 +321,34 @@ export function webhookConversationStatusesFor(
 }
 
 /**
+ * The statuses a run ended with that an endpoint takes as `automation.run_ended` (ADR-151), in the
+ * order an automation's runs list them; null takes every end.
+ */
+export const webhookRunEndStatusesSchema = z
+  .array(z.enum(WEBHOOK_RUN_END_STATUSES, { error: 'Choose how runs ended from the list.' }))
+  .min(1, 'Choose at least one way a run ends, or take every end.')
+  .max(WEBHOOK_RUN_END_STATUSES.length, 'Give each way a run ends once.')
+  .transform((chosen) => WEBHOOK_RUN_END_STATUSES.filter((status) => chosen.includes(status)))
+  .nullable();
+
+export const WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT =
+  'Choose how runs ended only for an endpoint that receives Automation ended.';
+
+/**
+ * The run end statuses an endpoint keeps after it is added or changed: every end (null) unless it
+ * takes `automation.run_ended`; then those given, or else the ones it had.
+ */
+export function webhookRunEndStatusesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookRunEndStatus[] | null | undefined,
+  current: readonly WebhookRunEndStatus[] | null,
+): WebhookRunEndStatus[] | null {
+  if (!eventTypes.includes('automation.run_ended')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
  * The parts of a contact whose change an endpoint takes as `contact.updated` (ADR-123), in the
  * order Settings lists them; null takes every change, including parts added later.
  */
@@ -456,6 +486,8 @@ const endpointFields = z.object({
    * Given, the conversation statuses it takes (null: every status, ADR-149); left out, they stay.
    */
   conversationStatuses: webhookConversationStatusesSchema.optional(),
+  /** Given, how the runs it takes ended (null: every end, ADR-151); left out, they stay. */
+  runEndStatuses: webhookRunEndStatusesSchema.optional(),
 });
 /** Statuses are chosen only for an endpoint that takes `message.status`. */
 const statusesNeedTheEvent = {
@@ -502,6 +534,12 @@ const conversationStatusesNeedTheEvent = {
     message: WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   },
 };
+/** How runs ended is chosen only for an endpoint that takes their ends (ADR-151). */
+const runEndStatusesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; runEndStatuses?: unknown }) =>
+    !data.runEndStatuses || data.eventTypes.includes('automation.run_ended'),
+  options: { path: ['runEndStatuses'], message: WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT },
+};
 const endpointSchema = endpointFields
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
   .refine(partsNeedTheEvent.check, partsNeedTheEvent.options)
@@ -509,7 +547,8 @@ const endpointSchema = endpointFields
   .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
   .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
   .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
-  .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options);
+  .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
+  .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options);
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointFields
   .extend({ endpointId: z.uuid() })
@@ -519,7 +558,8 @@ const updateSchema = endpointFields
   .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
   .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
   .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
-  .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options);
+  .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
+  .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
 const replayFailedSchema = endpointIdSchema.extend({
@@ -562,6 +602,8 @@ export interface WebhookEndpointView {
   templateStatuses: WebhookTemplateStatus[] | null;
   /** The conversation statuses it takes (ADR-149); null takes every status. */
   conversationStatuses: WebhookConversationStatus[] | null;
+  /** How the runs it takes as `automation.run_ended` ended (ADR-151); null takes every end. */
+  runEndStatuses: WebhookRunEndStatus[] | null;
   createdAt: Date;
   /** The member who added the endpoint in settings (null once their account is gone). */
   createdBy: string | null;
@@ -644,6 +686,7 @@ export async function lockWebhookEndpoint(
       orderStatuses: webhookEndpoints.orderStatuses,
       templateStatuses: webhookEndpoints.templateStatuses,
       conversationStatuses: webhookEndpoints.conversationStatuses,
+      runEndStatuses: webhookEndpoints.runEndStatuses,
     })
     .from(webhookEndpoints)
     .where(
@@ -683,6 +726,7 @@ export async function insertWebhookEndpoint(
     orderStatuses: WebhookOrderStatus[] | null;
     templateStatuses: WebhookTemplateStatus[] | null;
     conversationStatuses: WebhookConversationStatus[] | null;
+    runEndStatuses: WebhookRunEndStatus[] | null;
     creator: WebhookEndpointCreator;
   },
 ): Promise<{ id: string; secret: string }> {
@@ -714,6 +758,7 @@ export async function insertWebhookEndpoint(
     orderStatuses: input.orderStatuses,
     templateStatuses: input.templateStatuses,
     conversationStatuses: input.conversationStatuses,
+    runEndStatuses: input.runEndStatuses,
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
   });
@@ -1006,6 +1051,7 @@ export function createWebhooksService(deps: {
               orderStatuses: webhookEndpoints.orderStatuses,
               templateStatuses: webhookEndpoints.templateStatuses,
               conversationStatuses: webhookEndpoints.conversationStatuses,
+              runEndStatuses: webhookEndpoints.runEndStatuses,
               createdAt: webhookEndpoints.createdAt,
               createdBy: users.name,
               keyName: apiKeys.name,
@@ -1151,6 +1197,7 @@ export function createWebhooksService(deps: {
           data.conversationStatuses,
           null,
         );
+        const runEndStatuses = webhookRunEndStatusesFor(data.eventTypes, data.runEndStatuses, null);
         const { id, secret } = await insertWebhookEndpoint(tx, keyring, ctx.tenant.id, {
           url,
           description: data.description || null,
@@ -1163,6 +1210,7 @@ export function createWebhooksService(deps: {
           orderStatuses,
           templateStatuses,
           conversationStatuses,
+          runEndStatuses,
           creator: { userId: ctx.user.id },
         });
         await recordAudit(
@@ -1183,6 +1231,7 @@ export function createWebhooksService(deps: {
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(templateStatuses ? { templateStatuses } : {}),
               ...(conversationStatuses ? { conversationStatuses } : {}),
+              ...(runEndStatuses ? { runEndStatuses } : {}),
             },
           },
           meta,
@@ -1237,6 +1286,11 @@ export function createWebhooksService(deps: {
           data.conversationStatuses,
           endpoint.conversationStatuses,
         );
+        const runEndStatuses = webhookRunEndStatusesFor(
+          data.eventTypes,
+          data.runEndStatuses,
+          endpoint.runEndStatuses,
+        );
         await tx
           .update(webhookEndpoints)
           .set({
@@ -1250,6 +1304,7 @@ export function createWebhooksService(deps: {
             orderStatuses,
             templateStatuses,
             conversationStatuses,
+            runEndStatuses,
             ...(data.headers
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
               : {}),
@@ -1279,6 +1334,7 @@ export function createWebhooksService(deps: {
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(templateStatuses ? { templateStatuses } : {}),
               ...(conversationStatuses ? { conversationStatuses } : {}),
+              ...(runEndStatuses ? { runEndStatuses } : {}),
             },
           },
           meta,
