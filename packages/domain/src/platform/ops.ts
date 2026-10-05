@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { notFound, uuidv7, type Clock } from '@w360/core';
+import { forbidden, notFound, uuidv7, type Clock } from '@w360/core';
 import { ALL_QUEUES, queueMaxWaitMinutes } from '@w360/contracts';
 import {
   and,
@@ -13,6 +13,7 @@ import {
   isNull,
   lt,
   or,
+  platformAdmins,
   platformAlerts,
   platformAuditEvents,
   queueWaits,
@@ -45,16 +46,35 @@ import {
   quarantineExternalIds,
   signalFlags,
   byHealth,
+  deadLettersCsv,
+  emailsCsv,
+  failuresCsv,
   healthCsv,
+  newCompaniesCsv,
+  numberSetupsCsv,
   opsCsvFilename,
+  opsExportAction,
+  quarantineCsv,
+  queuesCsv,
+  receiptsCsv,
   signalsCsv,
+  signupsCsv,
   usageCsv,
   type CompanyActivity,
   type CompanyHealth,
   type CompanyHealthFacts,
   type CompanySignals,
   type CompanyUsage,
+  type CompanyWithoutNumber,
+  type EmailDeliveryCount,
+  type IntegrationFailure,
+  type NumberSetupProblem,
   type OpsExportList,
+  type QueueRow,
+  type QueueWait,
+  type ReceiptNeedingAttention,
+  type ReceiptProblem,
+  type SignupProblem,
 } from './ops-model';
 import type { PlatformActor } from './service';
 
@@ -260,95 +280,6 @@ async function signalRows(tx: Tx, since: Date): Promise<CompanySignals[]> {
     );
 }
 
-/**
- * One of the console's lists as a CSV body, read in the caller's transaction: the Usage tab over
- * its window (ADR-154), every company's health worst first or the Signals tab (ADR-155).
- */
-async function exportFile(
-  tx: Tx,
-  list: OpsExportList,
-  days: number,
-  now: Date,
-): Promise<{ window?: number; companies: number; body: string }> {
-  switch (list) {
-    case 'usage': {
-      const window = usageWindow(days);
-      const rows = await usageRows(tx, window, now);
-      return { window, companies: rows.length, body: usageCsv(rows) };
-    }
-    case 'health': {
-      const rows = (await healthFacts(tx, null)).map(assess).sort(byHealth);
-      return { companies: rows.length, body: healthCsv(rows) };
-    }
-    case 'signals': {
-      const window = OPS_SIGNAL_RULES.windowDays;
-      const rows = await signalRows(tx, new Date(now.getTime() - window * DAY_MS));
-      return { window, companies: rows.length, body: signalsCsv(rows) };
-    }
-  }
-}
-
-export interface IntegrationFailure {
-  tenantId: string;
-  tenantName: string;
-  tenantSlug: string;
-  source: string;
-  subjectId: string;
-  label: string | null;
-  state: string;
-  error: string | null;
-  since: Date | null;
-  /**
-   * A platform administrator's acknowledgement of this failure (ADR-141): when, by whom (null once
-   * the account has no name) and the note; null while nobody has taken it.
-   */
-  acknowledgement: { at: Date; byName: string | null; note: string } | null;
-}
-
-export type ReceiptProblem = 'exhausted' | 'waiting';
-
-/**
- * How long a queue's jobs waited when the worker last checked (ADR-096): jobs pg-boss would hand to
- * a worker, the oldest one's wait then, the queue's limit, and whether it is late.
- */
-export interface QueueWait {
-  waiting: number;
-  oldestWaitingSince: Date | null;
-  /** The oldest job's wait when the worker checked, in milliseconds (null when none waited). */
-  oldestWaitMs: number | null;
-  limitMinutes: number;
-  lateSince: Date | null;
-  /** When platform staff were emailed that it was late (ADR-096). */
-  alertedAt: Date | null;
-  checkedAt: Date;
-}
-
-/**
- * One queue: its declared retry policy and wait limit (null when this release does not declare it),
- * counts, and how long its jobs waited at the last check.
- */
-export interface QueueRow {
-  name: string;
-  policy: { retryLimit: number; hasDeadLetter: boolean; maxWaitMinutes: number } | null;
-  counts: QueueSnapshot | null;
-  deadLetters: { last24h: number; last7d: number };
-  wait: QueueWait | null;
-}
-
-export interface ReceiptNeedingAttention {
-  id: string;
-  provider: string;
-  receivedAt: Date;
-  status: string;
-  attempts: number;
-  lastError: string | null;
-  problem: ReceiptProblem;
-  /** Whether the body is still kept, so a retry can process it (checked again when retrying). */
-  retryable: boolean;
-  /** When platform staff were emailed that it used all its attempts (ADR-091). */
-  alertedAt: Date | null;
-}
-
 export interface EventCount {
   type: string;
   provider: string | null;
@@ -534,6 +465,291 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     return new Map(rows.map((r) => [r.queue, { last24h: num(r.last24h), last7d: num(r.last7d) }]));
   }
 
+  /** Embedded Signup sessions since a time that failed or were abandoned, newest first. */
+  async function signupProblems(tx: Tx, since: Date, now: Date): Promise<SignupProblem[]> {
+    const sessions = await tx.execute<Row>(
+      sql`select * from ops.platform_ops_signup_sessions(${since.toISOString()}::timestamptz, 200)`,
+    );
+    return sessions.rows.map((r) => ({
+      tenantId: String(r.tenant_id),
+      tenantName: String(r.tenant_name),
+      tenantSlug: String(r.tenant_slug),
+      sessionId: String(r.session_id),
+      outcome: String(r.outcome) as 'failed' | 'abandoned',
+      failureReason: text(r.failure_reason),
+      startedAt: date(r.started_at) ?? now,
+      hasActiveNumber: r.has_active_number === true,
+    }));
+  }
+
+  /** Number setups that failed, or have run for over `stuckSetupMinutes`, latest change first. */
+  async function numberSetupProblems(tx: Tx, now: Date): Promise<NumberSetupProblem[]> {
+    const stuckBefore = new Date(now.getTime() - OPS_WINDOWS.stuckSetupMinutes * MINUTE_MS);
+    const numbers = await tx
+      .select({
+        id: channelAccounts.id,
+        tenantId: channelAccounts.tenantId,
+        tenantName: tenants.name,
+        tenantSlug: tenants.slug,
+        phone: channelAccounts.displayPhoneNumber,
+        phoneNumberId: channelAccounts.phoneNumberId,
+        status: channelAccounts.status,
+        step: channelAccounts.onboardingStep,
+        error: channelAccounts.onboardingError,
+        createdAt: channelAccounts.createdAt,
+        updatedAt: channelAccounts.updatedAt,
+      })
+      .from(channelAccounts)
+      .innerJoin(tenants, eq(tenants.id, channelAccounts.tenantId))
+      .where(
+        and(
+          sql`${tenants.status} <> 'deleted'`,
+          or(
+            eq(channelAccounts.status, 'failed'),
+            and(
+              eq(channelAccounts.status, 'onboarding'),
+              lt(channelAccounts.createdAt, stuckBefore),
+            ),
+          ),
+        ),
+      )
+      .orderBy(desc(channelAccounts.updatedAt))
+      .limit(200);
+    return numbers.map((n) => ({ ...n, stuck: n.status === 'onboarding' }));
+  }
+
+  /** Companies created since a time, newest first, with whether each has an active number. */
+  async function companiesCreatedSince(
+    tx: Tx,
+    since: Date,
+  ): Promise<(CompanyWithoutNumber & { active: boolean })[]> {
+    return tx
+      .select({
+        id: tenants.id,
+        name: tenants.name,
+        slug: tenants.slug,
+        status: tenants.status,
+        createdAt: tenants.createdAt,
+        active: sql<boolean>`exists (select 1 from ${channelAccounts} c
+          where c.tenant_id = ${tenants.id} and c.status = 'active')`,
+        inProgress: sql<boolean>`exists (select 1 from ${channelAccounts} c
+          where c.tenant_id = ${tenants.id} and c.status = 'onboarding')`,
+      })
+      .from(tenants)
+      .where(and(gte(tenants.createdAt, since), sql`${tenants.status} <> 'deleted'`))
+      .orderBy(desc(tenants.createdAt))
+      .limit(500);
+  }
+
+  /** Open quarantine entries, newest first, with the provider ids staff may see. */
+  async function openQuarantine(tx: Tx, now: Date) {
+    const quarantine = await tx
+      .select({
+        id: webhookQuarantine.id,
+        receiptId: webhookQuarantine.receiptId,
+        provider: webhookQuarantine.provider,
+        reason: webhookQuarantine.reason,
+        externalIds: webhookQuarantine.externalIds,
+        createdAt: webhookQuarantine.createdAt,
+        alertedAt: webhookQuarantine.alertedAt,
+        receiptStatus: webhookReceipts.status,
+        receivedAt: webhookReceipts.receivedAt,
+      })
+      .from(webhookQuarantine)
+      .innerJoin(webhookReceipts, eq(webhookReceipts.id, webhookQuarantine.receiptId))
+      .where(isNull(webhookQuarantine.resolvedAt))
+      .orderBy(desc(webhookQuarantine.createdAt))
+      .limit(100);
+    const bodyKeptAfter = now.getTime() - RECEIPT_BODY_DAYS * DAY_MS;
+    return quarantine.map((q) => ({
+      ...q,
+      externalIds: quarantineExternalIds(q.externalIds),
+      retryable: q.receiptStatus === 'quarantined' && q.receivedAt.getTime() > bodyKeptAfter,
+    }));
+  }
+
+  /** Failed and waiting emails by kind over `emailDays`; counts only. */
+  async function emailDelivery(tx: Tx, now: Date): Promise<EmailDeliveryCount[]> {
+    const since = new Date(now.getTime() - OPS_WINDOWS.emailDays * DAY_MS);
+    const stuckBefore = new Date(now.getTime() - 15 * MINUTE_MS);
+    // Counts only: an SMTP error can quote the address it refused.
+    const emails = await tx
+      .select({
+        kind: emailOutbox.kind,
+        failed: sql<number>`count(*) filter (where ${emailOutbox.status} = 'failed')::int`,
+        stuck: sql<number>`count(*) filter (where ${emailOutbox.status} in ('pending', 'sending')
+          and ${emailOutbox.nextAttemptAt} < ${stuckBefore})::int`,
+      })
+      .from(emailOutbox)
+      .where(gte(emailOutbox.createdAt, since))
+      .groupBy(emailOutbox.kind)
+      .orderBy(emailOutbox.kind);
+    return emails
+      .map((e) => ({ kind: e.kind, failed: num(e.failed), stuck: num(e.stuck) }))
+      .filter((e) => e.failed > 0 || e.stuck > 0);
+  }
+
+  /**
+   * Every declared queue with its policy, pg-boss's counts, its dead letters and its wait at the
+   * last check, then any queue this release does not declare that has dead letters.
+   */
+  async function queueRows(
+    tx: Tx,
+    now: Date,
+    snapshot: QueueSnapshot[],
+    waits: Map<string, QueueWait>,
+  ): Promise<QueueRow[]> {
+    const byName = new Map<string, QueueSnapshot>(snapshot.map((q) => [q.name, q]));
+    const counts = await deadLetterCountsByQueue(tx, now);
+    const known = new Set(ALL_QUEUES.map((q) => q.name));
+    const rows: QueueRow[] = ALL_QUEUES.map((definition) => ({
+      name: definition.name,
+      policy: {
+        retryLimit: definition.retryLimit,
+        hasDeadLetter: Boolean(definition.deadLetter),
+        maxWaitMinutes: queueMaxWaitMinutes(definition),
+      },
+      counts: byName.get(definition.name) ?? null,
+      deadLetters: counts.get(definition.name) ?? { last24h: 0, last7d: 0 },
+      wait: waits.get(definition.name) ?? null,
+    }));
+    // Dead letters from a queue this release does not declare still show, with no policy.
+    for (const [name, c] of counts) {
+      if (!known.has(name)) {
+        rows.push({
+          name,
+          policy: null,
+          counts: byName.get(name) ?? null,
+          deadLetters: c,
+          wait: null,
+        });
+      }
+    }
+    return rows;
+  }
+
+  /** The latest dead letters with what keeps each from a retry (ADR-108). */
+  async function recentDeadLetters(tx: Tx, now: Date) {
+    const recent = await tx
+      .select({
+        id: deadLetters.id,
+        sourceQueue: deadLetters.sourceQueue,
+        sourceJobId: deadLetters.sourceJobId,
+        kind: deadLetters.kind,
+        tenantId: deadLetters.tenantId,
+        tenantName: tenants.name,
+        tenantSlug: tenants.slug,
+        ref: deadLetters.ref,
+        verified: deadLetters.verified,
+        retries: deadLetters.retries,
+        errorName: deadLetters.errorName,
+        errorCode: deadLetters.errorCode,
+        firstQueuedAt: deadLetters.firstQueuedAt,
+        failedAt: deadLetters.failedAt,
+        alertedAt: deadLetters.alertedAt,
+        tenantStatus: tenants.status,
+        retriedAt: deadLetters.retriedAt,
+        retriedByName: users.name,
+        settledAt: deadLetters.settledAt,
+        settledEnded: deadLetters.settledEnded,
+      })
+      .from(deadLetters)
+      .leftJoin(tenants, eq(tenants.id, deadLetters.tenantId))
+      .leftJoin(users, eq(users.id, deadLetters.retriedByUserId))
+      .orderBy(desc(deadLetters.failedAt))
+      .limit(100);
+    return recent.map((d) => {
+      const retryBlock = deadLetterRetryBlock(d, now);
+      return {
+        ...d,
+        retryableUntil: deadLetterRetryableUntil(d.sourceQueue, d.failedAt),
+        retryBlock,
+        retryable: retryBlock === null,
+      };
+    });
+  }
+
+  /**
+   * One of the console's lists as a CSV body, read in the caller's transaction with the tab's own
+   * read: the Usage tab over its window (ADR-154), every company's health worst first or the Signals
+   * tab (ADR-155), and the lists of the Onboarding, Integrations and Queues tabs (ADR-158). Lines
+   * per company count as companies, other lines as rows.
+   */
+  async function exportFile(
+    tx: Tx,
+    list: OpsExportList,
+    days: number,
+    now: Date,
+  ): Promise<{ window?: number; counted: { companies: number } | { rows: number }; body: string }> {
+    const onboardingSince = new Date(now.getTime() - OPS_WINDOWS.onboardingDays * DAY_MS);
+    switch (list) {
+      case 'usage': {
+        const window = usageWindow(days);
+        const rows = await usageRows(tx, window, now);
+        return { window, counted: { companies: rows.length }, body: usageCsv(rows) };
+      }
+      case 'health': {
+        const rows = (await healthFacts(tx, null)).map(assess).sort(byHealth);
+        return { counted: { companies: rows.length }, body: healthCsv(rows) };
+      }
+      case 'signals': {
+        const window = OPS_SIGNAL_RULES.windowDays;
+        const rows = await signalRows(tx, new Date(now.getTime() - window * DAY_MS));
+        return { window, counted: { companies: rows.length }, body: signalsCsv(rows) };
+      }
+      case 'signups': {
+        const rows = await signupProblems(tx, onboardingSince, now);
+        return {
+          window: OPS_WINDOWS.onboardingDays,
+          counted: { rows: rows.length },
+          body: signupsCsv(rows),
+        };
+      }
+      case 'number-setups': {
+        const rows = await numberSetupProblems(tx, now);
+        return { counted: { rows: rows.length }, body: numberSetupsCsv(rows) };
+      }
+      case 'new-companies': {
+        const rows = (await companiesCreatedSince(tx, onboardingSince)).filter((c) => !c.active);
+        return {
+          window: OPS_WINDOWS.onboardingDays,
+          counted: { companies: rows.length },
+          body: newCompaniesCsv(rows),
+        };
+      }
+      case 'failures': {
+        const rows = await integrationFailures(tx, 500);
+        return { counted: { rows: rows.length }, body: failuresCsv(rows) };
+      }
+      case 'receipts': {
+        const rows = await receiptsNeedingAttention(tx, now);
+        return { counted: { rows: rows.length }, body: receiptsCsv(rows) };
+      }
+      case 'quarantine': {
+        const rows = await openQuarantine(tx, now);
+        return { counted: { rows: rows.length }, body: quarantineCsv(rows) };
+      }
+      case 'emails': {
+        const rows = await emailDelivery(tx, now);
+        return {
+          window: OPS_WINDOWS.emailDays,
+          counted: { rows: rows.length },
+          body: emailsCsv(rows),
+        };
+      }
+      case 'queues': {
+        // pg-boss's counts, as the Queues tab reads them (through pg-boss's own connection).
+        const snapshot = await inspector.snapshot();
+        const rows = await queueRows(tx, now, snapshot, await queueWaitsByName(tx));
+        return { counted: { rows: rows.length }, body: queuesCsv(rows) };
+      }
+      case 'dead-letters': {
+        const rows = await recentDeadLetters(tx, now);
+        return { counted: { rows: rows.length }, body: deadLettersCsv(rows) };
+      }
+    }
+  }
+
   return {
     /** Totals and the companies needing attention, most severe first. */
     async overview(actor: PlatformActor) {
@@ -603,73 +819,14 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     async onboarding(actor: PlatformActor) {
       const now = clock.now();
       const since = new Date(now.getTime() - OPS_WINDOWS.onboardingDays * DAY_MS);
-      const stuckBefore = new Date(now.getTime() - OPS_WINDOWS.stuckSetupMinutes * MINUTE_MS);
       return platformDb.run(actor.userId, async (tx) => {
-        const sessions = await tx.execute<Row>(
-          sql`select * from ops.platform_ops_signup_sessions(${since.toISOString()}::timestamptz, 200)`,
-        );
-        const numbers = await tx
-          .select({
-            id: channelAccounts.id,
-            tenantId: channelAccounts.tenantId,
-            tenantName: tenants.name,
-            tenantSlug: tenants.slug,
-            phone: channelAccounts.displayPhoneNumber,
-            phoneNumberId: channelAccounts.phoneNumberId,
-            status: channelAccounts.status,
-            step: channelAccounts.onboardingStep,
-            error: channelAccounts.onboardingError,
-            createdAt: channelAccounts.createdAt,
-            updatedAt: channelAccounts.updatedAt,
-          })
-          .from(channelAccounts)
-          .innerJoin(tenants, eq(tenants.id, channelAccounts.tenantId))
-          .where(
-            and(
-              sql`${tenants.status} <> 'deleted'`,
-              or(
-                eq(channelAccounts.status, 'failed'),
-                and(
-                  eq(channelAccounts.status, 'onboarding'),
-                  lt(channelAccounts.createdAt, stuckBefore),
-                ),
-              ),
-            ),
-          )
-          .orderBy(desc(channelAccounts.updatedAt))
-          .limit(200);
-        const created = await tx
-          .select({
-            id: tenants.id,
-            name: tenants.name,
-            slug: tenants.slug,
-            status: tenants.status,
-            createdAt: tenants.createdAt,
-            active: sql<boolean>`exists (select 1 from ${channelAccounts} c
-              where c.tenant_id = ${tenants.id} and c.status = 'active')`,
-            inProgress: sql<boolean>`exists (select 1 from ${channelAccounts} c
-              where c.tenant_id = ${tenants.id} and c.status = 'onboarding')`,
-          })
-          .from(tenants)
-          .where(and(gte(tenants.createdAt, since), sql`${tenants.status} <> 'deleted'`))
-          .orderBy(desc(tenants.createdAt))
-          .limit(500);
+        const sessions = await signupProblems(tx, since, now);
+        const numbers = await numberSetupProblems(tx, now);
+        const created = await companiesCreatedSince(tx, since);
         return {
           since,
-          sessions: sessions.rows.map((r) => ({
-            tenantId: String(r.tenant_id),
-            tenantName: String(r.tenant_name),
-            tenantSlug: String(r.tenant_slug),
-            sessionId: String(r.session_id),
-            outcome: String(r.outcome) as 'failed' | 'abandoned',
-            failureReason: text(r.failure_reason),
-            startedAt: date(r.started_at) ?? now,
-            hasActiveNumber: r.has_active_number === true,
-          })),
-          numbers: numbers.map((n) => ({
-            ...n,
-            stuck: n.status === 'onboarding',
-          })),
+          sessions,
+          numbers,
           createdCompanies: created.length,
           connectedCompanies: created.filter((c) => c.active).length,
           stalled: created.filter((c) => !c.active),
@@ -680,41 +837,11 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     /** Current integration failures, platform webhook receipts, quarantine and email delivery. */
     async integrations(actor: PlatformActor) {
       const now = clock.now();
-      const since7d = new Date(now.getTime() - 7 * DAY_MS);
-      const stuckBefore = new Date(now.getTime() - 15 * MINUTE_MS);
       return platformDb.run(actor.userId, async (tx) => {
         const failures = await integrationFailures(tx, 500);
         const receipts = await receiptsNeedingAttention(tx, now);
-        const quarantine = await tx
-          .select({
-            id: webhookQuarantine.id,
-            receiptId: webhookQuarantine.receiptId,
-            provider: webhookQuarantine.provider,
-            reason: webhookQuarantine.reason,
-            externalIds: webhookQuarantine.externalIds,
-            createdAt: webhookQuarantine.createdAt,
-            alertedAt: webhookQuarantine.alertedAt,
-            receiptStatus: webhookReceipts.status,
-            receivedAt: webhookReceipts.receivedAt,
-          })
-          .from(webhookQuarantine)
-          .innerJoin(webhookReceipts, eq(webhookReceipts.id, webhookQuarantine.receiptId))
-          .where(isNull(webhookQuarantine.resolvedAt))
-          .orderBy(desc(webhookQuarantine.createdAt))
-          .limit(100);
-        const bodyKeptAfter = now.getTime() - RECEIPT_BODY_DAYS * DAY_MS;
-        // Counts only: an SMTP error can quote the address it refused.
-        const emails = await tx
-          .select({
-            kind: emailOutbox.kind,
-            failed: sql<number>`count(*) filter (where ${emailOutbox.status} = 'failed')::int`,
-            stuck: sql<number>`count(*) filter (where ${emailOutbox.status} in ('pending', 'sending')
-              and ${emailOutbox.nextAttemptAt} < ${stuckBefore})::int`,
-          })
-          .from(emailOutbox)
-          .where(gte(emailOutbox.createdAt, since7d))
-          .groupBy(emailOutbox.kind)
-          .orderBy(emailOutbox.kind);
+        const quarantine = await openQuarantine(tx, now);
+        const emails = await emailDelivery(tx, now);
         // When platform staff were last emailed about work that failed for good (ADR-091) and about
         // companies' failing integrations (ADR-139).
         const alerts = await tx
@@ -727,14 +854,8 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           receipts,
           lastFailureAlertAt: lastSent('failures'),
           lastIntegrationAlertAt: lastSent('integrations'),
-          quarantine: quarantine.map((q) => ({
-            ...q,
-            externalIds: quarantineExternalIds(q.externalIds),
-            retryable: q.receiptStatus === 'quarantined' && q.receivedAt.getTime() > bodyKeptAfter,
-          })),
-          emails: emails
-            .map((e) => ({ kind: e.kind, failed: num(e.failed), stuck: num(e.stuck) }))
-            .filter((e) => e.failed > 0 || e.stuck > 0),
+          quarantine,
+          emails,
         };
       });
     },
@@ -774,78 +895,17 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     async queues(actor: PlatformActor) {
       const now = clock.now();
       const snapshot = await inspector.snapshot();
-      const byName = new Map<string, QueueSnapshot>(snapshot.map((q) => [q.name, q]));
       return platformDb.run(actor.userId, async (tx) => {
-        const counts = await deadLetterCountsByQueue(tx, now);
         const waits = await queueWaitsByName(tx);
         const [alerts] = await tx
           .select({ lastSentAt: platformAlerts.lastSentAt })
           .from(platformAlerts)
           .where(eq(platformAlerts.kind, 'queues'));
-        const recent = await tx
-          .select({
-            id: deadLetters.id,
-            sourceQueue: deadLetters.sourceQueue,
-            sourceJobId: deadLetters.sourceJobId,
-            kind: deadLetters.kind,
-            tenantId: deadLetters.tenantId,
-            tenantName: tenants.name,
-            tenantSlug: tenants.slug,
-            ref: deadLetters.ref,
-            verified: deadLetters.verified,
-            retries: deadLetters.retries,
-            errorName: deadLetters.errorName,
-            errorCode: deadLetters.errorCode,
-            firstQueuedAt: deadLetters.firstQueuedAt,
-            failedAt: deadLetters.failedAt,
-            alertedAt: deadLetters.alertedAt,
-            tenantStatus: tenants.status,
-            retriedAt: deadLetters.retriedAt,
-            retriedByName: users.name,
-            settledAt: deadLetters.settledAt,
-            settledEnded: deadLetters.settledEnded,
-          })
-          .from(deadLetters)
-          .leftJoin(tenants, eq(tenants.id, deadLetters.tenantId))
-          .leftJoin(users, eq(users.id, deadLetters.retriedByUserId))
-          .orderBy(desc(deadLetters.failedAt))
-          .limit(100);
-        const known = new Set(ALL_QUEUES.map((q) => q.name));
-        const rows: QueueRow[] = ALL_QUEUES.map((definition) => ({
-          name: definition.name,
-          policy: {
-            retryLimit: definition.retryLimit,
-            hasDeadLetter: Boolean(definition.deadLetter),
-            maxWaitMinutes: queueMaxWaitMinutes(definition),
-          },
-          counts: byName.get(definition.name) ?? null,
-          deadLetters: counts.get(definition.name) ?? { last24h: 0, last7d: 0 },
-          wait: waits.get(definition.name) ?? null,
-        }));
-        // Dead letters from a queue this release does not declare still show, with no policy.
-        for (const [name, c] of counts) {
-          if (!known.has(name)) {
-            rows.push({
-              name,
-              policy: null,
-              counts: byName.get(name) ?? null,
-              deadLetters: c,
-              wait: null,
-            });
-          }
-        }
+        const rows = await queueRows(tx, now, snapshot, waits);
         const check = queueCheck(waits, now);
         return {
           queues: rows,
-          deadLetters: recent.map((d) => {
-            const retryBlock = deadLetterRetryBlock(d, now);
-            return {
-              ...d,
-              retryableUntil: deadLetterRetryableUntil(d.sourceQueue, d.failedAt),
-              retryBlock,
-              retryable: retryBlock === null,
-            };
-          }),
+          deadLetters: await recentDeadLetters(tx, now),
           waitsCheckedAt: check.checkedAt,
           waitsFresh: check.fresh,
           lastQueueAlertAt: alerts?.lastSentAt ?? null,
@@ -901,9 +961,10 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
 
     /**
      * One of the console's lists as CSV: the Usage tab for a window (ADR-154), every company's
-     * health or the Signals tab (ADR-155). The export is written to the platform audit log (the
-     * list, its window and how many companies) in the transaction that reads the rows, before the
-     * file is returned, so no file leaves without its entry.
+     * health or the Signals tab (ADR-155), or a list of the Onboarding, Integrations or Queues tab
+     * (ADR-158). The export is written to the platform audit log (the list, its window and how many
+     * companies or rows) in the transaction that reads the rows, before the file is returned, so no
+     * file leaves without its entry.
      */
     async exportList(
       actor: PlatformActor,
@@ -912,17 +973,22 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     ): Promise<{ filename: string; body: string }> {
       const now = clock.now();
       return platformDb.run(actor.userId, async (tx) => {
+        // Refused to anyone who is not a platform administrator before any list is read, as the
+        // definer functions refuse, whether or not the list's read goes through one (ADR-158).
+        const [admin] = await tx
+          .select({ userId: platformAdmins.userId })
+          .from(platformAdmins)
+          .where(eq(platformAdmins.userId, actor.userId));
+        if (!admin) throw forbidden('Only platform administrators can export the console’s lists.');
         const file = await exportFile(tx, list, days, now);
         await tx.insert(platformAuditEvents).values({
           id: uuidv7(),
           actorUserId: actor.userId,
-          action: `platform.ops_${list}_exported`,
+          action: opsExportAction(list),
           result: 'success',
           correlationId: actor.correlationId,
           metadata:
-            file.window === undefined
-              ? { companies: file.companies }
-              : { days: file.window, companies: file.companies },
+            file.window === undefined ? file.counted : { days: file.window, ...file.counted },
         });
         return { filename: opsCsvFilename(list, now, file.window), body: file.body };
       });

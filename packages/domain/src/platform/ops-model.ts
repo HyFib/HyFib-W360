@@ -5,6 +5,8 @@
  */
 
 import { CSV_BOM, csvLine } from '../contacts/csv';
+import type { QueueSnapshot } from '../jobs/queue';
+import { DEAD_LETTER_RETRY_BLOCK_TEXT, type DeadLetterRetryBlock } from './dead-letter-retries';
 
 export const OPS_HEALTH_RULES = {
   /** Failure rates are judged only with at least this many outbound messages in 24 hours. */
@@ -34,6 +36,8 @@ export const OPS_WINDOWS = {
   /** A receipt still waiting after this long is shown as stuck. */
   stuckReceiptMinutes: 10,
   deadLetterDays: 7,
+  /** Emails failed or waiting, by kind, created in this many days. */
+  emailDays: 7,
 } as const;
 
 /** What `ops.platform_ops_health` returns for one company. */
@@ -232,12 +236,34 @@ export function usageChange(current: number, previous: number): string | null {
   return `${percent > 0 ? '+' : ''}${percent}%`;
 }
 
-/** The console's lists staff can download as CSV (ADR-154, ADR-155). */
-export const OPS_EXPORT_LISTS = ['usage', 'health', 'signals'] as const;
+/**
+ * The console's lists staff can download as CSV: the Usage tab (ADR-154), every company's health
+ * and the Signals tab (ADR-155), and every list of the Onboarding, Integrations and Queues tabs
+ * (ADR-158).
+ */
+export const OPS_EXPORT_LISTS = [
+  'usage',
+  'health',
+  'signals',
+  'signups',
+  'number-setups',
+  'new-companies',
+  'failures',
+  'receipts',
+  'quarantine',
+  'emails',
+  'queues',
+  'dead-letters',
+] as const;
 export type OpsExportList = (typeof OPS_EXPORT_LISTS)[number];
 
 export function isOpsExportList(value: string): value is OpsExportList {
   return (OPS_EXPORT_LISTS as readonly string[]).includes(value);
+}
+
+/** The platform audit log's action for an export: `platform.ops_number_setups_exported`. */
+export function opsExportAction(list: OpsExportList): string {
+  return `platform.ops_${list.replaceAll('-', '_')}_exported`;
 }
 
 /** The Usage tab's columns in its CSV (ADR-154). */
@@ -435,8 +461,9 @@ export function signalsCsv(rows: readonly CompanySignals[]): string {
 }
 
 /**
- * `hyfib-usage-30-days-2026-10-05.csv`, `hyfib-health-2026-10-05.csv`: the list, its window when it
- * has one and the UTC day of the export.
+ * `hyfib-usage-30-days-2026-10-05.csv`, `hyfib-health-2026-10-05.csv`,
+ * `hyfib-dead-letters-2026-10-05.csv`: the list, its window when it has one and the UTC day of the
+ * export.
  */
 export function opsCsvFilename(list: OpsExportList, at: Date, days?: number): string {
   return `hyfib-${list}${days === undefined ? '' : `-${days}-days`}-${csvDay(at)}.csv`;
@@ -556,3 +583,444 @@ export const WEBHOOK_PROVIDER_LABELS: Record<string, string> = {
   meta_whatsapp: 'Meta (WhatsApp)',
   razorpay: 'Razorpay',
 };
+
+/** The steps of a number's setup, as the Onboarding tab names them. */
+export const NUMBER_SETUP_STEP_LABELS: Record<string, string> = {
+  subscribe_app: 'Subscribing the app',
+  register_number: 'Registering the number',
+  health_check: 'Checking the number',
+  done: 'Done',
+};
+
+/** An Embedded Signup session that failed, or was abandoned when it expired (ADR-054). */
+export interface SignupProblem {
+  sessionId: string;
+  tenantId: string;
+  tenantName: string;
+  tenantSlug: string;
+  outcome: 'failed' | 'abandoned';
+  failureReason: string | null;
+  startedAt: Date;
+  hasActiveNumber: boolean;
+}
+
+/** A number whose setup failed, or has run for over `stuckSetupMinutes` (ADR-054). */
+export interface NumberSetupProblem {
+  id: string;
+  tenantId: string;
+  tenantName: string;
+  tenantSlug: string;
+  /** The number as Meta displays it, once Meta gave it. */
+  phone: string | null;
+  phoneNumberId: string;
+  status: string;
+  step: string | null;
+  error: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  stuck: boolean;
+}
+
+/** A company created in the onboarding window that has no active number (ADR-054). */
+export interface CompanyWithoutNumber {
+  id: string;
+  name: string;
+  slug: string;
+  status: string;
+  createdAt: Date;
+  /** Whether one of its numbers is being set up. */
+  inProgress: boolean;
+}
+
+export interface IntegrationFailure {
+  tenantId: string;
+  tenantName: string;
+  tenantSlug: string;
+  source: string;
+  subjectId: string;
+  label: string | null;
+  state: string;
+  error: string | null;
+  since: Date | null;
+  /**
+   * A platform administrator's acknowledgement of this failure (ADR-141): when, by whom (null once
+   * the account has no name) and the note; null while nobody has taken it.
+   */
+  acknowledgement: { at: Date; byName: string | null; note: string } | null;
+}
+
+export type ReceiptProblem = 'exhausted' | 'waiting';
+
+export const RECEIPT_PROBLEM_LABELS: Record<ReceiptProblem, string> = {
+  exhausted: 'Failed all attempts',
+  waiting: 'Still waiting',
+};
+
+export interface ReceiptNeedingAttention {
+  id: string;
+  provider: string;
+  receivedAt: Date;
+  status: string;
+  attempts: number;
+  lastError: string | null;
+  problem: ReceiptProblem;
+  /** Whether the body is still kept, so a retry can process it (checked again when retrying). */
+  retryable: boolean;
+  /** When platform staff were emailed that it used all its attempts (ADR-091). */
+  alertedAt: Date | null;
+}
+
+/** An open quarantine entry, with only the provider ids staff may see (`quarantineExternalIds`). */
+export interface QuarantineEntry {
+  id: string;
+  receiptId: string;
+  provider: string;
+  reason: string;
+  externalIds: { key: string; value: string }[];
+  createdAt: Date;
+  /** When platform staff were emailed about it (ADR-091). */
+  alertedAt: Date | null;
+  /** Whether its receipt can be processed again: quarantined, with its body still kept. */
+  retryable: boolean;
+}
+
+/** One kind of email's failed and waiting counts over `emailDays` (counts only). */
+export interface EmailDeliveryCount {
+  kind: string;
+  failed: number;
+  /** Due for over 15 minutes and not sent. */
+  stuck: number;
+}
+
+/**
+ * How long a queue's jobs waited when the worker last checked (ADR-096): jobs pg-boss would hand to
+ * a worker, the oldest one's wait then, the queue's limit, and whether it is late.
+ */
+export interface QueueWait {
+  waiting: number;
+  oldestWaitingSince: Date | null;
+  /** The oldest job's wait when the worker checked, in milliseconds (null when none waited). */
+  oldestWaitMs: number | null;
+  limitMinutes: number;
+  lateSince: Date | null;
+  /** When platform staff were emailed that it was late (ADR-096). */
+  alertedAt: Date | null;
+  checkedAt: Date;
+}
+
+/**
+ * One queue: its declared retry policy and wait limit (null when this release does not declare it),
+ * counts, and how long its jobs waited at the last check.
+ */
+export interface QueueRow {
+  name: string;
+  policy: { retryLimit: number; hasDeadLetter: boolean; maxWaitMinutes: number } | null;
+  counts: QueueSnapshot | null;
+  deadLetters: { last24h: number; last7d: number };
+  wait: QueueWait | null;
+}
+
+/** A dead letter the Queues tab lists (ADR-054), and whether its job can be retried (ADR-108). */
+export interface DeadLetterLine {
+  id: string;
+  sourceQueue: string;
+  failedAt: Date;
+  verified: boolean;
+  /** The job's company, set only when its signature verified. */
+  tenantId: string | null;
+  tenantName: string | null;
+  tenantSlug: string | null;
+  ref: string | null;
+  errorName: string | null;
+  errorCode: string | null;
+  retries: number | null;
+  /** When platform staff were emailed about it (ADR-091). */
+  alertedAt: Date | null;
+  retriedAt: Date | null;
+  /** Who retried it, for the console only: the CSV leaves it out. */
+  retriedByName: string | null;
+  /** When the sweep settled its work for its company, and whether that ended it (ADR-111). */
+  settledAt: Date | null;
+  settledEnded: boolean | null;
+  retryable: boolean;
+  retryableUntil: Date | null;
+  retryBlock: DeadLetterRetryBlock | null;
+}
+
+/*
+ * The Onboarding, Integrations and Queues tabs' lists as CSV (ADR-158): each list's lines in the
+ * tab's order with what the tab shows, through the same writer as the other lists (ADR-154). Who
+ * acknowledged a failure or retried a job, and the notes staff wrote, are left out: they stay in the
+ * console and the platform audit log.
+ */
+
+const yesNo = (value: boolean) => (value ? 'Yes' : 'No');
+
+/** A wait in whole minutes, none when nothing waited; a worker's clock a little ahead reads as 0. */
+const waitMinutes = (ms: number | null) =>
+  ms === null ? null : Math.floor(Math.max(ms, 0) / 60_000);
+
+export const SIGNUPS_CSV_COLUMNS = [
+  'Company',
+  'Address',
+  'Outcome',
+  'Reason',
+  'Started (UTC)',
+  'Active number now',
+] as const;
+
+/** Signups that failed or were abandoned in the Onboarding tab's window. */
+export function signupsCsv(rows: readonly SignupProblem[]): string {
+  return csvFile(
+    SIGNUPS_CSV_COLUMNS,
+    rows.map((s) => [
+      s.tenantName,
+      s.tenantSlug,
+      s.outcome === 'failed' ? 'Failed' : 'Abandoned',
+      s.failureReason,
+      csvMinute(s.startedAt),
+      yesNo(s.hasActiveNumber),
+    ]),
+  );
+}
+
+export const NUMBER_SETUPS_CSV_COLUMNS = [
+  'Company',
+  'Address',
+  'Number',
+  'State',
+  'Step',
+  'Error',
+  'Since (UTC)',
+] as const;
+
+/** Number setups that failed or are stuck. */
+export function numberSetupsCsv(rows: readonly NumberSetupProblem[]): string {
+  return csvFile(
+    NUMBER_SETUPS_CSV_COLUMNS,
+    rows.map((n) => [
+      n.tenantName,
+      n.tenantSlug,
+      n.phone ?? n.phoneNumberId,
+      n.stuck ? 'Stuck' : 'Failed',
+      n.step === null ? null : (NUMBER_SETUP_STEP_LABELS[n.step] ?? n.step),
+      n.error,
+      csvMinute(n.updatedAt),
+    ]),
+  );
+}
+
+export const NEW_COMPANIES_CSV_COLUMNS = [
+  'Company',
+  'Address',
+  'Status',
+  'Created (UTC)',
+  'Number being set up',
+] as const;
+
+/** Companies created in the Onboarding tab's window without an active number. */
+export function newCompaniesCsv(rows: readonly CompanyWithoutNumber[]): string {
+  return csvFile(
+    NEW_COMPANIES_CSV_COLUMNS,
+    rows.map((c) => [c.name, c.slug, c.status, csvMinute(c.createdAt), yesNo(c.inProgress)]),
+  );
+}
+
+export const FAILURES_CSV_COLUMNS = [
+  'Company',
+  'Address',
+  'What',
+  'Label',
+  'State',
+  'Error',
+  'Since (UTC)',
+  'Acknowledged (UTC)',
+] as const;
+
+/** Current failures, an acknowledgement by its time only (ADR-141). */
+export function failuresCsv(rows: readonly IntegrationFailure[]): string {
+  return csvFile(
+    FAILURES_CSV_COLUMNS,
+    rows.map((f) => [
+      f.tenantName,
+      f.tenantSlug,
+      INTEGRATION_SOURCE_LABELS[f.source] ?? f.source,
+      f.label,
+      INTEGRATION_STATE_LABELS[f.state] ?? f.state,
+      f.error,
+      csvMinute(f.since),
+      csvMinute(f.acknowledgement?.at ?? null),
+    ]),
+  );
+}
+
+export const RECEIPTS_CSV_COLUMNS = [
+  'Received (UTC)',
+  'Receipt',
+  'From',
+  'Problem',
+  'Attempts',
+  'Last error',
+  'Staff emailed (UTC)',
+  'Retry',
+] as const;
+
+/** Meta and Razorpay receipts that failed all their attempts or have waited too long. */
+export function receiptsCsv(rows: readonly ReceiptNeedingAttention[]): string {
+  return csvFile(
+    RECEIPTS_CSV_COLUMNS,
+    rows.map((r) => [
+      csvMinute(r.receivedAt),
+      r.id,
+      WEBHOOK_PROVIDER_LABELS[r.provider] ?? r.provider,
+      r.problem === 'exhausted' && r.status === 'processing'
+        ? `${RECEIPT_PROBLEM_LABELS.exhausted}: its worker stopped during the last one`
+        : RECEIPT_PROBLEM_LABELS[r.problem],
+      r.attempts,
+      r.lastError,
+      csvMinute(r.alertedAt),
+      r.retryable
+        ? 'Can be retried'
+        : r.problem === 'waiting'
+          ? 'Retried by the sweep'
+          : 'Body erased',
+    ]),
+  );
+}
+
+export const QUARANTINE_CSV_COLUMNS = [
+  'Quarantined (UTC)',
+  'Receipt',
+  'From',
+  'Reason',
+  'Provider ids',
+  'Staff emailed (UTC)',
+  'Receipt can be retried',
+] as const;
+
+/** Open quarantine entries with the provider ids staff may see. */
+export function quarantineCsv(rows: readonly QuarantineEntry[]): string {
+  return csvFile(
+    QUARANTINE_CSV_COLUMNS,
+    rows.map((q) => [
+      csvMinute(q.createdAt),
+      q.receiptId,
+      WEBHOOK_PROVIDER_LABELS[q.provider] ?? q.provider,
+      QUARANTINE_REASON_LABELS[q.reason] ?? q.reason,
+      q.externalIds.map((e) => `${e.key}: ${e.value}`).join('; '),
+      csvMinute(q.alertedAt),
+      yesNo(q.retryable),
+    ]),
+  );
+}
+
+export const EMAILS_CSV_COLUMNS = ['Kind', 'Failed', 'Waiting'] as const;
+
+/** Failed and waiting emails by kind: counts only, as an SMTP error can quote an address. */
+export function emailsCsv(rows: readonly EmailDeliveryCount[]): string {
+  return csvFile(
+    EMAILS_CSV_COLUMNS,
+    rows.map((e) => [e.kind, e.failed, e.stuck]),
+  );
+}
+
+export const QUEUES_CSV_COLUMNS = [
+  'Queue',
+  'Declared by this release',
+  'Retries',
+  'Dead-lettered after its retries',
+  'Wait limit (minutes)',
+  'In the database',
+  'Ready',
+  'Deferred',
+  'Active',
+  'Failed',
+  'Oldest wait (minutes)',
+  'Late since (UTC)',
+  'Staff emailed (UTC)',
+  'Waits checked (UTC)',
+  'Dead letters (24 hours)',
+  'Dead letters (7 days)',
+] as const;
+
+/**
+ * Each queue's policy, pg-boss's counts, the oldest wait at the worker's last check in whole
+ * minutes (empty when none waited or the queue was not checked) and its dead letters.
+ */
+export function queuesCsv(rows: readonly QueueRow[]): string {
+  return csvFile(
+    QUEUES_CSV_COLUMNS,
+    rows.map((q) => [
+      q.name,
+      yesNo(q.policy !== null),
+      q.policy?.retryLimit ?? null,
+      q.policy ? yesNo(q.policy.hasDeadLetter) : null,
+      q.policy?.maxWaitMinutes ?? null,
+      yesNo(q.counts !== null),
+      q.counts?.ready ?? null,
+      q.counts?.deferred ?? null,
+      q.counts?.active ?? null,
+      q.counts?.failed ?? null,
+      q.wait ? waitMinutes(q.wait.oldestWaitMs) : null,
+      csvMinute(q.wait?.lateSince ?? null),
+      csvMinute(q.wait?.alertedAt ?? null),
+      csvMinute(q.wait?.checkedAt ?? null),
+      q.deadLetters.last24h,
+      q.deadLetters.last7d,
+    ]),
+  );
+}
+
+export const DEAD_LETTERS_CSV_COLUMNS = [
+  'Failed (UTC)',
+  'Dead letter',
+  'Queue',
+  'Signature verified',
+  'Company',
+  'Address',
+  'Reference',
+  'Error',
+  'Error code',
+  'Retries',
+  'Staff emailed (UTC)',
+  'Retried (UTC)',
+  'Work settled (UTC)',
+  'Retry',
+  'Can be retried until (UTC)',
+] as const;
+
+/** What became of a dead letter's job, or whether it can be retried, as the Queues tab says. */
+function deadLetterRetry(d: DeadLetterLine): string | null {
+  if (d.retriedAt !== null) return 'Retried';
+  if (d.settledAt !== null) {
+    return d.settledEnded
+      ? 'Work ended for its company, which can start it again'
+      : 'Nothing left to end: the work had finished or was started again';
+  }
+  if (d.retryable) return 'Can be retried';
+  return d.retryBlock === null ? null : DEAD_LETTER_RETRY_BLOCK_TEXT[d.retryBlock];
+}
+
+/** Recent dead letters: the company only through a verified signature, errors by name and code. */
+export function deadLettersCsv(rows: readonly DeadLetterLine[]): string {
+  return csvFile(
+    DEAD_LETTERS_CSV_COLUMNS,
+    rows.map((d) => [
+      csvMinute(d.failedAt),
+      d.id,
+      d.sourceQueue,
+      yesNo(d.verified),
+      d.tenantName,
+      d.tenantSlug,
+      d.ref,
+      d.errorName,
+      d.errorCode,
+      d.retries,
+      csvMinute(d.alertedAt),
+      csvMinute(d.retriedAt),
+      csvMinute(d.settledAt),
+      deadLetterRetry(d),
+      d.retryable ? csvMinute(d.retryableUntil) : null,
+    ]),
+  );
+}

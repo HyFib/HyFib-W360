@@ -23,10 +23,16 @@ const PASSWORD = 'correct horse battery staple 42';
 /** A Meta-style numeric id no company has connected. */
 const unknownId = () => `7${Date.now()}${Math.floor(Math.random() * 1e4)}`.slice(0, 16);
 
-/** Clicks the page's "Download CSV" link and returns the file's suggested name and its text. */
-async function downloadCsv(page: Page): Promise<{ name: string; text: string }> {
+/**
+ * Clicks a "Download CSV" link and returns the file's suggested name and its text. A tab with several
+ * lists names each link after its list (ADR-158).
+ */
+async function downloadCsv(
+  page: Page,
+  name = 'Download CSV',
+): Promise<{ name: string; text: string }> {
   const downloading = page.waitForEvent('download');
-  await page.getByRole('link', { name: 'Download CSV' }).click();
+  await page.getByRole('link', { name, exact: true }).click();
   const download = await downloading;
   return {
     name: download.suggestedFilename(),
@@ -96,6 +102,28 @@ test('staff read the operations console and repair a quarantined webhook event',
   const stalled = page.getByRole('table', { name: 'New companies without an active number' });
   await expect(stalled.getByRole('row').filter({ hasText: companyName })).toBeVisible();
   await expectNoHorizontalOverflow(page);
+  // Each of the tab's lists as CSV (ADR-158), the new company among those without a number.
+  const signups = await downloadCsv(page, 'Download CSV: Signups that failed or were abandoned');
+  expect(signups.name).toMatch(/^hyfib-signups-30-days-\d{4}-\d{2}-\d{2}\.csv$/);
+  expect(signups.text).toContain(
+    'Company,Address,Outcome,Reason,Started (UTC),Active number now\r\n',
+  );
+  const setups = await downloadCsv(page, 'Download CSV: Number setups that failed or are stuck');
+  expect(setups.name).toMatch(/^hyfib-number-setups-\d{4}-\d{2}-\d{2}\.csv$/);
+  expect(setups.text).toContain('Company,Address,Number,State,Step,Error,Since (UTC)\r\n');
+  const newCompanies = await downloadCsv(
+    page,
+    'Download CSV: New companies without an active number',
+  );
+  expect(newCompanies.name).toMatch(/^hyfib-new-companies-30-days-\d{4}-\d{2}-\d{2}\.csv$/);
+  expect(newCompanies.text).toContain(
+    'Company,Address,Status,Created (UTC),Number being set up\r\n',
+  );
+  expect(newCompanies.text).toMatch(
+    new RegExp(
+      `\\r\\n${companyName},ops-${suffix},active,\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2},No\\r\\n`,
+    ),
+  );
 
   // Integrations: the quarantined event names the unknown account; staff retry it, then resolve it.
   await sections.getByRole('link', { name: 'Integrations' }).click();
@@ -117,6 +145,34 @@ test('staff read the operations console and repair a quarantined webhook event',
     await expect(row).toContainText('Unknown account or number', { timeout: 1_000 });
   }).toPass({ timeout: 30_000 });
   await expect(row).not.toContainText('Hello?');
+  // The tab's lists as CSV (ADR-158): the quarantined event with the account's id, never the
+  // message.
+  const quarantineCsv = await downloadCsv(page, 'Download CSV: Quarantined webhook events');
+  expect(quarantineCsv.name).toMatch(/^hyfib-quarantine-\d{4}-\d{2}-\d{2}\.csv$/);
+  expect(quarantineCsv.text).toContain(
+    'Quarantined (UTC),Receipt,From,Reason,Provider ids,Staff emailed (UTC),Receipt can be retried\r\n',
+  );
+  expect(quarantineCsv.text).toMatch(
+    new RegExp(`,Meta \\(WhatsApp\\),Unknown account or number,[^,]*waba: ${wabaId}[^,]*,`),
+  );
+  expect(quarantineCsv.text).not.toContain('Hello?');
+  for (const [list, file, header] of [
+    [
+      'Current failures',
+      'failures',
+      'Company,Address,What,Label,State,Error,Since (UTC),Acknowledged (UTC)',
+    ],
+    [
+      'Meta and Razorpay webhook receipts',
+      'receipts',
+      'Received (UTC),Receipt,From,Problem,Attempts,Last error,Staff emailed (UTC),Retry',
+    ],
+    ['Email delivery (7 days)', 'emails-7-days', 'Kind,Failed,Waiting'],
+  ] as const) {
+    const csv = await downloadCsv(page, `Download CSV: ${list}`);
+    expect(csv.name).toMatch(new RegExp(`^hyfib-${file}-\\d{4}-\\d{2}-\\d{2}\\.csv$`));
+    expect(csv.text.startsWith(`\uFEFF${header}\r\n`)).toBe(true);
+  }
   await row.getByText('Retry', { exact: true }).click();
   await row.getByLabel('Reason (the fix made)').fill('Checked the account mapping: retrying once');
   await row.getByRole('button', { name: 'Retry receipt' }).click();
@@ -153,6 +209,19 @@ test('staff read the operations console and repair a quarantined webhook event',
   await expect(queue('commerce.store')).toContainText('waits 60 min at most');
   await expect(queue('message.send')).toContainText('waits 15 min at most');
   await expectNoHorizontalOverflow(page);
+  // Both lists as CSV (ADR-158): every queue with its policy and counts, and the dead letters.
+  const queuesCsv = await downloadCsv(page, 'Download CSV: Job queues');
+  expect(queuesCsv.name).toMatch(/^hyfib-queues-\d{4}-\d{2}-\d{2}\.csv$/);
+  expect(queuesCsv.text).toContain(
+    'Queue,Declared by this release,Retries,Dead-lettered after its retries,Wait limit (minutes),In the database,',
+  );
+  expect(queuesCsv.text).toMatch(/\r\ncommerce\.store,Yes,5,Yes,60,Yes,\d+,\d+,\d+,\d+,/);
+  expect(queuesCsv.text).toMatch(/\r\nbilling\.auto-recharge,Yes,0,No,\d+,Yes,/);
+  const deadLetters = await downloadCsv(page, 'Download CSV: Recent dead letters');
+  expect(deadLetters.name).toMatch(/^hyfib-dead-letters-\d{4}-\d{2}-\d{2}\.csv$/);
+  expect(deadLetters.text).toContain(
+    'Failed (UTC),Dead letter,Queue,Signature verified,Company,Address,Reference,Error,',
+  );
   await sections.getByRole('link', { name: 'Signals' }).click();
   await expect(page.getByText('Sending signals (7 days)')).toBeVisible();
   // The tab as CSV (ADR-155): the new company has sent nothing, so it is not listed.
@@ -285,6 +354,18 @@ test('staff acknowledge a company’s failing integration on the console, with a
   await expect(row).toContainText('Called the owner: they will reconnect the number today.');
   await expect(row.getByText('Replace the note', { exact: true })).toBeVisible();
   await expectNoHorizontalOverflow(page);
+  // The list as CSV (ADR-158): when the failure was acknowledged, but neither by whom nor the note.
+  const failures = await downloadCsv(page, 'Download CSV: Current failures');
+  expect(failures.name).toMatch(/^hyfib-failures-\d{4}-\d{2}-\d{2}\.csv$/);
+  expect(failures.text).toMatch(
+    new RegExp(
+      `\\r\\n${companyName},${slug},WhatsApp number,[^,]*,Failed,` +
+        `E2E: Meta refused the number's registration\\.,` +
+        '\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2},\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}\\r\\n',
+    ),
+  );
+  expect(failures.text).not.toContain('Called the owner');
+  expect(failures.text).not.toContain('Anil Staff');
 
   // In the platform audit log.
   await page.goto('/platform');

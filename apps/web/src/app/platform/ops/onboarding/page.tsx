@@ -5,7 +5,6 @@ import {
   CardContent,
   CardDescription,
   CardHeader,
-  CardTitle,
   EmptyState,
   TBody,
   TD,
@@ -14,20 +13,13 @@ import {
   TR,
   Table,
 } from '@w360/ui';
-import { OPS_WINDOWS } from '@w360/domain';
-import { CompanyLink, Utc } from '@/components/platform/ops';
+import { NUMBER_SETUP_STEP_LABELS, OPS_WINDOWS } from '@w360/domain';
+import { CompanyLink, ListTitle, Utc } from '@/components/platform/ops';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
 
 export const metadata: Metadata = { title: 'Onboarding · Operations' };
 export const dynamic = 'force-dynamic';
-
-const STEP_LABELS: Record<string, string> = {
-  subscribe_app: 'Subscribing the app',
-  register_number: 'Registering the number',
-  health_check: 'Checking the number',
-  done: 'Done',
-};
 
 export default async function OpsOnboardingPage() {
   const actor = await requirePlatformActor();
@@ -43,7 +35,7 @@ export default async function OpsOnboardingPage() {
       </p>
       <Card>
         <CardHeader>
-          <CardTitle>Signups that failed or were abandoned</CardTitle>
+          <ListTitle title="Signups that failed or were abandoned" list="signups" />
           <CardDescription>
             Embedded Signup sessions in the last {days} days. An abandoned session expired before
             the popup finished.
@@ -88,7 +80,7 @@ export default async function OpsOnboardingPage() {
       </Card>
       <Card>
         <CardHeader>
-          <CardTitle>Number setups that failed or are stuck</CardTitle>
+          <ListTitle title="Number setups that failed or are stuck" list="number-setups" />
           <CardDescription>
             Setup failed, or has been running for over {OPS_WINDOWS.stuckSetupMinutes} minutes.
           </CardDescription>
@@ -120,7 +112,7 @@ export default async function OpsOnboardingPage() {
                         {n.stuck ? 'Stuck' : 'Failed'}
                       </Badge>
                     </TD>
-                    <TD>{n.step ? (STEP_LABELS[n.step] ?? n.step) : '—'}</TD>
+                    <TD>{n.step ? (NUMBER_SETUP_STEP_LABELS[n.step] ?? n.step) : '—'}</TD>
                     <TD className="max-w-sm text-sm">{n.error ?? '—'}</TD>
                     <TD>
                       <Utc at={n.updatedAt} />
@@ -134,7 +126,7 @@ export default async function OpsOnboardingPage() {
       </Card>
       <Card>
         <CardHeader>
-          <CardTitle>New companies without an active number</CardTitle>
+          <ListTitle title="New companies without an active number" list="new-companies" />
           <CardDescription>Created in the last {days} days.</CardDescription>
         </CardHeader>
         <CardContent>

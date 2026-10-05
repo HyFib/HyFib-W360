@@ -6265,3 +6265,45 @@ Decision:
 
 Not built: comparisons of the other figures (failures, webhook deliveries, the plans' counters,
 which are per period), trends over more than two windows, charts, alerts on a fall.
+
+## ADR-158 Exporting the console's action lists (P5-10) (2026-10-05)
+
+Context: ADR-154 and ADR-155 made the Usage tab, every company's health and the Signals tab
+downloadable, and left out the lists staff act on: the Onboarding tab's failed and abandoned
+signups, failed or stuck number setups and new companies without a number; the Integrations tab's
+current failures, Meta and Razorpay receipts needing attention, quarantined events and email
+delivery; and the Queues tab's queues and dead letters. Staff handing a list to the person fixing
+it, or keeping a record of a bad day, copied it by hand.
+
+Decision:
+
+- **"Download CSV" on each list of the three tabs,** for the rows the tab shows, in its order and in
+  its words: an outcome, a state, a step, a problem or a reason as the tab says it, times to the
+  minute in UTC, Yes or No for the tab's yes-or-no facts. A queue's oldest wait is in whole minutes,
+  empty when nothing waited or the worker did not check the queue; a dead letter's last columns say
+  what became of its job, or why it cannot be retried, as the tab does. Each link is named after its
+  list ("Download CSV: Recent dead letters"), so a tab with several lists tells them apart.
+- **The same export:** `/platform/ops/export/<list>` for `signups`, `number-setups`,
+  `new-companies`, `failures`, `receipts`, `quarantine`, `emails`, `queues` and `dead-letters`,
+  beside ADR-155's three lists, through the same service call: the tab's own read of the list (each
+  tab's reads are now one per list, shared by the tab and its exports),
+  `platform.ops_<list>_exported` in the platform audit log with how many rows (companies, for new
+  companies without a number) and the window where the list has one (30 days for signups and new
+  companies, 7 for email delivery), in that transaction, before the file is returned, and the same
+  writer: UTF-8 with a byte-order mark, RFC 4180 quoting and formula neutralisation. Named
+  `hyfib-dead-letters-<day>.csv`, `hyfib-signups-30-days-<day>.csv` and so on.
+- **Refused before any read:** an export checks, in its transaction, that the actor is a platform
+  administrator and refuses anyone else before the list is read. The lists read through a definer
+  function were refused there already; the others, the platform role's own reads of number setups,
+  receipts, quarantine, emails, queues and dead letters, were refused only by the pages' platform
+  actor check, which stays.
+- **What the screens show, less people and notes:** who acknowledged a failure (ADR-141) or retried
+  a job (ADR-108) is left out, and so is an acknowledgement's note: the file gives when a failure
+  was acknowledged and when a job was retried, and the rest stays in the console and the platform
+  audit log. Errors are the providers' answers as the tab shows them (an endpoint by its host only);
+  emails are counted by kind, never with an address; quarantine entries carry only the allow-listed
+  provider ids.
+
+Not built: exports beyond the rows a tab lists (its latest 100 dead letters, receipts and quarantine
+entries, 200 signups and number setups, 500 failures and new companies), an export of the Keys tab,
+other formats, scheduled exports.

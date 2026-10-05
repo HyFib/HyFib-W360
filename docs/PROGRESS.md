@@ -1,5 +1,64 @@
 # Progress
 
+## 2026-10-05 — Phase 5: exporting the console's action lists (P5-10, ADR-158)
+
+Status: **Implemented; its database tests run in CI only (test data only).** The Onboarding,
+Integrations and Queues tabs' lists could be read on screen only. The local PostgreSQL is
+unavailable (its Docker daemon stopped), so the integration and e2e tests below were written but not
+run here.
+
+### Completed
+
+- **Design (ADR-158):** "Download CSV" on each list of the three tabs through ADR-155's audited
+  export, each export refused to anyone but a platform administrator before any read, without who
+  acknowledged or retried or the notes.
+- **Domain:** `platform/ops-model.ts` (nine CSV builders with their columns, `opsExportAction`,
+  `OPS_WINDOWS.emailDays`; the console's row types moved here from `ops.ts`, with `SignupProblem`,
+  `NumberSetupProblem`, `CompanyWithoutNumber`, `QuarantineEntry`, `EmailDeliveryCount` and
+  `DeadLetterLine`; the step and receipt problem labels moved here from the pages);
+  `platform/ops.ts` (one read per list, shared by the tabs and `exportFile`, now inside the service;
+  `exportList` checks the administrator first).
+- **Web:** `ListTitle` in `components/platform/ops.tsx` (a list's title with its named "Download
+  CSV" link) on the Onboarding, Integrations and Queues tabs' nine cards; Current failures and
+  Recent dead letters say what their CSVs leave out.
+- **Tests:**
+  - Unit (7 new in `ops-model.test.ts`): each file's header text; each list's lines with its words
+    and formula neutralisation; an acknowledgement by its time, without who or the note; receipts'
+    three retry states and a worker stopped during the last attempt; quarantine ids; a queue's wait
+    in whole minutes, none, unchecked and a clock ahead; each dead letter's fate and never who
+    retried; the audit actions within the audit log's pattern and the filenames.
+  - Integration (4 new in `platform-ops.test.ts`): each tab's lists exported equal to the CSV of the
+    tab's own read, with the seeded lines (a failed signup, a refused number registration, a company
+    without a number, an acknowledged failing endpoint labelled by its host, an exhausted receipt, a
+    quarantined event's ids, a refused email counted without its address, a retryable dead letter)
+    and one audit entry each; a non-administrator refused for all nine lists with no entry. Written
+    for CI; not run here.
+  - E2E (`platform-ops.spec.ts` extended): every download of the three tabs, the new company among
+    those without a number, the quarantined event's account id without its text, the queues with
+    their policies, and an acknowledged failure's line with its time but neither who nor the note.
+    Written for CI; not run here.
+- **Docs:** ADR-158; SECURITY (the console's row); THREAT-MODEL T75; ARCHITECTURE; BACKLOG P5-10;
+  feature matrix H-034.
+- **Mutation checks:** 60 tried, all caught by the unit tests (one, a column missing from a header,
+  survived the first run: the tests compared each header with the same constant; a test now pins
+  each file's header text). The service, the route and the pages need the database, so none were
+  tried there.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                                                                                                                                                               |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                                                                                                                                                |
+| `pnpm test` (unit)                                 | 720 passed (75 files; 7 new)                                                                                                                                                                         |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them                                                                                                                                      |
+| `pnpm build`                                       | passed                                                                                                                                                                                               |
+| Mutation checks                                    | 60 tried, all caught by the unit tests (one, a column missing from a header, survived the first run: the tests compared each header with the same constant; a test now pins each file's header text) |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                                                                                                                                                       |
+
+### Known gaps
+
+- Exports beyond the rows a tab lists, an export of the Keys tab, other formats, scheduled exports.
+
 ## 2026-10-05 — Phase 5: each company's usage against the window before (P5-10, ADR-157)
 
 Status: **Implemented; its database tests run in CI only (test data only).** The console's Usage tab

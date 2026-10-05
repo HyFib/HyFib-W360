@@ -1522,15 +1522,18 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   since the window's start and since twice as far back in one statement (two calls of the STABLE
   definer function, so one snapshot) and gives each company the difference, the window before's
   sending and receipts; 90 days has none (the function reads at most 93 days back).
-- **Exports (ADR-154, ADR-155):** `/platform/ops/export/[list]` (a route handler behind the pages'
-  platform actor check; `usage`, `health` or `signals`, any other name not found) calls
-  `exportList`, which reads the list's rows with the tab's own reads (`usageRows`, `healthFacts`
-  sorted by `byHealth`, `signalRows`), inserts `platform.ops_<list>_exported` into
-  `ops.platform_audit_events` in that transaction and returns `usageCsv`, `healthCsv` or
-  `signalsCsv` (`platform/ops-model.ts`, formula-safe through `contacts/csv`); the Overview, Signals
-  and Usage tabs link to it as "Download CSV".
+- **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
+  pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
+  `exportList`, which checks in its transaction that the actor is a platform administrator, reads
+  the list's rows with the tab's own read (`usageRows`, `healthFacts` sorted by `byHealth`,
+  `signalRows`; for the Onboarding, Integrations and Queues tabs one read per list, such as
+  `signupProblems`, `integrationFailures`, `openQuarantine`, `queueRows` or `recentDeadLetters`,
+  which the tabs share), inserts `platform.ops_<list>_exported` (`opsExportAction`) into
+  `ops.platform_audit_events` in that transaction and returns the list's CSV (`usageCsv` to
+  `deadLettersCsv` in `platform/ops-model.ts`, formula-safe through `contacts/csv`); each tab links
+  to it as "Download CSV", named after its list where a tab has several (`ListTitle`).
 - **Not built yet:** other alert channels, trends,
-  quality updates from Meta's quality webhook, exports of the action lists, sweeps for the work of
+  quality updates from Meta's quality webhook, sweeps for the work of
   `channel.onboard`, `commerce.account` and `template.delete`, retrying several dead letters at
   once, and acknowledging the console's other lists (dead letters, receipts, late queues).
 

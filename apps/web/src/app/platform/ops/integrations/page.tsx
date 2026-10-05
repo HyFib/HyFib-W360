@@ -5,7 +5,6 @@ import {
   CardContent,
   CardDescription,
   CardHeader,
-  CardTitle,
   EmptyState,
   TBody,
   TD,
@@ -17,10 +16,12 @@ import {
 import {
   INTEGRATION_SOURCE_LABELS,
   INTEGRATION_STATE_LABELS,
+  OPS_WINDOWS,
   QUARANTINE_REASON_LABELS,
+  RECEIPT_PROBLEM_LABELS,
   WEBHOOK_PROVIDER_LABELS,
 } from '@w360/domain';
-import { CompanyLink, Utc } from '@/components/platform/ops';
+import { CompanyLink, ListTitle, Utc } from '@/components/platform/ops';
 import {
   AcknowledgeFailureForm,
   ResolveQuarantineForm,
@@ -32,11 +33,6 @@ import { requirePlatformActor } from '@/server/session';
 export const metadata: Metadata = { title: 'Integrations · Operations' };
 export const dynamic = 'force-dynamic';
 
-const PROBLEM_LABELS = {
-  exhausted: 'Failed all attempts',
-  waiting: 'Still waiting',
-} as const;
-
 export default async function OpsIntegrationsPage() {
   const actor = await requirePlatformActor();
   const { platformOps } = await getRuntime();
@@ -45,7 +41,7 @@ export default async function OpsIntegrationsPage() {
     <div className="grid grid-cols-1 gap-6">
       <Card>
         <CardHeader>
-          <CardTitle>Current failures</CardTitle>
+          <ListTitle title="Current failures" list="failures" />
           <CardDescription>
             Numbers, WhatsApp accounts, stores, payment accounts, catalog and Flow syncs, and
             webhook endpoints that are failing now. Errors are the provider&apos;s answer as HyFib
@@ -60,7 +56,7 @@ export default async function OpsIntegrationsPage() {
             )}{' '}
             An administrator who takes a failure acknowledges it with a note, so the others see who
             took it and what was found; the acknowledgement lasts while the failure is listed
-            (ADR-141).
+            (ADR-141). The CSV gives when a failure was acknowledged, not by whom or the note.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -128,7 +124,7 @@ export default async function OpsIntegrationsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Meta and Razorpay webhook receipts</CardTitle>
+          <ListTitle title="Meta and Razorpay webhook receipts" list="receipts" />
           <CardDescription>
             Receipts that failed all 12 attempts, or whose worker stopped during the last one, or
             that have waited over 10 minutes (quarantined ones are listed below). Retry one after
@@ -170,7 +166,7 @@ export default async function OpsIntegrationsPage() {
                     <TD>{WEBHOOK_PROVIDER_LABELS[r.provider] ?? r.provider}</TD>
                     <TD>
                       <Badge tone={r.problem === 'waiting' ? 'warning' : 'danger'}>
-                        {PROBLEM_LABELS[r.problem]}
+                        {RECEIPT_PROBLEM_LABELS[r.problem]}
                       </Badge>
                       {r.problem === 'exhausted' && r.status === 'processing' ? (
                         <div className="text-xs text-muted-foreground">
@@ -204,7 +200,7 @@ export default async function OpsIntegrationsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Quarantined webhook events</CardTitle>
+          <ListTitle title="Quarantined webhook events" list="quarantine" />
           <CardDescription>
             Events HyFib could not attribute to a company. Map an account only after verifying
             ownership with the company (it reconnects through Embedded Signup), then retry the
@@ -263,7 +259,7 @@ export default async function OpsIntegrationsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Email delivery (7 days)</CardTitle>
+          <ListTitle title={`Email delivery (${OPS_WINDOWS.emailDays} days)`} list="emails" />
           <CardDescription>
             Counts by kind only. Waiting means due for over 15 minutes and not sent.
           </CardDescription>
