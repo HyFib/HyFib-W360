@@ -10,6 +10,7 @@ export * from './contact-changes';
 export * from './contact-fields';
 export * from './resources';
 export * from './openapi';
+export * from './reference';
 export * from './errors';
 export * from './request-text';
 export * from './quota';

@@ -1179,6 +1179,16 @@ true`); the same key with another request (method, path and body hashed) answers
   limit clears this period's marks.
 - **OpenAPI** (`api/openapi.ts`): `GET /api/v1/openapi.json` (no key; cacheable 5 minutes) is built
   from the zod schemas that validate requests; a unit test checks it against the route handlers.
+- **API reference (ADR-152) [built]:** the web tier builds the document once with the configured
+  address alone and keeps it in memory (`publicApiDocs` in `server/api-docs.ts`, from `getWebConfig`;
+  each server bundle that imports it, the page's and the route's, keeps its own copy), without
+  starting the runtime, and serves it as built. The page `/developers` (no sign-in) shows the same
+  document: `apiReference` (`api/reference.ts`, pure) turns it into groups of operations by the
+  first segment of their paths, webhook events and schemas, with named types, notes for limits,
+  allowed values and defaults, the fields inside fields and the shapes of unions, and descriptions
+  as paragraphs and code spans; `components/developers/reference.tsx` renders them as text, with
+  contents and links from each type to its schema. Settings → API keys and Settings → Webhooks link
+  to it.
 - **Expiry reminders (0040, ADR-067):** the minute messaging sweep (`api/expiry-reminders.ts`) lists,
   through the definer function `ops.api_key_expiry_reminders_due` (company and key ids only, over a
   partial index), keys that can still be used, were not rotated, expire within 7 days and were not

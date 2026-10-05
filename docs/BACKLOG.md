@@ -557,6 +557,10 @@ verification, app review, Embedded Signup configuration).
   **[What was left out of a message built, locally verified]** (ADR-132: every message says
   `contentTooLarge` when WhatsApp sent more than a message may hold, so its content was not kept,
   and `contactsLeftOut` when a contact card left contacts out; the same in `message.received`).
+  **[An API reference page built, locally verified]** (ADR-152, W-140: `/developers`, for anyone,
+  shows the OpenAPI document the API serves, each operation, webhook event and schema once, with
+  named types, limits, allowed values and defaults, the fields inside fields and the shapes of
+  unions, as text; linked from Settings → API keys and Settings → Webhooks).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   choosing conversations to change by a filter, media downloads, a contact card's contacts (Meta's
   contact object is not confirmed), starting or stopping runs for many

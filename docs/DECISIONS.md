@@ -6091,3 +6091,49 @@ Decision:
 
 Not built: filters on a run's end reason, its trigger or the key that started it, on how long it
 ran, or by tag or folder.
+
+## ADR-152 An API reference page made from the OpenAPI document (P5-08) (2026-10-05)
+
+Context: since ADR-052 the public API has been described by one OpenAPI 3.1 document at
+`/api/v1/openapi.json`, generated from the schemas that validate requests, and by nothing a person
+can read: a developer imported the 314 KB document into Postman or a viewer to learn an operation's
+parameters or a webhook body, and Settings → API keys and Settings → Webhooks linked to the JSON
+only. The feature matrix recorded a documentation site as not built (W-140).
+
+Decision:
+
+- **A page made from the document, for anyone:** `/developers` shows the document the API serves,
+  built by the same call with the same address, so it never describes more or less: each operation
+  once, grouped by the first segment of its path in the document's order (`Contacts`,
+  `Webhook endpoints`), with its summary, description, parameters, request body and answers; each
+  webhook event with the headers every delivery carries, its body and the answer HyFib expects; each
+  schema with its fields. Contents at the top lead to every group, operation, event and schema
+  (`#op-<operationId>`, `#event-<type>`, `#schema-<name>`), and a schema named in a type leads to
+  it. Settings → API keys and Settings → Webhooks link to it (Webhooks to its events), beside the
+  document.
+- **No sign-in, nothing private:** the page reads no session, no company data and no database: only
+  the configured address, through the web configuration alone (`getWebConfig`, which the runtime now
+  shares). The document route needs no more, so neither starts the runtime (database pool, keyring,
+  job queue) any longer.
+- **Words, not a viewer:** `apiReference` (domain, pure) turns the document into what the page
+  shows. Types are named (a schema, `string (uuid)`, `array of Contact`, `map of string`, "one of 9
+  objects", a constant value), a nullable value with its other option; limits, allowed values and
+  defaults are notes ("1 to 100", "One of `asc` or `desc`", "At most 1,000 characters", "Default
+  50"), those of each key, item or value after a lead-in; a pattern is left out where a format says
+  the same. Fields inside fields are indented under theirs, and a union of objects (a contact
+  search's conditions) lists each shape, named by its one constant field (`type = tag`), otherwise
+  by its place.
+- **Text only:** descriptions become paragraphs at line breaks and code between backticks (an
+  unpaired backtick stays text); nothing in the document is rendered as HTML, so
+  `Authorization: Bearer <API key>` reads as written.
+- **Refused rather than left out:** a reference the page cannot follow (outside the document) or a
+  shared parameter the document lacks stops the page with an error instead of dropping part of it;
+  the unit tests build the reference from the real document, so such a document fails them first.
+- **Built once, not per request:** the document and its reference depend on the code and the
+  configured address alone, so the web tier builds them once and keeps them in memory
+  (`publicApiDocs`; the page's and the route's server bundles each keep a copy), and the route serves
+  the JSON it built. The page is rendered for each request, with its CSP nonce, and like every page is
+  `private, no-store` and asked not to be indexed; the document stays `public, max-age=300`.
+
+Not built: a changelog, code samples, a console for trying requests, search, and references for
+other versions (there is one, `v1`).

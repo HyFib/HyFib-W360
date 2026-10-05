@@ -1,5 +1,78 @@
 # Progress
 
+## 2026-10-05 — Phase 5: an API reference page made from the OpenAPI document (P5-08, ADR-152)
+
+Status: **Implemented; the page is locally verified (test data only).** Since ADR-052 the public API
+was described by its OpenAPI 3.1 document at `/api/v1/openapi.json` alone: a developer imported it
+into Postman or a viewer to read an operation's parameters or a webhook body, and Settings linked to
+the JSON only. A documentation site was recorded as not built (W-140). The local PostgreSQL has been
+unavailable since its Docker daemon stopped before this slice began, so the integration suite and
+the e2e tests that need the database run in CI only.
+
+### Completed
+
+- **Design (ADR-152):** `/developers` shows the document the API serves, for anyone, signed in or
+  not: each operation once, grouped by the first segment of its path, with its parameters, request
+  body and answers; each webhook event with its signed headers, body and the answer it expects; each
+  schema with the fields inside fields and each shape of a union; contents and links from each type
+  to its schema. Text only; a reference it cannot follow fails the page rather than leaving part of
+  it out; no session, company data or database; the document and its reference built once and
+  kept in memory, not per request.
+- **Domain:** `api/reference.ts` (new): `apiReference` turns the document into groups, events and
+  schemas; `referenceType` names types, `referenceNotes` words limits, allowed values and defaults,
+  `referenceFields` lists the fields inside fields and the shapes of unions, and `referenceText`
+  makes paragraphs and code spans.
+- **Web:** `app/developers/page.tsx` (new) and `components/developers/reference.tsx` (new: the
+  operation, event and schema sections, their tables and type names, text rendered as text);
+  `server/api-docs.ts` (new: `publicApiDocs`, the document as JSON and its reference, built once and
+  kept in memory by each server bundle that imports it, the page's and the route's, from
+  `getWebConfig`, the web configuration alone, which `runtime.ts` now shares);
+  `/api/v1/openapi.json` serves that JSON without starting the runtime; Settings → API keys and
+  Settings → Webhooks link to the page.
+- **Tests:**
+  - Unit (9 new in `reference.test.ts`): each operation of the route table once, grouped and titled
+    in the document's order; each event and schema once, every schema a type names listed and no
+    type left unnamed; paragraphs and code; the types; the notes; the fields inside fields, arrays,
+    maps and unions, shapes named by their one constant or their place; parameters (a shared one
+    resolved), request bodies and answers; events' headers, body and answer; a missing shared
+    parameter refused.
+  - E2E (1 new, `developers.spec.ts`; 2 extended): without signing in, the page has exactly one
+    section for each operation, event and schema of the document the API serves, shows its base
+    address and introduction, its contents and type links lead to their sections, nested fields and
+    shapes have rows, and it fits a phone screen; Settings → API keys and Settings → Webhooks link
+    to it (`api-keys.spec.ts`, `webhooks.spec.ts`, which need the database and run in CI).
+- **Docs:** ADR-152; SECURITY (the reference's row and rule); THREAT-MODEL T161; ARCHITECTURE;
+  BACKLOG P5-08; feature matrix H-033 and W-140.
+- **Mutation checks:** 71 deliberate regressions tried, all caught. 49 in the domain by the unit
+  tests (paragraphs and code, each kind of type and note and their wording, the lead-ins, the fields
+  inside fields, arrays, maps and unions, shapes named by their constant or their place, depths,
+  required fields, shared parameters resolved or refused, request bodies, answers, events' headers
+  and bodies, groups and titles, operations by method, the server address); one of them survived the
+  first run (a shape with two constant fields named by the first), and a test of such a shape now
+  catches it. 22 in the web through the e2e test (the contents' links, the sections' anchors,
+  schemas left out, tables not named, type links, the base address, a session required, statuses
+  rewritten, a table wider than a phone, the contents and the main heading, the introduction, the
+  document link, nested rows, shape rows, events' headers and answers, and the page and the document
+  made from different documents); two of them were tried before the page and the document route came
+  to share one builder, which now rules that out, and two more against the builder itself.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                                                             | Result                                                                                                                                                                    |
+| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                                  | clean                                                                                                                                                                     |
+| `pnpm test` (unit)                                                                  | 705 passed (75 files; 9 new)                                                                                                                                              |
+| `pnpm test:integration`                                                             | not run here: the local PostgreSQL is unavailable (its Docker daemon stopped); CI runs it on PostgreSQL 17 and 18 (this slice changes no database code or domain service) |
+| `pnpm build`                                                                        | passed                                                                                                                                                                    |
+| e2e: developers (chromium, mobile-chromium) against `next start` without a database | 2 passed; Firefox and WebKit are not installed here, and the api-keys and webhooks additions need the database, so CI runs them                                           |
+| Mutation checks                                                                     | 71 tried, all caught (49 by unit tests, 22 through the e2e test)                                                                                                          |
+| gitleaks 8.30.1 on the staged changes                                               | no leaks found                                                                                                                                                            |
+
+### Known gaps
+
+- A changelog, code samples, a console for trying requests, search, references for other
+  versions.
+
 ## 2026-10-05 — Phase 5: choosing how the automation runs a webhook endpoint receives ended (P5-09, ADR-151)
 
 Status: **Implemented and locally verified (test data only).** Since ADR-078 an endpoint that took

@@ -94,6 +94,10 @@ test('an endpoint added in settings receives signed events, replays and a rotate
   // Settings → Webhooks: an endpoint for received messages and consent; its secret is shown once.
   await page.goto(`/c/${slug}/settings/webhooks`);
   await expect(page.getByText('No endpoints yet.')).toBeVisible();
+  await expect(page.getByRole('link', { name: 'API reference', exact: true })).toHaveAttribute(
+    'href',
+    '/developers#webhook-events',
+  );
   await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${path}`);
   await page.getByLabel('Description').fill('Order system');
   await page.getByRole('checkbox', { name: /Message received/ }).check();

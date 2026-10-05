@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import {
   API_KEY_LIMITS,
@@ -109,6 +110,10 @@ export default async function ApiKeysPage({ params }: { params: Promise<{ slug: 
             retry never sends twice. Each key can make {API_LIMITS.keyRate.refillPerSecond} requests
             a second, and can be limited to the addresses your systems call from and to a number of
             requests a month. The full reference is the{' '}
+            <Link className="font-medium underline underline-offset-4" href="/developers">
+              API reference
+            </Link>
+            , also as an{' '}
             <a
               className="font-medium underline underline-offset-4"
               href="/api/v1/openapi.json"

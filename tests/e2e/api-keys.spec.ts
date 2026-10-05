@@ -66,6 +66,10 @@ test('a key that expires within 7 days is marked in settings, and its owner is e
   await expect(
     page.getByText('Owners and administrators are emailed 7 days before a key expires'),
   ).toBeVisible();
+  await expect(page.getByRole('link', { name: 'API reference', exact: true })).toHaveAttribute(
+    'href',
+    '/developers',
+  );
   await page.getByLabel('Name', { exact: true }).fill('Orders sync');
   await page.getByRole('checkbox', { name: /Read contacts/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
