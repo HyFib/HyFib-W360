@@ -746,6 +746,12 @@ Phase 5 rules (Public API, P5-08):
   cap) only to keys that also hold `campaigns.write`; a key that only reads campaigns still gets
   counts (ADR-125). A leaked key with the scope can create drafts and change the company's drafts
   until it is revoked, which members see in each draft's history before they submit it.
+- Cancelling drafts (ADR-187): `POST /campaigns/{id}/cancel` cancels a draft for a key holding
+  `campaigns.write`, the scope that writes drafts, as members cancel drafts with that permission; it
+  never stops a campaign that sends, which still needs `campaigns.stop`. Both scopes are checked as
+  writing scopes before anything is read, and the campaign is locked in the key's company. A leaked
+  key with `campaigns.write` can cancel the company's drafts until it is revoked; a cancelled draft
+  is kept, and its history names the key.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so

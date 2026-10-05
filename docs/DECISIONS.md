@@ -4944,8 +4944,8 @@ Decision:
   campaigns' pause reason check with `api` added; existing rows already satisfy them.
 
 Not built: resuming (built by ADR-176 for the campaigns keys paused), approving, scheduling,
-creating or editing campaigns through the API (drafts: built by ADR-186), cancelling drafts,
-stopping many campaigns in one call, a reason or note given with the call, and
+creating or editing campaigns through the API (drafts: built by ADR-186), cancelling drafts (built
+by ADR-187), stopping many campaigns in one call, a reason or note given with the call, and
 `campaign.status_changed` naming who cancelled a campaign.
 
 ## ADR-129 Database errors without the data they quote (SEC-11) (2026-10-03)
@@ -7537,5 +7537,32 @@ Decision:
   existing rows already satisfy them.
 
 Not built: submitting, approving, scheduling or starting campaigns through the API (a key is not a
-member), cancelling or deleting drafts, test sends, a draft's review (the audience breakdown and the
-cost estimate) through the API, and creating many drafts in one call.
+member), cancelling drafts (built by ADR-187) or deleting them, test sends, a draft's review (the
+audience breakdown and the cost estimate) through the API, and creating many drafts in one call.
+
+## ADR-187 Cancelling campaign drafts through the public API (P5-08) (2026-10-05)
+
+Context: since ADR-186 keys create and edit drafts, but a draft a key made by mistake (a duplicate,
+a promotion called off) stayed for a member to cancel: `POST /campaigns/{id}/cancel` refused drafts
+(ADR-128), because only members wrote them.
+
+Decision:
+
+- **Drafts with `campaigns.write`:** `POST /campaigns/{id}/cancel` cancels a draft for a key holding
+  `campaigns.write`, whoever wrote the draft, as members cancel drafts with the permission of that
+  name (and anything else with `campaigns.send`). Everything else it cancels still needs
+  `campaigns.stop`: a key holding only `campaigns.write` is refused any other campaign with 403
+  naming `campaigns.stop`, and a key holding only `campaigns.stop` is refused a draft with 409
+  naming its status, as before. A cancelled or completed campaign is answered as it is to a key with
+  either scope, so a retry is harmless.
+- **Checked before anything is read:** the key must hold one of the two scopes within the company's
+  plan, and, both being writing scopes, the company must be active (423 otherwise); the campaign is
+  then locked in the key's company.
+- **As members cancel it:** `cancelLockedCampaign`, which members' cancel calls too (a draft has no
+  recipients or sends to cancel); the `canceled` event names no member and carries the key's id,
+  members' history names the key, the audit row `campaign.canceled` is the key's with `source`
+  `api`, and `campaign.status_changed` reports the change.
+- **No migration.**
+
+Not built: deleting drafts (a cancelled draft is kept, as members' are) and cancelling many
+campaigns in one call.

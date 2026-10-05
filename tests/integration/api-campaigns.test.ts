@@ -1654,4 +1654,60 @@ describe('campaign drafts through the API (ADR-186)', () => {
       await fx.query(`SELECT max_messages FROM app.campaigns WHERE id = $1`, [theirs]),
     ).toEqual([{ max_messages: null }]);
   });
+
+  it('cancel a draft with a key that writes drafts, naming the key, and nothing else; a stopping key still cancels the rest (ADR-187)', async () => {
+    const s = await setup();
+    await s.contact('+919820007001', 'Asha');
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Campaign drafts');
+    const stopper = await apiKey(s.c, ['campaigns.stop'], 'Stock watcher');
+    // The key's own draft and a member's are cancelled alike; a retry answers each as it is.
+    const created = await apiCreateCampaign(writeDeps(), writer, { name: 'Mistake' }, null);
+    const mistake = (created.body as { data: { id: string } }).data.id;
+    const membersDraft = await s.draft('Members draft');
+    for (const id of [mistake, membersDraft]) {
+      for (let i = 0; i < 2; i += 1) {
+        expect(await apiCancelCampaign(writeDeps(), writer, id)).toMatchObject({
+          id,
+          status: 'canceled',
+        });
+      }
+    }
+    expect((await eventsOf(mistake)).map((e) => [e.type, e.actor_user_id, e.api_key_id])).toEqual([
+      ['created', null, writer.key.id],
+      ['canceled', null, writer.key.id],
+    ]);
+    expect(await auditOf(mistake, 'campaign.canceled')).toEqual([
+      {
+        actor_type: 'api_key',
+        actor_id: writer.key.id,
+        metadata: expect.objectContaining({ source: 'api' }),
+      },
+    ]);
+
+    // Anything else needs the stopping scope: refused to the writing key, cancelled by the other,
+    // and then answered as it is to either.
+    const live = await s.draft('Live sale');
+    await s.campaigns.submitCampaign(s.owner, live, { expectedVersion: 1 }, {});
+    expect(await refused(apiCancelCampaign(writeDeps(), writer, live))).toEqual({
+      code: 'forbidden',
+      message: 'This API key does not have the campaigns.stop scope.',
+    });
+    expect(await apiCancelCampaign(writeDeps(), stopper, live)).toMatchObject({
+      status: 'canceled',
+    });
+    expect(await apiCancelCampaign(writeDeps(), writer, live)).toMatchObject({
+      status: 'canceled',
+    });
+
+    // A stopping key still does not cancel a draft, which stays a draft.
+    const another = await s.draft('Another draft');
+    expect(await refused(apiCancelCampaign(writeDeps(), stopper, another))).toEqual({
+      code: 'conflict',
+      message:
+        "A draft sends nothing until a member submits it, so it is cancelled through the API only by a key with campaigns.write: members edit or cancel drafts in the app. This campaign's status is draft.",
+    });
+    expect(await fx.query(`SELECT status FROM app.campaigns WHERE id = $1`, [another])).toEqual([
+      { status: 'draft' },
+    ]);
+  });
 });

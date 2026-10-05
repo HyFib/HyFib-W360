@@ -4152,6 +4152,66 @@ describe('campaign drafts through the API (ADR-186)', () => {
   });
 });
 
+describe('cancelling campaign drafts through the API (ADR-187)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const cancel = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    apiCancelCampaign({} as never, ctx(scopes, status, planScopes), 'not-an-id');
+
+  it('take a key that writes drafts as well as one that stops campaigns, checked before anything is read', async () => {
+    // Either scope passes the checks made before the campaign is read (a bad id is then not found).
+    for (const scopes of [
+      ['campaigns.write'],
+      ['campaigns.stop'],
+      ['campaigns.write', 'campaigns.stop'],
+    ]) {
+      expect(await code(cancel(scopes)), scopes.join()).toBe('not_found');
+    }
+    // Neither: refused naming campaigns.stop, as before.
+    await expect(cancel(['campaigns.read', 'campaigns.resume'])).rejects.toThrow(
+      'This API key does not have the campaigns.stop scope.',
+    );
+    // A writing scope: refused while the company is not active, and outside the plan.
+    for (const status of ['suspended', 'restricted']) {
+      expect(await code(cancel(['campaigns.write'], status))).toBe('tenant_suspended');
+    }
+    await expect(cancel(['campaigns.write'], 'active', ['campaigns.read'])).rejects.toMatchObject({
+      code: 'forbidden',
+      details: { apiReason: 'not_in_plan' },
+    });
+    // A stopping key outside the plan with a writing key in it cancels drafts only.
+    expect(
+      await code(cancel(['campaigns.write', 'campaigns.stop'], 'active', ['campaigns.write'])),
+    ).toBe('not_found');
+  });
+
+  it('are described: drafts with campaigns.write, everything else with campaigns.stop', () => {
+    expect(API_SCOPE_INFO['campaigns.write'].description).toContain('; and cancel drafts.');
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const cancelOp = (
+      doc.paths as unknown as Record<string, Record<string, { description: string }>>
+    )['/campaigns/{id}/cancel']?.post;
+    for (const words of [
+      'Scope: `campaigns.stop`.',
+      'A draft is cancelled by a key with `campaigns.write` instead',
+      'A cancelled or completed campaign is answered as it is to a key with either scope',
+      'A draft is refused with 409 to a key without `campaigns.write`',
+      'A key with only `campaigns.write` is refused any other campaign with 403.',
+    ]) {
+      expect(cancelOp?.description).toContain(words);
+    }
+  });
+});
+
 describe('starting an automation for many contacts in one call (ADR-161)', () => {
   const ctx = (scopes: string[]) =>
     ({

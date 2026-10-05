@@ -615,6 +615,9 @@ verification, app review, Embedded Signup configuration).
   `POST /campaigns` and `PATCH /campaigns/{id}` with the new `campaigns.write` scope, granted with
   `campaigns.write`: a draft's settings as members edit them, checked as members' are, with a
   version; members submit and start it; migration 0134).
+  **[Cancelling campaign drafts built; its database tests run only in CI]** (ADR-187:
+  `POST /campaigns/{id}/cancel` cancels a draft for a key holding `campaigns.write`, as members
+  cancel drafts; anything else still needs `campaigns.stop`; no migration).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   media downloads, a contact card's contacts (Meta's
   contact object is not confirmed), changing a field's type, changing

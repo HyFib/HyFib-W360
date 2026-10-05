@@ -945,6 +945,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `PATCH` refuses any status but draft and, when given, a version other than the draft's. Answers
   add `version` and `settings`, which `GET /campaigns/{id}` gives only to keys that hold
   `campaigns.write`.
+- **Cancelling drafts (ADR-187):** `apiCancelCampaign` takes `campaigns.stop` or `campaigns.write`,
+  each checked as a writing scope before the campaign is read, then needs `campaigns.write` for a
+  draft and `campaigns.stop` for any other campaign it cancels; a cancelled or completed campaign is
+  answered to either. It calls `cancelLockedCampaign` as members' cancel does, with the key named in
+  the event and the audit.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions (`last_message` with `conversations.read` and `campaign` with
   `campaigns.read` since ADR-126, a named campaign checked to be the company's, `name` since

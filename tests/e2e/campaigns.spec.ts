@@ -449,4 +449,18 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
   await expect(
     page.getByRole('listitem').filter({ hasText: 'Created' }).filter({ hasText: byDrafts }),
   ).toHaveCount(1);
+  // The key cancels its draft (ADR-187), and a retry answers it as it is.
+  for (let i = 0; i < 2; i += 1) {
+    const dropped = await request.post(`/api/v1/campaigns/${winter.id}/cancel`, {
+      headers: draftAuth,
+    });
+    expect(dropped.status()).toBe(200);
+    expect(((await dropped.json()) as { data: unknown }).data).toMatchObject({
+      id: winter.id,
+      status: 'canceled',
+    });
+  }
+  await page.reload();
+  await expect(page.getByText('Cancelled', { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('listitem').filter({ hasText: byDrafts })).toHaveCount(3);
 });

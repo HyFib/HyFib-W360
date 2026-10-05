@@ -327,6 +327,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `PATCH /api/v1/campaigns/{id}` with 405 (their routes only read there); rolling web servers back
    to an image from before it does the same. Workers are not affected.
 
+   ADR-187 has no migration: until the web rollout ends, an old web server refuses a key's cancel of
+   a draft with 409, as before.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

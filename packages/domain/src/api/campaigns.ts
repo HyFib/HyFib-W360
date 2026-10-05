@@ -563,6 +563,9 @@ async function readApiCampaign(tx: Tx, tenantId: string, campaignId: string): Pr
   return toApiCampaign(row);
 }
 
+/** The scopes that cancel: `campaigns.stop` (ADR-128), and `campaigns.write` for drafts (ADR-187). */
+const CANCEL_SCOPES = ['campaigns.stop', 'campaigns.write'] as const;
+
 /** A refusal that names the campaign's status, as `status` gives it. */
 const statusRefusal = (message: string, status: CampaignStatus) =>
   new AppError('conflict', `${message} This campaign's status is ${status}.`);
@@ -663,24 +666,37 @@ export async function apiResumeCampaign(
 /**
  * Cancels one of the company's campaigns as members cancel it (ADR-128), with the campaign row
  * locked: one waiting for approval, scheduled, running or paused is cancelled, with its waiting
- * recipients and the sends no worker claimed. A cancelled or completed campaign is answered as it
- * is, so a retry changes nothing; a draft, which sends nothing until a member submits it, is
- * refused with 409.
+ * recipients and the sends no worker claimed, by a key with `campaigns.stop`, and a draft by a key
+ * with `campaigns.write`, as members cancel drafts with the permission of that name (ADR-187). A
+ * cancelled or completed campaign is answered as it is to either, so a retry changes nothing; a
+ * draft is refused with 409 to a key that cannot cancel it.
  */
 export async function apiCancelCampaign(
   deps: Pick<OutboundDeps, 'db' | 'clock'>,
   ctx: ApiContext,
   campaignId: string,
 ): Promise<ApiCampaign> {
-  assertScope(ctx, 'campaigns.stop');
+  // Either scope, checked as a writing scope (plan and company status) before anything is read.
+  const usable = CANCEL_SCOPES.find((scope) => hasScope(ctx, scope));
+  assertScope(
+    ctx,
+    usable ??
+      (ctx.key.scopes.has('campaigns.write') && !ctx.key.scopes.has('campaigns.stop')
+        ? 'campaigns.write'
+        : 'campaigns.stop'),
+  );
   if (!z.uuid().safeParse(campaignId).success) throw notFound('Campaign');
   return deps.db.run(ctx.scope, async (tx) => {
     const c = await lockCampaign(tx, ctx.tenant.id, campaignId);
     if (c.status === 'draft') {
-      throw statusRefusal(
-        'A draft sends nothing until a member submits it, so it is not cancelled through the API: members edit or cancel drafts in the app.',
-        c.status,
-      );
+      if (!hasScope(ctx, 'campaigns.write')) {
+        throw statusRefusal(
+          'A draft sends nothing until a member submits it, so it is cancelled through the API only by a key with campaigns.write: members edit or cancel drafts in the app.',
+          c.status,
+        );
+      }
+    } else if (c.status !== 'canceled' && c.status !== 'completed') {
+      assertScope(ctx, 'campaigns.stop');
     }
     if (c.status !== 'canceled' && c.status !== 'completed') {
       const counts = await cancelLockedCampaign(

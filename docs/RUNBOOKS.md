@@ -1782,10 +1782,10 @@ resumes a paused campaign as any other (messages released by the pause are queue
 cancelled campaign is not resumed: create a new one. 403 `forbidden` names the scope the key lacks,
 `campaigns.stop` (keys keep the scopes they were created with: create a key with it); `not_in_plan`
 means the plan leaves it out (ADR-092). 404 means the id is not one of the key's company's
-campaigns. 409 names the campaign's status: only scheduled and running campaigns pause, and drafts
-are not cancelled through the API. 423 means the company is suspended or its plan ended (nothing
-sends then anyway). To stop a key from stopping campaigns, revoke it and create one without the
-scope.
+campaigns. 409 names the campaign's status: only scheduled and running campaigns pause, and a draft
+is cancelled only by a key with `campaigns.write` (ADR-187). 423 means the company is suspended or
+its plan ended (nothing sends then anyway). To stop a key from stopping campaigns, revoke it and
+create one without the scope.
 
 **A campaign was resumed through the API, or `POST /api/v1/campaigns/{id}/resume` answers 403, 404,
 409, 412 or 423 (ADR-176).** Its history names the key ("Resumed through the API, key “name”"), and

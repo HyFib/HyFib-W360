@@ -1519,7 +1519,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           summary: 'Cancel a campaign',
           description: [
             `${scopeNote('campaigns.stop')} Cancels a campaign waiting for approval, scheduled, running or paused, as a member cancels it: recipients still waiting, and messages it queued that are not yet on their way to WhatsApp, are cancelled (GET /campaigns/{id}/recipients lists them as \`canceled\`, with the message error \`campaign_canceled\` for the messages). A message already on its way cannot be recalled and ends as it ends. A cancelled campaign is never resumed.`,
-            'A cancelled or completed campaign is answered as it is, so a retry is harmless. A draft is refused with 409: it sends nothing until a member submits it, and members edit or cancel drafts in the app. No `Idempotency-Key` is needed. `campaign.status_changed` webhooks report the change.',
+            'A draft is cancelled by a key with `campaigns.write` instead, as members cancel drafts with the permission of that name. A cancelled or completed campaign is answered as it is to a key with either scope, so a retry is harmless. A draft is refused with 409 to a key without `campaigns.write`: it sends nothing until a member submits it, and members edit or cancel drafts in the app. A key with only `campaigns.write` is refused any other campaign with 403. No `Idempotency-Key` is needed. `campaign.status_changed` webhooks report the change.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/Id' }],
           responses: {

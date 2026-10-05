@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-05 — Phase 5: cancelling campaign drafts through the public API (P5-08, ADR-187)
+
+Status: **Implemented; its database and browser tests run in CI only.** A draft a key made by
+mistake stayed for a member to cancel. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so the integration test and the changed e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-187):** `POST /campaigns/{id}/cancel` cancels a draft for a key holding
+  `campaigns.write`, as members cancel drafts with that permission; anything else still needs
+  `campaigns.stop`; finished campaigns are answered to either; no migration.
+- **Domain:** `apiCancelCampaign` takes either scope before the read and the one the campaign's
+  status needs after it; the scope's description and the OpenAPI entry.
+- **Tests:**
+  - Unit (2 new in `api.test.ts`): either scope before the read, the plan and company refusals, the
+    descriptions.
+  - Integration (1 new in `api-campaigns.test.ts`): drafts cancelled by the writing key with
+    retries, the key named, a scheduled campaign refused to it and cancelled by the stopping key, a
+    stopping key refused a draft. Written for CI; not run here.
+  - E2E (1 changed in `campaigns.spec.ts`): the drafts key cancels its draft, a retry answers it,
+    and the history names the key three times. Written for CI; not run here.
+- **Docs:** ADR-187 (and the "Not built" of ADR-128 and ADR-186 annotated); SECURITY; ARCHITECTURE;
+  THREAT-MODEL T181; DEPLOYMENT and RUNBOOKS; BACKLOG P5-08; feature matrix H-033 and W-134.
+- **Mutation checks:** 5 deliberate regressions tried, all caught on the unit-tested parts (the
+  writing scope left out, the plan's refusal hidden, the plan ignored, the descriptions). The cancel
+  itself needs the database, so its regressions are left to the integration and e2e tests, which run
+  in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 836 passed (82 files)                                               |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 5 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Deleting drafts; cancelling many campaigns in one call.
+
 ## 2026-10-05 — Phase 5: creating and editing campaign drafts through the public API (P5-08, ADR-186)
 
 Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Keys
