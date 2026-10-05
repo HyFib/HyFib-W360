@@ -270,6 +270,10 @@ describe('groups of conditions in contact searches (ADR-164)', () => {
     expect(tooMany.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
       ['conditions', 'At most 20 conditions in all, those in groups included.'],
     ]);
+    // More than 20 items is refused once, by the list's own limit.
+    expect(
+      parse(Array.from({ length: 21 }, () => isSet)).error?.issues.map((i) => i.path.join('.')),
+    ).toEqual(['conditions']);
     for (const conditions of [
       [group('any', [])],
       [group('any', Array(21).fill(isSet))],

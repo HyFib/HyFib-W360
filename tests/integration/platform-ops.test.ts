@@ -1852,15 +1852,24 @@ describe('acknowledging companies’ failing integrations (ADR-141)', () => {
 });
 
 describe('acknowledging dead letters (ADR-169)', () => {
-  /** A dead letter already emailed about, so the alert tests of this file count only theirs. */
+  /**
+   * A dead letter already emailed about, so the alert tests of this file count only theirs. One
+   * whose envelope did not verify keeps no kind, company or reference, as the worker records it
+   * (0026's check).
+   */
   async function letter(verified: boolean, tenantId: string | null = company.tenant.id) {
     const id = uuidv7();
     await fx.query(
       `INSERT INTO ops.dead_letters (id, source_queue, kind, tenant_id, ref, verified, error_code,
          failed_at, alerted_at)
-       VALUES ($1, 'template.submit', 'template.submit', $2, 'tpl-ack', $3, 'provider_rejected',
-         now(), now())`,
-      [id, tenantId, verified],
+       VALUES ($1, 'template.submit', $2, $3, $4, $5, 'provider_rejected', now(), now())`,
+      [
+        id,
+        verified ? 'template.submit' : null,
+        verified ? tenantId : null,
+        verified ? 'tpl-ack' : null,
+        verified,
+      ],
     );
     return id;
   }
@@ -2262,7 +2271,8 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
       expect.stringMatching(
         new RegExp(
           `^${MINUTE},${letterId},commerce\\.store,Yes,Company ${slug},${slug},store-export,` +
-            `AppError,provider_rejected,5,,,,Can be retried,${MINUTE}$`,
+            // Not acknowledged (ADR-169): the last column is empty.
+            `AppError,provider_rejected,5,,,,Can be retried,${MINUTE},$`,
         ),
       ),
     ]);

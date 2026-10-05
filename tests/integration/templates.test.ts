@@ -364,11 +364,18 @@ describe('template sync', () => {
   it('turns template webhooks into sync requests only through a verified account binding', async () => {
     const c = await fx.company();
     await syncTemplates(workerDeps(), scopeOf(c), c.whatsappAccountId);
-    expect(
-      (await findTemplateSyncsDue(fx.dbs.app, 500)).some(
-        (d) => d.whatsappAccountId === c.whatsappAccountId,
-      ),
-    ).toBe(false);
+    // Whether the account asks for a sync since its last one, as `ops.template_sync_due` reads it.
+    // Its list is not searched for the account: it holds at most 500, those never synced first, and
+    // the suite's shared database holds more connected accounts that never synced.
+    const syncRequested = async () => {
+      const [row] = await fx.query<{ requested: boolean }>(
+        `SELECT coalesce(templates_sync_requested_at >= templates_synced_at, false) AS requested
+           FROM app.whatsapp_accounts WHERE id = $1`,
+        [c.whatsappAccountId],
+      );
+      return row!.requested;
+    };
+    expect(await syncRequested()).toBe(false);
     const result = await fx.deliver(
       fx.fieldBody(c.wabaId, 'message_template_status_update', {
         event: 'APPROVED',
@@ -376,11 +383,7 @@ describe('template sync', () => {
       }),
     );
     expect(result.outcome).toBe('processed');
-    expect(
-      (await findTemplateSyncsDue(fx.dbs.app, 500)).some(
-        (d) => d.whatsappAccountId === c.whatsappAccountId,
-      ),
-    ).toBe(true);
+    expect(await syncRequested()).toBe(true);
     const unknown = await fx.deliver(fx.fieldBody('123456789012', 'template_category_update', {}));
     expect(unknown.outcome).toBe('quarantined');
     // Suspended companies are left out of the sweep until they are reactivated.

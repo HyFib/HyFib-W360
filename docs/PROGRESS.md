@@ -1,5 +1,40 @@
 # Progress
 
+## 2026-10-05 — Fixes found by CI: six integration tests of ADR-163 to ADR-172
+
+Status: **Fixed; the integration suite runs in CI only.** The first CI run of the ten slices (PR
+#32) failed six integration tests on PostgreSQL 18 and 17; none had run anywhere before (the local
+PostgreSQL is unavailable). One found a duplicated refusal in the API; the others were tests that
+did not match the database or what an earlier slice changed.
+
+### Completed
+
+- **ADR-164 (the API):** a contact search with more than 20 conditions was refused twice under
+  `conditions`, once by the list's limit and once by the count across groups. The count now leaves a
+  list over the limit to the limit, so it is refused once (`api/contact-search.ts`); a unit test
+  covers it.
+- **ADR-168 (the test):** audit entries were ordered by a column they do not have; they are ordered
+  by `occurred_at`.
+- **ADR-169 (the tests):** an unverified dead letter was written with a kind, a company and a
+  reference, which 0026's check refuses (the worker keeps none for an envelope that did not verify);
+  the helper now writes them only for a verified one. ADR-158's test of the dead letters' CSV now
+  expects the "Acknowledged (UTC)" column ADR-169 added, empty there.
+- **ADR-170 and ADR-172 (the test):** the API test of a new endpoint now expects `channelIds` and
+  `messageSenders`, null.
+- **Template sync requests (the test):** the test looked for the company's account in
+  `ops.template_sync_due`'s list, which holds at most 500 accounts, those never synced first; the
+  suite's shared database now holds more connected accounts that never synced, so the account was
+  left out. The test now reads the account's sync request itself, as the sweep does.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                         |
+| -------------------------------------------------- | -------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                          |
+| `pnpm test` (unit)                                 | 772 passed (79 files); the new assertion fails without the fix |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it  |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                 |
+
 ## 2026-10-05 — Phase 5: choosing who sent the messages whose statuses a webhook endpoint receives (P5-09, ADR-172)
 
 Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every

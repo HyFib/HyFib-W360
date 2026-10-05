@@ -2992,7 +2992,7 @@ describe('WhatsApp orders (ADR-167)', () => {
       fx.query<{ actor_type: string; actor_id: string; metadata: Record<string, unknown> }>(
         `SELECT actor_type, actor_id, metadata FROM app.audit_events
           WHERE tenant_id = $1 AND subject_id = $2 AND action = 'commerce.order_status_changed'
-          ORDER BY created_at, id`,
+          ORDER BY occurred_at, id`,
         [c.tenant.id, order.id],
       );
     expect(await audit()).toEqual([

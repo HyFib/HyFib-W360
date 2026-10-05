@@ -189,7 +189,10 @@ const searchFields = {
     .min(1)
     .max(SEGMENT_LIMITS.conditions)
     .refine(
-      (items) => conditionCount(items) <= SEGMENT_LIMITS.conditions,
+      // A list over the limit is refused by `max` already: one refusal, not two.
+      (items) =>
+        items.length > SEGMENT_LIMITS.conditions ||
+        conditionCount(items) <= SEGMENT_LIMITS.conditions,
       `At most ${SEGMENT_LIMITS.conditions} conditions in all, those in groups included.`,
     )
     .describe(
