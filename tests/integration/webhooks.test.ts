@@ -3000,13 +3000,14 @@ describe('assignee filters (ADR-181)', () => {
       { id: agent, name: 'Agent' },
       { id: owner.membership.id, name: 'Owner' },
     ]);
+    // Developers only: refused before the agent is suspended, whose company no longer resolves then.
+    for (const user of [c.agent, c.marketer]) {
+      await expectAppError(webhooks().assigneeChoices(await fx.ctx(c, user)), 'forbidden');
+    }
     await setMember(agent, `status = 'suspended'`);
     expect(await webhooks().assigneeChoices(owner)).toEqual([
       { id: owner.membership.id, name: 'Owner' },
     ]);
-    for (const user of [c.agent, c.marketer]) {
-      await expectAppError(webhooks().assigneeChoices(await fx.ctx(c, user)), 'forbidden');
-    }
   });
 
   it("send an endpoint that names members only their conversations' events, a change of assignee to the member left and given, events of no conversation to both, and capture none nobody takes", async () => {
