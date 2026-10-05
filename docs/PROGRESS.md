@@ -1,5 +1,57 @@
 # Progress
 
+## 2026-10-05 — Phase 5: choosing the types of the received messages a webhook endpoint receives (P5-09, ADR-191)
+
+Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every
+endpoint taking `message.received` received every message, whatever its type. The local PostgreSQL
+is unavailable (its Docker daemon stopped), so migration 0137, the integration tests and the changed
+e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-191):** `messageTypes`, null for every type or 1 to 14 of the types a received
+  message has (never `template`), only with `message.received`, matched to the type the message
+  trigger stores.
+- **Database:** migration 0137 (the column and its check, the column grant,
+  `app.capture_webhook_event`); the schema's column and type (`packages/db`).
+- **Domain:** the list's schema, keeping and refining (`webhookMessageTypesSchema`,
+  `webhookMessageTypesFor`); the types and their labels in the model; `messageTypes` in the settings
+  service, the API (create, update, answers) and the OpenAPI document; the export column.
+- **Web:** "Received messages sent, by type" under Message received in the endpoint form (all ticked
+  unless some are unticked) and "Received messages sent: …" on the endpoints list.
+- **Tests:**
+  - Unit (3 new in `webhooks.test.ts`, 1 new and 1 changed in `api.test.ts`): the list's rules, its
+    types and labels, keeping and clearing, the API schemas and the OpenAPI entries.
+  - Integration (2 new in `webhooks.test.ts`, 1 new and 1 changed in
+    `api-webhook-endpoints.test.ts`): refusals, keeping and clearing, audits, the check and the
+    grant, capture by type, the API. Written for CI; not run here.
+  - E2E (1 changed in `webhook-events.spec.ts`): an endpoint for locations hears a shared location,
+    not the text before it. Written for CI; not run here.
+- **Docs:** ADR-191; SECURITY; ARCHITECTURE; THREAT-MODEL T185; DEPLOYMENT and RUNBOOKS (migration
+  0137, a receiver missing received messages); DATA-RETENTION; BACKLOG P5-09; feature matrix H-014,
+  W-138 and W-139.
+- **Mutation checks:** 13 deliberate regressions tried, all caught on the unit-tested parts (the
+  order or repeats kept, an empty list, a list kept without the event, for another event or by a
+  null, a template offered, a type left out, a label, the API's refinement, change rule and field,
+  the OpenAPI field). The services' checks, the capture and the form need the database or a browser,
+  so their regressions are left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-05)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 849 passed (82 files)                                                |
+| `pnpm test:integration`, e2e, migration 0137       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 13 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Filters on a message's words or the kind of an interactive reply; types for `message.status`;
+  filters on the sending contact's values.
+
 ## 2026-10-05 — Phase 5: choosing where the added contacts a webhook endpoint receives came from (P5-09, ADR-190)
 
 Status: **Implemented; its database and browser tests run in CI only (test receivers only).** Every

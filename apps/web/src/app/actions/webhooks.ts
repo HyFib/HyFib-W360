@@ -52,6 +52,8 @@ export async function createWebhookEndpointAction(
     consentChanges: string[] | null;
     /** Where the contacts whose `contact.created` it takes came from (ADR-190); null: every one. */
     contactSources: string[] | null;
+    /** The types of the received messages it takes (ADR-191); null takes every type. */
+    messageTypes: string[] | null;
     /** The WhatsApp numbers whose events it takes (ADR-170); null takes every number. */
     channelIds: string[] | null;
     /** The teams whose conversations' events it takes (ADR-174); null takes every one's. */
@@ -110,6 +112,8 @@ export async function updateWebhookEndpointAction(
     consentChanges: string[] | null;
     /** Where the contacts whose `contact.created` it takes came from (ADR-190); null: every one. */
     contactSources: string[] | null;
+    /** The types of the received messages it takes (ADR-191); null takes every type. */
+    messageTypes: string[] | null;
     /** The WhatsApp numbers whose events it takes (ADR-170); null takes every number. */
     channelIds: string[] | null;
     /** The teams whose conversations' events it takes (ADR-174); null takes every one's. */

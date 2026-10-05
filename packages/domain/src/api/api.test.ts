@@ -121,6 +121,7 @@ import {
   WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
   WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT,
   WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT,
+  WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT,
   WEBHOOK_ASSIGNEES_NEED_THE_EVENTS,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS,
@@ -1388,6 +1389,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'headers',
       'messageSenders',
       'messageStatuses',
+      'messageTypes',
       'oauth',
       'orderStatuses',
       'runEndStatuses',
@@ -1931,6 +1933,56 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(create.properties.contactSources?.description).toContain(
       'Leave out `api` not to hear of the contacts your own keys add.',
     );
+  });
+
+  it('take the types of received messages only with message.received, each once, and a list of them alone is a change (ADR-191)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['message.received'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, messageTypes: ['order', 'text', 'order'] })
+        .messageTypes,
+    ).toEqual(['text', 'order']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.status'],
+      messageTypes: ['text'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['messageTypes', WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, messageTypes: [] },
+      { ...base, messageTypes: ['template'] },
+      { ...base, messageTypes: ['button_reply'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiCreateWebhookEndpointSchema.parse({ ...base, messageTypes: null }).messageTypes).toBe(
+      null,
+    );
+    expect(apiUpdateWebhookEndpointSchema.parse({ messageTypes: null })).toEqual({
+      messageTypes: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ messageTypes: ['interactive'] })).toEqual({
+      messageTypes: ['interactive'],
+    });
+    // Answered as a list of types, or null.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: unknown[] } }[] }>;
+      required?: string[];
+    };
+    const answeredTypes = answered.properties.messageTypes?.anyOf?.find((t) => t.items)?.items
+      ?.enum;
+    expect(answeredTypes).toHaveLength(14);
+    expect(answeredTypes).not.toContain('template');
+    expect(answered.required).toContain('messageTypes');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('messageTypes');
   });
 
   it('take members only with an event of a conversation, each once, and a list of them alone is a change (ADR-181)', () => {

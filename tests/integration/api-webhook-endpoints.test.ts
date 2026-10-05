@@ -266,6 +266,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       runTriggers: null,
       consentChanges: null,
       contactSources: null,
+      messageTypes: null,
       channelIds: null,
       teamIds: null,
       templateIds: null,
@@ -1801,6 +1802,84 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { contactSources: [] }))).toMatchObject({
       path: 'contactSources',
+    });
+  });
+
+  it('choose the types of the received messages an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-191)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The types need message.received, at least one, and each from the list, by place.
+    const refusals = [
+      [['message.status'], ['text'], 'messageTypes'],
+      [['message.received'], [], 'messageTypes'],
+      [['message.received'], ['text', 'template'], 'messageTypes.1'],
+      [['message.received'], ['button_reply'], 'messageTypes.0'],
+    ] as const;
+    for (const [index, [events, messageTypes, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, messageTypes },
+            idem(`message-types-bad-${index}`, JSON.stringify(messageTypes)),
+          ),
+        ),
+        JSON.stringify(messageTypes),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'message-types-1', {
+      url: receiverUrl(),
+      events: ['message.received', 'message.status'],
+      messageTypes: ['interactive', 'text', 'button'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.messageTypes).toEqual(['text', 'interactive', 'button']);
+    expect((await api().get(key.ctx, id)).messageTypes).toEqual(['text', 'interactive', 'button']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ messageTypes: ['text', 'interactive', 'button'] });
+
+    expect(await api().update(key.ctx, id, { description: 'Chatbot' })).toMatchObject({
+      messageTypes: ['text', 'interactive', 'button'],
+    });
+    expect(await api().update(key.ctx, id, { messageTypes: ['order'] })).toMatchObject({
+      messageTypes: ['order'],
+    });
+    const updates = await fx.query<{ metadata: { messageTypes?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.messageTypes)).toEqual([
+      ['text', 'interactive', 'button'],
+      ['order'],
+    ]);
+    // Dropping the event clears the list.
+    expect(await api().update(key.ctx, id, { events: ['message.status'] })).toMatchObject({
+      events: ['message.status'],
+      messageTypes: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { messageTypes: ['text'] }))).toMatchObject({
+      path: 'messageTypes',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['message.received'], messageTypes: ['text'] }),
+    ).toMatchObject({ messageTypes: ['text'] });
+    expect(await api().update(key.ctx, id, { messageTypes: null })).toMatchObject({
+      messageTypes: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { messageTypes: [] }))).toMatchObject({
+      path: 'messageTypes',
     });
   });
 

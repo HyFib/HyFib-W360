@@ -26,6 +26,7 @@ import {
   WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_CONSENT_CHANGES,
   WEBHOOK_CONTACT_SOURCES,
+  WEBHOOK_RECEIVED_MESSAGE_TYPES,
   WEBHOOK_RETRY_SECONDS,
   WEBHOOK_TEMPLATE_STATUSES,
 } from '../webhooks/model';
@@ -552,6 +553,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'Where the contacts whose contact.created the endpoint receives came from, as contact.source names it; null receives every contact.',
+    ),
+  messageTypes: z
+    .array(z.enum(WEBHOOK_RECEIVED_MESSAGE_TYPES))
+    .nullable()
+    .describe(
+      'The types of the received messages the endpoint receives as message.received, as message.type names them; null receives every type.',
     ),
   channelIds: z
     .array(z.uuid())

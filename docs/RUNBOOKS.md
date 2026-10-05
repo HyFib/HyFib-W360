@@ -2265,6 +2265,15 @@ to replay. To take more, tick the templates under "Templates" on the endpoint's 
 `templateIds` (null for every template). Removing both Message status and Template status clears the
 list.
 
+**A receiver misses received messages (ADR-191).** An endpoint can take the received messages of
+chosen types only. The endpoints list shows them ("Received messages sent: …"), and the API answers
+`messageTypes` (null takes every type). A message goes by its type (`message.type`): those of other
+types are never queued for the endpoint, and when no endpoint of the company takes a message, it is
+not recorded at all, so there is nothing to replay. A tap on reply buttons or a list row is
+`interactive`; a tap on a template's quick-reply button is `button`. To take more, tick the types
+under "Message received" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with
+`messageTypes` (null for every type). Removing Message received clears the list.
+
 **A receiver misses added contacts (ADR-190).** An endpoint can take the `contact.created` of the
 contacts from chosen sources only. The endpoints list shows them ("New contacts sent: …"), and the
 API answers `contactSources` (null takes every contact). An added contact goes by its source
@@ -2905,6 +2914,14 @@ bootstrap roles, or a lock held on the table: fix it and run the migrations agai
 this release need it before they start, or Settings → Webhooks and the endpoints API fail (their
 reads of endpoints name the column); workers of either release and web servers of the previous
 release work with it.
+
+**Migration 0137 failed.** It adds `message_types` to `app.webhook_endpoints` with the check
+`webhook_endpoints_message_types`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event`, in one transaction; a failure rolls it all back (usually the bootstrap
+roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
+release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
+endpoints name the column); workers of either release and web servers of the previous release work
+with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

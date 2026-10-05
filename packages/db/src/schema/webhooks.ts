@@ -1,6 +1,6 @@
 import { integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { jsonb } from './columns';
-import type { ContactSource } from './messaging';
+import type { ContactSource, MessageType } from './messaging';
 import { appSchema } from './tenancy';
 
 const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
@@ -98,6 +98,12 @@ export type WebhookRunTrigger =
  */
 export type WebhookConsentChange =
   'marketing_opt_in' | 'marketing_opt_out' | 'utility_opt_in' | 'utility_opt_out';
+
+/**
+ * The types a received message has (`message.received`'s `message.type`), which an endpoint can
+ * choose (ADR-191): every message type but `template`, which only HyFib sends.
+ */
+export type WebhookReceivedMessageType = Exclude<MessageType, 'template'>;
 
 export const WEBHOOK_DELIVERY_STATES = ['pending', 'delivering', 'succeeded', 'failed'] as const;
 export type WebhookDeliveryState = (typeof WEBHOOK_DELIVERY_STATES)[number];
@@ -212,6 +218,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * `contact.source`; null takes every contact. Set only while `contact.created` is among its events.
    */
   contactSources: text('contact_sources').array().$type<ContactSource[]>(),
+  /**
+   * The types of the received messages it takes as `message.received` (ADR-191); null takes every
+   * type. Set only while `message.received` is among its events.
+   */
+  messageTypes: text('message_types').array().$type<WebhookReceivedMessageType[]>(),
   /**
    * The endpoint's OAuth client (ADR-173): its authorization server's token endpoint, the client
    * identifier, the secret encrypted by the keyring and the scope to ask for (null: none). All

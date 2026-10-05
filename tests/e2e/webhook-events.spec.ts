@@ -6,6 +6,7 @@ import { expect, test } from './fixtures';
 import {
   connectTestChannel,
   inboundMessage,
+  inboundMessages,
   messagingConfigured,
   orderMessage,
   randomWaId,
@@ -410,7 +411,7 @@ test('conversation team and assignment events name the team and the member: a me
   expect(forUs()).toHaveLength(3);
 });
 
-test("an endpoint for one team receives only its conversations' events: messages once a conversation joins the team, and the change of team when it leaves (ADR-174)", async ({
+test("an endpoint for one team receives only its conversations' events: messages once a conversation joins the team, and the change of team when it leaves (ADR-174); another the received messages of chosen types only (ADR-191)", async ({
   page,
   request,
 }) => {
@@ -505,6 +506,69 @@ test("an endpoint for one team receives only its conversations' events: messages
     'conversation.team_changed',
   ]);
   expect(forUs().some((r) => r.body.includes('For billing'))).toBe(false);
+
+  // A second endpoint takes received locations only (ADR-191).
+  const locationPath = `${path}/locations`;
+  const locations = () =>
+    received.filter((r) => r.path === locationPath).map((r) => JSON.parse(r.body) as EventBody);
+  const typeBox = (name: string) => page.getByRole('checkbox', { name, exact: true });
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${locationPath}`);
+  await page.getByRole('checkbox', { name: /Message received/ }).check();
+  for (const name of [
+    'Text (text)',
+    'Photos (image)',
+    'Videos (video)',
+    'Audio (audio)',
+    'Documents (document)',
+    'Stickers (sticker)',
+    'Contact cards (contacts)',
+    'Replies to buttons and lists (interactive)',
+    'Template button replies (button)',
+    'Reactions (reaction)',
+    'Orders (order)',
+    'WhatsApp account updates (system)',
+    'Unsupported messages (unsupported)',
+  ]) {
+    await typeBox(name).uncheck();
+  }
+  await expect(typeBox('Locations (location)')).toBeChecked();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await expect(secretField).toBeVisible();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  await page.reload();
+  await expect(page.getByText('Received messages sent: Locations')).toBeVisible();
+  // The customer writes and then shares a location: the team's endpoint hears both (the
+  // conversation is back in Returns), the second only the location.
+  await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, waId, 'I am at home'));
+  await expect(async () =>
+    expect(forUs().some((r) => r.body.includes('I am at home'))).toBe(true),
+  ).toPass({ timeout: 30_000 });
+  await sendSignedWebhook(
+    request,
+    inboundMessages(wabaId, phoneNumberId, waId, [
+      {
+        type: 'location',
+        location: { latitude: 12.97, longitude: 77.59, name: 'Home', address: 'MG Road' },
+      },
+    ]),
+  );
+  await expect(async () => expect(locations()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(locations()[0]).toMatchObject({
+    type: 'message.received',
+    data: { message: { type: 'location' } },
+  });
+  await page
+    .getByRole('list', { name: 'Endpoints' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Received messages sent: Locations' })
+    .getByRole('link', { name: /Deliveries and settings/ })
+    .click();
+  await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Deliveries' }).getByRole('listitem')).toHaveCount(1);
+  await expect(typeBox('Locations (location)')).toBeChecked();
+  await expect(typeBox('Text (text)')).not.toBeChecked();
+  expect(locations()).toHaveLength(1);
 });
 
 test('an endpoint for one member receives only the events of the conversations assigned to them, and the change of assignee when a conversation leaves them (ADR-181)', async ({

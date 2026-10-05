@@ -10,6 +10,7 @@ import type {
   WebhookMessageStatus,
   WebhookOrderStatus,
   WebhookRunEndStatus,
+  WebhookReceivedMessageType,
   WebhookRunTrigger,
   WebhookTemplateStatus,
 } from '@w360/db';
@@ -25,6 +26,7 @@ export type {
   WebhookMessageStatus,
   WebhookOrderStatus,
   WebhookRunEndStatus,
+  WebhookReceivedMessageType,
   WebhookRunTrigger,
   WebhookTemplateStatus,
 } from '@w360/db';
@@ -397,6 +399,45 @@ export const WEBHOOK_CONTACT_SOURCE_LABELS: Record<ContactSource, string> = {
   import: 'Imported from a file',
   api: 'Added through the API',
   store: 'From a store',
+};
+
+/**
+ * The types a received message has, which an endpoint taking `message.received` can choose
+ * (ADR-191), in the order message types are defined; `template` is only sent, never received.
+ */
+export const WEBHOOK_RECEIVED_MESSAGE_TYPES = [
+  'text',
+  'image',
+  'video',
+  'audio',
+  'document',
+  'sticker',
+  'location',
+  'contacts',
+  'interactive',
+  'button',
+  'reaction',
+  'order',
+  'system',
+  'unsupported',
+] as const satisfies readonly WebhookReceivedMessageType[];
+
+/** How Settings names a received message's type (ADR-191). */
+export const WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS: Record<WebhookReceivedMessageType, string> = {
+  text: 'Text',
+  image: 'Photos',
+  video: 'Videos',
+  audio: 'Audio',
+  document: 'Documents',
+  sticker: 'Stickers',
+  location: 'Locations',
+  contacts: 'Contact cards',
+  interactive: 'Replies to buttons and lists',
+  button: 'Template button replies',
+  reaction: 'Reactions',
+  order: 'Orders',
+  system: 'WhatsApp account updates',
+  unsupported: 'Unsupported messages',
 };
 
 export const WEBHOOK_LIMITS = {

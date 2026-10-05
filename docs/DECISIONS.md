@@ -7689,3 +7689,47 @@ Decision:
 
 Not built: filters on which key added a contact (one integration's key among several), on the source
 for `contact.updated` and `contact.erased`, and filters for `order.received`.
+
+## ADR-191 Choosing the types of the received messages a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint that takes `message.received` receives every message customers send, or those
+its numbers, teams and members keep (ADR-170, ADR-174, ADR-181), whatever its type. A receiver often
+handles some kinds only: a chatbot answers text and taps on its buttons and lists, an order system
+takes carts, an archive keeps documents and photos. Each was sent every reaction, sticker and
+account notice and had to read `message.type` and drop the rest.
+
+Decision:
+
+- **A list of types per endpoint,** for `message.received` only: `text`, `image`, `video`, `audio`,
+  `document`, `sticker`, `location`, `contacts`, `interactive` (taps on reply buttons and list
+  rows), `button` (taps on a template's quick-reply buttons), `reaction`, `order`, `system` and
+  `unsupported`, the type the payload reports as `message.type`; `template` is only ever sent, so it
+  is no choice. Null receives every type, as before; a list holds 1 to 14 of them, kept in the order
+  message types are defined. It is chosen in Settings → Webhooks under "Message received" ("Received
+  messages sent, by type": all ticked unless some are unticked; saving them all ticked keeps none)
+  and shown on the endpoint as "Received messages sent: …", and through the API as `messageTypes` on
+  `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every endpoint the API
+  answers.
+- **Only with the event:** a list given for an endpoint that does not take `message.received` is
+  refused (`messageTypes`; 422 through the API). A change that removes the event clears it, and a
+  `PATCH` that leaves it out keeps it; Settings always sends it. A check in the database holds the
+  same rule (null, or 1 to 14 known types, one dimension, without a null, while `message.received`
+  is among the endpoint's events).
+- **Matched as captured:** `app.capture_webhook_event` creates a `message.received` delivery only
+  for the active endpoints whose list is null or holds the message's type, as the message trigger
+  has always stored it in the event's detail (ADR-053), applied with the endpoints' numbers, teams
+  and members, and writes no event when no endpoint takes it. A message's type is set when it is
+  received and never changes. Other events, `message.status` included, are not narrowed; replays and
+  test events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `messageTypes` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0137:** `message_types text[]` on `app.webhook_endpoints` with the check, validated at
+  once (a company has at most 10 endpoints), an update grant on the column for the runtime role, and
+  `app.capture_webhook_event` replaced with the same signature, so its owner and grants stay.
+  Existing endpoints keep null; nothing is backfilled.
+
+Not built: filters on a received message's words or on the kind of an interactive reply (button or
+list), types for `message.status` (the messages HyFib sends), and filters on the contact who sent it
+(a tag, a field's value).

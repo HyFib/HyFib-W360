@@ -3905,6 +3905,146 @@ describe('contact source filters (ADR-190)', () => {
   });
 });
 
+describe('message type filters (ADR-191)', () => {
+  it('are refused without message.received, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to the event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], messageTypes: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, messageTypes }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvent = /only for an endpoint that receives Message received/;
+    await refused(['message.status'], ['text'], needsTheEvent);
+    await refused(['message.received'], [], /at least one message type/);
+    await refused(['message.received'], ['template'], /from the list/);
+    await refused(['message.received'], ['list_reply'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['message.received', 'message.status'],
+      messageTypes: ['order', 'text', 'order'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ messageTypes: ['text', 'order'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['message.received', 'message.status'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.messageTypes;
+    expect(await current()).toEqual(['text', 'order']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['text', 'order']);
+    await change({ messageTypes: ['interactive', 'button'] });
+    expect(await current()).toEqual(['interactive', 'button']);
+    const updates = await fx.query<{ metadata: { messageTypes?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.messageTypes)).toEqual([
+      ['text', 'order'],
+      ['interactive', 'button'],
+    ]);
+    await change({ messageTypes: null });
+    expect(await current()).toBeNull();
+    await change({ messageTypes: ['location'] });
+    // The database refuses an empty list, more than fourteen entries, a template, an unknown type
+    // or a missing one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET message_types = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{text,image,video,audio,document,sticker,location,contacts,interactive,button,reaction,order,system,unsupported,text}'`,
+      `'{text,template}'`,
+      `'{list_reply}'`,
+      `ARRAY['text', NULL]::text[]`,
+      `ARRAY[['text']]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_message_types/);
+    }
+    await change({ eventTypes: ['message.status'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['message.status'], messageTypes: ['text'] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // …and any list for an endpoint that does not take it.
+    await expect(setInDatabase(`'{text}'`)).rejects.toThrow(/webhook_endpoints_message_types/);
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'message_types', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('sends an endpoint that names message types only those messages, others every message, and captures none nobody takes (ADR-191)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const path = `/ok/${randomBytes(6).toString('hex')}`;
+    const replies = await webhooks().create(owner, {
+      url: `http://${HOST}:${port}${path}`,
+      eventTypes: ['message.received'],
+      messageTypes: ['text', 'interactive'],
+    });
+    const from = waId();
+    const send = (message: Record<string, unknown>) =>
+      fx.deliver(fx.messagesBody(c, { messages: [{ waId: from, ...message }] }));
+    // A location only an endpoint taking every message would take: none does yet, so it is not
+    // captured at all.
+    await send({
+      type: 'location',
+      extra: { location: { latitude: 12.97, longitude: 77.59, name: 'Home', address: 'MG Road' } },
+    });
+    expect((await eventsOf(c)).filter((e) => e.type === 'message.received')).toEqual([]);
+    const every = await addEndpoint(c, 'ok', ['message.received']);
+    await send({ text: 'Which size fits me?' });
+    await send({
+      type: 'interactive',
+      extra: {
+        interactive: {
+          type: 'list_reply',
+          list_reply: { id: 'size-m', title: 'Medium', description: 'Chest 40 in' },
+        },
+      },
+    });
+    await send({
+      type: 'location',
+      extra: { location: { latitude: 12.97, longitude: 77.59, name: 'Home', address: 'MG Road' } },
+    });
+    const received = (await eventsOf(c)).filter((e) => e.type === 'message.received');
+    expect(received.map((e) => e.detail.messageType)).toEqual(['text', 'interactive', 'location']);
+    const takenBy = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).map((d) => d.event_id);
+    const [text, tap, place] = received.map((e) => e.id);
+    expect(await takenBy(replies.id)).toEqual([text, tap]);
+    expect(await takenBy(every.id)).toEqual([text, tap, place]);
+
+    await deliverDue(c);
+    const typesAt = (to: string) =>
+      requestsTo(to)
+        .map((r) => messageReceivedPayloadSchema.parse(JSON.parse(r.body)).data.message.type)
+        .sort();
+    expect(typesAt(path)).toEqual(['interactive', 'text']);
+    expect(typesAt(every.path)).toEqual(['interactive', 'location', 'text']);
+  });
+});
+
 describe('event capture', () => {
   it('records an event only for subscribed types, with one delivery per active subscribed endpoint, and none from a rolled-back change', async () => {
     const c = await fx.company();

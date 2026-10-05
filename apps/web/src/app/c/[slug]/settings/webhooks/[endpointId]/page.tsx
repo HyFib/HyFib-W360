@@ -209,6 +209,7 @@ export default async function WebhookEndpointPage({
               runTriggers: endpoint.runTriggers,
               consentChanges: endpoint.consentChanges,
               contactSources: endpoint.contactSources,
+              messageTypes: endpoint.messageTypes,
               channelIds: endpoint.channels?.map((c) => c.id) ?? null,
               teams: endpoint.teams,
               templateIds: endpoint.templates?.map((t) => t.id) ?? null,

@@ -14,6 +14,7 @@ import {
   WEBHOOK_RUN_TRIGGER_LABELS,
   WEBHOOK_CONSENT_CHANGE_LABELS,
   WEBHOOK_CONTACT_SOURCE_LABELS,
+  WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS,
   WEBHOOK_MESSAGE_SENDER_LABELS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
@@ -231,6 +232,14 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         New contacts sent:{' '}
                         {e.contactSources.map((c) => WEBHOOK_CONTACT_SOURCE_LABELS[c]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.messageTypes ? (
+                      <p className="text-xs text-muted-foreground">
+                        Received messages sent:{' '}
+                        {e.messageTypes
+                          .map((t) => WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS[t])
+                          .join(', ')}
                       </p>
                     ) : null}
                     {e.channels ? (

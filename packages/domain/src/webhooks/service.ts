@@ -48,6 +48,7 @@ import {
   WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_CONSENT_CHANGES,
   WEBHOOK_CONTACT_SOURCES,
+  WEBHOOK_RECEIVED_MESSAGE_TYPES,
   WEBHOOK_MESSAGE_SENDERS,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
@@ -82,6 +83,7 @@ import {
   type WebhookRunEndStatus,
   type WebhookRunTrigger,
   type WebhookConsentChange,
+  type WebhookReceivedMessageType,
   type WebhookTeamChoice,
   type WebhookTemplateChoice,
   type WebhookTemplateStatus,
@@ -556,6 +558,34 @@ export function webhookContactSourcesFor(
   current: readonly ContactSource[] | null,
 ): ContactSource[] | null {
   if (!eventTypes.includes('contact.created')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * The types of the received messages an endpoint takes as `message.received` (ADR-191), in the
+ * order message types are defined; null takes every type.
+ */
+export const webhookMessageTypesSchema = z
+  .array(z.enum(WEBHOOK_RECEIVED_MESSAGE_TYPES, { error: 'Choose message types from the list.' }))
+  .min(1, 'Choose at least one message type, or take every message.')
+  .max(WEBHOOK_RECEIVED_MESSAGE_TYPES.length, 'Give each message type once.')
+  .transform((chosen) => WEBHOOK_RECEIVED_MESSAGE_TYPES.filter((type) => chosen.includes(type)))
+  .nullable();
+
+export const WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT =
+  'Choose message types only for an endpoint that receives Message received.';
+
+/**
+ * The message types an endpoint keeps after it is added or changed: every type (null) unless it
+ * takes `message.received`; then those given, or else the ones it had.
+ */
+export function webhookMessageTypesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookReceivedMessageType[] | null | undefined,
+  current: readonly WebhookReceivedMessageType[] | null,
+): WebhookReceivedMessageType[] | null {
+  if (!eventTypes.includes('message.received')) return null;
   const kept = given === undefined ? current : given;
   return kept ? [...kept] : null;
 }
@@ -1103,6 +1133,8 @@ const endpointFields = z.object({
   consentChanges: webhookConsentChangesSchema.optional(),
   /** Given, where the contacts it takes came from (null: every one, ADR-190); left out, they stay. */
   contactSources: webhookContactSourcesSchema.optional(),
+  /** Given, the types of the received messages it takes (null: every type, ADR-191); left out, they stay. */
+  messageTypes: webhookMessageTypesSchema.optional(),
   /**
    * Given, the numbers whose events it takes (null: every number, ADR-170); left out, they stay.
    */
@@ -1205,6 +1237,12 @@ const contactSourcesNeedTheEvent = {
     !data.contactSources || data.eventTypes.includes('contact.created'),
   options: { path: ['contactSources'], message: WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT },
 };
+/** Message types are chosen only for an endpoint that takes `message.received` (ADR-191). */
+const messageTypesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; messageTypes?: unknown }) =>
+    !data.messageTypes || data.eventTypes.includes('message.received'),
+  options: { path: ['messageTypes'], message: WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT },
+};
 /** Numbers are chosen only for an endpoint that takes events of numbers (ADR-170). */
 const channelsNeedTheEvents = {
   check: (data: { eventTypes: WebhookEventType[]; channelIds?: unknown }) =>
@@ -1248,6 +1286,7 @@ const endpointSchema = endpointFields
   .refine(runTriggersNeedTheEvents.check, runTriggersNeedTheEvents.options)
   .refine(consentChangesNeedTheEvent.check, consentChangesNeedTheEvent.options)
   .refine(contactSourcesNeedTheEvent.check, contactSourcesNeedTheEvent.options)
+  .refine(messageTypesNeedTheEvent.check, messageTypesNeedTheEvent.options)
   .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
   .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
   .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options)
@@ -1268,6 +1307,7 @@ const updateSchema = endpointFields
   .refine(runTriggersNeedTheEvents.check, runTriggersNeedTheEvents.options)
   .refine(consentChangesNeedTheEvent.check, consentChangesNeedTheEvent.options)
   .refine(contactSourcesNeedTheEvent.check, contactSourcesNeedTheEvent.options)
+  .refine(messageTypesNeedTheEvent.check, messageTypesNeedTheEvent.options)
   .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
   .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
   .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options)
@@ -1333,6 +1373,8 @@ export interface WebhookEndpointView {
   consentChanges: WebhookConsentChange[] | null;
   /** Where the contacts whose `contact.created` it takes came from (ADR-190); null: every contact. */
   contactSources: ContactSource[] | null;
+  /** The types of the received messages it takes as `message.received` (ADR-191); null: every type. */
+  messageTypes: WebhookReceivedMessageType[] | null;
   /** The numbers whose events it takes (ADR-170), as stored, named; null takes every number. */
   channels: WebhookEndpointChannel[] | null;
   /**
@@ -1584,6 +1626,7 @@ export async function lockWebhookEndpoint(
       runTriggers: webhookEndpoints.runTriggers,
       consentChanges: webhookEndpoints.consentChanges,
       contactSources: webhookEndpoints.contactSources,
+      messageTypes: webhookEndpoints.messageTypes,
       channelAccountIds: webhookEndpoints.channelAccountIds,
       teamIds: webhookEndpoints.teamIds,
       templateIds: webhookEndpoints.templateIds,
@@ -1639,6 +1682,7 @@ export async function insertWebhookEndpoint(
     runTriggers: WebhookRunTrigger[] | null;
     consentChanges: WebhookConsentChange[] | null;
     contactSources: ContactSource[] | null;
+    messageTypes: WebhookReceivedMessageType[] | null;
     channelAccountIds: string[] | null;
     teamIds: string[] | null;
     templateIds: string[] | null;
@@ -1683,6 +1727,7 @@ export async function insertWebhookEndpoint(
     runTriggers: input.runTriggers,
     consentChanges: input.consentChanges,
     contactSources: input.contactSources,
+    messageTypes: input.messageTypes,
     channelAccountIds: input.channelAccountIds,
     teamIds: input.teamIds,
     templateIds: input.templateIds,
@@ -2076,6 +2121,7 @@ export function createWebhooksService(deps: {
               runTriggers: webhookEndpoints.runTriggers,
               consentChanges: webhookEndpoints.consentChanges,
               contactSources: webhookEndpoints.contactSources,
+              messageTypes: webhookEndpoints.messageTypes,
               channelAccountIds: webhookEndpoints.channelAccountIds,
               teamIds: webhookEndpoints.teamIds,
               templateIds: webhookEndpoints.templateIds,
@@ -2508,6 +2554,7 @@ export function createWebhooksService(deps: {
         const runTriggers = webhookRunTriggersFor(data.eventTypes, data.runTriggers, null);
         const consentChanges = webhookConsentChangesFor(data.eventTypes, data.consentChanges, null);
         const contactSources = webhookContactSourcesFor(data.eventTypes, data.contactSources, null);
+        const messageTypes = webhookMessageTypesFor(data.eventTypes, data.messageTypes, null);
         const channelIds = webhookChannelIdsFor(data.eventTypes, data.channelIds, null);
         await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
         const teamIds = webhookTeamIdsFor(data.eventTypes, data.teamIds, null);
@@ -2544,6 +2591,7 @@ export function createWebhooksService(deps: {
           runTriggers,
           consentChanges,
           contactSources,
+          messageTypes,
           channelAccountIds: channelIds,
           teamIds,
           templateIds,
@@ -2576,6 +2624,7 @@ export function createWebhooksService(deps: {
               ...(runTriggers ? { runTriggers } : {}),
               ...(consentChanges ? { consentChanges } : {}),
               ...(contactSources ? { contactSources } : {}),
+              ...(messageTypes ? { messageTypes } : {}),
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),
@@ -2680,6 +2729,11 @@ export function createWebhooksService(deps: {
           data.contactSources,
           endpoint.contactSources,
         );
+        const messageTypes = webhookMessageTypesFor(
+          data.eventTypes,
+          data.messageTypes,
+          endpoint.messageTypes,
+        );
         const channelIds = webhookChannelIdsFor(
           data.eventTypes,
           data.channelIds,
@@ -2749,6 +2803,7 @@ export function createWebhooksService(deps: {
             runTriggers,
             consentChanges,
             contactSources,
+            messageTypes,
             channelAccountIds: channelIds,
             teamIds,
             templateIds,
@@ -2792,6 +2847,7 @@ export function createWebhooksService(deps: {
               ...(runTriggers ? { runTriggers } : {}),
               ...(consentChanges ? { consentChanges } : {}),
               ...(contactSources ? { contactSources } : {}),
+              ...(messageTypes ? { messageTypes } : {}),
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),

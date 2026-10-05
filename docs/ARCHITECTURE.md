@@ -1596,6 +1596,13 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   when an active endpoint of the company names sources and creates a `contact.created` delivery only
   where it is listed. Settings (checkboxes under "Contact added") and the API (`contactSources`) set
   it; a change that drops the event clears it.
+- **Message type filters** (migration 0137, ADR-191): `message_types` on an endpoint lists the types
+  of the received messages it takes as `message.received`, null for every type; a check keeps it to
+  1 to 14 known types (never `template`) and to endpoints taking the event.
+  `app.capture_webhook_event` (replaced with the same signature) matches the `messageType` the
+  message trigger stores in the detail against the list, with the endpoint's other filters. Settings
+  (checkboxes under "Message received") and the API (`messageTypes`) set it; a change that drops the
+  event clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and

@@ -1543,6 +1543,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'run_triggers',
       'consent_changes',
       'contact_sources',
+      'message_types',
       'channel_account_ids',
       'team_ids',
       'template_ids',

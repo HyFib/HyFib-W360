@@ -11,6 +11,7 @@ import {
   CHANNEL_STATUSES,
   CONTACT_SOURCES,
   CONVERSATION_STATUSES,
+  MESSAGE_TYPES,
   ORDER_STATUSES,
   TEMPLATE_STATUSES,
 } from '@w360/db';
@@ -41,6 +42,8 @@ import {
   WEBHOOK_CONSENT_CHANGES,
   WEBHOOK_CONTACT_SOURCE_LABELS,
   WEBHOOK_CONTACT_SOURCES,
+  WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS,
+  WEBHOOK_RECEIVED_MESSAGE_TYPES,
   WEBHOOK_CAMPAIGN_EVENTS,
   WEBHOOK_TEAM_EVENTS,
   WEBHOOK_TEMPLATE_EVENTS,
@@ -137,6 +140,8 @@ import {
   webhookConsentChangesSchema,
   webhookContactSourcesFor,
   webhookContactSourcesSchema,
+  webhookMessageTypesFor,
+  webhookMessageTypesSchema,
   webhookHeadersAad,
   webhookHeadersSchema,
   webhookMessageSendersFor,
@@ -2654,5 +2659,65 @@ describe('contact source filters (ADR-190)', () => {
     expect(
       webhookContactSourcesFor(['contact.updated', 'contact.erased'], ['api'], ['api']),
     ).toBeNull();
+  });
+});
+
+describe('message type filters (ADR-191)', () => {
+  it('take 1 to 14 of the types a received message has, once each in their order; null takes every message', () => {
+    expect(WEBHOOK_RECEIVED_MESSAGE_TYPES).toHaveLength(14);
+    expect(webhookMessageTypesSchema.parse(['order', 'text', 'order'])).toEqual(['text', 'order']);
+    expect(webhookMessageTypesSchema.parse([...WEBHOOK_RECEIVED_MESSAGE_TYPES].reverse())).toEqual([
+      ...WEBHOOK_RECEIVED_MESSAGE_TYPES,
+    ]);
+    expect(webhookMessageTypesSchema.parse(null)).toBeNull();
+    // A template is only ever sent, so it is no choice; nor is anything else.
+    for (const refused of [
+      [],
+      ['template'],
+      ['Text'],
+      ['list_reply'],
+      ['text', null],
+      'text',
+      [...WEBHOOK_RECEIVED_MESSAGE_TYPES, 'text'],
+    ]) {
+      expect(webhookMessageTypesSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookMessageTypesSchema.safeParse(['template']).error?.issues[0]?.message).toBe(
+      'Choose message types from the list.',
+    );
+    expect(webhookMessageTypesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one message type, or take every message.',
+    );
+    expect(
+      webhookMessageTypesSchema.safeParse([...WEBHOOK_RECEIVED_MESSAGE_TYPES, 'text']).error
+        ?.issues[0]?.message,
+    ).toBe('Give each message type once.');
+  });
+
+  it('are every message type but a template, each named', () => {
+    expect([...WEBHOOK_RECEIVED_MESSAGE_TYPES]).toEqual(
+      MESSAGE_TYPES.filter((type) => type !== 'template'),
+    );
+    expect(Object.keys(WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS)).toEqual([
+      ...WEBHOOK_RECEIVED_MESSAGE_TYPES,
+    ]);
+    expect(WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS).toMatchObject({
+      text: 'Text',
+      interactive: 'Replies to buttons and lists',
+      button: 'Template button replies',
+      system: 'WhatsApp account updates',
+    });
+  });
+
+  it('are kept only while the endpoint takes message.received: given, kept, or cleared', () => {
+    expect(webhookMessageTypesFor(['message.received'], ['order'], null)).toEqual(['order']);
+    expect(
+      webhookMessageTypesFor(['message.received', 'message.status'], undefined, ['text']),
+    ).toEqual(['text']);
+    expect(webhookMessageTypesFor(['message.received'], null, ['text'])).toBeNull();
+    expect(webhookMessageTypesFor(['message.received'], undefined, null)).toBeNull();
+    expect(webhookMessageTypesFor(['message.status'], ['text'], ['text'])).toBeNull();
   });
 });

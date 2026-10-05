@@ -29,6 +29,8 @@ import {
   WEBHOOK_CONSENT_CHANGES,
   WEBHOOK_CONTACT_SOURCE_LABELS,
   WEBHOOK_CONTACT_SOURCES,
+  WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS,
+  WEBHOOK_RECEIVED_MESSAGE_TYPES,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUSES,
   webhookAssigneeText,
@@ -69,6 +71,7 @@ import {
   type WebhookRunTrigger,
   type WebhookConsentChange,
   type ContactSource,
+  type WebhookReceivedMessageType,
   type WebhookTeamChoice,
   type WebhookTemplateChoice,
   type WebhookTemplateStatus,
@@ -427,6 +430,50 @@ function ContactSourceChoices({
             <Label htmlFor={id} className="font-normal">
               {WEBHOOK_CONTACT_SOURCE_LABELS[source]}{' '}
               <span className="font-mono text-xs">({source})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * The types of the received messages an endpoint takes as `message.received` (ADR-191), shown while
+ * it takes the event.
+ */
+function MessageTypeChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: WebhookReceivedMessageType[];
+  onChange: (next: WebhookReceivedMessageType[]) => void;
+}) {
+  return (
+    <fieldset className="ml-6 grid gap-1">
+      <legend className="mb-1 text-xs text-muted-foreground">
+        Received messages sent, by type (all of them unless you untick some)
+      </legend>
+      {WEBHOOK_RECEIVED_MESSAGE_TYPES.map((type) => {
+        const id = `${prefix}-message-type-${type}`;
+        return (
+          <div key={type} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(type)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_RECEIVED_MESSAGE_TYPES.filter((t) => t === type || chosen.includes(t))
+                    : chosen.filter((t) => t !== type),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS[type]}{' '}
+              <span className="font-mono text-xs">({type})</span>
             </Label>
           </div>
         );
@@ -1143,6 +1190,8 @@ function EventChoices({
   onConsentChangesChange,
   contactSources,
   onContactSourcesChange,
+  messageTypes,
+  onMessageTypesChange,
 }: {
   prefix: string;
   chosen: WebhookEventType[];
@@ -1167,6 +1216,8 @@ function EventChoices({
   onConsentChangesChange: (next: WebhookConsentChange[]) => void;
   contactSources: ContactSource[];
   onContactSourcesChange: (next: ContactSource[]) => void;
+  messageTypes: WebhookReceivedMessageType[];
+  onMessageTypesChange: (next: WebhookReceivedMessageType[]) => void;
 }) {
   return (
     <fieldset className="grid gap-2">
@@ -1192,6 +1243,13 @@ function EventChoices({
                 <span className="text-xs text-muted-foreground">{info.description}</span>
               </Label>
             </div>
+            {type === 'message.received' && chosen.includes(type) ? (
+              <MessageTypeChoices
+                prefix={prefix}
+                chosen={messageTypes}
+                onChange={onMessageTypesChange}
+              />
+            ) : null}
             {type === 'message.status' && chosen.includes(type) ? (
               <>
                 <StatusChoices prefix={prefix} chosen={statuses} onChange={onStatusesChange} />
@@ -1542,6 +1600,8 @@ export function WebhookEndpointForm({
     consentChanges: WebhookConsentChange[] | null;
     /** Where the contacts it takes as `contact.created` came from (ADR-190); null for every one. */
     contactSources: ContactSource[] | null;
+    /** The types of the received messages it takes (ADR-191); null for every type. */
+    messageTypes: WebhookReceivedMessageType[] | null;
     channelIds: string[] | null;
     /** The teams it names (ADR-174), deleted ones without a name; null for every team. */
     teams: WebhookEndpointTeam[] | null;
@@ -1605,6 +1665,9 @@ export function WebhookEndpointForm({
   );
   const [contactSources, setContactSources] = useState<ContactSource[]>(
     endpoint?.contactSources ?? [...WEBHOOK_CONTACT_SOURCES],
+  );
+  const [messageTypes, setMessageTypes] = useState<WebhookReceivedMessageType[]>(
+    endpoint?.messageTypes ?? [...WEBHOOK_RECEIVED_MESSAGE_TYPES],
   );
   const [everyAutomation, setEveryAutomation] = useState(!endpoint?.automationIds);
   const [automationIds, setAutomationIds] = useState<string[]>(endpoint?.automationIds ?? []);
@@ -1724,6 +1787,12 @@ export function WebhookEndpointForm({
           contactSources.length < WEBHOOK_CONTACT_SOURCES.length
             ? contactSources
             : null;
+        // Every message type ticked takes every received message (null, ADR-191).
+        const chosenMessageTypes =
+          eventTypes.includes('message.received') &&
+          messageTypes.length < WEBHOOK_RECEIVED_MESSAGE_TYPES.length
+            ? messageTypes
+            : null;
         // Every number's events unless the numbers ticked are chosen (ADR-170).
         const chosenChannels =
           webhookTakesChannelEvents(eventTypes) && !everyChannel ? channelIds : null;
@@ -1755,6 +1824,7 @@ export function WebhookEndpointForm({
           runTriggers: chosenRunTriggers,
           consentChanges: chosenConsentChanges,
           contactSources: chosenContactSources,
+          messageTypes: chosenMessageTypes,
           channelIds: chosenChannels,
           teamIds: chosenTeams,
           templateIds: chosenTemplates,
@@ -1815,6 +1885,7 @@ export function WebhookEndpointForm({
               setRunTriggers([...WEBHOOK_RUN_TRIGGERS]);
               setConsentChanges([...WEBHOOK_CONSENT_CHANGES]);
               setContactSources([...WEBHOOK_CONTACT_SOURCES]);
+              setMessageTypes([...WEBHOOK_RECEIVED_MESSAGE_TYPES]);
               setEveryAutomation(true);
               setAutomationIds([]);
               setEveryChannel(true);
@@ -1899,6 +1970,8 @@ export function WebhookEndpointForm({
         onConsentChangesChange={setConsentChanges}
         contactSources={contactSources}
         onContactSourcesChange={setContactSources}
+        messageTypes={messageTypes}
+        onMessageTypesChange={setMessageTypes}
       />
       {webhookTakesFieldChanges(eventTypes, parts) ? (
         <FieldChoices

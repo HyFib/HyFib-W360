@@ -29,6 +29,7 @@ import {
   type WebhookRunTrigger,
   type WebhookConsentChange,
   type ContactSource,
+  type WebhookReceivedMessageType,
   type WebhookTemplateStatus,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
@@ -77,6 +78,7 @@ import {
   WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
   WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT,
   WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT,
+  WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT,
   WEBHOOK_SENDERS_NEED_THE_EVENT,
   WEBHOOK_TEAMS_NEED_THE_EVENTS,
   WEBHOOK_TEMPLATES_NEED_THE_EVENTS,
@@ -105,6 +107,8 @@ import {
   webhookConsentChangesSchema,
   webhookContactSourcesFor,
   webhookContactSourcesSchema,
+  webhookMessageTypesFor,
+  webhookMessageTypesSchema,
   webhookTeamIdsFor,
   webhookTeamIdsSchema,
   webhookTemplateIdsFor,
@@ -282,6 +286,16 @@ const invalidContactSources = () =>
     issues: [{ path: 'contactSources', message: WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT }],
   });
 
+const messageTypesField = webhookMessageTypesSchema.describe(
+  'The types of the received messages the endpoint receives as message.received, as `message.type` names them (text, image, video, audio, document, sticker, location, contacts, interactive, button, reaction, order, system, unsupported), only with message.received; applied with the numbers, teams and members chosen. null receives every type.',
+);
+
+/** Message types are chosen only for an endpoint that receives `message.received` (ADR-191). */
+const invalidMessageTypes = () =>
+  new AppError('validation_failed', WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT, {
+    issues: [{ path: 'messageTypes', message: WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT }],
+  });
+
 const channelIdsField = webhookChannelIdsSchema.describe(
   `The WhatsApp numbers whose events the endpoint receives: 1 to ${WEBHOOK_LIMITS.channels} ids of the company's numbers (messages, conversations and orders give a number's id as \`channelId\`, templates in \`channels\` and webhook events as \`channel.id\`), only with an event that happens on a number: message.received, message.status, conversation.status_changed, conversation.assignment_changed, conversation.team_changed, automation.run_started, automation.run_ended, order.received, order.status_changed or campaign.status_changed. A campaign's events are those of the number it sends from; a campaign without a number yet is on none. Consent, contact and template events belong to no number: an endpoint that names numbers still receives every one of them it takes. null receives the events of every number, including numbers connected later.`,
 );
@@ -362,6 +376,7 @@ export const apiCreateWebhookEndpointSchema = z
     runTriggers: runTriggersField.optional(),
     consentChanges: consentChangesField.optional(),
     contactSources: contactSourcesField.optional(),
+    messageTypes: messageTypesField.optional(),
     channelIds: channelIdsField.optional(),
     teamIds: teamIdsField.optional(),
     templateIds: templateIdsField.optional(),
@@ -422,6 +437,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.contactSources || data.events.includes('contact.created'), {
     path: ['contactSources'],
     message: WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.messageTypes || data.events.includes('message.received'), {
+    path: ['messageTypes'],
+    message: WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT,
   })
   .refine((data) => !data.channelIds || webhookTakesChannelEvents(data.events), {
     path: ['channelIds'],
@@ -526,6 +545,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'Where the contacts whose contact.created the endpoint receives came from; null receives every contact. Left out, they stay, unless the events no longer include contact.created, which clears them.',
       ),
+    messageTypes: messageTypesField
+      .optional()
+      .describe(
+        'The types of the received messages the endpoint receives as message.received; null receives every type. Left out, they stay, unless the events no longer include message.received, which clears them.',
+      ),
     channelIds: channelIdsField
       .optional()
       .describe(
@@ -578,13 +602,14 @@ export const apiUpdateWebhookEndpointSchema = z
       data.runTriggers !== undefined ||
       data.consentChanges !== undefined ||
       data.contactSources !== undefined ||
+      data.messageTypes !== undefined ||
       data.channelIds !== undefined ||
       data.teamIds !== undefined ||
       data.templateIds !== undefined ||
       data.campaignIds !== undefined ||
       data.assigneeIds !== undefined ||
       data.oauth !== undefined,
-    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the custom fields, the automations, the campaign statuses, the order statuses, the template statuses, the conversation statuses, the run end statuses, what started the runs, the consent changes, where contacts came from, the numbers, the teams, the templates, the campaigns, the members, the OAuth client or whether the endpoint is enabled',
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the custom fields, the automations, the campaign statuses, the order statuses, the template statuses, the conversation statuses, the run end statuses, what started the runs, the consent changes, where contacts came from, the received message types, the numbers, the teams, the templates, the campaigns, the members, the OAuth client or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -629,6 +654,8 @@ export interface ApiWebhookEndpoint {
   consentChanges: WebhookConsentChange[] | null;
   /** Where the contacts whose `contact.created` it receives came from (ADR-190); null: every one. */
   contactSources: ContactSource[] | null;
+  /** The types of the received messages it receives (ADR-191); null receives every type. */
+  messageTypes: WebhookReceivedMessageType[] | null;
   /** The numbers whose events it receives (ADR-170); null receives every number's. */
   channelIds: string[] | null;
   /** The teams whose conversations' events it receives (ADR-174); null receives every one's. */
@@ -745,6 +772,7 @@ const columns = {
   runTriggers: webhookEndpoints.runTriggers,
   consentChanges: webhookEndpoints.consentChanges,
   contactSources: webhookEndpoints.contactSources,
+  messageTypes: webhookEndpoints.messageTypes,
   channelAccountIds: webhookEndpoints.channelAccountIds,
   teamIds: webhookEndpoints.teamIds,
   templateIds: webhookEndpoints.templateIds,
@@ -785,6 +813,7 @@ type EndpointRow = Pick<
   | 'runTriggers'
   | 'consentChanges'
   | 'contactSources'
+  | 'messageTypes'
   | 'channelAccountIds'
   | 'teamIds'
   | 'templateIds'
@@ -830,6 +859,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     runTriggers: row.runTriggers,
     consentChanges: row.consentChanges,
     contactSources: row.contactSources,
+    messageTypes: row.messageTypes,
     channelIds: row.channelAccountIds,
     teamIds: row.teamIds,
     templateIds: row.templateIds,
@@ -1075,6 +1105,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             const runTriggers = webhookRunTriggersFor(data.events, data.runTriggers, null);
             const consentChanges = webhookConsentChangesFor(data.events, data.consentChanges, null);
             const contactSources = webhookContactSourcesFor(data.events, data.contactSources, null);
+            const messageTypes = webhookMessageTypesFor(data.events, data.messageTypes, null);
             const channelIds = webhookChannelIdsFor(data.events, data.channelIds, null);
             await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
             const teamIds = webhookTeamIdsFor(data.events, data.teamIds, null);
@@ -1103,6 +1134,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               runTriggers,
               consentChanges,
               contactSources,
+              messageTypes,
               channelAccountIds: channelIds,
               teamIds,
               templateIds,
@@ -1128,6 +1160,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(runTriggers ? { runTriggers } : {}),
               ...(consentChanges ? { consentChanges } : {}),
               ...(contactSources ? { contactSources } : {}),
+              ...(messageTypes ? { messageTypes } : {}),
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),
@@ -1189,6 +1222,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         }
         if (data.contactSources && !events.includes('contact.created')) {
           throw invalidContactSources();
+        }
+        if (data.messageTypes && !events.includes('message.received')) {
+          throw invalidMessageTypes();
         }
         if (data.channelIds && !webhookTakesChannelEvents(events)) throw invalidChannels();
         if (data.teamIds && !webhookTakesTeamEvents(events)) throw invalidTeams();
@@ -1254,6 +1290,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.runTriggers !== undefined ||
           data.consentChanges !== undefined ||
           data.contactSources !== undefined ||
+          data.messageTypes !== undefined ||
           data.channelIds !== undefined ||
           data.teamIds !== undefined ||
           data.templateIds !== undefined ||
@@ -1330,6 +1367,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.contactSources,
                 endpoint.contactSources,
               ),
+              messageTypes: webhookMessageTypesFor(
+                events,
+                data.messageTypes,
+                endpoint.messageTypes,
+              ),
               channelAccountIds: webhookChannelIdsFor(
                 events,
                 data.channelIds,
@@ -1357,6 +1399,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               runTriggers: webhookEndpoints.runTriggers,
               consentChanges: webhookEndpoints.consentChanges,
               contactSources: webhookEndpoints.contactSources,
+              messageTypes: webhookEndpoints.messageTypes,
               channelAccountIds: webhookEndpoints.channelAccountIds,
               teamIds: webhookEndpoints.teamIds,
               templateIds: webhookEndpoints.templateIds,
@@ -1383,6 +1426,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(changed.runTriggers ? { runTriggers: changed.runTriggers } : {}),
             ...(changed.consentChanges ? { consentChanges: changed.consentChanges } : {}),
             ...(changed.contactSources ? { contactSources: changed.contactSources } : {}),
+            ...(changed.messageTypes ? { messageTypes: changed.messageTypes } : {}),
             ...(changed.channelAccountIds ? { channelIds: changed.channelAccountIds } : {}),
             ...(changed.teamIds ? { teamIds: changed.teamIds } : {}),
             ...(changed.templateIds ? { templateIds: changed.templateIds } : {}),
