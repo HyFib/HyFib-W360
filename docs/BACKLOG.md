@@ -94,9 +94,10 @@ verification, app review, Embedded Signup configuration).
   members' and keys' own pauses email nobody; no migration). **[Emails when a campaign finishes
   built; its database and browser tests run only in CI]** (ADR-214: the member it sent under is told
   it finished, or that its sending period ended and how many contacts it had not reached, with its
-  counts; no migration). **Remaining:** the 10k run in staging with real dispatch, per-recipient
-  time zones, A/B variants, messaging-tier awareness (read the number's limit from Meta), campaign
-  sends through the public API (the API sends single templates since P5-08), media-header templates.
+  counts; no migration). Keys draft, review and submit campaigns for a member's approval through the
+  public API (ADR-186, ADR-193, ADR-202). **Remaining:** the 10k run in staging with real dispatch,
+  per-recipient time zones, A/B variants, messaging-tier awareness (read the number's limit from
+  Meta), media-header templates (only the API sends them, ADR-201).
 - **P3-05 Reports** — _implemented (2026-09-26); provider data verified against the Graph stand-in
   only_: persisted, versioned metric definitions; periods of whole days in the company time zone;
   messaging outcomes with denominators; estimated Meta charges from Meta's billable flag and
