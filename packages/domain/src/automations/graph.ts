@@ -57,6 +57,8 @@ export const AUTOMATION_LIMITS = {
   /** A CRM deal's title (as the CRM allows), and the characters of its value as typed. */
   dealTitleLength: 120,
   dealValueLength: 24,
+  /** How far ahead a deal step's expected close date may be, in days. */
+  dealCloseDays: 365,
 } as const;
 
 /**
@@ -506,6 +508,17 @@ const createDealNode = z.object({
     .transform((v) => (v ? v : null)),
   /** Who owns the deal: an active member who can use the CRM, checked again when it runs. */
   ownerMembershipId: z.uuid('Choose who owns the deal.').nullable(),
+  /**
+   * Expected to close this many days after the step runs, on the company's calendar (ADR-247);
+   * absent or null: no expected date.
+   */
+  closeInDays: z
+    .number()
+    .int('Use whole days.')
+    .min(0, 'Use 0 for the day the step runs, or more.')
+    .max(AUTOMATION_LIMITS.dealCloseDays, 'At most a year (365 days).')
+    .nullable()
+    .optional(),
   next: nextSchema,
 });
 

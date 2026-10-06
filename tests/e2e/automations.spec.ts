@@ -248,6 +248,7 @@ test('an automation creates a CRM task and a deal about the customer (ADR-244, A
   await expect(page.locator('#step-create-deal-1-stage')).toHaveValue(/.+/);
   await page.locator('#step-create-deal-1-value').fill('2,500.50');
   await page.locator('#step-create-deal-1-owner').selectOption({ label: 'Tomas Tasks' });
+  await page.locator('#step-create-deal-1-close').fill('30');
   await page.locator('#step-create-task-1-next').selectOption('create-deal-1');
   await expect(page.getByText(/to fix before publishing/)).toBeHidden();
 
@@ -260,7 +261,7 @@ test('an automation creates a CRM task and a deal about the customer (ADR-244, A
   ).toBeVisible();
   await expect(
     page.getByText(
-      'CRM deal “Kettles for Asha” created in Sales (New), worth ₹2,500.50, owned by Tomas Tasks, unless the contact already has an open deal there.',
+      'CRM deal “Kettles for Asha” created in Sales (New), worth ₹2,500.50, owned by Tomas Tasks, expected to close in 30 days, unless the contact already has an open deal there.',
     ),
   ).toBeVisible();
 
@@ -296,6 +297,8 @@ test('an automation creates a CRM task and a deal about the customer (ADR-244, A
     page.getByRole('heading', { name: 'Kettles for Priya Customer', level: 1 }),
   ).toBeVisible();
   await expect(page.getByText('Sales · ₹2,500.50')).toBeVisible();
-  await expect(page.getByText(/by an automation · owner Tomas Tasks/)).toBeVisible();
+  await expect(
+    page.getByText(/by an automation · owner Tomas Tasks · expected to close \d{4}-\d{2}-\d{2}/),
+  ).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });

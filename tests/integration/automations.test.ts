@@ -6,6 +6,7 @@ import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/co
 import { QUEUES } from '@w360/contracts';
 import { authorizedTenantScope, type Database } from '@w360/db';
 import {
+  localDateAfter,
   advanceAutomationRun,
   apiSendReaction,
   apiSendText,
@@ -2208,7 +2209,11 @@ describe('automations that create CRM deals (ADR-245)', () => {
 
   /** A company with a Sales pipeline (INR) and an automation that opens a deal in its first stage. */
   async function setup(
-    options: { owner?: (c: Company) => Promise<string | null>; value?: string | null } = {},
+    options: {
+      owner?: (c: Company) => Promise<string | null>;
+      value?: string | null;
+      closeInDays?: number;
+    } = {},
   ) {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
@@ -2232,6 +2237,7 @@ describe('automations that create CRM deals (ADR-245)', () => {
           stageId,
           value: options.value === undefined ? '2,500.50' : options.value,
           ownerMembershipId: dealOwner,
+          ...(options.closeInDays === undefined ? {} : { closeInDays: options.closeInDays }),
           next: 'thanks',
         },
         { id: 'thanks', type: 'send_text', text: 'We will send you a quote.', next: null },
@@ -2261,12 +2267,17 @@ describe('automations that create CRM deals (ADR-245)', () => {
     );
 
   it('creates the deal for the run’s contact and conversation, as the automation, once while it is open', async () => {
-    const s = await setup({ owner: async (c) => (await fx.ctx(c, c.agent)).membership.id });
+    const s = await setup({
+      owner: async (c) => (await fx.ctx(c, c.agent)).membership.id,
+      closeInDays: 30,
+    });
     const agent = await fx.ctx(s.c, s.c.agent);
     const from = waId();
     const conversationId = await inbound(s.c, from, 'what is the price?');
     const run = await onlyRun(conversationId);
+    const before = new Date();
     expect((await drive(s.c, conversationId, run.id)).outcome).toBe('ended');
+    const after = new Date();
     const [contact] = await fx.query<{ contact_id: string }>(
       'SELECT contact_id FROM app.conversations WHERE id = $1',
       [conversationId],
@@ -2286,6 +2297,15 @@ describe('automations that create CRM deals (ADR-245)', () => {
         created_by_automation_id: s.automationId,
       }),
     ]);
+    // Expected to close 30 days after the step ran, on the company's calendar (ADR-247).
+    const [close] = await fx.query<{ close_on: string }>(
+      'SELECT expected_close_on::text AS close_on FROM app.crm_deals WHERE id = $1',
+      [deals[0]!.id],
+    );
+    expect([
+      localDateAfter(before, 'Asia/Kolkata', 30),
+      localDateAfter(after, 'Asia/Kolkata', 30),
+    ]).toContain(close!.close_on);
     expect(
       await fx.query(
         `SELECT kind, actor_membership_id, data FROM app.crm_activities

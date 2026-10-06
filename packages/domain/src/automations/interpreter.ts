@@ -154,6 +154,8 @@ export type RunEffect =
       stageId: string;
       value: string | null;
       ownerMembershipId: string | null;
+      /** Days after the step runs that the deal is expected to close (ADR-247), or null. */
+      closeInDays: number | null;
     }
   | { kind: 'handoff'; teamId: string | null };
 
@@ -608,6 +610,7 @@ export function advance(input: AdvanceInput): StepResult {
           stageId: current.stageId,
           value: current.value,
           ownerMembershipId: current.ownerMembershipId,
+          closeInDays: current.closeInDays ?? null,
         };
         return moveTo(current.next, base, [effect], 'created', null);
       }

@@ -9458,3 +9458,17 @@ Decision:
 
 Not built: a reminder at another time than the due time, and reminders for the deals automations
 create.
+
+## ADR-247 An expected close date from deal steps (P4-01, P4-04) (2026-10-06)
+
+Context: the board's forecast of the month (ADR-242) counts deals by their expected close date,
+which deals created by automations (ADR-245) never had.
+
+Decision:
+
+- A deal step may expect the deal to close a number of days after the step runs (0 to 365,
+  `closeInDays`), counted on the company's calendar in its time zone (`localDateAfter`), so a step
+  run late in the evening in India counts from the Indian date. Versions saved before have no
+  expected date. No migration.
+
+Not built: a date from an answer or an order, and moving the date when the deal changes stage.

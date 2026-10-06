@@ -912,6 +912,32 @@ export function NodeFields({
                 </Select>
               )}
             </Field>
+            <Field
+              id={`${p}-close`}
+              label="Expected to close after (days)"
+              description="Counted on the company's calendar from the day the step runs; left empty, no date."
+            >
+              {(aria) => (
+                <Input
+                  {...aria}
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  max={AUTOMATION_LIMITS.dealCloseDays}
+                  value={
+                    typeof node.closeInDays === 'number' && Number.isFinite(node.closeInDays)
+                      ? node.closeInDays
+                      : ''
+                  }
+                  onChange={(e) =>
+                    patch(node, {
+                      closeInDays:
+                        e.target.value === '' ? undefined : Number.parseInt(e.target.value, 10),
+                    })
+                  }
+                />
+              )}
+            </Field>
           </div>
           <NextSelect
             id={`${p}-next`}

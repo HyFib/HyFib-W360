@@ -583,6 +583,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-246 has no migration. An old worker reads a task step's reminder as absent and creates the
    task without it, so roll the workers out before the web tier as usual.
 
+   ADR-247 has no migration either: an old worker reads a deal step's expected close date as absent
+   and creates the deal without it.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

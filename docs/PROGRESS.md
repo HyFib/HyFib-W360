@@ -1,5 +1,32 @@
 # Progress
 
+## 2026-10-06 — An expected close date from deal steps (P4-01, P4-04, ADR-247)
+
+Status: **Implemented; its database and browser tests run in CI only.** No migration. The local
+PostgreSQL is unavailable, so the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Domain:** `closeInDays` on deal steps, `localDateAfter` in `crm/time.ts`, and `applyDealEffect`
+  setting `expected_close_on` from the company's time zone.
+- **Web:** "Expected to close after (days)" on the deal step, and its line in the simulator.
+- **Tests:** unit (1 new in `deal-step.test.ts`, with time zones, a year end, a leap day and a
+  daylight-saving change); integration (the date in the deal test); e2e (the date on the deal page).
+  The integration and e2e tests were written for CI; not run here.
+- **Docs:** ADR-247; DEPLOYMENT; BACKLOG P4-04; feature matrix H-012.
+- **Mutation checks:** 10/10 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 1057 passed (112 files)                                         |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 10/10 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
 ## 2026-10-06 — Reminder emails for the tasks automations create (P4-01, P4-04, ADR-246)
 
 Status: **Implemented; its database and browser tests run in CI only.** No migration. The local

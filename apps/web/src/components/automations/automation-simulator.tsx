@@ -270,7 +270,7 @@ export function AutomationSimulator({
           out.push({
             who: 'note',
             text: effect.title
-              ? `CRM deal “${effect.title}” created in ${pipeline?.name ?? 'a pipeline'} (${stage?.name ?? 'a stage'})${worth}${owner ? `, owned by ${owner.name}` : ''}, unless the contact already has an open deal there.`
+              ? `CRM deal “${effect.title}” created in ${pipeline?.name ?? 'a pipeline'} (${stage?.name ?? 'a stage'})${worth}${owner ? `, owned by ${owner.name}` : ''}${effect.closeInDays === null ? '' : `, expected to close in ${effect.closeInDays} ${effect.closeInDays === 1 ? 'day' : 'days'}`}, unless the contact already has an open deal there.`
               : 'No CRM deal created: its title is empty after filling in placeholders.',
           });
           break;

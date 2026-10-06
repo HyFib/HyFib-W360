@@ -9,6 +9,7 @@ import {
   parseGraph,
   type AutomationGraph,
 } from './graph';
+import { localDateAfter } from '../crm/time';
 import { advance, initialRunState, type RunFacts } from './interpreter';
 
 /** Steps that create a CRM deal for the run's contact (ADR-245). */
@@ -159,5 +160,32 @@ describe('steps that create a CRM deal (ADR-245)', () => {
     const title = (run(long, { size: 'k'.repeat(300) }).effects[0] as { title: string }).title;
     expect([...title]).toHaveLength(AUTOMATION_LIMITS.dealTitleLength);
     expect((run(long).effects[0] as { title: string }).title).toBe('');
+  });
+
+  it('may expect the deal to close a number of days later, on the company’s calendar (ADR-247)', () => {
+    expect(AUTOMATION_LIMITS.dealCloseDays).toBe(365);
+    for (const ok of [null, 0, 365]) {
+      expect(parseGraph(graphInput({ closeInDays: ok })).ok, String(ok)).toBe(true);
+    }
+    for (const bad of [-1, 366, 1.5]) {
+      expect(parseGraph(graphInput({ closeInDays: bad })).ok, String(bad)).toBe(false);
+    }
+    // Absent (versions saved before): no expected date.
+    expect(graphOf(graphInput()).nodes[0]).not.toHaveProperty('closeInDays');
+    expect(run(graphOf(graphInput())).effects).toMatchObject([{ closeInDays: null }]);
+    expect(run(graphOf(graphInput({ closeInDays: 30 }))).effects).toMatchObject([
+      { kind: 'create_deal', closeInDays: 30 },
+    ]);
+    // 20:00 UTC is already the next day in India.
+    const evening = new Date('2026-10-06T20:00:00Z');
+    expect(localDateAfter(evening, 'Asia/Kolkata', 0)).toBe('2026-10-07');
+    expect(localDateAfter(evening, 'UTC', 0)).toBe('2026-10-06');
+    expect(localDateAfter(evening, 'Asia/Kolkata', 30)).toBe('2026-11-06');
+    // Across a year end, a leap day and a daylight-saving change.
+    expect(localDateAfter(new Date('2026-12-31T10:00:00Z'), 'UTC', 1)).toBe('2027-01-01');
+    expect(localDateAfter(new Date('2028-02-28T10:00:00Z'), 'UTC', 1)).toBe('2028-02-29');
+    expect(localDateAfter(new Date('2026-03-08T12:00:00Z'), 'America/New_York', 1)).toBe(
+      '2026-03-09',
+    );
   });
 });

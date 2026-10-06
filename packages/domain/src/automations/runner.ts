@@ -35,6 +35,7 @@ import { lockCampaignSends, marketingCapReached } from '../campaigns/frequency-c
 import { checkTemplateEligibility } from '../consent/service';
 import { MAX_TAGS_PER_CONTACT, coerceFieldValue } from '../contacts/fields';
 import { addActivity, memberRefs } from '../crm/common';
+import { localDateAfter } from '../crm/time';
 import { scheduleTaskReminder } from '../crm/reminders';
 import { phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { businessStatusAt, loadBusinessCalendar } from '../inbox/business-hours';
@@ -817,6 +818,15 @@ async function applyDealEffect(
     valueMinor = null;
     notes.push('deal_value_invalid');
   }
+  // The expected close date is a date on the company's calendar (ADR-247).
+  let expectedCloseOn: string | null = null;
+  if (effect.closeInDays !== null) {
+    const [company] = await tx
+      .select({ timezone: tenants.timezone })
+      .from(tenants)
+      .where(eq(tenants.id, run.tenantId));
+    if (company) expectedCloseOn = localDateAfter(now, company.timezone, effect.closeInDays);
+  }
   const id = uuidv7();
   await tx.insert(crmDeals).values({
     id,
@@ -828,6 +838,7 @@ async function applyDealEffect(
     title: effect.title,
     valueMinor,
     ownerMembershipId: owner,
+    expectedCloseOn,
     stageEnteredAt: now,
     createdByAutomationId: run.automationId,
   });
