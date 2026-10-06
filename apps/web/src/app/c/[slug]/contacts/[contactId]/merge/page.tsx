@@ -80,7 +80,8 @@ export default async function MergeSearchPage({
         title="Merge a duplicate"
         description={`Find the other record of the same person to merge into ${title}. You review what moves before anything changes.`}
       />
-      <div className="grid gap-4">
+      {/* One column at most as wide as the page: the results table scrolls inside its card. */}
+      <div className="grid grid-cols-1 gap-4">
         <form
           method="get"
           className="flex flex-wrap items-end gap-3"

@@ -133,8 +133,10 @@ test('an owner merges a customer known only by WhatsApp user id into the contact
     )
     .toBe(1);
   await page.getByRole('link', { name: 'Asha', exact: true }).click();
-  const mergedUrl = page.url();
+  // The link navigates in the page: read the address once it is the contact's.
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}/contacts/[0-9a-f-]{36}$`));
   await expect(page.getByText('No phone number')).toBeVisible();
+  const mergedUrl = page.url();
 
   // From the kept contact: find the duplicate, review, merge.
   await page.goto(keptUrl);
@@ -142,6 +144,9 @@ test('an owner merges a customer known only by WhatsApp user id into the contact
   await page.getByLabel('Search').fill('Asha');
   await page.getByRole('button', { name: 'Search' }).click();
   await expect(page.getByRole('cell', { name: 'Asha Rao' })).toHaveCount(0);
+  // The results table scrolls inside its card, not the page.
+  await expect(page.getByRole('link', { name: 'Review merge' })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
   await page.getByRole('link', { name: 'Review merge' }).click();
   await expect(page.getByRole('heading', { name: 'Review merge', level: 1 })).toBeVisible();
   await expect(page.getByText('user id only')).toBeVisible();
