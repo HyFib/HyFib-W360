@@ -50,6 +50,9 @@ export const AUTOMATION_LIMITS = {
   /** Inputs an automation started through the API declares, and the characters of each value. */
   apiInputs: 10,
   apiInputLength: 1000,
+  /** A CRM task's title (as the CRM allows) and how far ahead its due time may be (90 days). */
+  taskTitleLength: 200,
+  taskDueHours: 2160,
 } as const;
 
 /**
@@ -376,6 +379,27 @@ const handoffNode = z.object({
 
 const endNode = z.object({ id: nodeIdSchema, type: z.literal('end'), label: labelSchema });
 
+/**
+ * A CRM task about the run's contact for a member of the company (ADR-244), created by the
+ * automation. The title may hold placeholders, filled in when the step runs.
+ */
+const createTaskNode = z.object({
+  id: nodeIdSchema,
+  type: z.literal('create_task'),
+  label: labelSchema,
+  title: textSchema(AUTOMATION_LIMITS.taskTitleLength, 'task title'),
+  /** Who the task is for: an active member who can use the CRM, checked again when it runs. */
+  assigneeMembershipId: z.uuid('Choose who the task is for.'),
+  /** Due this many hours after the step runs; null: no due time. */
+  dueInHours: z
+    .number()
+    .int('Use whole hours.')
+    .min(1, 'At least 1 hour.')
+    .max(AUTOMATION_LIMITS.taskDueHours, 'At most 90 days (2160 hours).')
+    .nullable(),
+  next: nextSchema,
+});
+
 /** A template variable's text (an empty one is a check error, so an unfinished draft can be saved). */
 const templateParamSchema = z
   .string()
@@ -465,6 +489,7 @@ export const nodeSchema = z.discriminatedUnion('type', [
   updateContactNode,
   updateConversationNode,
   httpRequestNode,
+  createTaskNode,
   waitNode,
   handoffNode,
   endNode,
@@ -483,6 +508,7 @@ export const NODE_TYPES: readonly NodeType[] = [
   'update_contact',
   'update_conversation',
   'http_request',
+  'create_task',
   'wait',
   'handoff',
   'end',
@@ -498,6 +524,7 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   update_contact: 'Update contact',
   update_conversation: 'Tag the conversation',
   http_request: 'Call a web address',
+  create_task: 'Create a CRM task',
   wait: 'Wait',
   handoff: 'Hand off to people',
   end: 'End',
@@ -1054,6 +1081,7 @@ export function edgesOf(node: AutomationNode): { label: string; target: string |
     case 'send_template':
     case 'update_contact':
     case 'update_conversation':
+    case 'create_task':
     case 'wait':
       return [{ label: 'next', target: node.next }];
     case 'ask_template':
@@ -1120,6 +1148,8 @@ function textsOf(node: AutomationNode): string[] {
       return [node.text, ...(node.retryText ? [node.retryText] : [])];
     case 'update_contact':
       return node.action.kind === 'set_field' ? [node.action.value] : [];
+    case 'create_task':
+      return [node.title];
     default:
       return [];
   }
@@ -1128,6 +1158,11 @@ function textsOf(node: AutomationNode): string[] {
 export interface GraphReferences {
   /** Teams of the company; when given, hand-off teams must be among them. */
   teamIds?: ReadonlySet<string>;
+  /**
+   * Active members who can use the CRM; when given, the members task steps create tasks for must
+   * be among them (ADR-244).
+   */
+  crmMemberIds?: ReadonlySet<string>;
   /** Contact field keys of the company; when given, fields must be among them. */
   fieldKeys?: ReadonlySet<string>;
   /** Domains the company allows HTTP steps to call; when given, addresses must match one. */
@@ -1414,6 +1449,17 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
     }
     if (node.type === 'handoff' && node.teamId && refs.teamIds && !refs.teamIds.has(node.teamId)) {
       issues.push({ level: 'error', nodeId: node.id, message: 'The team no longer exists.' });
+    }
+    if (
+      node.type === 'create_task' &&
+      refs.crmMemberIds &&
+      !refs.crmMemberIds.has(node.assigneeMembershipId)
+    ) {
+      issues.push({
+        level: 'error',
+        nodeId: node.id,
+        message: 'Choose an active member who can use the CRM for the task.',
+      });
     }
     if (node.type === 'send_template' || node.type === 'ask_template') {
       if ([...node.header, ...node.body].some((v) => !v)) {

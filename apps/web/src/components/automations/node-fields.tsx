@@ -46,6 +46,8 @@ export interface EditorTemplate {
 export interface NodeFieldOptions {
   steps: StepChoice[];
   teams: { id: string; name: string }[];
+  /** Active members who can use the CRM, whom task steps may create tasks for. */
+  crmMembers: { id: string; name: string }[];
   fields: { key: string; label: string; type: string }[];
   /** Answer names saved by questions and web requests in this automation. */
   answers: string[];
@@ -709,6 +711,83 @@ export function NodeFields({
         </div>
       );
     }
+    case 'create_task':
+      return (
+        <div className="grid gap-4">
+          <Field
+            id={`${p}-title`}
+            label="Task"
+            description={`The task about the contact, in the CRM. ${hintFor(options)}`}
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                value={node.title}
+                maxLength={AUTOMATION_LIMITS.taskTitleLength}
+                onChange={(e) => patch(node, { title: e.target.value })}
+              />
+            )}
+          </Field>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field
+              id={`${p}-assignee`}
+              label="For"
+              description="An active member who can use the CRM. If they no longer can when the step runs, no task is created and the run goes on."
+            >
+              {(aria) => (
+                <Select
+                  {...aria}
+                  value={node.assigneeMembershipId}
+                  onChange={(e) => patch(node, { assigneeMembershipId: e.target.value })}
+                >
+                  {options.crmMembers.some((m) => m.id === node.assigneeMembershipId) ? null : (
+                    <option value={node.assigneeMembershipId}>Choose a member</option>
+                  )}
+                  {options.crmMembers.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+            <Field
+              id={`${p}-due`}
+              label="Due after (hours)"
+              description="Left empty, the task has no due time."
+            >
+              {(aria) => (
+                <Input
+                  {...aria}
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  max={AUTOMATION_LIMITS.taskDueHours}
+                  value={
+                    node.dueInHours !== null && Number.isFinite(node.dueInHours)
+                      ? node.dueInHours
+                      : ''
+                  }
+                  onChange={(e) =>
+                    patch(node, {
+                      dueInHours:
+                        e.target.value === '' ? null : Number.parseInt(e.target.value, 10),
+                    })
+                  }
+                />
+              )}
+            </Field>
+          </div>
+          <NextSelect
+            id={`${p}-next`}
+            label="Then"
+            value={node.next}
+            self={node.id}
+            options={options}
+            onChange={(next) => patch(node, { next })}
+          />
+        </div>
+      );
     case 'wait':
       return (
         <div className="grid gap-4 sm:grid-cols-2">

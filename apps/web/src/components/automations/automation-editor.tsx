@@ -135,6 +135,7 @@ function defaultNode(
   graph: AutomationGraph,
   allowedDomains: readonly string[],
   template: EditorTemplate | undefined,
+  crmMember: string | undefined,
 ): AutomationNode {
   const id = newNodeId(graph, type);
   switch (type) {
@@ -225,6 +226,16 @@ function defaultNode(
         failureNext: null,
       };
     }
+    case 'create_task':
+      return {
+        id,
+        type,
+        label: '',
+        title: 'Follow up with {{name}}',
+        assigneeMembershipId: crmMember ?? '',
+        dueInHours: 24,
+        next: null,
+      };
     case 'handoff':
       return { id, type, label: '', teamId: null };
     case 'end':
@@ -240,6 +251,7 @@ function retarget(node: AutomationNode, target: string, value: string | null): A
     case 'send_template':
     case 'update_contact':
     case 'update_conversation':
+    case 'create_task':
     case 'wait':
       return { ...node, next: t(node.next) };
     case 'ask_template':
@@ -290,6 +302,7 @@ export function AutomationEditor({
   channels,
   templates,
   teams,
+  crmMembers,
   fields,
   web,
 }: {
@@ -301,6 +314,8 @@ export function AutomationEditor({
   /** The company's templates (the checks need them all; steps offer the ones they can send). */
   templates: EditorTemplate[];
   teams: { id: string; name: string }[];
+  /** Active members who can use the CRM, whom task steps may create tasks for. */
+  crmMembers: { id: string; name: string }[];
   fields: { key: string; label: string; type: string }[];
   /** What web request steps may use: allowed domains and secrets (names and domains only). */
   web: {
@@ -359,6 +374,7 @@ export function AutomationEditor({
   const refs = useMemo(
     () => ({
       teamIds: new Set(teams.map((t) => t.id)),
+      crmMemberIds: new Set(crmMembers.map((m) => m.id)),
       fieldKeys: new Set(fields.map((f) => f.key)),
       allowedDomains: web.allowedDomains,
       secrets: new Map(web.secrets.map((s) => [s.name, s.domain])),
@@ -368,7 +384,7 @@ export function AutomationEditor({
       apiInputs: apiInputs ? new Set(apiInputs) : undefined,
       channelWhatsappAccountId,
     }),
-    [teams, fields, web, templates, storeEvent, apiInputs, channelWhatsappAccountId],
+    [teams, crmMembers, fields, web, templates, storeEvent, apiInputs, channelWhatsappAccountId],
   );
   const parsedGraph = useMemo(() => parseGraph(graph), [graph]);
   const issues: GraphIssue[] = useMemo(() => {
@@ -419,6 +435,7 @@ export function AutomationEditor({
   const options: NodeFieldOptions = {
     steps: stepChoices,
     teams,
+    crmMembers,
     fields,
     answers,
     allowedDomains: web.allowedDomains,
@@ -869,7 +886,13 @@ export function AutomationEditor({
                         ...g,
                         nodes: [
                           ...g.nodes,
-                          defaultNode(newType, g, web.allowedDomains, usableTemplates[0]),
+                          defaultNode(
+                            newType,
+                            g,
+                            web.allowedDomains,
+                            usableTemplates[0],
+                            crmMembers[0]?.id,
+                          ),
                         ],
                       })),
                     )
@@ -916,6 +939,7 @@ export function AutomationEditor({
             graph={parsedGraph.ok ? parsedGraph.graph : null}
             companyName={companyName}
             teams={teams}
+            crmMembers={crmMembers}
             templates={templates}
             storeEvent={storeEvent}
             apiInputs={apiInputs}

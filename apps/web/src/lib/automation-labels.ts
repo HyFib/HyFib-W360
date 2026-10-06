@@ -60,6 +60,8 @@ export const STEP_OUTCOMES: Record<string, string> = {
   taken_over: 'Taken over',
   requested: 'Made a web request',
   responded: 'Web request finished',
+  created: 'Created a CRM task',
+  skipped: 'Skipped the step',
 };
 
 export const STEP_DETAILS: Record<string, string> = {
@@ -93,6 +95,10 @@ export const STEP_DETAILS: Record<string, string> = {
   conversation_too_many_tags: 'the conversation already has the maximum number of tags',
   field_missing: 'the contact field no longer exists',
   invalid_value: 'the value did not fit the contact field',
+  // Task steps (ADR-244): why no task was created.
+  task_title_empty: 'the task’s title was empty after filling in placeholders',
+  task_assignee_unavailable:
+    'the member the task was for is no longer an active member who can use the CRM',
   tester_not_member: 'the member running the test left the company',
   tester_not_permitted: 'the member running the test may no longer run tests',
   version_unreadable: 'the version could not be read',

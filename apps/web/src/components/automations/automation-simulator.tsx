@@ -126,6 +126,7 @@ export function AutomationSimulator({
   graph,
   companyName,
   teams,
+  crmMembers,
   templates,
   storeEvent,
   apiInputs,
@@ -134,6 +135,8 @@ export function AutomationSimulator({
   graph: AutomationGraph | null;
   companyName: string;
   teams: { id: string; name: string }[];
+  /** Members task steps may create tasks for, to name them. */
+  crmMembers: { id: string; name: string }[];
   templates: EditorTemplate[];
   /** Started by order messages: the run reads a sample order. */
   storeEvent: boolean;
@@ -236,6 +239,20 @@ export function AutomationSimulator({
             body: effect.body,
           });
           break;
+        case 'create_task': {
+          const member = crmMembers.find((m) => m.id === effect.assigneeMembershipId);
+          const due =
+            effect.dueInHours === null
+              ? ''
+              : `, due in ${effect.dueInHours} ${effect.dueInHours === 1 ? 'hour' : 'hours'}`;
+          out.push({
+            who: 'note',
+            text: effect.title
+              ? `CRM task “${effect.title}” created for ${member?.name ?? 'a member'}${due}.`
+              : 'No CRM task created: its title is empty after filling in placeholders.',
+          });
+          break;
+        }
         case 'handoff': {
           const team = teams.find((t) => t.id === effect.teamId);
           out.push({

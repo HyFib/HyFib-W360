@@ -45,6 +45,7 @@ import { STORE_MESSAGE_EVENT_INFO } from '../stores/messages-model';
 import { linkButtons, renderPlaceholders, sendSpecFor } from '../templates/definition';
 import { parseInput } from '../validation';
 import { CSV_BOM, csvLine } from '../contacts/csv';
+import { crmMembers } from '../crm/common';
 import { RUN_CSV_COLUMNS, runCsvLine, type RunCsvRow } from './runs-csv';
 import {
   apiInputValues,
@@ -178,6 +179,8 @@ export interface AutomationDetail {
     /** The company's templates, for template steps (HyFib sends approved utility or marketing ones). */
     templates: AutomationTemplateOption[];
     teams: { id: string; name: string }[];
+    /** Active members who can use the CRM, whom task steps may create tasks for (ADR-244). */
+    crmMembers: { id: string; name: string }[];
     fields: { key: string; label: string; type: string }[];
     /** Domains HTTP steps may call, and the secrets they may use (never their values). */
     allowedDomains: string[];
@@ -428,6 +431,10 @@ export function createAutomationService(deps: AutomationServiceDeps) {
     return {
       teamRows,
       fieldRows,
+      crmMembers: (await crmMembers(tx, tenantId)).map((m) => ({
+        id: m.membershipId,
+        name: m.name,
+      })),
       domains: domainRows.map((d) => d.domain),
       secrets: secretRows,
       templates: templateRows.map(templateOption),
@@ -446,6 +453,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
   ): GraphReferences {
     return {
       teamIds: new Set(refs.teamRows.map((t) => t.id)),
+      crmMemberIds: new Set(refs.crmMembers.map((m) => m.id)),
       fieldKeys: new Set(refs.fieldRows.map((f) => f.key)),
       allowedDomains: refs.domains,
       secrets: new Map(refs.secrets.map((r) => [r.name, r.domain])),
@@ -495,6 +503,21 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         `${action === 'publish' ? 'Publishing' : 'Testing'} an automation that sends marketing templates needs the campaign sending permission.`,
       );
     }
+  }
+
+  /**
+   * Publishing or testing a graph that creates CRM tasks needs `crm.write`, as creating a task in
+   * the CRM does (ADR-244).
+   */
+  function assertMayCreateTasks(
+    ctx: TenantContext,
+    graph: AutomationGraph,
+    action: 'publish' | 'test',
+  ) {
+    if (can(ctx, 'crm.write') || !graph.nodes.some((n) => n.type === 'create_task')) return;
+    throw forbidden(
+      `${action === 'publish' ? 'Publishing' : 'Testing'} an automation that creates CRM tasks needs the permission to edit the CRM.`,
+    );
   }
 
   /** Parses and checks a draft; throws when it cannot be run. */
@@ -816,6 +839,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               })),
               templates: refs.templates,
               teams: teamRows,
+              crmMembers: refs.crmMembers,
               fields: fieldRows,
               allowedDomains: refs.domains,
               secrets: refs.secrets,
@@ -992,6 +1016,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         if (row.status === 'draft') await assertLiveAutomationAvailable(tx, ctx.tenant.id, row.id);
         const { trigger, graph } = await runnableDraft(tx, row);
         await assertMayUseTemplates(tx, ctx, graph, 'publish');
+        assertMayCreateTasks(ctx, graph, 'publish');
         const sha = definitionSha({ trigger, graph, channelAccountId: row.draftChannelAccountId });
         if (row.activeVersionId) {
           const [current] = await tx
@@ -1193,6 +1218,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           throw new AppError('precondition_failed', 'Restore the automation before testing it.');
         const { trigger, graph } = await runnableDraft(tx, row);
         await assertMayUseTemplates(tx, ctx, graph, 'test');
+        assertMayCreateTasks(ctx, graph, 'test');
         let storeOrderId: string | null = null;
         if (trigger.type === 'store_event') {
           // The steps send the order's customer details: seeing store orders needs both.

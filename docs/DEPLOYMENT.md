@@ -564,6 +564,16 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    a report from a new page that reaches an old server finds no route and the page says it could not
    check, until a report reaches a new server.
 
+   Migration 0158 (ADR-244) adds `app.crm_tasks.created_by_automation_id`, makes
+   `created_by_membership_id` nullable (both without rewriting the table) and adds, NOT VALID, the
+   creator check, the foreign key to the automation and the run steps' outcome check with `created`
+   and `skipped`; 0159 validates them while the tables stay writable. Roll the workers out before
+   the web tier as usual: a worker of the previous release cannot read a published version with a
+   task step and would fail its runs as unreadable. An old web server cannot read a draft with a
+   task step either: its editor opens such an automation with the starter steps, and saving there
+   would replace the draft, so do not edit automations with task steps until the web rollout ends.
+   Old servers list the tasks automations create as before (they never show who created a task).
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

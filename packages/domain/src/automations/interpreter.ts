@@ -131,6 +131,16 @@ export type RunEffect =
       body: string | null;
       save: { path: string; saveAs: string }[];
     }
+  /**
+   * A CRM task about the run's contact for a member, created by the automation (ADR-244): the
+   * title as rendered (empty when its placeholders filled in nothing), due after `dueInHours`.
+   */
+  | {
+      kind: 'create_task';
+      title: string;
+      assigneeMembershipId: string;
+      dueInHours: number | null;
+    }
   | { kind: 'handoff'; teamId: string | null };
 
 export type StepStatus = 'running' | 'waiting' | 'completed' | 'handed_off' | 'failed';
@@ -158,7 +168,10 @@ export type StepLogOutcome =
   | 'completed'
   | 'failed'
   | 'requested'
-  | 'responded';
+  | 'responded'
+  | 'created'
+  /** Recorded by the runner when a task step could not create its task (ADR-244). */
+  | 'skipped';
 
 export interface StepResult {
   /** True when the event did not apply to the run's position (nothing to record or apply). */
@@ -554,6 +567,19 @@ export function advance(input: AdvanceInput): StepResult {
           tag: current.action.tag,
         };
         return moveTo(current.next, base, [effect], 'updated', null);
+      }
+      case 'create_task': {
+        const effect: RunEffect = {
+          kind: 'create_task',
+          // One line: renderText trims, and line breaks or runs of spaces become one space.
+          title: clipText(
+            renderText(current.title, values(base.variables)).replace(/\s+/g, ' '),
+            AUTOMATION_LIMITS.taskTitleLength,
+          ),
+          assigneeMembershipId: current.assigneeMembershipId,
+          dueInHours: current.dueInHours,
+        };
+        return moveTo(current.next, base, [effect], 'created', null);
       }
       case 'http_request': {
         if (base.httpCalls + 1 > RUN_BUDGETS.maxHttpCalls)

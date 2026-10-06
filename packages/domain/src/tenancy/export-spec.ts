@@ -1012,6 +1012,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'completed_by_membership_id',
       'version',
       'created_by_membership_id',
+      'created_by_automation_id',
       'created_at',
       'updated_at',
     ],

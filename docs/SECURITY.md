@@ -269,6 +269,11 @@ Phase 4 rules (automations, P4-01):
   contact's WhatsApp number when queued (a template step checks its template and the contact's
   consent instead of the window, P4-06e). Live runs send as the company's automation (no member
   actor on the send); test runs send under the tester's authority.
+- Task steps (ADR-244): publishing or testing an automation with one needs `crm.write`. The task is
+  for a chosen member who must be an active member who can use the CRM when the automation is
+  published and again when the step runs (otherwise the step is skipped and says why); it is about
+  the run's contact only, in the company's scope, never for an erased contact, and is recorded as
+  created by the automation, never by a member.
 
 Phase 4 rules (automation web requests, P4-02):
 

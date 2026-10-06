@@ -9382,3 +9382,36 @@ Decision:
 
 Not built: who is typing a reply or a note, presence in the conversation list, and presence through
 the API or webhooks.
+
+## ADR-244 Automation steps that create a CRM task (P4-01, P4-04) (2026-10-06)
+
+Context: an automation could answer, ask, tag and hand over, but a conversation that ended with
+"please call me" left nothing in the CRM: someone had to read the run and create the task by hand.
+
+Decision:
+
+- **The step:** "Create a CRM task" (`create_task`) has a title (up to 200 characters, with the
+  placeholders of a message: the contact's name, the company, answers, order fields or the call's
+  inputs), the member it is for, and an optional due time 1 hour to 90 days after the step runs. The
+  title is filled in when the step runs, on one line. The run goes on to the next step.
+- **Who the task is for:** a chosen member, who must be an active member who can use the CRM when
+  the automation is published and when the step runs. During a run the conversation is unassigned (a
+  member taking it ends the run), so "the conversation's assignee" is not offered.
+- **Created as the automation:** a task records the automation that created it
+  (`crm_tasks.created_by_automation_id`; migration 0158 makes `created_by_membership_id` nullable
+  and checks that exactly one creator is set) and is about the run's contact; its `task_created`
+  activity has no member as actor and names the automation and the run, and the timeline says "by an
+  automation". No member is impersonated.
+- **When no task is created:** a member who left or can no longer use the CRM, an erased contact, or
+  a title whose placeholders filled in nothing: the step is logged as skipped with the reason (a new
+  step outcome, `skipped`; a created task is `created`), and the run goes on, so a change in the
+  team never stops a conversation with a customer. A test run creates its task too, like its other
+  changes.
+- **Permission:** publishing or testing an automation with a task step needs `crm.write`, as
+  creating a task does, as publishing marketing templates needs `campaigns.send`.
+- **Migrations:** 0158 adds the column and, NOT VALID, the creator check, the foreign key to the
+  automation and the run steps' outcome check with `created` and `skipped`; 0159 validates them
+  without blocking writes.
+
+Not built: steps that create deals, a reminder email for an automation's task, tasks for the
+conversation's team or in turn, and a link from the task to the run.

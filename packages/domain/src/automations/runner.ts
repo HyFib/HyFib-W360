@@ -11,6 +11,7 @@ import {
   contactTags,
   contacts,
   conversations,
+  crmTasks,
   conversationTags,
   eq,
   gte,
@@ -30,6 +31,7 @@ import { permissionsForRoles } from '../authz/permissions';
 import { lockCampaignSends, marketingCapReached } from '../campaigns/frequency-cap';
 import { checkTemplateEligibility } from '../consent/service';
 import { MAX_TAGS_PER_CONTACT, coerceFieldValue } from '../contacts/fields';
+import { addActivity, memberRefs } from '../crm/common';
 import { phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { businessStatusAt, loadBusinessCalendar } from '../inbox/business-hours';
 import { MAX_TAGS_PER_CONVERSATION } from '../inbox/conversation-tags';
@@ -684,6 +686,53 @@ async function applyConversationEffect(
   return null;
 }
 
+/**
+ * Creates the CRM task a step asks for (ADR-244) about the run's contact, as the automation, and
+ * puts it on the contact's CRM timeline; returns a note for the step log when it was skipped. A
+ * member who left or can no longer use the CRM gets no task, nor does an erased contact, and a title
+ * whose placeholders filled in nothing creates none. The contact is held for key share, as for the
+ * contact's tags, so an erasure waits for the task (and deletes it) or comes first.
+ */
+async function applyTaskEffect(
+  tx: Tx,
+  run: AutomationRun,
+  effect: Extract<RunEffect, { kind: 'create_task' }>,
+  now: Date,
+): Promise<string | null> {
+  if (!effect.title) return 'task_title_empty';
+  const [contact] = await tx
+    .select({ erasedAt: contacts.erasedAt })
+    .from(contacts)
+    .where(and(eq(contacts.tenantId, run.tenantId), eq(contacts.id, run.contactId)))
+    .for('key share');
+  if (!contact || contact.erasedAt) return 'contact_erased';
+  const assignee = (await memberRefs(tx, run.tenantId, [effect.assigneeMembershipId])).get(
+    effect.assigneeMembershipId,
+  );
+  if (!assignee?.active) return 'task_assignee_unavailable';
+  const id = uuidv7();
+  await tx.insert(crmTasks).values({
+    id,
+    tenantId: run.tenantId,
+    title: effect.title,
+    contactId: run.contactId,
+    assigneeMembershipId: effect.assigneeMembershipId,
+    dueAt:
+      effect.dueInHours === null ? null : new Date(now.getTime() + effect.dueInHours * 3_600_000),
+    createdByAutomationId: run.automationId,
+  });
+  await addActivity(tx, {
+    tenantId: run.tenantId,
+    contactId: run.contactId,
+    taskId: id,
+    actorMembershipId: null,
+    kind: 'task_created',
+    data: { automationId: run.automationId, runId: run.id },
+    at: now,
+  });
+  return null;
+}
+
 type StepOutcome =
   | { kind: 'progress' }
   | { kind: 'waiting' }
@@ -900,6 +949,8 @@ async function runStep(
     let messageId: string | null = null;
     const notes: string[] = [];
     let blocked: string | null = null;
+    // A task step whose task could not be created (ADR-244): the step log says so and why.
+    let skipped = false;
     let handoff: { teamId: string | null } | null = null;
     for (const effect of result.effects) {
       if (effect.kind === 'send_text' || effect.kind === 'send_buttons') {
@@ -949,6 +1000,12 @@ async function runStep(
       ) {
         const note = await applyConversationEffect(tx, run, conv.assignedMembershipId, effect);
         if (note) notes.push(note);
+      } else if (effect.kind === 'create_task') {
+        const note = await applyTaskEffect(tx, run, effect, now);
+        if (note) {
+          notes.push(note);
+          skipped = true;
+        }
       } else {
         const note = await applyContactEffect(tx, run, effect);
         if (note) notes.push(note);
@@ -985,7 +1042,7 @@ async function runStep(
     await appendRunStep(tx, tenantId, run.id, {
       nodeId: result.log.nodeId,
       nodeType: result.log.nodeType,
-      outcome: result.log.outcome,
+      outcome: skipped ? 'skipped' : result.log.outcome,
       branch: result.log.branch,
       messageId,
       detail: [result.log.detail, ...notes].filter(Boolean).join(', ') || null,

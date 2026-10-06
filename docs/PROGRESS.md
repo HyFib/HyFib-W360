@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-06 — Automation steps that create a CRM task (P4-01, P4-04, H-012, ADR-244)
+
+Status: **Implemented; its database and browser tests run in CI only.** Automations could not create
+CRM work. The local PostgreSQL is unavailable, so migrations 0158 and 0159 and the integration and
+e2e tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0158 (`crm_tasks.created_by_automation_id`, the creator check and the
+  foreign key to the automation, the run steps' outcomes `created` and `skipped`, all NOT VALID) and
+  0159 (validates them).
+- **Domain:** the `create_task` step (graph, checks against `crmMemberIds`, the interpreter's
+  effect), `applyTaskEffect` in the runner, the `crm.write` check on publishing and testing, the
+  company's CRM members among the editor's options, the export column.
+- **Web:** the step in the automation editor (title, member, due after hours), its line in the
+  simulator, the run page's outcomes and reasons, and "by an automation" on the CRM timeline.
+- **Tests:**
+  - Unit (5 new in `task-step.test.ts`).
+  - Integration (3 new in `automations.test.ts`: the task and its activity, a suspended member
+    skipped while the run goes on, publishing refused for a member without CRM access and for a
+    member who cannot edit the CRM). Written for CI; not run here.
+  - E2e (`automations.spec.ts`: a task step built, simulated, published and run, the task on the
+    owner's task list). Written for CI; not run here.
+- **Docs:** ADR-244; ARCHITECTURE; SECURITY; THREAT-MODEL T221; DATA-RETENTION; DEPLOYMENT; BACKLOG
+  P4-04; feature matrix H-012.
+- **Mutation checks:** 16/16 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                                     | Result                                                          |
+| ----------------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`          | clean                                                           |
+| `pnpm test` (unit)                                          | 1050 passed (111 files)                                         |
+| `pnpm test:integration`, `pnpm test:e2e`, `pnpm db:migrate` | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                                | passed                                                          |
+| Mutation checks                                             | 16/16 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes                       | no leaks found                                                  |
+
+### Known gaps
+
+- No steps that create deals, no reminder email for an automation's task, no tasks for a team or in
+  turn.
+
 ## 2026-10-06 — Members who have a conversation open (P3-06, H-011, ADR-243)
 
 Status: **Implemented; its database and browser tests run in CI only.** Nothing told a member that a

@@ -175,6 +175,9 @@ export const AUTOMATION_STEP_OUTCOMES = [
   'taken_over',
   'requested',
   'responded',
+  /** A task step created its CRM task, or skipped it (migration 0158, ADR-244). */
+  'created',
+  'skipped',
 ] as const;
 export type AutomationStepOutcome = (typeof AUTOMATION_STEP_OUTCOMES)[number];
 

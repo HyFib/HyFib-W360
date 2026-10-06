@@ -466,6 +466,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   and `remove_conversation_tag` effects and reads `RunFacts.conversationTags`, which `loadFacts`
   reads; `applyConversationEffect` in the runner applies them under the conversation lock the step
   holds.
+- **Automations that create CRM tasks** (ADR-244): `create_task` steps in `automations/graph.ts`
+  (checked against the company's active CRM members, `crmMemberIds`); the interpreter gives a
+  `create_task` effect with the rendered title; `applyTaskEffect` in the runner checks the contact
+  and the member and inserts the task with `created_by_automation_id`, adding a `task_created`
+  activity without an actor. A skipped task logs the step as `skipped`.
 - **Read receipts and typing indicators** (`inbox/read-receipts.ts`, ADR-223): `markRead` in
   `messaging/inbox.ts` calls `queueReadReceipt` in its transaction; the composer calls
   `showTypingAction` at most every 20 seconds, which `showTyping` checks and queues; both sign a job

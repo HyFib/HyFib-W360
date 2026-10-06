@@ -2036,6 +2036,140 @@ describe('automations that tag the conversation (ADR-222)', () => {
   });
 });
 
+describe('automations that create CRM tasks (ADR-244)', () => {
+  /** A callback task for `assignee`, due in 4 hours, then a message to the customer. */
+  const callback = (assignee: string) => ({
+    version: 1,
+    start: 'task',
+    nodes: [
+      {
+        id: 'task',
+        type: 'create_task',
+        title: 'Call {{name}} back',
+        assigneeMembershipId: assignee,
+        dueInHours: 4,
+        next: 'thanks',
+      },
+      { id: 'thanks', type: 'send_text', text: 'Someone will call you soon.', next: null },
+    ],
+  });
+
+  const tasksOf = (tenantId: string) =>
+    fx.query<{
+      id: string;
+      title: string;
+      contact_id: string;
+      assignee_membership_id: string;
+      due_at: Date | null;
+      status: string;
+      created_by_membership_id: string | null;
+      created_by_automation_id: string | null;
+    }>(
+      `SELECT id, title, contact_id, assignee_membership_id, due_at, status,
+              created_by_membership_id, created_by_automation_id
+         FROM app.crm_tasks WHERE tenant_id = $1 ORDER BY created_at, id`,
+      [tenantId],
+    );
+
+  it('creates the task for the chosen member about the run’s contact, as the automation', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const { id: automationId } = await publish(
+      owner,
+      'Callbacks',
+      keyword('call me'),
+      callback(agent.membership.id),
+    );
+    const conversationId = await inbound(c, waId(), 'please call me');
+    const run = await onlyRun(conversationId);
+    const before = Date.now();
+    expect((await drive(c, conversationId, run.id)).outcome).toBe('ended');
+    const after = Date.now();
+
+    const [contact] = await fx.query<{ contact_id: string }>(
+      'SELECT contact_id FROM app.conversations WHERE id = $1',
+      [conversationId],
+    );
+    const tasks = await tasksOf(c.tenant.id);
+    expect(tasks).toHaveLength(1);
+    const task = tasks[0]!;
+    expect(task).toMatchObject({
+      title: 'Call Priya Customer back',
+      contact_id: contact!.contact_id,
+      assignee_membership_id: agent.membership.id,
+      status: 'open',
+      created_by_membership_id: null,
+      created_by_automation_id: automationId,
+    });
+    expect(task.due_at!.getTime()).toBeGreaterThanOrEqual(before + 4 * 3_600_000);
+    expect(task.due_at!.getTime()).toBeLessThanOrEqual(after + 4 * 3_600_000);
+    // On the contact's CRM timeline, created by no member, naming the automation and the run.
+    expect(
+      await fx.query(
+        `SELECT kind, actor_membership_id, data FROM app.crm_activities
+          WHERE tenant_id = $1 AND task_id = $2`,
+        [c.tenant.id, task.id],
+      ),
+    ).toEqual([
+      {
+        kind: 'task_created',
+        actor_membership_id: null,
+        data: { automationId, runId: run.id },
+      },
+    ]);
+    expect((await stepLog(run.id)).map((s) => [s.node_id, s.outcome, s.detail])).toEqual(
+      expect.arrayContaining([
+        ['task', 'created', null],
+        ['thanks', 'sent', null],
+      ]),
+    );
+  });
+
+  it('creates no task for a member who can no longer use the CRM, says why and goes on', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    await publish(owner, 'Callbacks', keyword('call me'), callback(agent.membership.id));
+    await fx.query(`UPDATE app.memberships SET status = 'suspended' WHERE id = $1`, [
+      agent.membership.id,
+    ]);
+    const conversationId = await inbound(c, waId(), 'call me please');
+    const run = await onlyRun(conversationId);
+    expect((await drive(c, conversationId, run.id)).outcome).toBe('ended');
+    expect(await tasksOf(c.tenant.id)).toEqual([]);
+    const log = await stepLog(run.id);
+    expect(log.find((s) => s.node_id === 'task')).toMatchObject({
+      outcome: 'skipped',
+      detail: 'task_assignee_unavailable',
+    });
+    expect(log.find((s) => s.node_id === 'thanks')?.outcome).toBe('sent');
+  });
+
+  it('is published only for an active member who can use the CRM, by a member who may edit the CRM', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const marketer = await fx.ctx(c, c.marketer);
+    // A marketer cannot use the CRM: no task can be for them.
+    await expectAppError(
+      publish(owner, 'Callbacks', keyword('call me'), callback(marketer.membership.id)),
+      'precondition_failed',
+      /active member who can use the CRM/,
+    );
+    // A member whose roles do not let them edit the CRM cannot publish or test a task step.
+    const agent = await fx.ctx(c, c.agent);
+    const noCrm: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'crm.write')),
+    };
+    await expectAppError(
+      publish(noCrm, 'Callbacks', keyword('call me'), callback(agent.membership.id)),
+      'forbidden',
+      /permission to edit the CRM/,
+    );
+  });
+});
+
 /** Polls a condition (every 100 ms, up to 20 s); jobs run asynchronously in pg-boss. */
 async function waitFor(condition: () => Promise<boolean>) {
   const deadline = Date.now() + 20_000;

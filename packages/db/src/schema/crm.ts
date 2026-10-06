@@ -82,7 +82,10 @@ export const crmTasks = appSchema.table('crm_tasks', {
   completedAt: tz('completed_at'),
   completedByMembershipId: uuid('completed_by_membership_id'),
   version: integer('version').notNull().default(1),
-  createdByMembershipId: uuid('created_by_membership_id').notNull(),
+  /** The member who created the task, or null when an automation did (migration 0158, ADR-244). */
+  createdByMembershipId: uuid('created_by_membership_id'),
+  /** The automation whose run created the task (ADR-244); exactly one creator is set. */
+  createdByAutomationId: uuid('created_by_automation_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
