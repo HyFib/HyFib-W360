@@ -475,6 +475,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-221 has no migration. Until the web rollout ends, an old web server answers conversations
    without `tags` and refuses `tag`, `addTags` and `removeTags` as unknown fields (422).
 
+   ADR-222 has no migration, but roll the workers out before the web tier as usual: a worker of the
+   previous release cannot read a published version with a "Tag the conversation" step and would
+   fail its runs as unreadable.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

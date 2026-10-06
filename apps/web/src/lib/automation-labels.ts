@@ -88,6 +88,7 @@ export const STEP_DETAILS: Record<string, string> = {
   empty_message: 'the message was empty after filling in placeholders',
   contact_erased: 'the contact was erased',
   too_many_tags: 'the contact already has the maximum number of tags',
+  conversation_too_many_tags: 'the conversation already has the maximum number of tags',
   field_missing: 'the contact field no longer exists',
   invalid_value: 'the value did not fit the contact field',
   tester_not_member: 'the member running the test left the company',

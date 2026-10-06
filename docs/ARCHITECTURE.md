@@ -416,6 +416,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `tag`, `prepareConversationChange` checks `addTags` and `removeTags` before the transaction, and
   `changeLockedConversation` applies them after the status under the row lock, touching
   `updated_at`, emitting `conversation.tags` and auditing the counts.
+- **Automations that tag the conversation** (ADR-222): `update_conversation` steps and
+  `conversation_tag` rules in `automations/graph.ts`; the interpreter gives `add_conversation_tag`
+  and `remove_conversation_tag` effects and reads `RunFacts.conversationTags`, which `loadFacts`
+  reads; `applyConversationEffect` in the runner applies them under the conversation lock the step
+  holds.
 - **Files customers send** (`messaging/received-media.ts`, ADR-216): the route
   `/c/<company>/inbox/<conversation>/media/<message>` checks that the member can see the
   conversation and reads the message's media record and the receiving account's token in one

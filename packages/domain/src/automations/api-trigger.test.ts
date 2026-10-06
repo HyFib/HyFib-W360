@@ -164,6 +164,7 @@ describe('API inputs in the steps (ADR-077)', () => {
       contactName: 'Asha',
       companyName: 'Cora Clinic',
       tags: new Set(),
+      conversationTags: new Set(),
       fields: {},
       businessOpen: true,
     };

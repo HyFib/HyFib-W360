@@ -152,3 +152,55 @@ test('an automation is built, simulated, published, runs on WhatsApp and hands o
   await page.getByRole('button', { name: 'Pause' }).click();
   await expect(page.getByText(/Paused: no new runs start/)).toBeVisible();
 });
+
+test('an automation tags the conversation it answers, and the inbox shows the tag (ADR-222)', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const email = uniqueEmail('bottags');
+  const slug = `bottags-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Tia Triage', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Triage Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  await page.getByRole('link', { name: 'Automations' }).first().click();
+  await page.getByLabel('Name', { exact: true }).fill('Refund triage');
+  await page.getByRole('button', { name: 'Create draft' }).click();
+  await expect(page.getByRole('heading', { name: 'Refund triage' })).toBeVisible();
+
+  // A greeting, then a step that tags the conversation.
+  await page.getByLabel('Start when').selectOption('keyword');
+  await page.getByLabel('Keywords').fill('refund');
+  await page.locator('#step-welcome-text').fill('We are looking into your refund.');
+  await page.getByLabel('Add a step').selectOption('update_conversation');
+  await page.getByRole('button', { name: 'Add step' }).click();
+  await page.locator('#step-update-conversation-1-tag').fill('Refund');
+  await page.locator('#step-welcome-next').selectOption('update-conversation-1');
+  await expect(page.getByText(/to fix before publishing/)).toBeHidden();
+
+  // The simulator says what the step would do, and changes nothing.
+  await page.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(page.getByText('Tag “refund” added to the conversation.')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByText('Draft saved.')).toBeVisible();
+  await page.getByRole('button', { name: 'Publish' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Publish' }).click();
+  await expect(page.getByText('Published.')).toBeVisible();
+
+  // A customer asks about a refund: the run answers, then tags the conversation.
+  const customer = randomWaId();
+  await sendSignedWebhook(
+    request,
+    inboundMessage(wabaId, phoneNumberId, customer, 'refund please'),
+  );
+  await page.goto(`/c/${slug}/inbox`);
+  const item = page.getByRole('link', { name: /Priya Customer/ });
+  await expect(item).toContainText('refund', { timeout: 30_000 });
+  await page.goto(`/c/${slug}/inbox?view=all&status=open&tag=refund`);
+  await expect(item).toHaveCount(1);
+});

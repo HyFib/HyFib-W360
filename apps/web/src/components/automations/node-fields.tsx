@@ -227,13 +227,15 @@ function RuleEditor({
               onChange({ kind, variable: options.answers[0] ?? 'answer', op: 'equals', value: '' });
             else if (kind === 'field')
               onChange({ kind, field: options.fields[0]?.key ?? 'field', op: 'equals', value: '' });
-            else if (kind === 'tag') onChange({ kind, op: 'has', tag: '' });
+            else if (kind === 'tag' || kind === 'conversation_tag')
+              onChange({ kind, op: 'has', tag: '' });
             else onChange({ kind, op: 'open' });
           }}
         >
           <option value="answer">A saved answer</option>
           <option value="field">A contact field</option>
           <option value="tag">A contact tag</option>
+          <option value="conversation_tag">A conversation tag</option>
           <option value="business_hours">Business hours</option>
         </Select>
       )}
@@ -309,10 +311,10 @@ function RuleEditor({
         )}
       </>
     );
-  } else if (rule.kind === 'tag') {
+  } else if (rule.kind === 'tag' || rule.kind === 'conversation_tag') {
     rest = (
       <>
-        <Field id={`${prefix}-op`} label="Contact">
+        <Field id={`${prefix}-op`} label={rule.kind === 'tag' ? 'Contact' : 'Conversation'}>
           {(aria) => (
             <Select
               {...aria}
@@ -643,6 +645,56 @@ export function NodeFields({
               )}
             </Field>
           ) : null}
+          <NextSelect
+            id={`${p}-next`}
+            label="Then"
+            value={node.next}
+            self={node.id}
+            options={options}
+            onChange={(next) => patch(node, { next })}
+          />
+        </div>
+      );
+    }
+    case 'update_conversation': {
+      const action = node.action;
+      return (
+        <div className="grid gap-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field id={`${p}-action`} label="Change">
+              {(aria) => (
+                <Select
+                  {...aria}
+                  value={action.kind}
+                  onChange={(e) =>
+                    patch(node, {
+                      action: {
+                        kind: e.target.value as 'add_tag' | 'remove_tag',
+                        tag: action.tag,
+                      },
+                    })
+                  }
+                >
+                  <option value="add_tag">Add a tag to the conversation</option>
+                  <option value="remove_tag">Remove a tag from the conversation</option>
+                </Select>
+              )}
+            </Field>
+            <Field
+              id={`${p}-tag`}
+              label="Tag"
+              description="As members tag conversations in the inbox: lower case, without commas."
+            >
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={action.tag}
+                  maxLength={40}
+                  onChange={(e) => patch(node, { action: { ...action, tag: e.target.value } })}
+                />
+              )}
+            </Field>
+          </div>
           <NextSelect
             id={`${p}-next`}
             label="Then"

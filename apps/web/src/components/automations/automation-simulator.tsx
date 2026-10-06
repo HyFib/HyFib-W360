@@ -80,9 +80,28 @@ const END_TEXT: Record<string, string> = {
 interface SimFacts {
   contactName: string;
   tags: string;
+  /** The simulated conversation's tags (ADR-222). */
+  conversationTags: string;
   fields: string;
   businessOpen: boolean;
 }
+
+/** Tags typed with commas, as a run reads them (lower case, each once). */
+const tagSet = (typed: string): Set<string> =>
+  new Set(
+    typed
+      .split(',')
+      .map((t) => t.trim().toLowerCase())
+      .filter(Boolean),
+  );
+
+/** The typed tags without `tag`. */
+const withoutTag = (typed: string, tag: string): string =>
+  typed
+    .split(',')
+    .map((t) => t.trim())
+    .filter((t) => t && t.toLowerCase() !== tag)
+    .join(', ');
 
 function toFacts(sim: SimFacts, companyName: string, storeEvent: boolean): RunFacts {
   const fields: Record<string, string> = {};
@@ -93,12 +112,8 @@ function toFacts(sim: SimFacts, companyName: string, storeEvent: boolean): RunFa
   return {
     contactName: sim.contactName.trim() || null,
     companyName,
-    tags: new Set(
-      sim.tags
-        .split(',')
-        .map((t) => t.trim().toLowerCase())
-        .filter(Boolean),
-    ),
+    tags: tagSet(sim.tags),
+    conversationTags: tagSet(sim.conversationTags),
     fields,
     businessOpen: sim.businessOpen,
     order: storeEvent ? sampleOrder(sim.contactName.trim(), companyName) : null,
@@ -128,6 +143,7 @@ export function AutomationSimulator({
   const [sim, setSim] = useState<SimFacts>({
     contactName: 'Asha',
     tags: '',
+    conversationTags: '',
     fields: '',
     businessOpen: true,
   });
@@ -186,15 +202,21 @@ export function AutomationSimulator({
           out.push({ who: 'note', text: `Tag “${effect.tag}” added to the contact.` });
           break;
         case 'remove_tag':
+          facts = { ...facts, tags: withoutTag(facts.tags, effect.tag) };
+          out.push({ who: 'note', text: `Tag “${effect.tag}” removed from the contact.` });
+          break;
+        case 'add_conversation_tag':
           facts = {
             ...facts,
-            tags: facts.tags
-              .split(',')
-              .map((t) => t.trim())
-              .filter((t) => t && t.toLowerCase() !== effect.tag)
+            conversationTags: [withoutTag(facts.conversationTags, effect.tag), effect.tag]
+              .filter(Boolean)
               .join(', '),
           };
-          out.push({ who: 'note', text: `Tag “${effect.tag}” removed from the contact.` });
+          out.push({ who: 'note', text: `Tag “${effect.tag}” added to the conversation.` });
+          break;
+        case 'remove_conversation_tag':
+          facts = { ...facts, conversationTags: withoutTag(facts.conversationTags, effect.tag) };
+          out.push({ who: 'note', text: `Tag “${effect.tag}” removed from the conversation.` });
           break;
         case 'set_field':
           facts = { ...facts, fields: `${facts.fields}\n${effect.field}=${effect.value}`.trim() };
@@ -577,6 +599,19 @@ export function AutomationSimulator({
               {...aria}
               value={sim.tags}
               onChange={(e) => setSim({ ...sim, tags: e.target.value })}
+            />
+          )}
+        </Field>
+        <Field
+          id="sim-conversation-tags"
+          label="Conversation tags"
+          description="Separated by commas."
+        >
+          {(aria) => (
+            <Input
+              {...aria}
+              value={sim.conversationTags}
+              onChange={(e) => setSim({ ...sim, conversationTags: e.target.value })}
             />
           )}
         </Field>

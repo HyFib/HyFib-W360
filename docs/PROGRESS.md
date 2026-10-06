@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-06 — Phase 4 follow-up: automations that tag the conversation (P4-01, W-035, ADR-222)
+
+Status: **Implemented; its database and browser tests run in CI only.** Automations could tag
+contacts but not conversations. The local PostgreSQL is unavailable (its Docker daemon stopped), so
+the new integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-222):** a "Tag the conversation" step and a "conversation tag" condition rule;
+  applied under the conversation's lock, at most 20 tags; no migration.
+- **Domain:** `automations/graph.ts` (the step, the rule, its label and edge),
+  `automations/interpreter.ts` (the facts, the effects, the rule), `automations/runner.ts`
+  (`applyConversationEffect`, the facts read).
+- **Web:** the step's form and the rule in the builder, simulated conversation tags in the
+  simulator, and the step log's note.
+- **Tests:**
+  - Unit (3 new in `automations/interpreter.test.ts`, 2 changed for the new facts): branching on the
+    conversation's tags, the effects, refusals of tags that cannot be tags.
+  - Integration (2 new in `automations.test.ts`): tagging, untagging and branching in real runs,
+    `updatedAt` and the live events, the limit. Written for CI; not run here.
+  - E2E (1 new in `automations.spec.ts`): an automation built in the editor, simulated and
+    published, tags the conversation it answers. Written for CI; not run here.
+- **Docs:** ADR-222; ARCHITECTURE; SECURITY; THREAT-MODEL T209; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P4-01; feature matrix W-035, W-076 and W-077.
+- **Mutation checks:** 8 deliberate regressions tried, all caught on the unit-tested parts. Applying
+  the step under the lock needs the database, so its regressions are left to the integration tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 962 passed (96 files)                                               |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 8 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- A trigger when a conversation is tagged; tags from saved answers.
+
 ## 2026-10-06 — Phase 5: conversation tags through the API (P5-08, W-035, ADR-221)
 
 Status: **Implemented; its database and browser tests run in CI only.** Members tag conversations

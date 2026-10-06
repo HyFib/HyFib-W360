@@ -8712,3 +8712,27 @@ Decision:
 
 Not built: webhook events or webhook filters on tags, tags in the message feed, and a list of the
 tags in use through the API.
+
+## ADR-222 Automations that tag the conversation and branch on its tags (P4-01, W-035) (2026-10-06)
+
+Context: members and keys tag conversations since ADR-220 and ADR-221, but an automation that asks
+the customer what they need could not label the conversation for the team ("refund"), nor take
+another path for a conversation already labelled.
+
+Decision:
+
+- **A step, "Tag the conversation"** (`update_conversation`): add or remove one tag on the run's
+  conversation, written as tags are, then go on to the next step. A conversation that already has 20
+  tags keeps them; the step goes on and its log says why (`conversation_too_many_tags`), as a
+  contact at its limit does. A conversation whose contact was erased takes no tag.
+- **A condition rule, "A conversation tag"** (`conversation_tag`): the run's conversation has, or
+  does not have, a tag, beside the contact's tags (whose rule is unchanged).
+- **Applied as members tag:** the runner holds the conversation's row lock for the step, which
+  members and keys take before changing its tags, so the count and the change see one state; a
+  change moves `updatedAt` and emits the live event. The simulator shows what the step would do and
+  keeps simulated conversation tags.
+- **No migration:** steps live in the published versions' JSON. Workers roll out before the web
+  tier, so a version with the new step is never read by a worker that does not know it.
+
+Not built: a trigger when a conversation is tagged, tagging from the API's runs, and tags set from
+saved answers.

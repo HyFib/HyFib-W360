@@ -73,6 +73,8 @@ export interface RunFacts {
   contactName: string | null;
   companyName: string;
   tags: ReadonlySet<string>;
+  /** The tags on the run's conversation (ADR-222). */
+  conversationTags: ReadonlySet<string>;
   fields: Readonly<Record<string, string | number | boolean>>;
   /** Whether the business is open now (true when business hours are off). */
   businessOpen: boolean;
@@ -108,6 +110,9 @@ export type RunEffect =
   | { kind: 'add_tag'; tag: string }
   | { kind: 'remove_tag'; tag: string }
   | { kind: 'set_field'; field: string; value: string }
+  /** A tag added to or removed from the run's conversation (ADR-222). */
+  | { kind: 'add_conversation_tag'; tag: string }
+  | { kind: 'remove_conversation_tag'; tag: string }
   /**
    * An HTTP call to make (by the worker, outside the step's transaction). Texts are rendered;
    * header values keep references to secrets, which only the worker fills in.
@@ -271,6 +276,11 @@ export function evaluateRule(
     case 'tag': {
       const normalized = normalizeTag(rule.tag);
       const has = normalized.ok && facts.tags.has(normalized.tag);
+      return rule.op === 'has' ? has : !has;
+    }
+    case 'conversation_tag': {
+      const normalized = normalizeTag(rule.tag);
+      const has = normalized.ok && facts.conversationTags.has(normalized.tag);
       return rule.op === 'has' ? has : !has;
     }
     case 'business_hours':
@@ -525,6 +535,14 @@ export function advance(input: AdvanceInput): StepResult {
                 ),
               }
             : { kind: action.kind, tag: action.tag };
+        return moveTo(current.next, base, [effect], 'updated', null);
+      }
+      case 'update_conversation': {
+        const effect: RunEffect = {
+          kind:
+            current.action.kind === 'add_tag' ? 'add_conversation_tag' : 'remove_conversation_tag',
+          tag: current.action.tag,
+        };
         return moveTo(current.next, base, [effect], 'updated', null);
       }
       case 'http_request': {

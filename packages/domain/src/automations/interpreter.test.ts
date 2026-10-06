@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { TEMPLATE_LIMITS } from '../templates/definition';
 import {
   AUTOMATION_LIMITS,
+  NODE_TYPES,
+  NODE_TYPE_LABELS,
   RUN_BUDGETS,
   checkGraph,
+  edgesOf,
   encodeHeaderValue,
   httpHeaderText,
   matchTrigger,
@@ -17,6 +20,7 @@ import {
   acceptAnswer,
   advance,
   botButtonId,
+  evaluateRule,
   initialRunState,
   parseBotButtonId,
   type RunEvent,
@@ -31,6 +35,7 @@ const facts: RunFacts = {
   contactName: 'Asha',
   companyName: 'Acme',
   tags: new Set(['vip']),
+  conversationTags: new Set(['refund']),
   fields: { orders: 3, city: 'Pune' },
   businessOpen: true,
 };
@@ -972,5 +977,132 @@ describe('automation HTTP step', () => {
       status: 'failed',
       endReason: 'budget_http',
     });
+  });
+});
+
+describe('steps that tag the conversation (ADR-222)', () => {
+  const tagging = graphOf({
+    version: 1,
+    start: 'check',
+    nodes: [
+      {
+        id: 'check',
+        type: 'condition',
+        match: 'any',
+        rules: [{ kind: 'conversation_tag', op: 'has_not', tag: ' Refund ' }],
+        then: 'tag',
+        else: 'untag',
+      },
+      {
+        id: 'tag',
+        type: 'update_conversation',
+        action: { kind: 'add_tag', tag: 'Follow  Up' },
+        next: null,
+      },
+      {
+        id: 'untag',
+        type: 'update_conversation',
+        action: { kind: 'remove_tag', tag: 'REFUND' },
+        next: null,
+      },
+    ],
+  });
+
+  it('branches on the conversation’s tags, not the contact’s', () => {
+    // The facts' conversation has refund and the contact vip.
+    const has = step(tagging, initialRunState(tagging), { kind: 'continue' });
+    expect(has.log).toMatchObject({ nodeId: 'check', outcome: 'branched', branch: 'no' });
+    const without = step(
+      tagging,
+      initialRunState(tagging),
+      { kind: 'continue' },
+      { ...facts, conversationTags: new Set(), tags: new Set(['refund']) },
+    );
+    expect(without.log.branch).toBe('yes');
+    expect(
+      evaluateRule(
+        { kind: 'conversation_tag', op: 'has', tag: 'Refund' },
+        { ...facts, conversationTags: new Set(['refund']) },
+        {},
+      ),
+    ).toBe(true);
+    expect(evaluateRule({ kind: 'conversation_tag', op: 'has', tag: 'vip' }, facts, {})).toBe(
+      false,
+    );
+  });
+
+  it('adds or removes the tag, written as tags are, and moves on', () => {
+    const tagged = step(
+      tagging,
+      { ...initialRunState(tagging), nodeId: 'tag' },
+      { kind: 'continue' },
+    );
+    expect(tagged).toMatchObject({
+      effects: [{ kind: 'add_conversation_tag', tag: 'follow up' }],
+      status: 'completed',
+      endReason: 'no_next',
+      log: { nodeId: 'tag', nodeType: 'update_conversation', outcome: 'updated' },
+    });
+    const untagged = step(
+      tagging,
+      { ...initialRunState(tagging), nodeId: 'untag' },
+      { kind: 'continue' },
+    );
+    expect(untagged.effects).toEqual([{ kind: 'remove_conversation_tag', tag: 'refund' }]);
+    expect(edgesOf(tagging.nodes.find((n) => n.id === 'tag')!)).toEqual([
+      { label: 'next', target: null },
+    ]);
+    expect(NODE_TYPES).toContain('update_conversation');
+    expect(NODE_TYPE_LABELS.update_conversation).toBe('Tag the conversation');
+  });
+
+  it('refuses a tag that cannot be one, in a step or a rule', () => {
+    for (const tag of ['', 'a,b', 'x'.repeat(41)]) {
+      expect(
+        parseGraph({
+          version: 1,
+          start: 'tag',
+          nodes: [
+            {
+              id: 'tag',
+              type: 'update_conversation',
+              action: { kind: 'add_tag', tag },
+              next: null,
+            },
+          ],
+        }).ok,
+        JSON.stringify(tag),
+      ).toBe(false);
+      expect(
+        parseGraph({
+          version: 1,
+          start: 'c',
+          nodes: [
+            {
+              id: 'c',
+              type: 'condition',
+              match: 'all',
+              rules: [{ kind: 'conversation_tag', op: 'has', tag }],
+              then: null,
+              else: null,
+            },
+          ],
+        }).ok,
+      ).toBe(false);
+    }
+    expect(
+      parseGraph({
+        version: 1,
+        start: 'tag',
+        nodes: [
+          {
+            id: 'tag',
+            type: 'update_conversation',
+            action: { kind: 'set_field', field: 'plan', value: 'x' },
+            next: null,
+          },
+        ],
+      }).ok,
+    ).toBe(false);
   });
 });
