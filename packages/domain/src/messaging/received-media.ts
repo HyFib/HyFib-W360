@@ -90,14 +90,15 @@ export function mediaPresentation(mimeType: string | null | undefined): {
 }
 
 /**
- * The name a file is saved under: the name the customer's document came with, without characters
- * a file name or a header cannot hold, or else `whatsapp-<type>-<message>.<extension>`.
+ * The name a file is saved under: the name the document came with, without characters a file name
+ * or a header cannot hold, or else `whatsapp-<type>-<message>.<extension>` (without the message for
+ * a file not yet sent).
  */
 export function mediaFilename(input: {
   type: string;
   mimeType: string | null | undefined;
   filename: string | null | undefined;
-  messageId: string;
+  messageId: string | null;
 }): string {
   const cleaned = (input.filename ?? '')
     .normalize('NFC')
@@ -107,7 +108,8 @@ export function mediaFilename(input: {
   const given = Array.from(cleaned).slice(0, 150).join('').trim();
   if (given) return given;
   const extension = EXTENSIONS[baseMediaType(input.mimeType) ?? ''];
-  return `whatsapp-${input.type}-${input.messageId.slice(0, 8)}${extension ? `.${extension}` : ''}`;
+  const message = input.messageId ? `-${input.messageId.slice(0, 8)}` : '';
+  return `whatsapp-${input.type}${message}${extension ? `.${extension}` : ''}`;
 }
 
 /** A Content-Disposition value: an ASCII name, and the full name in UTF-8 (RFC 6266, RFC 8187). */
@@ -270,10 +272,20 @@ export function createReceivedMediaService(deps: ReceivedMediaDeps) {
     tenantId: string,
     messageId: string,
     row: NonNullable<Awaited<ReturnType<typeof findReceivedFile>>>,
+    customerOnly: boolean,
   ): Promise<{ mimeType: string | null; filename: string; body: ReadableStream<Uint8Array> }> {
-    // An erased customer's files are gone with their media rows.
-    if (row.direction !== 'inbound' || !RECEIVED_MEDIA_TYPES.has(row.type) || !row.providerMediaId)
-      throw refusal('not_found', 'This message has no file from the customer.', 'no_file');
+    // A message has a media record when the customer sent a file or a member uploaded one
+    // (ADR-218); an erased customer's are gone with their messages' content.
+    if (
+      (customerOnly && row.direction !== 'inbound') ||
+      !RECEIVED_MEDIA_TYPES.has(row.type) ||
+      !row.providerMediaId
+    )
+      throw refusal(
+        'not_found',
+        customerOnly ? 'This message has no file from the customer.' : 'This message has no file.',
+        'no_file',
+      );
     if (row.accountStatus !== 'connected' || !row.credential)
       throw refusal('precondition_failed', DISCONNECTED, 'channel_disconnected');
     const token = keyring.decryptString(
@@ -300,8 +312,9 @@ export function createReceivedMediaService(deps: ReceivedMediaDeps) {
 
   return {
     /**
-     * The file a customer sent in a message of a conversation the member can see, fetched from
-     * WhatsApp now. A message the member cannot see is not found, as the conversation is.
+     * The file of a message of a conversation the member can see, a customer's or one a member
+     * sent (ADR-218), fetched from WhatsApp now. A message the member cannot see is not found, as
+     * the conversation is.
      */
     async openReceivedMedia(
       ctx: TenantContext,
@@ -311,7 +324,7 @@ export function createReceivedMediaService(deps: ReceivedMediaDeps) {
       if (!isUuid(conversationId) || !isUuid(messageId)) throw notFound('Message');
       const row = await findReceivedFile(db, ctx.scope, ctx.tenant.id, messageId, conversationId);
       if (!row || !canSeeConversation(ctx, row.assignedMembershipId)) throw notFound('Message');
-      const file = await fetchFile(ctx.tenant.id, messageId, row);
+      const file = await fetchFile(ctx.tenant.id, messageId, row, false);
       return { ...mediaPresentation(file.mimeType), filename: file.filename, body: file.body };
     },
 
@@ -325,7 +338,7 @@ export function createReceivedMediaService(deps: ReceivedMediaDeps) {
       if (!isUuid(messageId)) throw notFound('Message');
       const row = await findReceivedFile(db, ctx.scope, ctx.tenant.id, messageId, null);
       if (!row || row.contactErasedAt !== null) throw notFound('Message');
-      const file = await fetchFile(ctx.tenant.id, messageId, row);
+      const file = await fetchFile(ctx.tenant.id, messageId, row, true);
       return {
         contentType: baseMediaType(file.mimeType) ?? 'application/octet-stream',
         disposition: 'attachment',

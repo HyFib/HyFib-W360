@@ -42,8 +42,11 @@ verification, app review, Embedded Signup configuration).
   idempotency keys, window indicator, assignment, resolve/reopen, notes, unknown-outcome decisions,
   live updates. **[Files customers send built; their database and browser tests run only in CI]**
   (ADR-216: photos, stickers, voice notes, videos and documents fetched from WhatsApp when shown and
-  never stored; no migration). Remaining: list virtualisation, collision warnings (phase 3 with
-  presence), template picker (phase 3), byte ranges so Safari plays recordings and videos.
+  never stored; no migration). **[Sending files built; their database and browser tests run only in
+  CI]** (ADR-218: photos, videos, recordings and documents up to 16 MB uploaded to WhatsApp when a
+  member sends them and sent by their id; no migration). Remaining: list virtualisation, collision
+  warnings (phase 3 with presence), template picker (phase 3), byte ranges so Safari plays
+  recordings and videos.
 - **P2-10 Channel settings UI** — done: connect (Embedded Signup), setup progress and errors, retry,
   disconnect, quality and health time. Remaining: messaging limits and granted permissions display.
 - **P2-11 Platform quarantine view** — done with P5-10 (ADR-054): the operations console's

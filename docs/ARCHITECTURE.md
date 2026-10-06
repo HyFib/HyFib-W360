@@ -416,6 +416,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `openReceivedMediaForKey`): `conversations.read`, the message in the key's company and not of an
   erased contact, then the same fetch, answered as an attachment with the file's own type through
   `handleApiRequest`'s file result.
+- **Files members send** (`messaging/file-replies.ts`, ADR-218): the route
+  `/api/c/<company>/inbox/<conversation>/files` (trusted origin, the member's session, at most 16 MB
+  and 64 KB read) hands the file to `queueFileReply`, which checks its type and size, answers a
+  retried client key with its message, checks the reply without writing (`prepareReply`), uploads
+  the file (`GraphClient.uploadMedia`) and queues the reply through `queueReply`, which text replies
+  use too, with a media record naming the upload.
 - **Collision warning** (`queueTextMessage` `afterMessageId`): under the conversation row lock, a
   reply is refused once when another member's reply is newer than the newest message the sender had
   seen; the composer refreshes the thread and keeps the draft (ADR-033).

@@ -106,11 +106,11 @@ export function classifyGraphError(
   };
 }
 
-/** A file part of a multipart request. */
+/** A file part of a multipart request: text (Flow JSON) or bytes (an uploaded file, ADR-218). */
 export interface FormFile {
   filename: string;
   contentType: string;
-  content: string;
+  content: string | Uint8Array<ArrayBuffer>;
 }
 
 /** A flow as `GET /{flow-id}` describes it (research M-163). */
@@ -210,6 +210,9 @@ export interface MediaLocation {
  */
 export const MEDIA_DOWNLOAD_TIMEOUT_MS = 300_000;
 
+/** How long an upload of a file a member sends may take (at most 16 MB, ADR-218). */
+export const MEDIA_UPLOAD_TIMEOUT_MS = 120_000;
+
 /** A product token in the form of the User-Agent pattern in Meta's OpenAPI description. */
 const MEDIA_USER_AGENT = 'HyFib-W360/1.0.0';
 
@@ -240,6 +243,8 @@ export class GraphClient {
       body?: unknown;
       /** Multipart form data (Flows endpoints take form fields and files, research M-161). */
       form?: Record<string, string | FormFile>;
+      /** A longer limit than the client's, for an upload. */
+      timeoutMs?: number;
     },
     map: (json: Record<string, unknown>) => T | null,
   ): Promise<GraphResult<T>> {
@@ -266,7 +271,7 @@ export class GraphClient {
         method,
         headers,
         ...(body !== undefined ? { body } : {}),
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(options.timeoutMs ?? this.timeoutMs),
         redirect: 'error',
       });
     } catch (error) {
@@ -785,6 +790,33 @@ export class GraphClient {
       `/${encodeURIComponent(phoneNumberId)}/register`,
       { token, body: { messaging_product: 'whatsapp', pin } },
       (json) => (json.success === true ? { registered: true } : null),
+    );
+  }
+
+  /**
+   * POST /{phone-number-id}/media: uploads a file for the number to send, as multipart form data
+   * with `messaging_product` and `file`, whose part carries the file's type (operation
+   * `uploadImage` in Meta's official OpenAPI description, research M-046, M-197). Meta answers the
+   * media's `id`, which a message names in place of a link. An upload that times out may have
+   * reached Meta: the media it left is never sent and Meta deletes it (M-046).
+   */
+  uploadMedia(
+    phoneNumberId: string,
+    token: string,
+    file: { filename: string; contentType: string; bytes: Uint8Array<ArrayBuffer> },
+  ) {
+    return this.request(
+      'POST',
+      `/${encodeURIComponent(phoneNumberId)}/media`,
+      {
+        token,
+        form: {
+          messaging_product: 'whatsapp',
+          file: { filename: file.filename, contentType: file.contentType, content: file.bytes },
+        },
+        timeoutMs: MEDIA_UPLOAD_TIMEOUT_MS,
+      },
+      (json) => (typeof json.id === 'string' && json.id.length > 0 ? { mediaId: json.id } : null),
     );
   }
 

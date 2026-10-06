@@ -48,6 +48,7 @@ import {
   createEmailPreferencesService,
   createInboxService,
   createReceivedMediaService,
+  createFileRepliesService,
   createOnboardingService,
   createPlanAdminService,
   createPlanAddOnsService,
@@ -100,6 +101,7 @@ import {
   type EmailPreferencesService,
   type InboxService,
   type ReceivedMediaService,
+  type FileRepliesService,
   type JobQueue,
   type OnboardingService,
   type OutboundDeps,
@@ -168,6 +170,8 @@ export interface Runtime {
   inbox: InboxService;
   /** Files customers send, fetched from WhatsApp per request (ADR-216); null without Meta. */
   receivedMedia: ReceivedMediaService | null;
+  /** Files members send from the inbox, uploaded to WhatsApp (ADR-218); null without Meta. */
+  fileReplies: FileRepliesService | null;
   emailPreferences: EmailPreferencesService;
   teams: TeamsService;
   businessHours: BusinessHoursService;
@@ -464,11 +468,20 @@ async function init(): Promise<Runtime> {
         meta,
       })
     : null;
-  const receivedMedia = meta
-    ? createReceivedMediaService({
+  const mediaGraph = meta
+    ? new GraphClient({ baseUrl: meta.graphBaseUrl, version: meta.graphApiVersion })
+    : null;
+  const receivedMedia = mediaGraph
+    ? createReceivedMediaService({ db, keyring, graph: mediaGraph })
+    : null;
+  const fileReplies = mediaGraph
+    ? createFileRepliesService({
         db,
+        jobs,
+        signer,
+        clock: systemClock,
         keyring,
-        graph: new GraphClient({ baseUrl: meta.graphBaseUrl, version: meta.graphApiVersion }),
+        graph: mediaGraph,
       })
     : null;
   const billing = createBillingService({
@@ -532,6 +545,7 @@ async function init(): Promise<Runtime> {
     billingUsage,
     inbox,
     receivedMedia,
+    fileReplies,
     emailPreferences,
     teams,
     businessHours,

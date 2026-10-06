@@ -1,5 +1,51 @@
 # Progress
 
+## 2026-10-06 — Phase 2 follow-up: sending files from the inbox (P2-09, ADR-218)
+
+Status: **Implemented; its database and browser tests run in CI only.** Members could reply with
+text only. The local PostgreSQL is unavailable (its Docker daemon stopped), so the new integration
+and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-218):** files uploaded to WhatsApp when sent and sent by their id; the reply's
+  checks before the upload and again under the lock; a retried submission sent once; 16 MB and
+  listed types.
+- **Domain:** `messaging/file-replies.ts` (`queueFileReply`, `checkReplyFile`); `queueReply` and
+  `prepareReply` shared with text replies; `GraphClient.uploadMedia`; members open files members
+  sent (ADR-216's route).
+- **Web:** the route `/api/c/<company>/inbox/<conversation>/files` (trusted origin, session, 16 MB);
+  the "Send a file" card; the thread shows sent files.
+- **Test stand-in:** uploads kept as files; a document's name taken with an id.
+- **Tests:**
+  - Unit (6 new in `messaging/file-replies.test.ts`): types, limits, caption, refusals, the upload's
+    form and its time limit.
+  - Integration (2 new in `file-replies.test.ts`): the upload with the token, the message, its media
+    record and request, the send by id, the retry, a member opening it, the API refusing it,
+    refusals before any upload. Written for CI; not run here.
+  - E2E (1 new in `inbox.spec.ts`): a member sends a document and downloads what they sent. Written
+    for CI; not run here.
+- **Docs:** ADR-218; research M-197; ARCHITECTURE; SECURITY; THREAT-MODEL T205; DEPLOYMENT and
+  RUNBOOKS; DATA-RETENTION; BACKLOG P2-09; feature matrix W-032.
+- **Mutation checks:** 15 deliberate regressions tried, all caught (one only after a test was added)
+  on the unit-tested parts. The reply's checks need the database, so their regressions are left to
+  the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                                                                 |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                                                  |
+| `pnpm test` (unit)                                 | 949 passed (93 files)                                                                                  |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them                                        |
+| `pnpm build`                                       | passed                                                                                                 |
+| Mutation checks                                    | 15 deliberate regressions tried, all caught (one only after a test was added) on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                                                         |
+
+### Known gaps
+
+- Uploads through the public API, several files at once, a progress bar, files over 16 MB.
+
 ## 2026-10-06 — Phase 5: downloading the files customers send through the API (P5-08, ADR-217)
 
 Status: **Implemented; its database and browser tests run in CI only.** Keys read a message a

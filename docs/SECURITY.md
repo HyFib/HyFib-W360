@@ -174,6 +174,10 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   and passed on without a copy. Only photos, stickers, recordings and videos keep their type; every
   other file is an `application/octet-stream` attachment. Answers carry `nosniff`, a `sandbox`
   Content-Security-Policy and a same-origin resource policy, and stop past 100 MB.
+  Files members send (ADR-218) need `inbox.reply` and every check of a text reply, go through a
+  route only HyFib's own pages may post to (the trusted-origin check) with the member's session, are
+  read up to 16 MB and accepted only as listed photo, video, recording and document types, and are
+  uploaded with the account's token from the server, never the browser; HyFib keeps no copy.
   Automatic assignment only reaches active members whose role can read and answer conversations.
 - CSAT taps: a tap is recorded only when its button id names a survey of the same conversation and
   its `context.id` is that survey's message; nothing in the tap is trusted beyond selecting one of

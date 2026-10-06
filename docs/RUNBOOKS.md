@@ -415,6 +415,12 @@ why: `no_file` (the message has no file from the customer: check its `direction`
 Channels), `file_too_large` (over 100 MB); a 503 means WhatsApp did not answer, so retry later. The
 key needs `conversations.read`.
 
+**A member cannot send a file (ADR-218).** The card says why: the type is not one HyFib sends, the
+file is empty or over 16 MB, the window closed (only templates can go), the number or its account is
+disconnected (reconnect it in Settings → Channels), or WhatsApp refused the file (its reason is
+shown) or did not answer (try again). A 413 from a load balancer before HyFib answers means its body
+limit is below the 16 MB HyFib accepts.
+
 **Many failures with 131049.** Meta's per-user marketing limit: those customers received too many
 marketing messages from businesses. Do not resend; wait at least 24 hours (M-062) and consider the
 company's frequency cap.

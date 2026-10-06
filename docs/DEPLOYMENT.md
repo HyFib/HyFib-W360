@@ -454,6 +454,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-217 has no migration. Until the web rollout ends, an old web server answers
    `GET /api/v1/messages/{id}/media` with 404.
 
+   ADR-218 has no migration. The web tier now uploads files of up to 16 MB to Meta: a load balancer
+   or reverse proxy in front of it must accept request bodies of at least 17 MB on
+   `/api/c/*/inbox/*/files`, and each upload holds its file in the web server's memory once. Until
+   the web rollout ends, an old web server shows no "Send a file" card.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

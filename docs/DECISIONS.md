@@ -8582,3 +8582,45 @@ Decision:
 
 Not built: thumbnails, files in webhook events (they keep the type and `mimeType`), a link that
 works without the key, and the files the business sent.
+
+## ADR-218 Sending files from the inbox (P2-09) (2026-10-06)
+
+Context: members answered in text only, so a price list, an invoice or a product photo went from
+someone's phone. Meta's spec uploads a file for a number (`POST /{phone-number-id}/media`, multipart
+`file` and `messaging_product`, answering an `id`) and sends media by that id, with a caption and,
+in its "Send Document Message by ID" example, a file name (research M-046, M-197). HyFib has no file
+storage.
+
+Decision:
+
+- **Uploaded when sent, never kept:** while a reply can be sent, the conversation page has a "Send a
+  file" card. The browser posts the file and an optional caption to
+  `/api/c/<company>/inbox/<conversation>/files`; HyFib checks the reply as it checks a text reply
+  (`inbox.reply`, sight of the conversation, the number active, the 24-hour window, a WhatsApp
+  number), uploads the file for the conversation's number with its account's token, and queues a
+  reply naming the media id. The bytes pass through memory once; the message keeps the media id, the
+  caption, the type and a document's name, and so does its media record.
+- **What can be sent:** JPEG and PNG photos, MP4 and 3GPP videos, AAC, AMR, MP3, MP4 and OGG
+  recordings, and PDF, text, Word, Excel and PowerPoint documents, up to 16 MB, HyFib's limit for a
+  file through its servers (Meta's limits by type come from third-party copies, M-049). A caption of
+  up to 1,024 characters goes with a photo, a video or a document; a recording takes none (M-191). A
+  document goes with the name it came with, cleaned as ADR-216 cleans names.
+- **Once:** a retry of the same submission (its client key) answers the first message without
+  uploading again. If the reply is refused after the upload, for example because the window closed
+  meanwhile, the media is never sent and Meta deletes it (M-046).
+- **Refusals before anything is written:** a file of another type, empty or over 16 MB (422, naming
+  the file); the reply's own refusals (403, 404, 412); Meta refusing the upload (422, with Meta's
+  reason) or the account's token (412), or not answering (503).
+- **The route** is under /api, so Next's proxy neither buffers nor cuts a body over its 10 MB; only
+  HyFib's own pages may post to it (the trusted-origin check of server actions), with the member's
+  session, and it reads at most 16 MB and 64 KB.
+- **Members see what they sent:** a file a member sent shows in the thread as a customer's does
+  (ADR-216), fetched from WhatsApp while Meta keeps it. The API's download stays for customers'
+  files (ADR-217).
+- **One implementation:** text and file replies share the reply's checks and queueing
+  (`queueReply`). The test stand-in keeps uploads as files and takes a document's name only with an
+  id, as the spec's examples do.
+- **No migration.**
+
+Not built: uploads through the public API, several files at once, dragging and dropping, a progress
+bar, stickers, files over 16 MB, and files outside the window, where only templates go.

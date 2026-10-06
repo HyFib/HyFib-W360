@@ -168,7 +168,7 @@ describe('files customers send (ADR-216)', () => {
       service().openReceivedMedia(owner, image.conversationId, textMessage!.id),
     ).rejects.toMatchObject({
       code: 'not_found',
-      publicMessage: 'This message has no file from the customer.',
+      publicMessage: 'This message has no file.',
     });
   });
 
@@ -244,7 +244,7 @@ describe('files customers send (ADR-216)', () => {
       service().openReceivedMedia(dOwner, sent.conversationId, sent.messageId),
     ).rejects.toMatchObject({
       code: 'not_found',
-      publicMessage: 'This message has no file from the customer.',
+      publicMessage: 'This message has no file.',
     });
   });
 });

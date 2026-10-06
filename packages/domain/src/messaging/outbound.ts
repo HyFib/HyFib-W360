@@ -21,6 +21,7 @@ import {
   eq,
   inArray,
   isNull,
+  mediaObjects,
   messageStatusEvents,
   messageTemplates,
   messages,
@@ -95,18 +96,132 @@ export function canSeeConversation(
 }
 
 /**
- * Queues a free-form text reply. Idempotent per client key: resubmitting the same composer
+ * What a reply holds: the message's type and content, the type's part of the Graph message (such as
+ * `{ text: … }` or `{ document: … }`) and the conversation's preview.
+ */
+export interface ReplyBody {
+  type: 'text' | 'image' | 'video' | 'audio' | 'document';
+  content: Record<string, unknown>;
+  payload: Record<string, unknown>;
+  preview: string;
+  /** A file HyFib uploaded to WhatsApp for this reply (ADR-218), recorded as the message's media. */
+  media?: { providerMediaId: string; mimeType: string; filename: string | null; sizeBytes: number };
+}
+
+/** The conversation a member replies in, if they can see it; locked when `lock`. */
+async function replyConversation(
+  tx: Tx,
+  ctx: TenantContext,
+  conversationId: string,
+  lock: boolean,
+) {
+  const query = tx
+    .select({
+      id: conversations.id,
+      assignedMembershipId: conversations.assignedMembershipId,
+      lastInboundAt: conversations.lastInboundAt,
+      channelAccountId: conversations.channelAccountId,
+      contactId: conversations.contactId,
+    })
+    .from(conversations)
+    .where(and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, conversationId)));
+  // Locking serialises replies with assignment changes.
+  const [row] = lock ? await query.for('update') : await query;
+  if (!row || !canSeeConversation(ctx, row.assignedMembershipId)) throw notFound('Conversation');
+  return row;
+}
+
+/**
+ * Where a reply in the conversation goes, or why it cannot: the number must be active, the 24-hour
+ * window open and the contact known by a WhatsApp number on the number's account.
+ */
+async function replyRoute(
+  tx: Tx,
+  ctx: TenantContext,
+  conv: Awaited<ReturnType<typeof replyConversation>>,
+  now: Date,
+) {
+  const [channel] = await tx
+    .select({
+      status: channelAccounts.status,
+      whatsappAccountId: channelAccounts.whatsappAccountId,
+      phoneNumberId: channelAccounts.phoneNumberId,
+    })
+    .from(channelAccounts)
+    .where(
+      and(
+        eq(channelAccounts.tenantId, ctx.tenant.id),
+        eq(channelAccounts.id, conv.channelAccountId),
+      ),
+    );
+  if (!channel) throw notFound('Conversation');
+  if (channel.status !== 'active') {
+    throw new AppError(
+      'precondition_failed',
+      'This WhatsApp number is not active. Reconnect it in Settings → Channels.',
+    );
+  }
+  if (!conv.lastInboundAt || now.getTime() - conv.lastInboundAt.getTime() > SERVICE_WINDOW_MS) {
+    throw new AppError(
+      'precondition_failed',
+      'The 24-hour customer service window has closed. Only approved templates can be sent now.',
+    );
+  }
+  const [identity] = await tx
+    .select({ waId: contactIdentities.waId })
+    .from(contactIdentities)
+    .where(
+      and(
+        eq(contactIdentities.tenantId, ctx.tenant.id),
+        eq(contactIdentities.contactId, conv.contactId),
+        eq(contactIdentities.whatsappAccountId, channel.whatsappAccountId),
+      ),
+    )
+    .limit(1);
+  if (!identity?.waId) {
+    throw new AppError(
+      'unsupported',
+      'This contact is known only by a WhatsApp user id. Sending to user ids is not enabled until Meta’s request format is verified.',
+    );
+  }
+  return {
+    whatsappAccountId: channel.whatsappAccountId,
+    phoneNumberId: channel.phoneNumberId,
+    waId: identity.waId,
+  };
+}
+
+/**
+ * Checks, without writing, that the member could reply in the conversation now, and gives the
+ * number and account a file for the reply is uploaded with (ADR-218). `queueReply` checks again.
+ */
+export async function prepareReply(
+  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+  ctx: TenantContext,
+  conversationId: string,
+) {
+  assertCan(ctx, 'inbox.reply');
+  return deps.db.run(
+    ctx.scope,
+    async (tx) => {
+      const conv = await replyConversation(tx, ctx, conversationId, false);
+      return replyRoute(tx, ctx, conv, deps.clock.now());
+    },
+    { accessMode: 'read only' },
+  );
+}
+
+/**
+ * Queues a member's reply in a conversation. Idempotent per client key: resubmitting the same
  * submission returns the existing message instead of creating a duplicate.
  */
-export async function queueTextMessage(deps: OutboundDeps, ctx: TenantContext, input: unknown) {
+export async function queueReply(
+  deps: OutboundDeps,
+  ctx: TenantContext,
+  data: { conversationId: string; clientKey: string; afterMessageId?: string | undefined },
+  body: ReplyBody,
+) {
   assertCan(ctx, 'inbox.reply');
-  const parsed = sendTextSchema.safeParse(input);
-  if (!parsed.success) {
-    throw new AppError('validation_failed', parsed.error.issues[0]?.message ?? 'Invalid message', {
-      issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
-    });
-  }
-  const data = parsed.data;
   const now = deps.clock.now();
   return deps.db.run(ctx.scope, async (tx) => {
     const [existing] = await tx
@@ -115,22 +230,7 @@ export async function queueTextMessage(deps: OutboundDeps, ctx: TenantContext, i
       .where(and(eq(messages.tenantId, ctx.tenant.id), eq(messages.clientKey, data.clientKey)));
     if (existing) return { messageId: existing.id, duplicate: true };
 
-    // Lock the conversation row (serialises replies with assignment changes), then read its number.
-    const [locked] = await tx
-      .select({
-        id: conversations.id,
-        assignedMembershipId: conversations.assignedMembershipId,
-        lastInboundAt: conversations.lastInboundAt,
-        channelAccountId: conversations.channelAccountId,
-        contactId: conversations.contactId,
-      })
-      .from(conversations)
-      .where(
-        and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, data.conversationId)),
-      )
-      .for('update');
-    if (!locked || !canSeeConversation(ctx, locked.assignedMembershipId))
-      throw notFound('Conversation');
+    const conv = await replyConversation(tx, ctx, data.conversationId, true);
     if (data.afterMessageId) {
       // Under the conversation lock, so two members replying at once cannot both miss the other.
       const collision = await tx.execute<{ name: string | null }>(sql`
@@ -140,7 +240,7 @@ export async function queueTextMessage(deps: OutboundDeps, ctx: TenantContext, i
                                 and seen.conversation_id = m.conversation_id
           left join app.memberships ms on ms.tenant_id = m.tenant_id and ms.id = m.sender_membership_id
           left join auth.users u on u.id = ms.user_id
-         where m.tenant_id = ${ctx.tenant.id}::uuid and m.conversation_id = ${locked.id}::uuid
+         where m.tenant_id = ${ctx.tenant.id}::uuid and m.conversation_id = ${conv.id}::uuid
            and m.direction = 'outbound' and m.sender_type = 'agent'
            and m.sender_membership_id is distinct from ${ctx.membership.id}::uuid
            and (m.created_at, m.id) > (seen.created_at, seen.id)
@@ -155,53 +255,7 @@ export async function queueTextMessage(deps: OutboundDeps, ctx: TenantContext, i
         );
       }
     }
-    const [channel] = await tx
-      .select({
-        status: channelAccounts.status,
-        whatsappAccountId: channelAccounts.whatsappAccountId,
-      })
-      .from(channelAccounts)
-      .where(
-        and(
-          eq(channelAccounts.tenantId, ctx.tenant.id),
-          eq(channelAccounts.id, locked.channelAccountId),
-        ),
-      );
-    if (!channel) throw notFound('Conversation');
-    const conv = {
-      ...locked,
-      channelStatus: channel.status,
-      whatsappAccountId: channel.whatsappAccountId,
-    };
-    if (conv.channelStatus !== 'active') {
-      throw new AppError(
-        'precondition_failed',
-        'This WhatsApp number is not active. Reconnect it in Settings → Channels.',
-      );
-    }
-    if (!conv.lastInboundAt || now.getTime() - conv.lastInboundAt.getTime() > SERVICE_WINDOW_MS) {
-      throw new AppError(
-        'precondition_failed',
-        'The 24-hour customer service window has closed. Only approved templates can be sent now.',
-      );
-    }
-    const [identity] = await tx
-      .select({ waId: contactIdentities.waId })
-      .from(contactIdentities)
-      .where(
-        and(
-          eq(contactIdentities.tenantId, ctx.tenant.id),
-          eq(contactIdentities.contactId, conv.contactId),
-          eq(contactIdentities.whatsappAccountId, conv.whatsappAccountId),
-        ),
-      )
-      .limit(1);
-    if (!identity?.waId) {
-      throw new AppError(
-        'unsupported',
-        'This contact is known only by a WhatsApp user id. Sending to user ids is not enabled until Meta’s request format is verified.',
-      );
-    }
+    const route = await replyRoute(tx, ctx, conv, now);
 
     // A member's reply ends an automation handling the conversation, and bot messages not yet
     // handed to the sender are cancelled, so the bot and the member never answer at once.
@@ -217,9 +271,9 @@ export async function queueTextMessage(deps: OutboundDeps, ctx: TenantContext, i
     const request = {
       messaging_product: 'whatsapp',
       recipient_type: 'individual',
-      to: identity.waId,
-      type: 'text',
-      text: { body: data.text, preview_url: false },
+      to: route.waId,
+      type: body.type,
+      ...body.payload,
     };
     await tx.insert(messages).values({
       id: messageId,
@@ -227,14 +281,25 @@ export async function queueTextMessage(deps: OutboundDeps, ctx: TenantContext, i
       conversationId: conv.id,
       channelAccountId: conv.channelAccountId,
       direction: 'outbound',
-      type: 'text',
-      content: { text: data.text },
+      type: body.type,
+      content: body.content,
       status: 'queued',
       statusRank: STATUS_RANK.queued,
       senderType: 'agent',
       senderMembershipId: ctx.membership.id,
       clientKey: data.clientKey,
     });
+    if (body.media) {
+      await tx.insert(mediaObjects).values({
+        id: uuidv7(),
+        tenantId: ctx.tenant.id,
+        messageId,
+        providerMediaId: body.media.providerMediaId,
+        mimeType: body.media.mimeType,
+        filename: body.media.filename,
+        sizeBytes: body.media.sizeBytes,
+      });
+    }
     await tx.insert(sendIntents).values({
       id: intentId,
       tenantId: ctx.tenant.id,
@@ -248,7 +313,7 @@ export async function queueTextMessage(deps: OutboundDeps, ctx: TenantContext, i
       .update(conversations)
       .set({
         lastMessageAt: now,
-        lastMessagePreview: clipText(data.text, 200),
+        lastMessagePreview: clipText(body.preview, 200),
         unreadCount: 0,
         status: 'open',
         ...(claim ? { assignedMembershipId: ctx.membership.id } : {}),
@@ -273,6 +338,27 @@ export async function queueTextMessage(deps: OutboundDeps, ctx: TenantContext, i
       { singletonKey: intentId, group: { id: conv.channelAccountId } },
     );
     return { messageId, duplicate: false };
+  });
+}
+
+/**
+ * Queues a free-form text reply. Idempotent per client key: resubmitting the same composer
+ * submission returns the existing message instead of creating a duplicate.
+ */
+export async function queueTextMessage(deps: OutboundDeps, ctx: TenantContext, input: unknown) {
+  assertCan(ctx, 'inbox.reply');
+  const parsed = sendTextSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new AppError('validation_failed', parsed.error.issues[0]?.message ?? 'Invalid message', {
+      issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
+    });
+  }
+  const data = parsed.data;
+  return queueReply(deps, ctx, data, {
+    type: 'text',
+    content: { text: data.text },
+    payload: { text: { body: data.text, preview_url: false } },
+    preview: data.text,
   });
 }
 

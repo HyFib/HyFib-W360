@@ -104,18 +104,21 @@ const HEADER_FILE_NAMES: Record<string, string> = {
 };
 
 /**
- * A file the customer sent, fetched from WhatsApp by this member's browser when shown (ADR-216):
- * photos and stickers in the page, voice notes and videos in a player that loads on play, and
- * documents as downloads. A file WhatsApp no longer keeps shows the photo's description instead.
+ * A file the customer sent (ADR-216) or a member sent (ADR-218), fetched from WhatsApp by this
+ * member's browser when shown: photos and stickers in the page, recordings and videos in a player
+ * that loads on play, and documents as downloads. A file WhatsApp no longer keeps shows the
+ * photo's description instead.
  */
-function ReceivedFile({
+function ConversationFile({
   type,
   url,
   content,
+  outbound,
 }: {
   type: string;
   url: string;
   content: Record<string, unknown>;
+  outbound: boolean;
 }) {
   const caption = text(content.caption);
   const captionLine = caption ? (
@@ -129,7 +132,7 @@ function ReceivedFile({
             {/* eslint-disable-next-line @next/next/no-img-element -- fetched with the member's session, which Next's image optimiser would not send */}
             <img
               src={url}
-              alt={caption ?? 'Sent by the customer'}
+              alt={caption ?? (outbound ? 'Sent to the customer' : 'Sent by the customer')}
               loading="lazy"
               className="max-h-64 max-w-full rounded-md border border-border object-contain"
             />
@@ -142,7 +145,7 @@ function ReceivedFile({
         // eslint-disable-next-line @next/next/no-img-element -- fetched with the member's session, which Next's image optimiser would not send
         <img
           src={url}
-          alt="Sticker from the customer"
+          alt={outbound ? 'Sticker sent to the customer' : 'Sticker from the customer'}
           loading="lazy"
           className="h-32 w-32 object-contain"
         />
@@ -155,10 +158,10 @@ function ReceivedFile({
             {type === 'video' ? 'Video' : content.voice === true ? 'Voice message' : 'Audio'}
           </span>
           {type === 'video' ? (
-            // eslint-disable-next-line jsx-a11y/media-has-caption -- a customer's recording comes without captions
+            // eslint-disable-next-line jsx-a11y/media-has-caption -- a recording sent on WhatsApp comes without captions
             <video controls preload="none" src={url} className="max-h-64 max-w-full rounded-md" />
           ) : (
-            // eslint-disable-next-line jsx-a11y/media-has-caption -- a customer's recording comes without captions
+            // eslint-disable-next-line jsx-a11y/media-has-caption -- a recording sent on WhatsApp comes without captions
             <audio controls preload="none" src={url} className="w-64 max-w-full" />
           )}
           {captionLine}
@@ -186,12 +189,14 @@ function Body({
   content,
   replyTo,
   mediaUrl,
+  outbound,
 }: {
   type: string;
   content: unknown;
   replyTo: ThreadMessage['replyTo'];
-  /** Where the browser fetches the file of a message the customer sent with one. */
+  /** Where the browser fetches the file of a message sent with one through WhatsApp. */
   mediaUrl: string | null;
+  outbound: boolean;
 }) {
   const c = (typeof content === 'object' && content !== null ? content : {}) as Record<
     string,
@@ -221,7 +226,9 @@ function Body({
     case 'audio':
     case 'document':
     case 'sticker': {
-      if (mediaUrl) return <ReceivedFile type={type} url={mediaUrl} content={c} />;
+      if (mediaUrl) {
+        return <ConversationFile type={type} url={mediaUrl} content={c} outbound={outbound} />;
+      }
       const link = text(c.link);
       return (
         <p className="whitespace-pre-wrap break-words">
@@ -525,7 +532,7 @@ function Body({
   }
 }
 
-/** The message types a customer sends a file with (ADR-216). */
+/** The message types a file is sent with (ADR-216, ADR-218). */
 const FILE_TYPES = new Set(['image', 'video', 'audio', 'document', 'sticker']);
 
 export function MessageBubble({
@@ -543,11 +550,9 @@ export function MessageBubble({
 }) {
   const outbound = message.direction === 'outbound';
   const content = message.content as { id?: unknown } | null;
+  // A file the customer sent, or one a member uploaded (ADR-218); media sent from a link has none.
   const mediaUrl =
-    !outbound &&
-    FILE_TYPES.has(message.type) &&
-    typeof content?.id === 'string' &&
-    content.id.length > 0
+    FILE_TYPES.has(message.type) && typeof content?.id === 'string' && content.id.length > 0
       ? `/c/${slug}/inbox/${conversationId}/media/${message.id}`
       : null;
   const at = formatDateTime(message.providerTimestamp ?? message.createdAt, timeZone);
@@ -589,6 +594,7 @@ export function MessageBubble({
           content={message.content}
           replyTo={message.replyTo}
           mediaUrl={mediaUrl}
+          outbound={outbound}
         />
         <p className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
           <time dateTime={message.providerTimestamp ?? message.createdAt}>{at}</time>

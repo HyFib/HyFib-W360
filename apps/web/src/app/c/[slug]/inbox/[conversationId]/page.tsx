@@ -10,6 +10,7 @@ import { ProductSender } from '@/components/commerce/product-sender';
 import { ContactCrmPanel } from '@/components/crm/contact-crm-panel';
 import { FlowSender } from '@/components/flows/flow-sender';
 import { Composer } from '@/components/inbox/composer';
+import { FileSender } from '@/components/inbox/file-sender';
 import { ConversationControls, TeamControl } from '@/components/inbox/conversation-controls';
 import { InboxShell, inboxQueryString } from '@/components/inbox/inbox-shell';
 import { MarkRead } from '@/components/inbox/mark-read';
@@ -315,6 +316,16 @@ export default async function ConversationPage({
             savedReplies={replies}
             {...(latestMessageId ? { latestMessageId } : {})}
           />
+          {disabledReason === null ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Send a file</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <FileSender slug={ctx.tenant.slug} conversationId={conv.id} />
+              </CardContent>
+            </Card>
+          ) : null}
           {disabledReason === null && forms.length > 0 ? (
             <Card>
               <CardHeader>

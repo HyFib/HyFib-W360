@@ -205,6 +205,71 @@ test('a photo and a document the customer sends open from the conversation (ADR-
   expect(fetched.every((r) => r.authorization === `Bearer ${E2E_CHANNEL_TOKEN}`)).toBe(true);
 });
 
+test('a member sends a document from the conversation, uploaded to WhatsApp and sent by its id (ADR-218)', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('inbox-send-file');
+  const slug = `sendfile-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Sana Sends', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Sending Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  // The customer writes, which opens the window for replies.
+  const waId = randomWaId();
+  await sendSignedWebhook(
+    request,
+    inboundMessage(wabaId, phoneNumberId, waId, 'Can you send the price list?'),
+  );
+  await page.getByRole('link', { name: 'Inbox' }).click();
+  const conversation = page.getByRole('link', { name: /Priya Customer/ });
+  await expect(conversation).toBeVisible({ timeout: 20_000 });
+  await conversation.click();
+
+  const pdf = Buffer.from('%PDF-1.4 price list for Sana');
+  const picker = page.getByLabel('File', { exact: true });
+  // The form takes the file once React has hydrated it.
+  await expect(picker).toBeEnabled();
+  await picker.setInputFiles({ name: 'Price list.pdf', mimeType: 'application/pdf', buffer: pdf });
+  await page.getByLabel(/^Caption/).fill('Our prices for October');
+  await page.getByRole('button', { name: 'Send file' }).click();
+  await expect(page.getByText('File sent.')).toBeVisible();
+
+  // The thread shows the file the member sent, and the worker hands it to WhatsApp by its id.
+  const thread = page.getByRole('list', { name: /^Messages with/ });
+  await expect(thread.getByText('Our prices for October')).toBeVisible();
+  await expect(thread.getByText('Sent to WhatsApp')).toBeVisible({ timeout: 20_000 });
+  const requests = await standInRequests(request);
+  const upload = requests.filter((r) => r.path === `/v26.0/${phoneNumberId}/media`);
+  expect(upload).toHaveLength(1);
+  expect(upload[0]!.authorization).toBe(`Bearer ${E2E_CHANNEL_TOKEN}`);
+  const send = requests
+    .filter(
+      (r) =>
+        r.path === `/v26.0/${phoneNumberId}/messages` &&
+        (r.body as { to?: string } | null)?.to === waId,
+    )
+    .pop();
+  expect(send?.body).toMatchObject({
+    type: 'document',
+    document: {
+      id: expect.any(String) as unknown as string,
+      caption: 'Our prices for October',
+      filename: 'Price list.pdf',
+    },
+  });
+
+  // The member opens what they sent, as WhatsApp keeps it.
+  const downloading = page.waitForEvent('download');
+  await thread.getByRole('link', { name: 'Download Price list.pdf' }).click();
+  const download = await downloading;
+  expect(download.suggestedFilename()).toBe('Price list.pdf');
+  expect((await readFile(await download.path())).equals(pdf)).toBe(true);
+});
+
 test('webhooks with a bad signature are refused and store nothing', async ({ request }) => {
   const res = await request.post('/api/webhooks/meta', {
     data: JSON.stringify({ object: 'whatsapp_business_account', entry: [] }),

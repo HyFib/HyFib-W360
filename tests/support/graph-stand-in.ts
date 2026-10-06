@@ -128,6 +128,9 @@ export interface StandInState {
    * an object it does not have; `downloadStatus` makes the download itself fail.
    */
   media: Map<string, { bytes: Buffer; mimeType: string; downloadStatus?: number }>;
+  mediaCounter: number;
+  /** When set, uploads fail with this Graph error (ADR-218). */
+  uploadError: { status: number; code: number; message: string } | null;
 }
 
 export interface GraphStandIn {
@@ -160,7 +163,13 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
       out[key] =
         typeof value === 'string'
           ? value
-          : { filename: value.name, type: value.type, content: await value.text() };
+          : {
+              filename: value.name,
+              type: value.type,
+              content: await value.text(),
+              // The bytes of an uploaded file (ADR-218), which text would mangle.
+              base64: Buffer.from(await value.arrayBuffer()).toString('base64'),
+            };
     }
     return out;
   }
@@ -342,8 +351,9 @@ function reactionProblem(body: unknown): string | null {
 const MEDIA_MESSAGE_TYPES = new Set(['image', 'video', 'audio', 'document', 'sticker']);
 
 /**
- * Checks a media message (research M-191): an `id` or an http(s) `link`, not both, and a caption
- * of at most 1,024 characters for a photo, a video or a document only.
+ * Checks a media message (research M-191): an `id` or an http(s) `link`, not both, a caption of at
+ * most 1,024 characters for a photo, a video or a document only, and a file name for a document
+ * sent by id only, as the spec's "Send Document Message by ID" example has (research M-197).
  */
 function mediaProblem(body: unknown): string | null {
   const b = body as Record<string, unknown> | undefined;
@@ -352,8 +362,18 @@ function mediaProblem(body: unknown): string | null {
   const media = b?.[type] as Record<string, unknown> | undefined;
   if (typeof media !== 'object' || media === null) return type;
   const allowed =
-    type === 'audio' || type === 'sticker' ? ['id', 'link'] : ['id', 'link', 'caption'];
+    type === 'audio' || type === 'sticker'
+      ? ['id', 'link']
+      : type === 'document' && media.id !== undefined
+        ? ['id', 'caption', 'filename']
+        : ['id', 'link', 'caption'];
   if (Object.keys(media).some((key) => !allowed.includes(key))) return type;
+  if (
+    media.filename !== undefined &&
+    (typeof media.filename !== 'string' || !media.filename || media.filename.length > 240)
+  ) {
+    return `${type}.filename`;
+  }
   if ((media.id === undefined) === (media.link === undefined)) return `${type}.link`;
   if (
     media.link !== undefined &&
@@ -601,6 +621,8 @@ export async function startGraphStandIn(options: {
     businessKeys: new Map(),
     keySignatureStatus: 'VALID',
     media: new Map(),
+    mediaCounter: 0,
+    uploadError: null,
   };
   for (const token of options.acceptTokens ?? []) {
     state.tokens.set(token, {
@@ -834,6 +856,33 @@ export async function startGraphStandIn(options: {
           return graphError(res, e.status, e.code, e.message);
         }
         return json(res, 200, { success: true });
+      }
+      // A file uploaded for a number to send (research M-046, M-197): multipart form data with
+      // `messaging_product` and `file`; kept like a customer's file, under a new media id.
+      if (req.method === 'POST' && first && second === 'media') {
+        const form = (body ?? {}) as {
+          messaging_product?: unknown;
+          file?: { type?: unknown; base64?: unknown };
+        };
+        if (form.messaging_product !== 'whatsapp' || typeof form.file?.base64 !== 'string') {
+          return graphError(res, 400, 100, '(#100) Invalid parameter');
+        }
+        if (state.uploadError) {
+          return graphError(
+            res,
+            state.uploadError.status,
+            state.uploadError.code,
+            state.uploadError.message,
+          );
+        }
+        state.mediaCounter += 1;
+        const id = String(7_000_000_000_000 + state.mediaCounter);
+        state.media.set(id, {
+          bytes: Buffer.from(form.file.base64, 'base64'),
+          mimeType:
+            typeof form.file.type === 'string' ? form.file.type : 'application/octet-stream',
+        });
+        return json(res, 200, { id });
       }
       if (req.method === 'POST' && first && second === 'messages') {
         const flowInvalid = flowMessageProblem(body, state.flows);
