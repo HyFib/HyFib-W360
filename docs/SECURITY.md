@@ -795,6 +795,10 @@ Phase 5 rules (Public API, P5-08):
   restricted, and the audit names the key. Saving a segment reads no contact; counting one needs
   `campaigns.read`, and finding its contacts `contacts.read`. Another company's segment is not
   found.
+- A segment's contacts (ADR-208): `GET /segments/{id}/contacts` needs `campaigns.read` and
+  `contacts.read`, and `conversations.read` for a segment with a `last_message` condition, as a
+  search with the same conditions does, so a segment never gives what a search could not; it reads
+  in the key's company scope, erased contacts left out.
 - Media from links (ADR-194): a key with `messages.reply` sends a photo, a video, audio or a
   document by a link WhatsApp fetches, within the 24-hour window. HyFib never fetches the link, so
   it cannot be used to reach HyFib's network; it takes only https links with a host and no user name

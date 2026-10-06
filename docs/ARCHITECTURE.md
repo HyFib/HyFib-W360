@@ -985,6 +985,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   search's own checks, write `app.segments` and record a system audit with the key; a unique
   violation of `segments_name_uq` becomes a 409 through `segmentNameRefusal`
   (`campaigns/segments.ts`), which members' `createSegment` and `updateSegment` use too.
+- **A segment's contacts (ADR-208):** `apiListSegmentContacts` (`api/segments.ts`) reads the
+  segment, checks it as `GET /segments/{id}` does, and passes `segmentConditionsSql` as the filter
+  of `apiContactPage` (`api/contacts.ts`), the page `POST /contacts/search` reads, in a
+  repeatable-read, read-only transaction.
 - **Media from links (ADR-194):** `apiSendMedia` (`api/resources.ts`) parses `type` `image`,
   `video`, `audio` or `document`, an https `link` (`isMediaLink`) and a caption except for audio,
   and sends through `sendReply` as text replies do: the content keeps the link and the caption, the

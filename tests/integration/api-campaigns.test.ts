@@ -12,6 +12,7 @@ import {
   apiListCampaignRecipients,
   apiListCampaigns,
   apiListMessages,
+  apiListSegmentContacts,
   apiListSegments,
   apiPauseCampaign,
   apiResumeCampaign,
@@ -2854,5 +2855,101 @@ describe('writing saved segments through the API (ADR-207)', () => {
         (action) => ({ action, actor_type: 'api_key', actor_id: writer.key.id, source: 'api' }),
       ),
     );
+  });
+});
+
+describe("listing a segment's contacts through the API (ADR-208)", () => {
+  async function refused(promise: Promise<unknown>) {
+    try {
+      await promise;
+    } catch (error) {
+      if (!isAppError(error)) throw error;
+      return { code: error.code, message: error.publicMessage };
+    }
+    throw new Error('expected a refusal');
+  }
+
+  it('lists the contacts a segment holds now, newest first on pages, as a search with its conditions finds them', async () => {
+    const s = await setup();
+    const asha = await s.contact('+919820008221', 'Asha');
+    const ravi = await s.contact('+919820008222', 'Ravi');
+    await s.contact('+919820008223', 'Meena', false);
+    const segmentsService = createSegmentsService({ db: fx.dbs.app, clock: systemClock });
+    const consent = { type: 'consent', purpose: 'marketing', status: 'opted_in' } as const;
+    const optedIn = await segmentsService.createSegment(
+      s.owner,
+      { name: 'Opted in', definition: { conditions: [consent] } },
+      {},
+    );
+    const key = await apiKey(s.c, ['campaigns.read', 'contacts.read'], 'Segment contacts');
+
+    // Newest first on pages; Meena, without an opt-in, is not in it.
+    const first = await apiListSegmentContacts(deps(), key, optedIn.id, { limit: '1' });
+    expect(first.data.map((c) => c.id)).toEqual([ravi]);
+    const second = await apiListSegmentContacts(deps(), key, optedIn.id, {
+      limit: '1',
+      cursor: first.nextCursor!,
+    });
+    expect(second).toEqual({ data: [expect.objectContaining({ id: asha })], nextCursor: null });
+    // The same contacts as a search with the segment's conditions, each as the API gives it.
+    const searched = await apiSearchContacts(deps(), key, { conditions: [consent] });
+    expect([...first.data, ...second.data]).toEqual(searched.data);
+    // An erased contact leaves it.
+    await s.erase(ravi);
+    expect(
+      (await apiListSegmentContacts(deps(), key, optedIn.id, {})).data.map((c) => c.id),
+    ).toEqual([asha]);
+
+    // A segment on recent messages also needs conversations.read, as a search does.
+    const recent = await segmentsService.createSegment(
+      s.owner,
+      {
+        name: 'Wrote this week',
+        definition: { conditions: [{ type: 'last_message', op: 'within_days', days: 7 }] },
+      },
+      {},
+    );
+    expect(await refused(apiListSegmentContacts(deps(), key, recent.id, {}))).toEqual({
+      code: 'forbidden',
+      message: 'This API key does not have the conversations.read scope.',
+    });
+    const reader = await apiKey(
+      s.c,
+      ['campaigns.read', 'contacts.read', 'conversations.read'],
+      'Inbox reader',
+    );
+    expect(await apiListSegmentContacts(deps(), reader, recent.id, {})).toEqual({
+      data: [],
+      nextCursor: null,
+    });
+
+    // A segment with a problem is refused saying it; archived and other companies' are not found.
+    const broken = await segmentsService.createSegment(
+      s.owner,
+      { name: 'Gold tier', definition: { conditions: [{ type: 'tag', op: 'has', tag: 'gold' }] } },
+      {},
+    );
+    await fx.query(`UPDATE app.segments SET definition = $2 WHERE id = $1`, [
+      broken.id,
+      JSON.stringify({
+        match: 'all',
+        conditions: [{ type: 'field', key: 'tier', op: 'equals', value: 'gold' }],
+      }),
+    ]);
+    expect(await refused(apiListSegmentContacts(deps(), key, broken.id, {}))).toEqual({
+      code: 'precondition_failed',
+      message:
+        'A condition uses a custom field that does not exist. A member fixes the segment on the Segments page.',
+    });
+    await segmentsService.archiveSegment(s.owner, recent.id, {});
+    const other = await setup();
+    const theirs = await segmentsService.createSegment(
+      other.owner,
+      { name: 'Theirs', definition: { conditions: [consent] } },
+      {},
+    );
+    for (const id of [recent.id, theirs.id]) {
+      expect((await refused(apiListSegmentContacts(deps(), key, id, {}))).code).toBe('not_found');
+    }
   });
 });

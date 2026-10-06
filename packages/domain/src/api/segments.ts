@@ -18,6 +18,7 @@ import {
   SEGMENT_LIMITS,
   checkSegmentDefinition,
   loadFieldTypes,
+  segmentConditionsSql,
   segmentDefinitionSchema,
   segmentNameRefusal,
   segmentWhere,
@@ -25,6 +26,8 @@ import {
 import type { OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import { apiSearchConditionSchema, apiSegmentConditions } from './contact-search';
+import type { ApiContact } from './contact-view';
+import { apiContactPage } from './contacts';
 import { apiActor, assertScope, type ApiContext } from './context';
 import type { ApiResponse, IdempotencyInput } from './idempotency';
 import { API_LIMITS } from './model';
@@ -37,7 +40,8 @@ import { idempotent } from './resources';
  * the words `POST /contacts/search` and drafts take, checked by segments' rules as members' segment
  * page checks them; one segment also says how many contacts match it now, counted by segments' own
  * SQL. Counts only: a key finds the contacts with `POST /contacts/search` and `contacts.read`.
- * Keys with `campaigns.write` also create, change and archive segments as members do (ADR-207).
+ * Keys with `campaigns.write` also create, change and archive segments as members do (ADR-207), and
+ * keys that also read contacts list the contacts a segment holds (ADR-208).
  */
 
 export const apiSegmentListQuerySchema = z
@@ -463,4 +467,74 @@ export async function apiArchiveSegment(
     }
     return { id: segmentId, archived: true as const };
   });
+}
+
+// A segment's contacts (ADR-208) ------------------------------------------------------------------
+
+export const apiSegmentContactsQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(API_LIMITS.pageSize).default(50),
+    cursor: z.string().max(200).optional().describe('`nextCursor` from the previous page.'),
+  })
+  .strict();
+
+/**
+ * The contacts one of the company's segments holds now (ADR-208), newest first, on the pages
+ * `POST /contacts/search` reads (ADR-113), erased contacts left out: the segment's conditions turned
+ * into SQL by segments' own code, as a campaign takes its audience, with dates in the company's time
+ * zone, in one snapshot. Needs `campaigns.read` (segments) and `contacts.read` (contacts); a segment
+ * with a `last_message` condition also needs `conversations.read`, as a search with one does
+ * (ADR-126). A segment with a problem is refused with 412 saying it; an archived one and another
+ * company's are not found.
+ */
+export async function apiListSegmentContacts(
+  deps: Pick<OutboundDeps, 'db'>,
+  ctx: ApiContext,
+  segmentId: string,
+  query: unknown,
+): Promise<{ data: ApiContact[]; nextCursor: string | null }> {
+  assertScope(ctx, 'campaigns.read');
+  assertScope(ctx, 'contacts.read');
+  if (!z.uuid().safeParse(segmentId).success) throw notFound('Segment');
+  const q = parseInput(apiSegmentContactsQuerySchema, query);
+  const cursor = decodeKeysetCursor(q.cursor);
+  return deps.db.run(
+    ctx.scope,
+    async (tx) => {
+      const [row] = await tx
+        .select(segmentColumns)
+        .from(segments)
+        .where(
+          and(
+            eq(segments.tenantId, ctx.tenant.id),
+            eq(segments.id, segmentId),
+            isNull(segments.archivedAt),
+          ),
+        );
+      if (!row) throw notFound('Segment');
+      const fields = await loadFieldTypes(tx, ctx.tenant.id);
+      const { segment, usable } = await readSegment(tx, ctx.tenant.id, row, fields);
+      if (!usable) {
+        throw new AppError(
+          'precondition_failed',
+          `${segment.problem} A member fixes the segment on the Segments page.`,
+        );
+      }
+      if (usable.conditions.some((c) => c.type === 'last_message')) {
+        assertScope(ctx, 'conversations.read');
+      }
+      const [company] = await tx
+        .select({ timezone: tenants.timezone })
+        .from(tenants)
+        .where(eq(tenants.id, ctx.tenant.id));
+      if (!company) throw notFound('Company');
+      return apiContactPage(tx, ctx.tenant.id, {
+        cursor,
+        limit: q.limit,
+        narrow: [],
+        filters: [segmentConditionsSql(usable, company.timezone, fields)],
+      });
+    },
+    { isolationLevel: 'repeatable read', accessMode: 'read only' },
+  );
 }

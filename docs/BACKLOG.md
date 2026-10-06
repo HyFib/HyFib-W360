@@ -663,6 +663,9 @@ verification, app review, Embedded Signup configuration).
   `PATCH /segments/{id}` and `DELETE /segments/{id}` with `campaigns.write` create, change and
   archive segments as members do, with conditions checked as searches are; a name another segment
   has is refused with words that say so, for members too; no migration).
+  **[Listing a segment's contacts built; its database tests run only in CI]** (ADR-208:
+  `GET /segments/{id}/contacts` gives the contacts a segment holds now, on the pages of
+  `POST /contacts/search`, with the scopes a search with its conditions needs; no migration).
   Remaining: uploaded media, call-to-action messages through the API, taking
   reactions back,
   media downloads, changing a field's type,

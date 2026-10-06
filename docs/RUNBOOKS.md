@@ -1859,6 +1859,12 @@ whatever its case, or a stale `expectedVersion`. The audit log shows which key c
 archived a segment. An archived segment leaves members' Segments page and the API's reads; drafts
 with it need another audience before they are submitted.
 
+**A segment's contacts through the API come in short or empty pages, or are refused (ADR-208).**
+Each page reads at most 2,000 of the company's contacts, newest first, so a segment that leaves out
+most contacts gives short or empty pages with a `nextCursor`: follow it until it is `null`. A 412 is
+a segment with a problem, which a member fixes on its page; a 403 naming `conversations.read` is a
+segment with a recent-messages condition.
+
 **A draft's review through the API shows no estimate, or other counts than expected (ADR-193).**
 `GET /campaigns/{id}/review` reads the saved draft as members' review does, now: save the draft
 first. `estimate` is null without a currency (the spending cap's, or else Settings → Messaging),

@@ -34,6 +34,7 @@ import {
   apiArchiveSegment,
   apiCreateSegment,
   apiGetSegment,
+  apiListSegmentContacts,
   apiListSegments,
   apiUpdateSegment,
 } from './segments';
@@ -6427,5 +6428,94 @@ describe('writing saved segments through the API (ADR-207)', () => {
         ['delete', '/segments/{id}'],
       ]),
     );
+  });
+});
+
+describe("listing a segment's contacts through the API (ADR-208)", () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const id = '0190a000-0000-7000-8000-000000000006';
+  const reached = {
+    db: { run: () => Promise.reject(new Error('the database was reached')) },
+  } as never;
+  const both = ['campaigns.read', 'contacts.read'];
+
+  it('is refused before anything is read: without either scope, outside the plan, a bad id or a bad page; a suspended company still reads', async () => {
+    for (const [scopes, missing] of [
+      [['contacts.read', 'campaigns.write'], 'campaigns.read'],
+      [['campaigns.read', 'contacts.write'], 'contacts.read'],
+    ] as const) {
+      await expect(apiListSegmentContacts(reached, ctx([...scopes]), id, {})).rejects.toThrow(
+        `This API key does not have the ${missing} scope.`,
+      );
+    }
+    await expect(
+      apiListSegmentContacts(reached, ctx(both, 'active', ['campaigns.read']), id, {}),
+    ).rejects.toMatchObject({ code: 'forbidden', details: { apiReason: 'not_in_plan' } });
+    expect(await code(apiListSegmentContacts(reached, ctx(both), 'not-an-id', {}))).toBe(
+      'not_found',
+    );
+    for (const query of [{ limit: '0' }, { limit: '101' }, { cursor: 'nope' }, { tag: 'vip' }]) {
+      expect(await code(apiListSegmentContacts(reached, ctx(both), id, query))).toBe(
+        'validation_failed',
+      );
+    }
+    for (const status of ['active', 'suspended', 'restricted']) {
+      await expect(apiListSegmentContacts(reached, ctx(both, status), id, {})).rejects.toThrow(
+        'the database was reached',
+      );
+    }
+  });
+
+  it('is described: both scopes, pages as searches give them, a segment with a problem refused', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const op = (
+      doc.paths as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            description: string;
+            parameters: { name?: string; $ref?: string }[];
+            responses: Record<string, { content?: unknown }>;
+          }
+        >
+      >
+    )['/segments/{id}/contacts']?.get;
+    expect(op?.operationId).toBe('listSegmentContacts');
+    expect(op?.parameters.map((p) => p.$ref ?? p.name)).toEqual([
+      '#/components/parameters/Id',
+      'limit',
+      'cursor',
+    ]);
+    expect(op?.responses['200']?.content).toMatchObject({
+      'application/json': {
+        schema: { properties: { data: { items: { $ref: '#/components/schemas/Contact' } } } },
+      },
+    });
+    expect(Object.keys(op?.responses ?? {})).toEqual(expect.arrayContaining(['404', '412']));
+    for (const words of [
+      'Scope: `campaigns.read`.',
+      'Also needs `contacts.read`, and `conversations.read` for a segment with a `last_message` condition',
+      'newest first, erased contacts left out, pages that never skip or repeat a contact',
+      'Each page reads at most 2,000 of the company',
+      'A segment with a `problem` (GET /segments/{id}) is refused with 412 saying it',
+    ]) {
+      expect(op?.description).toContain(words);
+    }
+    expect(API_SCOPE_INFO['campaigns.read'].description).toContain(
+      'With contacts read as well, list the contacts each segment holds.',
+    );
+    expect(API_ROUTES).toContainEqual(['get', '/segments/{id}/contacts']);
   });
 });

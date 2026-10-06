@@ -161,7 +161,7 @@ test('a key finds contacts with segment conditions: comparisons, tags, all or an
   expect((await request.get('/api/v1/contacts/search', { headers: auth })).status()).toBe(405);
 });
 
-test('a key finds contacts by part of their name as members do, with name conditions in searches and segments too (ADR-143) and the segment read back (ADR-206) and written through the API (ADR-207), and text holding the NUL character is refused where it is (ADR-124)', async ({
+test('a key finds contacts by part of their name as members do, with name conditions in searches and segments too (ADR-143) and the segment read back (ADR-206) and written through the API (ADR-207) with its contacts listed (ADR-208), and text holding the NUL character is refused where it is (ADR-124)', async ({
   page,
   request,
 }) => {
@@ -289,6 +289,14 @@ test('a key finds contacts by part of their name as members do, with name condit
     name: 'Martins',
     count: 2,
   });
+
+  // And lists the contacts it holds, as the search found them (ADR-208).
+  const held = await request.get(`/api/v1/segments/${segments[0]!.id}/contacts`, { headers: auth });
+  expect(held.status()).toBe(200);
+  expect(((await held.json()) as Page).data.map((c) => c.name)).toEqual([
+    'MARTINA Rao',
+    'Élodie Martin',
+  ]);
 
   // The key creates a segment members then find on the Segments page, and archives it (ADR-207).
   const made = await request.post('/api/v1/segments', {

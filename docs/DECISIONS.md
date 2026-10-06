@@ -8289,3 +8289,27 @@ Decision:
 - **No migration.**
 
 Not built: segments' members as pages, and restoring an archived segment (members cannot either).
+
+## ADR-208 Listing a segment's contacts through the API (P5-08) (2026-10-06)
+
+Context: keys read, write and count segments (ADR-206, ADR-207), but to get a segment's contacts an
+integration had to copy its conditions into `POST /contacts/search`, and keep the copy in step with
+members' changes.
+
+Decision:
+
+- **`GET /segments/{id}/contacts`** gives the contacts a segment holds now, read from its stored
+  conditions by segments' own SQL (`segmentConditionsSql`), with dates in the company's time zone,
+  as a campaign takes its audience. Pages are those of `POST /contacts/search` (`apiContactPage`):
+  newest first, erased contacts left out, each page reading at most 2,000 contacts in one
+  repeatable-read snapshot, so a page can be short and still give a cursor.
+- **Scopes as a search's:** `campaigns.read` (segments) and `contacts.read` (contacts), and
+  `conversations.read` for a segment with a `last_message` condition, as a search with one needs it
+  (ADR-126); a `campaign` condition needs `campaigns.read`, which the route needs anyway. That last
+  check reads the segment first, as a search reads its conditions.
+- **A segment with a problem** (ADR-206) is refused with 412 saying it, rather than answered from
+  conditions that no longer hold; an archived segment and another company's are not found.
+- **No migration.**
+
+Not built: restoring an archived segment (members cannot either), and a segment's contacts as a
+file.

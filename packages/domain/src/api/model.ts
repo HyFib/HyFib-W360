@@ -108,7 +108,7 @@ export const API_SCOPE_INFO: Record<
   'campaigns.read': {
     label: 'Read campaigns',
     description:
-      "List the company's campaigns and read each one's progress and results: messages sent, delivered, read and failed, replies and opt-outs, and why recipients were skipped. Also read the company's saved segments, their conditions and how many contacts each matches. A key that also reads contacts lists each campaign's recipients and what happened to each. Never members or costs.",
+      "List the company's campaigns and read each one's progress and results: messages sent, delivered, read and failed, replies and opt-outs, and why recipients were skipped. Also read the company's saved segments, their conditions and how many contacts each matches. With contacts read as well, list the contacts each segment holds. A key that also reads contacts lists each campaign's recipients and what happened to each. Never members or costs.",
     permission: 'campaigns.read',
     writes: false,
   },
