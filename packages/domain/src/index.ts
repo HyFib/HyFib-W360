@@ -89,6 +89,7 @@ export * from './inbox/business-hours';
 export * from './inbox/sla';
 export * from './inbox/saved-replies';
 export * from './inbox/csat';
+export * from './inbox/mention-emails';
 export * from './automations/graph';
 export * from './automations/interpreter';
 export * from './automations/runs';

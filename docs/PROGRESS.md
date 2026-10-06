@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-06 — Phase 3 follow-up: emailing members about unread mentions (P3-06, ADR-211)
+
+Status: **Implemented; its database tests run in CI only.** Members mentioned in a note saw it only
+in the app. The local PostgreSQL is unavailable (its Docker daemon stopped), so the new and changed
+integration tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-211):** a signed job per mentioned member (not the author), due 10 minutes later;
+  the mention row decides under its lock; the newest unread mention of a burst emails; the author's
+  name, the unread count and a link only; no SQL migration, a new `note.mention` queue.
+- **Domain:** `inbox/mention-emails.ts` (`scheduleMentionEmail`, `mentionEmailNotice`,
+  `sendMentionEmail`); `addNote` schedules the jobs, and needs the job queue when it mentions
+  someone else.
+- **Worker:** `noteMentionHandler` on the `note.mention` queue.
+- **Tests:**
+  - Unit (4 new in `inbox/mention-emails.test.ts`): the email, the unread count, the delay and the
+    late limit, the email's limits and escaping.
+  - Integration (2 new in `inbox-advanced.test.ts`; its inbox service now has the job queue): the
+    signed jobs and their time, the email once and without the note, and no email once read, gone, a
+    day late, out of sight or after leaving, nor for an older mention of a burst. Written for CI;
+    not run here.
+- **Docs:** ADR-211; ARCHITECTURE; SECURITY; DEPLOYMENT and RUNBOOKS; BACKLOG P3-06; feature matrix
+  H-025.
+- **Mutation checks:** 9 deliberate regressions tried, all caught on the unit-tested parts. Which
+  mentions are emailed needs the database, so those regressions are left to the integration tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 914 passed (87 files)                                               |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it       |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 9 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Email preferences, a daily digest, and the note's text in the email.
+
 ## 2026-10-06 — Phase 3 follow-up: emailing members when HyFib pauses a campaign (P3-04, ADR-210)
 
 Status: **Implemented; its database tests run in CI only.** A campaign HyFib paused by itself (a cap

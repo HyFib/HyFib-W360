@@ -433,6 +433,16 @@ number is suppressed, the contact was erased or has no phone number, the WhatsAp
 or the customer was asked in the last 24 hours. A survey that was queued but failed shows Meta's
 error on the message in the thread (for example a consent change before dispatch: `opted_out`).
 
+**A member was not emailed about a mention (ADR-211).** The email goes 10 minutes after the note,
+only if the member has not opened the conversation since (opening it marks their mentions read), is
+still active and can still see it (an agent loses sight of a conversation assigned to someone else),
+and the mention is less than a day old; of several unread mentions in one conversation only the
+newest one emails. Mentions while the company was suspended are not emailed. The worker logs
+`mention email` with the mention id and the outcome (`sent`, `read`, `cannot_see`, `newer`, `gone`,
+`too_late`, `already_sent`); a sent one is in `ops.email_outbox` with the dedupe key
+`note-mention:<mention id>`, and is then the email worker's (dead letters, the email provider). A
+note added while the `note.mention` queue did not exist fails: run the migration job.
+
 **Migration 0010 failed.** It builds `app.conversations_team_idx` concurrently. If it failed, an
 INVALID index can remain: run `DROP INDEX CONCURRENTLY app.conversations_team_idx;` and run the
 migrations again.

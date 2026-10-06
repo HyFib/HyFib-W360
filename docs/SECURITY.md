@@ -152,6 +152,10 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   closed days and CSAT settings need `tenant.settings.manage` (audited). Teams never widen
   visibility. Mentions: only active members who can see the conversation at that moment can be
   mentioned, and a member's mentions are listed only for conversations they can still see.
+  A member who has not opened the conversation 10 minutes later is emailed once, after the same
+  checks run again (active, can still see it, mention unread); the email names only who mentioned
+  them, how many mentions are unread there and the conversation's link, never the note or the
+  customer (ADR-211).
   Automatic assignment only reaches active members whose role can read and answer conversations.
 - CSAT taps: a tap is recorded only when its button id names a survey of the same conversation and
   its `context.id` is that survey's message; nothing in the tap is trusted beyond selecting one of

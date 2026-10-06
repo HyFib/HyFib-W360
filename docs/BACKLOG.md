@@ -108,10 +108,13 @@ verification, app review, Embedded Signup configuration).
   business hours and closed days; reply-due timers and a longest-waiting order; team, number and
   customer filters; conversation cases and resolution times; business-hours report figures; saved
   replies; note mentions; a send-time collision warning; CSAT surveys with three reply buttons.
-  **Remaining:** per-team SLA targets and calendars, SLA breach notifications (email or in-app),
-  presence and typing indicators, conversation tags (W-035), private team queues (would change
-  visibility, ADR-029), mention emails, CSAT by template outside the window (needs a consent
-  decision), CSAT with a real WABA, transcript download (W-042), phone-number masking (W-044).
+  **[Emails about unread mentions built; its database tests run only in CI]** (ADR-211: a member
+  mentioned in a note who has not opened the conversation 10 minutes later is emailed who mentioned
+  them and a link, never the note or the customer; no SQL migration, one new queue). **Remaining:**
+  per-team SLA targets and calendars, SLA breach notifications (email or in-app), presence and
+  typing indicators, conversation tags (W-035), private team queues (would change visibility,
+  ADR-029), email preferences, CSAT by template outside the window (needs a consent decision), CSAT
+  with a real WABA, transcript download (W-042), phone-number masking (W-044).
 
 ## Phase 4 — automation, Flows, CRM, commerce
 

@@ -1,14 +1,20 @@
 import { randomInt } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { isAppError, systemClock } from '@w360/core';
+import { QUEUES } from '@w360/contracts';
+import { isAppError, systemClock, type Clock } from '@w360/core';
 import { authorizedTenantScope, sql } from '@w360/db';
 import {
+  MENTION_EMAIL_DELAY_MS,
+  MENTION_EMAIL_LATE_LIMIT_MS,
   createInboxService,
   createSavedRepliesService,
   createTeamsService,
   createTenancyService,
+  mentionEmailNotice,
+  outboxAad,
   queueTextMessage,
   routeDueConversations,
+  sendMentionEmail,
   type TenantContext,
 } from '@w360/domain';
 import { acceptInvitation, createUser, invite, type TestUser } from './helpers';
@@ -29,7 +35,8 @@ afterAll(async () => {
 });
 
 const teamsService = () => createTeamsService({ db: fx.dbs.app, clock: systemClock });
-const inboxService = () => createInboxService({ db: fx.dbs.app, clock: systemClock });
+const inboxService = () =>
+  createInboxService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
 const waId = () => `91${randomInt(7_000_000_000, 9_999_999_999)}`;
 
 async function expectAppError(promise: Promise<unknown>, code: string, message?: RegExp) {
@@ -704,6 +711,198 @@ describe('mentions', () => {
       [c.tenant.id],
     );
     expect(left[0]?.n).toBe(0);
+  });
+});
+
+describe('emailing members mentioned in a note who have not opened it (ADR-211)', () => {
+  const emailDeps = (clock: Clock = systemClock) => ({ db: fx.dbs.app, clock, ...fx.notices() });
+  const scopeOf = (c: Company) => authorizedTenantScope(c.tenant.id, null);
+  /** The mentions of the company's note with this text. */
+  const mentionsOf = (c: Company, body: string) =>
+    fx.query<{ id: string; membership_id: string }>(
+      `SELECT m.id, m.membership_id FROM app.note_mentions m
+         JOIN app.conversation_notes n ON n.tenant_id = m.tenant_id AND n.id = m.note_id
+        WHERE m.tenant_id = $1 AND n.body = $2`,
+      [c.tenant.id, body],
+    );
+  async function mentionEmails(c: Company) {
+    const rows = await fx.query<{
+      id: string;
+      to_address: string;
+      dedupe_key: string;
+      payload_ciphertext: string;
+    }>(
+      `SELECT id, to_address, dedupe_key, payload_ciphertext FROM ops.email_outbox
+        WHERE tenant_id = $1 AND dedupe_key LIKE 'note-mention:%' ORDER BY id`,
+      [c.tenant.id],
+    );
+    return rows.map((r) => ({
+      to: r.to_address,
+      dedupeKey: r.dedupe_key,
+      ...(JSON.parse(fx.keyring.decryptString(r.payload_ciphertext, outboxAad(r.id))) as {
+        kind: string;
+        companyName: string;
+        subject: string;
+        lines: string[];
+        url: string;
+        actionLabel: string;
+      }),
+    }));
+  }
+  /** The owner's name as the company shows it. */
+  const ownerName = async (c: Company) =>
+    (
+      await fx.query<{ name: string }>(
+        `SELECT coalesce(m.display_name, u.name) AS name
+           FROM app.memberships m JOIN auth.users u ON u.id = m.user_id
+          WHERE m.tenant_id = $1 AND m.user_id = $2`,
+        [c.tenant.id, c.owner.id],
+      )
+    )[0]!.name;
+
+  it('schedules a signed job for each member mentioned but the author, and emails one who has not opened the conversation once, without the note', async () => {
+    const { c, owner, agents } = await setup(1);
+    const inbox = inboxService();
+    const [a, b] = agents as [Setup['agents'][0], Setup['agents'][0]];
+    const from = waId();
+    const conv = await inbound(c, from, 'My parcel never arrived');
+    const before = Date.now();
+    const body = 'Refund approved for order 1042, call them back';
+    await inbox.addNote(owner, {
+      conversationId: conv.id,
+      body,
+      mentionIds: [a.membershipId, b.membershipId, owner.membership.id],
+    });
+    const after = Date.now();
+    const mentions = await mentionsOf(c, body);
+    const of = (membershipId: string) => mentions.find((m) => m.membership_id === membershipId)!.id;
+    const jobs = await fx.query<{ singleton_key: string; start_after: Date; data: unknown }>(
+      `SELECT singleton_key, start_after, data FROM pgboss.job
+        WHERE name = $1 AND singleton_key = ANY($2::text[])`,
+      [QUEUES.noteMention.name, mentions.map((m) => m.id)],
+    );
+    // One for each agent, none for the owner, who mentioned themselves.
+    expect(jobs.map((j) => j.singleton_key).sort()).toEqual(
+      [of(a.membershipId), of(b.membershipId)].sort(),
+    );
+    for (const job of jobs) {
+      expect(fx.signer.verify(job.data)).toMatchObject({
+        kind: 'note.mention',
+        tenantId: c.tenant.id,
+        actorUserId: null,
+        ref: job.singleton_key,
+      });
+      expect(job.start_after.getTime()).toBeGreaterThanOrEqual(before + MENTION_EMAIL_DELAY_MS);
+      expect(job.start_after.getTime()).toBeLessThanOrEqual(after + MENTION_EMAIL_DELAY_MS);
+    }
+
+    // b opened the conversation before the email was due; a did not.
+    await inbox.markRead(b.ctx, conv.id);
+    expect(await sendMentionEmail(emailDeps(), scopeOf(c), of(b.membershipId))).toBe('read');
+    expect(await sendMentionEmail(emailDeps(), scopeOf(c), of(a.membershipId))).toBe('sent');
+    // A job run again finds its email queued.
+    expect(await sendMentionEmail(emailDeps(), scopeOf(c), of(a.membershipId))).toBe(
+      'already_sent',
+    );
+    const author = await ownerName(c);
+    const [company] = await fx.query<{ name: string }>(
+      'SELECT name FROM app.tenants WHERE id = $1',
+      [c.tenant.id],
+    );
+    const sent = await mentionEmails(c);
+    expect(sent).toEqual([
+      {
+        to: a.user.email,
+        dedupeKey: `note-mention:${of(a.membershipId)}`,
+        kind: 'tenant.notice',
+        companyName: company!.name,
+        subject: `${author} mentioned you in a note`,
+        lines: mentionEmailNotice({ authorName: author, unread: 1 }).lines,
+        url: `http://localhost:3000/c/${c.tenant.slug}/inbox/${conv.id}`,
+        actionLabel: 'Open conversation',
+      },
+    ]);
+    // Neither the note, the customer's message nor their number is in it.
+    for (const text of ['Refund approved', 'parcel', from]) {
+      expect(JSON.stringify(sent)).not.toContain(text);
+    }
+  });
+
+  it('emails only the newest unread mention of a member in a conversation, and no member who can no longer see it or left, nor a mention gone or a day late', async () => {
+    const { c, owner, agents } = await setup(1);
+    const inbox = inboxService();
+    const [a, b] = agents as [Setup['agents'][0], Setup['agents'][0]];
+    const conv = await inbound(c, waId());
+    await inbox.addNote(owner, {
+      conversationId: conv.id,
+      body: 'First: can you look?',
+      mentionIds: [a.membershipId],
+    });
+    await inbox.addNote(owner, {
+      conversationId: conv.id,
+      body: 'Second: any news?',
+      mentionIds: [a.membershipId],
+    });
+    const [first] = await mentionsOf(c, 'First: can you look?');
+    const [second] = await mentionsOf(c, 'Second: any news?');
+    // The first mention's job leaves the email to the second's, which counts both.
+    expect(await sendMentionEmail(emailDeps(), scopeOf(c), first!.id)).toBe('newer');
+    expect(await sendMentionEmail(emailDeps(), scopeOf(c), second!.id)).toBe('sent');
+    const author = await ownerName(c);
+    expect((await mentionEmails(c)).map((e) => [e.to, e.dedupeKey, e.lines])).toEqual([
+      [
+        a.user.email,
+        `note-mention:${second!.id}`,
+        mentionEmailNotice({ authorName: author, unread: 2 }).lines,
+      ],
+    ]);
+
+    // Assigned to b after the note: a, an agent, can no longer see the conversation.
+    const assigned = await inbound(c, waId());
+    await inbox.addNote(owner, {
+      conversationId: assigned.id,
+      body: 'Third: for a',
+      mentionIds: [a.membershipId],
+    });
+    await inbox.assign(owner, {
+      conversationId: assigned.id,
+      membershipId: b.membershipId,
+      expectedVersion: (await conversation(assigned.id)).version,
+    });
+    const [third] = await mentionsOf(c, 'Third: for a');
+    expect(await sendMentionEmail(emailDeps(), scopeOf(c), third!.id)).toBe('cannot_see');
+
+    // More than a day late (the company was suspended, or the worker down), then gone with its
+    // note when the contact is erased.
+    const erased = await inbound(c, waId());
+    await inbox.addNote(owner, {
+      conversationId: erased.id,
+      body: 'Fourth: for b',
+      mentionIds: [b.membershipId],
+    });
+    const [fourth] = await mentionsOf(c, 'Fourth: for b');
+    const dayLater: Clock = {
+      now: () => new Date(Date.now() + MENTION_EMAIL_LATE_LIMIT_MS + 60_000),
+    };
+    expect(await sendMentionEmail(emailDeps(dayLater), scopeOf(c), fourth!.id)).toBe('too_late');
+    await fx.dbs.app.run(authorizedTenantScope(c.tenant.id, c.owner.id), (tx) =>
+      tx.execute(
+        sql`select app.erase_contact((select contact_id from app.conversations where id = ${erased.id}::uuid), false)`,
+      ),
+    );
+    expect(await sendMentionEmail(emailDeps(), scopeOf(c), fourth!.id)).toBe('gone');
+
+    // A member who left the company.
+    const left = await inbound(c, waId());
+    await inbox.addNote(owner, {
+      conversationId: left.id,
+      body: 'Fifth: for b',
+      mentionIds: [b.membershipId],
+    });
+    const [fifth] = await mentionsOf(c, 'Fifth: for b');
+    await fx.query(`UPDATE app.memberships SET status = 'removed' WHERE id = $1`, [b.membershipId]);
+    expect(await sendMentionEmail(emailDeps(), scopeOf(c), fifth!.id)).toBe('cannot_see');
+    expect(await mentionEmails(c)).toHaveLength(1);
   });
 });
 

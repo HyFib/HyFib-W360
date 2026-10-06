@@ -382,6 +382,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Mentions** (`app.note_mentions`): a note can name members who can see the conversation at that
   moment; Inbox → Mentions lists a member's mentions in conversations they can still see, with an
   unread count cleared when they open the conversation.
+  **Mention emails** (`inbox/mention-emails.ts`, queue `note.mention`, ADR-211): `addNote` schedules
+  one signed job per member it mentions other than its author, due `MENTION_EMAIL_DELAY_MS` (10
+  minutes) later. `sendMentionEmail` locks the mention row and queues a `tenant.notice` (dedupe key
+  `note-mention:<mention>`) only for an unread mention less than a day old, of an active member who
+  can still see the conversation, with no newer unread mention of the member there; the email names
+  the author and the unread count, never the note or the customer.
 - **Collision warning** (`queueTextMessage` `afterMessageId`): under the conversation row lock, a
   reply is refused once when another member's reply is newer than the newest message the sender had
   seen; the composer refreshes the thread and keeps the draft (ADR-033).

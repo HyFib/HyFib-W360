@@ -37,6 +37,7 @@ import { endRunForHuman } from '../automations/runs';
 import { automationStateForConversation } from '../automations/service';
 import { latestConversationSource } from '../growth/sources';
 import { latestCsatSurvey, queueCsatSurvey } from '../inbox/csat';
+import { MENTION_EMAIL_DELAY_MS, scheduleMentionEmail } from '../inbox/mention-emails';
 import {
   INBOX_WORKER_ROLES,
   lockAssignableMember,
@@ -195,7 +196,10 @@ function memberCanSee(rolesColumn: SQL, membershipIdColumn: SQL, assigneeColumn:
 export interface InboxDeps {
   db: Database;
   clock: Clock;
-  /** Needed to send CSAT surveys when a company turns them on. */
+  /**
+   * Needed to send CSAT surveys when a company turns them on, and to email members mentioned in a
+   * note who have not opened it (ADR-211).
+   */
   jobs?: JobQueue;
   signer?: JobSigner;
 }
@@ -204,6 +208,7 @@ export function createInboxService(deps: InboxDeps) {
   const { db, clock } = deps;
   const csatDeps =
     deps.jobs && deps.signer ? { jobs: deps.jobs, signer: deps.signer, clock } : null;
+  const mentionDeps = deps.jobs && deps.signer ? { jobs: deps.jobs, signer: deps.signer } : null;
 
   function visibilityFilter(ctx: TenantContext): SQL | undefined {
     if (can(ctx, 'inbox.read_all')) return undefined;
@@ -825,7 +830,10 @@ export function createInboxService(deps: InboxDeps) {
       });
     },
 
-    /** Adds an internal note; mentioned members are notified and must be able to see the thread. */
+    /**
+     * Adds an internal note; mentioned members are notified and must be able to see the thread.
+     * Those who have not opened it a while later are emailed (ADR-211).
+     */
     async addNote(ctx: TenantContext, input: unknown) {
       assertCan(ctx, 'inbox.reply');
       const data = parse(noteSchema, input);
@@ -863,16 +871,28 @@ export function createInboxService(deps: InboxDeps) {
           body: data.body,
         });
         if (mentionIds.length) {
-          await tx.insert(noteMentions).values(
-            mentionIds.map((membershipId) => ({
-              id: uuidv7(),
-              tenantId: ctx.tenant.id,
-              noteId,
-              membershipId,
-              // Mentioning yourself needs no notification.
-              readAt: membershipId === ctx.membership.id ? clock.now() : null,
-            })),
-          );
+          const now = clock.now();
+          const rows = mentionIds.map((membershipId) => ({
+            id: uuidv7(),
+            tenantId: ctx.tenant.id,
+            noteId,
+            membershipId,
+            // Mentioning yourself needs no notification.
+            readAt: membershipId === ctx.membership.id ? now : null,
+          }));
+          await tx.insert(noteMentions).values(rows);
+          const notified = rows.filter((row) => row.readAt === null);
+          if (notified.length) {
+            if (!mentionDeps) throw new Error('Mention emails need the job queue');
+            const at = new Date(now.getTime() + MENTION_EMAIL_DELAY_MS);
+            for (const row of notified) {
+              await scheduleMentionEmail(mentionDeps, tx, {
+                tenantId: ctx.tenant.id,
+                mentionId: row.id,
+                at,
+              });
+            }
+          }
         }
         await emitTenantEvent(tx, ctx.tenant.id, {
           type: mentionIds.length ? 'conversation.mention' : 'conversation.note',

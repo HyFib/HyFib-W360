@@ -8365,3 +8365,33 @@ Decision:
 
 Not built: an email when a campaign completes or its sending period ends, a digest of pauses, email
 preferences, and in-app notifications.
+
+## ADR-211 Emailing members mentioned in a note who have not opened it (P3-06) (2026-10-06)
+
+Context: a member mentioned in a note sees it only in the app (the unread count, Inbox → Mentions
+and the live update). One who is not in the app learns of it when they next open it, however urgent
+the note.
+
+Decision:
+
+- **After a delay, only if still unread:** adding a note schedules a signed `note.mention` job for
+  each member it mentions other than its author, due 10 minutes later. Opening the conversation in
+  that time (which marks the mention read) means no email.
+- **The mention row decides,** under its row lock, when the job runs: no email for a mention already
+  read, gone with its note (erased contact, deleted company), more than a day old (the company was
+  suspended or the worker down), or of a member who is no longer active or can no longer see the
+  conversation (the inbox's own rule, checked again). Of a member's unread mentions in one
+  conversation, only the newest one's job emails, saying how many are unread, so a burst of notes
+  sends one email. A job run again after its transaction committed finds its email queued (the
+  outbox's dedupe key holds the mention id).
+- **What it says:** who mentioned them, how many of their mentions in the conversation are unread,
+  and a link to the conversation, where access is checked again. Never the note, the customer's name
+  or number, or the message: an email stays readable after its reader loses access to the
+  conversation, and leaves HyFib's controls.
+- **A suspended company's** jobs are dropped (logged): its members get no email for those mentions,
+  which the inbox still shows as unread.
+- **No SQL migration and no setting;** the migration job creates the new queue. Keys' notes mention
+  no one (ADR-072), so nothing changes in the API.
+
+Not built: email preferences (a member cannot turn these emails off), a daily digest, and the note's
+text in the email.
