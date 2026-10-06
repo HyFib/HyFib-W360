@@ -461,11 +461,12 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
     }
   ).data;
   expect(review).toMatchObject({ campaignId: winter.id, version: 2 });
+  // The page puts the number that can receive it in its own element, as the review above reads.
   await expect(
     page.getByText(
-      `${review.audience.eligible} of ${review.audience.total} contacts can receive it now.`,
+      new RegExp(`of ${review.audience.total} contacts in the audience can receive it now`),
     ),
-  ).toBeVisible();
+  ).toContainText(String(review.audience.eligible));
   const readerReviews = await request.get(`/api/v1/campaigns/${winter.id}/review`, {
     headers: auth,
   });
