@@ -261,8 +261,10 @@ verification, app review, Embedded Signup configuration).
   and say why, and cannot be published; no migration). **[Automation steps that move deals built;
   their database and browser tests run only in CI]** (ADR-250, migrations 0162 and 0163: the
   contact's single open deal in a pipeline moved to an active stage, as the automation; nothing
-  moves when it is unclear which deal). **Remaining:** custom deal fields, products on deals, deal
-  import, forecasts in Reports, automation steps that close deals, CRM connectors (HubSpot,
+  moves when it is unclear which deal). **[Automation steps that close deals built; their database
+  test runs only in CI]** (ADR-251, migrations 0164 and 0165: the contact's single open deal in a
+  pipeline closed as won or lost, with an optional reason, as the automation). **Remaining:** custom
+  deal fields, products on deals, deal import, forecasts in Reports, CRM connectors (HubSpot,
   Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
   checklist).
 - **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad

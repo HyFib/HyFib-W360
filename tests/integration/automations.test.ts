@@ -2643,6 +2643,121 @@ describe('automations that create CRM deals (ADR-245)', () => {
     expect((await row(deal!.id)).version).toBe(moved.version);
   });
 
+  it('closes the contact’s open deal as the automation, won with its value or lost with a reason (ADR-251)', async () => {
+    const s = await setup();
+    const closer = (outcome: 'won' | 'lost', lostReason: string | null) => ({
+      version: 1,
+      start: 'close',
+      nodes: [
+        {
+          id: 'close',
+          type: 'close_deal',
+          pipelineId: s.pipelineId,
+          outcome,
+          lostReason,
+          next: 'thanks',
+        },
+        { id: 'thanks', type: 'send_text', text: 'Thank you.', next: null },
+      ],
+    });
+    const { id: winsId } = await publish(s.owner, 'Wins', keyword('paid'), closer('won', null));
+    const { id: lossesId } = await publish(
+      s.owner,
+      'Losses',
+      keyword('no thanks'),
+      closer('lost', 'Declined on WhatsApp'),
+    );
+    const runIn = async (conversationId: string) => {
+      const run = (await runsOf(conversationId)).at(-1)!;
+      expect((await drive(s.c, conversationId, run.id)).outcome).toBe('ended');
+      return run;
+    };
+    const closeOf = async (runId: string) =>
+      (await stepLog(runId)).find((st) => st.node_id === 'close');
+    const row = async (id: string) =>
+      (
+        await fx.query<{
+          status: string;
+          closed_at: Date | null;
+          closed_by_membership_id: string | null;
+          lost_reason: string | null;
+          version: number;
+        }>(
+          `SELECT status, closed_at, closed_by_membership_id, lost_reason, version
+             FROM app.crm_deals WHERE id = $1`,
+          [id],
+        )
+      )[0]!;
+    const activities = (dealId: string) =>
+      fx.query(
+        `SELECT kind, actor_membership_id, data FROM app.crm_activities
+          WHERE deal_id = $1 AND kind IN ('deal_won', 'deal_lost')`,
+        [dealId],
+      );
+
+    // A customer asks the price (their deal is created), then pays: the deal is won.
+    const buyer = waId();
+    const bought = await inbound(s.c, buyer, 'what is the price?');
+    await runIn(bought);
+    const [deal] = await dealsOf(s.c.tenant.id);
+    const before = await row(deal!.id);
+    await inbound(s.c, buyer, 'I paid');
+    const won = await runIn(bought);
+    expect(await closeOf(won.id)).toMatchObject({ outcome: 'closed', detail: null });
+    expect(await row(deal!.id)).toMatchObject({
+      status: 'won',
+      closed_by_membership_id: null,
+      lost_reason: null,
+      version: before.version + 1,
+    });
+    expect((await row(deal!.id)).closed_at).not.toBeNull();
+    expect(await activities(deal!.id)).toEqual([
+      {
+        kind: 'deal_won',
+        actor_membership_id: null,
+        data: { valueMinor: 250050, automationId: winsId, runId: won.id },
+      },
+    ]);
+    // Paying again: the deal is no longer open, so nothing closes.
+    await inbound(s.c, buyer, 'paid again');
+    expect(await closeOf((await runIn(bought)).id)).toMatchObject({
+      outcome: 'skipped',
+      detail: 'deal_not_open',
+    });
+
+    // Another customer declines: their deal is lost, with the step's reason.
+    const decliner = waId();
+    const declined = await inbound(s.c, decliner, 'the price please');
+    await runIn(declined);
+    const second = (await dealsOf(s.c.tenant.id)).find((d) => d.id !== deal!.id)!;
+    await inbound(s.c, decliner, 'no thanks');
+    const lost = await runIn(declined);
+    expect(await closeOf(lost.id)).toMatchObject({ outcome: 'closed' });
+    expect(await row(second.id)).toMatchObject({
+      status: 'lost',
+      closed_by_membership_id: null,
+      lost_reason: 'Declined on WhatsApp',
+    });
+    expect(await activities(second.id)).toEqual([
+      {
+        kind: 'deal_lost',
+        actor_membership_id: null,
+        data: { automationId: lossesId, runId: lost.id },
+      },
+    ]);
+    // A member can reopen a deal an automation closed, as any closed deal.
+    const reopened = await crm().reopenDeal(s.owner, {
+      id: second.id,
+      expectedVersion: (await row(second.id)).version,
+    });
+    expect(await row(second.id)).toMatchObject({
+      status: 'open',
+      closed_at: null,
+      lost_reason: null,
+      version: reopened.version,
+    });
+  });
+
   it('is published only with an active stage, by a member who may edit the CRM (ADR-250)', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);

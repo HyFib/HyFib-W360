@@ -60,6 +60,8 @@ export const AUTOMATION_LIMITS = {
   dealValueLength: 24,
   /** How far ahead a deal step's expected close date may be, in days. */
   dealCloseDays: 365,
+  /** A lost deal's reason, as the CRM limits it (ADR-251). */
+  dealLostReasonLength: 200,
 } as const;
 
 /**
@@ -555,6 +557,26 @@ const moveDealNode = z.object({
 });
 
 /**
+ * Closes the run's contact's open deal in a pipeline as won or lost (ADR-251), as the automation,
+ * on the same terms as moving it: nothing closes when the contact has no open deal there, or more
+ * than one. A lost deal may get a reason, kept as written.
+ */
+const closeDealNode = z.object({
+  id: nodeIdSchema,
+  type: z.literal('close_deal'),
+  label: labelSchema,
+  pipelineId: z.uuid('Choose a pipeline.'),
+  outcome: z.enum(['won', 'lost'], { error: 'Choose won or lost.' }),
+  lostReason: z
+    .string()
+    .trim()
+    .max(AUTOMATION_LIMITS.dealLostReasonLength, 'The reason is limited to 200 characters.')
+    .nullable()
+    .transform((v) => (v ? v : null)),
+  next: nextSchema,
+});
+
+/**
  * A deal step's value in minor units of the pipeline's currency: null without a value, undefined
  * when the text is not an amount in that currency or is more than a deal can hold.
  */
@@ -577,6 +599,7 @@ export const nodeSchema = z.discriminatedUnion('type', [
   createTaskNode,
   createDealNode,
   moveDealNode,
+  closeDealNode,
   waitNode,
   handoffNode,
   endNode,
@@ -599,6 +622,7 @@ export const NODE_TYPES: readonly NodeType[] = [
   'create_task',
   'create_deal',
   'move_deal',
+  'close_deal',
   'wait',
   'handoff',
   'end',
@@ -618,6 +642,7 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   create_task: 'Create a CRM task',
   create_deal: 'Create a CRM deal',
   move_deal: 'Move the CRM deal',
+  close_deal: 'Close the CRM deal',
   wait: 'Wait',
   handoff: 'Hand off to people',
   end: 'End',
@@ -1179,6 +1204,7 @@ export function edgesOf(node: AutomationNode): { label: string; target: string |
     case 'create_task':
     case 'create_deal':
     case 'move_deal':
+    case 'close_deal':
     case 'wait':
       return [{ label: 'next', target: node.next }];
     case 'ask_template':
@@ -1600,6 +1626,17 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
           message: 'Choose an active stage of an active pipeline to move the deal to.',
         });
       }
+    }
+    if (
+      node.type === 'close_deal' &&
+      refs.crmPipelines &&
+      !refs.crmPipelines.has(node.pipelineId)
+    ) {
+      issues.push({
+        level: 'error',
+        nodeId: node.id,
+        message: 'Choose an active pipeline for the deal to close.',
+      });
     }
     if (node.type === 'create_deal') {
       for (const message of dealStepIssues(node, refs)) {

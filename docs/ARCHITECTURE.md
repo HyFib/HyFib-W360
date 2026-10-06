@@ -486,6 +486,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   checks the plan, locks the contact (key share) and shares the pipeline, reads the stage, locks the
   contact's open deals in the pipeline (at most two), moves the only one and adds a `stage_changed`
   activity without an actor; anything else is a note for a `skipped` step.
+- **Automations that close CRM deals** (ADR-251): `close_deal` steps (checked against
+  `crmPipelines`); the interpreter gives a `close_deal` effect logged as `closed`, with a reason
+  only for a lost deal; `applyCloseDealEffect` shares `holdForDealChange` (the plan, the contact,
+  the pipeline) and `onlyOpenDeal` with moves, then closes the deal with no member closer and adds a
+  `deal_won` or `deal_lost` activity without an actor.
 - **Read receipts and typing indicators** (`inbox/read-receipts.ts`, ADR-223): `markRead` in
   `messaging/inbox.ts` calls `queueReadReceipt` in its transaction; the composer calls
   `showTypingAction` at most every 20 seconds, which `showTyping` checks and queues; both sign a job

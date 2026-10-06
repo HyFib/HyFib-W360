@@ -196,8 +196,13 @@ export interface AutomationDetail {
   };
 }
 
-/** Steps that write to the CRM (ADR-244, ADR-245, ADR-250). */
-const CRM_NODE_TYPES: ReadonlySet<string> = new Set(['create_task', 'create_deal', 'move_deal']);
+/** Steps that write to the CRM (ADR-244, ADR-245, ADR-250, ADR-251). */
+const CRM_NODE_TYPES: ReadonlySet<string> = new Set([
+  'create_task',
+  'create_deal',
+  'move_deal',
+  'close_deal',
+]);
 
 /** A form a form step may send (ADR-248): only one published at Meta can be sent. */
 export interface AutomationFlowOption {
@@ -573,9 +578,9 @@ export function createAutomationService(deps: AutomationServiceDeps) {
   }
 
   /**
-   * Publishing or testing a graph that creates CRM tasks or deals, or moves deals, needs the CRM in
-   * the company's plan (ADR-249) and `crm.write`, as doing so in the CRM does (ADR-244, ADR-245,
-   * ADR-250).
+   * Publishing or testing a graph that creates CRM tasks or deals, or moves or closes deals, needs
+   * the CRM in the company's plan (ADR-249) and `crm.write`, as doing so in the CRM does (ADR-244,
+   * ADR-245, ADR-250, ADR-251).
    */
   function assertMayChangeCrm(
     ctx: TenantContext,

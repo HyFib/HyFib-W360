@@ -180,6 +180,8 @@ export const AUTOMATION_STEP_OUTCOMES = [
   'skipped',
   /** A step moved the contact's deal (migration 0162, ADR-250). */
   'moved',
+  /** A step closed the contact's deal (migration 0164, ADR-251). */
+  'closed',
 ] as const;
 export type AutomationStepOutcome = (typeof AUTOMATION_STEP_OUTCOMES)[number];
 

@@ -293,6 +293,8 @@ Phase 4 rules (automations, P4-01):
   single open deal in the chosen pipeline moves, to an active stage checked when publishing and
   again when the step runs, recorded on the deal's timeline as the automation's. With none or
   several open deals, nothing moves.
+- Steps that close deals (ADR-251): the same rules, for an active pipeline; the deal is closed with
+  no member as its closer, and the timeline records the automation and the run.
 
 Phase 4 rules (automation web requests, P4-02):
 

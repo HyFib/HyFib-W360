@@ -1,5 +1,39 @@
 # Progress
 
+## 2026-10-06 — Automation steps that close a CRM deal (P4-01, P4-04, H-012, ADR-251)
+
+Status: **Implemented; its database test runs in CI only.** Automations could move deals (ADR-250)
+but not close them. The local PostgreSQL is unavailable, so migrations 0164 and 0165 and the
+integration test below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0164 (the run steps' outcome check with `closed`, NOT VALID) and 0165
+  (validates it).
+- **Domain:** the `close_deal` step (graph, its check against `crmPipelines`, the interpreter's
+  effect and `closed` outcome), `applyCloseDealEffect` in the runner with `holdForDealChange` and
+  `onlyOpenDeal`, now shared with moves.
+- **Web:** the step in the automation editor (pipeline, won or lost, reason), its line in the
+  simulator, and the run page's outcome.
+- **Tests:** unit (4 new in `close-step.test.ts`); integration (1 new in `automations.test.ts`: won
+  with the value, a deal no longer open, lost with the reason, a member's reopen). No e2e test of
+  its own: the e2e automation's deal is checked on the board, which shows open deals. Written for
+  CI; not run here.
+- **Docs:** ADR-251; ARCHITECTURE; SECURITY; THREAT-MODEL T221; DEPLOYMENT; BACKLOG P4-04; feature
+  matrix H-012.
+- **Mutation checks:** 10/10 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 1070 passed (115 files)                                         |
+| `pnpm test:integration`, `pnpm db:migrate`         | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 10/10 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
 ## 2026-10-06 — Automation steps that move a CRM deal (P4-01, P4-04, H-012, ADR-250)
 
 Status: **Implemented; its database and browser tests run in CI only.** Automations could create

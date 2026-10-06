@@ -175,6 +175,14 @@ export type RunEffect =
     }
   /** The run's contact's open deal in the pipeline moved to the stage, by the automation (ADR-250). */
   | { kind: 'move_deal'; pipelineId: string; stageId: string }
+  /** The run's contact's open deal in the pipeline closed, by the automation (ADR-251). */
+  | {
+      kind: 'close_deal';
+      pipelineId: string;
+      outcome: 'won' | 'lost';
+      /** Only for a lost deal. */
+      lostReason: string | null;
+    }
   | { kind: 'handoff'; teamId: string | null };
 
 export type StepStatus = 'running' | 'waiting' | 'completed' | 'handed_off' | 'failed';
@@ -206,6 +214,8 @@ export type StepLogOutcome =
   | 'created'
   /** A step that moves a deal (ADR-250). */
   | 'moved'
+  /** A step that closes a deal (ADR-251). */
+  | 'closed'
   /**
    * Recorded by the runner when a task or deal step created nothing, or a step that moves a deal
    * moved nothing (ADR-244, ADR-245, ADR-250).
@@ -661,6 +671,15 @@ export function advance(input: AdvanceInput): StepResult {
           stageId: current.stageId,
         };
         return moveTo(current.next, base, [effect], 'moved', null);
+      }
+      case 'close_deal': {
+        const effect: RunEffect = {
+          kind: 'close_deal',
+          pipelineId: current.pipelineId,
+          outcome: current.outcome,
+          lostReason: current.outcome === 'lost' ? current.lostReason : null,
+        };
+        return moveTo(current.next, base, [effect], 'closed', null);
       }
       case 'http_request': {
         if (base.httpCalls + 1 > RUN_BUDGETS.maxHttpCalls)

@@ -9545,3 +9545,26 @@ Decision:
 
 Not built: closing a deal as won or lost from an automation, moving it to another pipeline, and
 choosing which of several open deals to move.
+
+## ADR-251 Automation steps that close a CRM deal (P4-01, P4-04) (2026-10-06)
+
+Context: after ADR-250 an automation could move a customer's deal but not close it, so a paid order
+or a customer's "no thanks" still needed a member to mark the deal won or lost.
+
+Decision:
+
+- **The step:** "Close the CRM deal" (`close_deal`) closes the run's contact's open deal in a chosen
+  active pipeline as won or lost, with an optional reason for a lost deal (up to 200 characters, the
+  CRM's limit, kept as written), as a member closes it: the status and the time it closed change and
+  the version moves on. No member is its closer; its `deal_won` (with the value) or `deal_lost`
+  activity has no member actor and names the automation and the run, so the timeline says "by an
+  automation". A member reopens such a deal as any other.
+- **On the same terms as a move (ADR-250):** nothing closes, the step is logged as `skipped` and the
+  run goes on, when the contact has no open deal in the pipeline or more than one, when the pipeline
+  was archived, when the contact was erased, or when the plan no longer includes the CRM; publishing
+  checks the pipeline and needs `crm.write` and the CRM in the plan. The lookup and the locks are
+  shared with moves. Run steps get the outcome `closed` (migrations 0164 and 0165, as 0162 and
+  0163).
+
+Not built: recording the automation on the deal row as its closer (the timeline names it), and a
+reason filled in from the conversation.

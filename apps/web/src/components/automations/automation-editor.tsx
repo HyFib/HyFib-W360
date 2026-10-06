@@ -277,6 +277,16 @@ function defaultNode(
         stageId: (pipeline?.stages[1] ?? pipeline?.stages[0])?.id ?? '',
         next: null,
       };
+    case 'close_deal':
+      return {
+        id,
+        type,
+        label: '',
+        pipelineId: pipeline?.id ?? '',
+        outcome: 'won',
+        lostReason: null,
+        next: null,
+      };
     case 'handoff':
       return { id, type, label: '', teamId: null };
     case 'end':
@@ -296,6 +306,7 @@ function retarget(node: AutomationNode, target: string, value: string | null): A
     case 'create_task':
     case 'create_deal':
     case 'move_deal':
+    case 'close_deal':
     case 'wait':
       return { ...node, next: t(node.next) };
     case 'ask_template':

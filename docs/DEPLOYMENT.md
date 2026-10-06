@@ -603,6 +603,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    automations with these steps until the web rollout ends; an old server's run page shows the
    outcome as `moved`, untranslated.
 
+   Migrations 0164 and 0165 (ADR-251) do the same for `closed`, with the same rollout rules for
+   steps that close a deal: workers first, and no editing of automations with these steps on old web
+   servers. Old servers show a deal an automation closed as closed by nobody; the timeline names the
+   automation on new servers.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

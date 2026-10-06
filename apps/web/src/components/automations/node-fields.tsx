@@ -1092,6 +1092,76 @@ export function NodeFields({
         </div>
       );
     }
+    case 'close_deal': {
+      const pipeline = options.crmPipelines.find((pl) => pl.id === node.pipelineId);
+      return (
+        <div className="grid gap-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field
+              id={`${p}-pipeline`}
+              label="Pipeline"
+              description="The contact's open deal in it closes. Nothing closes when the contact has none, or more than one."
+            >
+              {(aria) => (
+                <Select
+                  {...aria}
+                  value={node.pipelineId}
+                  onChange={(e) => patch(node, { pipelineId: e.target.value })}
+                >
+                  {pipeline ? null : <option value={node.pipelineId}>Choose a pipeline</option>}
+                  {options.crmPipelines.map((pl) => (
+                    <option key={pl.id} value={pl.id}>
+                      {pl.name}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+            <Field id={`${p}-outcome`} label="Close it as">
+              {(aria) => (
+                <Select
+                  {...aria}
+                  value={node.outcome}
+                  onChange={(e) =>
+                    patch(node, {
+                      outcome: e.target.value === 'lost' ? 'lost' : 'won',
+                      lostReason: e.target.value === 'lost' ? node.lostReason : null,
+                    })
+                  }
+                >
+                  <option value="won">Won</option>
+                  <option value="lost">Lost</option>
+                </Select>
+              )}
+            </Field>
+          </div>
+          {node.outcome === 'lost' ? (
+            <Field
+              id={`${p}-reason`}
+              label="Reason (optional)"
+              description="Kept as written on the deal."
+            >
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={node.lostReason ?? ''}
+                  maxLength={AUTOMATION_LIMITS.dealLostReasonLength}
+                  onChange={(e) => patch(node, { lostReason: e.target.value || null })}
+                />
+              )}
+            </Field>
+          ) : null}
+          <NextSelect
+            id={`${p}-next`}
+            label="Then"
+            value={node.next}
+            self={node.id}
+            options={options}
+            onChange={(next) => patch(node, { next })}
+          />
+        </div>
+      );
+    }
     case 'wait':
       return (
         <div className="grid gap-4 sm:grid-cols-2">
