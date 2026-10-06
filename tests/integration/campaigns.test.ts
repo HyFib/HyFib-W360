@@ -1326,6 +1326,8 @@ describe('notice emails skip members who turned them off (ADR-215)', () => {
     await fx.query(`UPDATE app.message_templates SET status = 'paused' WHERE id = $1`, [
       s.templateId,
     ]);
+    // The next tick is due a tick after the batch.
+    s.clock.advance(11_000);
     expect(await s.tick(id)).toMatchObject({ pauseReason: 'template_not_approved' });
     expect(await campaignEmails(s.c.tenant.id, `campaign-paused:${id}:`)).toEqual([]);
     await fx.query(`UPDATE app.message_templates SET status = 'approved' WHERE id = $1`, [
