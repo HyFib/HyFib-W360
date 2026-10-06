@@ -43,6 +43,7 @@ import { deadLetterRetryBlock, deadLetterRetryableUntil } from './dead-letter-re
 import { parseInput } from '../validation';
 import {
   OPS_SIGNAL_RULES,
+  OPS_LIST_ROWS,
   OPS_WINDOWS,
   healthIssues,
   healthLevel,
@@ -395,7 +396,11 @@ const resolveSchema = z.object({
 export function createPlatformOpsService(deps: PlatformOpsDeps) {
   const { platformDb, queues: inspector, clock } = deps;
 
-  async function receiptsNeedingAttention(tx: Tx, now: Date): Promise<ReceiptNeedingAttention[]> {
+  async function receiptsNeedingAttention(
+    tx: Tx,
+    now: Date,
+    limit: number = OPS_LIST_ROWS.receipts.shown,
+  ): Promise<ReceiptNeedingAttention[]> {
     const waitingBefore = new Date(now.getTime() - OPS_WINDOWS.stuckReceiptMinutes * MINUTE_MS);
     // One rule for a receipt that used all its attempts, shared with the alerts and the retry
     // (migration 0068): failed its last attempt, or its worker stopped during it.
@@ -431,8 +436,8 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           ),
         ),
       )
-      .orderBy(desc(webhookReceipts.receivedAt))
-      .limit(100);
+      .orderBy(desc(webhookReceipts.receivedAt), desc(webhookReceipts.id))
+      .limit(limit);
     const bodyKeptAfter = now.getTime() - RECEIPT_BODY_DAYS * DAY_MS;
     return rows.map(
       ({ exhausted: usedUp, acknowledgedAt, acknowledgedByName, acknowledgement, ...r }) => {
@@ -548,9 +553,14 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
   }
 
   /** Embedded Signup sessions since a time that failed or were abandoned, newest first. */
-  async function signupProblems(tx: Tx, since: Date, now: Date): Promise<SignupProblem[]> {
+  async function signupProblems(
+    tx: Tx,
+    since: Date,
+    now: Date,
+    limit: number = OPS_LIST_ROWS.signups.shown,
+  ): Promise<SignupProblem[]> {
     const sessions = await tx.execute<Row>(
-      sql`select * from ops.platform_ops_signup_sessions(${since.toISOString()}::timestamptz, 200)`,
+      sql`select * from ops.platform_ops_signup_sessions(${since.toISOString()}::timestamptz, ${limit}::int)`,
     );
     return sessions.rows.map((r) => ({
       tenantId: String(r.tenant_id),
@@ -565,7 +575,11 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
   }
 
   /** Number setups that failed, or have run for over `stuckSetupMinutes`, latest change first. */
-  async function numberSetupProblems(tx: Tx, now: Date): Promise<NumberSetupProblem[]> {
+  async function numberSetupProblems(
+    tx: Tx,
+    now: Date,
+    limit: number = OPS_LIST_ROWS.numberSetups.shown,
+  ): Promise<NumberSetupProblem[]> {
     const stuckBefore = new Date(now.getTime() - OPS_WINDOWS.stuckSetupMinutes * MINUTE_MS);
     const numbers = await tx
       .select({
@@ -595,8 +609,8 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           ),
         ),
       )
-      .orderBy(desc(channelAccounts.updatedAt))
-      .limit(200);
+      .orderBy(desc(channelAccounts.updatedAt), desc(channelAccounts.id))
+      .limit(limit);
     return numbers.map((n) => ({ ...n, stuck: n.status === 'onboarding' }));
   }
 
@@ -604,6 +618,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
   async function companiesCreatedSince(
     tx: Tx,
     since: Date,
+    limit: number = OPS_LIST_ROWS.newCompanies.shown,
   ): Promise<(CompanyWithoutNumber & { active: boolean })[]> {
     return tx
       .select({
@@ -621,12 +636,12 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
       })
       .from(tenants)
       .where(and(gte(tenants.createdAt, since), sql`${tenants.status} <> 'deleted'`))
-      .orderBy(desc(tenants.createdAt))
-      .limit(500);
+      .orderBy(desc(tenants.createdAt), desc(tenants.id))
+      .limit(limit);
   }
 
   /** Open quarantine entries, newest first, with the provider ids staff may see. */
-  async function openQuarantine(tx: Tx, now: Date) {
+  async function openQuarantine(tx: Tx, now: Date, limit: number = OPS_LIST_ROWS.quarantine.shown) {
     const quarantine = await tx
       .select({
         id: webhookQuarantine.id,
@@ -653,8 +668,8 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         eq(acknowledgers.id, quarantineAcknowledgements.acknowledgedByUserId),
       )
       .where(isNull(webhookQuarantine.resolvedAt))
-      .orderBy(desc(webhookQuarantine.createdAt))
-      .limit(100);
+      .orderBy(desc(webhookQuarantine.createdAt), desc(webhookQuarantine.id))
+      .limit(limit);
     const bodyKeptAfter = now.getTime() - RECEIPT_BODY_DAYS * DAY_MS;
     return quarantine.map(({ acknowledgedAt, acknowledgedByName, acknowledgement, ...q }) => ({
       ...q,
@@ -728,7 +743,11 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
   }
 
   /** The latest dead letters with what keeps each from a retry (ADR-108). */
-  async function recentDeadLetters(tx: Tx, now: Date) {
+  async function recentDeadLetters(
+    tx: Tx,
+    now: Date,
+    limit: number = OPS_LIST_ROWS.deadLetters.shown,
+  ) {
     const recent = await tx
       .select({
         id: deadLetters.id,
@@ -759,8 +778,8 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
       .leftJoin(tenants, eq(tenants.id, deadLetters.tenantId))
       .leftJoin(users, eq(users.id, deadLetters.retriedByUserId))
       .leftJoin(acknowledgers, eq(acknowledgers.id, deadLetters.acknowledgedByUserId))
-      .orderBy(desc(deadLetters.failedAt))
-      .limit(100);
+      .orderBy(desc(deadLetters.failedAt), desc(deadLetters.id))
+      .limit(limit);
     return recent.map((d) => {
       const retryBlock = deadLetterRetryBlock(d, now);
       return {
@@ -801,7 +820,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         return { window, counted: { companies: rows.length }, body: signalsCsv(rows) };
       }
       case 'signups': {
-        const rows = await signupProblems(tx, onboardingSince, now);
+        const rows = await signupProblems(tx, onboardingSince, now, OPS_LIST_ROWS.signups.exported);
         return {
           window: OPS_WINDOWS.onboardingDays,
           counted: { rows: rows.length },
@@ -809,11 +828,13 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         };
       }
       case 'number-setups': {
-        const rows = await numberSetupProblems(tx, now);
+        const rows = await numberSetupProblems(tx, now, OPS_LIST_ROWS.numberSetups.exported);
         return { counted: { rows: rows.length }, body: numberSetupsCsv(rows) };
       }
       case 'new-companies': {
-        const rows = (await companiesCreatedSince(tx, onboardingSince)).filter((c) => !c.active);
+        const rows = (
+          await companiesCreatedSince(tx, onboardingSince, OPS_LIST_ROWS.newCompanies.exported)
+        ).filter((c) => !c.active);
         return {
           window: OPS_WINDOWS.onboardingDays,
           counted: { companies: rows.length },
@@ -821,15 +842,15 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         };
       }
       case 'failures': {
-        const rows = await integrationFailures(tx, 500);
+        const rows = await integrationFailures(tx, OPS_LIST_ROWS.failures.exported);
         return { counted: { rows: rows.length }, body: failuresCsv(rows) };
       }
       case 'receipts': {
-        const rows = await receiptsNeedingAttention(tx, now);
+        const rows = await receiptsNeedingAttention(tx, now, OPS_LIST_ROWS.receipts.exported);
         return { counted: { rows: rows.length }, body: receiptsCsv(rows) };
       }
       case 'quarantine': {
-        const rows = await openQuarantine(tx, now);
+        const rows = await openQuarantine(tx, now, OPS_LIST_ROWS.quarantine.exported);
         return { counted: { rows: rows.length }, body: quarantineCsv(rows) };
       }
       case 'emails': {
@@ -847,7 +868,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         return { counted: { rows: rows.length }, body: queuesCsv(rows) };
       }
       case 'dead-letters': {
-        const rows = await recentDeadLetters(tx, now);
+        const rows = await recentDeadLetters(tx, now, OPS_LIST_ROWS.deadLetters.exported);
         return { counted: { rows: rows.length }, body: deadLettersCsv(rows) };
       }
     }
@@ -941,7 +962,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     async integrations(actor: PlatformActor) {
       const now = clock.now();
       return platformDb.run(actor.userId, async (tx) => {
-        const failures = await integrationFailures(tx, 500);
+        const failures = await integrationFailures(tx, OPS_LIST_ROWS.failures.shown);
         const receipts = await receiptsNeedingAttention(tx, now);
         const quarantine = await openQuarantine(tx, now);
         const emails = await emailDelivery(tx, now);

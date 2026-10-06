@@ -1785,6 +1785,9 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   entries only) with the platform audit entry in one transaction and read by the platform role. The
   Integrations tab's read (`openQuarantine`) joins it and the administrator's name through
   `acknowledgers`; the CSV writes the time only.
+- **Exports beyond a tab's rows (ADR-200):** each list read in `platform/ops.ts` takes a limit, the
+  tab's by default; `exportFile` passes the larger one from `OPS_LIST_ROWS`, and the reads order
+  ties by id so the file starts with the tab's rows.
 - **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
   90 days) and a health card on each company's platform page. Every page re-checks the platform
   actor. The functions read every company on each view, which suits the test envelope; paging and

@@ -387,6 +387,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    release need it, as the Integrations tab reads the table; web servers from before it show no
    acknowledgements.
 
+   ADR-200 has no migration: until the web rollout ends, an old web server's export gives only the
+   rows its tab shows.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

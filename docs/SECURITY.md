@@ -1556,6 +1556,10 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   and only the platform role reads (the runtime role, which writes quarantine entries, has no grant
   on it); they are deleted with their entry; the CSV gives the time only (unit tests; integration
   tests, run in CI only).
+- Exports beyond a tab's rows (ADR-200): a list's CSV may give more rows than its tab (up to 5,000),
+  with the same checks: platform administrators only, refused before the list is read, audited with
+  the row count in the same transaction, and the same allow-listed contents without people or notes
+  (ADR-158).
 
 Company export and deletion (Settings → Company data, ADR-055):
 

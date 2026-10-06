@@ -1,5 +1,45 @@
 # Progress
 
+## 2026-10-06 — Phase 5: exporting the console's lists beyond the rows a tab shows (P5-10, ADR-200)
+
+Status: **Implemented; its database tests run in CI only.** The console's CSV exports gave only the
+rows each tab shows. The local PostgreSQL is unavailable (its Docker daemon stopped), so the
+integration tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-200):** exports of up to 5,000 rows (1,000 failures, 500 signups, the definer
+  functions' limits), the tabs unchanged, the tab's rows first; no migration.
+- **Domain:** `OPS_LIST_ROWS`, a limit on each list read, ties ordered by id, and the exports'
+  larger limits.
+- **Web:** each list's title says how many rows its CSV gives.
+- **Tests:**
+  - Unit (1 new in `ops-model.test.ts`): the numbers of rows.
+  - Integration (1 new in `platform-ops.test.ts`, 7 assertions changed): 101 failed receipts and
+    quarantine entries exported beyond the tab's 100, the tab's rows first, the audit counts; the
+    earlier export tests held to the tab's rows. Written for CI; not run here.
+- **Docs:** ADR-200; SECURITY; ARCHITECTURE; THREAT-MODEL T194; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-10; feature matrix H-034.
+- **Mutation checks:** 4 deliberate regressions tried, all caught on the unit-tested parts (the
+  numbers of rows). The reads need the database, so their regressions are left to the integration
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 882 passed (83 files)                                               |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 4 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Paged or streamed exports beyond these numbers, filters on an export, and raising the definer
+  functions' limits.
+
 ## 2026-10-06 — Phase 5: acknowledging quarantine entries on the operations console (P5-10, ADR-199)
 
 Status: **Implemented; its database and browser tests run in CI only.** Quarantine entries could be

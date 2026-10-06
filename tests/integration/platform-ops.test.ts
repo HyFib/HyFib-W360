@@ -32,6 +32,7 @@ import {
   HEALTH_CSV_COLUMNS,
   NEW_COMPANIES_CSV_COLUMNS,
   NUMBER_SETUPS_CSV_COLUMNS,
+  OPS_LIST_ROWS,
   QUARANTINE_CSV_COLUMNS,
   QUEUES_CSV_COLUMNS,
   RECEIPTS_CSV_COLUMNS,
@@ -2625,9 +2626,93 @@ describe('acknowledging quarantine entries (ADR-199)', () => {
   });
 });
 
+describe('exports beyond the rows a tab shows (ADR-200)', () => {
+  const csvLines = (body: string) => body.replace(/^\uFEFF/, '').split('\r\n');
+
+  it('gives every failed receipt and open quarantine entry, where the tab shows the newest 100', async () => {
+    const exporter = await platformStaff();
+    // 101 receipts that failed all their attempts and 101 open quarantine entries, 60 days old (older
+    // than what the other tests add, whose rows stay the tab's newest) and already emailed about.
+    const sealed = `md5(g::text || clock_timestamp()::text) || md5(random()::text)`;
+    const failed = await fx.query<{ id: string; received_at: Date }>(
+      `INSERT INTO ops.webhook_receipts (id, provider, received_at, body_sha256, body_size, status,
+         attempts, last_error, exhausted_alerted_at)
+       SELECT gen_random_uuid(), 'meta_whatsapp', now() - interval '60 days' - g * interval '1 minute',
+              ${sealed}, 10, 'failed', 12, 'boom', now()
+         FROM generate_series(1, 101) g
+       RETURNING id, received_at`,
+    );
+    const quarantined = await fx.query<{ receipt_id: string; created_at: Date }>(
+      `WITH r AS (
+         INSERT INTO ops.webhook_receipts (id, provider, received_at, body_sha256, body_size, status,
+           attempts, exhausted_alerted_at)
+         SELECT gen_random_uuid(), 'meta_whatsapp',
+                now() - interval '60 days' - g * interval '1 minute', ${sealed}, 10, 'quarantined', 1,
+                now()
+           FROM generate_series(1, 101) g
+         RETURNING id, received_at)
+       INSERT INTO ops.webhook_quarantine (receipt_id, provider, reason, external_ids, created_at,
+         alerted_at)
+       SELECT r.id, 'meta_whatsapp', 'unknown_asset', jsonb_build_object('waba', r.id::text),
+              r.received_at, now()
+         FROM r
+       RETURNING receipt_id, created_at`,
+    );
+    const oldest = <T>(rows: T[], at: (row: T) => Date) =>
+      rows.reduce((a, b) => (at(a) <= at(b) ? a : b));
+    const oldestFailed = oldest(failed, (r) => r.received_at).id;
+    const oldestQuarantined = oldest(quarantined, (q) => q.created_at).receipt_id;
+
+    const tab = await ops().integrations(exporter);
+    expect(tab.receipts).toHaveLength(OPS_LIST_ROWS.receipts.shown);
+    expect(tab.quarantine).toHaveLength(OPS_LIST_ROWS.quarantine.shown);
+    expect(tab.receipts.some((r) => r.id === oldestFailed)).toBe(false);
+    expect(tab.quarantine.some((q) => q.receiptId === oldestQuarantined)).toBe(false);
+
+    const receipts = await ops().exportList(exporter, 'receipts', 30);
+    const receiptLines = csvLines(receipts.body).filter(Boolean);
+    expect(receiptLines.length - 1).toBeGreaterThan(OPS_LIST_ROWS.receipts.shown);
+    expect(receiptLines.some((l) => l.includes(`,${oldestFailed},`))).toBe(true);
+    expect(receiptLines.slice(0, OPS_LIST_ROWS.receipts.shown + 1)).toEqual(
+      csvLines(receiptsCsv(tab.receipts)).filter(Boolean),
+    );
+    const quarantine = await ops().exportList(exporter, 'quarantine', 30);
+    const quarantineLines = csvLines(quarantine.body).filter(Boolean);
+    expect(quarantineLines.length - 1).toBeGreaterThan(OPS_LIST_ROWS.quarantine.shown);
+    expect(quarantineLines.some((l) => l.includes(`,${oldestQuarantined},`))).toBe(true);
+
+    // Each export's audit entry counts the rows the file gives.
+    const audited = await fx.query<{ action: string; metadata: Record<string, number> }>(
+      `SELECT action, metadata FROM ops.platform_audit_events
+        WHERE actor_user_id = $1 AND action LIKE 'platform.ops\\_%\\_exported'
+        ORDER BY occurred_at, id`,
+      [exporter.userId],
+    );
+    expect(audited).toEqual([
+      { action: 'platform.ops_receipts_exported', metadata: { rows: receiptLines.length - 1 } },
+      {
+        action: 'platform.ops_quarantine_exported',
+        metadata: { rows: quarantineLines.length - 1 },
+      },
+    ]);
+  });
+});
+
 describe('exports of the onboarding, integrations and queues lists (ADR-158)', () => {
   const MINUTE = '\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}';
   const csvLines = (body: string) => body.replace(/^\uFEFF/, '').split('\r\n');
+  /**
+   * An export gives the rows its tab shows, in the tab's order and words: the same file when the tab
+   * shows the whole list, and the tab's rows first when the export goes beyond them (ADR-200).
+   */
+  const expectTabRows = (body: string, tab: string, shown: number) => {
+    const tabLines = csvLines(tab).filter(Boolean);
+    if (tabLines.length - 1 < shown) {
+      expect(body).toBe(tab);
+      return;
+    }
+    expect(csvLines(body).slice(0, tabLines.length)).toEqual(tabLines);
+  };
   const exports = async (actor: PlatformActor) =>
     fx.query<{ action: string; metadata: Record<string, number> }>(
       `SELECT action, metadata FROM ops.platform_audit_events
@@ -2664,7 +2749,7 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
     const tab = await ops().onboarding(exporter);
     const signups = await ops().exportList(exporter, 'signups', 30);
     expect(signups.filename).toMatch(/^hyfib-signups-30-days-\d{4}-\d{2}-\d{2}\.csv$/);
-    expect(signups.body).toBe(signupsCsv(tab.sessions));
+    expectTabRows(signups.body, signupsCsv(tab.sessions), OPS_LIST_ROWS.signups.shown);
     const signupLines = csvLines(signups.body);
     expect(signupLines[0]).toBe(SIGNUPS_CSV_COLUMNS.join(','));
     expect(signupLines.filter((l) => l.includes(`,${slug},`))).toEqual([
@@ -2677,7 +2762,7 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
 
     const setups = await ops().exportList(exporter, 'number-setups', 30);
     expect(setups.filename).toMatch(/^hyfib-number-setups-\d{4}-\d{2}-\d{2}\.csv$/);
-    expect(setups.body).toBe(numberSetupsCsv(tab.numbers));
+    expectTabRows(setups.body, numberSetupsCsv(tab.numbers), OPS_LIST_ROWS.numberSetups.shown);
     const setupLines = csvLines(setups.body);
     expect(setupLines[0]).toBe(NUMBER_SETUPS_CSV_COLUMNS.join(','));
     expect(setupLines.filter((l) => l.includes(`,${slug},`))).toEqual([
@@ -2691,7 +2776,7 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
 
     const fresh = await ops().exportList(exporter, 'new-companies', 30);
     expect(fresh.filename).toMatch(/^hyfib-new-companies-30-days-\d{4}-\d{2}-\d{2}\.csv$/);
-    expect(fresh.body).toBe(newCompaniesCsv(tab.stalled));
+    expectTabRows(fresh.body, newCompaniesCsv(tab.stalled), OPS_LIST_ROWS.newCompanies.shown);
     const freshLines = csvLines(fresh.body);
     expect(freshLines[0]).toBe(NEW_COMPANIES_CSV_COLUMNS.join(','));
     expect(freshLines.filter((l) => l.includes(`,${bare.slug},`))).toEqual([
@@ -2770,7 +2855,7 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
     const tab = await ops().integrations(exporter);
     const failures = await ops().exportList(exporter, 'failures', 30);
     expect(failures.filename).toMatch(/^hyfib-failures-\d{4}-\d{2}-\d{2}\.csv$/);
-    expect(failures.body).toBe(failuresCsv(tab.failures));
+    expectTabRows(failures.body, failuresCsv(tab.failures), OPS_LIST_ROWS.failures.shown);
     const failureLines = csvLines(failures.body);
     expect(failureLines[0]).toBe(FAILURES_CSV_COLUMNS.join(','));
     expect(failureLines.filter((l) => l.includes(`,${slug},`))).toEqual([
@@ -2785,7 +2870,7 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
 
     const receipts = await ops().exportList(exporter, 'receipts', 30);
     expect(receipts.filename).toMatch(/^hyfib-receipts-\d{4}-\d{2}-\d{2}\.csv$/);
-    expect(receipts.body).toBe(receiptsCsv(tab.receipts));
+    expectTabRows(receipts.body, receiptsCsv(tab.receipts), OPS_LIST_ROWS.receipts.shown);
     const receiptLines = csvLines(receipts.body);
     expect(receiptLines[0]).toBe(RECEIPTS_CSV_COLUMNS.join(','));
     expect(receiptLines.filter((l) => l.includes(`,${receiptId},`))).toEqual([
@@ -2799,7 +2884,7 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
 
     const quarantine = await ops().exportList(exporter, 'quarantine', 30);
     expect(quarantine.filename).toMatch(/^hyfib-quarantine-\d{4}-\d{2}-\d{2}\.csv$/);
-    expect(quarantine.body).toBe(quarantineCsv(tab.quarantine));
+    expectTabRows(quarantine.body, quarantineCsv(tab.quarantine), OPS_LIST_ROWS.quarantine.shown);
     const quarantineLines = csvLines(quarantine.body);
     expect(quarantineLines[0]).toBe(QUARANTINE_CSV_COLUMNS.join(','));
     expect(quarantineLines.filter((l) => l.includes(`,${quarantined},`))).toEqual([
@@ -2868,7 +2953,7 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
 
     const letters = await ops().exportList(exporter, 'dead-letters', 30);
     expect(letters.filename).toMatch(/^hyfib-dead-letters-\d{4}-\d{2}-\d{2}\.csv$/);
-    expect(letters.body).toBe(deadLettersCsv(tab.deadLetters));
+    expectTabRows(letters.body, deadLettersCsv(tab.deadLetters), OPS_LIST_ROWS.deadLetters.shown);
     const letterLines = csvLines(letters.body);
     expect(letterLines[0]).toBe(DEAD_LETTERS_CSV_COLUMNS.join(','));
     expect(letterLines.filter((l) => l.includes(`,${letterId},`))).toEqual([

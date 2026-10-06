@@ -8,6 +8,7 @@ import {
   NUMBER_SETUPS_CSV_COLUMNS,
   OPS_EXPORT_LISTS,
   OPS_SIGNAL_RULES,
+  OPS_LIST_ROWS,
   QUARANTINE_CSV_COLUMNS,
   QUEUES_CSV_COLUMNS,
   RECEIPTS_CSV_COLUMNS,
@@ -884,5 +885,22 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
     expect(opsCsvFilename('signups', at('2026-10-05T00:00:00Z'), 30)).toBe(
       'hyfib-signups-30-days-2026-10-05.csv',
     );
+  });
+});
+
+describe('how many rows the console’s lists export (ADR-200)', () => {
+  it('exports at least the rows each tab shows, up to 5,000, or what the definer functions return', () => {
+    for (const [list, rows] of Object.entries(OPS_LIST_ROWS)) {
+      expect(rows.exported, list).toBeGreaterThanOrEqual(rows.shown);
+    }
+    expect(OPS_LIST_ROWS).toEqual({
+      signups: { shown: 200, exported: 500 },
+      numberSetups: { shown: 200, exported: 5000 },
+      newCompanies: { shown: 500, exported: 5000 },
+      failures: { shown: 500, exported: 1000 },
+      receipts: { shown: 100, exported: 5000 },
+      quarantine: { shown: 100, exported: 5000 },
+      deadLetters: { shown: 100, exported: 5000 },
+    });
   });
 });

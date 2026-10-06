@@ -840,9 +840,12 @@ verification, app review, Embedded Signup configuration).
   **[Acknowledging quarantine entries built; its database tests run only in CI]** (ADR-199: a
   platform administrator acknowledges an open quarantine entry with a note, shown with who and when,
   replaced by a later note, audited and deleted with the entry; a resolved entry takes none; the CSV
-  gives when, never who or the note). Remaining:
-  other alert channels, longer trends and charts, Meta's quality webhook (unconfirmed), exports
-  beyond the rows a tab lists, assigning failures, paging and rollups for many companies.
+  gives when, never who or the note).
+  **[Exports beyond the rows a tab shows built; its database tests run only in CI]** (ADR-200: a
+  list's CSV gives up to 5,000 rows, 1,000 failures and 500 signups, in the tab's order; the tabs
+  keep their rows). Remaining:
+  other alert channels, longer trends and charts, Meta's quality webhook (unconfirmed),
+  assigning failures, paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

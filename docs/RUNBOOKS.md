@@ -2658,6 +2658,12 @@ it, and the next time it falls behind it starts unacknowledged and is emailed ag
 changes neither the lateness nor the alert. "This queue is no longer late since then." means the
 queue recovered, or fell behind again, since the page loaded: reload it.
 
+**A list's CSV has more rows than its tab (ADR-200).** The console's exports give up to 5,000 rows
+of number setups, new companies, receipts needing attention, quarantine entries and dead letters, up
+to 1,000 current failures and up to 500 signups, newest first, while the tabs show fewer. The file's
+first rows are the tab's; the platform audit entry of the export counts the rows it gave. A list
+longer than its CSV's limit needs a query on the database.
+
 **Acknowledging a quarantine entry (ADR-199).** The administrator who takes up an open quarantine
 entry opens Acknowledge on its row and writes a note of 10 to 500 characters: what was found or is
 awaited ("Asked the company to reconnect through Embedded Signup", "A Meta test account; waiting for

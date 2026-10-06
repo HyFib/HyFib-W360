@@ -28,6 +28,21 @@ export const OPS_SIGNAL_RULES = {
   complaints: 5,
 } as const;
 
+/**
+ * How many rows each of the console's action lists shows on its tab, and how many its CSV gives
+ * (ADR-200): the lists the platform role reads itself export up to 5,000 rows in the tab's order;
+ * failures and signups, read through definer functions, as many as those return.
+ */
+export const OPS_LIST_ROWS = {
+  signups: { shown: 200, exported: 500 },
+  numberSetups: { shown: 200, exported: 5000 },
+  newCompanies: { shown: 500, exported: 5000 },
+  failures: { shown: 500, exported: 1000 },
+  receipts: { shown: 100, exported: 5000 },
+  quarantine: { shown: 100, exported: 5000 },
+  deadLetters: { shown: 100, exported: 5000 },
+} as const;
+
 export const OPS_WINDOWS = {
   /** Embedded Signup sessions and new companies shown on the onboarding page. */
   onboardingDays: 30,

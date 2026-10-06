@@ -8049,3 +8049,27 @@ Decision:
 Not built: assigning an entry or a failure to someone, editing or deleting a note (a new
 acknowledgement replaces it), and leaving acknowledged entries out of the alert email (each is
 emailed once anyway).
+
+## ADR-200 Exporting the console's lists beyond the rows a tab shows (P5-10) (2026-10-06)
+
+Context: each of the console's action lists downloads as CSV (ADR-158), but only the rows its tab
+shows: the latest 100 dead letters, receipts needing attention and quarantine entries, 200 signups
+and number setups, 500 current failures and new companies. After a bad day, or for a provider asking
+about every quarantined event, staff could not get the rest.
+
+Decision:
+
+- **Exports go further than the tab:** the CSV of number setups, new companies without a number,
+  receipts needing attention, quarantine entries and dead letters gives up to 5,000 rows; of current
+  failures, up to 1,000, and of signups, up to 500, the most their definer functions return, so no
+  function changes. Tabs keep their rows. `OPS_LIST_ROWS` names both numbers for each list, and each
+  list's title says how many rows its CSV gives.
+- **The same list, the same order:** the export reads the list with the tab's own read, only with
+  the larger number, and each read now breaks ties by id, so the tab's rows are the file's first
+  rows. The audit entry (`platform.ops_<list>_exported`) counts the rows the file gives, as before;
+  the files hold what the tabs hold, people and notes left out (ADR-158).
+- **No migration:** the platform role reads the larger lists through its own grants, and the definer
+  functions already accept those numbers.
+
+Not built: exports beyond these numbers (paged or streamed files), filters on an export, and raising
+the definer functions' limits.
