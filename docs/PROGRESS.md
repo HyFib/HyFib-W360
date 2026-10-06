@@ -1,5 +1,45 @@
 # Progress
 
+## 2026-10-06 — Phase 5: withdrawing a key's campaign submission through the API (P5-08, ADR-203)
+
+Status: **Implemented; its database and browser tests run in CI only.** A key submitted drafts but
+only members could take a submission back. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so the integration test and the changed e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-203):** `POST /campaigns/{id}/withdraw` with `campaigns.write`, for the key's own
+  submission while it waits for approval; drafts answered as they are; no migration.
+- **Domain:** `returnLockedCampaignToDraft` shared with members' withdrawal and rejection;
+  `apiWithdrawCampaign`; the scope's description and the OpenAPI entries.
+- **Web:** the route.
+- **Tests:**
+  - Unit (2 new in `api.test.ts`): the refusals before anything is read, the OpenAPI entries.
+  - Integration (1 new in `api-campaigns.test.ts`): the key's withdrawal and its refusals. Written
+    for CI; not run here.
+  - E2E (1 changed in `campaigns.spec.ts`): a key withdraws its submission and submits it again.
+    Written for CI; not run here.
+- **Docs:** ADR-203; SECURITY; ARCHITECTURE; THREAT-MODEL T197; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-08; feature matrix W-134 and H-033.
+- **Mutation checks:** 6 deliberate regressions tried, all caught on the unit-tested parts. The
+  withdrawal itself needs the database, so its regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 890 passed (83 files)                                               |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 6 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Notifying approvers of a waiting campaign, and a key withdrawing what a member submitted.
+
 ## 2026-10-06 — Phase 5: submitting campaign drafts through the API, for a member's approval (P5-08, ADR-202)
 
 Status: **Implemented; its database and browser tests run in CI only.** Keys created and reviewed

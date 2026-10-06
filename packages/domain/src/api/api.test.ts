@@ -27,6 +27,7 @@ import {
   apiReviewCampaign,
   apiSubmitCampaign,
   apiSubmitCampaignSchema,
+  apiWithdrawCampaign,
   toApiCampaignReview,
 } from './campaigns';
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
@@ -6005,5 +6006,88 @@ describe('submitting campaign drafts through the API (ADR-202)', () => {
       'POST /campaigns/{id}/submit',
     );
     expect(API_ROUTES).toContainEqual(['post', '/campaigns/{id}/submit']);
+  });
+});
+
+describe('withdrawing campaign submissions through the API (ADR-203)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const id = '0190a000-0000-7000-8000-000000000003';
+
+  it('are refused before anything is read: without the scope, outside the plan, while the company is not active, and a bad id', async () => {
+    for (const scopes of [['campaigns.read'], ['campaigns.stop', 'campaigns.resume']]) {
+      expect(await code(apiWithdrawCampaign({} as never, ctx(scopes), id))).toBe('forbidden');
+    }
+    await expect(apiWithdrawCampaign({} as never, ctx(['campaigns.read']), id)).rejects.toThrow(
+      'This API key does not have the campaigns.write scope.',
+    );
+    await expect(
+      apiWithdrawCampaign({} as never, ctx(['campaigns.write'], 'active', ['campaigns.read']), id),
+    ).rejects.toMatchObject({ code: 'forbidden', details: { apiReason: 'not_in_plan' } });
+    for (const status of ['suspended', 'restricted']) {
+      expect(
+        await code(apiWithdrawCampaign({} as never, ctx(['campaigns.write'], status), id)),
+      ).toBe('tenant_suspended');
+    }
+    expect(
+      await code(apiWithdrawCampaign({} as never, ctx(['campaigns.write']), 'not-an-id')),
+    ).toBe('not_found');
+  });
+
+  it('are described: the key that submitted it only, a draft again at a new version, safe retries', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const paths = doc.paths as unknown as Record<
+      string,
+      Record<
+        string,
+        {
+          operationId: string;
+          description: string;
+          requestBody?: unknown;
+          responses: Record<string, { content?: unknown }>;
+        }
+      >
+    >;
+    const op = paths['/campaigns/{id}/withdraw']?.post;
+    expect(op?.operationId).toBe('withdrawCampaign');
+    expect(op?.requestBody).toBeUndefined();
+    expect(op?.responses['200']?.content).toEqual({
+      'application/json': {
+        schema: {
+          type: 'object',
+          properties: { data: { $ref: '#/components/schemas/Campaign' } },
+          required: ['data'],
+        },
+      },
+    });
+    expect(Object.keys(op?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '403', '404', '409', '423']),
+    );
+    for (const words of [
+      'Scope: `campaigns.write`.',
+      "Takes a campaign this key submitted (POST /campaigns/{id}/submit) back to a draft while it waits for a member's approval",
+      'its audience is dropped (nothing was sent), its version goes up',
+      'A draft is answered as it is, so a retry changes nothing.',
+      'A submission a member or another key made is refused with 403 (members withdraw it in the app)',
+      'a campaign that no longer waits for approval with 409, naming its status',
+    ]) {
+      expect(op?.description).toContain(words);
+    }
+    expect(paths['/campaigns/{id}/submit']?.post?.description).toContain(
+      'or the key withdraws it (POST /campaigns/{id}/withdraw), and it is a draft again at a new version',
+    );
+    expect(API_SCOPE_INFO['campaigns.write'].description).toContain(
+      "submit drafts, which then always wait for a member's approval, and take back what it submitted;",
+    );
+    expect(API_ROUTES).toContainEqual(['post', '/campaigns/{id}/withdraw']);
   });
 });

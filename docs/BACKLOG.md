@@ -647,11 +647,14 @@ verification, app review, Embedded Signup configuration).
   **[Submitting campaign drafts built; its database tests run only in CI]** (ADR-202: a key submits
   a draft with members' checks, and the submission always waits for a member's approval, who must be
   able to send campaigns and under whose authority it sends; migrations 0140 and 0141).
+  **[Withdrawing a key's submission built; its database tests run only in CI]** (ADR-203: the key
+  that submitted a campaign takes it back to a draft at a new version while it waits for approval;
+  no migration).
   Remaining: uploaded media, call-to-action messages through the API, taking
   reactions back,
   media downloads, changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
-  resuming what members or HyFib paused, withdrawing a key's submission through the API, campaign
+  resuming what members or HyFib paused, notifying approvers of a waiting campaign, campaign
   recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose
   per scope since ADR-092). The one-argument key lookup kept for rolling deploys (0051) is dropped
   (0074). Replaying many deliveries in one call is built with P5-09 (ADR-095).

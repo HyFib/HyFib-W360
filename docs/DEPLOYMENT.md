@@ -400,6 +400,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `POST /campaigns/{id}/submit` with 404, says a member submitted a key's submission, and fails
    with an error when a member approves one: approve such campaigns once the rollout ends.
 
+   ADR-203 has no migration: until the web rollout ends, an old web server answers
+   `POST /campaigns/{id}/withdraw` with 404.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

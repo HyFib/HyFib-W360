@@ -1541,7 +1541,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           operationId: 'submitCampaign',
           summary: 'Submit a campaign draft for a member’s approval',
           description: [
-            `${scopeNote('campaigns.write')} Submits the draft as a member submits it in the app: it must be at \`expectedVersion\` and pass the checks its review lists (GET /campaigns/{id}/review), and its audience is taken now (\`audienceCount\`, \`skippedCount\`). It then waits for a member's approval (\`pending_approval\`), whatever the company's settings: a key never starts a campaign. A member who may approve and send campaigns approves it in the app, and it sends under their authority from the time it was set to start, or at once when that time has passed; or a member rejects it with a note, or takes it back, and it is a draft again. Its history in the app names the key.`,
+            `${scopeNote('campaigns.write')} Submits the draft as a member submits it in the app: it must be at \`expectedVersion\` and pass the checks its review lists (GET /campaigns/{id}/review), and its audience is taken now (\`audienceCount\`, \`skippedCount\`). It then waits for a member's approval (\`pending_approval\`), whatever the company's settings: a key never starts a campaign. A member who may approve and send campaigns approves it in the app, and it sends under their authority from the time it was set to start, or at once when that time has passed; or a member rejects it with a note or takes it back, or the key withdraws it (POST /campaigns/{id}/withdraw), and it is a draft again at a new version. Its history in the app names the key.`,
             'A draft changed since you read it is refused with 409 and stays a draft; one the checks refuse is refused with 412, naming the first thing to change, and stays a draft. A campaign this key submitted is answered as it is, so a retry changes nothing; any other campaign that is not a draft is refused with 409, naming its status.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/Id' }],
@@ -1552,6 +1552,24 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('Campaign'))),
             },
             ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/campaigns/{id}/withdraw': {
+        post: {
+          operationId: 'withdrawCampaign',
+          summary: 'Take back a campaign submission this key made',
+          description: [
+            `${scopeNote('campaigns.write')} Takes a campaign this key submitted (POST /campaigns/{id}/submit) back to a draft while it waits for a member's approval, as a member takes back their own: its audience is dropped (nothing was sent), its version goes up, and it can be edited and submitted again. Its history in the app names the key.`,
+            'A draft is answered as it is, so a retry changes nothing. A submission a member or another key made is refused with 403 (members withdraw it in the app), and a campaign that no longer waits for approval with 409, naming its status.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The campaign, a draft again.',
+              content: json(dataOf(ref('Campaign'))),
+            },
+            ...errors(401, 403, 404, 409, 423, 429, 500),
           },
         },
       },
@@ -2389,6 +2407,7 @@ export const API_ROUTES = [
   ['patch', '/campaigns/{id}'],
   ['get', '/campaigns/{id}/review'],
   ['post', '/campaigns/{id}/submit'],
+  ['post', '/campaigns/{id}/withdraw'],
   ['get', '/campaigns/{id}/recipients'],
   ['post', '/campaigns/{id}/pause'],
   ['post', '/campaigns/{id}/resume'],

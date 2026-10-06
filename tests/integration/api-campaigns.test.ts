@@ -15,6 +15,7 @@ import {
   apiSearchContacts,
   apiSubmitCampaign,
   apiUpdateCampaign,
+  apiWithdrawCampaign,
   authenticateApiToken,
   createApiKeysService,
   createCampaignsService,
@@ -2093,5 +2094,113 @@ describe('submitting campaign drafts through the API (ADR-202)', () => {
         `SELECT has_column_privilege('w360_app', 'app.campaigns', 'submitted_by_api_key_id', 'UPDATE') AS can`,
       ),
     ).toEqual([{ can: true }]);
+  });
+});
+
+describe('withdrawing campaign submissions through the API (ADR-203)', () => {
+  const versionOf = async (id: string) =>
+    (
+      await fx.query<{ version: number }>(`SELECT version FROM app.campaigns WHERE id = $1`, [id])
+    )[0]!.version;
+  async function refused(promise: Promise<unknown>) {
+    try {
+      await promise;
+    } catch (error) {
+      if (!isAppError(error)) throw error;
+      return { code: error.code, message: error.publicMessage };
+    }
+    throw new Error('expected a refusal');
+  }
+
+  it("takes a key's own submission back to a draft at a new version, and nobody else's", async () => {
+    const s = await setup();
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Drafts');
+    const other = await apiKey(s.c, ['campaigns.write'], 'Other drafts');
+    await s.contact('+919820008021', 'Asha');
+    const id = await s.draft('Festive sale');
+    // A draft is answered as it is, changing nothing.
+    const version = await versionOf(id);
+    expect(await apiWithdrawCampaign(writeDeps(), writer, id)).toMatchObject({
+      id,
+      status: 'draft',
+    });
+    expect(await versionOf(id)).toBe(version);
+    await apiSubmitCampaign(writeDeps(), writer, id, { expectedVersion: version });
+
+    // Another key cannot take it back, and it keeps waiting with its audience.
+    expect(await refused(apiWithdrawCampaign(writeDeps(), other, id))).toEqual({
+      code: 'forbidden',
+      message:
+        'Only the key that submitted this campaign withdraws it through the API: members withdraw it in the app.',
+    });
+    expect(
+      (
+        await fx.query<{ status: string }>(`SELECT status FROM app.campaigns WHERE id = $1`, [id])
+      )[0]?.status,
+    ).toBe('pending_approval');
+
+    // The key that submitted it does: a draft at a new version without its audience; a retry
+    // answers the draft as it is.
+    for (let i = 0; i < 2; i += 1) {
+      expect(await apiWithdrawCampaign(writeDeps(), writer, id)).toMatchObject({
+        id,
+        status: 'draft',
+        audienceCount: 0,
+        skippedCount: 0,
+      });
+    }
+    expect(await versionOf(id)).toBe(version + 2);
+    expect(
+      await fx.query(`SELECT 1 FROM app.campaign_recipients WHERE campaign_id = $1`, [id]),
+    ).toEqual([]);
+    expect(
+      await fx.query(
+        `SELECT submitted_by_api_key_id, submitted_at FROM app.campaigns WHERE id = $1`,
+        [id],
+      ),
+    ).toEqual([{ submitted_by_api_key_id: null, submitted_at: null }]);
+    expect(
+      await fx.query(
+        `SELECT type, actor_user_id, detail->>'apiKeyId' AS api_key_id FROM app.campaign_events
+          WHERE campaign_id = $1 AND type IN ('submitted', 'withdrawn') ORDER BY occurred_at, id`,
+        [id],
+      ),
+    ).toEqual([
+      { type: 'submitted', actor_user_id: null, api_key_id: writer.key.id },
+      { type: 'withdrawn', actor_user_id: null, api_key_id: writer.key.id },
+    ]);
+    expect(
+      await fx.query(
+        `SELECT actor_type, actor_id, metadata FROM app.audit_events
+          WHERE subject_id = $1 AND action = 'campaign.withdrawn'`,
+        [id],
+      ),
+    ).toEqual([{ actor_type: 'api_key', actor_id: writer.key.id, metadata: { source: 'api' } }]);
+
+    // It is submitted again from its new version; once approved it is no longer withdrawn.
+    await apiSubmitCampaign(writeDeps(), writer, id, { expectedVersion: version + 2 });
+    await s.campaigns.approveCampaign(s.owner, id, {}, {});
+    expect(await refused(apiWithdrawCampaign(writeDeps(), writer, id))).toEqual({
+      code: 'conflict',
+      message:
+        "Only a campaign waiting for approval is withdrawn. This campaign's status is scheduled.",
+    });
+
+    // A member's submission is withdrawn in the app only.
+    await s.campaigns.updateSettings(
+      s.owner,
+      { approvalRequired: true, cap: null, costCurrency: null },
+      {},
+    );
+    const membersId = await s.draft('Members sale');
+    await s.campaigns.submitCampaign(
+      s.owner,
+      membersId,
+      { expectedVersion: await versionOf(membersId) },
+      {},
+    );
+    expect((await refused(apiWithdrawCampaign(writeDeps(), writer, membersId))).code).toBe(
+      'forbidden',
+    );
   });
 });

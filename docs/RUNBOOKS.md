@@ -1826,8 +1826,8 @@ message and shown in the inbox.
 member's approval, even where members' own campaigns start at once. Its page names the key; a member
 who may approve and send campaigns (owners and administrators) approves it there, and it sends under
 their authority, or sends it back with a note. A member who cannot send campaigns sees no Approve
-button for it. The key cannot take it back: a member withdraws it in the app, which makes it a draft
-at a new version.
+button for it. The key that submitted it can take it back (`POST /campaigns/{id}/withdraw`,
+ADR-203), and a member can in the app; either makes it a draft at a new version.
 
 **A draft's review through the API shows no estimate, or other counts than expected (ADR-193).**
 `GET /campaigns/{id}/review` reads the saved draft as members' review does, now: save the draft

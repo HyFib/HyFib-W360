@@ -1980,31 +1980,42 @@ export function createCampaignsService(deps: CampaignDeps) {
     campaignId: string,
     extra: { reviewNote?: string },
   ) {
-    await tx
-      .delete(campaignRecipients)
-      .where(
-        and(
-          eq(campaignRecipients.tenantId, ctx.tenant.id),
-          eq(campaignRecipients.campaignId, campaignId),
-        ),
-      );
-    await tx
-      .update(campaigns)
-      .set({
-        status: 'draft',
-        audienceUsed: null,
-        audienceCount: 0,
-        skippedCount: 0,
-        submittedByUserId: null,
-        submittedByApiKeyId: null,
-        submittedAt: null,
-        scheduledAt: null,
-        scheduleAdjustment: null,
-        reviewNote: extra.reviewNote ?? null,
-        version: sql`${campaigns.version} + 1`,
-      })
-      .where(and(eq(campaigns.tenantId, ctx.tenant.id), eq(campaigns.id, campaignId)));
+    await returnLockedCampaignToDraft(tx, ctx.tenant.id, campaignId, extra);
   }
+}
+
+/**
+ * Takes a locked submission waiting for approval back to a draft, as a rejection, a member's
+ * withdrawal and a key's (ADR-203) do: its audience snapshot (nothing was sent) and submission are
+ * dropped, and its version goes up, so a submission made from the old version is refused.
+ */
+export async function returnLockedCampaignToDraft(
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+  extra: { reviewNote?: string },
+): Promise<void> {
+  await tx
+    .delete(campaignRecipients)
+    .where(
+      and(eq(campaignRecipients.tenantId, tenantId), eq(campaignRecipients.campaignId, campaignId)),
+    );
+  await tx
+    .update(campaigns)
+    .set({
+      status: 'draft',
+      audienceUsed: null,
+      audienceCount: 0,
+      skippedCount: 0,
+      submittedByUserId: null,
+      submittedByApiKeyId: null,
+      submittedAt: null,
+      scheduledAt: null,
+      scheduleAdjustment: null,
+      reviewNote: extra.reviewNote ?? null,
+      version: sql`${campaigns.version} + 1`,
+    })
+    .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
 }
 
 export type CampaignsService = ReturnType<typeof createCampaignsService>;

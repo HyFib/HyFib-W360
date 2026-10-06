@@ -115,7 +115,7 @@ export const API_SCOPE_INFO: Record<
   'campaigns.write': {
     label: 'Create, edit and submit campaign drafts',
     description:
-      "Create campaign drafts and edit them as members do: the name, the number and template, the variables, the audience (a segment or conditions), the schedule, the sending window and the caps; review drafts as members do before they submit them (who they would reach and what they would cost); submit drafts, which then always wait for a member's approval; and cancel drafts. A key never starts a campaign: a member approves a key's submission, or submits a draft, in the app, and the campaign sends under the authority of a member allowed to send campaigns.",
+      "Create campaign drafts and edit them as members do: the name, the number and template, the variables, the audience (a segment or conditions), the schedule, the sending window and the caps; review drafts as members do before they submit them (who they would reach and what they would cost); submit drafts, which then always wait for a member's approval, and take back what it submitted; and cancel drafts. A key never starts a campaign: a member approves a key's submission, or submits a draft, in the app, and the campaign sends under the authority of a member allowed to send campaigns.",
     permission: 'campaigns.write',
     writes: true,
   },

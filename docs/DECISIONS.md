@@ -8153,3 +8153,25 @@ Decision:
 
 Not built: keys approving or starting campaigns (by design), withdrawing a key's submission through
 the API, and notifying approvers of a waiting campaign.
+
+## ADR-203 Withdrawing a key's campaign submission through the API (P5-08) (2026-10-06)
+
+Context: a key submits drafts, which wait for a member's approval (ADR-202), but only a member could
+take a submission back, so an integration that found a mistake after submitting had to ask someone
+to open the app. Members take back their own submissions and approvers anyone's.
+
+Decision:
+
+- **The submitting key withdraws its own:** `POST /campaigns/{id}/withdraw` with `campaigns.write`
+  takes a campaign waiting for approval that the key submitted back to a draft, as a member's
+  withdrawal does (`returnLockedCampaignToDraft`, shared with members' withdrawal and rejection):
+  the audience snapshot is dropped (nothing was sent), the submission is cleared and the version
+  goes up, so the key reads the draft again before it submits it again.
+- **Nobody else's:** a submission a member or another key made is refused with 403, as a member may
+  take back only their own (approvers withdraw any in the app); a campaign that no longer waits for
+  approval is refused with 409, naming its status.
+- **Retries:** a draft is answered as it is, so a retry after the withdrawal changes nothing; the
+  event and the audit name the key.
+- **No migration.**
+
+Not built: notifying approvers of a waiting campaign, and a key withdrawing what a member submitted.

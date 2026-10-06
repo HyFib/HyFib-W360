@@ -770,6 +770,9 @@ Phase 5 rules (Public API, P5-08):
   authority, which the runner checks before each batch. The campaign records the key (a composite
   foreign key to the company's keys, and never with a submitting member, both enforced by the
   database), and the event and the audit name it. A suspended company's keys cannot submit.
+- Withdrawing submissions (ADR-203): a key takes back only a submission it made, while it waits for
+  approval (403 for a member's or another key's, 409 once approved); the withdrawal drops the
+  audience, raises the version and is recorded in the event and the audit with the key.
 - Media from links (ADR-194): a key with `messages.reply` sends a photo, a video, audio or a
   document by a link WhatsApp fetches, within the 24-hour window. HyFib never fetches the link, so
   it cannot be used to reach HyFib's network; it takes only https links with a host and no user name

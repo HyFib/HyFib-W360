@@ -525,12 +525,31 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
       skippedCount: review.audience.total - review.audience.eligible,
     });
   }
+  // The key takes its submission back (ADR-203), a draft at a new version, and submits it again
+  // from that version.
+  const withdrawn = await request.post(`/api/v1/campaigns/${launch.id}/withdraw`, {
+    headers: draftAuth,
+  });
+  expect(withdrawn.status()).toBe(200);
+  expect(((await withdrawn.json()) as { data: unknown }).data).toMatchObject({
+    id: launch.id,
+    status: 'draft',
+    audienceCount: 0,
+  });
+  const resubmitted = await request.post(`/api/v1/campaigns/${launch.id}/submit`, {
+    headers: draftAuth,
+    data: { expectedVersion: launch.version + 2 },
+  });
+  expect(resubmitted.status()).toBe(200);
   await page.goto(`/c/${slug}/campaigns/${launch.id}`);
   await expect(
     page.getByText('Submitted through the API by the key “Campaign drafts”'),
   ).toBeVisible();
   await expect(
     page.getByRole('listitem').filter({ hasText: 'Submitted' }).filter({ hasText: byDrafts }),
+  ).toHaveCount(2);
+  await expect(
+    page.getByRole('listitem').filter({ hasText: 'Withdrawn' }).filter({ hasText: byDrafts }),
   ).toHaveCount(1);
   await page.getByRole('button', { name: 'Approve' }).click();
   await expect(page.getByText('Scheduled', { exact: true }).first()).toBeVisible();

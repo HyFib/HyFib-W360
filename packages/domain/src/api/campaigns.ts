@@ -46,6 +46,7 @@ import {
   resumeLockedCampaign,
   reviewCampaignDraft,
   awaitCampaignApproval,
+  returnLockedCampaignToDraft,
   submitLockedDraft,
   writeLockedCampaignDraft,
   type CampaignDraftInput,
@@ -67,8 +68,9 @@ import { idempotent } from './resources';
  * also reads contacts lists a campaign's recipients, each with what happened to it (ADR-127).
  * Never members or costs. A key with `campaigns.stop` pauses and cancels campaigns as members do
  * (ADR-128), one with `campaigns.resume` resumes what keys paused (ADR-176), and one with
- * `campaigns.write` creates, edits, reviews and submits drafts (ADR-186, ADR-193, ADR-202): a key's
- * submission always waits for a member's approval, so approving and starting stay with members.
+ * `campaigns.write` creates, edits, reviews and submits drafts (ADR-186, ADR-193, ADR-202) and
+ * withdraws its own submissions (ADR-203): a key's submission always waits for a member's approval,
+ * so approving and starting stay with members.
  */
 
 export const apiCampaignListQuerySchema = z
@@ -1242,6 +1244,52 @@ export async function apiSubmitCampaign(
           category: submission.category,
           source: 'api',
         },
+        correlationId: ctx.requestId,
+      },
+      apiActor(ctx),
+    );
+    return readApiCampaign(tx, ctx.tenant.id, c.id);
+  });
+}
+
+/**
+ * Takes a submission this key made back to a draft (ADR-203), as members withdraw theirs, with the
+ * campaign row locked: the campaign waiting for approval becomes a draft at a new version, its
+ * audience dropped (nothing was sent). A draft is answered as it is, so a retry changes nothing; a
+ * submission a member or another key made is refused with 403 (members withdraw it in the app), and
+ * a campaign in any other status with 409, naming it.
+ */
+export async function apiWithdrawCampaign(
+  deps: Pick<OutboundDeps, 'db'>,
+  ctx: ApiContext,
+  campaignId: string,
+): Promise<ApiCampaign> {
+  assertScope(ctx, 'campaigns.write');
+  if (!z.uuid().safeParse(campaignId).success) throw notFound('Campaign');
+  return deps.db.run(ctx.scope, async (tx) => {
+    const c = await lockCampaign(tx, ctx.tenant.id, campaignId);
+    if (c.status === 'draft') return readApiCampaign(tx, ctx.tenant.id, c.id);
+    if (c.status !== 'pending_approval') {
+      throw statusRefusal('Only a campaign waiting for approval is withdrawn.', c.status);
+    }
+    if (c.submittedByApiKeyId !== ctx.key.id) {
+      throw new AppError(
+        'forbidden',
+        'Only the key that submitted this campaign withdraws it through the API: members withdraw it in the app.',
+      );
+    }
+    await returnLockedCampaignToDraft(tx, ctx.tenant.id, c.id, {});
+    await recordCampaignEvent(tx, ctx.tenant.id, c.id, 'withdrawn', null, {
+      apiKeyId: ctx.key.id,
+    });
+    await recordSystemAudit(
+      tx,
+      ctx.tenant.id,
+      {
+        action: 'campaign.withdrawn',
+        subjectType: 'campaign',
+        subjectId: c.id,
+        metadata: { source: 'api' },
         correlationId: ctx.requestId,
       },
       apiActor(ctx),

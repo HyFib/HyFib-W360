@@ -960,6 +960,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   submission then always goes to `awaitCampaignApproval`; members' launches when the company needs
   no approval. `approveCampaign` launches a key's submission under the approving member, who must
   hold `campaigns.send`.
+- **Withdrawing submissions (ADR-203):** `apiWithdrawCampaign` locks the campaign and, for a
+  submission waiting for approval that the key made, calls `returnLockedCampaignToDraft`
+  (`campaigns/service.ts`), which members' withdrawal and rejection call too.
 - **Media from links (ADR-194):** `apiSendMedia` (`api/resources.ts`) parses `type` `image`,
   `video`, `audio` or `document`, an https `link` (`isMediaLink`) and a caption except for audio,
   and sends through `sendReply` as text replies do: the content keeps the link and the caption, the
