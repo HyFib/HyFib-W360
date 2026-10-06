@@ -10,7 +10,7 @@ import { CrmTabs } from '@/components/crm/crm-tabs';
 import { PageHeader } from '@/components/page-header';
 import { ModuleNotInPlan } from '@/components/plan-limit';
 import { contactLabel, DEAL_STATUS } from '@/lib/crm-labels';
-import { formatDateTime } from '@/lib/format';
+import { formatDate, formatDateTime } from '@/lib/format';
 import { crmLookups } from '@/server/crm';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
@@ -189,6 +189,23 @@ export default async function CrmPage({
                 </nav>
                 <span className="text-muted-foreground">Values in {board.pipeline.currency}</span>
               </div>
+              {board.forecast.hasChances ? (
+                // Weighted by each stage's chance of winning (ADR-242). The month's end is a
+                // calendar date in the company's time already, so it is shown as written (UTC).
+                <p className="text-sm">
+                  <span className="font-medium">Weighted pipeline</span>{' '}
+                  {formatMinor(board.forecast.weightedMinor, board.pipeline.currency)}
+                  <span className="text-muted-foreground">
+                    {` · expected to close by ${formatDate(board.forecast.monthEnd, 'UTC')}: `}
+                  </span>
+                  {formatMinor(board.forecast.weightedMonthMinor, board.pipeline.currency)}
+                  {board.forecast.stagesWithoutChance > 0 ? (
+                    <span className="text-muted-foreground">
+                      {` · ${board.forecast.stagesWithoutChance} ${board.forecast.stagesWithoutChance === 1 ? 'stage' : 'stages'} with deals but no chance of winning left out`}
+                    </span>
+                  ) : null}
+                </p>
+              ) : null}
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 {board.columns.map((col) => (
                   <section
@@ -207,6 +224,14 @@ export default async function CrmPage({
                           : ''}
                         {col.deals.length < col.count ? ` · showing ${col.deals.length}` : ''}
                       </p>
+                      {col.stage.winPercent !== null ? (
+                        <p className="text-xs text-muted-foreground">
+                          {col.stage.winPercent}% chance
+                          {col.weightedMinor
+                            ? ` · weighted ${formatMinor(col.weightedMinor, board.pipeline.currency)}`
+                            : ''}
+                        </p>
+                      ) : null}
                     </header>
                     {col.deals.length === 0 ? (
                       <p className="text-xs text-muted-foreground">No deals.</p>

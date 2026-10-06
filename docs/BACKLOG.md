@@ -238,9 +238,12 @@ verification, app review, Embedded Signup configuration).
   company's other active pipelines and their stages; the service keeps its rules; no migration).
   **[Deal export built; its database tests run only in CI]** (ADR-239: the deals a view shows as
   CSV, with `crm.read` and `contacts.export`, numbers masked as for the member, audited; no
-  migration). **Remaining:** custom deal fields, products on deals, deal import, forecasting,
-  automation steps that create deals or tasks, CRM connectors (HubSpot, Salesforce, Zoho:
-  integrations), reminder emails through the production SMTP provider (release checklist).
+  migration). **[Stage chances and a weighted forecast built; their database and browser tests run
+  only in CI]** (ADR-242, migration 0156: a chance of winning per stage weighs the board's open
+  deals, for the pipeline and for the deals expected to close this month). **Remaining:** custom
+  deal fields, products on deals, deal import, forecasts in Reports, automation steps that create
+  deals or tasks, CRM connectors (HubSpot, Salesforce, Zoho: integrations), reminder emails through
+  the production SMTP provider (release checklist).
 - **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad
   traffic yet_: click-to-chat links (a short link that counts clicks per link and company day
   without any visitor data and redirects to wa.me with a pre-filled message and an optional

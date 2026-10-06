@@ -9329,3 +9329,28 @@ Decision:
 
 Not built: a notice outside the inbox (the navigation or other pages), a sound or browser
 notification, per-team targets, and presence of members.
+
+## ADR-242 Stage chances of winning and a weighted forecast on the CRM board (P4-04) (2026-10-06)
+
+Context: the board totals each stage's open deals at full value, so a pipeline full of early-stage
+deals looked as valuable as one about to close, and there was no figure for what the month was
+likely to bring.
+
+Decision:
+
+- **A chance per stage:** owners and administrators may give each stage, in Settings → Pipelines, a
+  whole-percentage chance of winning its deals (`crm_stages.win_percent`, 0 to 100, empty by
+  default; migration 0156). A new pipeline's stages take one with their names; saving a pipeline
+  without a stage's chance keeps it. Like the rest of a pipeline, it is a company setting
+  (`tenant.settings.manage`, the update audited as before).
+- **On the board:** each stage with a chance shows it and its open deals' value times it (rounded to
+  the minor unit). Above the columns, when any stage has a chance: the weighted pipeline (the sum
+  over stages with a chance) and the weighted value of the deals expected to close by the end of the
+  month in the company's time zone (a past expected date included), with the board's owner filter.
+  Stages that hold open deals but have no chance are left out and counted, so the figure never looks
+  complete when it is not.
+- **Additive:** a nullable column without a default; the account export includes it. The API is
+  unchanged.
+
+Not built: chances per deal, forecasts in Reports or by month further ahead, won and lost history to
+suggest chances, and the forecast through the API.

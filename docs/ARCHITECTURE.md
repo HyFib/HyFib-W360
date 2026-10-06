@@ -619,6 +619,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   open deal in an archived stage or pipeline. A closed deal whose stage was removed reopens in the
   pipeline's first stage. A deal moves to a stage of another pipeline (a value in a different
   currency must be cleared first); the deal page offers it as "Move to another pipeline" (ADR-234).
+  Forecasts (ADR-242): a stage's chance of winning (`crm_stages.win_percent`, migration 0156) weighs
+  its open deals on the board (`crm/forecast.ts`: `weigh`, `forecast`); the board's per-stage totals
+  add the value of deals expected to close by the month's end in the company's time (`monthEndIn`).
   Amounts are parsed and formatted by `crm/money.ts` (browser-safe, exact: no floats in parsing).
 - **Reminders** (ADR-041, queue `crm.reminder`): saving a reminder time schedules a delayed job keyed
   by task and time; the job locks the task and, when it is due, queues the email through the outbox

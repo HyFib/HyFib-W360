@@ -26,6 +26,8 @@ export interface StageSummary {
   position: number;
   archived: boolean;
   openDeals: number;
+  /** The chance, in whole percent, that the stage's open deals are won (ADR-242); null: not set. */
+  winPercent: number | null;
 }
 
 export interface PipelineSummary {
@@ -39,23 +41,42 @@ export interface PipelineSummary {
   stages: StageSummary[];
 }
 
-const stageNames = z
-  .array(trimmed(40, 'a stage name'))
-  .min(1, 'Add at least one stage.')
-  .max(CRM_LIMITS.stages, `A pipeline has at most ${CRM_LIMITS.stages} stages.`);
+/** A stage's chance of winning its open deals (ADR-242): a whole percentage, or null for none. */
+export const winPercentSchema = z
+  .number('Enter the chance as a whole percentage.')
+  .int('Enter the chance as a whole percentage.')
+  .min(0, 'A chance is between 0 and 100%.')
+  .max(100, 'A chance is between 0 and 100%.')
+  .nullable();
 
-const createSchema = z.object({
+/** A new pipeline's stage: its name, or its name and chance of winning. */
+export const newStageSchema = z.union([
+  trimmed(40, 'a stage name').transform((name) => ({ name, winPercent: null })),
+  z.object({ name: trimmed(40, 'a stage name'), winPercent: winPercentSchema.default(null) }),
+]);
+
+export const createPipelineSchema = z.object({
   name: trimmed(60, 'a pipeline name'),
   currency: z.string().trim().toUpperCase().refine(isCurrency, 'Choose a currency.'),
-  stages: stageNames,
+  stages: z
+    .array(newStageSchema)
+    .min(1, 'Add at least one stage.')
+    .max(CRM_LIMITS.stages, `A pipeline has at most ${CRM_LIMITS.stages} stages.`),
 });
 
-const updateSchema = z.object({
+export const updatePipelineSchema = z.object({
   id: uuidSchema,
   expectedVersion: z.number().int().min(1),
   name: trimmed(60, 'a pipeline name'),
   stages: z
-    .array(z.object({ id: uuidSchema.nullable(), name: trimmed(40, 'a stage name') }))
+    .array(
+      z.object({
+        id: uuidSchema.nullable(),
+        name: trimmed(40, 'a stage name'),
+        /** Absent: a kept stage keeps its chance, a new one has none. */
+        winPercent: winPercentSchema.optional(),
+      }),
+    )
     .min(1, 'Add at least one stage.')
     .max(CRM_LIMITS.stages, `A pipeline has at most ${CRM_LIMITS.stages} stages.`),
 });
@@ -95,6 +116,7 @@ export async function loadPipelines(
       name: crmStages.name,
       position: crmStages.position,
       archivedAt: crmStages.archivedAt,
+      winPercent: crmStages.winPercent,
       openDeals: sql<number>`(select count(*)::int from app.crm_deals d
         where d.tenant_id = ${outerColumn(crmStages.tenantId)}
           and d.stage_id = ${outerColumn(crmStages.id)} and d.status = 'open')`,
@@ -118,6 +140,7 @@ export async function loadPipelines(
         position: s.position,
         archived: s.archivedAt !== null,
         openDeals: s.openDeals,
+        winPercent: s.winPercent,
       })),
   }));
 }
@@ -161,8 +184,8 @@ export function pipelineOperations(deps: { db: Database; clock: Clock }) {
     /** Pipelines and stages are company settings. */
     async createPipeline(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'tenant.settings.manage');
-      const data = parseInput(createSchema, input);
-      assertDistinct(data.stages);
+      const data = parseInput(createPipelineSchema, input);
+      assertDistinct(data.stages.map((s) => s.name));
       try {
         return await db.run(ctx.scope, async (tx) => {
           const active = await lockPipelineCount(tx, ctx.tenant.id);
@@ -182,11 +205,12 @@ export function pipelineOperations(deps: { db: Database; clock: Clock }) {
             createdByMembershipId: ctx.membership.id,
           });
           await tx.insert(crmStages).values(
-            data.stages.map((name, position) => ({
+            data.stages.map((stage, position) => ({
               id: uuidv7(),
               tenantId: ctx.tenant.id,
               pipelineId: id,
-              name,
+              name: stage.name,
+              winPercent: stage.winPercent,
               position,
             })),
           );
@@ -217,7 +241,7 @@ export function pipelineOperations(deps: { db: Database; clock: Clock }) {
      */
     async updatePipeline(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'tenant.settings.manage');
-      const data = parseInput(updateSchema, input);
+      const data = parseInput(updatePipelineSchema, input);
       assertDistinct(data.stages.map((s) => s.name));
       try {
         return await db.run(ctx.scope, async (tx) => {
@@ -272,12 +296,17 @@ export function pipelineOperations(deps: { db: Database; clock: Clock }) {
                 tenantId: ctx.tenant.id,
                 pipelineId: data.id,
                 name: s.name,
+                winPercent: s.winPercent ?? null,
                 position,
               });
             } else {
               await tx
                 .update(crmStages)
-                .set({ name: s.name, position })
+                .set({
+                  name: s.name,
+                  position,
+                  ...(s.winPercent !== undefined ? { winPercent: s.winPercent } : {}),
+                })
                 .where(and(eq(crmStages.tenantId, ctx.tenant.id), eq(crmStages.id, s.id)));
             }
             position += 1;

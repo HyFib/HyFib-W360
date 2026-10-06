@@ -61,6 +61,7 @@ export default async function PipelinesSettingsPage({
                       {stages.map((s, i) => (
                         <li key={s.id}>
                           {i + 1}. {s.name}
+                          {s.winPercent !== null ? ` · ${s.winPercent}%` : ''}
                           {s.openDeals > 0
                             ? ` (${s.openDeals} open deal${s.openDeals === 1 ? '' : 's'})`
                             : ''}
@@ -81,7 +82,11 @@ export default async function PipelinesSettingsPage({
                               name: p.name,
                               currency: p.currency,
                               version: p.version,
-                              stages: stages.map((s) => ({ id: s.id, name: s.name })),
+                              stages: stages.map((s) => ({
+                                id: s.id,
+                                name: s.name,
+                                winPercent: s.winPercent,
+                              })),
                             }}
                             currencies={currencies}
                             defaultCurrency={p.currency}

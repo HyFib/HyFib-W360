@@ -120,6 +120,7 @@ export * from './crm/deals';
 export * from './crm/deals-csv';
 export * from './crm/tasks';
 export * from './crm/time';
+export * from './crm/forecast';
 export * from './crm/reminders';
 export * from './crm/service';
 export * from './growth/model';

@@ -42,9 +42,11 @@ import {
   type MemberRef,
 } from './common';
 import { DEAL_CSV_COLUMNS, dealCsvLine } from './deals-csv';
+import { forecast, weigh, type Forecast } from './forecast';
 import { currencyDigits, parseAmountToMinor } from './money';
 import { loadPipelines, type PipelineSummary, type StageSummary } from './pipelines';
 import { tasksWhere, type TaskItem } from './tasks';
+import { monthEndIn } from './time';
 
 export interface DealCard {
   id: string;
@@ -69,12 +71,16 @@ export interface BoardColumn {
   /** All open deals in the stage (the list may be cut at CRM_LIMITS.boardDealsPerStage). */
   count: number;
   valueMinor: number;
+  /** Their value times the stage's chance of winning (ADR-242); null without a chance. */
+  weightedMinor: number | null;
 }
 
 export interface Board {
   pipeline: PipelineSummary;
   pipelines: PipelineSummary[];
   columns: BoardColumn[];
+  /** The weighted pipeline of the columns shown, and of the deals expected to close by `monthEnd`. */
+  forecast: Forecast & { monthEnd: string };
 }
 
 export interface ActivityItem {
@@ -421,11 +427,15 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             eq(crmDeals.status, 'open'),
             ownerFilter(ctx, data.owner),
           );
+          // Deals expected to close by the end of this month, in the company's time (ADR-242).
+          const monthEnd = monthEndIn(clock.now(), ctx.tenant.timezone);
           const totals = await tx
             .select({
               stageId: crmDeals.stageId,
               n: sql<number>`count(*)::int`,
               value: sql<string>`coalesce(sum(${crmDeals.valueMinor}), 0)::text`,
+              monthValue: sql<string>`coalesce(sum(${crmDeals.valueMinor})
+                filter (where ${crmDeals.expectedCloseOn} <= ${monthEnd}::date), 0)::text`,
             })
             .from(crmDeals)
             .where(where)
@@ -455,20 +465,38 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             new Map([[pipeline.id, pipeline.currency]]),
             ctx,
           );
+          const stages = pipeline.stages
+            .filter((s) => !s.archived)
+            .map((stage) => {
+              const total = totals.find((t) => t.stageId === stage.id);
+              return {
+                stage,
+                count: total?.n ?? 0,
+                valueMinor: Number(total?.value ?? 0),
+                monthValueMinor: Number(total?.monthValue ?? 0),
+              };
+            });
           return {
             pipeline,
             pipelines,
-            columns: pipeline.stages
-              .filter((s) => !s.archived)
-              .map((stage) => {
-                const total = totals.find((t) => t.stageId === stage.id);
-                return {
-                  stage,
-                  deals: cards.filter((c) => c.stageId === stage.id),
-                  count: total?.n ?? 0,
-                  valueMinor: Number(total?.value ?? 0),
-                };
-              }),
+            columns: stages.map(({ stage, count, valueMinor }) => ({
+              stage,
+              deals: cards.filter((c) => c.stageId === stage.id),
+              count,
+              valueMinor,
+              weightedMinor: stage.winPercent === null ? null : weigh(valueMinor, stage.winPercent),
+            })),
+            forecast: {
+              ...forecast(
+                stages.map((s) => ({
+                  count: s.count,
+                  valueMinor: s.valueMinor,
+                  monthValueMinor: s.monthValueMinor,
+                  winPercent: s.stage.winPercent,
+                })),
+              ),
+              monthEnd,
+            },
           };
         },
         { accessMode: 'read only' },

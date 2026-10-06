@@ -980,7 +980,16 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
   },
   {
     table: 'app.crm_stages',
-    columns: ['id', 'pipeline_id', 'name', 'position', 'archived_at', 'created_at', 'updated_at'],
+    columns: [
+      'id',
+      'pipeline_id',
+      'name',
+      'position',
+      'archived_at',
+      'win_percent',
+      'created_at',
+      'updated_at',
+    ],
   },
   {
     table: 'app.crm_tasks',

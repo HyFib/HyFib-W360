@@ -1,5 +1,45 @@
 # Progress
 
+## 2026-10-06 — Stage chances and a weighted forecast on the CRM board (P4-04, ADR-242)
+
+Status: **Implemented; its database and browser tests run in CI only.** The board showed each
+stage's open deals at full value only. The local PostgreSQL is unavailable, so migration 0156 and
+the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0156 (`crm_stages.win_percent`, 0 to 100 or null, and its update grant);
+  the account export lists the column.
+- **Domain:** `crm/forecast.ts` (`weigh`, `forecast`), `monthEndIn` in `crm/time.ts`, chances in
+  `createPipelineSchema`, `updatePipelineSchema` (absent: kept) and `loadPipelines`, and the board's
+  weighted columns and forecast.
+- **Web:** a chance field per stage in the pipeline editor, the chances in the pipeline list, and
+  the board's weighted figures.
+- **Tests:**
+  - Unit (4 new in `forecast.test.ts`).
+  - Integration (1 new in `crm.test.ts`: weighted columns, the forecast with the month and the owner
+    filter, chances kept, refused beyond 100% and to agents, and set at creation). Written for CI;
+    not run here.
+  - E2e (`crm.spec.ts`: a 50% chance set at creation, listed, and weighing the deal on the board).
+    Written for CI; not run here.
+- **Docs:** ADR-242; ARCHITECTURE; DEPLOYMENT; BACKLOG P4-04; feature matrix H-012.
+- **Mutation checks:** 13/13 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                                     | Result                                                          |
+| ----------------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`          | clean                                                           |
+| `pnpm test` (unit)                                          | 1042 passed (109 files)                                         |
+| `pnpm test:integration`, `pnpm test:e2e`, `pnpm db:migrate` | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                                | passed                                                          |
+| Mutation checks                                             | 13/13 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes                       | no leaks found                                                  |
+
+### Known gaps
+
+- No chances per deal, no forecast in Reports or beyond this month, none through the API.
+
 ## 2026-10-06 — A notice of overdue replies in the inbox (P3-06, ADR-241)
 
 Status: **Implemented; its database test runs in CI only.** Overdue replies were marked in the list

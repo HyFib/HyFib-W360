@@ -551,6 +551,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    checked as JSON. Rolling workers back while an automation with a form body is published would
    send that body as JSON: unpublish such automations first.
 
+   Migration 0156 (ADR-242) adds `app.crm_stages.win_percent`, a nullable column without a default
+   (the table is not rewritten), and the runtime role's update of it. Until the web rollout ends, an
+   old web server neither shows nor sets stage chances and its board has no weighted figures, but
+   saving a pipeline there keeps the chances it does not know (its update names only names and
+   positions). Rolling the web back hides them until it rolls forward.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

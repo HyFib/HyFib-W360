@@ -1,4 +1,4 @@
-import { bigint, date, integer, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { bigint, date, integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { jsonb } from './columns';
 import { appSchema } from './tenancy';
 
@@ -29,6 +29,8 @@ export const crmStages = appSchema.table('crm_stages', {
   name: text('name').notNull(),
   position: integer('position').notNull(),
   archivedAt: tz('archived_at'),
+  /** The chance, in whole percent, that the stage's open deals are won (ADR-242); null: not set. */
+  winPercent: smallint('win_percent'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });

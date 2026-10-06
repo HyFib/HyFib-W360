@@ -13,6 +13,7 @@ import {
   createReportsService,
   findDueReminders,
   maskPhoneNumber,
+  monthEndIn,
   sendTaskReminder,
   type TenantContext,
 } from '@w360/domain';
@@ -475,6 +476,110 @@ describe('crm deals', () => {
       /archived/,
     );
     expect(c.tenant.id).not.toBe(other.c.tenant.id);
+  });
+
+  it('weighs open deals by their stage’s chance of winning, for the pipeline and the month (ADR-242)', async () => {
+    const { owner, agent, pipeline, newStage, qualified, proposal } = await setup();
+    const svc = crm();
+    const contactId = await newContact(owner, 'Hema');
+    const { version } = await svc.updatePipeline(owner, {
+      id: pipeline.id,
+      expectedVersion: pipeline.version,
+      name: 'Sales',
+      stages: [
+        { id: newStage.id, name: 'New', winPercent: 10 },
+        { id: qualified.id, name: 'Qualified', winPercent: 50 },
+        { id: proposal.id, name: 'Proposal' },
+      ],
+    });
+    // Expected to close on the month's last day (company time), the day after, and some day.
+    const monthEnd = monthEndIn(new Date(), owner.tenant.timezone);
+    const after = new Date(`${monthEnd}T00:00:00Z`);
+    after.setUTCDate(after.getUTCDate() + 1);
+    const deal = (stageId: string, title: string, value: string, expectedCloseOn: string | null) =>
+      svc.createDeal(owner, {
+        contactId,
+        pipelineId: pipeline.id,
+        stageId,
+        title,
+        value,
+        expectedCloseOn,
+      });
+    await deal(newStage.id, 'Annual plan', '1,000', monthEnd);
+    await deal(qualified.id, 'Second store', '500', after.toISOString().slice(0, 10));
+    await deal(qualified.id, 'Add-on', '300', null);
+    await deal(proposal.id, 'Franchise', '2,000', monthEnd);
+
+    const board = (await svc.board(owner, { pipelineId: pipeline.id }))!;
+    expect(board.columns.map((c) => [c.stage.winPercent, c.valueMinor, c.weightedMinor])).toEqual([
+      [10, 100_000, 10_000],
+      [50, 80_000, 40_000],
+      [null, 200_000, null],
+    ]);
+    // The month counts only the deals of stages with a chance expected to close by its end.
+    expect(board.forecast).toEqual({
+      hasChances: true,
+      weightedMinor: 50_000,
+      weightedMonthMinor: 10_000,
+      stagesWithoutChance: 1,
+      monthEnd,
+    });
+    // The owner filter applies: none of these deals has an owner.
+    expect(
+      (await svc.board(agent, { pipelineId: pipeline.id, owner: 'mine' }))!.forecast,
+    ).toMatchObject({ weightedMinor: 0, weightedMonthMinor: 0, stagesWithoutChance: 0 });
+
+    // An update that leaves chances out keeps them; one beyond 100% or by an agent changes nothing.
+    const names = [
+      { id: newStage.id, name: 'New' },
+      { id: qualified.id, name: 'Qualified' },
+      { id: proposal.id, name: 'Proposal' },
+    ];
+    await svc.updatePipeline(owner, {
+      id: pipeline.id,
+      expectedVersion: version,
+      name: 'Sales',
+      stages: names,
+    });
+    const kept = (await svc.listPipelines(owner)).find((p) => p.id === pipeline.id)!;
+    expect(kept.stages.map((s) => s.winPercent)).toEqual([10, 50, null]);
+    await expectAppError(
+      svc.updatePipeline(owner, {
+        id: pipeline.id,
+        expectedVersion: kept.version,
+        name: 'Sales',
+        stages: [{ ...names[0]!, winPercent: 101 }, names[1]!, names[2]!],
+      }),
+      'validation_failed',
+      /between 0 and 100/,
+    );
+    await expectAppError(
+      svc.updatePipeline(agent, {
+        id: pipeline.id,
+        expectedVersion: kept.version,
+        name: 'Sales',
+        stages: [{ ...names[0]!, winPercent: 90 }, names[1]!, names[2]!],
+      }),
+      'forbidden',
+    );
+    expect(
+      (await svc.listPipelines(owner)).find((p) => p.id === pipeline.id)!.stages[0]!.winPercent,
+    ).toBe(10);
+
+    // A new pipeline takes chances with its stages.
+    const { id: renewals } = await svc.createPipeline(owner, {
+      name: 'Renewals',
+      currency: 'INR',
+      stages: [{ name: 'Due', winPercent: 80 }, 'Unsure'],
+    });
+    expect(
+      (await svc.listPipelines(owner))
+        .find((p) => p.id === renewals)!
+        .stages.map((s) => [s.name, s.winPercent]),
+    ).toEqual([
+      ['Due', 80],
+      ['Unsure', null],
+    ]);
   });
 
   it('links a deal to a conversation only for members who can see it', async () => {

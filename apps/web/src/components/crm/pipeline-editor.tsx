@@ -15,7 +15,13 @@ interface StageDraft {
   key: string;
   id: string | null;
   name: string;
+  /** The chance of winning in percent as typed; empty for none (ADR-242). */
+  winPercent: string;
 }
+
+/** A typed chance as the service takes it: a whole number, or null for an empty field. */
+const chance = (typed: string): number | null =>
+  typed.trim() === '' ? null : Number(typed.trim());
 
 interface PipelineFormProps {
   slug: string;
@@ -24,7 +30,7 @@ interface PipelineFormProps {
     name: string;
     currency: string;
     version: number;
-    stages: { id: string; name: string }[];
+    stages: { id: string; name: string; winPercent: number | null }[];
   };
   currencies: string[];
   defaultCurrency: string;
@@ -64,11 +70,17 @@ function PipelineFields({
   const [currency, setCurrency] = useState(pipeline?.currency ?? defaultCurrency);
   const [stages, setStages] = useState<StageDraft[]>(
     pipeline
-      ? pipeline.stages.map((s) => ({ key: s.id, id: s.id, name: s.name }))
+      ? pipeline.stages.map((s) => ({
+          key: s.id,
+          id: s.id,
+          name: s.name,
+          winPercent: s.winPercent === null ? '' : String(s.winPercent),
+        }))
       : ['New', 'Qualified', 'Proposal', 'Negotiation'].map((n, i) => ({
           key: `default-${i}`,
           id: null,
           name: n,
+          winPercent: '',
         })),
   );
   // Keys for stages added in this editor (used from event handlers only).
@@ -102,18 +114,22 @@ function PipelineFields({
             id: pipeline.id,
             expectedVersion: pipeline.version,
             name,
-            stages: stages.map((s) => ({ id: s.id, name: s.name })),
+            stages: stages.map((s) => ({
+              id: s.id,
+              name: s.name,
+              winPercent: chance(s.winPercent),
+            })),
           }).then((r) => done(r, 'Pipeline saved.'));
         } else {
           void createPipelineAction(slug, {
             name,
             currency,
-            stages: stages.map((s) => s.name),
+            stages: stages.map((s) => ({ name: s.name, winPercent: chance(s.winPercent) })),
           }).then((r) => {
             done(r, 'Pipeline created.');
             if (r.ok) {
               setName('');
-              setStages([{ key: newKey(), id: null, name: 'New' }]);
+              setStages([{ key: newKey(), id: null, name: 'New', winPercent: '' }]);
             }
           });
         }
@@ -178,6 +194,30 @@ function PipelineFields({
                   )
                 }
               />
+              <label htmlFor={`${prefix}-chance-${index}`} className="sr-only">
+                Stage {index + 1} chance of winning, in percent
+              </label>
+              <span className="inline-flex items-center gap-1 text-sm text-muted-foreground">
+                <Input
+                  id={`${prefix}-chance-${index}`}
+                  className="w-20"
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  max={100}
+                  step={1}
+                  placeholder="—"
+                  value={stage.winPercent}
+                  onChange={(e) =>
+                    setStages(
+                      stages.map((s) =>
+                        s.key === stage.key ? { ...s, winPercent: e.target.value } : s,
+                      ),
+                    )
+                  }
+                />
+                %
+              </span>
               <ClientButton
                 type="button"
                 size="sm"
@@ -217,11 +257,17 @@ function PipelineFields({
             size="sm"
             variant="outline"
             disabled={stages.length >= 30}
-            onClick={() => setStages([...stages, { key: newKey(), id: null, name: '' }])}
+            onClick={() =>
+              setStages([...stages, { key: newKey(), id: null, name: '', winPercent: '' }])
+            }
           >
             Add stage
           </ClientButton>
         </div>
+        <p className="text-xs text-muted-foreground">
+          The percentage beside a stage is its chance of winning a deal: the board weighs each
+          stage&apos;s open deals by it. Leave it empty to leave the stage out.
+        </p>
         {pipeline ? (
           <p className="text-xs text-muted-foreground">
             Removing a stage keeps its closed deals; a stage with open deals cannot be removed until

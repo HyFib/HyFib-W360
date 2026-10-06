@@ -38,12 +38,22 @@ async function createCompany(page: Page, prefix: string, name: string) {
   return { email, slug };
 }
 
-/** Settings → Pipelines: a rupee pipeline with the suggested four stages. */
-async function createPipeline(page: Page, slug: string) {
+/**
+ * Settings → Pipelines: a rupee pipeline with the suggested four stages, optionally with a chance of
+ * winning on the second (ADR-242).
+ */
+async function createPipeline(
+  page: Page,
+  slug: string,
+  options: { qualifiedChance?: string } = {},
+) {
   await page.goto(`/c/${slug}/settings/pipelines`);
   await expect(page.getByText('No pipelines yet.')).toBeVisible();
   await page.getByLabel('Name', { exact: true }).fill('Sales');
   await expect(page.getByLabel('Currency')).toHaveValue('INR');
+  if (options.qualifiedChance) {
+    await page.getByLabel('Stage 2 chance of winning, in percent').fill(options.qualifiedChance);
+  }
   await page.getByRole('button', { name: 'Create pipeline' }).click();
   await expect(page.getByText('Pipeline created.')).toBeVisible();
   await expect(page.getByText('2. Qualified')).toBeVisible();
@@ -58,7 +68,8 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   // Before a pipeline exists, the board points owners to Settings → Pipelines.
   await page.getByRole('link', { name: 'CRM' }).first().click();
   await expect(page.getByRole('heading', { name: 'No pipeline yet' })).toBeVisible();
-  await createPipeline(page, slug);
+  await createPipeline(page, slug, { qualifiedChance: '50' });
+  await expect(page.getByText('2. Qualified · 50%')).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
   // A contact, and a deal added from the contact's page.
@@ -88,6 +99,14 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   await expect(page.getByLabel('Value (INR)')).toHaveValue('26000.00');
   await expect(timeline.getByText(/₹25,000.50 → ₹26,000.00/)).toBeVisible();
   await expect(page.getByText('Deal saved.')).toBeVisible();
+
+  // The board weighs it by its stage's chance of winning (ADR-242).
+  const editedUrl = page.url();
+  await page.goto(`/c/${slug}/crm`);
+  await expect(page.getByText('50% chance · weighted ₹13,000.00')).toBeVisible();
+  await expect(page.getByText('Weighted pipeline')).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  await page.goto(editedUrl);
 
   // A second rupee pipeline takes the deal with its value (ADR-234).
   const dealUrl = page.url();
