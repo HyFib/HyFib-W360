@@ -86,6 +86,7 @@ company is suspended, restricted (its plan expired or was canceled) or pending d
 | `inbox.reply`            |   ✓   |   ✓   |     ✓      |   ✓   |          |         |         |                         |
 | `inbox.assign`           |   ✓   |   ✓   |     ✓      |       |          |         |         |                         |
 | `inbox.supervise`        |   ✓   |   ✓   |     ✓      |       |          |         |         |                         |
+| `inbox.export`           |   ✓   |   ✓   |     ✓      |       |          |         |         |            ✓            |
 | `contacts.read`          |   ✓   |   ✓   |     ✓      |   ✓   |    ✓     |         |         |            ✓            |
 | `contacts.write`         |   ✓   |   ✓   |     ✓      |   ✓   |    ✓     |         |         |                         |
 | `contacts.import`        |   ✓   |   ✓   |     ✓      |       |    ✓     |         |         |                         |
@@ -156,6 +157,9 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   checks run again (active, can still see it, mention unread); the email names only who mentioned
   them, how many mentions are unread there and the conversation's link, never the note or the
   customer (ADR-211).
+  Transcripts need `inbox.export` (owners, administrators, supervisors) and sight of the
+  conversation, are audited (`conversation.transcript_exported`, no content), are plain text so no
+  spreadsheet runs a formula from them, and leave internal notes out (ADR-212).
   Automatic assignment only reaches active members whose role can read and answer conversations.
 - CSAT taps: a tap is recorded only when its button id names a survey of the same conversation and
   its `context.id` is that survey's message; nothing in the tap is trusted beyond selecting one of

@@ -388,6 +388,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `note-mention:<mention>`) only for an unread mention less than a day old, of an active member who
   can still see the conversation, with no newer unread mention of the member there; the email names
   the author and the unread count, never the note or the customer.
+- **Transcripts** (`messaging/transcript.ts`, `exportTranscript` in `messaging/inbox.ts`, ADR-212):
+  an async generator checks `inbox.export` and that the member can see the conversation and writes
+  the audit entry in one transaction, then yields the header and pages of 500 messages (keyset on
+  the exact `created_at` and the id, read-only transactions) formatted as plain text; the route
+  `/c/<company>/inbox/<conversation>/transcript` streams it as an attachment.
 - **Collision warning** (`queueTextMessage` `afterMessageId`): under the conversation row lock, a
   reply is refused once when another member's reply is newer than the newest message the sender had
   seen; the composer refreshes the thread and keeps the draft (ADR-033).

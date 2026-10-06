@@ -1,5 +1,50 @@
 # Progress
 
+## 2026-10-06 — Phase 3 follow-up: downloading a conversation's transcript (P3-06, ADR-212)
+
+Status: **Implemented; its database and browser tests run in CI only.** W-042 was planned: a
+conversation could only be copied from the screen. The local PostgreSQL is unavailable (its Docker
+daemon stopped), so the new integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-212):** a new `inbox.export` permission (owners, administrators, supervisors; kept
+  while suspended); plain text, oldest first, the company's time zone, notes left out; audited
+  before the first byte; no migration.
+- **Domain:** `messaging/transcript.ts` (the format) and `exportTranscript` in the inbox service;
+  `MESSAGE_TYPE_NAMES` exported from `messaging/message-text.ts`.
+- **Web:** the route `/c/<company>/inbox/<conversation>/transcript` and a "Download transcript" link
+  on the conversation page for members with the permission.
+- **Tests:**
+  - Unit (5 new in `messaging/transcript.test.ts`, 1 new in `authz/permissions.test.ts`): times, the
+    header, senders, every kind of message, entries and outcomes; who holds the permission.
+  - Integration (1 new in `inbox-advanced.test.ts`): the transcript of 1,002 messages in order
+    across pages, the audit entry, notes left out, a supervisor allowed, an agent refused, another
+    company's owner not finding it. Written for CI; not run here.
+  - E2E (1 changed in `inbox.spec.ts`): the owner downloads the transcript of the conversation just
+    answered. Written for CI; not run here.
+- **Docs:** ADR-212; ARCHITECTURE; SECURITY (rule and permission matrix); DEPLOYMENT and RUNBOOKS;
+  BACKLOG P3-06; feature matrix W-042 (implemented).
+- **Mutation checks:** 19 deliberate regressions tried, all caught on the unit-tested parts. The
+  route and the service's checks need a browser and the database, so their regressions are left to
+  the e2e and integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 920 passed (88 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 19 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Notes in the transcript, a PDF, a date range, transcripts through the API, and emailing a
+  transcript to the customer.
+
 ## 2026-10-06 — Phase 3 follow-up: emailing members about unread mentions (P3-06, ADR-211)
 
 Status: **Implemented; its database tests run in CI only.** Members mentioned in a note saw it only

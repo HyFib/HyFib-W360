@@ -26,6 +26,15 @@ describe('permission matrix', () => {
     expect(ROLE_PERMISSIONS.analyst.has('contacts.read')).toBe(false);
   });
 
+  it('owners, administrators and supervisors download conversation transcripts, also while suspended (ADR-212)', () => {
+    expect(
+      Object.entries(ROLE_PERMISSIONS)
+        .filter(([, granted]) => granted.has('inbox.export'))
+        .map(([role]) => role),
+    ).toEqual(['owner', 'admin', 'supervisor']);
+    expect(ALLOWED_WHEN_SUSPENDED.has('inbox.export')).toBe(true);
+  });
+
   it('roles combine as a union', () => {
     const p = permissionsForRoles(['agent', 'billing']);
     expect(p.has('inbox.reply')).toBe(true);

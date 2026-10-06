@@ -430,6 +430,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    mentions another member, and queueing to a missing queue fails the note. Workers roll out first,
    so the jobs find a worker of this release.
 
+   ADR-212 has no migration: until the web rollout ends, an old web server shows no "Download
+   transcript" link and answers its address with 404.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

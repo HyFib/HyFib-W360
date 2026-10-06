@@ -34,7 +34,7 @@ export function outboundText(type: string, content: Record<string, unknown>): st
 }
 
 /** What a message without words is called. */
-const TYPE_NAMES: Record<string, string> = {
+export const MESSAGE_TYPE_NAMES: Record<string, string> = {
   image: 'Photo',
   video: 'Video',
   audio: 'Audio',
@@ -71,7 +71,7 @@ export function messageSnippet(
       : direction === 'inbound'
         ? inboundSummary(type, content).text
         : outboundText(type, content);
-  const line = words?.replace(/\s+/g, ' ').trim() || TYPE_NAMES[type] || 'Message';
+  const line = words?.replace(/\s+/g, ' ').trim() || MESSAGE_TYPE_NAMES[type] || 'Message';
   const characters = Array.from(line);
   return characters.length > SNIPPET_LENGTH
     ? `${characters.slice(0, SNIPPET_LENGTH - 1).join('')}…`

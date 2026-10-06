@@ -272,6 +272,15 @@ export default async function ConversationPage({
                 teams={filters.teams}
               />
             ) : null}
+            {can(ctx, 'inbox.export') ? (
+              <a
+                href={`/c/${ctx.tenant.slug}/inbox/${conv.id}/transcript`}
+                download
+                className="text-sm text-primary underline-offset-4 hover:underline"
+              >
+                Download transcript
+              </a>
+            ) : null}
           </div>
           {thread.olderCursor ? (
             <Link

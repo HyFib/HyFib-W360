@@ -4,6 +4,7 @@ import {
   and,
   apiKeys,
   asc,
+  campaigns,
   channelAccounts,
   contactIdentities,
   contacts,
@@ -52,6 +53,7 @@ import { emitTenantEvent } from './events';
 import { messageSnippet } from './message-text';
 import { NOTE_MAX_LENGTH } from './notes';
 import { SERVICE_WINDOW_MS, canSeeConversation } from './outbound';
+import { transcriptEntry, transcriptHeader } from './transcript';
 import { answeredJoin, answeredMessages } from './reply-context';
 
 /**
@@ -686,6 +688,151 @@ export function createInboxService(deps: InboxDeps) {
         },
         { accessMode: 'read only' },
       );
+    },
+
+    /**
+     * Streams a conversation's transcript as plain text (ADR-212), oldest message first, for a
+     * member with `inbox.export` who can see the conversation. The check and the audit entry come
+     * before the first byte, so a refused download is a 403 or 404, never a partial file.
+     */
+    async *exportTranscript(
+      ctx: TenantContext,
+      conversationId: string,
+      meta: RequestMeta = {},
+    ): AsyncGenerator<string> {
+      assertCan(ctx, 'inbox.export');
+      if (!z.uuid().safeParse(conversationId).success) throw notFound('Conversation');
+      const conv = await db.run(ctx.scope, async (tx) => {
+        const [row] = await tx
+          .select({
+            assignedMembershipId: conversations.assignedMembershipId,
+            contactName: contacts.displayName,
+            contactPhone: contacts.phoneE164,
+            number: channelAccounts.displayPhoneNumber,
+          })
+          .from(conversations)
+          .innerJoin(
+            contacts,
+            and(
+              eq(contacts.tenantId, conversations.tenantId),
+              eq(contacts.id, conversations.contactId),
+            ),
+          )
+          .innerJoin(
+            channelAccounts,
+            and(
+              eq(channelAccounts.tenantId, conversations.tenantId),
+              eq(channelAccounts.id, conversations.channelAccountId),
+            ),
+          )
+          .where(
+            and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, conversationId)),
+          );
+        if (!row || !canSeeConversation(ctx, row.assignedMembershipId))
+          throw notFound('Conversation');
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'conversation.transcript_exported',
+            subjectType: 'conversation',
+            subjectId: conversationId,
+          },
+          meta,
+        );
+        return row;
+      });
+      const timeZone = ctx.tenant.timezone;
+      yield transcriptHeader({
+        contactName: conv.contactName,
+        contactPhone: conv.contactPhone,
+        number: conv.number,
+        companyName: ctx.tenant.name,
+        timeZone,
+        downloadedBy: ctx.user.name,
+        downloadedAt: clock.now(),
+      });
+      /** The next 500 messages after `cursor`, oldest first. */
+      const page = (cursor: { at: string; id: string } | null) =>
+        db.run(
+          ctx.scope,
+          (tx) =>
+            tx
+              .select({
+                id: messages.id,
+                direction: messages.direction,
+                type: messages.type,
+                content: messages.content,
+                status: messages.status,
+                errorTitle: messages.errorTitle,
+                senderType: messages.senderType,
+                memberName: users.name,
+                apiKeyName: apiKeys.name,
+                campaignName: campaigns.name,
+                createdAt: messages.createdAt,
+                providerTimestamp: messages.providerTimestamp,
+                cursorAt: exactTimestamp(messages.createdAt),
+              })
+              .from(messages)
+              .leftJoin(
+                memberships,
+                and(
+                  eq(memberships.tenantId, messages.tenantId),
+                  eq(memberships.id, messages.senderMembershipId),
+                ),
+              )
+              .leftJoin(users, eq(users.id, memberships.userId))
+              .leftJoin(
+                apiKeys,
+                and(eq(apiKeys.tenantId, messages.tenantId), eq(apiKeys.id, messages.apiKeyId)),
+              )
+              .leftJoin(
+                campaigns,
+                and(
+                  eq(campaigns.tenantId, messages.tenantId),
+                  eq(campaigns.id, messages.campaignId),
+                ),
+              )
+              .where(
+                and(
+                  eq(messages.tenantId, ctx.tenant.id),
+                  eq(messages.conversationId, conversationId),
+                  cursor
+                    ? sql`(${messages.createdAt}, ${messages.id}) > (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
+                    : undefined,
+                ),
+              )
+              .orderBy(asc(messages.createdAt), asc(messages.id))
+              .limit(500),
+          { accessMode: 'read only' },
+        );
+      let after: { at: string; id: string } | null = null;
+      for (;;) {
+        const rows = await page(after);
+        const last = rows.at(-1);
+        if (!last) break;
+        yield rows
+          .map((m) =>
+            transcriptEntry(
+              {
+                direction: m.direction,
+                type: m.type,
+                content: m.content,
+                status: m.status,
+                errorTitle: m.errorTitle,
+                senderType: m.senderType,
+                memberName: m.memberName,
+                apiKeyName: m.apiKeyName,
+                campaignName: m.campaignName,
+                at: m.providerTimestamp ?? m.createdAt,
+              },
+              conv.contactName,
+              timeZone,
+            ),
+          )
+          .join('');
+        after = { at: last.cursorAt, id: last.id };
+      }
     },
 
     async assign(ctx: TenantContext, input: unknown) {

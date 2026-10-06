@@ -443,6 +443,13 @@ newest one emails. Mentions while the company was suspended are not emailed. The
 `note-mention:<mention id>`, and is then the email worker's (dead letters, the email provider). A
 note added while the `note.mention` queue did not exist fails: run the migration job.
 
+**A member cannot download a conversation's transcript (ADR-212).** It needs `inbox.export` (owners,
+administrators and supervisors; agents do not have it) and a conversation the member can see;
+otherwise the conversation page shows no "Download transcript" link and its address answers with a
+403 or a 404. Each download is in the audit log as `conversation.transcript_exported` with the
+conversation's id. A transcript leaves internal notes out by design; a download cut short mid-file
+is logged by the web server as `transcript export failed mid-stream`, so download it again.
+
 **Migration 0010 failed.** It builds `app.conversations_team_idx` concurrently. If it failed, an
 INVALID index can remain: run `DROP INDEX CONCURRENTLY app.conversations_team_idx;` and run the
 migrations again.

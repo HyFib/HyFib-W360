@@ -8395,3 +8395,33 @@ Decision:
 
 Not built: email preferences (a member cannot turn these emails off), a daily digest, and the note's
 text in the email.
+
+## ADR-212 Downloading a conversation's transcript (P3-06, W-042) (2026-10-06)
+
+Context: a team settling a dispute, handing a case to another system or keeping a record had to copy
+a conversation from the screen; the company export holds every conversation at once and is for
+owners only.
+
+Decision:
+
+- **Who:** a new permission, `inbox.export`, held by owners, administrators and supervisors (and
+  kept while the company is suspended, like the other exports), and only for a conversation the
+  member can see. Agents read their conversations on screen but do not take copies; marketers and
+  analysts do not read conversations.
+- **What:** every message, oldest first, with its time in the company's time zone (WhatsApp's time
+  for a customer's message), who sent it (the contact's name or "Customer", the member, the
+  automation, the campaign by name, the API key by name, or "Sent automatically"), its words in full
+  after its kind when it is not plain text, a contact card's names only, and what happened to a
+  message of the company that did not reach the customer (not delivered with Meta's reason,
+  cancelled, or delivery unknown). A header names the contact, the number, the company, the time
+  zone and who downloaded it when. Internal notes are left out: they are the team's, not the
+  conversation's.
+- **How:** a plain-text file streamed from `/c/<company>/inbox/<conversation>/transcript`, 500
+  messages per read-only transaction, from a "Download transcript" link on the conversation page.
+  The permission, the conversation and the audit entry (`conversation.transcript_exported`, no
+  content) come first, so a refused download is a 403 or 404, never a partial file. Plain text, not
+  CSV: no spreadsheet reads any of it as a formula.
+- **No migration;** the API is unchanged.
+
+Not built: notes in the transcript, a PDF, a date range, transcripts through the API, and emailing a
+transcript to the customer.

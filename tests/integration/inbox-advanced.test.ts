@@ -15,6 +15,7 @@ import {
   queueTextMessage,
   routeDueConversations,
   sendMentionEmail,
+  transcriptTime,
   type TenantContext,
 } from '@w360/domain';
 import { acceptInvitation, createUser, invite, type TestUser } from './helpers';
@@ -903,6 +904,103 @@ describe('emailing members mentioned in a note who have not opened it (ADR-211)'
     await fx.query(`UPDATE app.memberships SET status = 'removed' WHERE id = $1`, [b.membershipId]);
     expect(await sendMentionEmail(emailDeps(), scopeOf(c), fifth!.id)).toBe('cannot_see');
     expect(await mentionEmails(c)).toHaveLength(1);
+  });
+});
+
+describe('conversation transcripts (ADR-212)', () => {
+  async function transcript(ctx: TenantContext, conversationId: string) {
+    let text = '';
+    for await (const chunk of inboxService().exportTranscript(ctx, conversationId, {})) {
+      text += chunk;
+    }
+    return text;
+  }
+
+  it('gives owners, administrators and supervisors who can see the conversation its messages in order, audited, without notes', async () => {
+    const { c, owner, agents } = await setup(0);
+    const [agent] = agents as [Setup['agents'][0]];
+    const from = waId();
+    const conv = await inbound(c, from, 'Where is my parcel?');
+    await inboxService().addNote(owner, {
+      conversationId: conv.id,
+      body: 'Internal: VIP customer, offer a refund',
+    });
+    // 1,001 replies: more than two pages of 500.
+    await fx.query(
+      `INSERT INTO app.messages (id, tenant_id, conversation_id, channel_account_id, direction, type,
+                                 content, status, sender_type, sender_membership_id, created_at)
+       SELECT gen_random_uuid(), $1, $2, $3, 'outbound', 'text',
+              jsonb_build_object('text', 'Reply ' || g), 'delivered', 'agent', $4,
+              now() + g * interval '1 millisecond'
+         FROM generate_series(1, 1001) g`,
+      [c.tenant.id, conv.id, c.channelAccountId, owner.membership.id],
+    );
+    const [facts] = await fx.query<{
+      contact_name: string | null;
+      phone: string | null;
+      number: string | null;
+      received_at: Date;
+      timezone: string;
+    }>(
+      `SELECT ct.display_name AS contact_name, ct.phone_e164 AS phone,
+              ca.display_phone_number AS number, t.timezone,
+              (SELECT coalesce(m.provider_timestamp, m.created_at) FROM app.messages m
+                WHERE m.conversation_id = cv.id AND m.direction = 'inbound') AS received_at
+         FROM app.conversations cv
+         JOIN app.contacts ct ON ct.tenant_id = cv.tenant_id AND ct.id = cv.contact_id
+         JOIN app.channel_accounts ca ON ca.tenant_id = cv.tenant_id AND ca.id = cv.channel_account_id
+         JOIN app.tenants t ON t.id = cv.tenant_id
+        WHERE cv.id = $1`,
+      [conv.id],
+    );
+    const text = await transcript(owner, conv.id);
+    const lines = text.split('\n');
+    expect(lines.slice(0, 4)).toEqual([
+      `Conversation with ${[facts!.contact_name, facts!.phone].filter(Boolean).join(' · ')}`,
+      `WhatsApp number: ${facts!.number ?? 'unknown'}`,
+      `Company: ${owner.tenant.name}`,
+      `Times are in ${facts!.timezone}. Internal notes are not included.`,
+    ]);
+    expect(lines[4]!.startsWith(`Downloaded by ${c.owner.name} on `)).toBe(true);
+    expect(lines[4]).toMatch(/ on \d{4}-\d{2}-\d{2} \d{2}:\d{2}\.$/);
+    const entries = lines.filter((line) => line.startsWith('['));
+    expect(entries).toHaveLength(1_002);
+    expect(entries[0]).toBe(
+      `[${transcriptTime(facts!.received_at, facts!.timezone)}] ${facts!.contact_name || 'Customer'}: Where is my parcel?`,
+    );
+    // Every reply once, oldest first, across the pages.
+    expect(entries.slice(1).map((line) => line.replace(/^\[[^\]]+\] /, ''))).toEqual(
+      Array.from({ length: 1_001 }, (_, i) => `${c.owner.name}: Reply ${i + 1}`),
+    );
+    expect(text).not.toContain('VIP customer');
+    const audit = await fx.query<{ actor_id: string; subject_id: string }>(
+      `SELECT actor_id, subject_id FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'conversation.transcript_exported'`,
+      [c.tenant.id],
+    );
+    expect(audit).toEqual([{ actor_id: c.owner.id, subject_id: conv.id }]);
+
+    // A supervisor can download it too; an agent, who can see the conversation, cannot.
+    const user = await createUser(fx.dbs, { name: 'Supervisor S' });
+    const { token } = await invite(fx.dbs, c.tenant, c.owner, user.email, ['supervisor']);
+    await acceptInvitation(fx.dbs, user, token);
+    expect((await transcript(await fx.ctx(c, user), conv.id)).split('\n')[4]).toMatch(
+      /^Downloaded by Supervisor S on /,
+    );
+    await expectAppError(transcript(agent.ctx, conv.id), 'forbidden');
+    // Another company's owner cannot find it, nor can anyone find an id that is not a conversation.
+    const other = await setup(0);
+    await expectAppError(transcript(other.owner, conv.id), 'not_found');
+    await expectAppError(transcript(owner, 'not-a-uuid'), 'not_found');
+    expect(
+      (
+        await fx.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM app.audit_events
+            WHERE action = 'conversation.transcript_exported' AND subject_id = $1`,
+          [conv.id],
+        )
+      )[0]!.n,
+    ).toBe(2);
   });
 });
 
