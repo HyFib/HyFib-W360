@@ -7923,3 +7923,39 @@ Decision:
 Not built: locations in the inbox's own reply box, asking a customer for their location
 (`location_request_message` is not among the spec's interactive types, M-043), a place's `url`, and
 maps.
+
+## ADR-196 Reading the contacts of contact cards through the API and webhooks (P5-08, P5-09) (2026-10-06)
+
+Context: when a customer shares a contact card, HyFib keeps the contacts WhatsApp sends (its first
+ones, at most 20, while they fit, ADR-131), but the API and the `message.received` webhook gave only
+how many were left out (`contactsLeftOut`, ADR-132), and the inbox only "Shared a contact card": a
+CRM could not file a referral, and members had to open WhatsApp to read the number. The backlog
+waited on Meta's contact object, which Meta's published spec describes for received cards (research
+M-193).
+
+Decision:
+
+- **`contacts` on every message:** `GET /conversations/{id}/messages`, `GET /messages`,
+  `GET /message-changes` and `message.received` give each message `contacts`: for a contact card,
+  the contacts kept, in the API's words (`name` with `formattedName`, `firstName`, `lastName`,
+  `middleName`, `prefix` and `suffix`; `phones` with `phone`, `waId` and `type`; `emails`; `urls`;
+  `addresses` with `street`, `city`, `state`, `zip`, `country`, `countryCode` and `type`; `org` with
+  `company`, `department` and `title`; `birthday`). It is null for other messages and for content
+  removed or too large to keep; `contactsLeftOut` still counts the contacts left out.
+- **As WhatsApp gave them, every part optional:** the spec says parts may be missing when the person
+  does not or cannot share them, and its schema and examples disagree on the values of `type` (HOME
+  and WORK in the schema, MOBILE in an example), so HyFib passes text on as given. A value that is
+  not text is left out, as are a phone, an email or a link without its value, an address without any
+  part and an organisation without any. Nothing is checked or normalised: a number is the card's,
+  not E.164, and a link is not made a link.
+- **One mapping:** `contactCards` (`webhooks/payloads.ts`) reads the stored content for the API and
+  the webhook alike, so they never differ. An erased customer's messages are redacted, so their
+  cards give null, in a webhook delivered after the erasure too.
+- **Inbox:** a contact card shows each contact's name (its formatted name, else its first and last
+  names) with its numbers and email addresses, as text.
+- **No migration, no new scope:** the content is already stored, and `conversations.read` reads it
+  as it reads messages' text. `message.received`'s description of `text` now names a location's
+  name, which it has always given.
+
+Not built: sending contact cards through the API (the spec describes the object a sent card uses,
+M-193), and adding a shared person as a contact.

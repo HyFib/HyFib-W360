@@ -30,7 +30,13 @@ import { NOTE_MAX_LENGTH } from '../messaging/notes';
 import { SERVICE_WINDOW_MS, type OutboundDeps } from '../messaging/outbound';
 import { answeredJoin, answeredMessages } from '../messaging/reply-context';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
-import { inboundOmissions, inboundSummary, type TappedReply } from '../webhooks/payloads';
+import {
+  contactCards,
+  inboundOmissions,
+  inboundSummary,
+  type ContactCard,
+  type TappedReply,
+} from '../webhooks/payloads';
 import { apiActor, assertScope, type ApiContext } from './context';
 import type { ApiResponse, IdempotencyInput } from './idempotency';
 import { API_LIMITS } from './model';
@@ -258,6 +264,8 @@ export interface ApiConversationMessage {
   contentTooLarge: boolean;
   /** How many contacts a contact card left out (ADR-131, ADR-132); 0 otherwise. */
   contactsLeftOut: number;
+  /** The contacts a contact card shares (ADR-196); null for other messages. */
+  contacts: ContactCard[] | null;
   templateId: string | null;
   templateName: string | null;
   sentBy: ApiSentBy | null;
@@ -511,6 +519,7 @@ function toApiMessage(m: MessageRow): ApiConversationMessage {
     mimeType: summary.mimeType,
     contentTooLarge: omissions.contentTooLarge,
     contactsLeftOut: omissions.contactsLeftOut,
+    contacts: contactCards(m.type, m.content),
     templateId: m.templateId,
     templateName: m.type === 'template' ? str(template?.name) : null,
     sentBy: inbound ? null : sentBy(m.senderType),

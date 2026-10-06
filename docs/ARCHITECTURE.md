@@ -963,6 +963,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `sendReply`: the content keeps the coordinates as numbers, as received locations do, and the send
   intent's Graph request gives them as decimal text (`decimalDegrees`). `outboundText` reads the
   name, else the address, and the inbox shows the coordinates.
+- **Contact cards' contacts (ADR-196):** `contactCards` (`webhooks/payloads.ts`) reads the contact
+  objects a stored contact card kept into `ContactCard`s, every part optional, for `toApiMessage`
+  (conversation messages, the feed and the change feed) and the `message.received` payload alike;
+  other messages, removed content and content too large to keep give null. The inbox reads the same
+  content for names, numbers and email addresses.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions (`last_message` with `conversations.read` and `campaign` with
   `campaigns.read` since ADR-126, a named campaign checked to be the company's, `name` since

@@ -632,10 +632,12 @@ verification, app review, Embedded Signup configuration).
   **[Sending locations built; its database tests run only in CI]** (ADR-195: a key replies with a
   place's coordinates, and its name and address if wanted, within the 24-hour window, sent as Meta's
   spec types them; no migration).
+  **[Contact cards' contacts built; their database tests run only in CI]** (ADR-196: every message
+  the API gives, and `message.received`, carry a contact card's contacts as WhatsApp gave them,
+  every part optional; the inbox shows their names and numbers; no migration).
   Remaining: uploaded media and stickers, call-to-action messages through the API, taking
   reactions back,
-  media downloads, a contact card's contacts (Meta's
-  contact object is not confirmed), changing a field's type,
+  media downloads, sending contact cards, changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
   resuming what members or HyFib paused, approving, scheduling and starting campaigns
   through the API, campaign
@@ -768,7 +770,8 @@ verification, app review, Embedded Signup configuration).
   message as before). **[Run end reason filters built; their database tests run only in CI]**
   (ADR-192: an endpoint takes the ends of the runs that ended for the reasons it chooses, each
   narrowing the end it belongs to, such as only the failures to send among failed runs, or every end
-  as before). Remaining:
+  as before). **[Contact cards' contacts built; their database tests run only in CI]** (ADR-196:
+  `message.received` gives a contact card's contacts, as the API does). Remaining:
   filters for other event types and on a message's or contact's values (such as by tag or a field's
   value, or the key that started a run), other authentication (headers computed
   per delivery, other OAuth grants),

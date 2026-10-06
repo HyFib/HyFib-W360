@@ -39,6 +39,7 @@ import {
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
   contactsLeftOutSchema,
+  messageContactsSchema,
   contactUpdatedPayloadSchema,
   conversationAssignmentPayloadSchema,
   conversationStatusPayloadSchema,
@@ -380,6 +381,7 @@ export const apiConversationMessageSchema = z.object({
   mimeType: z.string().nullable().describe('For media messages (the media is not attached).'),
   contentTooLarge: contentTooLargeSchema,
   contactsLeftOut: contactsLeftOutSchema,
+  contacts: messageContactsSchema,
   templateId: z.uuid().nullable(),
   templateName: z.string().nullable(),
   sentBy: z

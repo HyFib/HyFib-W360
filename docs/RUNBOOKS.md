@@ -1779,6 +1779,13 @@ they were created with: create a key with both); `not_in_plan` means the plan le
 `outcome` the results do not count, a `cursor` that is not the previous page's `nextCursor`, or an
 unknown parameter.
 
+**A contact card's contacts are missing or partial through the API or a webhook (ADR-196).**
+`contacts` gives what WhatsApp sent and HyFib kept: parts the person did not or could not share are
+null or empty, a card larger than a message may hold keeps its first contacts (up to 20;
+`contactsLeftOut` counts the others), and an erased customer's cards give null. Values that are not
+text are left out rather than passed on, and numbers are as the card gives them, not E.164. The
+inbox shows the same contacts' names, numbers and email addresses.
+
 **A location sent through the API failed (ADR-195).** HyFib sends the coordinates as decimal text,
 as Meta's spec types them, with the name and address given; `GET /messages/{id}` (and the
 `message.status` webhook) gives WhatsApp's error when it refuses one. The spec's examples send the

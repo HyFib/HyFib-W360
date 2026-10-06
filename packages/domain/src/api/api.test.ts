@@ -2950,6 +2950,49 @@ describe('OpenAPI document', () => {
     }
   });
 
+  it('gives a contact card’s contacts on every message and in message.received (ADR-196)', () => {
+    type Shape = {
+      required?: string[];
+      properties?: Record<string, Shape>;
+      type?: string;
+      items?: Shape;
+      anyOf?: Shape[];
+      description?: string;
+    };
+    const schemas = doc.components.schemas as Record<string, Shape>;
+    const received = schemas.WebhookMessageReceived?.properties?.data?.properties?.message;
+    for (const message of [schemas.ConversationMessage, schemas.FeedMessage, received]) {
+      expect(message?.required).toEqual(expect.arrayContaining(['contacts']));
+      const contacts = message?.properties?.contacts;
+      expect(contacts?.description).toContain('For a contact card: the contacts it shares');
+      expect(contacts?.anyOf?.map((branch) => branch.type).sort()).toEqual(['array', 'null']);
+      const card = contacts?.anyOf?.find((branch) => branch.type === 'array')?.items;
+      const parts = ['addresses', 'birthday', 'emails', 'name', 'org', 'phones', 'urls'];
+      expect(Object.keys(card?.properties ?? {}).sort()).toEqual(parts);
+      expect([...(card?.required ?? [])].sort()).toEqual(parts);
+      expect(Object.keys(card?.properties?.name?.properties ?? {}).sort()).toEqual([
+        'firstName',
+        'formattedName',
+        'lastName',
+        'middleName',
+        'prefix',
+        'suffix',
+      ]);
+      expect(Object.keys(card?.properties?.phones?.items?.properties ?? {}).sort()).toEqual([
+        'phone',
+        'type',
+        'waId',
+      ]);
+      expect(message?.properties?.contactsLeftOut?.description).toContain(
+        'The contacts kept are in `contacts`.',
+      );
+    }
+    // A received message's words name a location too.
+    expect(received?.properties?.text?.description).toContain(
+      'a location’s name (its address if it has no name)',
+    );
+  });
+
   it('names the plan refusals in the 403 and 429 responses and the error reason', () => {
     const responses = paths['/contacts']?.get?.responses as Record<string, { description: string }>;
     expect(responses['403']?.description).toContain('not_in_plan');

@@ -1,5 +1,52 @@
 # Progress
 
+## 2026-10-06 — Phase 5: contact cards' contacts through the API and webhooks (P5-08, ADR-196)
+
+Status: **Implemented; its database and browser tests run in CI only.** The API and the
+`message.received` webhook said how many contacts a card left out, never which it shared. The local
+PostgreSQL is unavailable (its Docker daemon stopped), so the integration tests and the changed e2e
+test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-196):** `contacts` on every message the API gives and in `message.received`, a
+  contact card's contacts as WhatsApp gave them, every part optional, from one mapping; the inbox
+  shows their names and numbers; no migration.
+- **Research:** M-193 from Meta's published OpenAPI spec (the contact object of received and sent
+  cards, and where its schema and examples disagree).
+- **Domain:** `contactCardSchema`, `messageContactsSchema` and `contactCards`, `contacts` in
+  `toApiMessage` and in the `message.received` payload, and the descriptions (`contactsLeftOut`, and
+  a received message's `text`, which names a location's name).
+- **Web:** a contact card shows each contact's name, numbers and email addresses.
+- **Tests:**
+  - Unit (2 new and 2 changed in `webhooks.test.ts`, `api.test.ts` and `message-changes.test.ts`):
+    the mapping, what is left out, the schemas and the OpenAPI entries.
+  - Integration (1 new in `api.test.ts`, 1 new in `webhooks.test.ts`, 1 changed): a card read
+    through the conversation, the feed and the change feed, and posted in `message.received`, none
+    after its sender's erasure. Written for CI; not run here.
+  - E2E (1 changed in `api.spec.ts`): a key reads a shared card and the inbox shows the person's
+    name and number. Written for CI; not run here.
+- **Docs:** ADR-196; research M-193; SECURITY; ARCHITECTURE; THREAT-MODEL T190; DEPLOYMENT and
+  RUNBOOKS; DATA-RETENTION; BACKLOG P5-08 and P5-09; feature matrix H-033 and W-134.
+- **Mutation checks:** 20 deliberate regressions tried, all caught on the unit-tested parts. The
+  reads and the payload need the database, so their regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 871 passed (82 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 20 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Sending contact cards through the API, and adding a shared person as a contact.
+
 ## 2026-10-06 — Phase 5: sending locations through the public API (P5-08, ADR-195)
 
 Status: **Implemented; its database and browser tests run in CI only (test stand-in only).** Keys

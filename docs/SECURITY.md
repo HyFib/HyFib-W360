@@ -775,6 +775,12 @@ Phase 5 rules (Public API, P5-08):
   what the key gives, bounded (coordinates within their ranges, a name and an address of at most
   1,000 characters each, no other property), and the inbox shows them as text only. The location is
   the company's own data: it is redacted with the contact's messages and exported with them.
+- Contact cards' contacts (ADR-196): the people a customer shares are third parties' personal data,
+  kept as the message's content since ADR-131. The API gives them only with `conversations.read`
+  (granted only by members who read every conversation), and `message.received` only to the
+  company's endpoints taking it, as both already give messages' text; nothing new is stored. Erasing
+  the customer redacts the card, so reads and deliveries after the erasure give no contacts. The
+  inbox shows them as text only, never as links.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so

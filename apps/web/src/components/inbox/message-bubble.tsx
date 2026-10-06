@@ -51,6 +51,40 @@ function text(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
+/** The values a contact card gives under `key` in a list such as its phones (ADR-196). */
+function cardValues(list: unknown, key: string): string[] {
+  if (!Array.isArray(list)) return [];
+  return list.flatMap((entry: unknown) => {
+    const value =
+      typeof entry === 'object' && entry !== null
+        ? text((entry as Record<string, unknown>)[key])
+        : null;
+    return value ? [value] : [];
+  });
+}
+
+/** The people a contact card shares (ADR-196): each one's name, numbers and email addresses. */
+function cardPeople(content: Record<string, unknown>): { name: string; reach: string }[] {
+  const list: unknown[] = Array.isArray(content.contacts) ? content.contacts : [];
+  return list.flatMap((entry) => {
+    if (typeof entry !== 'object' || entry === null) return [];
+    const contact = entry as Record<string, unknown>;
+    const name = (
+      typeof contact.name === 'object' && contact.name !== null ? contact.name : {}
+    ) as Record<string, unknown>;
+    const parts = [text(name.first_name), text(name.last_name)].filter(Boolean).join(' ');
+    return [
+      {
+        name: text(name.formatted_name) ?? (parts || 'A contact without a name'),
+        reach: [
+          ...cardValues(contact.phones, 'phone'),
+          ...cardValues(contact.emails, 'email'),
+        ].join(', '),
+      },
+    ];
+  });
+}
+
 /** A location's coordinates in decimal degrees ("18.5204, 73.8567"), when it has both. */
 function coordinates(content: Record<string, unknown>): string | null {
   const { latitude, longitude } = content;
@@ -304,6 +338,14 @@ function Body({
       return (
         <div className="grid gap-1">
           <p>Shared a contact card</p>
+          {cardPeople(c).map((person, index) => (
+            <p key={index} className="break-words">
+              <span className="font-medium">{person.name}</span>
+              {person.reach ? (
+                <span className="block text-xs opacity-80">{person.reach}</span>
+              ) : null}
+            </p>
+          ))}
           {omitted > 0 ? (
             <p className="text-xs opacity-80">
               {omitted} contact{omitted === 1 ? ' was' : 's were'} too large to keep

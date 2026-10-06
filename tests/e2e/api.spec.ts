@@ -3,6 +3,7 @@ import { expect, test } from './fixtures';
 import {
   connectTestChannel,
   inboundMessage,
+  inboundMessages,
   listReply,
   messagingConfigured,
   randomWaId,
@@ -474,6 +475,59 @@ test('a key answers a customer who wrote, reads the conversation and resolves it
       (r.body as { to?: string } | null)?.to === waId,
   );
   expect(sentToCustomer).toHaveLength(1);
+
+  // The customer shares a colleague's contact card (ADR-196): the key reads its contacts as
+  // WhatsApp gave them, and the inbox shows the person's name and number.
+  await sendSignedWebhook(
+    request,
+    inboundMessages(wabaId, phoneNumberId, waId, [
+      {
+        type: 'contacts',
+        contacts: [
+          {
+            name: { formatted_name: 'Lucía Gómez', first_name: 'Lucía', last_name: 'Gómez' },
+            org: { company: 'Gómez Logistics' },
+            phones: [{ phone: '+91 98765 43210', wa_id: '919876543210', type: 'MOBILE' }],
+          },
+        ],
+      },
+    ]),
+  );
+  await expect(async () => {
+    const newestCard = await request.get(`/api/v1/conversations/${open!.id}/messages?limit=1`, {
+      headers: auth,
+    });
+    expect((await newestCard.json()).data).toEqual([
+      expect.objectContaining({
+        direction: 'inbound',
+        type: 'contacts',
+        text: null,
+        contactsLeftOut: 0,
+        contacts: [
+          {
+            name: {
+              formattedName: 'Lucía Gómez',
+              firstName: 'Lucía',
+              lastName: 'Gómez',
+              middleName: null,
+              prefix: null,
+              suffix: null,
+            },
+            phones: [{ phone: '+91 98765 43210', waId: '919876543210', type: 'MOBILE' }],
+            emails: [],
+            urls: [],
+            addresses: [],
+            org: { company: 'Gómez Logistics', department: null, title: null },
+            birthday: null,
+          },
+        ],
+      }),
+    ]);
+  }).toPass({ timeout: 20_000 });
+  await page.reload();
+  const card = thread.getByRole('listitem').filter({ hasText: 'Shared a contact card' });
+  await expect(card).toContainText('Lucía Gómez');
+  await expect(card).toContainText('+91 98765 43210');
 });
 
 test('a key assigns a conversation to a member and moves it to a team, and the inbox shows both', async ({

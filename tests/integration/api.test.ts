@@ -28,6 +28,7 @@ import {
   apiListConversations,
   apiListMembers,
   apiListMessages,
+  apiMessageChanges,
   apiListOrders,
   apiListTeams,
   apiListTemplates,
@@ -3687,6 +3688,7 @@ describe('conversation reads (ADR-072)', () => {
       mimeType: null,
       contentTooLarge: false,
       contactsLeftOut: 0,
+      contacts: null,
       templateId: null,
       templateName: null,
       sentBy: null,
@@ -3836,6 +3838,66 @@ describe('conversation reads (ADR-072)', () => {
         ['system', true, 0],
         ['text', false, 0],
       ].sort(),
+    );
+  });
+
+  it('give the contacts a card shares as WhatsApp gave them, wherever messages are read (ADR-196)', async () => {
+    const c = await fx.company();
+    const reader = await apiKey(c, ['conversations.read']);
+    const waId = '919811101961';
+    // Meta's example of a received card (research M-193), and a contact with only a name and an
+    // email address.
+    const lucia = {
+      name: { first_name: 'Lucía', last_name: 'Gómez', formatted_name: 'Lucía Gómez' },
+      org: { company: 'Google' },
+      phones: [{ phone: '+1 (983) 555-2319', wa_id: '19835552319', type: 'MOBILE' }],
+    };
+    const ravi = { name: { formatted_name: 'Ravi' }, emails: [{ email: 'ravi@example.com' }] };
+    await inbound(c, waId, [
+      { type: 'contacts', extra: { contacts: [lucia, ravi] } },
+      { text: 'My colleagues' },
+    ]);
+    const conv = await conversationOf(c, waId);
+    const none = { middleName: null, prefix: null, suffix: null };
+    const card = [
+      {
+        name: { formattedName: 'Lucía Gómez', firstName: 'Lucía', lastName: 'Gómez', ...none },
+        phones: [{ phone: '+1 (983) 555-2319', waId: '19835552319', type: 'MOBILE' }],
+        emails: [],
+        urls: [],
+        addresses: [],
+        org: { company: 'Google', department: null, title: null },
+        birthday: null,
+      },
+      {
+        name: { formattedName: 'Ravi', firstName: null, lastName: null, ...none },
+        phones: [],
+        emails: [{ email: 'ravi@example.com', type: null }],
+        urls: [],
+        addresses: [],
+        org: null,
+        birthday: null,
+      },
+    ];
+    // The conversation, the feed across conversations and the change feed give the same contacts;
+    // other messages give none.
+    const { data } = await apiListConversationMessages(deps(), reader.ctx, conv.id, {});
+    expect(data.map((m) => [m.type, m.text, m.contactsLeftOut, m.contacts])).toEqual(
+      expect.arrayContaining([
+        ['contacts', null, 0, card],
+        ['text', 'My colleagues', 0, null],
+      ]),
+    );
+    expect(data).toHaveLength(2);
+    const feed = await apiListMessages(deps(), reader.ctx, {});
+    expect(feed.data.find((m) => m.type === 'contacts')?.contacts).toEqual(card);
+    const changes = await apiMessageChanges(
+      { db: fx.dbs.app, keyring: fx.keyring },
+      reader.ctx,
+      {},
+    );
+    expect(changes.data.map((change) => change.message?.contacts ?? null)).toEqual(
+      expect.arrayContaining([card, null]),
     );
   });
 

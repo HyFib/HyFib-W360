@@ -198,6 +198,7 @@ describe('the message change feed (ADR-116)', () => {
           mimeType: null,
           contentTooLarge: false,
           contactsLeftOut: 0,
+          contacts: null,
           templateId: null,
           templateName: null,
           sentBy: 'api',
