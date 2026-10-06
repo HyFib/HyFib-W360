@@ -1779,6 +1779,12 @@ they were created with: create a key with both); `not_in_plan` means the plan le
 `outcome` the results do not count, a `cursor` that is not the previous page's `nextCursor`, or an
 unknown parameter.
 
+**A sticker sent through the API failed (ADR-198).** As for media from links (ADR-194), WhatsApp
+fetches the sticker and decides whether the file can be one, and `GET /messages/{id}` (and the
+`message.status` webhook) gives its error. Meta's spec uploads stickers as WebP files (research
+M-194) but states no format, dimensions or size, so check the file against Meta's current sticker
+requirements before sending again with a new Idempotency-Key.
+
 **A contact card sent through the API failed (ADR-197).** `GET /messages/{id}` (and the
 `message.status` webhook) gives WhatsApp's error. HyFib sends only the parts Meta's spec describes
 (research M-193), in WhatsApp's words, and requires a second part of the name besides

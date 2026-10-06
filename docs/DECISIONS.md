@@ -7996,3 +7996,24 @@ Decision:
 
 Not built: contact cards in the inbox's own reply box, and sending one of the company's contacts as
 a card.
+
+## ADR-198 Sending stickers from links through the public API (P5-08) (2026-10-06)
+
+Context: keys send photos, videos, audio and documents from links (ADR-194), and ADR-194 left
+stickers out, though Meta's published spec sends a sticker by link the same way, without a caption
+(research M-191, M-194).
+
+Decision:
+
+- **A fifth kind of media:** `POST /messages` takes `type` `sticker` with `to`, an optional `from`
+  and `replyTo`, and a `link` under ADR-194's rules (https, a host, no user name or password, at
+  most 2,000 characters), and nothing else: no caption, as for audio. It is a reply (ADR-070) under
+  `messages.reply`, sent through the same path as every medium.
+- **WhatsApp decides:** the spec states no format, dimensions or size for a sticker (its upload
+  example is a WebP file), so HyFib checks none; a file WhatsApp does not take as a sticker makes
+  the message fail, which `GET /messages/{id}` and `message.status` report with WhatsApp's error.
+- **Stored as other media sent from a link:** the content keeps the link, the conversation's preview
+  says "Sticker", the API's `text` is null, and the inbox shows the link as other media's.
+- **No migration:** `sticker` is already a message type.
+
+Not built: stickers uploaded to Meta or sent by id, and checking that a file can be a sticker.

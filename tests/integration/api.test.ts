@@ -1654,6 +1654,68 @@ describe('text replies (ADR-070)', () => {
     expect(count).toBe(2);
   });
 
+  it('send a sticker from an https link the same way, without a caption (ADR-198)', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['messages.reply', 'conversations.read'], 'Stickers');
+    const waId = '919811101981';
+    await wrote(c, waId);
+    const conv = await conversationWith(c, `+${waId}`);
+    const link = 'https://cdn.example.com/thanks.webp';
+    const sent = await apiSendMessage(
+      deps(),
+      ctx,
+      { type: 'sticker', to: `+${waId}`, link },
+      idem('sticker-1', 'sticker-1'),
+    );
+    expect(sent.status).toBe(201);
+    expect(sent.body.data).toMatchObject({ type: 'sticker', status: 'queued' });
+    const [stored] = await fx.query(
+      `SELECT m.type, m.content, si.request
+         FROM app.messages m
+         JOIN app.send_intents si ON si.tenant_id = m.tenant_id AND si.message_id = m.id
+        WHERE m.id = $1`,
+      [idOf(sent)],
+    );
+    expect(stored).toEqual({
+      type: 'sticker',
+      content: { link },
+      request: {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: waId,
+        type: 'sticker',
+        sticker: { link },
+      },
+    });
+    expect((await conversationWith(c, `+${waId}`)).last_message_preview).toBe('Sticker');
+    // WhatsApp's sticker object through the send pipeline (the stand-in checks its shape).
+    expect(await sendAll(c)).toEqual(['accepted']);
+    const atStandIn = fx.standIn.state.requests.filter(
+      (r) => r.path.endsWith('/messages') && (r.body as { to?: string } | undefined)?.to === waId,
+    );
+    expect(atStandIn.map((r) => (r.body as { sticker?: unknown }).sticker)).toEqual([{ link }]);
+    const { data } = await apiListConversationMessages(deps(), ctx, conv.id, {});
+    expect(data.find((m) => m.direction === 'outbound')).toMatchObject({
+      type: 'sticker',
+      text: null,
+      mimeType: null,
+      sentBy: 'api',
+    });
+    // A caption is refused before anything is queued.
+    const captioned = await apiSendMessage(
+      deps(),
+      ctx,
+      { type: 'sticker', to: `+${waId}`, link, caption: 'Thanks!' },
+      idem('sticker-2', 'sticker-2'),
+    ).catch((error: unknown) => error);
+    expect(isAppError(captioned) && captioned.code).toBe('validation_failed');
+    const [{ count } = { count: -1 }] = await fx.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM app.messages WHERE tenant_id = $1 AND direction = 'outbound'`,
+      [c.tenant.id],
+    );
+    expect(count).toBe(1);
+  });
+
   it('send a location the same way, keeping its coordinates and giving WhatsApp decimal text (ADR-195)', async () => {
     const c = await fx.company();
     const { ctx } = await apiKey(c, ['messages.reply', 'conversations.read'], 'Front desk');

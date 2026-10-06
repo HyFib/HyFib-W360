@@ -761,10 +761,12 @@ describe('text replies (ADR-070)', () => {
       planScopes: null,
     } as unknown as ApiContext;
     const idem = { key: 'k-1', requestHash: 'h' };
-    // Stickers are not sent through the API (ADR-194 sends media from links, ADR-195 locations and
-    // ADR-197 contact cards).
+    // WhatsApp's own kinds the API sends otherwise (buttons and lists as `buttons` and `list`), and
+    // types in another case (ADR-194, ADR-195, ADR-197 and ADR-198 send the media, locations,
+    // contact cards and stickers named in lower case).
     for (const body of [
-      { type: 'sticker' },
+      { type: 'interactive' },
+      { type: 'STICKER' },
       { type: 'CONTACTS' },
       { type: 'LOCATION' },
       { type: 'IMAGE' },
@@ -3031,6 +3033,7 @@ describe('OpenAPI document', () => {
         { $ref: '#/components/schemas/SendVideo' },
         { $ref: '#/components/schemas/SendAudio' },
         { $ref: '#/components/schemas/SendDocument' },
+        { $ref: '#/components/schemas/SendSticker' },
         { $ref: '#/components/schemas/SendLocation' },
         { $ref: '#/components/schemas/SendContacts' },
       ],
@@ -5189,7 +5192,7 @@ describe('media from links through the API (ADR-194)', () => {
   const base = { to: '+919876543210', link: 'https://cdn.example.com/menu.pdf' };
 
   it('take an https link without a user name or password, and a trimmed caption except for audio', () => {
-    expect([...API_MEDIA_TYPES]).toEqual(['image', 'video', 'audio', 'document']);
+    expect([...API_MEDIA_TYPES]).toEqual(['image', 'video', 'audio', 'document', 'sticker']);
     expect(
       apiSendMediaSchema.parse({ ...base, type: 'document', caption: '  Our menu  ' }),
     ).toEqual({ ...base, type: 'document', caption: 'Our menu' });
@@ -5226,7 +5229,7 @@ describe('media from links through the API (ADR-194)', () => {
       { ...base, type: 'document', filename: 'menu.pdf' },
       { ...base, type: 'image', id: '1003383421387256' },
       { to: base.to, type: 'image' },
-      { ...base, type: 'sticker' },
+      { ...base, type: 'sticker', caption: 'Thanks!' },
     ]) {
       expect(apiSendMediaSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
     }
@@ -5266,7 +5269,7 @@ describe('media from links through the API (ADR-194)', () => {
       'Reply with text, media and other messages',
     );
     expect(API_SCOPE_INFO['messages.reply'].description).toContain(
-      'photos, videos, audio or documents from links',
+      'photos, videos, audio, documents or stickers from links',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const send = (
@@ -5277,10 +5280,10 @@ describe('media from links through the API (ADR-194)', () => {
     )['/messages']?.post;
     expect(send?.summary).toContain('a reaction, media, a location or contacts');
     for (const words of [
-      '`image`, `video`, `audio` or `document`',
+      '`image`, `video`, `audio`, `document` or `sticker`',
       'https:// `link` that WhatsApp fetches when it sends the message',
       'HyFib neither fetches nor keeps the media',
-      'a `caption` of up to 1,024 characters; audio takes none',
+      'a `caption` of up to 1,024 characters; audio and stickers take none',
     ]) {
       expect(send?.description).toContain(words);
     }
@@ -5442,7 +5445,7 @@ describe('locations through the API (ADR-195)', () => {
     )['/messages']?.post;
     expect(send?.summary).toContain('media, a location or contacts');
     for (const words of [
-      '`document`, `location` or `contacts`) needs `messages.reply`',
+      '`location` or `contacts`) needs `messages.reply`',
       'A text, buttons, a list, products, media, a location or contacts can quote',
       'A location (`location`) is a place given by its `latitude` and `longitude` in decimal degrees',
       `up to ${API_LIMITS.locationTextLength.toLocaleString('en')} characters each`,
@@ -5691,5 +5694,76 @@ describe('contact cards through the API (ADR-197)', () => {
     expect(card?.required).toEqual(['name']);
     expect(card?.properties?.phones).toMatchObject({ minItems: 1, maxItems: 5 });
     expect(card?.properties?.phones?.items?.properties?.type?.enum).toEqual(['HOME', 'WORK']);
+  });
+});
+
+describe('stickers from links through the API (ADR-198)', () => {
+  const base = {
+    type: 'sticker',
+    to: '+919876543210',
+    link: 'https://cdn.example.com/thanks.webp',
+  };
+
+  it('take an https link and no caption, as audio does', () => {
+    expect(apiSendMediaSchema.parse(base)).toEqual(base);
+    expect(apiSendMediaSchema.parse({ ...base, link: ' https://x.example/s.webp ' })).toMatchObject(
+      { link: 'https://x.example/s.webp' },
+    );
+    for (const bad of [
+      { ...base, caption: 'Thanks!' },
+      { ...base, link: 'http://cdn.example.com/thanks.webp' },
+      { ...base, link: 'https://:secret@cdn.example.com/thanks.webp' },
+      { ...base, id: '1003383421387256' },
+      { ...base, animated: true },
+    ]) {
+      expect(apiSendMediaSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+    expect(outboundText('sticker', { link: base.link })).toBeNull();
+    expect(messageSnippet('outbound', 'sticker', { link: base.link })).toBe('Sticker');
+  });
+
+  it('are chosen by their type and need a key that replies', async () => {
+    const idem = { key: 'k-1', requestHash: 'h' };
+    const sending = {
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(['messages.send']) },
+      planScopes: null,
+    } as unknown as ApiContext;
+    await expect(apiSendMessage({} as never, sending, base, idem)).rejects.toThrow(
+      'This API key does not have the messages.reply scope.',
+    );
+    const replying = {
+      ...sending,
+      key: { id: 'k', scopes: new Set(['messages.reply']) },
+    } as unknown as ApiContext;
+    const refused: unknown = await apiSendMessage(
+      {} as never,
+      replying,
+      { ...base, caption: 'Thanks!' },
+      idem,
+    ).catch((caught: unknown) => caught);
+    expect(isAppError(refused) && refused.code).toBe('validation_failed');
+  });
+
+  it('are described in the send operation, with their own schema', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const send = (doc.paths as unknown as Record<string, Record<string, { description: string }>>)[
+      '/messages'
+    ]?.post;
+    expect(send?.description).toContain('`document`, `sticker`, `location` or `contacts`) needs');
+    expect(send?.description).toContain('WhatsApp decides whether a file can be a sticker');
+    const sticker = (
+      doc.components as unknown as {
+        schemas: Record<
+          string,
+          { properties: object; required: string[]; additionalProperties: unknown }
+        >;
+      }
+    ).schemas.SendSticker;
+    expect(Object.keys(sticker?.properties ?? {}).sort()).toEqual(
+      ['from', 'link', 'replyTo', 'to', 'type'].sort(),
+    );
+    expect([...(sticker?.required ?? [])].sort()).toEqual(['link', 'to', 'type']);
+    expect(sticker?.additionalProperties).toBe(false);
   });
 });

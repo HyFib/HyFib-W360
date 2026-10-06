@@ -227,7 +227,7 @@ export const apiSendTextSchema = z
   .strict();
 
 /** The media a message can carry from a link (ADR-194), as WhatsApp's message `type` names it. */
-export const API_MEDIA_TYPES = ['image', 'video', 'audio', 'document'] as const;
+export const API_MEDIA_TYPES = ['image', 'video', 'audio', 'document', 'sticker'] as const;
 export type ApiMediaType = (typeof API_MEDIA_TYPES)[number];
 
 /** A link WhatsApp may fetch media from (ADR-194): https, with a host, and no user name or password. */
@@ -280,16 +280,21 @@ export const apiSendAudioSchema = z.object({ type: z.literal('audio'), ...mediaF
 export const apiSendDocumentSchema = z
   .object({ type: z.literal('document'), ...mediaFrame, caption: captionField })
   .strict();
+/** A sticker WhatsApp fetches from a link (ADR-198), without a caption. */
+export const apiSendStickerSchema = z
+  .object({ type: z.literal('sticker'), ...mediaFrame })
+  .strict();
 
 /**
- * A photo, video, audio or document WhatsApp fetches from a link, to a contact who wrote in the
- * last 24 hours (ADR-194); audio takes no caption.
+ * A photo, video, audio, document or sticker WhatsApp fetches from a link, to a contact who wrote
+ * in the last 24 hours (ADR-194, ADR-198); audio and stickers take no caption.
  */
 export const apiSendMediaSchema = z.discriminatedUnion('type', [
   apiSendImageSchema,
   apiSendVideoSchema,
   apiSendAudioSchema,
   apiSendDocumentSchema,
+  apiSendStickerSchema,
 ]);
 
 /** What the conversation shows for media without a caption (ADR-194). */
@@ -298,6 +303,7 @@ const MEDIA_PREVIEWS: Record<ApiMediaType, string> = {
   video: 'Video',
   audio: 'Audio',
   document: 'Document',
+  sticker: 'Sticker',
 };
 
 /**
@@ -1879,8 +1885,8 @@ export async function apiSendText(
 }
 
 /**
- * A photo, video, audio or document WhatsApp fetches from an https link (ADR-194); see
- * `sendReply`. HyFib stores the link and the caption, never the media.
+ * A photo, video, audio, document or sticker WhatsApp fetches from an https link (ADR-194,
+ * ADR-198); see `sendReply`. HyFib stores the link and the caption, never the media.
  */
 export async function apiSendMedia(
   deps: OutboundDeps,
@@ -1890,7 +1896,7 @@ export async function apiSendMedia(
 ): Promise<ApiResponse> {
   assertScope(ctx, 'messages.reply');
   const data = parseInput(apiSendMediaSchema, input);
-  const caption = data.type === 'audio' ? undefined : data.caption;
+  const caption = data.type === 'audio' || data.type === 'sticker' ? undefined : data.caption;
   const media = { link: data.link, ...(caption ? { caption } : {}) };
   return sendReply(deps, ctx, data, idempotency, {
     type: data.type,

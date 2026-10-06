@@ -787,6 +787,10 @@ Phase 5 rules (Public API, P5-08):
   and dates checked, no other part) and within the size a message may hold; it fetches nothing, and
   the inbox shows the card as text only. The people on a card are the company's data like any
   message's: redacted with the contact's messages and exported with them.
+- Stickers from links (ADR-198): the rules of media from links (ADR-194): a key with
+  `messages.reply`, within the 24-hour window, an https link with a host and no credentials that
+  HyFib never fetches, shown in the inbox as an https anchor in a new tab without the referrer; no
+  caption is taken.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so

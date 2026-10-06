@@ -1032,20 +1032,32 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
     contacts: [{ name: { formattedName: 'Dr Meera Rao' } }],
   });
   expect(bare.status()).toBe(422);
+  // And a thank-you sticker from a link (ADR-198); a caption on it is refused.
+  const stickerLink = 'https://cdn.example.com/harbour-dental/thanks.webp';
+  const sticker = await post({ type: 'sticker', to: `+${waId}`, link: stickerLink });
+  expect(sticker.status()).toBe(201);
+  const captioned = await post({
+    type: 'sticker',
+    to: `+${waId}`,
+    link: stickerLink,
+    caption: 'Thanks!',
+  });
+  expect(captioned.status()).toBe(422);
 
-  // The worker sends all five, in any order, as Meta's spec describes them.
+  // The worker sends all six, in any order, as Meta's spec describes them.
   let sent: Awaited<ReturnType<typeof standInRequests>> = [];
   await expect(async () => {
     sent = (await standInRequests(request)).filter(
       (r) =>
         r.path === `/v26.0/${phoneNumberId}/messages` && (r.body as { to?: string }).to === waId,
     );
-    expect(sent).toHaveLength(5);
+    expect(sent).toHaveLength(6);
   }).toPass({ timeout: 30_000 });
   const ofType = (type: string) => sent.find((r) => (r.body as { type: string }).type === type);
   expect(ofType('document')?.body).toMatchObject({
     document: { link: leafletLink, caption: 'Before your visit' },
   });
+  expect(ofType('sticker')?.body).toMatchObject({ sticker: { link: stickerLink } });
   expect(ofType('contacts')?.body).toMatchObject({
     contacts: [
       {
@@ -1095,6 +1107,11 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
   const sentPlace = thread.filter({ hasText: '12 Harbour Road, Pune' });
   await expect(sentPlace).toContainText('Location · Harbour Dental Clinic');
   await expect(sentPlace).toContainText('18.5204, 73.8567');
+  // The sticker shows the link it was sent from.
+  await expect(thread.getByRole('link', { name: stickerLink })).toHaveAttribute(
+    'href',
+    stickerLink,
+  );
   // The contact card shows the dentist's name and number.
   const sentCard = thread.filter({ hasText: 'Shared a contact card' });
   await expect(sentCard).toContainText('Dr Meera Rao');

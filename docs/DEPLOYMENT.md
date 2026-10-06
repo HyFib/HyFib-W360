@@ -379,6 +379,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-197 has no migration: until the web rollout ends, an old web server refuses contact cards in
    `POST /messages` with 422, as before, and shows the scope's old label.
 
+   ADR-198 has no migration: until the web rollout ends, an old web server refuses stickers in
+   `POST /messages` with 422, as before.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

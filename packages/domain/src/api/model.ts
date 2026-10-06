@@ -87,7 +87,7 @@ export const API_SCOPE_INFO: Record<
   'messages.reply': {
     label: 'Reply with text, media and other messages',
     description:
-      'Send text, reply buttons, list messages, products from the company’s WhatsApp catalogs, reactions, photos, videos, audio or documents from links, locations and contact cards, to contacts who wrote to the number in the last 24 hours, quoting their messages if wanted, and read the status of messages the API sent.',
+      'Send text, reply buttons, list messages, products from the company’s WhatsApp catalogs, reactions, photos, videos, audio, documents or stickers from links, locations and contact cards, to contacts who wrote to the number in the last 24 hours, quoting their messages if wanted, and read the status of messages the API sent.',
     permission: 'inbox.reply',
     writes: true,
   },

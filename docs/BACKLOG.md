@@ -638,7 +638,9 @@ verification, app review, Embedded Signup configuration).
   **[Sending contact cards built; its database tests run only in CI]** (ADR-197: a key shares 1 to 5
   contacts as Meta's spec describes them, each part checked, within the 24-hour window; kept as
   received cards are, so reads give them back; no migration).
-  Remaining: uploaded media and stickers, call-to-action messages through the API, taking
+  **[Sending stickers from links built; its database tests run only in CI]** (ADR-198: a key replies
+  with a sticker WhatsApp fetches from an https link, without a caption; no migration).
+  Remaining: uploaded media, call-to-action messages through the API, taking
   reactions back,
   media downloads, changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),

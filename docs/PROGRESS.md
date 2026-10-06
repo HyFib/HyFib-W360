@@ -1,5 +1,47 @@
 # Progress
 
+## 2026-10-06 — Phase 5: sending stickers from links through the public API (P5-08, ADR-198)
+
+Status: **Implemented; its database and browser tests run in CI only (test stand-in only).** Keys
+sent media from links but not stickers. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so the integration test and the changed e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-198):** `type` `sticker` in `POST /messages`, an https link WhatsApp fetches and no
+  caption, under ADR-194's rules; WhatsApp decides whether the file can be a sticker; no migration.
+- **Research:** M-194 from Meta's published OpenAPI spec (a sticker by id or link, no caption, a
+  WebP upload, no stated limits).
+- **Domain:** `sticker` in `API_MEDIA_TYPES`, `apiSendStickerSchema`, its preview, the scope's
+  description and the OpenAPI entries (`SendSticker`).
+- **Tests:**
+  - Unit (3 new and 5 changed in `api.test.ts`): the rules, the dispatch and the scope, the snippet,
+    the OpenAPI entries.
+  - Integration (1 new in `api.test.ts`): a sticker stored, sent and read back; a caption refused.
+    Written for CI; not run here.
+  - E2E (1 changed in `api.spec.ts`): a key sends a sticker and the inbox shows its link. Written
+    for CI; not run here.
+- **Docs:** ADR-198; research M-194; SECURITY; ARCHITECTURE; THREAT-MODEL T192; DEPLOYMENT and
+  RUNBOOKS; DATA-RETENTION; BACKLOG P5-08; feature matrix H-033 and W-134.
+- **Mutation checks:** 7 deliberate regressions tried, all caught on the unit-tested parts. The send
+  itself needs the database and the stand-in, so its regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 878 passed (82 files)                                               |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 7 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Stickers uploaded to Meta or sent by id, and checking that a file can be a sticker.
+
 ## 2026-10-06 — Phase 5: sending contact cards through the public API (P5-08, ADR-197)
 
 Status: **Implemented; its database and browser tests run in CI only (test stand-in only).** Keys

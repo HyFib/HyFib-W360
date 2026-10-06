@@ -972,6 +972,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   with `apiContactCardInputSchema`, turns each contact into WhatsApp's words (`whatsappContact`),
   refuses contacts larger than received content may be (`jsonbSize`), and sends through `sendReply`:
   the content and the Graph request hold the same contacts, which `contactCards` reads back.
+- **Stickers from links (ADR-198):** `API_MEDIA_TYPES` adds `sticker`, parsed by
+  `apiSendStickerSchema` (a link and no caption) and sent by `apiSendMedia` as other media from
+  links are.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions (`last_message` with `conversations.read` and `campaign` with
   `campaigns.read` since ADR-126, a named campaign checked to be the company's, `name` since
