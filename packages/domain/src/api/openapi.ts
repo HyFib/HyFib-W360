@@ -105,6 +105,7 @@ import {
   apiSendVideoSchema,
   apiSendAudioSchema,
   apiSendDocumentSchema,
+  API_MESSAGE_TYPES,
 } from './resources';
 import {
   apiCreateWebhookEndpointSchema,
@@ -139,8 +140,10 @@ export const apiTemplateSchema = z.object({
 export const apiQueuedMessageSchema = z.object({
   id: z.uuid(),
   type: z
-    .enum(['template', 'text', 'interactive', 'reaction'])
-    .describe('interactive: reply buttons or a list.'),
+    .enum(API_MESSAGE_TYPES)
+    .describe(
+      'interactive: reply buttons or a list; image, video, audio and document: media sent from a link.',
+    ),
   status: z.literal('queued'),
   contactId: z.uuid(),
   channelId: z.uuid(),
@@ -178,8 +181,10 @@ const OUTBOUND_STATUSES = [
 export const apiMessageSchema = z.object({
   id: z.uuid(),
   type: z
-    .enum(['template', 'text', 'interactive', 'reaction'])
-    .describe('interactive: reply buttons or a list.'),
+    .enum(API_MESSAGE_TYPES)
+    .describe(
+      'interactive: reply buttons or a list; image, video, audio and document: media sent from a link.',
+    ),
   status: z
     .enum(OUTBOUND_STATUSES)
     .describe(

@@ -32,6 +32,12 @@ run here.
 - **Mutation checks:** 13 deliberate regressions tried, all caught on the unit-tested parts. The
   send itself needs the database and the stand-in, so its regressions are left to the integration
   and e2e tests, which run in CI.
+- **Fixed after review on #34:** `GET /messages/{id}` gave a media message's type as `template`, and
+  the `QueuedMessage` and `Message` schemas listed only templates, text, interactive messages and
+  reactions; both now give `image`, `video`, `audio` and `document` (`API_MESSAGE_TYPES`,
+  `apiMessageType`). The inbox showed a link whose scheme was written `HTTPS:`, which the API
+  accepts, as unavailable; it now reads links as the API does (`isHttpsLink`). One unit test, one
+  for the inbox's links, and the media integration test reading the messages' status.
 
 ### Test commands and results (local, 2026-10-06)
 

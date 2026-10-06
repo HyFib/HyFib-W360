@@ -1585,6 +1585,18 @@ describe('text replies (ADR-070)', () => {
     expect((await conversationWith(c, `+${waId}`)).last_message_preview).toBe('Audio');
     // WhatsApp's media objects through the send pipeline (the stand-in checks their shape).
     expect(await sendAll(c)).toEqual(['accepted', 'accepted']);
+    // Their status reads back as the media they are, never as templates.
+    for (const [message, type] of [
+      [document, 'document'],
+      [audio, 'audio'],
+    ] as const) {
+      expect(await apiGetMessage(deps(), ctx, idOf(message))).toMatchObject({
+        type,
+        status: 'accepted',
+        templateId: null,
+        templateName: null,
+      });
+    }
     const sent = fx.standIn.state.requests.filter(
       (r) => r.path.endsWith('/messages') && (r.body as { to?: string } | undefined)?.to === waId,
     );

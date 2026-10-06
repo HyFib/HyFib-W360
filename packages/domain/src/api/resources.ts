@@ -596,9 +596,32 @@ export interface ApiTemplate {
   channels: { id: string; phone: string | null }[];
 }
 
+/**
+ * The types of the messages the API sends, as a queued send and `GET /messages/{id}` give them:
+ * templates, text, reply buttons and lists, reactions, and media from links (ADR-194).
+ */
+export const API_MESSAGE_TYPES = [
+  'template',
+  'text',
+  'interactive',
+  'reaction',
+  'image',
+  'video',
+  'audio',
+  'document',
+] as const;
+export type ApiMessageType = (typeof API_MESSAGE_TYPES)[number];
+
+/** A stored message's type as the API gives it; a template is stored as one. */
+export function apiMessageType(type: string): ApiMessageType {
+  return (API_MESSAGE_TYPES as readonly string[]).includes(type)
+    ? (type as ApiMessageType)
+    : 'template';
+}
+
 export interface ApiMessage {
   id: string;
-  type: 'template' | 'text' | 'interactive' | 'reaction';
+  type: ApiMessageType;
   status: string;
   statusAt: string;
   to: string | null;
@@ -1949,10 +1972,7 @@ export async function apiGetMessage(
   const template = (row.content as { template?: { name?: string } }).template;
   return {
     id: row.id,
-    type:
-      row.type === 'text' || row.type === 'interactive' || row.type === 'reaction'
-        ? row.type
-        : 'template',
+    type: apiMessageType(row.type),
     status: row.status,
     statusAt: row.statusAt.toISOString(),
     to: row.phone,

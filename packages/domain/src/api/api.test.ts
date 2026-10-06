@@ -114,6 +114,8 @@ import {
   API_MEDIA_TYPES,
   apiSendMediaSchema,
   isMediaLink,
+  API_MESSAGE_TYPES,
+  apiMessageType,
 } from './resources';
 import {
   apiCreateWebhookEndpointSchema,
@@ -5241,5 +5243,28 @@ describe('media from links through the API (ADR-194)', () => {
     const audio = schemas.SendAudio as { properties: object; additionalProperties: unknown };
     expect(Object.keys(audio.properties)).not.toContain('caption');
     expect(audio.additionalProperties).toBe(false);
+  });
+});
+
+describe('the types of the messages the API sends, in its answers (ADR-194)', () => {
+  it('give media from links as their own type, as sent, never as a template', () => {
+    for (const type of ['image', 'video', 'audio', 'document', 'text', 'interactive', 'reaction']) {
+      expect(apiMessageType(type)).toBe(type);
+    }
+    expect(apiMessageType('template')).toBe('template');
+    const schemas = (
+      buildOpenApiDocument('https://app.example.com/api/v1').components as unknown as {
+        schemas: Record<string, { properties: { type: { enum: string[]; description: string } } }>;
+      }
+    ).schemas;
+    for (const name of ['QueuedMessage', 'Message']) {
+      expect(schemas[name]?.properties.type.enum).toEqual([...API_MESSAGE_TYPES]);
+      expect(schemas[name]?.properties.type.description).toContain(
+        'image, video, audio and document: media sent from a link',
+      );
+    }
+    expect(API_MESSAGE_TYPES).toEqual(
+      expect.arrayContaining(['image', 'video', 'audio', 'document']),
+    );
   });
 });
