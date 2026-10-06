@@ -166,6 +166,9 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
 - Bulk tag edits need `contacts.write`, match only the company's contacts that are not erased,
   change at most 10,000 at once and only the number the member was shown, and are audited
   (`contacts.bulk_tagged`: the tag, counts and the filters used, never the search text; ADR-213).
+- Bulk field edits (ADR-238) have the same rules, accept only the company's own fields and values of
+  the field's type, and are audited (`contacts.bulk_field_set`: the field's key, whether it was
+  cleared, counts and the filters used, never the value or the search text).
 - Campaigns: drafts and segments need `campaigns.write`; submitting needs `campaigns.write` and
   `campaigns.send`; approving (when the company requires it) needs `campaigns.approve` and a member
   other than the submitter; pausing, resuming, cancelling a started campaign, changing its caps and

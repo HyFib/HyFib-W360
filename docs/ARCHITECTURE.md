@@ -243,6 +243,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`filterConditions`, at most 10,000, ordered by id) in one transaction, refuse a count other than
   the one the member saw, then insert the tag for those without it and below the tag cap, or delete
   it, recording one audit entry.
+  Bulk field edits (`bulkSetField`, ADR-238) take the same locks and count check (`lockMatching`),
+  check the value with `coerceFieldValue`, then update `attributes` only where the field's value
+  differs (`||` a one-key object, or `-` the key to clear), so the triggers of 0090 and 0091 capture
+  a change for exactly the contacts changed; one audit entry.
   Merging (`contacts/merge.ts`, ADR-224): `previewMerge` reads both contacts with their identities,
   conversations, consent and counts, and `planContactMerge` gives the result and the refusals;
   `mergeContacts` calls `app.merge_contacts` (SECURITY DEFINER), which takes the locks, checks

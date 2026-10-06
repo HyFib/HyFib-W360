@@ -3,6 +3,7 @@ import { refresh } from 'next/cache';
 import { AppError } from '@w360/core';
 import {
   IMPORT_LIMITS,
+  bulkFieldSummary,
   bulkTagSummary,
   queueTemplateMessage,
   type ImportResult,
@@ -92,6 +93,20 @@ export async function bulkTagContactsAction(
     const result = await contacts.bulkTagContacts(ctx, input, await requestMeta());
     refresh();
     return { message: bulkTagSummary(result) };
+  });
+}
+
+/** Sets or clears one custom field on every contact the filters match (ADR-238). */
+export async function bulkSetFieldAction(
+  slug: string,
+  input: unknown,
+): Promise<ActionResult<{ message: string }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { contacts } = await getRuntime();
+    const result = await contacts.bulkSetField(ctx, input, await requestMeta());
+    refresh();
+    return { message: bulkFieldSummary(result) };
   });
 }
 

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AppError, clipText, notFound, uuidv7, type Clock } from '@w360/core';
+import { AppError, clipText, jsonbText, notFound, uuidv7, type Clock } from '@w360/core';
 import {
   and,
   asc,
@@ -37,6 +37,7 @@ import {
   likePattern,
   parseInput,
 } from '../validation';
+import type { BulkFieldResult } from './bulk-fields';
 import { BULK_TAG_LIMIT, type BulkTagResult } from './bulk-tags';
 import { CsvError, CSV_BOM, csvLine, parseCsv, restoreCell, type CsvLimits } from './csv';
 import { createContactField, deleteContactField, renameContactField } from './field-definitions';
@@ -91,6 +92,17 @@ export const bulkTagSchema = z.object({
   filter: contactFilterSchema,
   tag: z.string().max(100),
   action: z.enum(['add', 'remove']),
+  expectedCount: z.number().int().min(1).max(BULK_TAG_LIMIT),
+});
+
+/**
+ * A bulk field edit (ADR-238): the filters, the field's key, the value as a member types it (empty
+ * clears the field), and how many contacts the member was shown.
+ */
+export const bulkFieldSchema = z.object({
+  filter: contactFilterSchema,
+  key: z.string().max(40),
+  value: z.string().max(1000),
   expectedCount: z.number().int().min(1).max(BULK_TAG_LIMIT),
 });
 
@@ -384,6 +396,40 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
     }
   }
 
+  /**
+   * Locks the contacts a bulk edit's filters match, in id order, and returns their ids: refused
+   * beyond BULK_TAG_LIMIT contacts, or when the filters no longer match the number the member was
+   * shown (ADR-213).
+   */
+  async function lockMatching(
+    tx: Tx,
+    ctx: TenantContext,
+    filter: z.infer<typeof contactFilterSchema>,
+    expectedCount: number,
+    done: 'tagged' | 'edited',
+  ): Promise<string[]> {
+    const locked = await tx
+      .select({ id: contacts.id })
+      .from(contacts)
+      .where(and(...filterConditions(ctx, filter)))
+      .orderBy(asc(contacts.id))
+      .limit(BULK_TAG_LIMIT + 1)
+      .for('update');
+    if (locked.length > BULK_TAG_LIMIT) {
+      throw new AppError(
+        'validation_failed',
+        `At most ${BULK_TAG_LIMIT.toLocaleString('en-IN')} contacts can be ${done} at once. Narrow the filters first.`,
+      );
+    }
+    if (locked.length !== expectedCount) {
+      throw new AppError(
+        'conflict',
+        `These filters now match ${locked.length.toLocaleString('en-IN')} contacts, not ${expectedCount.toLocaleString('en-IN')}. Review them and try again.`,
+      );
+    }
+    return locked.map((c) => c.id);
+  }
+
   async function lockContact(tx: Tx, ctx: TenantContext, contactId: string) {
     if (!z.uuid().safeParse(contactId).success) throw notFound('Contact');
     const [row] = await tx
@@ -463,26 +509,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
         });
       }
       return db.run(ctx.scope, async (tx) => {
-        const locked = await tx
-          .select({ id: contacts.id })
-          .from(contacts)
-          .where(and(...filterConditions(ctx, data.filter)))
-          .orderBy(asc(contacts.id))
-          .limit(BULK_TAG_LIMIT + 1)
-          .for('update');
-        if (locked.length > BULK_TAG_LIMIT) {
-          throw new AppError(
-            'validation_failed',
-            `At most ${BULK_TAG_LIMIT.toLocaleString('en-IN')} contacts can be tagged at once. Narrow the filters first.`,
-          );
-        }
-        if (locked.length !== data.expectedCount) {
-          throw new AppError(
-            'conflict',
-            `These filters now match ${locked.length.toLocaleString('en-IN')} contacts, not ${data.expectedCount.toLocaleString('en-IN')}. Review them and try again.`,
-          );
-        }
-        const ids = locked.map((c) => c.id);
+        const ids = await lockMatching(tx, ctx, data.filter, data.expectedCount, 'tagged');
         const current = await tx.execute<{ id: string; tagged: boolean; tags: number }>(sql`
           select c.id,
                  exists (select 1 from app.contact_tags t where t.tenant_id = ${ctx.tenant.id}::uuid
@@ -537,6 +564,90 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
             subjectId: ctx.tenant.id,
             metadata: {
               ...result,
+              filter: {
+                q: Boolean(data.filter.q),
+                tag: data.filter.tag ?? null,
+                consent: data.filter.consent,
+              },
+            },
+          },
+          meta,
+        );
+        return result;
+      });
+    },
+
+    /**
+     * Sets one custom field to one value, or clears it, on every contact the filters match
+     * (ADR-238), under the locks, limit and count check of a bulk tag edit. The value is checked
+     * against the field's type as one contact's edit checks it; a contact that already has it (or,
+     * clearing, has none) is left as it is. Each changed contact is a change in the contact feed
+     * and a `contact.updated` webhook event (the triggers of 0090 and 0091); the audit entry names
+     * the field and counts the contacts, never the value or the search text.
+     */
+    async bulkSetField(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta = {},
+    ): Promise<BulkFieldResult> {
+      assertCan(ctx, 'contacts.write');
+      const data = parseInput(bulkFieldSchema, input);
+      return db.run(ctx.scope, async (tx) => {
+        const field = (await loadFields(tx, ctx.tenant.id)).find((f) => f.key === data.key);
+        if (!field) {
+          const message = 'Choose one of the company’s custom fields.';
+          throw new AppError('validation_failed', message, {
+            issues: [{ path: 'key', message }],
+          });
+        }
+        const coerced = coerceFieldValue(field, data.value);
+        if (!coerced.ok) {
+          throw new AppError('validation_failed', coerced.message, {
+            issues: [{ path: 'value', message: coerced.message }],
+          });
+        }
+        const ids = await lockMatching(tx, ctx, data.filter, data.expectedCount, 'edited');
+        const current = sql`(${contacts.attributes} -> ${field.key}::text)`;
+        const value = coerced.value === null ? null : jsonbText(coerced.value);
+        const changed = await tx
+          .update(contacts)
+          .set({
+            attributes:
+              value === null
+                ? sql`${contacts.attributes} - ${field.key}::text`
+                : sql`${contacts.attributes} || jsonb_build_object(${field.key}::text, ${value}::jsonb)`,
+          })
+          .where(
+            and(
+              eq(contacts.tenantId, ctx.tenant.id),
+              sql`${contacts.id} = any(${sql.param(ids)}::uuid[])`,
+              value === null
+                ? sql`${current} is not null`
+                : sql`${current} is distinct from ${value}::jsonb`,
+            ),
+          )
+          .returning({ id: contacts.id });
+        const result: BulkFieldResult = {
+          key: field.key,
+          label: field.label,
+          value: coerced.value,
+          matched: ids.length,
+          changed: changed.length,
+          unchanged: ids.length - changed.length,
+        };
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'contacts.bulk_field_set',
+            subjectType: 'tenant',
+            subjectId: ctx.tenant.id,
+            metadata: {
+              key: field.key,
+              cleared: coerced.value === null,
+              matched: result.matched,
+              changed: result.changed,
+              unchanged: result.unchanged,
               filter: {
                 q: Boolean(data.filter.q),
                 tag: data.filter.tag ?? null,

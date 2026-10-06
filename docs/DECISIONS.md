@@ -9222,3 +9222,32 @@ Decision:
   first byte; each export is audited (`automation.runs_exported`, with its filters). No migration.
 
 Not built: exporting a run's steps or captured answers, and exports through the public API.
+
+## ADR-238 Setting a custom field on every contact a filter matches (P3-01) (2026-10-06)
+
+Context: bulk tag edits (ADR-213) change one tag on every contact the contacts page's filters match.
+Custom field values (a city, a plan, a renewal date) were still set one contact at a time, or by
+importing a CSV of the contacts again with the value in a column.
+
+Decision:
+
+- **From the contacts page, beside the bulk tag edit:** a member with `contacts.write` chooses one
+  of the company's custom fields and sets one value on every contact the filters match, or clears
+  the field on all of them, the number shown in the form. The member confirms first: each contact's
+  own value is replaced, which cannot be undone.
+- **The rules of bulk tag edits:** at most 10,000 matches; in one transaction the matching contacts
+  are locked and counted again, and a count other than the one shown refuses the edit; erased
+  contacts never match.
+- **The value is checked as one contact's edit checks it:** against the field's type (text up to 500
+  characters, a number, a real date, yes or no), and an empty value clears. A field must be the
+  company's own. Contacts that already have the value (or, clearing, have none) are left untouched;
+  the result counts the contacts changed and those left as they were.
+- **Each changed contact is a change,** in the contact feed and as a `contact.updated` webhook event
+  naming the field, as when one member edits it (the triggers on the contact's values). The audit
+  entry (`contacts.bulk_field_set`) holds the field's key, whether it was cleared, the counts and
+  which filters were used, never the value or the search text.
+- **No migration;** the API is unchanged.
+
+Not built: bulk changes of consent (each contact's consent needs its own provenance; an import
+carries an attestation), of names, emails or numbers (each contact's own), bulk edits from a segment
+or through the API, choosing contacts one by one, and undo.

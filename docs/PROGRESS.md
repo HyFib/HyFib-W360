@@ -1,5 +1,44 @@
 # Progress
 
+## 2026-10-06 — Setting a custom field on every contact a filter matches (P3-01, ADR-238)
+
+Status: **Implemented; its database and browser tests run in CI only.** Bulk edits covered tags
+only. The local PostgreSQL is unavailable, so the integration and e2e tests below were written but
+not run here.
+
+### Completed
+
+- **Domain:** `contacts/bulk-fields.ts` (`BulkFieldResult`, `bulkFieldSummary`), `bulkFieldSchema`
+  and `bulkSetField` in the contacts service, with the locking and count check of bulk tag edits
+  shared as `lockMatching`.
+- **Web:** `BulkFieldForm` (a field, a value input of the field's type, Set and Clear, each
+  confirmed in a dialog) below the bulk tag form on the contacts page, and `bulkSetFieldAction`.
+- **Tests:**
+  - Unit (4 new in `bulk-fields.test.ts`).
+  - Integration (2 in `contacts.test.ts`, one new and one extended: typed values, clearing, only
+    changed contacts in the contact feed, an unknown field, a changed count, the 10,000 limit, an
+    analyst refused, another company, the audit entry). Written for CI; not run here.
+  - E2e (`contacts.spec.ts`: a field added in settings, set on the contacts a search finds after the
+    confirmation, and shown on the contact). Written for CI; not run here.
+- **Docs:** ADR-238; ARCHITECTURE; SECURITY; RUNBOOKS; BACKLOG P3-01; feature matrix W-049.
+- **Mutation checks:** 14/14 deliberate regressions caught on the summary and the request.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                             |
+| -------------------------------------------------- | ------------------------------------------------------------------ |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                              |
+| `pnpm test` (unit)                                 | 1024 passed (105 files)                                            |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them    |
+| `pnpm build`                                       | passed                                                             |
+| Mutation checks                                    | 14/14 deliberate regressions caught on the summary and the request |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                     |
+
+### Known gaps
+
+- No bulk consent, name, email or number edits; no bulk edits from a segment or through the API; no
+  undo.
+
 ## 2026-10-06 — Exporting automation runs as CSV (P4-01, ADR-237)
 
 Status: **Implemented; its database test runs in CI only.** Runs could be read fifty at a time on

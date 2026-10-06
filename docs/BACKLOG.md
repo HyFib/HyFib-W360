@@ -82,8 +82,10 @@ verification, app review, Embedded Signup configuration).
   the roles whose members see customers' numbers masked, enforced in the services, with searches by
   whole numbers only). **[Merges through the API built; their database tests run only in CI]**
   (ADR-227, migration 0153: a `contacts.merge` scope, granted by members who may delete contacts,
-  for `POST /contacts/{id}/merge`). **Remaining:** bulk edits of other fields, joining
-  conversations.
+  for `POST /contacts/{id}/merge`). **[Bulk field edits built; their database and browser tests run
+  only in CI]** (ADR-238: one custom field set to one value, or cleared, on up to 10,000 contacts
+  the page's filters match, after a confirmation, with the checks of a member's edit and of bulk tag
+  edits; no migration). **Remaining:** joining conversations.
 - **P3-02 Consent & suppression** — _implemented (2026-09-26)_: consent events with provenance,
   opt-out/opt-in keywords, Meta 131050 opt-outs, suppression list, send-time enforcement (race test
   with a queued template, and with campaigns). **Remaining:** review Meta's

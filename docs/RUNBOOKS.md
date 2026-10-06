@@ -336,6 +336,13 @@ has 50 tags keeps them, and the result counts it; remove a tag from it first. Ea
 audit log as `contacts.bulk_tagged` with its counts; each changed contact also appears in the
 contact feed and as a `contact.updated` webhook event.
 
+**A bulk field edit was refused or changed fewer contacts than expected (ADR-238).** It is refused
+like a bulk tag edit when the matches changed or exceed 10,000, and when the value does not fit the
+field's type (the message names the field). Contacts that already had the value are counted, not
+changed. Each edit is in the audit log as `contacts.bulk_field_set` with the field's key and its
+counts (never the value); each changed contact also appears in the contact feed and as a
+`contact.updated` webhook event.
+
 **Erasure request.** A member with `contacts.delete` erases the contact from its page (keep the
 number suppressed unless the requester asks otherwise). The action is audited
 (`contact.erased`). Data already delivered to Meta is outside our database (see

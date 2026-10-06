@@ -70,6 +70,7 @@ export * from './contacts/phone';
 export * from './contacts/csv';
 export * from './contacts/fields';
 export * from './contacts/service';
+export * from './contacts/bulk-fields';
 export * from './contacts/bulk-tags';
 export * from './contacts/merge';
 export * from './contacts/number-masking';

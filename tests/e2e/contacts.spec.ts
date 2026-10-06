@@ -86,6 +86,20 @@ test('an owner adds a contact, records consent and tags, imports a CSV and expor
   await expect(page.getByRole('cell', { name: 'gold, wholesale' })).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
+  // And a custom field set on them, once confirmed (ADR-238).
+  await page.goto(`/c/${slug}/settings/messaging`);
+  await page.getByLabel('New field').fill('City');
+  await page.getByRole('button', { name: 'Add field' }).click();
+  await expect(page.getByRole('cell', { name: 'city', exact: true })).toBeVisible();
+  await page.goto(`/c/${slug}/contacts?q=Bina`);
+  await page.getByLabel('Value for the 1 contact shown by these filters').fill('Pune');
+  await page.getByRole('button', { name: 'Set on 1 contact' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Set on 1 contact' }).click();
+  await expect(page.getByText('Set “City” to “Pune” on 1 contact.')).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  await page.getByRole('link', { name: 'Bina', exact: true }).click();
+  await expect(page.getByLabel('City', { exact: true })).toHaveValue('Pune');
+
   // Consent keywords are company settings.
   await page.goto(`/c/${slug}/settings/messaging`);
   await page.getByLabel('Stop all messages').fill('stop, band karo');
