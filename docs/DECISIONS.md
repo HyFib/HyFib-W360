@@ -9501,3 +9501,20 @@ Decision:
 
 Not built: forms from campaigns and templates, a draft form sent by a test run, waiting for the
 form's answers before the run goes on, and branching on them.
+
+## ADR-249 Task and deal steps follow the plan's CRM (P4-01, P4-04) (2026-10-06)
+
+Context: a plan without the CRM takes away writing it (ADR-051: `crm.write` leaves the members'
+permissions; read access stays). Publishing a task or deal step needs `crm.write`, so a company
+without the CRM could not publish one, but an automation published before a change of plan kept
+creating tasks and deals that no member of the company could create any more.
+
+Decision:
+
+- Task and deal steps check the company's plan when they run: without the CRM the step creates
+  nothing, is logged as `skipped` with `crm_not_in_plan`, and the run goes on, as other CRM steps
+  that create nothing do, and as order messages are skipped when the plan leaves out commerce.
+- Publishing or testing such an automation says that the plan does not include the CRM, before the
+  permission check. No migration.
+
+Not built: a notice to the company when its automations skip steps after a change of plan.

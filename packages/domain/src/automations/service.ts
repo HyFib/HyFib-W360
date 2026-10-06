@@ -570,19 +570,17 @@ export function createAutomationService(deps: AutomationServiceDeps) {
   }
 
   /**
-   * Publishing or testing a graph that creates CRM tasks or deals needs `crm.write`, as creating
-   * them in the CRM does (ADR-244, ADR-245).
+   * Publishing or testing a graph that creates CRM tasks or deals needs the CRM in the company's
+   * plan (ADR-249) and `crm.write`, as creating them in the CRM does (ADR-244, ADR-245).
    */
   function assertMayChangeCrm(
     ctx: TenantContext,
     graph: AutomationGraph,
     action: 'publish' | 'test',
   ) {
-    if (
-      can(ctx, 'crm.write') ||
-      !graph.nodes.some((n) => n.type === 'create_task' || n.type === 'create_deal')
-    )
-      return;
+    if (!graph.nodes.some((n) => n.type === 'create_task' || n.type === 'create_deal')) return;
+    assertModule(ctx.plan, 'crm');
+    if (can(ctx, 'crm.write')) return;
     throw forbidden(
       `${action === 'publish' ? 'Publishing' : 'Testing'} an automation that creates CRM tasks or deals needs the permission to edit the CRM.`,
     );

@@ -592,6 +592,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    saving there would replace the draft, so do not edit automations with form steps until the web
    rollout ends.
 
+   ADR-249 has no migration. Until the workers roll out, an old worker still creates the tasks and
+   deals of automations whose company's plan no longer includes the CRM.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

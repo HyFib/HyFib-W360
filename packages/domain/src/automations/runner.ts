@@ -842,6 +842,8 @@ async function applyTaskEffect(
   effect: Extract<RunEffect, { kind: 'create_task' }>,
   now: Date,
 ): Promise<string | null> {
+  // A plan without the CRM takes away writing it (ADR-051), from automations too (ADR-249).
+  if (!(await loadEntitlements(tx, run.tenantId)).modules.has('crm')) return 'crm_not_in_plan';
   if (!effect.title) return 'task_title_empty';
   const [contact] = await tx
     .select({ erasedAt: contacts.erasedAt })
@@ -900,6 +902,9 @@ async function applyDealEffect(
   now: Date,
 ): Promise<{ skipped: boolean; notes: string[] }> {
   const skip = (note: string) => ({ skipped: true, notes: [note] });
+  // As for task steps (ADR-249).
+  if (!(await loadEntitlements(tx, run.tenantId)).modules.has('crm'))
+    return skip('crm_not_in_plan');
   if (!effect.title) return skip('deal_title_empty');
   const [contact] = await tx
     .select({ erasedAt: contacts.erasedAt })

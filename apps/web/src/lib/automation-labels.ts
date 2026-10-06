@@ -99,6 +99,8 @@ export const STEP_DETAILS: Record<string, string> = {
   conversation_too_many_tags: 'the conversation already has the maximum number of tags',
   field_missing: 'the contact field no longer exists',
   invalid_value: 'the value did not fit the contact field',
+  // Task and deal steps (ADR-249): the plan's CRM.
+  crm_not_in_plan: 'the company’s plan does not include the CRM',
   // Task steps (ADR-244): why no task was created.
   task_title_empty: 'the task’s title was empty after filling in placeholders',
   task_assignee_unavailable:

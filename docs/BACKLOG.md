@@ -256,10 +256,12 @@ verification, app review, Embedded Signup configuration).
   browser tests run only in CI]** (ADR-246: a task step may email the member when the task is due,
   as a member's task reminder does; no migration). **[Expected close dates from deal steps built;
   their database and browser tests run only in CI]** (ADR-247: a number of days after the step runs,
-  on the company's calendar; no migration). **Remaining:** custom deal fields, products on deals,
-  deal import, forecasts in Reports, automation steps that move deals, CRM connectors (HubSpot,
-  Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
-  checklist).
+  on the company's calendar; no migration). **[CRM steps that follow the plan built; their database
+  test runs only in CI]** (ADR-249: without the CRM in the plan, task and deal steps create nothing
+  and say why, and cannot be published; no migration). **Remaining:** custom deal fields, products
+  on deals, deal import, forecasts in Reports, automation steps that move deals, CRM connectors
+  (HubSpot, Salesforce, Zoho: integrations), reminder emails through the production SMTP provider
+  (release checklist).
 - **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad
   traffic yet_: click-to-chat links (a short link that counts clicks per link and company day
   without any visitor data and redirects to wa.me with a pre-filled message and an optional

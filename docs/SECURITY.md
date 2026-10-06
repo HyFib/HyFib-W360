@@ -286,6 +286,9 @@ Phase 4 rules (automations, P4-01):
   company's plan includes WhatsApp Flows, as for a member's form. The send is the bot's (no member),
   with a flow token HyFib issues for the conversation and contact, so the Flows endpoint and the
   completion accept the answers exactly as for a member's form.
+- Task and deal steps need the CRM in the company's plan (ADR-249), as members' CRM writes do:
+  publishing or testing such an automation is refused without it, and a run skips the step
+  (`crm_not_in_plan`) and goes on.
 
 Phase 4 rules (automation web requests, P4-02):
 

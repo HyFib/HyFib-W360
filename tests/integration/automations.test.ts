@@ -263,6 +263,45 @@ async function stepLog(runId: string) {
   );
 }
 
+let planCodes = 0;
+/** Moves the company to a published plan with `modules` (P5-01), as platform staff would. */
+async function onPlan(c: Company, modules: string[]) {
+  const staff = await createUser(fx.dbs, { twoFactor: true });
+  await fx.dbs.ownerPool.query(
+    `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_owner')`,
+    [staff.id],
+  );
+  const actor: PlatformActor = {
+    userId: staff.id,
+    role: 'platform_owner',
+    correlationId: uuidv7(),
+  };
+  const plans = createPlanAdminService({ platformDb: fx.dbs.platform, clock: systemClock });
+  planCodes += 1;
+  const { id: planId } = await plans.createPlan(actor, {
+    code: `au-${Date.now().toString(36)}-${planCodes}`,
+    name: 'Automations plan',
+    price: '999',
+    intervalMonths: '1',
+    trialDays: '0',
+    graceDays: '7',
+    seatsIncluded: '10',
+    numbersIncluded: '5',
+    modules,
+  });
+  await plans.publishPlan(actor, planId);
+  const view = await plans.tenantPlan(actor, c.tenant.id);
+  await plans.setTenantPlan(actor, {
+    tenantId: c.tenant.id,
+    version: view.state.version,
+    status: 'active',
+    planId,
+    periodStart: dayOf(new Date(), 'Asia/Kolkata'),
+    periodEnd: dayOf(new Date(Date.now() + 30 * 86_400_000), 'Asia/Kolkata'),
+    reason: 'Plan for the automation tests',
+  });
+}
+
 async function botMessages(conversationId: string) {
   return fx.query<{
     id: string;
@@ -2436,6 +2475,71 @@ describe('automations that create CRM deals (ADR-245)', () => {
       /active stage of an active pipeline/,
     );
   });
+
+  it('creates no task or deal once the plan leaves out the CRM, says why and goes on (ADR-249)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const { id: pipelineId } = await crm().createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New'],
+    });
+    const [pipeline] = (await crm().listPipelines(owner)).filter((p) => p.id === pipelineId);
+    const graph = {
+      version: 1,
+      start: 'task',
+      nodes: [
+        {
+          id: 'task',
+          type: 'create_task',
+          title: 'Call {{name}}',
+          assigneeMembershipId: agent.membership.id,
+          dueInHours: null,
+          next: 'deal',
+        },
+        {
+          id: 'deal',
+          type: 'create_deal',
+          title: 'Kettles for {{name}}',
+          pipelineId,
+          stageId: pipeline!.stages[0]!.id,
+          value: null,
+          ownerMembershipId: null,
+          next: 'thanks',
+        },
+        { id: 'thanks', type: 'send_text', text: 'We will be in touch.', next: null },
+      ],
+    };
+    await publish(owner, 'Leads', keyword('price'), graph);
+    // Platform staff move the company to a plan without the CRM.
+    await onPlan(c, ['automations', 'flows']);
+
+    const conversationId = await inbound(c, waId(), 'price please');
+    const run = await onlyRun(conversationId);
+    expect((await drive(c, conversationId, run.id)).outcome).toBe('ended');
+    expect(
+      await fx.query('SELECT id FROM app.crm_tasks WHERE tenant_id = $1', [c.tenant.id]),
+    ).toEqual([]);
+    expect(await dealsOf(c.tenant.id)).toEqual([]);
+    const log = await stepLog(run.id);
+    for (const nodeId of ['task', 'deal']) {
+      expect(
+        log.find((st) => st.node_id === nodeId),
+        nodeId,
+      ).toMatchObject({
+        outcome: 'skipped',
+        detail: 'crm_not_in_plan',
+      });
+    }
+    expect(log.find((st) => st.node_id === 'thanks')?.outcome).toBe('sent');
+    // Nor can such steps be published, whatever the member's roles.
+    await expectAppError(
+      publish(await fx.ctx(c, c.owner), 'More leads', keyword('quote'), graph),
+      'forbidden',
+      /does not include CRM/,
+    );
+  });
 });
 
 describe('automations that send a form (ADR-248)', () => {
@@ -2596,39 +2700,7 @@ describe('automations that send a form (ADR-248)', () => {
     const flow = await form(c);
     await publish(await fx.ctx(c, c.owner), 'Bookings', keyword('book'), booking(flow.id));
     // Platform staff move the company to a plan with automations but without forms.
-    const staff = await createUser(fx.dbs, { twoFactor: true });
-    await fx.dbs.ownerPool.query(
-      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_owner')`,
-      [staff.id],
-    );
-    const actor: PlatformActor = {
-      userId: staff.id,
-      role: 'platform_owner',
-      correlationId: uuidv7(),
-    };
-    const plans = createPlanAdminService({ platformDb: fx.dbs.platform, clock: systemClock });
-    const { id: planId } = await plans.createPlan(actor, {
-      code: `au-${Date.now().toString(36)}-${randomInt(1_000_000)}`,
-      name: 'Automations plan',
-      price: '999',
-      intervalMonths: '1',
-      trialDays: '0',
-      graceDays: '7',
-      seatsIncluded: '10',
-      numbersIncluded: '5',
-      modules: ['automations'],
-    });
-    await plans.publishPlan(actor, planId);
-    const view = await plans.tenantPlan(actor, c.tenant.id);
-    await plans.setTenantPlan(actor, {
-      tenantId: c.tenant.id,
-      version: view.state.version,
-      status: 'active',
-      planId,
-      periodStart: dayOf(new Date(), 'Asia/Kolkata'),
-      periodEnd: dayOf(new Date(Date.now() + 30 * 86_400_000), 'Asia/Kolkata'),
-      reason: 'Plan for the automation form tests',
-    });
+    await onPlan(c, ['automations']);
 
     // The automation still runs, but its form is not sent: the run passes the conversation on.
     const conversationId = await inbound(c, waId(), 'book a table');

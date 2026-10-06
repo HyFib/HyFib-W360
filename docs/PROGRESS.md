@@ -1,5 +1,33 @@
 # Progress
 
+## 2026-10-06 — Task and deal steps follow the plan's CRM (P4-01, P4-04, H-012, ADR-249)
+
+Status: **Implemented; its database test runs in CI only.** Found while adding the plan check to
+form steps (ADR-248): an automation published before a change of plan kept creating CRM tasks and
+deals without the CRM in the plan. No migration. The local PostgreSQL is unavailable, so the
+integration test below was written but not run here.
+
+### Completed
+
+- **Domain:** `applyTaskEffect` and `applyDealEffect` skip with `crm_not_in_plan` when the plan
+  leaves out the CRM; `assertMayChangeCrm` checks the plan before `crm.write`.
+- **Web:** the run page's reason.
+- **Tests:** integration (1 new in `automations.test.ts`: both steps skipped with the reason after a
+  change of plan, the run going on, publishing refused; the plan change is now a shared helper).
+  Written for CI; not run here. The runner and service checks are not unit-tested, so there are no
+  mutation checks.
+- **Docs:** ADR-249; SECURITY; DEPLOYMENT; BACKLOG P4-04; feature matrix H-012.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 1062 passed (113 files)                                       |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-06 — Automation steps that send a WhatsApp form (P4-01, P4-03, W-085, ADR-248)
 
 Status: **Implemented; its database and browser tests run in CI only.** Forms could be sent only by
