@@ -260,6 +260,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   per-minute messaging sweep (`ops.template_sync_due`: requested, in review every 5 minutes, or
   older than 6 hours) and by members. The sweep lists the accounts asked for first, and their syncs,
   like members' refreshes, are queued at a higher pg-boss priority than routine ones (ADR-178).
+- **Starter templates (ADR-232):** `TEMPLATE_STARTERS` (`templates/library.ts`) holds HyFib's
+  starters as editor definitions; `starterDraft` gives a company's draft of one (its name, its
+  definition and, on a marketing starter, a quick reply with the company's first marketing opt-out
+  keyword). The New template page (`?starter=<key>`) passes it to `TemplateEditor` as its initial
+  state, keyed by the starter so a new choice starts afresh; saving goes through `createDraft` as
+  any draft.
 - **Template sends** reuse the Phase 2 pipeline: `queueTemplateMessage` writes the message and send
   intent (type `template`, rendered text stored for the thread, request body without secrets); the
   worker skips the 24-hour window check for templates but re-checks template approval, consent and

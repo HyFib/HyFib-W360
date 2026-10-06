@@ -38,6 +38,7 @@ export function TemplateEditor({
   slug,
   accounts,
   existing,
+  initial,
 }: {
   slug: string;
   accounts: { id: string; name: string }[];
@@ -48,13 +49,17 @@ export function TemplateEditor({
     language: string;
     definition: TemplateDefinition;
   };
+  /** A new draft's name and content to start from, such as a starter's (ADR-232). */
+  initial?: { name: string; definition: TemplateDefinition };
 }) {
   const router = useRouter();
   const langList = useId();
   const [accountId, setAccountId] = useState(accounts[0]?.id ?? '');
-  const [name, setName] = useState(existing?.name ?? '');
+  const [name, setName] = useState(existing?.name ?? initial?.name ?? '');
   const [language, setLanguage] = useState(existing?.language ?? 'en');
-  const [def, setDef] = useState<TemplateDefinition>(existing?.definition ?? EMPTY);
+  const [def, setDef] = useState<TemplateDefinition>(
+    existing?.definition ?? initial?.definition ?? EMPTY,
+  );
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [busy, startTransition] = useTransition();

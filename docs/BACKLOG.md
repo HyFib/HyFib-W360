@@ -89,11 +89,14 @@ verification, app review, Embedded Signup configuration).
   and periodic), deletion, status history, template sends from contacts and the inbox.
   **[Website buttons whose link ends with a value built; their database and browser tests run only
   in CI]** (ADR-228: created with their example, synced, and sent from contacts, conversations and
-  the API; ADR-229: filled by campaigns, automations and store messages too). **Remaining:**
-  creating media headers (Resumable Upload + media storage) and sending them outside the API (which
-  sends them with a link since ADR-201), named parameters, authentication/OTP, carousel, LTO,
-  copy-code and catalog templates, editing approved templates (`POST /{template-id}`), template
-  library (W-070), and a sandbox run with a real WABA.
+  the API; ADR-229: filled by campaigns, automations and store messages too). **[Starter templates
+  built; their browser test runs only in CI]** (ADR-232, W-070: twelve starters in HyFib's own copy,
+  eight utility and four marketing, that fill the New template editor; marketing ones get the
+  company's marketing opt-out keyword as a button; no migration). **Remaining:** creating media
+  headers (Resumable Upload + media storage) and sending them outside the API (which sends them with
+  a link since ADR-201), named parameters, authentication/OTP, carousel, LTO, copy-code and catalog
+  templates, editing approved templates (`POST /{template-id}`), starters in other languages, and a
+  sandbox run with a real WABA.
 - **P3-04 Campaigns** — _implemented (2026-09-26), sends verified against the Graph stand-in
   only_: saved segments (incl. campaign-response retargeting), drafts with a review panel,
   audience snapshots re-checked when queued and before dispatch, optional four-eyes approval,

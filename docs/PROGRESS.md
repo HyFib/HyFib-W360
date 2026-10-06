@@ -1,5 +1,41 @@
 # Progress
 
+## 2026-10-06 — Starter templates (W-070, ADR-232)
+
+Status: **Implemented; its browser test runs in CI only.** Members started every template from an
+empty editor. The browser test needs the web app, the worker and the Graph stand-in, which run in
+CI.
+
+### Completed
+
+- **Design (ADR-232):** twelve starters in HyFib's own copy that fill the New template editor;
+  marketing ones get the company's marketing opt-out keyword as a button; no migration.
+- **Domain:** `templates/library.ts` (`TEMPLATE_STARTERS`, `findTemplateStarter`, `starterDraft`).
+- **Web:** the New template page lists the starters by category and fills the editor from
+  `?starter=<key>`, saying what the opt-out button does or that the starter has none;
+  `TemplateEditor` takes an initial draft.
+- **Tests:**
+  - Unit (4 new in `library.test.ts`).
+  - E2E (1 new in `templates.spec.ts`). Runs in CI.
+- **Docs:** ADR-232; ARCHITECTURE; BACKLOG P3-03; feature matrix W-070.
+- **Mutation checks:** 10/10 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                                 |
+| -------------------------------------------------- | ---------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                  |
+| `pnpm test` (unit)                                 | 101 files, 1009 tests passed                                           |
+| `pnpm test:e2e`                                    | not run here: it needs the web app, the worker and Mailpit; CI runs it |
+| `pnpm build`                                       | passed                                                                 |
+| Mutation checks                                    | 10/10 deliberate regressions caught                                    |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                         |
+
+### Known gaps
+
+- Starters are in English only and were not submitted to Meta: Meta's review and category decision
+  are untested here.
+
 ## 2026-10-06 — Segments by store orders (W-051, ADR-231)
 
 Status: **Implemented; its database tests run in CI only.** Campaigns could not be aimed at contacts

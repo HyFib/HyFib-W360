@@ -9070,3 +9070,34 @@ Decision:
 Not built: products or categories bought, the first or last order date, average order value, refunds
 taken off spend, and orders matched by email. Contacts without a number never match an order
 condition.
+
+## ADR-232 Starter templates (W-070) (2026-10-06)
+
+Context: a member creating a company's first templates starts from an empty editor and has to learn
+Meta's form (numbered variables with examples, categories, buttons) before anything can be sent
+outside the 24-hour window. Most companies need the same few: order and shipping updates, reminders,
+payment notices, a welcome and an offer.
+
+Decision:
+
+- **Twelve starters, HyFib's own copy:** eight utility (order confirmation, shipping update,
+  delivery confirmation, appointment reminder with Confirm and Reschedule replies, booking
+  confirmation, payment reminder, payment received, request update) and four marketing (welcome,
+  back in stock, seasonal offer, cart reminder), in English, each with example values for its
+  variables (`templates/library.ts`). They hold no website or phone button, which need the company's
+  own address or number, and no body starts or ends with a variable (HyFib's rule for its starters,
+  not a verified Meta rule).
+- **Starting a draft:** the New template page lists them; choosing one fills the editor with its
+  name, category and content, which the member changes before saving as any draft. Nothing is
+  created until they save, and saving and submitting are the drafts' own (validation, Meta's review,
+  which decides the category).
+- **Opt-out button:** a marketing starter gets a quick reply carrying the company's first marketing
+  opt-out keyword (Settings → Messaging), when it fits a button; a customer's tap sends the keyword,
+  which HyFib already records as a marketing opt-out. Without one, the page asks the member to give
+  customers a way to stop offers.
+- **Checks:** a unit test passes every starter through the draft schema and checks, the round trip
+  through Meta's component format, and HyFib's starter rules. No migration, no new permission (the
+  page needs `templates.write`; it reads the keywords with `contacts.read`).
+
+Not built: starters in other languages, starters with media headers or website buttons, a gallery of
+other companies' approved templates, and starters through the API.

@@ -75,6 +75,7 @@ export * from './contacts/number-masking';
 export * from './consent/keywords';
 export * from './consent/service';
 export * from './templates/definition';
+export * from './templates/library';
 export * from './templates/service';
 export * from './campaigns/schedule';
 export * from './campaigns/variables';

@@ -135,3 +135,54 @@ test('a template is drafted, submitted, approved at Meta and sent after the serv
     },
   });
 });
+
+test('a template drafted from a starter keeps its copy and the company’s opt-out keyword', async ({
+  page,
+}) => {
+  const email = uniqueEmail('starters');
+  const slug = `tps-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Sana Starters', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Starter Supplies');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  await connectTestChannel({ ownerEmail: email, slug });
+
+  await page.goto(`/c/${slug}/templates/new`);
+  await page
+    .getByRole('navigation', { name: 'Marketing starters' })
+    .getByRole('link', { name: 'Seasonal offer' })
+    .click();
+  await expect(page.getByText('Started from “Seasonal offer”')).toBeVisible();
+  // The company's marketing opt-out keyword (the default) becomes the starter's button (ADR-232).
+  await expect(
+    page.getByText('The STOP PROMOTIONS button lets customers stop offers'),
+  ).toBeVisible();
+  await expect(page.getByLabel('Name')).toHaveValue('seasonal_offer');
+  await expect(page.getByLabel('Category')).toHaveValue('MARKETING');
+  const preview = page.getByLabel('Template preview');
+  await expect(preview).toContainText('Our sale is on');
+  await expect(preview).toContainText(
+    'Hi Asha, our Diwali sale runs until 20 October, with up to 30% off selected items.',
+  );
+  await expect(preview).toContainText('STOP PROMOTIONS');
+  await expect(page.getByLabel('Quick reply text')).toHaveValue('STOP PROMOTIONS');
+  // The member changes what they like before saving.
+  await page.getByLabel('Name').fill('festive_offer');
+  await page.getByLabel('Language code').fill('en');
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByRole('heading', { name: 'festive_offer', level: 1 })).toBeVisible();
+  await expect(page.getByText('Draft', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Body')).toHaveValue(
+    'Hi {{1}}, our {{2}} sale runs until {{3}}, with {{4}} off selected items. Reply to this message to ask about anything you like.',
+  );
+
+  // A utility starter takes no opt-out button; a blank template starts empty again.
+  await page.goto(`/c/${slug}/templates/new?starter=appointment_reminder`);
+  await expect(page.getByLabel('Name')).toHaveValue('appointment_reminder');
+  await expect(page.getByLabel('Quick reply text')).toHaveCount(2);
+  await expect(page.getByLabel('Template preview')).not.toContainText('STOP PROMOTIONS');
+  await page.getByRole('link', { name: 'A blank template' }).click();
+  await expect(page.getByLabel('Name')).toHaveValue('');
+  await expect(page.getByLabel('Body')).toHaveValue('');
+});
