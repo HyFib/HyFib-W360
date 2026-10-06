@@ -44,9 +44,12 @@ import {
   createFlowsService,
   createReportsService,
   createConsentService,
+  createContactMergeService,
   createContactsService,
   createEmailPreferencesService,
   createInboxService,
+  createReceivedMediaService,
+  createFileRepliesService,
   createOnboardingService,
   createPlanAdminService,
   createPlanAddOnsService,
@@ -63,6 +66,8 @@ import {
   pgBossQueueInspector,
   createRateCardsService,
   createSavedRepliesService,
+  createConversationTagsService,
+  createReadReceiptsService,
   createSegmentsService,
   createTeamsService,
   createTemplatesService,
@@ -95,9 +100,12 @@ import {
   type GrowthService,
   type ReportsService,
   type ConsentService,
+  type ContactMergeService,
   type ContactsService,
   type EmailPreferencesService,
   type InboxService,
+  type ReceivedMediaService,
+  type FileRepliesService,
   type JobQueue,
   type OnboardingService,
   type OutboundDeps,
@@ -111,6 +119,8 @@ import {
   type PlatformOpsService,
   type RateCardsService,
   type SavedRepliesService,
+  type ConversationTagsService,
+  type ReadReceiptsService,
   type SegmentsService,
   type TeamsService,
   type TemplatesService,
@@ -164,15 +174,27 @@ export interface Runtime {
   /** Billing → Usage and rates: Meta's rates and this month's estimate (ADR-060). */
   billingUsage: BillingUsageService;
   inbox: InboxService;
+  /** Files customers send, fetched from WhatsApp per request (ADR-216); null without Meta. */
+  receivedMedia: ReceivedMediaService | null;
+  /** Files members send from the inbox, uploaded to WhatsApp (ADR-218); null without Meta. */
+  fileReplies: FileRepliesService | null;
+  /** The Graph client for files: uploads through the API (ADR-219); null without Meta. */
+  mediaGraph: GraphClient | null;
   emailPreferences: EmailPreferencesService;
   teams: TeamsService;
   businessHours: BusinessHoursService;
   savedReplies: SavedRepliesService;
+  /** Tags members put on conversations (ADR-220). */
+  conversationTags: ConversationTagsService;
+  /** Read receipts and typing indicators to customers (ADR-223). */
+  readReceipts: ReadReceiptsService;
   csat: CsatService;
   outbound: OutboundDeps;
   /** Emails to the members who can approve a campaign waiting for approval (ADR-204). */
   campaignNotices: CampaignNoticeDeps;
   contacts: ContactsService;
+  /** Merging two contacts into one (ADR-224). */
+  contactMerges: ContactMergeService;
   consent: ConsentService;
   templates: TemplatesService;
   segments: SegmentsService;
@@ -331,9 +353,12 @@ async function init(): Promise<Runtime> {
   const teams = createTeamsService({ db, clock: systemClock });
   const businessHours = createBusinessHoursService({ db, clock: systemClock });
   const savedReplies = createSavedRepliesService({ db, clock: systemClock });
+  const conversationTags = createConversationTagsService({ db });
+  const readReceipts = createReadReceiptsService({ db, clock: systemClock, jobs, signer });
   const csat = createCsatService({ db, clock: systemClock });
   const outbound: OutboundDeps = { db, jobs, signer, clock: systemClock };
   const contacts = createContactsService({ db, clock: systemClock });
+  const contactMerges = createContactMergeService({ db, clock: systemClock });
   const consent = createConsentService({ db, clock: systemClock });
   const templates = createTemplatesService({ db, jobs, signer, clock: systemClock });
   const segments = createSegmentsService({ db, clock: systemClock });
@@ -460,6 +485,22 @@ async function init(): Promise<Runtime> {
         meta,
       })
     : null;
+  const mediaGraph = meta
+    ? new GraphClient({ baseUrl: meta.graphBaseUrl, version: meta.graphApiVersion })
+    : null;
+  const receivedMedia = mediaGraph
+    ? createReceivedMediaService({ db, keyring, graph: mediaGraph })
+    : null;
+  const fileReplies = mediaGraph
+    ? createFileRepliesService({
+        db,
+        jobs,
+        signer,
+        clock: systemClock,
+        keyring,
+        graph: mediaGraph,
+      })
+    : null;
   const billing = createBillingService({
     db,
     clock: systemClock,
@@ -520,14 +561,20 @@ async function init(): Promise<Runtime> {
     platformReconciliation,
     billingUsage,
     inbox,
+    receivedMedia,
+    fileReplies,
+    mediaGraph,
     emailPreferences,
     teams,
     businessHours,
     savedReplies,
+    conversationTags,
+    readReceipts,
     csat,
     outbound,
     campaignNotices,
     contacts,
+    contactMerges,
     consent,
     templates,
     segments,

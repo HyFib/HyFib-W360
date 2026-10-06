@@ -198,6 +198,7 @@ function defaultNode(
         else: null,
       };
     case 'update_contact':
+    case 'update_conversation':
       return { id, type, label: '', action: { kind: 'add_tag', tag: 'new tag' }, next: null };
     case 'wait':
       return { id, type, label: '', minutes: 60, next: null };
@@ -230,6 +231,7 @@ function retarget(node: AutomationNode, target: string, value: string | null): A
     case 'send_text':
     case 'send_template':
     case 'update_contact':
+    case 'update_conversation':
     case 'wait':
       return { ...node, next: t(node.next) };
     case 'ask_template':

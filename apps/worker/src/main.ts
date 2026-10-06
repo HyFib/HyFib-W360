@@ -13,6 +13,7 @@ import { automationHttpHandler, automationRunHandler } from './handlers/automati
 import { campaignRunHandler } from './handlers/campaigns';
 import { crmReminderHandler } from './handlers/crm';
 import { noteMentionHandler } from './handlers/mentions';
+import { messageReadHandler } from './handlers/read-receipts';
 import { emailSendHandler, outboxSweepHandler } from './handlers/email';
 import { flowKeysHandler, flowSyncHandler } from './handlers/flows';
 import {
@@ -148,6 +149,12 @@ async function main(): Promise<void> {
     QUEUES.noteMention.name,
     { localConcurrency: 2, batchSize: 1 },
     logFailures(rt, QUEUES.noteMention.name, noteMentionHandler(rt)),
+  );
+  // Read receipts and typing indicators (ADR-223): short jobs, picked up within a second.
+  await rt.boss.work(
+    QUEUES.messageRead.name,
+    { localConcurrency: concurrency, batchSize: 1, pollingIntervalSeconds: 1 },
+    logFailures(rt, QUEUES.messageRead.name, messageReadHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.flowSync.name,

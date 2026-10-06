@@ -40,8 +40,13 @@ verification, app review, Embedded Signup configuration).
   delivery in e2e.
 - **P2-09 Inbox UI** — done: views, thread, composer with per-member-and-company drafts and
   idempotency keys, window indicator, assignment, resolve/reopen, notes, unknown-outcome decisions,
-  live updates. Remaining: list virtualisation, collision warnings (phase 3 with presence), template
-  picker (phase 3).
+  live updates. **[Files customers send built; their database and browser tests run only in CI]**
+  (ADR-216: photos, stickers, voice notes, videos and documents fetched from WhatsApp when shown and
+  never stored; no migration). **[Sending files built; their database and browser tests run only in
+  CI]** (ADR-218: photos, videos, recordings and documents up to 16 MB uploaded to WhatsApp when a
+  member sends them and sent by their id; no migration). Remaining: list virtualisation, collision
+  warnings (phase 3 with presence), template picker (phase 3), byte ranges so Safari plays
+  recordings and videos.
 - **P2-10 Channel settings UI** — done: connect (Embedded Signup), setup progress and errors, retry,
   disconnect, quality and health time. Remaining: messaging limits and granted permissions display.
 - **P2-11 Platform quarantine view** — done with P5-10 (ADR-054): the operations console's
@@ -65,8 +70,11 @@ verification, app review, Embedded Signup configuration).
   and inbound), formula-safe export, erasure; saved segments (P3-04). **[Bulk tag edits built; their
   database and browser tests run only in CI]** (ADR-213: one tag added to or removed from up to
   10,000 contacts the page's filters match, refused if the matches changed since the member saw
-  them; no migration). **Remaining:** safe merge (H-019), role-based number masking (W-044), bulk
-  edits of other fields.
+  them; no migration). **[Merging contacts built; its database and browser tests run only in CI]**
+  (ADR-224, H-019, migrations 0147 to 0149: owners and administrators merge a duplicate into the
+  contact they keep after reviewing both; everything moves, the stricter consent stands, and the
+  duplicate is deleted with a record of the merge). **Remaining:** role-based number masking
+  (W-044), bulk edits of other fields, merges through the API, joining conversations.
 - **P3-02 Consent & suppression** — _implemented (2026-09-26)_: consent events with provenance,
   opt-out/opt-in keywords, Meta 131050 opt-outs, suppression list, send-time enforcement (race test
   with a queued template, and with campaigns). **Remaining:** review Meta's
@@ -122,10 +130,16 @@ verification, app review, Embedded Signup configuration).
   audited, without notes; a new `inbox.export` permission; no migration). **[Email preferences
   built; their database and browser tests run only in CI]** (ADR-215, migration 0142: each member
   turns off, per company, the notice emails about mentions and campaigns; security, sign-in and
-  billing emails stay on). **Remaining:** per-team SLA targets and calendars, SLA breach
-  notifications (email or in-app), presence and typing indicators, conversation tags (W-035),
-  private team queues (would change visibility, ADR-029), CSAT by template outside the window (needs
-  a consent decision), CSAT with a real WABA, phone-number masking (W-044).
+  billing emails stay on). **[Conversation tags built; their database and browser tests run only in
+  CI]** (ADR-220, W-035, migration 0145: members who can reply tag the conversations they can see,
+  and the inbox shows the tags and filters by one; erasing the contact deletes them). **[Read
+  receipts and typing indicators built; their database and browser tests run only in CI]** (ADR-223,
+  migration 0146: a company setting, off by default, marks the customer's message read when a member
+  opens the conversation and shows the customer a typing indicator while a member writes).
+  **Remaining:** per-team SLA targets and calendars, SLA breach notifications (email or in-app),
+  presence of members (who is viewing a conversation), private team queues (would change visibility,
+  ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA,
+  phone-number masking (W-044).
 
 ## Phase 4 — automation, Flows, CRM, commerce
 
@@ -140,11 +154,13 @@ verification, app review, Embedded Signup configuration).
   captured answers with retention; an automation report section; a builder with a generated diagram
   and an in-browser simulator. T: restart and lost signals resume from the stored position; bot and
   person never answer at once. Template steps (send a template, ask with a template's quick replies)
-  and the order-event trigger came with P4-06e. **Remaining:** Flow and catalog steps (sending a
-  WhatsApp Flow or products from a run), starting runs from the public API or campaigns, enrolling
-  contacts or segments in a sequence without a customer message or order event, fuzzy keyword
-  matching, a drag-and-drop canvas (ADR-034), run export, usage billing for
-  automation steps, a real sandbox run (release checklist).
+  and the order-event trigger came with P4-06e. **[Steps that tag the conversation built; their
+  database and browser tests run only in CI]** (ADR-222: a step adds or removes a tag on the run's
+  conversation and a condition reads its tags; no migration). **Remaining:** Flow and catalog steps
+  (sending a WhatsApp Flow or products from a run), starting runs from the public API or campaigns,
+  enrolling contacts or segments in a sequence without a customer message or order event, fuzzy
+  keyword matching, a drag-and-drop canvas (ADR-034), run export, usage billing for automation
+  steps, a real sandbox run (release checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
   local target server only_: "Call a web address" steps (method, address with URL-encoded
   placeholders, headers, JSON body, values saved from the response, success and failure branches);
@@ -686,9 +702,18 @@ verification, app review, Embedded Signup configuration).
   **[Saying until when a waiting campaign can be approved built; its database tests run only in
   CI]** (ADR-209: the approval email and the campaign's page give the end of its sending period,
   after which approving is refused, and the page then offers no Approve button; no migration).
-  Remaining: uploaded media, call-to-action messages through the API, taking
+  **[Downloading the files customers send built; its database and browser tests run only in CI]**
+  (ADR-217: `GET /messages/{id}/media` gives a key that reads conversations the file of a message a
+  customer sent, as WhatsApp gives it, with reasons when it cannot; no migration).
+  **[Uploading files to send by id built; its database and browser tests run only in CI]** (ADR-219,
+  migrations 0143 and 0144: `POST /media` uploads a file for a number, which `POST /messages` sends
+  as `mediaId` from that number for 30 days).
+  **[Conversation tags through the API built; their database and browser tests run only in CI]**
+  (ADR-221: conversations carry `tags`, `GET /conversations` filters by `tag`, and the three calls
+  that change conversations take `addTags` and `removeTags`; no migration).
+  Remaining: call-to-action messages through the API, taking
   reactions back,
-  media downloads, changing a field's type,
+  changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
   resuming what members or HyFib paused, campaign
   recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose

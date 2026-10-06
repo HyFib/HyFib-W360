@@ -8500,3 +8500,327 @@ Decision:
 
 Not built: a digest instead of single emails, in-app notifications, preferences for CRM task
 reminders, and a company-wide default set by an administrator.
+
+## ADR-216 Viewing and downloading the files customers send (P2-09, P5-08) (2026-10-06)
+
+Context: a photo, voice note, video, document or sticker a customer sent reached the inbox as its
+kind and caption only, with "Media download is not available yet.": members could not see what
+customers sent. WhatsApp keeps the file for the business to fetch (`GET /{media-id}` gives an
+address valid for 5 minutes, downloaded with the account's token; research M-047, M-196), but HyFib
+has no storage for files.
+
+Decision:
+
+- **Fetched when shown, never kept:** the conversation page shows each file the customer sent
+  through `/c/<company>/inbox/<conversation>/media/<message>`. For each request HyFib asks Graph for
+  the file's address with the token of the WhatsApp account that received it, downloads it with the
+  same token and passes it on as it arrives (`messaging/received-media.ts`). Nothing is written: the
+  file is not stored, cached on the server or logged, so a customer's erasure, which deletes the
+  message's media record, leaves nothing behind, and a file WhatsApp no longer keeps cannot be
+  shown.
+- **Who:** members who can see the conversation, as for its messages: `inbox.read_all`, or
+  `inbox.read_assigned` for conversations assigned to them or to nobody. A message of another
+  conversation or company, one the company sent, or one of an erased customer has no file to give
+  (404).
+- **How it reaches the browser:** photos (JPEG, PNG), stickers (WebP), recordings (AAC, MP4, MPEG
+  and OGG audio) and videos (MP4, 3GPP) keep their type and are shown or played in the page;
+  recordings and videos load only when played. Every other file, documents included, is sent as
+  `application/octet-stream` with `Content-Disposition: attachment`, under the name the document
+  came with (without characters a file name or a header cannot hold) or
+  `whatsapp-<type>-<message>.<extension>`, so no customer's file renders as a page of HyFib. Every
+  answer carries `X-Content-Type-Options: nosniff`, a `sandbox` Content-Security-Policy and
+  `Cross-Origin-Resource-Policy: same-origin`, and only the member's browser caches it (`private`,
+  an hour).
+- **The token reaches only Meta:** it goes in the Authorization header to Graph, and to the address
+  Graph returned only when that address is https (or the configured Graph origin, the test stand-in)
+  and has no user name or password; redirects are refused and the address is never stored or logged.
+  The download sends a User-Agent in the form of the pattern in Meta's description.
+- **Limits and refusals:** a file larger than 100 MB, Meta's largest (M-049), is refused by its
+  announced size before the download and by counting while it passes. Other refusals come before the
+  first byte, as plain text: the account disconnected or its token refused by Meta (412, reconnect
+  in Settings → Channels), WhatsApp no longer giving the file (404, as it keeps files for a limited
+  time), WhatsApp not answering (503). An error page in place of the file is refused.
+- **What is not checked:** Meta's description does not say how `sha256` is encoded (its example is
+  `<HASH>`), so HyFib does not compare the file with it; TLS protects the transfer.
+  `phone_number_id` is not sent: the description says it checks that the media belongs to that
+  number, and whether a customer's file belongs to the number it was sent to is not stated.
+- **No migration.** The web tier now calls Meta's media host on members' requests, as DEPLOYMENT
+  notes.
+
+Not built: files through the public API, byte ranges (Safari and iOS play recordings and videos only
+from servers that answer byte-range requests, so members there download them with the link below the
+player), keeping files beyond WhatsApp's lifetime, thumbnails, scanning documents for malware
+(members' devices open them), and sending files from the inbox.
+
+## ADR-217 Downloading the files customers send through the public API (P5-08) (2026-10-06)
+
+Context: keys read a message a customer sent with a file as its type, its caption (`text`) and
+`mimeType` (`GET /messages`, `message.received`), but not the file: an integration filing a
+customer's invoice or photo had someone download it by hand. Members open these files in the inbox
+since ADR-216.
+
+Decision:
+
+- **`GET /api/v1/messages/{id}/media`** with `conversations.read`, whose description now says it
+  includes the files contacts sent: the file of a message a customer sent with one (`direction`
+  `inbound`, `type` `image`, `video`, `audio`, `document` or `sticker`), fetched from WhatsApp for
+  the request with ADR-216's calls and passed on as it arrives. HyFib keeps no copy.
+- **As WhatsApp gave it:** `Content-Type` is the type WhatsApp gave the file, without its
+  parameters, or `application/octet-stream` without one; `Content-Disposition` is always
+  `attachment`, with the name ADR-216 gives. Unlike the inbox, every type is given: the API is
+  called with a key in a header, never with a browser's cookies, so no file runs as a page of HyFib.
+  The answer also carries `nosniff` and a `sandbox` policy.
+- **Refusals before the first byte, as the API's JSON errors:** 404 for a message not in the company
+  or of an erased contact (as its conversation is), or with reason `no_file` (no file from the
+  customer) or `file_expired` (WhatsApp no longer gives it); 412 with `channel_disconnected`,
+  `access_refused` or `file_too_large`; 503 when WhatsApp does not answer. Keys, scopes, the plan
+  and the limits apply as to every call.
+- **One implementation:** a member's and a key's request share the lookup and the fetch
+  (`createReceivedMediaService`), and the API's handler can now answer with a stream
+  (`handleApiRequest`'s file result) that carries the request's id.
+- **No migration.** The OpenAPI document and the reference describe the call.
+
+Not built: thumbnails, files in webhook events (they keep the type and `mimeType`), a link that
+works without the key, and the files the business sent.
+
+## ADR-218 Sending files from the inbox (P2-09) (2026-10-06)
+
+Context: members answered in text only, so a price list, an invoice or a product photo went from
+someone's phone. Meta's spec uploads a file for a number (`POST /{phone-number-id}/media`, multipart
+`file` and `messaging_product`, answering an `id`) and sends media by that id, with a caption and,
+in its "Send Document Message by ID" example, a file name (research M-046, M-197). HyFib has no file
+storage.
+
+Decision:
+
+- **Uploaded when sent, never kept:** while a reply can be sent, the conversation page has a "Send a
+  file" card. The browser posts the file and an optional caption to
+  `/api/c/<company>/inbox/<conversation>/files`; HyFib checks the reply as it checks a text reply
+  (`inbox.reply`, sight of the conversation, the number active, the 24-hour window, a WhatsApp
+  number, and the collision warning of ADR-033 against the newest message the page showed), uploads
+  the file for the conversation's number with its account's token, and queues a reply naming the
+  media id. The bytes pass through memory once; the message keeps the media id, the caption, the
+  type and a document's name, and so does its media record.
+- **What can be sent:** JPEG and PNG photos, MP4 and 3GPP videos, AAC, AMR, MP3, MP4 and OGG
+  recordings, and PDF, text, Word, Excel and PowerPoint documents, up to 16 MB, HyFib's limit for a
+  file through its servers (Meta's limits by type come from third-party copies, M-049). A caption of
+  up to 1,024 characters goes with a photo, a video or a document; a recording takes none (M-191). A
+  document goes with the name it came with, cleaned as ADR-216 cleans names.
+- **Once:** a retry of the same submission (its client key) answers the first message without
+  uploading again. If the reply is refused after the upload, for example because the window closed
+  meanwhile, the media is never sent and Meta deletes it (M-046).
+- **Refusals before anything is written:** a file of another type, empty or over 16 MB (422, naming
+  the file); the reply's own refusals (403, 404, 409, 412); Meta refusing the upload (422, with
+  Meta's reason) or the account's token (412), or not answering (503).
+- **The route** is under /api, so Next's proxy neither buffers nor cuts a body over its 10 MB; only
+  HyFib's own pages may post to it (the trusted-origin check of server actions), with the member's
+  session, and it reads at most 16 MB and 64 KB.
+- **Members see what they sent:** a file a member sent shows in the thread as a customer's does
+  (ADR-216), fetched from WhatsApp while Meta keeps it. The API's download stays for customers'
+  files (ADR-217).
+- **One implementation:** text and file replies share the reply's checks and queueing
+  (`queueReply`). The test stand-in keeps uploads as files and takes a document's name only with an
+  id, as the spec's examples do.
+- **No migration.**
+
+Not built: uploads through the public API, several files at once, dragging and dropping, a progress
+bar, stickers, files over 16 MB, and files outside the window, where only templates go.
+
+## ADR-219 Uploading files through the public API to send by id (P5-08) (2026-10-06)
+
+Context: keys sent media only from https links WhatsApp fetches (ADR-194), so an integration with an
+invoice or a price list on its own servers had to publish it at a public address first. Members
+upload files since ADR-218, with Meta's upload and sending by id (research M-046, M-197).
+
+Decision:
+
+- **`POST /api/v1/media`** with `messages.reply`, as multipart form data: `file`, and `from` (the
+  number's id) when the company has several active numbers. The file is checked as members' files
+  are (the types of ADR-218, at most 16 MB), uploaded to WhatsApp for the number with its account's
+  token, and recorded as the company's upload: a media row without a message, naming the number, the
+  key and Meta's media. The answer (201) gives its `id`, the number, its `type`, type, size and
+  name, and `expiresAt`, 30 days after the upload, as long as Meta keeps it (M-046). HyFib keeps no
+  copy. An upload takes no Idempotency-Key: a retry uploads the file again.
+- **Sent by id:** `POST /messages` with `type` `image`, `video`, `audio` or `document` takes
+  `mediaId` in place of `link` (one of the two). The file must be the company's upload, for the
+  number the message goes from, of the message's type, and less than 30 days old; otherwise 422
+  naming `mediaId`, or 412 with reason `file_expired`. It can be sent as often as needed. The
+  message names Meta's media id, a document with the name it was uploaded under (as the spec's
+  example sends it), gets a media row of its own, and shows in the inbox as members' files do
+  (ADR-218). Stickers stay links (ADR-198).
+- **Migration 0143** adds `channel_account_id` and `api_key_id` to `app.media_objects`, with
+  composite foreign keys to the company's numbers and keys and a check that a key's upload names its
+  number and Meta's media and belongs to no message, all NOT VALID so the table stays writable;
+  **0144** validates them. The company data export carries the columns; erasure and the company's
+  deletion already delete media rows, before the numbers and keys they name.
+- **The API takes multipart bodies** for this call only (`handleApiRequest`'s `multipartBytes`: at
+  most 16 MB and 64 KB, form fields checked for NUL as JSON is).
+
+Not built: listing or deleting uploads, uploads for template headers (they take links, ADR-201),
+stickers, files over 16 MB, and purging upload rows after their 30 days.
+
+## ADR-220 Conversation tags (P3-06, W-035) (2026-10-06)
+
+Context: the inbox filtered conversations by team, number and customer, but members had no way to
+label a conversation ("refund", "follow up") and find the labelled ones again; contact tags describe
+the person, not the conversation. WATI's inbox tags chats, from tags managed in its settings
+(research W-035).
+
+Decision:
+
+- **Tags on conversations** in `app.conversation_tags` (migration 0145), written as contact tags
+  are: lower case, trimmed, spaces collapsed, 1 to 40 characters, no commas or control characters;
+  at most 20 on a conversation, counted under the conversation's row lock. They are free text, as
+  contact tags are: there is no central list, and the editor suggests the tags already in use.
+- **Who:** members with `inbox.reply` add and remove tags on the conversations they can see (the
+  sight rule of replies and notes); everyone who sees a conversation sees its tags. The conversation
+  of an erased contact takes no new tags. Each change emits a `conversation.tags` live event, so
+  open inboxes refresh. Changes are not audited, as contact tags' are not.
+- **Inbox:** each conversation in the list shows its tags. The filter's Tag choice lists the tags on
+  conversations the member can see (at most 200, alphabetically), so an agent never learns the tags
+  of conversations they cannot open, and lists the conversations with the tag chosen. The
+  conversation page shows its tags with an editor that takes several at once, separated by commas.
+- **Erasure and deletion:** erasing a contact deletes the tags of their conversations, as it deletes
+  the conversations' notes: 0145 replaces `app.erase_contact` with that one statement added, and
+  w360_definer reads and deletes only the current company's tags. The company's deletion deletes
+  them before its conversations (step 365); the company data export carries them.
+
+Not built: tags through the public API or webhooks, automations that tag, a central list of allowed
+tags, renaming a tag everywhere, and reports by tag.
+
+## ADR-221 Conversation tags through the public API (P5-08, W-035) (2026-10-06)
+
+Context: members tag conversations since ADR-220, but an integration (a helpdesk, a CRM) could
+neither read the tags nor set them, so the two sides could not share the labels.
+
+Decision:
+
+- **Read:** every conversation the API answers carries `tags`, alphabetically, with
+  `conversations.read`. `GET /conversations` takes `tag` (written as tags are, so its case does not
+  matter); a value that cannot be a tag is refused with 422 naming `tag`. Changing the conversations
+  a filter finds (ADR-166) takes it too.
+- **Change:** `PATCH /conversations/{id}`, `POST /conversations/update-many` and `/update-matching`
+  take `addTags` and `removeTags` with `conversations.write`, applied after the status: written as
+  tags are, each once, never both added and removed (422 naming `removeTags`), at most 20 on a
+  conversation, counted under the conversation's row lock (422 naming `addTags`, or
+  `change.addTags`, and nothing changed). What a conversation already has changes nothing.
+- **A change of the tags is a change of the conversation**, through the API or the inbox: its
+  `updatedAt` moves, so `updatedSince` finds it, and open inboxes refresh. Through the API it is
+  audited as `conversation.tags_changed` with the counts added and removed, never the tags, as
+  contacts' tag changes are.
+- **The API document names no ADR:** a unit test now checks the whole document, and two descriptions
+  that did were corrected.
+
+Not built: webhook events or webhook filters on tags, tags in the message feed, and a list of the
+tags in use through the API.
+
+## ADR-222 Automations that tag the conversation and branch on its tags (P4-01, W-035) (2026-10-06)
+
+Context: members and keys tag conversations since ADR-220 and ADR-221, but an automation that asks
+the customer what they need could not label the conversation for the team ("refund"), nor take
+another path for a conversation already labelled.
+
+Decision:
+
+- **A step, "Tag the conversation"** (`update_conversation`): add or remove one tag on the run's
+  conversation, written as tags are, then go on to the next step. A conversation that already has 20
+  tags keeps them; the step goes on and its log says why (`conversation_too_many_tags`), as a
+  contact at its limit does. A conversation whose contact was erased takes no tag.
+- **A condition rule, "A conversation tag"** (`conversation_tag`): the run's conversation has, or
+  does not have, a tag, beside the contact's tags (whose rule is unchanged).
+- **Applied as members tag:** the runner holds the conversation's row lock for the step, which
+  members and keys take before changing its tags, so the count and the change see one state; a
+  change moves `updatedAt` and emits the live event. The simulator shows what the step would do and
+  keeps simulated conversation tags.
+- **No migration:** steps live in the published versions' JSON. Workers roll out before the web
+  tier, so a version with the new step is never read by a worker that does not know it.
+
+Not built: a trigger when a conversation is tagged, tagging from the API's runs, and tags set from
+saved answers.
+
+## ADR-223 Telling customers their message was read and a member is writing (P3-06) (2026-10-06)
+
+Context: a customer who writes to a company on HyFib never saw that anyone read their message: HyFib
+did not send WhatsApp's read receipts, nor the typing indicator WhatsApp offers in the same request
+(research M-045). P3-06 listed typing indicators.
+
+Decision:
+
+- **A company setting, off by default** (Settings → Inbox, "Read receipts and typing";
+  `tenant.settings.manage`, audited as `inbox.read_receipts_updated`; migration 0146 adds
+  `app.messaging_settings.read_receipts`): whether customers may see that the business read their
+  message is the company's choice.
+- **Read receipts:** when a member opens a conversation with unread messages, the transaction that
+  marks it read queues one read receipt for the customer's latest message WhatsApp named (one job
+  per message, signed, on the new `message.read` queue). Earlier messages are not marked one by one;
+  whether WhatsApp shows them read too was not verifiable from this environment.
+- **Typing indicators:** while a member who can reply and see the conversation writes in the
+  composer, inside the 24-hour window on an active number, the composer asks at most every 20
+  seconds; the server queues a typing indicator for the customer's latest message (which marks it
+  read as well). Best effort: a refusal changes nothing for the member, and the composer stops
+  asking once told the setting is off. How long WhatsApp shows the indicator is Meta's; it was not
+  verifiable.
+- **The worker sends** `POST /{phone-number-id}/messages` with `status: read`, the message's id and,
+  for typing, `typing_indicator: {type: text}` (`GraphClient.markRead`), after checking again in the
+  company's scope: the setting still on, an inbound message, the contact not erased, the number
+  active and its account connected. Meta's refusal is logged with what Meta said; a failure worth
+  trying again is retried for a read receipt (marking read again is harmless) and dropped for a
+  typing indicator, which would only show late.
+
+Not built: members' presence in the inbox (who else is viewing or writing in a conversation), read
+receipts for automations' or keys' replies, and marking each unread message read.
+
+## ADR-224 Merging two contacts (H-019) (2026-10-06)
+
+Context: one person could be two contacts, and nothing joined them. WhatsApp lets customers write
+with a username: a message naming them only by WhatsApp user id creates a contact without a number,
+while the company already knows them by phone (imported, added by a member, read from a store).
+Contacts from the API or a store can lack a number too. A later message naming both the user id and
+the number failed its whole receipt: the user id's identity took a number another identity held,
+against the unique index.
+
+Decision:
+
+- **Owners and administrators merge** (`contacts.write` and `contacts.delete`, so not while the
+  company is suspended), from the contact they keep: "Merge a duplicate" finds the other by name,
+  email or number, the review shows both side by side with what the result keeps and why a merge is
+  refused, and a confirmation merges. It cannot be undone; the audit log has `contact.merged` with
+  the merged contact's id and counts.
+- **Everything moves to the kept contact** in one transaction (`app.merge_contacts`, SECURITY
+  DEFINER): WhatsApp identities, conversations, the consent history (whole, with its times and
+  sources), tags, CRM deals with their tasks and timeline (one statement, as their composite keys
+  tie them to one contact), orders, store messages, conversation sources, campaign rows, automation
+  runs, Flow sends and answers, and earlier merges into it. The kept contact keeps its name, number,
+  email and field values and takes the other's where it has none. Of a campaign both were in, one
+  row stays: the one a message was sent from, else one still waiting to be sent (so the person is
+  not sent it twice), else the kept contact's.
+- **The stricter consent:** the merged contact's opt-out stands on the kept contact, recorded as a
+  consent event with the new source `merge` (at the later of now and the kept state's own time,
+  where an opt-out wins a tie). A merge never adds an opt-in: one only the merged contact had stays
+  in the history, the review says so, and a member records it again if the customer agreed.
+- **Deleted, not emptied:** the merged contact is deleted once nothing names it, and
+  `app.contact_merges` records who merged it into which contact, when, and the counts (no personal
+  data), so a link to it leads to the kept contact. Anything that read it before the merge's locks
+  committed first and was merged; anything still naming it afterwards meets its foreign key and
+  fails (ingestion and jobs are retried, members' actions refused) instead of landing on a contact
+  nobody sees. What the merge's own transaction captured about it (webhook events, the API's change
+  records) goes with it.
+- **Refused** (the review says why, and the function checks again under its locks): two phone
+  numbers (a contact keeps one), conversations of both on the same company number (one conversation
+  per number and contact; conversations are not joined), more than 50 tags between them, a campaign
+  sent to both, an erased contact, and a message to the merged contact being sent (its answer is
+  recorded for the contact read when it was claimed; queued sends are locked, so none is claimed
+  during the merge).
+- **Locks** in the order other writers take them: both contacts' conversations, then both contacts,
+  then the merged contact's queued and in-flight sends and both contacts' campaign rows, each in id
+  order. Consent events, the CRM timeline and what started an automation run stay append-only,
+  except for an update that changes only `contact_id` while the function sets `w360.contact_merge`,
+  by the definer role alone (it alone holds UPDATE on those columns), as erasure's exception (0005).
+- **Also fixed:** a message naming a customer by user id and by a number another identity holds
+  leaves the number with that identity and joins the user id's contact, instead of failing the
+  receipt; a reply uses the identity WhatsApp updated last among those with a number (with two
+  identities on an account it could take the one known by user id only and refuse).
+
+Not built: merging through the API and a `contact.merged` webhook event (the merged contact's id
+stops resolving: the API answers 404), joining two conversations on one number, merging contacts
+that each have a number, undoing a merge, and suggestions of likely duplicates.

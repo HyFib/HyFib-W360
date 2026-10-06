@@ -4,3 +4,5 @@
  */
 export * from './graph';
 export * from './interpreter';
+/** Tags as the inbox stores them, for the simulator's typed tags. */
+export { normalizeTag } from '../contacts/fields';

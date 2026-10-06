@@ -6,6 +6,7 @@ import {
   removeClosedDayAction,
   updateBusinessHoursAction,
   updateCsatSettingsAction,
+  updateReadReceiptsAction,
 } from '@/app/actions/inbox-settings';
 import { ClientButton, ClientForm } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
@@ -282,6 +283,70 @@ export function CsatSettingsForm({
           <div>
             <Button type="submit" disabled={busy}>
               {busy ? 'Saving…' : 'Save CSAT settings'}
+            </Button>
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            Only members who manage company settings can change this.
+          </p>
+        )}
+      </fieldset>
+    </ClientForm>
+  );
+}
+
+/** Read receipts and typing indicators to customers (ADR-223). */
+export function ReadReceiptsForm({
+  slug,
+  initial,
+  canEdit,
+}: {
+  slug: string;
+  initial: boolean;
+  canEdit: boolean;
+}) {
+  const [enabled, setEnabled] = useState(initial);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  return (
+    <ClientForm
+      className="grid gap-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        setBusy(true);
+        setError(null);
+        setSaved(false);
+        void updateReadReceiptsAction(slug, { enabled }).then((r) => {
+          setBusy(false);
+          if (!r.ok) setError(r.message);
+          else setSaved(true);
+        });
+      }}
+    >
+      <FormError message={error} />
+      <FormSuccess message={saved ? 'Read receipt settings saved.' : null} />
+      <fieldset disabled={!canEdit} className="grid gap-4">
+        <label htmlFor="read-receipts-on" className="flex items-start gap-2 text-sm">
+          <Checkbox
+            id="read-receipts-on"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+          />
+          <span>
+            Show customers when their messages are read and when a member is writing
+            <span className="block text-muted-foreground">
+              When a member opens a conversation with unread messages, the customer’s latest message
+              is marked read in WhatsApp. While a member who can reply writes in the composer inside
+              the 24-hour customer service window, the customer is shown that a reply is being
+              written.
+            </span>
+          </span>
+        </label>
+        {canEdit ? (
+          <div>
+            <Button type="submit" disabled={busy}>
+              {busy ? 'Saving…' : 'Save read receipt settings'}
             </Button>
           </div>
         ) : (

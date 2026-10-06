@@ -401,6 +401,33 @@ sign-in and billing emails cannot be turned off. During a rollout an old server 
 email that was turned off. The audit log records each change as
 `membership.email_preferences_updated`.
 
+**A member cannot open a file a customer sent (ADR-216).** The message says why: the account that
+received it is disconnected or Meta refused its token (reconnect it in Settings → Channels; the
+daily access check reports the same), WhatsApp no longer keeps the file (it keeps files for a
+limited time; there is nothing to restore, since HyFib keeps no copy), or WhatsApp did not answer
+(try again, and check the web tier's outbound https to Meta). Safari and iOS do not play recordings
+and videos from HyFib: members download them with the link below the player.
+
+**An integration cannot download a file a customer sent (ADR-217).** The JSON error's reason says
+why: `no_file` (the message has no file from the customer: check its `direction` and `type`),
+`file_expired` (WhatsApp no longer keeps it; integrations should fetch files soon after
+`message.received`), `channel_disconnected` or `access_refused` (reconnect the account in Settings →
+Channels), `file_too_large` (over 100 MB); a 503 means WhatsApp did not answer, so retry later. The
+key needs `conversations.read`.
+
+**A member cannot send a file (ADR-218).** The card says why: the type is not one HyFib sends, the
+file is empty or over 16 MB, the window closed (only templates can go), the number or its account is
+disconnected (reconnect it in Settings → Channels), or WhatsApp refused the file (its reason is
+shown) or did not answer (try again). A 413 from a load balancer before HyFib answers means its body
+limit is below the 16 MB HyFib accepts.
+
+**An integration cannot upload or send a file by id (ADR-219).** An upload is refused for its type
+or size (422 naming `file`), a number that is not the company's or not active, or WhatsApp refusing
+it (422 with its reason). A send by id is refused when the id is not the company's upload, was
+uploaded for another number or is of another kind (422 naming `mediaId`), or was uploaded more than
+30 days ago (412 `file_expired`): upload the file again. `app.media_objects` rows with an
+`api_key_id` and no `message_id` are the uploads.
+
 **Many failures with 131049.** Meta's per-user marketing limit: those customers received too many
 marketing messages from businesses. Do not resend; wait at least 24 hours (M-062) and consider the
 company's frequency cap.
@@ -469,6 +496,42 @@ otherwise the conversation page shows no "Download transcript" link and its addr
 403 or a 404. Each download is in the audit log as `conversation.transcript_exported` with the
 conversation's id. A transcript leaves internal notes out by design; a download cut short mid-file
 is logged by the web server as `transcript export failed mid-stream`, so download it again.
+
+**A member cannot tag a conversation (ADR-220).** Tagging needs `inbox.reply` and a conversation the
+member can see (agents see those assigned to them and the unassigned ones). A conversation takes at
+most 20 tags of up to 40 characters, without commas, and the conversation of an erased contact takes
+none ("This contact was erased."). The inbox's Tag filter offers only the tags on conversations the
+member can see, so two members may be offered different tags.
+
+**An integration's tag change is refused (ADR-221).** 422 naming `addTags` means a tag that cannot
+be one (over 40 characters, or with a comma) or a conversation that would have more than 20 tags
+(the message names it; the call changed nothing); `removeTags` means the same tag both added and
+removed; `tag` means a filter value that cannot be a tag. Conversations of erased contacts are not
+found. Each change is in the audit log as `conversation.tags_changed` with the counts.
+
+**An automation did not tag a conversation (ADR-222).** The run's step log says why: "the
+conversation already has the maximum number of tags" (20), or "the contact was erased". A run that
+failed as `version_unreadable` right after a deploy was read by a worker of the previous release:
+roll the workers out, then start the run again.
+
+**Customers do not see that their messages were read (ADR-223).** Settings → Inbox, "Read receipts
+and typing", must be on. A receipt is queued when a member opens a conversation with unread
+messages, for the customer's latest message; the worker logs each job as `read receipt` with its
+outcome (`off`, `contact_erased`, `channel_inactive`, `account_disconnected`, `rejected` with what
+Meta said). Jobs that kept failing are in the dead letters of the `message.read` queue. Typing
+indicators are queued only inside the 24-hour window, at most every 20 seconds per composer.
+
+**A merge is refused, or a contact is missing after one (ADR-224).** The review page says why a
+merge cannot be done; the function refuses the same cases again in fixed sentences, and a message to
+the merged contact being sent asks for a minute's wait. A merged contact is deleted: its old link
+leads to the contact it was merged into (`app.contact_merges`), and the audit log has
+`contact.merged` with the counts moved. A merge cannot be undone; a mistaken one is corrected by
+hand (a number moved back by a member, consent recorded again with evidence).
+
+**Migration 0148 or 0149 failed.** They build `app.campaign_recipients_contact_idx` and
+`app.automation_runs_contact_idx` concurrently. If one failed, an INVALID index can remain: run
+`DROP INDEX CONCURRENTLY app.campaign_recipients_contact_idx;` (or
+`app.automation_runs_contact_idx`) and run the migrations again.
 
 **Migration 0010 failed.** It builds `app.conversations_team_idx` concurrently. If it failed, an
 INVALID index can remain: run `DROP INDEX CONCURRENTLY app.conversations_team_idx;` and run the

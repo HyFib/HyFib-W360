@@ -106,11 +106,11 @@ export function classifyGraphError(
   };
 }
 
-/** A file part of a multipart request. */
+/** A file part of a multipart request: text (Flow JSON) or bytes (an uploaded file, ADR-218). */
 export interface FormFile {
   filename: string;
   contentType: string;
-  content: string;
+  content: string | Uint8Array<ArrayBuffer>;
 }
 
 /** A flow as `GET /{flow-id}` describes it (research M-163). */
@@ -197,14 +197,39 @@ function mapRemoteFlow(json: Record<string, unknown>): RemoteFlow | null {
   };
 }
 
+/** Where a file a customer sent can be downloaded for 5 minutes, and what Meta says it is. */
+export interface MediaLocation {
+  url: string;
+  mimeType: string | null;
+  fileSize: number | null;
+}
+
+/**
+ * How long a whole download may take, however slowly the member's browser reads it: Meta's files
+ * are at most 100 MB (research M-049).
+ */
+export const MEDIA_DOWNLOAD_TIMEOUT_MS = 300_000;
+
+/** How long an upload of a file a member sends may take (at most 16 MB, ADR-218). */
+export const MEDIA_UPLOAD_TIMEOUT_MS = 120_000;
+
+/** A product token in the form of the User-Agent pattern in Meta's OpenAPI description. */
+const MEDIA_USER_AGENT = 'HyFib-W360/1.0.0';
+
+export type MediaDownload =
+  | { ok: true; body: ReadableStream<Uint8Array>; contentLength: number | null }
+  | { ok: false; kind: GraphFailureKind; httpStatus?: number; title: string };
+
 export class GraphClient {
   private readonly base: string;
+  private readonly origin: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: GraphClientOptions) {
     if (!/^v\d+\.\d+$/.test(options.version)) throw new Error('Invalid Graph API version');
     this.base = `${options.baseUrl.replace(/\/$/, '')}/${options.version}`;
+    this.origin = new URL(options.baseUrl).origin;
     this.timeoutMs = options.timeoutMs ?? 15_000;
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
@@ -218,6 +243,8 @@ export class GraphClient {
       body?: unknown;
       /** Multipart form data (Flows endpoints take form fields and files, research M-161). */
       form?: Record<string, string | FormFile>;
+      /** A longer limit than the client's, for an upload. */
+      timeoutMs?: number;
     },
     map: (json: Record<string, unknown>) => T | null,
   ): Promise<GraphResult<T>> {
@@ -244,7 +271,7 @@ export class GraphClient {
         method,
         headers,
         ...(body !== undefined ? { body } : {}),
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(options.timeoutMs ?? this.timeoutMs),
         redirect: 'error',
       });
     } catch (error) {
@@ -302,6 +329,28 @@ export class GraphClient {
           waId: typeof waId === 'string' && /^[0-9]{6,20}$/.test(waId) ? waId : null,
         };
       },
+    );
+  }
+
+  /**
+   * POST /{phone-number-id}/messages with `status: read` (research M-045): marks the customer's
+   * message read and, with `typing`, shows the customer a typing indicator. Meta answers
+   * `success: true`.
+   */
+  markRead(phoneNumberId: string, token: string, input: { messageId: string; typing: boolean }) {
+    return this.request(
+      'POST',
+      `/${encodeURIComponent(phoneNumberId)}/messages`,
+      {
+        token,
+        body: {
+          messaging_product: 'whatsapp',
+          status: 'read',
+          message_id: input.messageId,
+          ...(input.typing ? { typing_indicator: { type: 'text' } } : {}),
+        },
+      },
+      (json) => (json.success === true ? { read: true as const } : null),
     );
   }
 
@@ -764,5 +813,120 @@ export class GraphClient {
       { token, body: { messaging_product: 'whatsapp', pin } },
       (json) => (json.success === true ? { registered: true } : null),
     );
+  }
+
+  /**
+   * POST /{phone-number-id}/media: uploads a file for the number to send, as multipart form data
+   * with `messaging_product` and `file`, whose part carries the file's type (operation
+   * `uploadImage` in Meta's official OpenAPI description, research M-046, M-197). Meta answers the
+   * media's `id`, which a message names in place of a link. An upload that times out may have
+   * reached Meta: the media it left is never sent and Meta deletes it (M-046).
+   */
+  uploadMedia(
+    phoneNumberId: string,
+    token: string,
+    file: { filename: string; contentType: string; bytes: Uint8Array<ArrayBuffer> },
+  ) {
+    return this.request(
+      'POST',
+      `/${encodeURIComponent(phoneNumberId)}/media`,
+      {
+        token,
+        form: {
+          messaging_product: 'whatsapp',
+          file: { filename: file.filename, contentType: file.contentType, content: file.bytes },
+        },
+        timeoutMs: MEDIA_UPLOAD_TIMEOUT_MS,
+      },
+      (json) => (typeof json.id === 'string' && json.id.length > 0 ? { mediaId: json.id } : null),
+    );
+  }
+
+  /**
+   * GET /{media-id}: where a file a customer sent can be downloaded, for 5 minutes (operation
+   * `retrieveMediaUrl` in Meta's official OpenAPI description, research M-047). Its example gives
+   * `file_size` as text; a number is read too.
+   */
+  getMedia(mediaId: string, token: string) {
+    return this.request(
+      'GET',
+      `/${encodeURIComponent(mediaId)}`,
+      { token },
+      (json): MediaLocation | null => {
+        const url = str(json.url);
+        if (!url) return null;
+        const size = json.file_size;
+        const fileSize =
+          typeof size === 'number' && Number.isSafeInteger(size) && size >= 0
+            ? size
+            : typeof size === 'string' && /^\d{1,15}$/.test(size)
+              ? Number(size)
+              : null;
+        return { url, mimeType: str(json.mime_type), fileSize };
+      },
+    );
+  }
+
+  /**
+   * Downloads a file from the address `getMedia` gave, with the account's token in the
+   * Authorization header (operation `downloadMedia`, research M-047, M-196). The token goes only to
+   * an https address, or to the configured Graph origin itself (the test stand-in), and redirects
+   * are refused, so it reaches no other host. The caller reads or cancels the body.
+   */
+  async downloadMedia(url: string, token: string): Promise<MediaDownload> {
+    let target: URL;
+    try {
+      target = new URL(url);
+    } catch {
+      return { ok: false, kind: 'permanent', title: 'unusable_media_url' };
+    }
+    if (
+      target.username !== '' ||
+      target.password !== '' ||
+      (target.protocol !== 'https:' && target.origin !== this.origin)
+    ) {
+      return { ok: false, kind: 'permanent', title: 'unusable_media_url' };
+    }
+    let response: Response;
+    try {
+      response = await this.fetchImpl(target, {
+        method: 'GET',
+        headers: { authorization: `Bearer ${token}`, 'user-agent': MEDIA_USER_AGENT },
+        signal: AbortSignal.timeout(MEDIA_DOWNLOAD_TIMEOUT_MS),
+        redirect: 'error',
+      });
+    } catch (error) {
+      const code = causeCode(error);
+      return {
+        ok: false,
+        kind: code && PRE_SEND_ERROR_CODES.has(code) ? 'retryable' : 'unknown',
+        title: code && PRE_SEND_ERROR_CODES.has(code) ? 'connection_failed' : 'no_response',
+      };
+    }
+    const type = (response.headers.get('content-type') ?? '')
+      .split(';', 1)[0]
+      ?.trim()
+      .toLowerCase();
+    // An error page instead of the file (the description says the file comes with its own type).
+    if (response.status !== 200 || !response.body || type === 'text/html') {
+      await response.body?.cancel();
+      return {
+        ok: false,
+        kind:
+          response.status === 401
+            ? 'auth'
+            : response.status === 429 || response.status >= 500
+              ? 'retryable'
+              : 'permanent',
+        httpStatus: response.status,
+        title: response.status === 200 ? 'not_a_file' : `HTTP ${response.status}`,
+      };
+    }
+    const length = response.headers.get('content-length');
+    return {
+      ok: true,
+      body: response.body,
+      contentLength: length && /^\d{1,15}$/.test(length) ? Number(length) : null,
+    };
   }
 }

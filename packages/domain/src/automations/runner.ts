@@ -11,6 +11,7 @@ import {
   contactTags,
   contacts,
   conversations,
+  conversationTags,
   eq,
   gte,
   inArray,
@@ -31,6 +32,7 @@ import { checkTemplateEligibility } from '../consent/service';
 import { MAX_TAGS_PER_CONTACT, coerceFieldValue } from '../contacts/fields';
 import { phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { businessStatusAt, loadBusinessCalendar } from '../inbox/business-hours';
+import { MAX_TAGS_PER_CONVERSATION } from '../inbox/conversation-tags';
 import { emitTenantEvent } from '../messaging/events';
 import { STATUS_RANK } from '../messaging/status';
 import { orderPlaceholderValues } from '../stores/order-values';
@@ -203,6 +205,15 @@ async function loadFacts(
     .select({ tag: contactTags.tag })
     .from(contactTags)
     .where(and(eq(contactTags.tenantId, run.tenantId), eq(contactTags.contactId, run.contactId)));
+  const conversationTagRows = await tx
+    .select({ tag: conversationTags.tag })
+    .from(conversationTags)
+    .where(
+      and(
+        eq(conversationTags.tenantId, run.tenantId),
+        eq(conversationTags.conversationId, run.conversationId),
+      ),
+    );
   let businessOpen = true;
   if (node?.type === 'condition' && node.rules.some((r) => r.kind === 'business_hours')) {
     const hours = await loadBusinessCalendar(tx, run.tenantId, tenant?.timezone ?? 'UTC');
@@ -217,6 +228,7 @@ async function loadFacts(
     contactName: contact?.name ?? null,
     companyName: tenant?.name ?? '',
     tags: new Set(tagRows.map((t) => t.tag)),
+    conversationTags: new Set(conversationTagRows.map((t) => t.tag)),
     fields: contact?.attributes ?? {},
     businessOpen,
     order,
@@ -597,6 +609,65 @@ async function applyContactEffect(
   return updated.length > 0 ? null : 'contact_erased';
 }
 
+/**
+ * Tags or untags the run's conversation (ADR-222) as members do in the inbox; returns a note for the
+ * step log when it was skipped. The step holds the conversation's row lock, which members and keys
+ * take before changing its tags, so the count of its tags and the change see one state. A
+ * conversation at the limit of tags keeps its tags; one whose contact was erased takes none.
+ */
+async function applyConversationEffect(
+  tx: Tx,
+  run: AutomationRun,
+  assignedMembershipId: string | null,
+  effect: Extract<RunEffect, { kind: 'add_conversation_tag' | 'remove_conversation_tag' }>,
+): Promise<string | null> {
+  const thisConversation = and(
+    eq(conversationTags.tenantId, run.tenantId),
+    eq(conversationTags.conversationId, run.conversationId),
+  );
+  let changed: boolean;
+  if (effect.kind === 'remove_conversation_tag') {
+    const removed = await tx
+      .delete(conversationTags)
+      .where(and(thisConversation, eq(conversationTags.tag, effect.tag)))
+      .returning({ id: conversationTags.id });
+    changed = removed.length > 0;
+  } else {
+    const [contact] = await tx
+      .select({ erasedAt: contacts.erasedAt })
+      .from(contacts)
+      .where(and(eq(contacts.tenantId, run.tenantId), eq(contacts.id, run.contactId)));
+    if (!contact || contact.erasedAt) return 'contact_erased';
+    const current = await tx
+      .select({ tag: conversationTags.tag })
+      .from(conversationTags)
+      .where(thisConversation);
+    if (current.some((row) => row.tag === effect.tag)) return null;
+    if (current.length >= MAX_TAGS_PER_CONVERSATION) return 'conversation_too_many_tags';
+    await tx.insert(conversationTags).values({
+      id: uuidv7(),
+      tenantId: run.tenantId,
+      conversationId: run.conversationId,
+      tag: effect.tag,
+    });
+    changed = true;
+  }
+  if (changed) {
+    await tx
+      .update(conversations)
+      .set({ updatedAt: sql`now()` })
+      .where(
+        and(eq(conversations.tenantId, run.tenantId), eq(conversations.id, run.conversationId)),
+      );
+    await emitTenantEvent(tx, run.tenantId, {
+      type: 'conversation.tags',
+      conversationId: run.conversationId,
+      assignedMembershipId,
+    });
+  }
+  return null;
+}
+
 type StepOutcome =
   | { kind: 'progress' }
   | { kind: 'waiting' }
@@ -856,6 +927,12 @@ async function runStep(
           effect,
           now,
         });
+      } else if (
+        effect.kind === 'add_conversation_tag' ||
+        effect.kind === 'remove_conversation_tag'
+      ) {
+        const note = await applyConversationEffect(tx, run, conv.assignedMembershipId, effect);
+        if (note) notes.push(note);
       } else {
         const note = await applyContactEffect(tx, run, effect);
         if (note) notes.push(note);

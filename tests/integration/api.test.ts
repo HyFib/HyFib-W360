@@ -3971,6 +3971,7 @@ describe('conversation reads (ADR-072)', () => {
       createdAt: '2026-09-28T10:00:00.123Z',
       updatedAt: row!.updated_at.toISOString(),
       resolvedAt: null,
+      tags: [],
     });
     expect(await apiGetConversation(deps(), ctx, assigned.id)).toEqual(shown);
     expect(listed.find((x) => x.id === resolved.id)).toMatchObject({

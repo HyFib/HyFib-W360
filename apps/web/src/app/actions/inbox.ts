@@ -111,3 +111,45 @@ export async function setConversationTeamAction(
     return result;
   });
 }
+
+/** Adds one tag, or several separated by commas, to a conversation (ADR-220). */
+export async function addConversationTagsAction(
+  slug: string,
+  input: { conversationId: string; tags: string },
+): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { conversationTags } = await getRuntime();
+    await conversationTags.addTags(ctx, input);
+    refresh();
+    return null;
+  });
+}
+
+export async function removeConversationTagAction(
+  slug: string,
+  input: { conversationId: string; tag: string },
+): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { conversationTags } = await getRuntime();
+    await conversationTags.removeTag(ctx, input);
+    refresh();
+    return null;
+  });
+}
+
+/**
+ * Shows the customer that a member is writing (ADR-223), when the company turned read receipts on.
+ * Best effort: says whether an indicator was queued and changes nothing else.
+ */
+export async function showTypingAction(
+  slug: string,
+  conversationId: string,
+): Promise<ActionResult<{ outcome: string }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { readReceipts } = await getRuntime();
+    return { outcome: await readReceipts.showTyping(ctx, String(conversationId)) };
+  });
+}

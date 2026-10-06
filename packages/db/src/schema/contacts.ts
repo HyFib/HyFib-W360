@@ -91,6 +91,8 @@ export const CONSENT_SOURCES = [
   'api',
   'erasure',
   'store',
+  /** An opt-out a merged contact had, carried to the contact it was merged into (ADR-224). */
+  'merge',
 ] as const;
 export type ConsentSource = (typeof CONSENT_SOURCES)[number];
 
@@ -125,6 +127,24 @@ export const contactConsents = appSchema.table('contact_consents', {
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
 
+/**
+ * A contact merged into another and deleted (migration 0147, ADR-224), written only by
+ * `app.merge_contacts`: who merged it and when, and how many records moved. The merged contact's
+ * details are not kept.
+ */
+export const contactMerges = appSchema.table('contact_merges', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  keptContactId: uuid('kept_contact_id').notNull(),
+  mergedContactId: uuid('merged_contact_id').notNull(),
+  mergedByUserId: text('merged_by_user_id'),
+  summary: jsonb('summary')
+    .notNull()
+    .default(sql`'{}'::jsonb`)
+    .$type<Record<string, unknown>>(),
+  mergedAt: tz('merged_at').notNull().defaultNow(),
+});
+
 export const SUPPRESSION_REASONS = ['manual', 'complaint', 'legal', 'erased'] as const;
 export type SuppressionReason = (typeof SUPPRESSION_REASONS)[number];
 
@@ -153,6 +173,8 @@ export const messagingSettings = appSchema.table('messaging_settings', {
   csatEnabled: boolean('csat_enabled').notNull().default(false),
   csatQuestion: text('csat_question'),
   csatLabels: text('csat_labels').array(),
+  /** Read receipts and typing indicators to customers (migration 0146, ADR-223). */
+  readReceipts: boolean('read_receipts').notNull().default(false),
   updatedByUserId: text('updated_by_user_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),

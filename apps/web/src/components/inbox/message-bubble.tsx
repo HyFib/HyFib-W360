@@ -103,16 +103,100 @@ const HEADER_FILE_NAMES: Record<string, string> = {
   document: 'Document',
 };
 
-/** One answer of a completed form as text (lists joined, other values as JSON, bounded). */
+/**
+ * A file the customer sent (ADR-216) or a member sent (ADR-218), fetched from WhatsApp by this
+ * member's browser when shown: photos and stickers in the page, recordings and videos in a player
+ * that loads on play, and documents as downloads. A file WhatsApp no longer keeps shows the
+ * photo's description instead.
+ */
+function ConversationFile({
+  type,
+  url,
+  content,
+  outbound,
+}: {
+  type: string;
+  url: string;
+  content: Record<string, unknown>;
+  outbound: boolean;
+}) {
+  const caption = text(content.caption);
+  const captionLine = caption ? (
+    <span className="block whitespace-pre-wrap break-words">{caption}</span>
+  ) : null;
+  switch (type) {
+    case 'image':
+      return (
+        <div className="grid gap-1">
+          <a href={url} target="_blank" rel="noopener noreferrer" className="block w-fit">
+            {/* eslint-disable-next-line @next/next/no-img-element -- fetched with the member's session, which Next's image optimiser would not send */}
+            <img
+              src={url}
+              alt={caption ?? (outbound ? 'Sent to the customer' : 'Sent by the customer')}
+              loading="lazy"
+              className="max-h-64 max-w-full rounded-md border border-border object-contain"
+            />
+          </a>
+          {captionLine}
+        </div>
+      );
+    case 'sticker':
+      return (
+        // eslint-disable-next-line @next/next/no-img-element -- fetched with the member's session, which Next's image optimiser would not send
+        <img
+          src={url}
+          alt={outbound ? 'Sticker sent to the customer' : 'Sticker from the customer'}
+          loading="lazy"
+          className="h-32 w-32 object-contain"
+        />
+      );
+    case 'audio':
+    case 'video':
+      return (
+        <div className="grid gap-1">
+          <span className="font-medium">
+            {type === 'video' ? 'Video' : content.voice === true ? 'Voice message' : 'Audio'}
+          </span>
+          {type === 'video' ? (
+            // eslint-disable-next-line jsx-a11y/media-has-caption -- a recording sent on WhatsApp comes without captions
+            <video controls preload="none" src={url} className="max-h-64 max-w-full rounded-md" />
+          ) : (
+            // eslint-disable-next-line jsx-a11y/media-has-caption -- a recording sent on WhatsApp comes without captions
+            <audio controls preload="none" src={url} className="w-64 max-w-full" />
+          )}
+          {captionLine}
+          <a href={url} download className="w-fit text-xs underline opacity-80">
+            Download {type === 'video' ? 'the video' : 'the recording'}
+          </a>
+        </div>
+      );
+    default:
+      return (
+        <div className="grid gap-1">
+          <span className="font-medium">Document</span>
+          <a href={url} download className="w-fit break-all underline">
+            Download {text(content.filename) ?? 'the document'}
+          </a>
+          {captionLine}
+        </div>
+      );
+  }
+}
+
 /** Renders message content as plain text only (never HTML), by type. */
 function Body({
   type,
   content,
   replyTo,
+  mediaUrl,
+  outbound,
 }: {
   type: string;
   content: unknown;
   replyTo: ThreadMessage['replyTo'];
+  /** Where the browser fetches the file of a message sent with one through WhatsApp. */
+  mediaUrl: string | null;
+  outbound: boolean;
 }) {
   const c = (typeof content === 'object' && content !== null ? content : {}) as Record<
     string,
@@ -142,6 +226,9 @@ function Body({
     case 'audio':
     case 'document':
     case 'sticker': {
+      if (mediaUrl) {
+        return <ConversationFile type={type} url={mediaUrl} content={c} outbound={outbound} />;
+      }
       const link = text(c.link);
       return (
         <p className="whitespace-pre-wrap break-words">
@@ -159,7 +246,7 @@ function Body({
               {link}
             </a>
           ) : (
-            <span className="block text-xs opacity-80">Media download is not available yet.</span>
+            <span className="block text-xs opacity-80">The file could not be read.</span>
           )}
         </p>
       );
@@ -445,18 +532,29 @@ function Body({
   }
 }
 
+/** The message types a file is sent with (ADR-216, ADR-218). */
+const FILE_TYPES = new Set(['image', 'video', 'audio', 'document', 'sticker']);
+
 export function MessageBubble({
   slug,
+  conversationId,
   message,
   timeZone,
   canResolveUnknown,
 }: {
   slug: string;
+  conversationId: string;
   message: ThreadMessage;
   timeZone: string;
   canResolveUnknown: boolean;
 }) {
   const outbound = message.direction === 'outbound';
+  const content = message.content as { id?: unknown } | null;
+  // A file the customer sent, or one a member uploaded (ADR-218); media sent from a link has none.
+  const mediaUrl =
+    FILE_TYPES.has(message.type) && typeof content?.id === 'string' && content.id.length > 0
+      ? `/c/${slug}/inbox/${conversationId}/media/${message.id}`
+      : null;
   const at = formatDateTime(message.providerTimestamp ?? message.createdAt, timeZone);
   return (
     <li className={cn('flex', outbound ? 'justify-end' : 'justify-start')}>
@@ -491,7 +589,13 @@ export function MessageBubble({
             <span className="block break-words">{message.replyTo.text}</span>
           </blockquote>
         ) : null}
-        <Body type={message.type} content={message.content} replyTo={message.replyTo} />
+        <Body
+          type={message.type}
+          content={message.content}
+          replyTo={message.replyTo}
+          mediaUrl={mediaUrl}
+          outbound={outbound}
+        />
         <p className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
           <time dateTime={message.providerTimestamp ?? message.createdAt}>{at}</time>
           {outbound && message.senderType === 'system' ? (

@@ -72,6 +72,16 @@ export function ConversationList({
                   {c.teamName ? <span>· {c.teamName}</span> : null}
                   {!c.windowOpen ? <span>· Window closed</span> : null}
                 </span>
+                {c.tags.length > 0 ? (
+                  <span className="flex flex-wrap gap-1">
+                    <span className="sr-only">Tags:</span>
+                    {c.tags.map((tag) => (
+                      <Badge key={tag} tone="neutral">
+                        {tag}
+                      </Badge>
+                    ))}
+                  </span>
+                ) : null}
                 {c.waitingSince ? (
                   <span className="text-xs text-muted-foreground">
                     <ReplyTimer

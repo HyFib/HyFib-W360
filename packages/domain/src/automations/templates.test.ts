@@ -43,6 +43,7 @@ const facts: RunFacts = {
   contactName: 'Nila',
   companyName: 'Cora',
   tags: new Set(),
+  conversationTags: new Set(),
   fields: {},
   businessOpen: true,
   order,

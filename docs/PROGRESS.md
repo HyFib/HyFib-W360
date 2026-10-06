@@ -1,5 +1,423 @@
 # Progress
 
+## 2026-10-06 — Phase 3 follow-up: merging contacts (P3-01, H-019, ADR-224)
+
+Status: **Implemented; its database and browser tests run in CI only.** One person could be two
+contacts (a customer writing by WhatsApp user id and known by phone) and nothing joined them. The
+local PostgreSQL is unavailable (its Docker daemon stopped), so migrations 0147 to 0149 and the new
+integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-224):** owners and administrators merge from the kept contact after a review;
+  everything moves; the stricter consent; the merged contact deleted with a record; refusals; the
+  lock order and the append-only exceptions.
+- **Migrations:** 0147 (`app.contact_merges`, `app.merge_contacts`, the `merge` consent source,
+  three guards' exceptions, grants and policies, deletion step 777), 0148 and 0149 (indexes on the
+  contact of campaign rows and automation runs, built concurrently).
+- **Domain:** `contacts/merge.ts` (`planContactMerge`, `mergedConsent`, the service with
+  `previewMerge`, `mergeContacts`, `mergedInto`); ingestion leaves a number another identity holds;
+  replies use the identity with a number WhatsApp updated last; the export spec lists
+  `app.contact_merges`.
+- **Web:** "Merge a duplicate" on the contact page, the search and review pages, the merged notice,
+  and the page a merged contact's link shows.
+- **Tests:**
+  - Unit (6 new in `contacts/merge.test.ts`): the consent rule, the result, the refusals and their
+    sentences, the schemas, the permissions before the database (also while suspended).
+  - Integration (4 new in `contact-merges.test.ts`): every record moved and the stricter consent,
+    the deletion, its record, audit and webhooks; the refusals under the function's checks; a
+    customer known by user id and by number, and the reply to the number; chained merges. Written
+    for CI; not run here.
+  - E2E (1 new in `contacts.spec.ts`): an owner merges a customer known only by user id into the
+    contact with their number. Written for CI; not run here.
+- **Docs:** ADR-224; ARCHITECTURE; SECURITY; THREAT-MODEL T211; DEPLOYMENT and RUNBOOKS;
+  DATA-RETENTION; BACKLOG P3-01; feature matrix H-019 (implemented).
+- **Mutation checks:** 19 deliberate regressions tried, all caught (one only after a test was added)
+  on the unit-tested parts. The function's moves and checks need the database, so their regressions
+  are left to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                               | Result                                                                                                 |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`    | clean                                                                                                  |
+| `pnpm test` (unit)                                    | 971 passed (98 files)                                                                                  |
+| `pnpm test:integration`, e2e, migrations 0147 to 0149 | not run here: the local PostgreSQL is unavailable; CI runs them                                        |
+| `pnpm build`                                          | passed                                                                                                 |
+| Mutation checks                                       | 19 deliberate regressions tried, all caught (one only after a test was added) on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes                 | no leaks found                                                                                         |
+
+### Known gaps
+
+- Merges through the API and a `contact.merged` webhook event; joining two conversations on one
+  number; merging contacts that each have a number; suggestions of duplicates.
+
+## 2026-10-06 — Phase 3 follow-up: read receipts and typing indicators (P3-06, ADR-223)
+
+Status: **Implemented; its database and browser tests run in CI only.** Customers never saw that the
+team read their message or was writing. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so migration 0146 and the new integration and e2e tests below were written but not run
+here.
+
+### Completed
+
+- **Design (ADR-223):** a company setting, off by default; a read receipt when a member opens a
+  conversation with unread messages; a typing indicator while a member writes; signed jobs on a new
+  queue; the request of research M-045.
+- **Migration 0146:** `app.messaging_settings.read_receipts` and the runtime role's update of it.
+- **Domain:** `inbox/read-receipts.ts` (settings, `queueReadReceipt`, `showTyping`,
+  `sendReadReceipt`), `GraphClient.markRead`, `markRead` queuing the receipt; the `message.read`
+  queue in the contracts.
+- **Web and worker:** the setting in Settings → Inbox, the composer's indicator, the worker's
+  `messageReadHandler`; the Graph stand-in answers read receipts as Meta does.
+- **Tests:**
+  - Unit (3 new in `inbox/read-receipts.test.ts`): the request with and without the indicator, the
+    answer, the refusals before the database.
+  - Integration (3 new in `read-receipts.test.ts`): off by default, one receipt per opening with
+    unread messages, typing within the window and sight, the checks when the job runs, Meta's
+    refusals. Written for CI; not run here.
+  - E2E (1 new in `inbox.spec.ts`): the setting turned on, the receipt and the indicator reach the
+    stand-in. Written for CI; not run here.
+- **Docs:** ADR-223; ARCHITECTURE; SECURITY; THREAT-MODEL T210; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P3-06.
+- **Mutation checks:** 9 deliberate regressions tried, all caught on the unit-tested parts. The
+  checks in the company's scope need the database, so their regressions are left to the integration
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 965 passed (97 files)                                               |
+| `pnpm test:integration`, e2e, migration 0146       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 9 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Members' presence in the inbox; read receipts with a real WABA (Meta's behaviour for earlier
+  messages and the indicator's duration was not verifiable here).
+
+## 2026-10-06 — Phase 4 follow-up: automations that tag the conversation (P4-01, W-035, ADR-222)
+
+Status: **Implemented; its database and browser tests run in CI only.** Automations could tag
+contacts but not conversations. The local PostgreSQL is unavailable (its Docker daemon stopped), so
+the new integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-222):** a "Tag the conversation" step and a "conversation tag" condition rule;
+  applied under the conversation's lock, at most 20 tags; no migration.
+- **Domain:** `automations/graph.ts` (the step, the rule, its label and edge),
+  `automations/interpreter.ts` (the facts, the effects, the rule), `automations/runner.ts`
+  (`applyConversationEffect`, the facts read).
+- **Web:** the step's form and the rule in the builder, simulated conversation tags in the
+  simulator, and the step log's note.
+- **Tests:**
+  - Unit (3 new in `automations/interpreter.test.ts`, 2 changed for the new facts): branching on the
+    conversation's tags, the effects, refusals of tags that cannot be tags.
+  - Integration (2 new in `automations.test.ts`): tagging, untagging and branching in real runs,
+    `updatedAt` and the live events, the limit. Written for CI; not run here.
+  - E2E (1 new in `automations.spec.ts`): an automation built in the editor, simulated and
+    published, tags the conversation it answers. Written for CI; not run here.
+- **Docs:** ADR-222; ARCHITECTURE; SECURITY; THREAT-MODEL T209; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P4-01; feature matrix W-035, W-076 and W-077.
+- **Mutation checks:** 8 deliberate regressions tried, all caught on the unit-tested parts. Applying
+  the step under the lock needs the database, so its regressions are left to the integration tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 962 passed (96 files)                                               |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 8 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- A trigger when a conversation is tagged; tags from saved answers.
+
+## 2026-10-06 — Phase 5: conversation tags through the API (P5-08, W-035, ADR-221)
+
+Status: **Implemented; its database and browser tests run in CI only.** Members tag conversations
+since ADR-220; integrations could not read or set the tags. The local PostgreSQL is unavailable (its
+Docker daemon stopped), so the new integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-221):** `tags` on every conversation the API answers, a `tag` filter, and `addTags`
+  and `removeTags` on the three calls that change conversations; a change of the tags moves
+  `updatedAt`, through the API or the inbox.
+- **Domain:** `api/conversations.ts` (`prepareConversationChange`, tags in
+  `changeLockedConversation`, the filter and the columns); the inbox's tag changes touch the
+  conversation; the scope's description and the API's summary mention tags.
+- **API document:** `tags` on `Conversation`, the `tag` parameter, `addTags` and `removeTags` on the
+  change schemas; two descriptions that named an ADR corrected, and a test that the document names
+  none.
+- **Tests:**
+  - Unit (4 new in `api/conversation-tags.test.ts`, 3 changed in `api/api.test.ts` and
+    `api/conversations.test.ts` for the new fields): the schemas, the refusals before the database,
+    the API document.
+  - Integration (3 new in `api-conversation-tags.test.ts`): reading, filtering, adding and removing,
+    `updatedAt`, the audit entry, the limit for one, many and a filter, other companies, erasure.
+    Written for CI; not run here.
+  - E2E (1 new in `api.spec.ts`): a key tags conversations, lists them by a tag, and the inbox shows
+    the tags. Written for CI; not run here.
+- **Docs:** ADR-221; ARCHITECTURE; SECURITY; THREAT-MODEL T208; DEPLOYMENT and RUNBOOKS;
+  DATA-RETENTION; BACKLOG P5-08; feature matrix W-035 and W-134.
+- **Mutation checks:** 12 deliberate regressions tried, all caught on the unit-tested parts.
+  Applying tags under the lock, the filter and `updatedAt` need the database, so their regressions
+  are left to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 959 passed (96 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 12 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Webhook events and filters on tags, tags in the message feed, a list of tags in use through the
+  API.
+
+## 2026-10-06 — Phase 3 follow-up: conversation tags (P3-06, W-035, ADR-220)
+
+Status: **Implemented; its database and browser tests run in CI only.** Members filtered the inbox
+by team, number and customer but could not label conversations. The local PostgreSQL is unavailable
+(its Docker daemon stopped), so migration 0145 and the new integration and e2e tests below were
+written but not run here.
+
+### Completed
+
+- **Design (ADR-220):** free-text tags on conversations, written as contact tags are, at most 20;
+  `inbox.reply` and sight of the conversation; the inbox filters by a tag among those on
+  conversations the member can see.
+- **Migration 0145:** `app.conversation_tags` (RLS, grants, deletion step 365, policies for erasure
+  and deletion) and `app.erase_contact` deleting the conversations' tags.
+- **Domain:** `inbox/conversation-tags.ts` (`parseTagList`, `addTags`, `removeTag`, `tagsInUse`);
+  tags in the inbox list and the conversation, and the `tag` filter.
+- **Web:** each conversation's tags in the list, a Tag filter, and a tag editor on the conversation
+  page.
+- **Tests:**
+  - Unit (3 new in `inbox/conversation-tags.test.ts`): the parsing, its refusals, and the checks
+    before the database.
+  - Integration (3 new in `conversation-tags.test.ts`): adding, repeats, the limit, live events, the
+    filter and the tags in use within what a member can see, roles, other companies, erasure.
+    Written for CI; not run here.
+  - E2E (1 new in `inbox.spec.ts`): a member tags a conversation, filters the inbox by a tag and
+    removes it. Written for CI; not run here.
+- **Docs:** ADR-220; ARCHITECTURE; SECURITY; THREAT-MODEL T207; DEPLOYMENT and RUNBOOKS;
+  DATA-RETENTION; BACKLOG P3-06; feature matrix W-035 (implemented).
+- **Mutation checks:** 12 deliberate regressions tried, all caught (one only after a test was
+  strengthened) on the unit-tested parts. The limit, the sight rule, the filter and erasure need the
+  database, so their regressions are left to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                                                         |
+| `pnpm test` (unit)                                 | 955 passed (95 files)                                                                                         |
+| `pnpm test:integration`, e2e, migration 0145       | not run here: the local PostgreSQL is unavailable; CI runs them                                               |
+| `pnpm build`                                       | passed                                                                                                        |
+| Mutation checks                                    | 12 deliberate regressions tried, all caught (one only after a test was strengthened) on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                                                                |
+
+### Known gaps
+
+- Tags through the public API, webhooks and automations; a central list of allowed tags; renaming a
+  tag everywhere; reports by tag.
+
+## 2026-10-06 — Phase 5: uploading files through the API to send by id (P5-08, ADR-219)
+
+Status: **Implemented; its database and browser tests run in CI only.** Keys sent media only from
+public links. The local PostgreSQL is unavailable (its Docker daemon stopped), so migrations 0143
+and 0144 and the new integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-219):** `POST /media` uploads a file for a number; `POST /messages` sends it by
+  `mediaId` from that number, of its kind, for 30 days.
+- **Migrations 0143 and 0144:** `app.media_objects.channel_account_id` and `api_key_id`, their
+  foreign keys and check, then their validation.
+- **Domain:** `api/media.ts` (`apiUploadMedia`); `mediaId` in the media send schemas and
+  `uploadedFileFor`; replies through the API record a media row for a file sent by id.
+- **Web:** `POST /api/v1/media`; multipart bodies in `handleApiRequest`.
+- **API document:** `uploadMedia`, `UploadedMedia`, and `mediaId` on media sends.
+- **Tests:**
+  - Unit (3 new in `api/media.test.ts`, 1 changed in `api/api.test.ts`): one source, the upload's
+    refusals before anything is reached, the OpenAPI entries.
+  - Integration (2 new in `api-media-uploads.test.ts`): the upload, its row, two sends by id, a
+    member opening one, every refusal. Written for CI; not run here.
+  - E2E (1 new in `api.spec.ts`): a key uploads a price list and sends it. Written for CI; not run
+    here.
+- **Docs:** ADR-219; ARCHITECTURE; SECURITY; THREAT-MODEL T206; DEPLOYMENT and RUNBOOKS;
+  DATA-RETENTION; BACKLOG P5-08; feature matrix W-134.
+- **Mutation checks:** 12 deliberate regressions tried, all caught on the unit-tested parts. The
+  upload's row and the send's checks need the database, so their regressions are left to the
+  integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                                | Result                                                               |
+| ------------------------------------------------------ | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`     | clean                                                                |
+| `pnpm test` (unit)                                     | 952 passed (94 files)                                                |
+| `pnpm test:integration`, e2e, migrations 0143 and 0144 | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                           | passed                                                               |
+| Mutation checks                                        | 12 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes                  | no leaks found                                                       |
+
+### Known gaps
+
+- Listing and deleting uploads, uploads for template headers, purging old upload rows.
+
+## 2026-10-06 — Phase 2 follow-up: sending files from the inbox (P2-09, ADR-218)
+
+Status: **Implemented; its database and browser tests run in CI only.** Members could reply with
+text only. The local PostgreSQL is unavailable (its Docker daemon stopped), so the new integration
+and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-218):** files uploaded to WhatsApp when sent and sent by their id; the reply's
+  checks before the upload and again under the lock; a retried submission sent once; 16 MB and
+  listed types.
+- **Domain:** `messaging/file-replies.ts` (`queueFileReply`, `checkReplyFile`); `queueReply` and
+  `prepareReply` shared with text replies; `GraphClient.uploadMedia`; members open files members
+  sent (ADR-216's route).
+- **Web:** the route `/api/c/<company>/inbox/<conversation>/files` (trusted origin, session, 16 MB);
+  the "Send a file" card; the thread shows sent files.
+- **Test stand-in:** uploads kept as files; a document's name taken with an id.
+- **Tests:**
+  - Unit (6 new in `messaging/file-replies.test.ts`): types, limits, caption, refusals, the upload's
+    form and its time limit.
+  - Integration (2 new in `file-replies.test.ts`): the upload with the token, the message, its media
+    record and request, the send by id, the retry, a member opening it, the API refusing it,
+    refusals before any upload. Written for CI; not run here.
+  - E2E (1 new in `inbox.spec.ts`): a member sends a document and downloads what they sent. Written
+    for CI; not run here.
+- **Docs:** ADR-218; research M-197; ARCHITECTURE; SECURITY; THREAT-MODEL T205; DEPLOYMENT and
+  RUNBOOKS; DATA-RETENTION; BACKLOG P2-09; feature matrix W-032.
+- **Mutation checks:** 15 deliberate regressions tried, all caught (one only after a test was added)
+  on the unit-tested parts. The reply's checks need the database, so their regressions are left to
+  the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                                                                 |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                                                  |
+| `pnpm test` (unit)                                 | 949 passed (93 files)                                                                                  |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them                                        |
+| `pnpm build`                                       | passed                                                                                                 |
+| Mutation checks                                    | 15 deliberate regressions tried, all caught (one only after a test was added) on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                                                         |
+
+### Known gaps
+
+- Uploads through the public API, several files at once, a progress bar, files over 16 MB.
+
+## 2026-10-06 — Phase 5: downloading the files customers send through the API (P5-08, ADR-217)
+
+Status: **Implemented; its database and browser tests run in CI only.** Keys read a message a
+customer sent with a file, but not the file. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so the new integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-217):** `GET /api/v1/messages/{id}/media` with `conversations.read`; the file as
+  WhatsApp gives it, as an attachment; refusals as JSON errors with reasons.
+- **Domain:** `openReceivedMediaForKey` beside the members' call, sharing the lookup and the fetch;
+  refusals carry their API reason; the scope's description names the files.
+- **Web:** the route, and file results in `handleApiRequest`.
+- **API document:** `getMessageMedia`, its file and its reasons.
+- **Tests:**
+  - Unit (2 new in `messaging/received-media.test.ts`): the reasons, the OpenAPI entry.
+  - Integration (1 new in `received-media.test.ts`): the file with its type, a key without the
+    scope, another company's key, the reasons, an erased contact's message. Written for CI; not run
+    here.
+  - E2E (1 new in `api.spec.ts`): a key downloads a document a customer sent. Written for CI; not
+    run here.
+- **Docs:** ADR-217; ARCHITECTURE; SECURITY; THREAT-MODEL T204; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-08; feature matrix W-134.
+- **Mutation checks:** 7 deliberate regressions tried, all caught on the unit-tested parts. The
+  key's checks need the database, so their regressions are left to the integration tests, which run
+  in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 943 passed (92 files)                                               |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 7 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Thumbnails, files in webhook events, links that work without the key.
+
+## 2026-10-06 — Phase 2 follow-up: viewing the files customers send (P2-09, P5-08, ADR-216)
+
+Status: **Implemented; its database and browser tests run in CI only.** The inbox showed only the
+kind and caption of a file a customer sent. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so the new integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-216):** files fetched from WhatsApp for each request with the receiving account's
+  token and passed on without a copy; members who can see the conversation; only photos, stickers,
+  recordings and videos shown in the page, other files downloaded; 100 MB at most.
+- **Domain:** `messaging/received-media.ts` (the service, `mediaPresentation`, `mediaFilename`,
+  `contentDisposition`, `limitedStream`); `GraphClient.getMedia` and `downloadMedia`.
+- **Web:** the route `/c/<company>/inbox/<conversation>/media/<message>`; the conversation page
+  shows photos and stickers, players for recordings and videos, and download links.
+- **Test stand-in:** files kept per media id, `GET /{media-id}` and the download address, which
+  needs a valid token.
+- **Tests:**
+  - Unit (9 new in `messaging/received-media.test.ts`): types, presentation, names, the header, the
+    limit, the refusals, the Graph answers, the address and redirect rules.
+  - Integration (2 new in `received-media.test.ts`): members who can see the conversation, the token
+    at both calls, nothing stored, other conversations and companies, refusals with reasons, none
+    after erasure. Written for CI; not run here.
+  - E2E (1 new in `inbox.spec.ts`): a photo shown and a document downloaded under its name. Written
+    for CI; not run here.
+- **Docs:** ADR-216; research M-196; ARCHITECTURE; SECURITY; THREAT-MODEL T203; DEPLOYMENT and
+  RUNBOOKS; DATA-RETENTION; BACKLOG P2-09 and P5-08; feature matrix W-032.
+- **Mutation checks:** 24 deliberate regressions tried, all caught on the unit-tested parts. The
+  service's access checks need the database, so their regressions are left to the integration tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 941 passed (92 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 24 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Files through the public API, byte ranges for Safari's players, thumbnails, keeping files past
+  WhatsApp's lifetime, scanning documents.
+
 ## 2026-10-06 — Phase 3 follow-up: members choose their notice emails (P3-06, ADR-215)
 
 Status: **Implemented; its database and browser tests run in CI only.** Notice emails about mentions

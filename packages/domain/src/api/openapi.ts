@@ -58,6 +58,7 @@ import { SEGMENT_LIMITS } from '../campaigns/segments';
 import { ORDER_REFERENCE_RE } from '../commerce/model';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
+import { MAX_TAGS_PER_CONVERSATION } from '../inbox/conversation-tags';
 import { TEMPLATE_HEADER_MEDIA } from '../templates/definition';
 import {
   apiStartAutomationSchema,
@@ -233,6 +234,11 @@ export const apiConversationSchema = z.object({
     .uuid()
     .nullable()
     .describe('The team the conversation is in, as GET /teams lists them.'),
+  tags: z
+    .array(z.string())
+    .describe(
+      'The conversation’s tags, alphabetically, as members and keys put them on it (lower-cased, without commas).',
+    ),
   unreadCount: z.number().int(),
   lastMessageAt: z.iso.datetime().nullable(),
   lastInboundAt: z.iso.datetime().nullable().describe('When the contact last wrote.'),
@@ -820,7 +826,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, read and manage saved segments and list their contacts, create, edit, review and submit campaign drafts for a member’s approval, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen, assign and tag conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, read and manage saved segments and list their contacts, create, edit, review and submit campaign drafts for a member’s approval, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -1173,7 +1179,7 @@ export function buildOpenApiDocument(serverUrl: string) {
             'A reply (`type` `text`, `buttons`, `list`, `product`, `product_list`, `catalog`, `reaction`, `image`, `video`, `audio`, `document`, `sticker`, `location` or `contacts`) needs `messages.reply` and goes only to a number that wrote to the WhatsApp number in the last 24 hours (WhatsApp’s customer service window); otherwise it is refused with reason `window_closed`, and nothing tells whether the number is a contact. Any reply but a reaction stops an automation answering the conversation, and the conversation keeps waiting for a member of the team. The window is checked again when the message is sent.',
             'Products (`product`: one; `product_list`: up to 30 in sections, with a header; `catalog`: the catalog, opened from a product’s picture) need Commerce in the company’s plan (403, reason `not_in_plan`, otherwise). They are named by their content ids (`retailerId`) in a catalog HyFib has read from Meta for the WhatsApp number (Commerce → Catalogs), still connected, and not removed at Meta; all from one catalog, which `catalogId` names when more than one has them all. Unknown ids are refused by name (422, `products`).',
             'A text, buttons, a list, products, media, a location or contacts can quote a message of the conversation with `replyTo`, its id from `GET /conversations/{id}/messages`, the `message.received` webhook or a send’s response: a message the contact sent, or one the business sent that WhatsApp accepted. A reaction (`type` `reaction`) puts one emoji on a message the contact sent in the last 30 days; reactions cannot be taken back through the API. A message of another conversation, or one that cannot be quoted or reacted to, is refused (422, `replyTo`).',
-            'Media (`image`, `video`, `audio`, `document` or `sticker`) is sent from an https:// `link` that WhatsApp fetches when it sends the message, reachable from the internet without signing in; HyFib neither fetches nor keeps the media, and stores the link with the message. A photo, a video or a document may carry a `caption` of up to 1,024 characters; audio and stickers take none, and WhatsApp decides whether a file can be a sticker. A link WhatsApp cannot fetch, or media it does not accept, makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
+            'Media (`image`, `video`, `audio`, `document` or `sticker`) is sent from an https:// `link` that WhatsApp fetches when it sends the message, reachable from the internet without signing in; HyFib neither fetches nor keeps the media, and stores the link with the message. A photo, a video or a document may carry a `caption` of up to 1,024 characters; audio and stickers take none, and WhatsApp decides whether a file can be a sticker. A link WhatsApp cannot fetch, or media it does not accept, makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error. In place of a link, a photo, a video, audio or a document may name a file uploaded with `POST /media` for the number it is sent from in the last 30 days (`mediaId`); the file is sent as WhatsApp keeps it, a document under the name it was uploaded with.',
             'A template whose header is a photo, a video or a document (its `headerMedia` in GET /templates) needs the file in `headerMedia`: an https:// `link` that WhatsApp fetches when it sends the message, as for media below, shown without a caption. Documents must be PDF files. HyFib neither fetches nor keeps the file, and stores the link with the message. Other templates take no file (422, `headerMedia`). A file WhatsApp cannot fetch, or does not accept, makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
             'A location (`location`) is a place given by its `latitude` and `longitude` in decimal degrees, with its `name` and `address` if wanted, up to 1,000 characters each, all stored with the message. A location WhatsApp does not accept makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
             'Contacts (`contacts`) share 1 to 5 contact cards, as Meta’s spec describes them: each with a `name` (its `formattedName` and at least one other part) and, if wanted, `phones`, `emails`, `urls` and `addresses` (up to 5 of each, each with a `type` of HOME or WORK if wanted), an `org` and a `birthday` (YYYY-MM-DD); each text up to 256 characters, a link up to 2,000. Messages read back give them in `contacts`, as they give the cards customers share. A card WhatsApp does not accept makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
@@ -1310,7 +1316,14 @@ export function buildOpenApiDocument(serverUrl: string) {
               in: 'query',
               schema: { type: 'string', format: 'date-time' },
               description:
-                'Only conversations changed at or after this time (a new message, a status or assignee change, a read).',
+                'Only conversations changed at or after this time (a new message, a status, assignee or tag change, a read).',
+            },
+            {
+              name: 'tag',
+              in: 'query',
+              schema: { type: 'string', maxLength: 100 },
+              description:
+                'Only the conversations with this tag, however its letters are cased. A value that cannot be a tag (over 40 characters, or with a comma) is refused (422).',
             },
           ],
           responses: {
@@ -1335,11 +1348,12 @@ export function buildOpenApiDocument(serverUrl: string) {
         },
         patch: {
           operationId: 'updateConversation',
-          summary: 'Resolve, reopen, assign or move a conversation',
+          summary: 'Resolve, reopen, assign, move or tag a conversation',
           description: [
-            `${scopeNote('conversations.write')} As members do in the inbox, with any of \`status\`, \`assigneeId\` and \`teamId\`, applied together: the team, then the member, then the status.`,
+            `${scopeNote('conversations.write')} As members do in the inbox, with any of \`status\`, \`assigneeId\`, \`teamId\`, \`addTags\` and \`removeTags\`, applied together: the team, then the member, then the status, then the tags.`,
             "Resolving stops an automation answering the conversation and ends the wait for a reply; the contact's next message opens the conversation again. No satisfaction survey is sent: surveys follow a member's resolve.",
             'Assigning a member (one from GET /members) stops an automation answering the conversation; `null` unassigns it, and a round-robin team gives it out again within a minute. Moving it to a team (one from GET /teams) gives it to the team’s next available member when the team assigns in turn and the conversation is open with no member. A member who cannot answer conversations, or a team of another company, is refused (422, naming the field). When routing hands the conversation out at the same moment as a move into a team, the request can be refused (409, changing nothing): send it again.',
+            `Tags are written as members write them (lower-cased, spaces collapsed, at most 40 characters, no commas), each once; a tag cannot be both added and removed. A conversation has at most ${MAX_TAGS_PER_CONVERSATION} tags: a change that would give it more is refused (422, naming \`addTags\`). A change of the tags is a change of the conversation (\`updatedAt\`).`,
             'What the conversation already has changes nothing, so a retry is safe without an `Idempotency-Key`. Conversations of erased contacts are not found.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/Id' }],
@@ -1356,9 +1370,9 @@ export function buildOpenApiDocument(serverUrl: string) {
       '/conversations/update-many': {
         post: {
           operationId: 'updateManyConversations',
-          summary: 'Resolve, reopen, assign or move many conversations at once',
+          summary: 'Resolve, reopen, assign, move or tag many conversations at once',
           description: [
-            `${scopeNote('conversations.write')} Up to ${API_LIMITS.conversationsPerChange} conversations, each changed as PATCH /conversations/{id} changes one, with any of \`status\`, \`assigneeId\` and \`teamId\`. All of them or none: an id that names none of the company's conversations (an erased contact's included), a member who cannot answer conversations or a team of another company refuses the call (422, naming the field, as \`conversationIds.3\`), and nothing is changed.`,
+            `${scopeNote('conversations.write')} Up to ${API_LIMITS.conversationsPerChange} conversations, each changed as PATCH /conversations/{id} changes one, with any of \`status\`, \`assigneeId\`, \`teamId\`, \`addTags\` and \`removeTags\`. All of them or none: an id that names none of the company's conversations (an erased contact's included), a member who cannot answer conversations, a team of another company or a conversation that would have more than ${MAX_TAGS_PER_CONVERSATION} tags refuses the call (422, naming the field, as \`conversationIds.3\`), and nothing is changed.`,
             'The conversations are changed in the order given (a team that assigns in turn gives them out in that order) and answered in it. When routing hands one of them out at the same moment as a move into a team, the call can be refused as a whole (409, changing nothing): send it again. A call counts as one request against the rate and monthly limits. What a conversation already has changes nothing, so a retry is safe without an `Idempotency-Key`.',
           ].join('\n\n'),
           requestBody: { required: true, content: json(ref('UpdateManyConversations')) },
@@ -1380,9 +1394,9 @@ export function buildOpenApiDocument(serverUrl: string) {
           operationId: 'updateMatchingConversations',
           summary: 'Change the conversations a filter finds, a page at a time',
           description: [
-            'Scopes: `conversations.read` and `conversations.write`. Takes the filters of GET /conversations (`filter`, at least one) and a change (`change`): any of `status`, `assigneeId` and `teamId`, the same for every conversation, applied as PATCH /conversations/{id} applies them: the team, then the member, then the status.',
+            'Scopes: `conversations.read` and `conversations.write`. Takes the filters of GET /conversations (`filter`, at least one) and a change (`change`): any of `status`, `assigneeId`, `teamId`, `addTags` and `removeTags`, the same for every conversation, applied as PATCH /conversations/{id} applies them: the team, then the member, then the status, then the tags.',
             `Each call reads one page of the conversations GET /conversations lists with the same filters (newest first, at most ${API_LIMITS.conversationsPerChange}), changes each of them as PATCH /conversations/{id} changes one, in that order, and answers them as they now are with \`nextCursor\`: send the same filter and change with it until it is \`null\`. Pages go from newer conversations to older ones, each found by the filters as they are when it is read, so a conversation the change takes out of the filter is not read again. One someone else takes out of the filter between the read and the change is left out, so a page can hold fewer conversations than the limit while more follow. Conversations of erased contacts are left out.`,
-            'A member who cannot answer conversations or a team of another company refuses the call (422, naming the field, as `change.teamId`), even when no conversation matches, and nothing is changed. When the call moves conversations into a team while routing hands out one of them, it can be refused as a whole (409, changing nothing): send it again with the same cursor.',
+            `A member who cannot answer conversations or a team of another company refuses the call (422, naming the field, as \`change.teamId\`), even when no conversation matches, and nothing is changed; so does a conversation of the page that would have more than ${MAX_TAGS_PER_CONVERSATION} tags (\`change.addTags\`). When the call moves conversations into a team while routing hands out one of them, it can be refused as a whole (409, changing nothing): send it again with the same cursor.`,
             'What a conversation already has changes nothing, and one the change took out of the filter is not found again, so a call sent again after a lost answer is safe without an `Idempotency-Key`: the pages still reach every conversation the filter finds, each changed once. A call counts as one request against the rate and monthly limits.',
           ].join('\n\n'),
           requestBody: { required: true, content: json(ref('UpdateMatchingConversations')) },
@@ -2144,6 +2158,88 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/media': {
+        post: {
+          operationId: 'uploadMedia',
+          summary: 'Upload a file to send by id',
+          description: [
+            `${scopeNote('messages.reply')} Uploads a photo (JPEG, PNG), a video (MP4, 3GPP), audio (AAC, AMR, MP3, MP4, OGG) or a document (PDF, text, Word, Excel, PowerPoint) of up to 16 MB to WhatsApp for one of the company's numbers, as multipart form data: \`file\`, and \`from\` (the number's id) when the company has several active numbers. The answer's \`id\` goes in \`POST /messages\` as \`mediaId\`, from that number, as often as needed for 30 days, as long as WhatsApp keeps the file. HyFib keeps no copy.`,
+            'WhatsApp may refuse a file it cannot send (422, with its reason). Retrying an upload uploads the file again: it takes no Idempotency-Key.',
+          ].join('\n\n'),
+          requestBody: {
+            required: true,
+            content: {
+              'multipart/form-data': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    file: {
+                      type: 'string',
+                      format: 'binary',
+                      description: 'The file, with its type.',
+                    },
+                    from: {
+                      type: 'string',
+                      format: 'uuid',
+                      description: 'The id of the number to send it from (`GET /channels`).',
+                    },
+                  },
+                  required: ['file'],
+                },
+              },
+            },
+          },
+          responses: {
+            '201': {
+              description: 'The file was uploaded.',
+              content: json(dataOf(ref('UploadedMedia'))),
+            },
+            ...errors(400, 401, 403, 404, 412, 415, 422, 429, 500),
+            '413': {
+              description: 'The body is larger than 16 MB.',
+              content: json(ref('Error')),
+            },
+            '503': {
+              description: 'WhatsApp did not answer, so the file was not uploaded: retry later.',
+              content: json(ref('Error')),
+            },
+          },
+        },
+      },
+      '/messages/{id}/media': {
+        get: {
+          operationId: 'getMessageMedia',
+          summary: 'The file a customer sent with a message',
+          description: [
+            `${scopeNote('conversations.read')} The photo, video, recording, document or sticker a customer sent with a message (\`direction\` \`inbound\`, \`type\` \`image\`, \`video\`, \`audio\`, \`document\` or \`sticker\`, as \`GET /messages\` and \`message.received\` give it), fetched from WhatsApp for this request and passed on as it arrives. HyFib keeps no copy and WhatsApp keeps a file for a limited time, so fetch it soon after it arrives if you need it.`,
+            'The answer is the file itself, with the type WhatsApp gave it in `Content-Type` (`application/octet-stream` when it gave none) and `Content-Disposition: attachment` naming it: the name a document came with, or `whatsapp-<type>-<message>.<extension>`. A file is at most 100 MB. Refusals come before the first byte, as JSON errors.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The file, as WhatsApp gave it.',
+              content: {
+                'application/octet-stream': { schema: { type: 'string', format: 'binary' } },
+              },
+            },
+            ...errors(401, 403, 429, 500),
+            '404': {
+              description:
+                'Not found in the company (a message of an erased contact is not found), or no file to give: the message has none from the customer (reason no_file), or WhatsApp no longer gives it (reason file_expired).',
+              content: json(ref('Error')),
+            },
+            '412': {
+              description:
+                'The WhatsApp account that received the file is disconnected (reason channel_disconnected), or WhatsApp refused its access (reason access_refused): an administrator reconnects it in Settings → Channels. Or the file is larger than 100 MB (reason file_too_large).',
+              content: json(ref('Error')),
+            },
+            '503': {
+              description: 'WhatsApp did not answer or did not give the file: retry later.',
+              content: json(ref('Error')),
+            },
+          },
+        },
+      },
       '/message-changes': {
         get: {
           operationId: 'listMessageChanges',
@@ -2351,6 +2447,45 @@ export function buildOpenApiDocument(serverUrl: string) {
         },
       },
       schemas: {
+        UploadedMedia: {
+          type: 'object',
+          description: 'A file uploaded for a number, to send by id.',
+          properties: {
+            id: { type: 'string', format: 'uuid', description: 'Give it as `mediaId`.' },
+            channelId: {
+              type: 'string',
+              format: 'uuid',
+              description: 'The number it was uploaded for, the only one it is sent from.',
+            },
+            type: {
+              type: 'string',
+              enum: ['image', 'video', 'audio', 'document'],
+              description: 'The `type` of the messages that send it.',
+            },
+            mimeType: { type: 'string' },
+            size: { type: 'integer', description: 'In bytes.' },
+            fileName: {
+              type: 'string',
+              description: 'The name a document is sent under.',
+            },
+            createdAt: { type: 'string', format: 'date-time' },
+            expiresAt: {
+              type: 'string',
+              format: 'date-time',
+              description: '30 days after the upload: WhatsApp no longer keeps the file after it.',
+            },
+          },
+          required: [
+            'id',
+            'channelId',
+            'type',
+            'mimeType',
+            'size',
+            'fileName',
+            'createdAt',
+            'expiresAt',
+          ],
+        },
         Contact: jsonSchema(apiContactSchema),
         ContactCreate: jsonSchema(apiContactCreateSchema, 'input'),
         ContactUpdate: jsonSchema(apiContactUpdateSchema, 'input'),
@@ -2489,6 +2624,8 @@ export const API_ROUTES = [
   ['post', '/messages/send-many'],
   ['get', '/messages'],
   ['get', '/messages/{id}'],
+  ['get', '/messages/{id}/media'],
+  ['post', '/media'],
   ['get', '/message-changes'],
   ['get', '/conversations'],
   ['get', '/conversations/{id}'],

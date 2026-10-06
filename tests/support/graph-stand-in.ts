@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -121,6 +122,17 @@ export interface StandInState {
   unreadableSubscribedApps: Set<string>;
   subscribeErrors: Map<string, { status: number; code: number; message: string }>;
   subscribedAppsErrors: Map<string, { status: number; code: number; message: string }>;
+  /**
+   * Files customers sent, by media id (research M-047): `GET /{media-id}` gives a download address
+   * on this stand-in, which answers the file to a valid token. Absent ids answer as Graph answers
+   * an object it does not have; `downloadStatus` makes the download itself fail.
+   */
+  media: Map<string, { bytes: Buffer; mimeType: string; downloadStatus?: number }>;
+  mediaCounter: number;
+  /** When set, uploads fail with this Graph error (ADR-218). */
+  uploadError: { status: number; code: number; message: string } | null;
+  /** When set, read receipts and typing indicators fail with this Graph error (ADR-223). */
+  readError: { status: number; code: number; message: string } | null;
 }
 
 export interface GraphStandIn {
@@ -153,7 +165,13 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
       out[key] =
         typeof value === 'string'
           ? value
-          : { filename: value.name, type: value.type, content: await value.text() };
+          : {
+              filename: value.name,
+              type: value.type,
+              content: await value.text(),
+              // The bytes of an uploaded file (ADR-218), which text would mangle.
+              base64: Buffer.from(await value.arrayBuffer()).toString('base64'),
+            };
     }
     return out;
   }
@@ -317,6 +335,33 @@ function productMessageProblem(
  * Checks a reaction message (research M-182): `reaction` holds only `message_id` and `emoji`, both
  * given. Taking a reaction back (recalled as an empty emoji, M-185) is not in the spec: refused.
  */
+/**
+ * A read receipt as research M-045 gives it: `messaging_product`, `status: read` and the id of the
+ * customer's message, optionally with a text typing indicator, and nothing else.
+ */
+function readReceiptProblem(body: unknown): string | null {
+  const b = (body ?? {}) as Record<string, unknown>;
+  if (b.messaging_product !== 'whatsapp') return 'messaging_product';
+  if (typeof b.message_id !== 'string' || b.message_id.length === 0 || b.message_id.length > 256) {
+    return 'message_id';
+  }
+  if (b.typing_indicator !== undefined) {
+    const typing = b.typing_indicator as Record<string, unknown> | null;
+    if (
+      typeof typing !== 'object' ||
+      typing === null ||
+      typing.type !== 'text' ||
+      Object.keys(typing).length !== 1
+    ) {
+      return 'typing_indicator';
+    }
+  }
+  const extra = Object.keys(b).find(
+    (key) => !['messaging_product', 'status', 'message_id', 'typing_indicator'].includes(key),
+  );
+  return extra ?? null;
+}
+
 function reactionProblem(body: unknown): string | null {
   const b = body as { type?: unknown; reaction?: unknown } | undefined;
   if (b?.type !== 'reaction') return b?.reaction === undefined ? null : 'reaction';
@@ -335,8 +380,9 @@ function reactionProblem(body: unknown): string | null {
 const MEDIA_MESSAGE_TYPES = new Set(['image', 'video', 'audio', 'document', 'sticker']);
 
 /**
- * Checks a media message (research M-191): an `id` or an http(s) `link`, not both, and a caption
- * of at most 1,024 characters for a photo, a video or a document only.
+ * Checks a media message (research M-191): an `id` or an http(s) `link`, not both, a caption of at
+ * most 1,024 characters for a photo, a video or a document only, and a file name for a document
+ * sent by id only, as the spec's "Send Document Message by ID" example has (research M-197).
  */
 function mediaProblem(body: unknown): string | null {
   const b = body as Record<string, unknown> | undefined;
@@ -345,8 +391,18 @@ function mediaProblem(body: unknown): string | null {
   const media = b?.[type] as Record<string, unknown> | undefined;
   if (typeof media !== 'object' || media === null) return type;
   const allowed =
-    type === 'audio' || type === 'sticker' ? ['id', 'link'] : ['id', 'link', 'caption'];
+    type === 'audio' || type === 'sticker'
+      ? ['id', 'link']
+      : type === 'document' && media.id !== undefined
+        ? ['id', 'caption', 'filename']
+        : ['id', 'link', 'caption'];
   if (Object.keys(media).some((key) => !allowed.includes(key))) return type;
+  if (
+    media.filename !== undefined &&
+    (typeof media.filename !== 'string' || !media.filename || media.filename.length > 240)
+  ) {
+    return `${type}.filename`;
+  }
   if ((media.id === undefined) === (media.link === undefined)) return `${type}.link`;
   if (
     media.link !== undefined &&
@@ -593,6 +649,10 @@ export async function startGraphStandIn(options: {
     flowUploadErrors: [],
     businessKeys: new Map(),
     keySignatureStatus: 'VALID',
+    media: new Map(),
+    mediaCounter: 0,
+    uploadError: null,
+    readError: null,
   };
   for (const token of options.acceptTokens ?? []) {
     state.tokens.set(token, {
@@ -686,6 +746,52 @@ export async function startGraphStandIn(options: {
         if (!template || typeof b.status !== 'string') return json(res, 404, { ok: false });
         template.status = b.status;
         return json(res, 200, { ok: true });
+      }
+      // Test control: a file a customer sent, as WhatsApp keeps it for the account (ADR-216).
+      if (req.method === 'POST' && url.pathname === '/__stand-in/media') {
+        const b = (body ?? {}) as {
+          id?: unknown;
+          mimeType?: unknown;
+          base64?: unknown;
+          downloadStatus?: unknown;
+        };
+        if (
+          typeof b.id !== 'string' ||
+          typeof b.mimeType !== 'string' ||
+          typeof b.base64 !== 'string'
+        )
+          return json(res, 400, { ok: false });
+        state.media.set(b.id, {
+          bytes: Buffer.from(b.base64, 'base64'),
+          mimeType: b.mimeType,
+          ...(typeof b.downloadStatus === 'number' ? { downloadStatus: b.downloadStatus } : {}),
+        });
+        return json(res, 200, { ok: true });
+      }
+      // The download address `GET /{media-id}` gives: the file, to a valid token only.
+      if (req.method === 'GET' && url.pathname.startsWith('/__media/')) {
+        const bearer = authorization?.startsWith('Bearer ') ? authorization.slice(7) : null;
+        state.requests.push({
+          method: 'GET',
+          path: url.pathname,
+          query: Object.fromEntries(url.searchParams),
+          authorization,
+          body,
+        });
+        if (!bearer || !state.tokens.get(bearer)?.valid) {
+          return graphError(res, 401, 190, 'Error validating access token');
+        }
+        const file = state.media.get(decodeURIComponent(url.pathname.slice('/__media/'.length)));
+        if (!file) return graphError(res, 404, 100, 'Unsupported get request.');
+        if (file.downloadStatus) {
+          res.writeHead(file.downloadStatus, { 'content-type': 'text/plain' });
+          return res.end('Download failed');
+        }
+        res.writeHead(200, {
+          'content-type': file.mimeType,
+          'content-length': String(file.bytes.length),
+        });
+        return res.end(file.bytes);
       }
       const segments = url.pathname.split('/').filter(Boolean);
       const [version, first, second] = segments;
@@ -781,7 +887,50 @@ export async function startGraphStandIn(options: {
         }
         return json(res, 200, { success: true });
       }
+      // A file uploaded for a number to send (research M-046, M-197): multipart form data with
+      // `messaging_product` and `file`; kept like a customer's file, under a new media id.
+      if (req.method === 'POST' && first && second === 'media') {
+        const form = (body ?? {}) as {
+          messaging_product?: unknown;
+          file?: { type?: unknown; base64?: unknown };
+        };
+        if (form.messaging_product !== 'whatsapp' || typeof form.file?.base64 !== 'string') {
+          return graphError(res, 400, 100, '(#100) Invalid parameter');
+        }
+        if (state.uploadError) {
+          return graphError(
+            res,
+            state.uploadError.status,
+            state.uploadError.code,
+            state.uploadError.message,
+          );
+        }
+        state.mediaCounter += 1;
+        const id = String(7_000_000_000_000 + state.mediaCounter);
+        state.media.set(id, {
+          bytes: Buffer.from(form.file.base64, 'base64'),
+          mimeType:
+            typeof form.file.type === 'string' ? form.file.type : 'application/octet-stream',
+        });
+        return json(res, 200, { id });
+      }
       if (req.method === 'POST' && first && second === 'messages') {
+        // A read receipt, with or without a typing indicator (research M-045).
+        if ((body as { status?: unknown } | undefined)?.status === 'read') {
+          const readInvalid = readReceiptProblem(body);
+          if (readInvalid) {
+            return graphError(res, 400, 100, `(#100) Invalid parameter: ${readInvalid}`);
+          }
+          if (state.readError) {
+            return graphError(
+              res,
+              state.readError.status,
+              state.readError.code,
+              state.readError.message,
+            );
+          }
+          return json(res, 200, { success: true });
+        }
         const flowInvalid = flowMessageProblem(body, state.flows);
         if (flowInvalid)
           return graphError(res, 400, 100, `(#100) Invalid parameter: ${flowInvalid}`);
@@ -1101,6 +1250,20 @@ export async function startGraphStandIn(options: {
               : [],
           });
         }
+      }
+      // A file a customer sent: where to download it, as Meta's description shows (research
+      // M-047); `file_size` is text there. An id the stand-in does not keep falls through to the
+      // generic answer for an object Graph does not have.
+      if (req.method === 'GET' && first && !second && state.media.has(first)) {
+        const file = state.media.get(first)!;
+        return json(res, 200, {
+          messaging_product: 'whatsapp',
+          url: `http://${req.headers.host}/__media/${encodeURIComponent(first)}`,
+          mime_type: file.mimeType,
+          sha256: createHash('sha256').update(file.bytes).digest('hex'),
+          file_size: String(file.bytes.length),
+          id: first,
+        });
       }
       if (req.method === 'GET' && first && !second) {
         const number = state.numbers.get(first);

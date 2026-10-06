@@ -445,6 +445,54 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    Old servers ignore the column: until the rollout ends, an old web server shows no Notifications
    tab and old workers and web servers email members who turned a kind off.
 
+   ADR-216 has no migration. The web tier now makes outbound https requests to Meta on members'
+   requests: to the Graph origin, as onboarding already did, and to the address each file's Graph
+   answer gives, whose host Meta's description does not name. Allow the web tier the same outbound
+   https to Meta as the worker. Until the web rollout ends, an old web server shows "Media download
+   is not available yet." in place of a file.
+
+   ADR-217 has no migration. Until the web rollout ends, an old web server answers
+   `GET /api/v1/messages/{id}/media` with 404.
+
+   ADR-218 has no migration. The web tier now uploads files of up to 16 MB to Meta: a load balancer
+   or reverse proxy in front of it must accept request bodies of at least 17 MB on
+   `/api/c/*/inbox/*/files`, and each upload holds its file in the web server's memory once. Until
+   the web rollout ends, an old web server shows no "Send a file" card.
+
+   Migration 0143 (ADR-219) adds `channel_account_id` and `api_key_id` to `app.media_objects`, with
+   their foreign keys and check NOT VALID, so the table stays writable; 0144 validates them, reading
+   the table without blocking writes. Old servers ignore the columns. `POST /api/v1/media` takes
+   bodies of up to 16 MB and 64 KB: a load balancer in front of the web tier must accept them on
+   that path too. Until the web rollout ends, an old web server answers it with 404 and refuses
+   `mediaId` in `POST /messages`.
+
+   Migration 0145 (ADR-220) creates `app.conversation_tags` and replaces `app.erase_contact` with
+   the same function deleting the conversations' tags too; the new table starts empty, so the
+   migration holds its locks briefly. Old servers ignore the table and erase contacts through the
+   new function. Until the web rollout ends, an old web server shows no tags and ignores the inbox's
+   `tag` filter.
+
+   ADR-221 has no migration. Until the web rollout ends, an old web server answers conversations
+   without `tags` and refuses `tag`, `addTags` and `removeTags` as unknown fields (422).
+
+   ADR-222 has no migration, but roll the workers out before the web tier as usual: a worker of the
+   previous release cannot read a published version with a "Tag the conversation" step and would
+   fail its runs as unreadable.
+
+   Migration 0146 (ADR-223) adds `app.messaging_settings.read_receipts` (off) without rewriting the
+   table, and the migration command creates the `message.read` queue: run it before the rollout, or
+   a member opening a conversation of a company that turned read receipts on fails to queue the job.
+   Old servers ignore the column; until the web rollout ends, an old web server shows no setting and
+   queues no receipts.
+
+   Migration 0147 (ADR-224) creates `app.contact_merges` and `app.merge_contacts`, adds the `merge`
+   consent source (its check is replaced, reading `app.consent_events` once under the migration's
+   lock), replaces three guard functions with an exception only that function uses, and grants the
+   definer role what it moves. 0148 and 0149 build `app.campaign_recipients_contact_idx` and
+   `app.automation_runs_contact_idx` concurrently (outside a transaction), so campaigns and runs
+   keep being written. Old servers never call the function; until the web rollout ends, an old web
+   server shows no merge.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

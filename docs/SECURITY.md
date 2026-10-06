@@ -132,6 +132,14 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   removing one needs `tenant.settings.manage` (it re-enables messaging).
 - Deleting a template Meta already has needs `templates.submit` as well as `templates.write`.
 - Erasing a contact needs `contacts.delete` (also while the company is suspended).
+- Merging contacts (ADR-224) needs `contacts.write` and `contacts.delete` (owners and
+  administrators, not while the company is suspended) and is audited with the counts.
+  `app.merge_contacts` (SECURITY DEFINER, executable by the runtime role only) works in the
+  company's own scope: a contact of another company is not found, and its new policies reach only
+  the current company's rows. Consent events, the CRM timeline and automation runs accept a change
+  of `contact_id` alone, only inside the function (`w360.contact_merge`) and only for the definer
+  role, which alone holds UPDATE on those columns. The opt-out of either contact stands; no opt-in
+  is added. `app.contact_merges` holds ids, the member and counts, never personal data.
 - Notice email choices (ADR-215): a member changes only their own, through
   `app.set_own_email_opt_outs` (SECURITY DEFINER, executable by the runtime role only), which takes
   the membership from the scope, never an argument; the runtime role has no update on memberships.
@@ -168,6 +176,30 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   Transcripts need `inbox.export` (owners, administrators, supervisors) and sight of the
   conversation, are audited (`conversation.transcript_exported`, no content), are plain text so no
   spreadsheet runs a formula from them, and leave internal notes out (ADR-212).
+  Conversation tags (ADR-220) need `inbox.reply` and sight of the conversation, checked under its
+  row lock; whoever sees a conversation sees its tags, and the inbox's filter offers only the tags
+  on conversations the member can see. Erasing a contact deletes the tags of their conversations
+  (the definer function's policies reach only the current company's rows), and an erased contact's
+  conversation takes no new tags.
+  Keys (ADR-221) read conversations' tags with `conversations.read` and change them with
+  `conversations.write`, in their own company only; conversations of erased contacts are not found.
+  Changes through the API are audited with the counts added and removed, never the tags.
+  Automations (ADR-222) tag only the conversation their run answers, under its row lock, with the
+  same limit, and never the conversation of an erased contact.
+  Read receipts and typing indicators (ADR-223) are off until a member who manages company settings
+  turns them on (audited). Typing needs `inbox.reply` and sight of the conversation; jobs carry only
+  the message's id in a signed envelope, and the worker re-reads everything in the company's scope
+  and uses the receiving account's token only towards Graph. Nothing is sent for an erased contact.
+  Files customers send (ADR-216) are given only to members who can see the conversation, fetched for
+  each request with the receiving account's token, which goes only to Graph and to the https address
+  Graph returned (no user name or password, no redirects; the address is never stored or logged),
+  and passed on without a copy. Only photos, stickers, recordings and videos keep their type; every
+  other file is an `application/octet-stream` attachment. Answers carry `nosniff`, a `sandbox`
+  Content-Security-Policy and a same-origin resource policy, and stop past 100 MB.
+  Files members send (ADR-218) need `inbox.reply` and every check of a text reply, go through a
+  route only HyFib's own pages may post to (the trusted-origin check) with the member's session, are
+  read up to 16 MB and accepted only as listed photo, video, recording and document types, and are
+  uploaded with the account's token from the server, never the browser; HyFib keeps no copy.
   Automatic assignment only reaches active members whose role can read and answer conversations.
 - CSAT taps: a tap is recorded only when its button id names a survey of the same conversation and
   its `context.id` is that survey's message; nothing in the tap is trusted beyond selecting one of
@@ -504,8 +536,14 @@ Phase 5 rules (Public API, P5-08):
   `conversations.read` reads every conversation of the company and what contacts wrote, so only a
   member who reads every conversation (`inbox.read_all`) can grant it. The conversations of erased
   contacts are neither listed nor read. A conversation names its member and team by id only
-  (ADR-093); messages carry their text and the media type, never the media, internal notes or
-  member names.
+  (ADR-093); messages carry their text and the media type, never internal notes or member names. The
+  file a customer sent comes only from `GET /messages/{id}/media` (ADR-217), with the same scope,
+  fetched from WhatsApp per request and given as an attachment; a key cannot be sent by a browser on
+  its own, so the file keeps its type.
+  Uploads (ADR-219) need `messages.reply`, are checked as members' files are (listed types, at most
+  16 MB) and are uploaded from the server with the account's token. A send names only the company's
+  own upload, for the number it goes from, of its type, within 30 days; another company's id is not
+  found.
   Keyset cursors carry a timestamp and an id that are checked before they reach a query.
 - Resolving and reopening conversations through the API (ADR-075) needs `conversations.write`,
   which only members who resolve every conversation in the inbox (`inbox.supervise`: owners,

@@ -55,6 +55,20 @@ export async function updateCsatSettingsAction(
   });
 }
 
+/** Read receipts and typing indicators to customers (ADR-223). */
+export async function updateReadReceiptsAction(
+  slug: string,
+  input: { enabled: boolean },
+): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { readReceipts } = await getRuntime();
+    await readReceipts.updateSettings(ctx, input, await requestMeta());
+    refresh();
+    return null;
+  });
+}
+
 export interface TeamFormInput {
   name: string;
   description: string;

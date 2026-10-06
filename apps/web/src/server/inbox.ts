@@ -1,5 +1,5 @@
 import 'server-only';
-import { can, currentEventCursor, type TenantContext } from '@w360/domain';
+import { can, currentEventCursor, normalizeTag, type TenantContext } from '@w360/domain';
 import type { InboxQuery } from '@/components/inbox/inbox-shell';
 import { getRuntime } from './runtime';
 
@@ -29,12 +29,15 @@ export function parseInboxQuery(ctx: TenantContext, sp: SearchParams): InboxQuer
   const status: InboxQuery['status'] = sp.status === 'resolved' ? 'resolved' : 'open';
   const team = one(sp.team);
   const channel = one(sp.channel);
+  // Written as tags are, so the filter's choice shows it; a value that cannot be a tag is dropped.
+  const tag = normalizeTag(one(sp.tag)?.slice(0, 100) ?? '');
   const q = one(sp.q)?.trim().slice(0, 100);
   return {
     view,
     status,
     ...(team && (team === 'none' || UUID.test(team)) ? { team } : {}),
     ...(channel && UUID.test(channel) ? { channel } : {}),
+    ...(tag.ok ? { tag: tag.tag } : {}),
     ...(q ? { q } : {}),
     order: sp.order === 'waiting' && status === 'open' ? 'waiting' : 'recent',
   };
@@ -45,11 +48,12 @@ export async function loadInboxList(ctx: TenantContext, sp: SearchParams) {
   const query = parseInboxQuery(ctx, sp);
   const views: InboxQuery['view'][] = ['mine', 'unassigned', 'all'];
   const cursor = one(sp.cursor);
-  const { inbox, teams } = await getRuntime();
-  const [list, teamOptions, channelOptions, mentions, available] = await Promise.all([
+  const { inbox, teams, conversationTags } = await getRuntime();
+  const [list, teamOptions, channelOptions, tags, mentions, available] = await Promise.all([
     inbox.listConversations(ctx, { ...query, ...(cursor ? { cursor } : {}) }),
     teams.teamOptions(ctx),
     can(ctx, 'channels.read') ? teams.channelOptions(ctx) : Promise.resolve([]),
+    conversationTags.tagsInUse(ctx),
     inbox.unreadMentionCount(ctx),
     can(ctx, 'inbox.reply') ? teams.getAvailability(ctx) : Promise.resolve(null),
   ]);
@@ -60,6 +64,7 @@ export async function loadInboxList(ctx: TenantContext, sp: SearchParams) {
     filters: {
       teams: teamOptions,
       channels: channelOptions.map((c) => ({ id: c.id, label: c.label })),
+      tags: tags.map((t) => t.tag),
     },
     unreadMentions: mentions,
     available,

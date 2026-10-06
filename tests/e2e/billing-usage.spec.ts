@@ -147,7 +147,8 @@ test('a company sees Meta’s rates in force, what changes next, and this month�
   await expect(conversation).toBeVisible({ timeout: 20_000 });
   await conversation.click();
   await page.getByLabel('Reply').fill('Yes, in all sizes.');
-  await page.getByRole('button', { name: 'Send' }).click();
+  // Exact: the conversation also has a “Send file” button.
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   const thread = page.getByRole('list', { name: /^Messages with/ });
   await expect(thread.getByText('Sent to WhatsApp')).toBeVisible({ timeout: 20_000 });
   const sent = (await standInRequests(request))

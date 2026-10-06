@@ -3,7 +3,7 @@ import { useRouter } from 'next/navigation';
 import { useId, useRef, useState, useSyncExternalStore } from 'react';
 import { clipText } from '@w360/core/text';
 import { Button, Select, Textarea } from '@w360/ui';
-import { sendReplyAction } from '@/app/actions/inbox';
+import { sendReplyAction, showTypingAction } from '@/app/actions/inbox';
 import { FormError } from '@/components/form-status';
 import { ClientForm } from '@/components/client-form';
 
@@ -48,6 +48,7 @@ export function Composer({
   disabledReason,
   savedReplies = [],
   latestMessageId,
+  typingIndicator = false,
 }: {
   slug: string;
   conversationId: string;
@@ -55,6 +56,8 @@ export function Composer({
   disabledReason: string | null;
   savedReplies?: ComposerSavedReply[];
   latestMessageId?: string;
+  /** The company shows customers that a member is writing (ADR-223). */
+  typingIndicator?: boolean;
 }) {
   const router = useRouter();
   const id = useId();
@@ -70,9 +73,25 @@ export function Composer({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const pendingKey = useRef<string | null>(null);
+  // When the customer was last shown that a member is writing, or -1 once the server said no.
+  const typingShownAt = useRef(0);
+
+  /** Shows the customer that a member is writing, at most every 20 seconds while they type. */
+  const showTyping = () => {
+    const now = Date.now();
+    if (!typingIndicator || typingShownAt.current < 0 || now - typingShownAt.current < 20_000) {
+      return;
+    }
+    typingShownAt.current = now;
+    void showTypingAction(slug, conversationId).then((result) => {
+      // Turned off, or refused: stop asking until the page is opened again.
+      if (!result.ok || result.data.outcome === 'off') typingShownAt.current = -1;
+    });
+  };
 
   const update = (value: string) => {
     setEdited(value);
+    if (value.trim()) showTyping();
     try {
       if (value) window.sessionStorage.setItem(draftKey, value);
       else window.sessionStorage.removeItem(draftKey);

@@ -207,6 +207,12 @@ const ruleSchema = z.discriminatedUnion('kind', [
     value: ruleValue,
   }),
   z.object({ kind: z.literal('tag'), op: z.enum(['has', 'has_not']), tag: tagSchema }),
+  /** A tag on the run's conversation (ADR-222), as members put them on it in the inbox. */
+  z.object({
+    kind: z.literal('conversation_tag'),
+    op: z.enum(['has', 'has_not']),
+    tag: tagSchema,
+  }),
   z.object({ kind: z.literal('business_hours'), op: z.enum(['open', 'closed']) }),
 ]);
 export type ConditionRule = z.infer<typeof ruleSchema>;
@@ -236,6 +242,18 @@ const updateContactNode = z.object({
       field: z.string().regex(FIELD_KEY_RE, 'Choose a contact field.'),
       value: textSchema(AUTOMATION_LIMITS.fieldValueLength, 'value'),
     }),
+  ]),
+  next: nextSchema,
+});
+
+/** Tags the run's conversation (ADR-222), as members do in the inbox. */
+const updateConversationNode = z.object({
+  id: nodeIdSchema,
+  type: z.literal('update_conversation'),
+  label: labelSchema,
+  action: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('add_tag'), tag: tagSchema }),
+    z.object({ kind: z.literal('remove_tag'), tag: tagSchema }),
   ]),
   next: nextSchema,
 });
@@ -418,6 +436,7 @@ export const nodeSchema = z.discriminatedUnion('type', [
   askTemplateNode,
   conditionNode,
   updateContactNode,
+  updateConversationNode,
   httpRequestNode,
   waitNode,
   handoffNode,
@@ -435,6 +454,7 @@ export const NODE_TYPES: readonly NodeType[] = [
   'ask_template',
   'condition',
   'update_contact',
+  'update_conversation',
   'http_request',
   'wait',
   'handoff',
@@ -449,6 +469,7 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   ask_template: 'Ask with a template',
   condition: 'Condition',
   update_contact: 'Update contact',
+  update_conversation: 'Tag the conversation',
   http_request: 'Call a web address',
   wait: 'Wait',
   handoff: 'Hand off to people',
@@ -948,6 +969,7 @@ export function edgesOf(node: AutomationNode): { label: string; target: string |
     case 'send_text':
     case 'send_template':
     case 'update_contact':
+    case 'update_conversation':
     case 'wait':
       return [{ label: 'next', target: node.next }];
     case 'ask_template':

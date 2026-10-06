@@ -235,6 +235,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`filterConditions`, at most 10,000, ordered by id) in one transaction, refuse a count other than
   the one the member saw, then insert the tag for those without it and below the tag cap, or delete
   it, recording one audit entry.
+  Merging (`contacts/merge.ts`, ADR-224): `previewMerge` reads both contacts with their identities,
+  conversations, consent and counts, and `planContactMerge` gives the result and the refusals;
+  `mergeContacts` calls `app.merge_contacts` (SECURITY DEFINER), which takes the locks, checks
+  again, moves every row naming the merged contact, records the stricter consent, deletes the merged
+  contact and records the merge in `app.contact_merges`; the contact page follows a link to a merged
+  contact through `mergedInto`.
 - **Consent** (`packages/domain/src/consent`): append-only `consent_events`; a definer trigger
   maintains `contact_consents` (later wins, opt-out wins ties). Sources: keyword messages (matched
   in ingestion on newly stored text, button and interactive replies), member notes, import
@@ -405,6 +411,51 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the audit entry in one transaction, then yields the header and pages of 500 messages (keyset on
   the exact `created_at` and the id, read-only transactions) formatted as plain text; the route
   `/c/<company>/inbox/<conversation>/transcript` streams it as an attachment.
+- **Conversation tags** (`inbox/conversation-tags.ts`, ADR-220): `addTags` and `removeTag` check
+  `inbox.reply`, lock the conversation when the member can see it (`canSeeConversation`), count and
+  change its rows in `app.conversation_tags` (migration 0145) and emit `conversation.tags`;
+  `tagsInUse` groups the tags of the conversations the member can see. The inbox list selects each
+  conversation's tags (`conversationTagsOf`) and filters with `conversationHasTag`;
+  `app.erase_contact` deletes the tags of the contact's conversations.
+- **Conversation tags through the API** (`api/conversations.ts`, ADR-221): the conversation columns
+  select the tags (`conversationTagsOf`), `conversationFilterSql` adds `conversationHasTag` for
+  `tag`, `prepareConversationChange` checks `addTags` and `removeTags` before the transaction, and
+  `changeLockedConversation` applies them after the status under the row lock, touching
+  `updated_at`, emitting `conversation.tags` and auditing the counts.
+- **Automations that tag the conversation** (ADR-222): `update_conversation` steps and
+  `conversation_tag` rules in `automations/graph.ts`; the interpreter gives `add_conversation_tag`
+  and `remove_conversation_tag` effects and reads `RunFacts.conversationTags`, which `loadFacts`
+  reads; `applyConversationEffect` in the runner applies them under the conversation lock the step
+  holds.
+- **Read receipts and typing indicators** (`inbox/read-receipts.ts`, ADR-223): `markRead` in
+  `messaging/inbox.ts` calls `queueReadReceipt` in its transaction; the composer calls
+  `showTypingAction` at most every 20 seconds, which `showTyping` checks and queues; both sign a job
+  (`message.read` or `message.typing`, the message's id as its reference) on the `message.read`
+  queue. The worker's `messageReadHandler` verifies the envelope for the kind it claims and runs
+  `sendReadReceipt`, which checks again and calls `GraphClient.markRead`.
+- **Files customers send** (`messaging/received-media.ts`, ADR-216): the route
+  `/c/<company>/inbox/<conversation>/media/<message>` checks that the member can see the
+  conversation and reads the message's media record and the receiving account's token in one
+  read-only transaction, then asks Graph for the file's address (`GraphClient.getMedia`) and
+  downloads it with the token (`downloadMedia`: https or the Graph origin only, no redirects),
+  passing the bytes on through a stream that stops past 100 MB. Nothing is stored;
+  `mediaPresentation` decides the response's type and disposition.
+  Keys get the same file from `GET /api/v1/messages/{id}/media` (ADR-217,
+  `openReceivedMediaForKey`): `conversations.read`, the message in the key's company and not of an
+  erased contact, then the same fetch, answered as an attachment with the file's own type through
+  `handleApiRequest`'s file result.
+- **Files members send** (`messaging/file-replies.ts`, ADR-218): the route
+  `/api/c/<company>/inbox/<conversation>/files` (trusted origin, the member's session, at most 16 MB
+  and 64 KB read) hands the file to `queueFileReply`, which checks its type and size, answers a
+  retried client key with its message, checks the reply without writing (`prepareReply`), uploads
+  the file (`GraphClient.uploadMedia`) and queues the reply through `queueReply`, which text replies
+  use too, with a media record naming the upload.
+- **Files keys upload** (`api/media.ts`, ADR-219): `POST /api/v1/media` reads a multipart body
+  through `handleApiRequest` (`multipartBytes`), checks the file as members' files are, uploads it
+  for the sending number and inserts a media row without a message, with the number and the key
+  (migration 0143). `POST /messages` with `mediaId` finds that row in the company
+  (`uploadedFileFor`: the same number, the same kind, 30 days) and gives the message a media row of
+  its own.
 - **Collision warning** (`queueTextMessage` `afterMessageId`): under the conversation row lock, a
   reply is refused once when another member's reply is newer than the newest message the sender had
   seen; the composer refreshes the thread and keeps the draft (ADR-033).

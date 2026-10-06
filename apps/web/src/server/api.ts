@@ -28,12 +28,20 @@ export interface ApiCall {
   runtime: Runtime;
   /** The JSON body (POST, PATCH), already parsed. */
   body: unknown;
+  /** The multipart body of an upload (ADR-219), already read within its limit. */
+  form: FormData | null;
   /** The Idempotency-Key header with the request's hash, when the header was sent. */
   idempotency: IdempotencyInput | null;
   query: Record<string, string>;
 }
 
-type HandlerResult = ApiResponse | { status: number; body: Record<string, unknown> };
+/** A file the handler passes on as it arrives (ADR-217), with the headers that describe it. */
+interface FileResult {
+  status: number;
+  file: { body: ReadableStream<Uint8Array>; headers: Record<string, string> };
+}
+
+type HandlerResult = ApiResponse | { status: number; body: Record<string, unknown> } | FileResult;
 
 // Responses are never cached: next.config sets `Cache-Control: private, no-store` for them.
 const baseHeaders = (requestId: string): HeadersInit => ({
@@ -64,7 +72,12 @@ function respond(
 export async function handleApiRequest(
   request: NextRequest,
   handler: (call: ApiCall) => Promise<HandlerResult>,
-  options: { json?: boolean; idempotency?: 'required' | 'optional' } = {},
+  options: {
+    json?: boolean;
+    idempotency?: 'required' | 'optional';
+    /** A multipart body of at most this many bytes, such as a file upload (ADR-219). */
+    multipartBytes?: number;
+  } = {},
 ): Promise<Response> {
   const requestId = crypto.randomUUID();
   const runtime = await getRuntime();
@@ -169,6 +182,38 @@ export async function handleApiRequest(
       }
     }
 
+    let form: FormData | null = null;
+    if (options.multipartBytes) {
+      const type = request.headers.get('content-type') ?? '';
+      if (!/^multipart\/form-data;/i.test(type.trim())) {
+        const e = apiRequestError(
+          415,
+          'bad_request',
+          'Send the body as multipart/form-data.',
+          requestId,
+        );
+        return respond(e.status, e.body, requestId);
+      }
+      const bytes = await readLimitedBody(request, options.multipartBytes);
+      if (!bytes) {
+        const e = apiRequestError(413, 'bad_request', 'The body is larger than 16 MB.', requestId);
+        return respond(e.status, e.body, requestId);
+      }
+      try {
+        form = await new Response(new Uint8Array(bytes), {
+          headers: { 'content-type': type },
+        }).formData();
+      } catch {
+        const e = apiRequestError(
+          400,
+          'bad_request',
+          'The body is not valid form data.',
+          requestId,
+        );
+        return respond(e.status, e.body, requestId);
+      }
+    }
+
     let idempotency: IdempotencyInput | null = null;
     const idempotencyKey = request.headers.get('idempotency-key');
     if (options.idempotency && idempotencyKey !== null) {
@@ -197,8 +242,13 @@ export async function handleApiRequest(
 
     const query = Object.fromEntries(request.nextUrl.searchParams.entries());
     // Text PostgreSQL cannot store is refused here, naming where it is, not failed in a query.
-    assertNoNulCharacter(query, body);
-    const result = await handler({ ctx, runtime, body, idempotency, query });
+    assertNoNulCharacter(
+      query,
+      form
+        ? Object.fromEntries([...form.entries()].filter(([, value]) => typeof value === 'string'))
+        : body,
+    );
+    const result = await handler({ ctx, runtime, body, form, idempotency, query });
     const replayed = 'replayed' in result && result.replayed;
     log.info(
       {
@@ -212,6 +262,12 @@ export async function handleApiRequest(
       },
       'api request',
     );
+    if ('file' in result) {
+      return new Response(result.file.body, {
+        status: result.status,
+        headers: { ...result.file.headers, 'X-Request-Id': requestId },
+      });
+    }
     return respond(
       result.status,
       result.body,

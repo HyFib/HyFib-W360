@@ -1830,6 +1830,119 @@ describe('a run and a member changing the same tag at once (ADR-114)', () => {
   });
 });
 
+describe('automations that tag the conversation (ADR-222)', () => {
+  /** Triage: a conversation already tagged refund ends; another is tagged refund and loses "new". */
+  const triage = {
+    version: 1,
+    start: 'check',
+    nodes: [
+      {
+        id: 'check',
+        type: 'condition',
+        match: 'all',
+        rules: [{ kind: 'conversation_tag', op: 'has', tag: 'Refund' }],
+        then: 'already',
+        else: 'tag',
+      },
+      { id: 'already', type: 'end' },
+      {
+        id: 'tag',
+        type: 'update_conversation',
+        action: { kind: 'add_tag', tag: ' REFUND ' },
+        next: 'untag',
+      },
+      {
+        id: 'untag',
+        type: 'update_conversation',
+        action: { kind: 'remove_tag', tag: 'new' },
+        next: null,
+      },
+    ],
+  };
+
+  const tagsOf = async (conversationId: string) =>
+    (
+      await fx.query<{ tag: string }>(
+        'SELECT tag FROM app.conversation_tags WHERE conversation_id = $1 ORDER BY tag',
+        [conversationId],
+      )
+    ).map((r) => r.tag);
+
+  const tagConversation = (c: Company, conversationId: string, tags: string[]) =>
+    Promise.all(
+      tags.map((tag) =>
+        fx.query(
+          `INSERT INTO app.conversation_tags (id, tenant_id, conversation_id, tag)
+           VALUES ($1, $2, $3, $4)`,
+          [uuidv7(), c.tenant.id, conversationId, tag],
+        ),
+      ),
+    );
+
+  it('tags and untags the run’s conversation, and branches on its tags', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await publish(owner, 'Triage', keyword('refund'), triage);
+
+    // Not tagged yet: tagged refund (written as tags are), and "new" taken off.
+    const fresh = await inbound(c, waId(), 'refund please');
+    await tagConversation(c, fresh, ['new']);
+    const [before] = await fx.query<{ updated_at: Date }>(
+      'SELECT updated_at FROM app.conversations WHERE id = $1',
+      [fresh],
+    );
+    const run = await onlyRun(fresh);
+    expect((await drive(c, fresh, run.id)).outcome).toBe('ended');
+    expect(await tagsOf(fresh)).toEqual(['refund']);
+    expect((await stepLog(run.id)).map((s) => [s.node_id, s.outcome, s.branch, s.detail])).toEqual(
+      expect.arrayContaining([
+        ['check', 'branched', 'no', null],
+        ['tag', 'updated', null, null],
+        ['untag', 'updated', null, null],
+      ]),
+    );
+    const [after] = await fx.query<{ updated_at: Date }>(
+      'SELECT updated_at FROM app.conversations WHERE id = $1',
+      [fresh],
+    );
+    expect(after!.updated_at.getTime()).toBeGreaterThan(before!.updated_at.getTime());
+    const [events] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM app.tenant_events
+        WHERE conversation_id = $1 AND type = 'conversation.tags'`,
+      [fresh],
+    );
+    expect(events!.n).toBe(2);
+    // The inbox shows the run's tag.
+    const inbox = createInboxService({ db: fx.dbs.app, clock: systemClock });
+    expect((await inbox.getConversation(owner, fresh)).conversation.tags).toEqual(['refund']);
+
+    // Already tagged: the condition takes the yes branch and nothing changes.
+    const tagged = await inbound(c, waId(), 'refund again');
+    await tagConversation(c, tagged, ['refund', 'new']);
+    const second = await onlyRun(tagged);
+    await drive(c, tagged, second.id);
+    expect((await stepLog(second.id)).map((s) => [s.node_id, s.branch])).toEqual(
+      expect.arrayContaining([['check', 'yes']]),
+    );
+    expect(await tagsOf(tagged)).toEqual(['new', 'refund']);
+  });
+
+  it('leaves a conversation with 20 tags as it is, saying why in the step log', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await publish(owner, 'Triage', keyword('refund'), triage);
+    const full = await inbound(c, waId(), 'refund now');
+    const twenty = Array.from({ length: 20 }, (_, i) => `t${i}`);
+    await tagConversation(c, full, twenty);
+    const run = await onlyRun(full);
+    expect((await drive(c, full, run.id)).outcome).toBe('ended');
+    expect(await tagsOf(full)).toEqual([...twenty].sort());
+    expect((await stepLog(run.id)).find((s) => s.node_id === 'tag')?.detail).toBe(
+      'conversation_too_many_tags',
+    );
+  });
+});
+
 /** Polls a condition (every 100 ms, up to 20 s); jobs run asynchronously in pg-boss. */
 async function waitFor(condition: () => Promise<boolean>) {
   const deadline = Date.now() + 20_000;

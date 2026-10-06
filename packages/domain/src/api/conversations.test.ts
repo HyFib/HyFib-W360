@@ -239,11 +239,14 @@ describe('changing the conversations a filter finds (ADR-166)', () => {
       'assigneeId',
       'teamId',
       'updatedSince',
+      'tag',
     ]);
     expect(Object.keys(schema.properties.change.properties)).toEqual([
       'status',
       'assigneeId',
       'teamId',
+      'addTags',
+      'removeTags',
     ]);
     expect(schema.properties.filter.additionalProperties).toBe(false);
     expect(schema.properties.change.additionalProperties).toBe(false);

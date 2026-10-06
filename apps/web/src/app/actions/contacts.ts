@@ -122,6 +122,24 @@ export async function eraseContactAction(
   });
 }
 
+/** Merges one contact into another (ADR-224); the kept contact's page is shown next. */
+export async function mergeContactsAction(
+  slug: string,
+  input: { keepContactId: string; mergeContactId: string },
+): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { contactMerges } = await getRuntime();
+    await contactMerges.mergeContacts(
+      ctx,
+      { keepContactId: String(input.keepContactId), mergeContactId: String(input.mergeContactId) },
+      await requestMeta(),
+    );
+    refresh();
+    return null;
+  });
+}
+
 export async function previewImportAction(slug: string, form: FormData) {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);

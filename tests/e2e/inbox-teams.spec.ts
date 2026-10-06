@@ -107,7 +107,8 @@ test('teams route conversations, saved replies fill the composer and CSAT answer
   await expect(page.getByLabel('Reply', { exact: true })).toHaveValue(
     'Hi Priya Customer, we are open 9 to 5.',
   );
-  await page.getByRole('button', { name: 'Send' }).click();
+  // Exact: the conversation also has a “Send file” button.
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   const thread = page.getByRole('list', { name: /^Messages with/ });
   await expect(thread.getByText('Hi Priya Customer, we are open 9 to 5.')).toBeVisible();
   await expect(thread.getByText('Sent to WhatsApp')).toBeVisible({ timeout: 20_000 });

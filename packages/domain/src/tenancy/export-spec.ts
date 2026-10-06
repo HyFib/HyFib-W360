@@ -776,6 +776,17 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
     ],
   },
   {
+    table: 'app.contact_merges',
+    columns: [
+      'id',
+      'kept_contact_id',
+      'merged_contact_id',
+      'merged_by_user_id',
+      'summary',
+      'merged_at',
+    ],
+  },
+  {
     table: 'app.contact_tags',
     columns: ['id', 'contact_id', 'tag', 'created_at'],
   },
@@ -832,6 +843,10 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'occurred_at',
       'created_at',
     ],
+  },
+  {
+    table: 'app.conversation_tags',
+    columns: ['id', 'conversation_id', 'tag', 'created_at'],
   },
   {
     table: 'app.conversation_turns',
@@ -1147,6 +1162,8 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'storage_key',
       'status',
       'failure_reason',
+      'channel_account_id',
+      'api_key_id',
       'created_at',
       'updated_at',
     ],
@@ -1260,6 +1277,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'csat_enabled',
       'csat_question',
       'csat_labels',
+      'read_receipts',
     ],
   },
   {

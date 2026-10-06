@@ -43,6 +43,7 @@ const SOURCE_LABEL: Record<string, string> = {
   api: 'API',
   erasure: 'Contact erased',
   store: 'Recorded by the store',
+  merge: 'Opt-out of a merged contact',
 };
 
 const SUPPRESSION_REASON: Record<string, string> = {
@@ -60,23 +61,49 @@ function attributeText(value: unknown): string {
 
 export default async function ContactPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ slug: string; contactId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { slug, contactId } = await params;
+  const justMerged = (await searchParams).merged === '1';
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'contacts.read')) notFound();
-  const { contacts, consent, templates, crm } = await getRuntime();
+  const { contacts, contactMerges, consent, templates, crm } = await getRuntime();
+  const tz = ctx.tenant.timezone;
+  const base = `/c/${ctx.tenant.slug}`;
   let detail: Awaited<ReturnType<typeof contacts.getContact>>;
   try {
     detail = await contacts.getContact(ctx, contactId);
   } catch (error) {
-    if (isAppError(error) && error.code === 'not_found') notFound();
-    throw error;
+    if (!isAppError(error) || error.code !== 'not_found') throw error;
+    // A link to a contact merged into another (ADR-224) leads to the contact it was merged into.
+    const merged = await contactMerges.mergedInto(ctx, contactId);
+    if (!merged) notFound();
+    return (
+      <>
+        <Link
+          href={`${base}/contacts`}
+          className="mb-2 inline-block text-sm text-primary underline-offset-4 hover:underline"
+        >
+          ← Contacts
+        </Link>
+        <PageHeader title="Merged contact" />
+        <Alert tone="info" title={`Merged on ${formatDateTime(merged.mergedAt.toISOString(), tz)}`}>
+          This contact was merged into another and deleted.{' '}
+          <Link
+            href={`${base}/contacts/${merged.keptContactId}`}
+            className="text-primary underline-offset-4 hover:underline"
+          >
+            Open the contact it was merged into
+          </Link>
+          .
+        </Alert>
+      </>
+    );
   }
   const { contact } = detail;
-  const tz = ctx.tenant.timezone;
-  const base = `/c/${ctx.tenant.slug}`;
   const title = contact.displayName ?? contact.phoneE164 ?? 'Unnamed contact';
 
   if (contact.erasedAt) {
@@ -132,6 +159,11 @@ export default async function ContactPage({
           </span>
         }
       />
+      {justMerged ? (
+        <Alert tone="success" title="Contacts merged" className="mb-6">
+          The other contact’s records moved here and it was deleted. The audit log has the details.
+        </Alert>
+      ) : null}
       <div className="grid gap-6 lg:grid-cols-2">
         <div className="grid content-start gap-6">
           {suppressed.length > 0 ? (
@@ -318,6 +350,25 @@ export default async function ContactPage({
               )}
             </CardContent>
           </Card>
+          {canWrite && can(ctx, 'contacts.delete') ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Merge a duplicate</CardTitle>
+                <CardDescription>
+                  Found this person twice? Merge the other contact into this one: its WhatsApp
+                  identities, conversations, consent history, tags and records move here.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Link
+                  href={`${base}/contacts/${contact.id}/merge`}
+                  className="text-sm text-primary underline-offset-4 hover:underline"
+                >
+                  Find the duplicate
+                </Link>
+              </CardContent>
+            </Card>
+          ) : null}
           {can(ctx, 'contacts.delete') ? (
             <Card className="border-destructive/40">
               <CardHeader>

@@ -6,6 +6,7 @@ import {
   contacts,
   conversationNotes,
   conversations,
+  conversationTags,
   CONVERSATION_STATUSES,
   desc,
   eq,
@@ -23,6 +24,12 @@ import {
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
 import { endRunForHuman } from '../automations/runs';
+import { normalizeTag } from '../contacts/fields';
+import {
+  MAX_TAGS_PER_CONVERSATION,
+  conversationHasTag,
+  conversationTagsOf,
+} from '../inbox/conversation-tags';
 import { lockAssignableMember, lockTeam, routeConversation } from '../inbox/routing';
 import { emitTenantEvent } from '../messaging/events';
 import { outboundText } from '../messaging/message-text';
@@ -37,6 +44,7 @@ import {
   type ContactCard,
   type TappedReply,
 } from '../webhooks/payloads';
+import { apiTags } from './contacts';
 import { apiActor, assertScope, type ApiContext } from './context';
 import type { ApiResponse, IdempotencyInput } from './idempotency';
 import { API_LIMITS } from './model';
@@ -46,9 +54,10 @@ import { idempotent } from './resources';
  * Conversations through the public API. A key with `conversations.read` lists the company's
  * conversations and reads their messages (ADR-072), or every message across them (ADR-088), and their
  * internal notes (ADR-089); one with `conversations.write` resolves and reopens them (ADR-075), adds
- * internal notes (ADR-084), and assigns them or moves them between teams (ADR-093), many at once
- * (ADR-120) or those a filter finds (ADR-166). The conversations of erased contacts are left out, as
- * their contacts are. Messages read as the webhooks describe them (ADR-053).
+ * internal notes (ADR-084), assigns them or moves them between teams (ADR-093) and tags them
+ * (ADR-221), many at once (ADR-120) or those a filter finds (ADR-166). The conversations of erased
+ * contacts are left out, as their contacts are. Messages read as the webhooks describe them
+ * (ADR-053).
  */
 
 const page = {
@@ -73,8 +82,14 @@ const conversationFilters = {
     .datetime({ offset: true })
     .optional()
     .describe(
-      'Only conversations changed at or after this time (a new message, a status or assignee change, a read).',
+      'Only conversations changed at or after this time (a new message, a status, assignee or tag change, a read).',
     ),
+  tag: z
+    .string()
+    .max(100)
+    .refine((value) => normalizeTag(value).ok, 'Give a tag: up to 40 characters, without commas.')
+    .optional()
+    .describe('Only the conversations with this tag, however its letters are cased.'),
 };
 
 export const apiConversationListQuerySchema = z
@@ -131,9 +146,24 @@ const conversationChange = {
   status: z.enum(['open', 'resolved']).optional(),
   assigneeId: z.uuid().nullable().optional(),
   teamId: z.uuid().nullable().optional(),
+  addTags: z.array(z.string().max(40)).max(MAX_TAGS_PER_CONVERSATION).optional(),
+  removeTags: z.array(z.string().max(40)).max(MAX_TAGS_PER_CONVERSATION).optional(),
 };
-const someChange = (v: { status?: unknown; assigneeId?: unknown; teamId?: unknown }) =>
-  v.status !== undefined || v.assigneeId !== undefined || v.teamId !== undefined;
+const someChange = (v: {
+  status?: unknown;
+  assigneeId?: unknown;
+  teamId?: unknown;
+  addTags?: unknown;
+  removeTags?: unknown;
+}) =>
+  v.status !== undefined ||
+  v.assigneeId !== undefined ||
+  v.teamId !== undefined ||
+  v.addTags !== undefined ||
+  v.removeTags !== undefined;
+const SOME_CHANGE = 'Give status, assigneeId, teamId, addTags or removeTags.';
+const ADD_TAGS = `Tags to put on the conversation, as members do in the inbox (lower-cased; commas are not allowed). A conversation has at most ${MAX_TAGS_PER_CONVERSATION}.`;
+const REMOVE_TAGS = 'Tags to take off the conversation; a tag it does not have changes nothing.';
 
 export const apiUpdateConversationSchema = z
   .object({
@@ -146,9 +176,11 @@ export const apiUpdateConversationSchema = z
     teamId: conversationChange.teamId.describe(
       'A team from GET /teams to move the conversation to, or null for no team.',
     ),
+    addTags: conversationChange.addTags.describe(ADD_TAGS),
+    removeTags: conversationChange.removeTags.describe(REMOVE_TAGS),
   })
   .strict()
-  .refine(someChange, 'Give status, assigneeId or teamId.');
+  .refine(someChange, SOME_CHANGE);
 
 /** The change many conversations get alike (ADR-120, ADR-166). */
 const manyConversationsChange = {
@@ -161,6 +193,8 @@ const manyConversationsChange = {
   teamId: conversationChange.teamId.describe(
     'A team from GET /teams to move the conversations to, or null for no team.',
   ),
+  addTags: conversationChange.addTags.describe(ADD_TAGS),
+  removeTags: conversationChange.removeTags.describe(REMOVE_TAGS),
 };
 
 /** The same change for up to 100 conversations at once (ADR-120), each named once. */
@@ -180,7 +214,7 @@ export const apiUpdateManyConversationsSchema = z
     ...manyConversationsChange,
   })
   .strict()
-  .refine(someChange, 'Give status, assigneeId or teamId.');
+  .refine(someChange, SOME_CHANGE);
 
 /**
  * Changing the conversations a filter finds, a page at a time (ADR-166): GET /conversations'
@@ -193,7 +227,7 @@ export const apiUpdateMatchingConversationsSchema = z
       .strict()
       .refine(
         (filter) => Object.values(filter).some((value) => value !== undefined),
-        'Give at least one filter: status, contactId, channelId, assigneeId, teamId or updatedSince.',
+        'Give at least one filter: status, contactId, channelId, assigneeId, teamId, updatedSince or tag.',
       )
       .describe(
         'The conversations to change, as GET /conversations filters them: at least one filter.',
@@ -201,9 +235,9 @@ export const apiUpdateMatchingConversationsSchema = z
     change: z
       .object(manyConversationsChange)
       .strict()
-      .refine(someChange, 'Give status, assigneeId or teamId.')
+      .refine(someChange, SOME_CHANGE)
       .describe(
-        'What each conversation of the page gets, as PATCH /conversations/{id} takes it: any of status, assigneeId and teamId.',
+        'What each conversation of the page gets, as PATCH /conversations/{id} takes it: any of status, assigneeId, teamId, addTags and removeTags.',
       ),
     limit: z
       .number()
@@ -227,6 +261,8 @@ export interface ApiConversation {
   /** The member assigned (an id from GET /members; ADR-093). */
   assigneeId: string | null;
   teamId: string | null;
+  /** The conversation's tags, alphabetically (ADR-221). */
+  tags: string[];
   unreadCount: number;
   lastMessageAt: string | null;
   lastInboundAt: string | null;
@@ -306,6 +342,7 @@ const conversationColumns = {
   status: conversations.status,
   assignedMembershipId: conversations.assignedMembershipId,
   teamId: conversations.teamId,
+  tags: conversationTagsOf(sql`${conversations.tenantId}`, sql`${conversations.id}`),
   unreadCount: conversations.unreadCount,
   lastMessageAt: conversations.lastMessageAt,
   lastInboundAt: conversations.lastInboundAt,
@@ -322,6 +359,7 @@ type ConversationRow = {
   status: ConversationStatus;
   assignedMembershipId: string | null;
   teamId: string | null;
+  tags: string[];
   unreadCount: number;
   lastMessageAt: Date | null;
   lastInboundAt: Date | null;
@@ -338,6 +376,7 @@ const toApiConversation = (r: ConversationRow): ApiConversation => ({
   assigned: r.assignedMembershipId !== null,
   assigneeId: r.assignedMembershipId,
   teamId: r.teamId,
+  tags: r.tags,
   unreadCount: r.unreadCount,
   lastMessageAt: r.lastMessageAt?.toISOString() ?? null,
   lastInboundAt: r.lastInboundAt?.toISOString() ?? null,
@@ -394,6 +433,11 @@ export function conversationFilterSql(tenantId: string, filter: ConversationFilt
   }
   if (filter.updatedSince) {
     conditions.push(sql`${conversations.updatedAt} >= ${filter.updatedSince}::timestamptz`);
+  }
+  if (filter.tag !== undefined) {
+    conditions.push(
+      conversationHasTag(sql`${conversations.tenantId}`, sql`${conversations.id}`, filter.tag),
+    );
   }
   return conditions;
 }
@@ -739,6 +783,29 @@ const invalidField = (path: string, message: string) =>
 const INVALID_TEAM = 'Give the id of one of the company’s teams (GET /teams).';
 const INVALID_ASSIGNEE = 'Give the id of a member who can answer conversations (GET /members).';
 
+/** A change as changeLockedConversation applies it, with its tags as the app keeps them. */
+type ConversationChange = Omit<
+  z.infer<typeof apiUpdateConversationSchema>,
+  'addTags' | 'removeTags'
+> & { addTags: string[]; removeTags: string[] };
+
+/**
+ * Checks a change's tags before its transaction (ADR-221), as contacts' are checked: written as
+ * tags are, each once, and never both added and removed. A refusal names `<place><field>`.
+ */
+function prepareConversationChange(
+  data: z.infer<typeof apiUpdateConversationSchema>,
+  place = '',
+): ConversationChange {
+  const addTags = apiTags(data.addTags ?? [], `${place}addTags`);
+  const removeTags = apiTags(data.removeTags ?? [], `${place}removeTags`);
+  const both = addTags.find((tag) => removeTags.includes(tag));
+  if (both) {
+    throw invalidField(`${place}removeTags`, `The tag ${both} cannot be both added and removed.`);
+  }
+  return { ...data, addTags, removeTags };
+}
+
 /** A conversation's row as a change locks it. */
 interface LockedConversation {
   status: ConversationStatus;
@@ -748,7 +815,7 @@ interface LockedConversation {
 
 /**
  * Changes a conversation whose row the caller has locked, as the inbox's controls do: its team, then
- * its assignee (ADR-093), then its status (ADR-075).
+ * its assignee (ADR-093), then its status (ADR-075), then its tags (ADR-221).
  * - A team must be the company's, and an assignee a member who can answer conversations (the members
  *   GET /members lists); both rows are locked while the change is written, so a member suspended or a
  *   team deleted at the same time is refused, or releases the conversation once this commits.
@@ -758,16 +825,19 @@ interface LockedConversation {
  * - Resolving stops an automation answering the conversation; the triggers close the waiting reply
  *   turn and the case, open a new case on reopening and capture the webhook events.
  * The key is the audit actor, so per-member report counts leave the change out, and no satisfaction
- * survey is sent (surveys follow a member's resolve, ADR-032). What the conversation already has
- * changes nothing, so a retried request does no harm. A refused field is named after `place`, the
- * object holding the change in the body (`change.` for ADR-166).
+ * survey is sent (surveys follow a member's resolve, ADR-032).
+ * - Tags are added and removed as members do in the inbox (ADR-220), at most 20 on a conversation,
+ *   counted under the conversation's lock; a change of its tags is a change of the conversation
+ *   (`updatedAt`, a live event and an audit entry with the counts, never the tags).
+ * What the conversation already has changes nothing, so a retried request does no harm. A refused
+ * field is named after `place`, the object holding the change in the body (`change.` for ADR-166).
  */
 async function changeLockedConversation(
   tx: Tx,
   ctx: ApiContext,
   conversationId: string,
   current: LockedConversation,
-  data: z.infer<typeof apiUpdateConversationSchema>,
+  data: ConversationChange,
   now: Date,
   place = '',
 ): Promise<void> {
@@ -867,6 +937,59 @@ async function changeLockedConversation(
     await audit('conversation.status_changed', { from: current.status, to: data.status });
   }
 
+  if (data.addTags.length > 0 || data.removeTags.length > 0) {
+    const existing = (
+      await tx
+        .select({ tag: conversationTags.tag })
+        .from(conversationTags)
+        .where(
+          and(
+            eq(conversationTags.tenantId, ctx.tenant.id),
+            eq(conversationTags.conversationId, conversationId),
+          ),
+        )
+    ).map((row) => row.tag);
+    const added = data.addTags.filter((tag) => !existing.includes(tag));
+    const removed = data.removeTags.filter((tag) => existing.includes(tag));
+    const total = existing.length + added.length - removed.length;
+    if (total > MAX_TAGS_PER_CONVERSATION) {
+      throw invalidField(
+        `${place}addTags`,
+        `A conversation can have at most ${MAX_TAGS_PER_CONVERSATION} tags; conversation ${conversationId} would have ${total}.`,
+      );
+    }
+    if (added.length > 0) {
+      await tx
+        .insert(conversationTags)
+        .values(
+          added.map((tag) => ({ id: uuidv7(), tenantId: ctx.tenant.id, conversationId, tag })),
+        );
+    }
+    if (removed.length > 0) {
+      await tx
+        .delete(conversationTags)
+        .where(
+          and(
+            eq(conversationTags.tenantId, ctx.tenant.id),
+            eq(conversationTags.conversationId, conversationId),
+            inArray(conversationTags.tag, removed),
+          ),
+        );
+    }
+    if (added.length > 0 || removed.length > 0) {
+      await tx
+        .update(conversations)
+        .set({ updatedAt: sql`now()` })
+        .where(thisConversation);
+      await emitTenantEvent(tx, ctx.tenant.id, {
+        type: 'conversation.tags',
+        conversationId,
+        assignedMembershipId: assignee,
+      });
+      await audit('conversation.tags_changed', { added: added.length, removed: removed.length });
+    }
+  }
+
   // Routing leaves a resolved or assigned conversation, and one an automation answers, as it is.
   if (moved && data.teamId) {
     await routeConversation(tx, ctx.tenant.id, conversationId, { newCase: false, text: null });
@@ -892,7 +1015,7 @@ export async function apiUpdateConversation(
 ): Promise<ApiConversation> {
   assertScope(ctx, 'conversations.write');
   if (!z.uuid().safeParse(conversationId).success) throw notFound('Conversation');
-  const data = parseInput(apiUpdateConversationSchema, input);
+  const data = prepareConversationChange(parseInput(apiUpdateConversationSchema, input));
   const row = await deps.db.run(ctx.scope, async (tx) => {
     const [current] = await tx
       .select(lockedColumns)
@@ -948,6 +1071,7 @@ export async function apiUpdateManyConversations(
 ): Promise<ApiConversation[]> {
   assertScope(ctx, 'conversations.write');
   const data = parseInput(apiUpdateManyConversationsSchema, input);
+  const change = prepareConversationChange(data);
   const ids = data.conversationIds;
   const rows = await deps.db.run(ctx.scope, async (tx) => {
     if (data.assigneeId && !(await lockAssignableMember(tx, ctx.tenant.id, data.assigneeId))) {
@@ -972,7 +1096,7 @@ export async function apiUpdateManyConversations(
     });
     const now = deps.clock.now();
     for (const { id, current } of changes) {
-      await changeLockedConversation(tx, ctx, id, current, data, now);
+      await changeLockedConversation(tx, ctx, id, current, change, now);
     }
     const after = await visible();
     return ids.map((id) => {
@@ -1022,6 +1146,7 @@ export async function apiUpdateMatchingConversations(
     cursor: after,
   } = parseInput(apiUpdateMatchingConversationsSchema, input);
   const cursor = decodeKeysetCursor(after);
+  const prepared = prepareConversationChange(change, 'change.');
   return deps.db.run(ctx.scope, async (tx) => {
     if (change.assigneeId && !(await lockAssignableMember(tx, ctx.tenant.id, change.assigneeId))) {
       throw invalidField('change.assigneeId', INVALID_ASSIGNEE);
@@ -1051,7 +1176,7 @@ export async function apiUpdateMatchingConversations(
     });
     const now = deps.clock.now();
     for (const { id, current } of changes) {
-      await changeLockedConversation(tx, ctx, id, current, change, now, 'change.');
+      await changeLockedConversation(tx, ctx, id, current, prepared, now, 'change.');
     }
     const changed = await visibleConversations(
       tx,

@@ -77,7 +77,8 @@ jobs:
   e2e:
     name: End-to-end (Chromium, Firefox, WebKit, mobile)
     runs-on: ubuntu-24.04
-    # Tests run one at a time across four browser projects: 344 took 127.3 minutes on 3695c23, 340
+    # Tests run one at a time across four browser projects: the whole job took 139 minutes on d50ff85
+    # (October 2026), 344 tests took 127.3 minutes on 3695c23, 340
     # took 120.3 to 127.6 on cecf550, 2e74750 and a2df990, 260 took 91.1 on 57bc896, 224 took 71.1
     # on aceb7a0, 220 took 65.3 on c1b45aa, 216 took 61.2 on 76b0eff, 212 took 64.0 on afcb21d and
     # 61.0 on b453b6c, 208 took 66.5 on da91fc3 (one flaky test passed on its retry on b453b6c and
@@ -91,8 +92,8 @@ jobs:
     # (about a minute each, ADR-137). Runners vary (148 tests took 33.5 minutes on b2b7614; 160 took
     # 45.9 on fb8efa6, including a 4-minute timeout and its retry), each slice adds about 4 tests,
     # and one retry of a long test (the cart reminder test allows 5 minutes) must still fit on a
-    # slow runner: the suite step stops at 180 minutes, the job at 190.
-    timeout-minutes: 190
+    # slow runner: the suite step stops at 230 minutes, the job at 240.
+    timeout-minutes: 240
     services:
       postgres:
         image: postgres:18-alpine
@@ -181,7 +182,7 @@ jobs:
       - run: pnpm exec playwright install --with-deps chromium firefox webkit
       # Stops before the job's limit, so a run that overruns still gets the steps below.
       - run: pnpm test:e2e
-        timeout-minutes: 180
+        timeout-minutes: 230
       - if: failure() || cancelled()
         run: cat "$RUNNER_TEMP/web.log" "$RUNNER_TEMP/worker.log"
       # Test data only: what the job queues and the stores held when the suite failed.

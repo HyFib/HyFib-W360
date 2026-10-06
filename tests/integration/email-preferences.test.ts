@@ -108,7 +108,7 @@ describe('members’ choice of notice emails (ADR-215)', () => {
     expect(await optOuts(marketer!.id)).toEqual(['campaign_pauses', 'mentions']);
     // Nobody signed in, someone who is not a member, a suspended member: refused.
     await expect(set(null, [])).rejects.toMatchObject({ code: 'forbidden' });
-    await expect(set(c.owner.id.replace(/.$/, 'x'), [])).rejects.toMatchObject({
+    await expect(set(`${c.owner.id}-not-a-member`, [])).rejects.toMatchObject({
       code: 'not_found',
     });
     await fx.query(

@@ -60,7 +60,8 @@ test('reports show response times against the target, member activity and a CSV 
     .first()
     .click();
   await page.getByLabel('Reply').fill('Yes, we do.');
-  await page.getByRole('button', { name: 'Send' }).click();
+  // Exact: the conversation also has a “Send file” button.
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   const thread = page.getByRole('list', { name: /^Messages with/ });
   await expect(thread.getByText('Yes, we do.')).toBeVisible();
   await expect(thread.getByText('Sent to WhatsApp')).toBeVisible({ timeout: 20_000 });

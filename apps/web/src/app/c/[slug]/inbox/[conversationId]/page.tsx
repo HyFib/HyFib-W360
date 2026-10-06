@@ -10,7 +10,9 @@ import { ProductSender } from '@/components/commerce/product-sender';
 import { ContactCrmPanel } from '@/components/crm/contact-crm-panel';
 import { FlowSender } from '@/components/flows/flow-sender';
 import { Composer } from '@/components/inbox/composer';
+import { FileSender } from '@/components/inbox/file-sender';
 import { ConversationControls, TeamControl } from '@/components/inbox/conversation-controls';
+import { ConversationTags } from '@/components/inbox/conversation-tags';
 import { InboxShell, inboxQueryString } from '@/components/inbox/inbox-shell';
 import { MarkRead } from '@/components/inbox/mark-read';
 import { MessageBubble, type ThreadMessage } from '@/components/inbox/message-bubble';
@@ -39,7 +41,7 @@ export default async function ConversationPage({
   const sp = await searchParams;
   const ctx = await requireTenant(slug);
   if (!canUseInbox(ctx)) notFound();
-  const { inbox, savedReplies, crm, flows, commerce, stores } = await getRuntime();
+  const { inbox, savedReplies, crm, flows, commerce, stores, readReceipts } = await getRuntime();
   const since = await liveEventCursor(ctx);
   const before = typeof sp.before === 'string' ? sp.before : undefined;
   let thread: Awaited<ReturnType<typeof inbox.getConversation>>;
@@ -66,6 +68,7 @@ export default async function ConversationPage({
     products,
     orders,
     storeOrders,
+    receipts,
   ] = await Promise.all([
     loadInboxList(ctx, sp),
     can(ctx, 'inbox.assign') && can(ctx, 'members.read')
@@ -85,6 +88,7 @@ export default async function ConversationPage({
       : Promise.resolve([]),
     showCommerce ? commerce.orders(ctx, { conversationId }) : null,
     showStoreOrders ? stores.conversationStoreOrders(ctx, conversationId) : null,
+    canReply ? readReceipts.getSettings(ctx) : null,
   ]);
   const conv = thread.conversation;
   const unread = list.items.find((i) => i.id === conv.id)?.unreadCount ?? 0;
@@ -272,6 +276,13 @@ export default async function ConversationPage({
                 teams={filters.teams}
               />
             ) : null}
+            <ConversationTags
+              slug={ctx.tenant.slug}
+              conversationId={conv.id}
+              tags={conv.tags}
+              suggestions={filters.tags}
+              canEdit={canReply}
+            />
             {can(ctx, 'inbox.export') ? (
               <a
                 href={`/c/${ctx.tenant.slug}/inbox/${conv.id}/transcript`}
@@ -298,6 +309,7 @@ export default async function ConversationPage({
                 <MessageBubble
                   key={m.id}
                   slug={ctx.tenant.slug}
+                  conversationId={conv.id}
                   message={m as ThreadMessage}
                   timeZone={tz}
                   canResolveUnknown={canReply}
@@ -313,7 +325,22 @@ export default async function ConversationPage({
             disabledReason={disabledReason}
             savedReplies={replies}
             {...(latestMessageId ? { latestMessageId } : {})}
+            typingIndicator={receipts?.enabled ?? false}
           />
+          {disabledReason === null ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Send a file</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <FileSender
+                  slug={ctx.tenant.slug}
+                  conversationId={conv.id}
+                  {...(latestMessageId ? { latestMessageId } : {})}
+                />
+              </CardContent>
+            </Card>
+          ) : null}
           {disabledReason === null && forms.length > 0 ? (
             <Card>
               <CardHeader>

@@ -311,6 +311,21 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 72,
   },
+  /**
+   * A read receipt (kind `message.read`) or a typing indicator (`message.typing`) for a customer's
+   * message (ADR-223). Short-lived: a typing indicator is worth nothing a minute later.
+   */
+  messageRead: {
+    name: 'message.read',
+    policy: 'exclusive',
+    retryLimit: 2,
+    retryDelaySeconds: 5,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 30,
+    expireInSeconds: 60,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 24,
+  },
   /** One operation on a WhatsApp flow at Meta (create, upload, publish, deprecate, delete, refresh). */
   flowSync: {
     name: 'flow.sync',

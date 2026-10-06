@@ -87,21 +87,21 @@ export const API_SCOPE_INFO: Record<
   'messages.reply': {
     label: 'Reply with text, media and other messages',
     description:
-      'Send text, reply buttons, list messages, products from the company’s WhatsApp catalogs, reactions, photos, videos, audio, documents or stickers from links, locations and contact cards, to contacts who wrote to the number in the last 24 hours, quoting their messages if wanted, and read the status of messages the API sent.',
+      'Send text, reply buttons, list messages, products from the company’s WhatsApp catalogs, reactions, photos, videos, audio, documents or stickers from links, or files uploaded for the number, locations and contact cards, to contacts who wrote to the number in the last 24 hours, quoting their messages if wanted, and read the status of messages the API sent.',
     permission: 'inbox.reply',
     writes: true,
   },
   'conversations.read': {
     label: 'Read conversations',
     description:
-      "List the company's conversations and read their messages, one conversation or all of them, including what contacts wrote, follow the messages as they change, and read the conversations' internal notes, with the teams and the members conversations can be assigned to (names only).",
+      "List the company's conversations and read their messages, one conversation or all of them, including what contacts wrote and the files they sent, follow the messages as they change, and read the conversations' internal notes, with the teams and the members conversations can be assigned to (names only).",
     permission: 'inbox.read_all',
     writes: false,
   },
   'conversations.write': {
     label: 'Resolve, reopen, assign and add notes to conversations',
     description:
-      'Mark conversations resolved, or open again, assign them to members or move them between teams, as members do in the inbox, and add internal notes the team reads there (WhatsApp never receives them). Resolving a conversation or assigning it to a member stops an automation answering it.',
+      'Mark conversations resolved, or open again, assign them to members, move them between teams and tag them, as members do in the inbox, and add internal notes the team reads there (WhatsApp never receives them). Resolving a conversation or assigning it to a member stops an automation answering it.',
     permission: 'inbox.supervise',
     writes: true,
   },
