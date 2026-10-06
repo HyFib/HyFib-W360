@@ -1101,6 +1101,15 @@ export async function awaitCampaignApproval(
 }
 
 /**
+ * Until when a campaign waiting for approval can be approved (ADR-209): the end of its sending
+ * period, counted from when it was set to start, which for a campaign that starts at once is its
+ * submission. Approving it later is refused: it has to be sent back and scheduled again.
+ */
+export function campaignApprovalDeadline(scheduledAt: Date, stopAfterHours: number): Date {
+  return new Date(scheduledAt.getTime() + stopAfterHours * 3_600_000);
+}
+
+/**
  * The email that a campaign waits for approval (ADR-204): who submitted it (a member, or a key whose
  * submission sends under the approver's authority, ADR-202), how many contacts it would reach and
  * when it would start once approved, in the campaign's time zone. Counts only, never contacts.
@@ -1112,6 +1121,8 @@ export function campaignApprovalNotice(input: {
   total: number;
   /** When it is set to start, or null when it starts once approved. */
   startsAt: Date | null;
+  /** Until when it can be approved (ADR-209), or null when that is not known. */
+  approveBy: Date | null;
   /** The campaign's time zone, the one its page shows its schedule in. */
   timeZone: string;
 }): { subject: string; lines: string[] } {
@@ -1126,6 +1137,11 @@ export function campaignApprovalNotice(input: {
       input.startsAt
         ? `Once approved, it starts at ${formatCompanyTime(input.startsAt, input.timeZone)}, or at once if that time has passed.`
         : 'Once approved, it starts at once.',
+      ...(input.approveBy
+        ? [
+            `It can be approved until ${formatCompanyTime(input.approveBy, input.timeZone)}, when its sending period ends; after that it has to be sent back and scheduled again.`,
+          ]
+        : []),
       input.submitter.kind === 'key'
         ? 'Approving it needs permission to send campaigns, as it then sends under your authority. You can also send it back with a note.'
         : 'Approve it, or send it back with a note, on its page.',
@@ -1152,6 +1168,7 @@ export async function emailCampaignApprovers(
       version: campaigns.version,
       scheduleKind: campaigns.scheduleKind,
       scheduledAt: campaigns.scheduledAt,
+      stopAfterHours: campaigns.stopAfterHours,
       audienceCount: campaigns.audienceCount,
       skippedCount: campaigns.skippedCount,
       submittedByUserId: campaigns.submittedByUserId,
@@ -1199,6 +1216,7 @@ export async function emailCampaignApprovers(
     pending: c.audienceCount - c.skippedCount,
     total: c.audienceCount,
     startsAt: c.scheduleKind === 'now' ? null : c.scheduledAt,
+    approveBy: c.scheduledAt ? campaignApprovalDeadline(c.scheduledAt, c.stopAfterHours) : null,
     timeZone: c.timezone,
   });
   const url = new URL(`/c/${c.slug}/campaigns/${campaignId}`, notices.appBaseUrl).toString();
@@ -1764,7 +1782,7 @@ export function createCampaignsService(deps: CampaignDeps) {
         if (!template || template.status !== 'approved')
           throw new AppError('precondition_failed', 'The template is no longer approved by Meta.');
         const scheduled = c.scheduledAt ?? now;
-        if (scheduled.getTime() + c.stopAfterHours * 3_600_000 <= now.getTime()) {
+        if (campaignApprovalDeadline(scheduled, c.stopAfterHours).getTime() <= now.getTime()) {
           throw new AppError(
             'precondition_failed',
             'The scheduled sending period has already ended. Reject the campaign so it can be rescheduled.',

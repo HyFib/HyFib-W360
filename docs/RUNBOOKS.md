@@ -1865,6 +1865,12 @@ most contacts gives short or empty pages with a `nextCursor`: follow it until it
 a segment with a problem, which a member fixes on its page; a 403 naming `conversations.read` is a
 segment with a recent-messages condition.
 
+**An approver cannot approve a waiting campaign: its sending period ended (ADR-209).** A campaign
+can be approved only until its sending period ends, counted from when it was set to start (its
+submission, for one that starts at once); the approval email and its page give the time, and after
+it the page offers no Approve button. Send it back with a note; the member who submitted it
+schedules it again and submits it, or raises its sending period first.
+
 **A draft's review through the API shows no estimate, or other counts than expected (ADR-193).**
 `GET /campaigns/{id}/review` reads the saved draft as members' review does, now: save the draft
 first. `estimate` is null without a currency (the spending cap's, or else Settings → Messaging),

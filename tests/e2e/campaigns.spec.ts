@@ -553,11 +553,16 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
     `It would be sent to ${review.audience.eligible} of the ${review.audience.total}`,
   );
   expect(approvalMail).toContain('Approving it needs permission to send campaigns');
+  // Until when it can be approved: the end of its sending period, a day after its start (ADR-209).
+  expect(approvalMail).toContain('It can be approved until ');
   const reviewLink = firstLink(approvalMail);
   expect(new URL(reviewLink).pathname).toBe(`/c/${slug}/campaigns/${launch.id}`);
   await page.goto(reviewLink);
   await expect(
     page.getByText('Submitted through the API by the key “Campaign drafts”'),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/It can be approved until .*, when its sending period ends\./),
   ).toBeVisible();
   await expect(
     page.getByRole('listitem').filter({ hasText: 'Submitted' }).filter({ hasText: byDrafts }),

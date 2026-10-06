@@ -666,6 +666,9 @@ verification, app review, Embedded Signup configuration).
   **[Listing a segment's contacts built; its database tests run only in CI]** (ADR-208:
   `GET /segments/{id}/contacts` gives the contacts a segment holds now, on the pages of
   `POST /contacts/search`, with the scopes a search with its conditions needs; no migration).
+  **[Saying until when a waiting campaign can be approved built; its database tests run only in
+  CI]** (ADR-209: the approval email and the campaign's page give the end of its sending period,
+  after which approving is refused, and the page then offers no Approve button; no migration).
   Remaining: uploaded media, call-to-action messages through the API, taking
   reactions back,
   media downloads, changing a field's type,

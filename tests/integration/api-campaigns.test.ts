@@ -23,6 +23,7 @@ import {
   apiUpdateSegment,
   apiWithdrawCampaign,
   authenticateApiToken,
+  campaignApprovalDeadline,
   campaignApprovalNotice,
   campaignReviewNotice,
   createApiKeysService,
@@ -2288,14 +2289,24 @@ describe('emailing about campaigns waiting for approval (ADR-204, ADR-205)', () 
     expect(await approvalEmails(s.c.tenant.id)).toEqual([]);
 
     await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: version });
+    // It starts once approved, and can be approved until its 24-hour sending period from the
+    // submission ends (ADR-209).
+    const [waiting] = await fx.query<{ scheduled_at: Date }>(
+      `SELECT scheduled_at FROM app.campaigns WHERE id = $1`,
+      [id],
+    );
     const expected = campaignApprovalNotice({
       campaignName: 'Festive sale',
       submitter: { kind: 'key', name: 'Campaign drafts' },
       pending: 2,
       total: 3,
       startsAt: null,
+      approveBy: campaignApprovalDeadline(waiting!.scheduled_at, 24),
       timeZone: 'Asia/Kolkata',
     });
+    expect(expected.lines[3]).toMatch(
+      /^It can be approved until \d+ \w+ \d{4} at \d{2}:\d{2} GMT\+5:30, when its sending period ends; /,
+    );
     expect(expected.lines.slice(0, 3)).toEqual([
       "The API key “Campaign drafts” submitted the campaign “Festive sale”, and it waits for a member's approval.",
       'It would be sent to 2 of the 3 contacts in its audience.',
@@ -2379,6 +2390,15 @@ describe('emailing about campaigns waiting for approval (ADR-204, ADR-205)', () 
         pending: 1,
         total: 1,
         startsAt: null,
+        approveBy: campaignApprovalDeadline(
+          (
+            await fx.query<{ scheduled_at: Date }>(
+              `SELECT scheduled_at FROM app.campaigns WHERE id = $1`,
+              [byMarketer],
+            )
+          )[0]!.scheduled_at,
+          24,
+        ),
         timeZone: 'Asia/Kolkata',
       }).lines,
     );
@@ -2409,6 +2429,7 @@ describe('emailing about campaigns waiting for approval (ADR-204, ADR-205)', () 
           pending: 1,
           total: 1,
           startsAt: scheduled!.scheduled_at,
+          approveBy: campaignApprovalDeadline(scheduled!.scheduled_at, 24),
           timeZone: 'Europe/London',
         }).lines,
         url: `http://localhost:3000/c/${s.c.tenant.slug}/campaigns/${byOwner}`,

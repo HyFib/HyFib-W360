@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { emailPayloadSchema, renderEmail } from '../email/templates';
-import { campaignApprovalNotice, campaignReviewNotice } from './service';
+import { campaignApprovalDeadline, campaignApprovalNotice, campaignReviewNotice } from './service';
 
 describe('the email that a campaign waits for approval (ADR-204)', () => {
   it('names the member who submitted it, how many it reaches and its start in the campaign’s time zone', () => {
@@ -11,6 +11,7 @@ describe('the email that a campaign waits for approval (ADR-204)', () => {
         pending: 118_000,
         total: 125_000,
         startsAt: new Date('2026-10-20T04:30:00Z'),
+        approveBy: new Date('2026-10-21T04:30:00Z'),
         timeZone: 'Asia/Kolkata',
       }),
     ).toEqual({
@@ -19,6 +20,7 @@ describe('the email that a campaign waits for approval (ADR-204)', () => {
         "Asha Rao submitted the campaign “Diwali offer”, and it waits for a member's approval.",
         'It would be sent to 1,18,000 of the 1,25,000 contacts in its audience.',
         'Once approved, it starts at 20 October 2026 at 10:00 GMT+5:30, or at once if that time has passed.',
+        'It can be approved until 21 October 2026 at 10:00 GMT+5:30, when its sending period ends; after that it has to be sent back and scheduled again.',
         'Approve it, or send it back with a note, on its page.',
       ],
     });
@@ -32,6 +34,7 @@ describe('the email that a campaign waits for approval (ADR-204)', () => {
         pending: 0,
         total: 1,
         startsAt: null,
+        approveBy: null,
         timeZone: 'Asia/Kolkata',
       }).lines,
     ).toEqual([
@@ -50,6 +53,7 @@ describe('the email that a campaign waits for approval (ADR-204)', () => {
       pending: 2_000_000_000,
       total: 2_000_000_000,
       startsAt: new Date('2026-12-31T23:59:00Z'),
+      approveBy: new Date('2027-01-07T23:59:00Z'),
       timeZone: 'America/Argentina/Buenos_Aires',
     });
     expect(name).toHaveLength(120);
@@ -68,6 +72,15 @@ describe('the email that a campaign waits for approval (ADR-204)', () => {
     expect(email.html).toContain(`&lt;b&gt;${'C'.repeat(113)}&lt;/b&gt;`);
     expect(email.html).not.toContain('<b>C');
     expect(email.html).toContain('>Review campaign</a>');
+  });
+});
+
+describe('until when a waiting campaign can be approved (ADR-209)', () => {
+  it('is the end of its sending period, counted from when it was set to start', () => {
+    const start = new Date('2026-10-20T04:30:00Z');
+    expect(campaignApprovalDeadline(start, 24)).toEqual(new Date('2026-10-21T04:30:00Z'));
+    expect(campaignApprovalDeadline(start, 1)).toEqual(new Date('2026-10-20T05:30:00Z'));
+    expect(campaignApprovalDeadline(start, 168)).toEqual(new Date('2026-10-27T04:30:00Z'));
   });
 });
 

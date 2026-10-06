@@ -4,6 +4,7 @@ import { notFound } from 'next/navigation';
 import { isAppError } from '@w360/core';
 import {
   METRIC_DEFINITIONS,
+  campaignApprovalDeadline,
   can,
   formatMicros,
   type CampaignAnalytics,
@@ -403,6 +404,17 @@ async function LiveView({
   const base = `/c/${slug}/campaigns/${c.id}`;
   const currency = c.estimateCurrency ?? c.budgetCurrency ?? settings.costCurrency;
   const inProgress = c.status === 'scheduled' || c.status === 'running';
+  // Until when a waiting campaign can be approved: the end of its sending period (ADR-209).
+  const approveBy =
+    c.status === 'pending_approval' && c.scheduledAt
+      ? campaignApprovalDeadline(c.scheduledAt, c.stopAfterHours)
+      : null;
+  const approvalEnded = approveBy !== null && approveBy.getTime() <= new Date().getTime();
+  const mayReview =
+    can(ctx, 'campaigns.approve') &&
+    c.submittedByUserId !== ctx.user.id &&
+    // A key's submission sends under the approver's authority (ADR-202).
+    (c.submittedByApiKeyId === null || can(ctx, 'campaigns.send'));
   return (
     <div className="grid gap-6">
       <AutoRefresh active={inProgress} />
@@ -437,18 +449,19 @@ async function LiveView({
                   different member with approval rights must approve it.
                 </>
               )}
+              {approveBy
+                ? approvalEnded
+                  ? ` Its sending period ended on ${formatDateTime(approveBy.toISOString(), c.timezone)} (${c.timezone}), so it can no longer be approved: send it back so it can be scheduled again.`
+                  : ` It can be approved until ${formatDateTime(approveBy.toISOString(), c.timezone)} (${c.timezone}), when its sending period ends.`
+                : null}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <ApprovalActions
               slug={slug}
               campaignId={c.id}
-              canApprove={
-                can(ctx, 'campaigns.approve') &&
-                c.submittedByUserId !== ctx.user.id &&
-                // A key's submission sends under the approver's authority (ADR-202).
-                (c.submittedByApiKeyId === null || can(ctx, 'campaigns.send'))
-              }
+              canApprove={mayReview && !approvalEnded}
+              canSendBack={mayReview}
               canWithdraw={
                 can(ctx, 'campaigns.write') &&
                 (c.submittedByUserId === ctx.user.id || can(ctx, 'campaigns.approve'))

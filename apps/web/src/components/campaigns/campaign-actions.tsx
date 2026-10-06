@@ -151,11 +151,14 @@ export function ApprovalActions({
   slug,
   campaignId,
   canApprove,
+  canSendBack,
   canWithdraw,
 }: {
   slug: string;
   campaignId: string;
   canApprove: boolean;
+  /** Sending it back stays possible after the time it could be approved until (ADR-209). */
+  canSendBack: boolean;
   canWithdraw: boolean;
 }) {
   // The note stays disabled until hydration: one typed before would never reach `note`, leaving
@@ -177,7 +180,7 @@ export function ApprovalActions({
   return (
     <div className="grid gap-3">
       <FormError message={error} />
-      {canApprove ? (
+      {canSendBack ? (
         <Field
           id="review-note"
           label="Note to the submitter"
@@ -197,18 +200,18 @@ export function ApprovalActions({
       ) : null}
       <div className="flex flex-wrap gap-2">
         {canApprove ? (
-          <>
-            <ClientButton disabled={busy} onClick={() => run('approve')}>
-              Approve
-            </ClientButton>
-            <ClientButton
-              variant="outline"
-              disabled={busy || !note.trim()}
-              onClick={() => run('reject')}
-            >
-              Send back for changes
-            </ClientButton>
-          </>
+          <ClientButton disabled={busy} onClick={() => run('approve')}>
+            Approve
+          </ClientButton>
+        ) : null}
+        {canSendBack ? (
+          <ClientButton
+            variant="outline"
+            disabled={busy || !note.trim()}
+            onClick={() => run('reject')}
+          >
+            Send back for changes
+          </ClientButton>
         ) : null}
         {canWithdraw ? (
           <ClientButton variant="outline" disabled={busy} onClick={() => run('withdraw')}>

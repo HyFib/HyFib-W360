@@ -8313,3 +8313,25 @@ Decision:
 
 Not built: restoring an archived segment (members cannot either), and a segment's contacts as a
 file.
+
+## ADR-209 Saying until when a waiting campaign can be approved (P5-08) (2026-10-06)
+
+Context: a campaign waiting for approval can be approved only until its sending period ends, counted
+from when it was set to start; a campaign that starts at once is set to start at its submission, so
+with the default 24-hour period it can no longer be approved a day after it was submitted. Approvers
+learned this only from the refusal ("The scheduled sending period has already ended"), neither the
+approval email (ADR-204) nor the campaign's page said it.
+
+Decision:
+
+- **One rule:** `campaignApprovalDeadline` (the set start plus `stop_after_hours`) is what
+  `approveCampaign` refuses after and what the email and the page show, so they cannot disagree.
+- **The approval email** says until when the campaign can be approved, in the campaign's time zone,
+  and that it has to be sent back and scheduled again after that.
+- **The campaign's page** says the same while it waits; once the time has passed it says the sending
+  period ended and that it can no longer be approved, and offers no Approve button (sending it back
+  stays).
+- **No migration and no new setting;** the API is unchanged (a key cannot approve).
+
+Not built: a reminder before the time passes, and letting an approver extend the sending period on
+approval.

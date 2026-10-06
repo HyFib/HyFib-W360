@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-06 — Phase 5: saying until when a waiting campaign can be approved (P5-08, ADR-209)
+
+Status: **Implemented; its database and browser tests run in CI only.** A waiting campaign could no
+longer be approved once its sending period ended (a day after submission, for one that starts at
+once), but approvers learned it only from the refusal. The local PostgreSQL is unavailable (its
+Docker daemon stopped), so the changed integration and e2e tests below were written but not run
+here.
+
+### Completed
+
+- **Design (ADR-209):** one deadline (`campaignApprovalDeadline`) for the refusal, the approval
+  email and the page; no Approve button after it; no migration.
+- **Domain:** `campaignApprovalDeadline`, used by `approveCampaign` and the approval email.
+- **Web:** the campaign page's waiting card gives the time, or says the period ended and offers no
+  Approve button; sending back stays, as the approval actions now take a flag for each.
+- **Tests:**
+  - Unit (1 new and 3 changed in `campaigns/approval-notice.test.ts`): the deadline, the email's
+    line.
+  - Integration (2 changed in `api-campaigns.test.ts`): the approval emails give the deadline.
+    Written for CI; not run here.
+  - E2E (1 changed in `campaigns.spec.ts`): the email and the page give it. Written for CI; not run
+    here.
+- **Docs:** ADR-209; ARCHITECTURE; DEPLOYMENT and RUNBOOKS; BACKLOG P5-08; feature matrix H-021.
+- **Mutation checks:** 5 deliberate regressions tried, all caught on the unit-tested parts. The page
+  and the refusal need a browser and the database, so their regressions are left to the e2e and
+  integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 904 passed (84 files)                                               |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 5 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- A reminder before the time passes, extending the sending period on approval, and email
+  preferences.
+
 ## 2026-10-06 — Phase 5: listing a segment's contacts through the API (P5-08, ADR-208)
 
 Status: **Implemented; its database and browser tests run in CI only.** Keys read and wrote

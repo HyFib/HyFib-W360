@@ -257,7 +257,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   → completed, with paused and canceled. Submitting runs the readiness checks, freezes the audience
   (`campaign_recipients`, one row per contact, pending or skipped with a reason, no personal data)
   and records the submitter. With approval required, a different member with `campaigns.approve`
-  approves. Sends run under the submitter's (or the resuming member's) authority.
+  approves. Sends run under the submitter's (or the resuming member's) authority. A waiting
+  campaign can be approved until `campaignApprovalDeadline` (its set start plus
+  `stop_after_hours`, ADR-209), which `approveCampaign`, the approval email and the page share.
 - **Scheduling** (`campaigns/schedule.ts`): a wall-clock time in an IANA zone resolved with Node's
   ICU data; a time inside a daylight-saving gap moves forward by the jump, a repeated time means its
   first occurrence, and the adjustment is stored and shown. An optional daily sending window (which
