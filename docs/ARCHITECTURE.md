@@ -1779,6 +1779,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   platform audit entry in one transaction and read by the platform role. The Integrations tab's read
   (`receiptsNeedingAttention`) joins it and the administrator's name through `acknowledgers`; the
   CSV writes the time only.
+- **Acknowledging quarantine entries** (ADR-199, migration 0139): `ops.quarantine_acknowledgements`,
+  one note per entry (who, when, the note), deleted with the entry through a cascading foreign key,
+  written only by `ops.platform_acknowledge_quarantine_entry` (definer, platform role only, open
+  entries only) with the platform audit entry in one transaction and read by the platform role. The
+  Integrations tab's read (`openQuarantine`) joins it and the administrator's name through
+  `acknowledgers`; the CSV writes the time only.
 - **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
   90 days) and a health card on each company's platform page. Every page re-checks the platform
   actor. The functions read every company on each view, which suits the test envelope; paging and

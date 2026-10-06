@@ -1,5 +1,51 @@
 # Progress
 
+## 2026-10-06 — Phase 5: acknowledging quarantine entries on the operations console (P5-10, ADR-199)
+
+Status: **Implemented; its database and browser tests run in CI only.** Quarantine entries could be
+retried or resolved, but nobody could note that they were on one. The local PostgreSQL is
+unavailable (its Docker daemon stopped), so migration 0139, the integration tests and the changed
+e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-199):** a note of 10 to 500 characters on an open quarantine entry, shown with who
+  and when, replaced by a later note, audited, deleted with the entry; a resolved entry takes none;
+  the CSV gives when only.
+- **Database (migration 0139):** `ops.quarantine_acknowledgements` and
+  `ops.platform_acknowledge_quarantine_entry` (definer, platform role only).
+- **Domain:** `acknowledgeQuarantine`, the listing's acknowledgement and the CSV column.
+- **Web:** the Integrations tab's Acknowledged column and form.
+- **Tests:**
+  - Unit (3 new in `quarantine-acknowledgements.test.ts`, 1 changed in `ops-model.test.ts`): the
+    input, the definer call and the CSV column.
+  - Integration (3 new in `platform-ops.test.ts`, 2 changed): who and the note, replacement and
+    audit, a resolved entry refused, refusals, retention, grants and the definer function. Written
+    for CI; not run here.
+  - E2E (1 changed in `platform-ops.spec.ts`): the quarantined event acknowledged before it is
+    resolved, and the CSV header. Written for CI; not run here.
+- **Docs:** ADR-199; SECURITY; ARCHITECTURE; THREAT-MODEL T193; DEPLOYMENT and RUNBOOKS;
+  DATA-RETENTION; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 9 deliberate regressions tried, all caught on the unit-tested parts. The
+  definer function and the listing need the database, so their regressions are left to the
+  integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 881 passed (83 files)                                               |
+| `pnpm test:integration`, e2e, migration 0139       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 9 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Assigning entries or failures to someone, editing or deleting a note, and leaving acknowledged
+  entries out of the alert email.
+
 ## 2026-10-06 — Phase 5: sending stickers from links through the public API (P5-08, ADR-198)
 
 Status: **Implemented; its database and browser tests run in CI only (test stand-in only).** Keys

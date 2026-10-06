@@ -2439,6 +2439,192 @@ describe('acknowledging webhook receipts (ADR-179)', () => {
   });
 });
 
+describe('acknowledging quarantine entries (ADR-199)', () => {
+  /** An open quarantine entry, its receipt received `age` ago; both already emailed about. */
+  async function entry(age = '1 hour') {
+    const receiptId = uuidv7();
+    await fx.query(
+      `INSERT INTO ops.webhook_receipts (id, provider, received_at, body_sha256, body_ciphertext,
+         body_size, status, attempts, exhausted_alerted_at)
+       VALUES ($1, 'meta_whatsapp', now() - $3::interval, $2, 'sealed-body', 10, 'quarantined', 1,
+         now())`,
+      [receiptId, randomBytes(32).toString('hex'), age],
+    );
+    const id = uuidv7();
+    await fx.query(
+      `INSERT INTO ops.webhook_quarantine (id, receipt_id, provider, reason, external_ids,
+         alerted_at)
+       VALUES ($1, $2, 'meta_whatsapp', 'unknown_asset', $3::jsonb, now())`,
+      [id, receiptId, JSON.stringify({ waba: String(Date.now()) })],
+    );
+    return { id, receiptId };
+  }
+  async function namedStaff(name: string): Promise<PlatformActor> {
+    const user = await createUser(fx.dbs, { twoFactor: true, name });
+    await fx.dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_operator')`,
+      [user.id],
+    );
+    return { userId: user.id, role: 'platform_operator', correlationId: uuidv7() };
+  }
+  const listed = async (id: string) =>
+    (await ops().integrations(staff)).quarantine.find((q) => q.id === id);
+  const acknowledge = (actor: PlatformActor, quarantineId: string, note: string) =>
+    ops().acknowledgeQuarantine(actor, { quarantineId, note });
+  const audits = (id: string) =>
+    fx.query<{
+      actor_user_id: string;
+      reason: string;
+      target_tenant_id: string | null;
+      metadata: unknown;
+      correlation_id: string;
+    }>(
+      `SELECT actor_user_id, reason, target_tenant_id, metadata, correlation_id
+         FROM ops.platform_audit_events
+        WHERE action = 'platform.webhook_quarantine_acknowledged'
+          AND metadata->>'quarantineId' = $1
+        ORDER BY occurred_at, id`,
+      [id],
+    );
+  const notes = async (id: string) =>
+    (
+      await fx.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM ops.quarantine_acknowledgements WHERE quarantine_id = $1`,
+        [id],
+      )
+    )[0]!.n;
+
+  it('records who looked at an entry and their note; another administrator replaces it; each is audited; a resolved entry takes none', async () => {
+    const { id, receiptId } = await entry();
+    expect((await listed(id))?.acknowledgement).toBeNull();
+    const asha = await namedStaff('Asha Ops');
+    await acknowledge(asha, id, '  Waiting on the company to reconnect the number.  ');
+    const first = (await listed(id))!.acknowledgement!;
+    expect([first.byName, first.note]).toEqual([
+      'Asha Ops',
+      'Waiting on the company to reconnect the number.',
+    ]);
+    expect(Date.now() - first.at.getTime()).toBeLessThan(60_000);
+    const ravi = await namedStaff('Ravi Ops');
+    await acknowledge(ravi, id, 'Meta confirmed it is a test account; resolving.');
+    expect((await listed(id))?.acknowledgement).toMatchObject({
+      byName: 'Ravi Ops',
+      note: 'Meta confirmed it is a test account; resolving.',
+    });
+    const audited = await audits(id);
+    expect(audited.map((a) => [a.actor_user_id, a.reason, a.correlation_id])).toEqual([
+      [asha.userId, 'Waiting on the company to reconnect the number.', asha.correlationId],
+      [ravi.userId, 'Meta confirmed it is a test account; resolving.', ravi.correlationId],
+    ]);
+    expect(audited[0]!.target_tenant_id).toBeNull();
+    expect(audited[0]!.metadata).toEqual({
+      quarantineId: id,
+      receiptId,
+      provider: 'meta_whatsapp',
+      reason: 'unknown_asset',
+    });
+    // The tab's CSV gives when, never who or the note.
+    const file = await ops().exportList(staff, 'quarantine', 30);
+    const line = file.body.split('\r\n').find((l) => l.includes(`,${receiptId},`))!;
+    expect(line).toMatch(/,\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+    for (const left of ['Ravi', 'Asha', 'reconnect', 'Meta confirmed']) {
+      expect(file.body).not.toContain(left);
+    }
+    // Resolved, it leaves the list and takes no more notes.
+    await ops().resolveQuarantine(staff, {
+      quarantineId: id,
+      resolution: 'A Meta test account, not a customer.',
+    });
+    expect(await listed(id)).toBeUndefined();
+    await expectCode(acknowledge(ravi, id, 'One more note after it closed.'), 'conflict');
+    expect(await audits(id)).toHaveLength(2);
+  });
+
+  it('refuses unknown entries, bad notes and anyone who is not an administrator, and deletes a note with its entry', async () => {
+    const { id } = await entry();
+    await expectCode(acknowledge(staff, uuidv7(), 'Looking into this entry now.'), 'not_found');
+    await expectCode(acknowledge(staff, id, 'Too short'), 'validation_failed');
+    await expectCode(acknowledge(staff, id, 'x'.repeat(501)), 'validation_failed');
+    await expectCode(
+      acknowledge(staff, 'not-a-uuid', 'Looking into this entry now.'),
+      'validation_failed',
+    );
+    // The function checks the note itself too, whatever calls it, and trims it.
+    const direct = (quarantineId: string, note: string) =>
+      fx.dbs.platform.run(staff.userId, (tx) =>
+        tx.execute(
+          sql`select ops.platform_acknowledge_quarantine_entry(${quarantineId}::uuid, ${note}, 'c')`,
+        ),
+      );
+    await expectCode(direct(id, '   short   '), 'precondition_failed');
+    await expectCode(direct(id, 'x'.repeat(501)), 'precondition_failed');
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    await expectCode(
+      acknowledge(
+        { userId: outsider.id, role: 'platform_operator', correlationId: uuidv7() },
+        id,
+        'Looking into this entry now.',
+      ),
+      'forbidden',
+    );
+    expect(await notes(id)).toBe(0);
+    expect(await audits(id)).toEqual([]);
+    await direct(id, '   Noted straight in SQL.   ');
+    expect((await listed(id))?.acknowledgement?.note).toBe('Noted straight in SQL.');
+
+    // The retention sweep deletes an entry with its receipt after 90 days, and its note with them.
+    const old = await entry('91 days');
+    await direct(old.id, 'An old one, noted before it goes.');
+    expect(await notes(old.id)).toBe(1);
+    await fx.dbs.appPool.query(`SELECT * FROM ops.apply_webhook_retention(5000)`);
+    expect(await notes(old.id)).toBe(0);
+    expect(await notes(id)).toBe(1);
+  });
+
+  it('keeps the writing to the definer function and the reading to platform staff', async () => {
+    const { id } = await entry();
+    const privilege = async (role: string, action: string) =>
+      (
+        await fx.query<{ ok: boolean }>(
+          `SELECT has_table_privilege($1, 'ops.quarantine_acknowledgements', $2) AS ok`,
+          [role, action],
+        )
+      )[0]!.ok;
+    expect(await privilege('w360_platform', 'SELECT')).toBe(true);
+    for (const action of ['INSERT', 'UPDATE', 'DELETE']) {
+      expect(await privilege('w360_platform', action), action).toBe(false);
+    }
+    for (const action of ['SELECT', 'INSERT', 'UPDATE', 'DELETE']) {
+      expect(await privilege('w360_app', action), action).toBe(false);
+      expect(await privilege('w360_auth', action), action).toBe(false);
+    }
+    await expect(
+      fx.dbs.appPool.query(
+        `SELECT ops.platform_acknowledge_quarantine_entry($1::uuid, 'Looking into this entry now.', 'c')`,
+        [id],
+      ),
+    ).rejects.toThrow(/permission denied for function/);
+    const [fn] = await fx.query<{ owner: string; definer: boolean; config: unknown }>(
+      `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer, p.proconfig AS config
+         FROM pg_proc p
+        WHERE p.oid = 'ops.platform_acknowledge_quarantine_entry(uuid,text,text)'::regprocedure`,
+    );
+    expect(fn).toEqual({
+      owner: 'w360_definer',
+      definer: true,
+      config: ['search_path=pg_catalog, pg_temp'],
+    });
+    // A note keeps to its length.
+    await expect(
+      fx.query(
+        `INSERT INTO ops.quarantine_acknowledgements (quarantine_id, acknowledged_by_user_id,
+           acknowledged_at, note) VALUES ($1, $2, now(), 'short')`,
+        [id, staff.userId],
+      ),
+    ).rejects.toThrow(/quarantine_acknowledgements_note_check/);
+  });
+});
+
 describe('exports of the onboarding, integrations and queues lists (ADR-158)', () => {
   const MINUTE = '\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}';
   const csvLines = (body: string) => body.replace(/^\uFEFF/, '').split('\r\n');
@@ -2620,7 +2806,8 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
       expect.stringMatching(
         new RegExp(
           `^${MINUTE},${quarantined},Meta \\(WhatsApp\\),Unknown account or number,` +
-            `waba: ${stranger.wabaId}; phoneNumberId: ${stranger.phoneNumberId},,Yes$`,
+            // Not acknowledged (ADR-199): the last column is empty.
+            `waba: ${stranger.wabaId}; phoneNumberId: ${stranger.phoneNumberId},,Yes,$`,
         ),
       ),
     ]);

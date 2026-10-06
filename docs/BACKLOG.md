@@ -836,10 +836,13 @@ verification, app review, Embedded Signup configuration).
   **[Acknowledging webhook receipts built; its database tests run only in CI]** (ADR-179: a
   platform administrator acknowledges a Meta or Razorpay receipt that needs attention with a
   note, shown with who and when, replaced by a later note, audited and deleted with the
-  receipt; the CSV gives when, never who or the note). Remaining:
+  receipt; the CSV gives when, never who or the note).
+  **[Acknowledging quarantine entries built; its database tests run only in CI]** (ADR-199: a
+  platform administrator acknowledges an open quarantine entry with a note, shown with who and when,
+  replaced by a later note, audited and deleted with the entry; a resolved entry takes none; the CSV
+  gives when, never who or the note). Remaining:
   other alert channels, longer trends and charts, Meta's quality webhook (unconfirmed), exports
-  beyond the rows a tab lists, assigning failures and acknowledging quarantine entries, paging
-  and rollups for many companies.
+  beyond the rows a tab lists, assigning failures, paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

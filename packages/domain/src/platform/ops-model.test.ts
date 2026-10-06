@@ -623,6 +623,11 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
             createdAt: at('2026-10-05T02:00:00Z'),
             alertedAt: at('2026-10-05T02:15:00Z'),
             retryable: true,
+            acknowledgement: {
+              at: at('2026-10-05T03:20:30Z'),
+              byName: 'Asha Ops',
+              note: 'Waiting on the company to reconnect the number.',
+            },
           },
           {
             id: 'q2',
@@ -633,15 +638,18 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
             createdAt: at('2026-09-01T00:00:00Z'),
             alertedAt: null,
             retryable: false,
+            acknowledgement: null,
           },
         ]),
       ),
     ).toEqual([
       QUARANTINE_CSV_COLUMNS.join(','),
-      '2026-10-05 02:00,r9,Meta (WhatsApp),Unknown account or number,waba: 8123; phoneNumberId: 8456,2026-10-05 02:15,Yes',
-      '2026-09-01 00:00,r10,Razorpay,mystery,,,No',
+      '2026-10-05 02:00,r9,Meta (WhatsApp),Unknown account or number,waba: 8123; phoneNumberId: 8456,2026-10-05 02:15,Yes,2026-10-05 03:20',
+      '2026-09-01 00:00,r10,Razorpay,mystery,,,No,',
       '',
     ]);
+    // When a quarantine entry was acknowledged, never who or the note (ADR-199).
+    expect(QUARANTINE_CSV_COLUMNS.at(-1)).toBe('Acknowledged (UTC)');
     expect(
       lines(
         emailsCsv([
@@ -838,7 +846,7 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
       'Company,Address,Status,Created (UTC),Number being set up',
       'Company,Address,What,Label,State,Error,Since (UTC),Acknowledged (UTC)',
       'Received (UTC),Receipt,From,Problem,Attempts,Last error,Staff emailed (UTC),Retry,Acknowledged (UTC)',
-      'Quarantined (UTC),Receipt,From,Reason,Provider ids,Staff emailed (UTC),Receipt can be retried',
+      'Quarantined (UTC),Receipt,From,Reason,Provider ids,Staff emailed (UTC),Receipt can be retried,Acknowledged (UTC)',
       'Kind,Failed,Waiting',
       'Queue,Declared by this release,Retries,Dead-lettered after its retries,Wait limit (minutes),' +
         'In the database,Ready,Deferred,Active,Failed,Oldest wait (minutes),Late since (UTC),' +

@@ -339,9 +339,9 @@ describe('database roles', () => {
       }
     }
     // Platform operations (0026): the read functions, the receipt retry, the dead letter retry
-    // (0086) and acknowledgement (0117), and the late queue (0125) and receipt (0127)
-    // acknowledgements for platform staff only; the dead-letter purge for the worker; the URL host
-    // helper for the definer functions.
+    // (0086) and acknowledgement (0117), and the late queue (0125), receipt (0127) and quarantine
+    // (0139) acknowledgements for platform staff only; the dead-letter purge for the worker; the
+    // URL host helper for the definer functions.
     for (const fn of [
       'ops.platform_ops_health(uuid)',
       'ops.platform_ops_activity(timestamp with time zone,uuid)',
@@ -352,6 +352,7 @@ describe('database roles', () => {
       'ops.platform_acknowledge_dead_letter(uuid,text,text)',
       'ops.platform_acknowledge_late_queue(text,timestamp with time zone,text,text)',
       'ops.platform_acknowledge_webhook_receipt(uuid,text,text)',
+      'ops.platform_acknowledge_quarantine_entry(uuid,text,text)',
     ]) {
       expect(await can('w360_platform', fn), fn).toBe(true);
       expect(await can('w360_app', fn), fn).toBe(false);

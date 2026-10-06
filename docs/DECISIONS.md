@@ -8017,3 +8017,35 @@ Decision:
 - **No migration:** `sticker` is already a message type.
 
 Not built: stickers uploaded to Meta or sent by id, and checking that a file can be a sticker.
+
+## ADR-199 Acknowledging quarantine entries on the operations console (P5-10) (2026-10-06)
+
+Context: the console's other lists take an administrator's note: current failures (ADR-141), dead
+letters (ADR-169), late queues (ADR-177) and webhook receipts (ADR-179). Quarantine entries, events
+HyFib could not attribute to a company, could only be retried or resolved: while one waited on the
+company to reconnect, or on Meta, nothing told the other administrators that someone was on it, and
+every administrator is emailed about each (ADR-091).
+
+Decision:
+
+- **A note on an open entry:** on the Integrations tab, a platform administrator acknowledges an
+  open quarantine entry with a note of 10 to 500 characters (what was found or is awaited). The row
+  shows who acknowledged it, when, and the note; another administrator may acknowledge it again,
+  replacing the note; the platform audit log keeps each (`platform.webhook_quarantine_acknowledged`,
+  the note as its reason, with the entry, its receipt, the provider and the reason it was
+  quarantined, and no company). Resolving the entry still closes it; a resolved entry takes no note
+  (409), as the console no longer lists it.
+- **Where it is enforced:** `ops.platform_acknowledge_quarantine_entry` (SECURITY DEFINER,
+  executable by the platform role only) checks the platform administrator, the note (trimmed) and
+  that the entry exists and is open, then records the note and the audit entry in one transaction.
+  The notes live in `ops.quarantine_acknowledgements` (migration 0139), which only the definer role
+  writes and only the platform role reads: the runtime role, which writes quarantine entries, has no
+  grant on it.
+- **How long:** a note goes with its entry. The retention sweep deletes entries with their receipts
+  after 90 days, and the notes with them through a cascading foreign key.
+- **Exports:** the quarantine CSV gains an "Acknowledged (UTC)" column with the time only, never who
+  or the note, as the other lists' exports do.
+
+Not built: assigning an entry or a failure to someone, editing or deleting a note (a new
+acknowledgement replaces it), and leaving acknowledged entries out of the alert email (each is
+emailed once anyway).

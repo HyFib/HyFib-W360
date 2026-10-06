@@ -333,6 +333,19 @@ export async function acknowledgeDeadLetterAction(input: unknown): Promise<Actio
 }
 
 /**
+ * Acknowledges an open quarantine entry on the operations console, with a note, or replaces the
+ * note (audited, ADR-199).
+ */
+export async function acknowledgeQuarantineAction(input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.platformOps.acknowledgeQuarantine(actor, input);
+    refresh();
+    return null;
+  });
+}
+
+/**
  * Acknowledges a webhook receipt on the operations console, with a note, or replaces the note
  * (audited, ADR-179).
  */

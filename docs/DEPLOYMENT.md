@@ -382,6 +382,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-198 has no migration: until the web rollout ends, an old web server refuses stickers in
    `POST /messages` with 422, as before.
 
+   Migration 0139 (ADR-199) creates `ops.quarantine_acknowledgements` (empty) and
+   `ops.platform_acknowledge_quarantine_entry`. Workers are not involved. Web servers of this
+   release need it, as the Integrations tab reads the table; web servers from before it show no
+   acknowledgements.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

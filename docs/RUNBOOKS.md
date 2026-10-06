@@ -2658,6 +2658,16 @@ it, and the next time it falls behind it starts unacknowledged and is emailed ag
 changes neither the lateness nor the alert. "This queue is no longer late since then." means the
 queue recovered, or fell behind again, since the page loaded: reload it.
 
+**Acknowledging a quarantine entry (ADR-199).** The administrator who takes up an open quarantine
+entry opens Acknowledge on its row and writes a note of 10 to 500 characters: what was found or is
+awaited ("Asked the company to reconnect through Embedded Signup", "A Meta test account; waiting for
+Meta to confirm"). The row then shows who, when and the note; a later note replaces it, and the
+platform audit log keeps each (`platform.webhook_quarantine_acknowledged`). Acknowledging neither
+retries the receipt nor resolves the entry, and it does not stop the alert email; resolve the entry
+once it is decided. "This quarantine entry is already resolved." means another administrator
+resolved it since the page loaded; "Quarantine entry not found." that it was deleted with its
+receipt.
+
 **Acknowledging a webhook receipt (ADR-179).** The administrator who looks at a receipt that needs
 attention opens Acknowledge on its row and writes a note of 10 to 500 characters: what was found or
 done ("Malformed body from a Meta test account; not retrying", "Parser fixed in 1.4.3; retried").
@@ -2985,6 +2995,12 @@ with it.
 roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
 release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
 endpoints name the column); workers of either release and web servers of the previous release work
+with it.
+
+**Migration 0139 failed.** It creates `ops.quarantine_acknowledgements` and
+`ops.platform_acknowledge_quarantine_entry`, in one transaction; a failure rolls it all back
+(usually the bootstrap roles: fix them and run the migrations again). Web servers of this release
+need it before they show the Integrations tab; workers and web servers of the previous release work
 with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of

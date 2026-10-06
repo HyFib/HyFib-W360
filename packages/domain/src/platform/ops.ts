@@ -18,6 +18,7 @@ import {
   platformAlerts,
   platformAuditEvents,
   queueWaits,
+  quarantineAcknowledgements,
   receiptAcknowledgements,
   securityEvents,
   sql,
@@ -321,6 +322,16 @@ const retrySchema = z.object({
 const deadLetterRetrySchema = z.object({
   deadLetterId: z.uuid(),
   reason: z.string().trim().min(10, 'Give a reason of at least 10 characters').max(2000),
+});
+
+/** An open quarantine entry and what the administrator noted about it (ADR-199). */
+const quarantineAcknowledgeSchema = z.object({
+  quarantineId: z.uuid(),
+  note: z
+    .string()
+    .trim()
+    .min(10, 'Write a note of at least 10 characters')
+    .max(500, 'Write a note of at most 500 characters'),
 });
 
 /** A webhook receipt the console lists and what the administrator noted about it (ADR-179). */
@@ -627,17 +638,32 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         alertedAt: webhookQuarantine.alertedAt,
         receiptStatus: webhookReceipts.status,
         receivedAt: webhookReceipts.receivedAt,
+        acknowledgedAt: quarantineAcknowledgements.acknowledgedAt,
+        acknowledgedByName: acknowledgers.name,
+        acknowledgement: quarantineAcknowledgements.note,
       })
       .from(webhookQuarantine)
       .innerJoin(webhookReceipts, eq(webhookReceipts.id, webhookQuarantine.receiptId))
+      .leftJoin(
+        quarantineAcknowledgements,
+        eq(quarantineAcknowledgements.quarantineId, webhookQuarantine.id),
+      )
+      .leftJoin(
+        acknowledgers,
+        eq(acknowledgers.id, quarantineAcknowledgements.acknowledgedByUserId),
+      )
       .where(isNull(webhookQuarantine.resolvedAt))
       .orderBy(desc(webhookQuarantine.createdAt))
       .limit(100);
     const bodyKeptAfter = now.getTime() - RECEIPT_BODY_DAYS * DAY_MS;
-    return quarantine.map((q) => ({
+    return quarantine.map(({ acknowledgedAt, acknowledgedByName, acknowledgement, ...q }) => ({
       ...q,
       externalIds: quarantineExternalIds(q.externalIds),
       retryable: q.receiptStatus === 'quarantined' && q.receivedAt.getTime() > bodyKeptAfter,
+      acknowledgement:
+        acknowledgedAt && acknowledgement
+          ? { at: acknowledgedAt, byName: acknowledgedByName, note: acknowledgement }
+          : null,
     }));
   }
 
@@ -1110,6 +1136,20 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
       await platformDb.run(actor.userId, async (tx) => {
         await tx.execute(
           sql`select ops.platform_acknowledge_dead_letter(${data.deadLetterId}::uuid, ${data.note}, ${actor.correlationId})`,
+        );
+      });
+    },
+
+    /**
+     * Records that a platform administrator looked at an open quarantine entry, with a note,
+     * replacing an earlier one (ADR-199). The definer function checks the administrator, the note
+     * and that the entry is still open, and audits it in the same transaction.
+     */
+    async acknowledgeQuarantine(actor: PlatformActor, input: unknown): Promise<void> {
+      const data = parseInput(quarantineAcknowledgeSchema, input);
+      await platformDb.run(actor.userId, async (tx) => {
+        await tx.execute(
+          sql`select ops.platform_acknowledge_quarantine_entry(${data.quarantineId}::uuid, ${data.note}, ${actor.correlationId})`,
         );
       });
     },

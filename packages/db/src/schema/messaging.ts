@@ -385,6 +385,17 @@ export const webhookQuarantine = opsSchema.table('webhook_quarantine', {
   alertedAt: tz('alerted_at'),
 });
 
+/**
+ * An administrator's note on an open quarantine entry (ADR-199), deleted with the entry. Platform
+ * staff read it; only `ops.platform_acknowledge_quarantine_entry` writes it.
+ */
+export const quarantineAcknowledgements = opsSchema.table('quarantine_acknowledgements', {
+  quarantineId: uuid('quarantine_id').primaryKey(),
+  acknowledgedByUserId: text('acknowledged_by_user_id').notNull(),
+  acknowledgedAt: tz('acknowledged_at').notNull(),
+  note: text('note').notNull(),
+});
+
 export const rateLimitBuckets = opsSchema.table('rate_limit_buckets', {
   key: text('key').primaryKey(),
   tokens: doublePrecision('tokens').notNull(),

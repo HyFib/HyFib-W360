@@ -1548,6 +1548,14 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   only the platform role reads (the runtime role, which writes receipts, has no grant on it); they
   are deleted with their receipt; the CSV gives the time only (unit tests; integration tests, run in
   CI only).
+- Acknowledging quarantine entries (ADR-199): through `ops.platform_acknowledge_quarantine_entry`
+  (SECURITY DEFINER, executable only by the platform role), which checks the platform administrator,
+  the note (10 to 500 characters, trimmed) and that the entry is open, and writes the platform audit
+  entry (`platform.webhook_quarantine_acknowledged`, the note as its reason, no company) in the same
+  transaction. Notes live in `ops.quarantine_acknowledgements`, which only the definer role writes
+  and only the platform role reads (the runtime role, which writes quarantine entries, has no grant
+  on it); they are deleted with their entry; the CSV gives the time only (unit tests; integration
+  tests, run in CI only).
 
 Company export and deletion (Settings → Company data, ADR-055):
 

@@ -684,6 +684,8 @@ export interface QuarantineEntry {
   alertedAt: Date | null;
   /** Whether its receipt can be processed again: quarantined, with its body still kept. */
   retryable: boolean;
+  /** Who noted that they looked at it, when, and what they noted (ADR-199). */
+  acknowledgement: { at: Date; byName: string | null; note: string } | null;
 }
 
 /** One kind of email's failed and waiting counts over `emailDays` (counts only). */
@@ -909,9 +911,13 @@ export const QUARANTINE_CSV_COLUMNS = [
   'Provider ids',
   'Staff emailed (UTC)',
   'Receipt can be retried',
+  'Acknowledged (UTC)',
 ] as const;
 
-/** Open quarantine entries with the provider ids staff may see. */
+/**
+ * Open quarantine entries with the provider ids staff may see, and when one was acknowledged (never
+ * who or the note, ADR-199).
+ */
 export function quarantineCsv(rows: readonly QuarantineEntry[]): string {
   return csvFile(
     QUARANTINE_CSV_COLUMNS,
@@ -923,6 +929,7 @@ export function quarantineCsv(rows: readonly QuarantineEntry[]): string {
       q.externalIds.map((e) => `${e.key}: ${e.value}`).join('; '),
       csvMinute(q.alertedAt),
       yesNo(q.retryable),
+      csvMinute(q.acknowledgement?.at ?? null),
     ]),
   );
 }
