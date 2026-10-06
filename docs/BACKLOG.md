@@ -62,8 +62,11 @@ verification, app review, Embedded Signup configuration).
 
 - **P3-01 Contacts & CRM fields** — _implemented (2026-09-26)_: custom fields, tags, search and
   filters, import preview/mapping/row errors, one contact per number (dedupe across manual, import
-  and inbound), formula-safe export, erasure; saved segments (P3-04). **Remaining:** safe merge
-  (H-019), role-based number masking (W-044), bulk tag edits.
+  and inbound), formula-safe export, erasure; saved segments (P3-04). **[Bulk tag edits built; their
+  database and browser tests run only in CI]** (ADR-213: one tag added to or removed from up to
+  10,000 contacts the page's filters match, refused if the matches changed since the member saw
+  them; no migration). **Remaining:** safe merge (H-019), role-based number masking (W-044), bulk
+  edits of other fields.
 - **P3-02 Consent & suppression** — _implemented (2026-09-26)_: consent events with provenance,
   opt-out/opt-in keywords, Meta 131050 opt-outs, suppression list, send-time enforcement (race test
   with a queued template, and with campaigns). **Remaining:** review Meta's

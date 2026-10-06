@@ -329,6 +329,13 @@ opt-out is a defect: collect the message id and the consent event ids (no messag
 security/privacy incident. If the opt-out was never recorded (for example the customer wrote a
 sentence rather than a keyword), record it manually with a note.
 
+**A bulk tag edit was refused or changed fewer contacts than expected (ADR-213).** "These filters
+now match N contacts" means contacts were added, changed or erased since the page loaded: reload it
+and check the matches again. More than 10,000 matches must be narrowed first. A contact that already
+has 50 tags keeps them, and the result counts it; remove a tag from it first. Each edit is in the
+audit log as `contacts.bulk_tagged` with its counts; each changed contact also appears in the
+contact feed and as a `contact.updated` webhook event.
+
 **Erasure request.** A member with `contacts.delete` erases the contact from its page (keep the
 number suppressed unless the requester asks otherwise). The action is audited
 (`contact.erased`). Data already delivered to Meta is outside our database (see

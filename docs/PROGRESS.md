@@ -1,5 +1,49 @@
 # Progress
 
+## 2026-10-06 — Phase 3 follow-up: bulk tag edits (P3-01, ADR-213)
+
+Status: **Implemented; its database and browser tests run in CI only.** Tags changed one contact at
+a time. The local PostgreSQL is unavailable (its Docker daemon stopped), so the new integration and
+e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-213):** one tag on every contact the page's filters match, at most 10,000, under
+  their locks, refused if the count changed; the tag cap kept; audited without the search text; no
+  migration.
+- **Domain:** `countContacts` and `bulkTagContacts` in the contacts service; `bulkTagSchema`;
+  `contacts/bulk-tags.ts` (`BULK_TAG_LIMIT`, `bulkTagSummary`).
+- **Web:** `bulkTagContactsAction` and the bulk tag form on the contacts page (a `ClientForm` with a
+  `ClientButton` for removing).
+- **Tests:**
+  - Unit (3 new in `contacts/bulk-tags.test.ts`): the result's words, the request and its bounds.
+  - Integration (2 new in `contacts.test.ts`): adding and removing under tag and search filters, the
+    tag cap, a changed count, a bad tag, the audit entries, an analyst refused, another company
+    matching none, and the 10,000 limit. Written for CI; not run here.
+  - E2E (1 changed in `contacts.spec.ts`): a tag added to the contact a search finds. Written for
+    CI; not run here.
+- **Docs:** ADR-213; ARCHITECTURE; SECURITY; DEPLOYMENT and RUNBOOKS; BACKLOG P3-01; feature matrix
+  W-049.
+- **Mutation checks:** 10 deliberate regressions tried, all caught on the unit-tested parts. The
+  edit itself needs the database, so its regressions are left to the integration tests, which run in
+  CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 923 passed (89 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 10 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Bulk edits of other fields, from a segment or through the API, choosing contacts one by one, and
+  undo.
+
 ## 2026-10-06 — Phase 3 follow-up: downloading a conversation's transcript (P3-06, ADR-212)
 
 Status: **Implemented; its database and browser tests run in CI only.** W-042 was planned: a

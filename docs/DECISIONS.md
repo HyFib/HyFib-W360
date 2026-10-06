@@ -8425,3 +8425,28 @@ Decision:
 
 Not built: notes in the transcript, a PDF, a date range, transcripts through the API, and emailing a
 transcript to the customer.
+
+## ADR-213 Adding or removing a tag on every contact a filter matches (P3-01) (2026-10-06)
+
+Context: tags were changed one contact at a time, or by importing a CSV of the contacts again.
+Tagging a group found on the contacts page (everyone from Pune who opted in, say) meant opening each
+contact.
+
+Decision:
+
+- **From the contacts page:** below its filters (search, tag, consent), a member with
+  `contacts.write` adds or removes one tag on every contact the filters match, the number shown in
+  the form. More than 10,000 matches are refused: the filters must be narrowed first.
+- **The number shown is the number changed:** the edit carries the count the member saw. In one
+  transaction the matching contacts are locked (as one contact's tag edit locks it) and counted
+  again; a different count refuses the edit, so no contact the member did not review is tagged.
+- **The tag rules stay:** the tag is normalised as everywhere (lower case, no commas). A contact
+  that has the 50 tags a contact may have keeps them; the result says how many were changed, already
+  had the tag (or did not, for a removal) and were full. Erased contacts never match.
+- **Each changed contact is a change,** in the contact feed and as a `contact.updated` webhook
+  event, as when one member edits it. The audit entry (`contacts.bulk_tagged`) holds the tag, the
+  counts and which filters were used, never the search text.
+- **No migration;** the API is unchanged.
+
+Not built: bulk edits of other fields, bulk edits from a segment or through the API, choosing
+contacts one by one, and undo.

@@ -66,6 +66,7 @@ export * from './contacts/phone';
 export * from './contacts/csv';
 export * from './contacts/fields';
 export * from './contacts/service';
+export * from './contacts/bulk-tags';
 export * from './consent/keywords';
 export * from './consent/service';
 export * from './templates/definition';

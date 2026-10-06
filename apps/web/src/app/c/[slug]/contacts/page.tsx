@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { isAppError } from '@w360/core';
-import { can } from '@w360/domain';
+import { BULK_TAG_LIMIT, can } from '@w360/domain';
 import {
   Alert,
   Button,
@@ -19,6 +19,7 @@ import {
   TR,
   Table,
 } from '@w360/ui';
+import { BulkTagForm } from '@/components/contacts/bulk-tag-form';
 import { ConsentBadge } from '@/components/contacts/consent-badge';
 import { PageHeader } from '@/components/page-header';
 import { formatShort } from '@/lib/format';
@@ -65,6 +66,11 @@ export default async function ContactsPage({
     list = await contacts.listContacts(ctx, filter);
   }
   const tags = await contacts.listTags(ctx);
+  // Bulk tag edits (ADR-213) need the number of contacts the filters match.
+  const matching =
+    can(ctx, 'contacts.write') && list.items.length > 0
+      ? await contacts.countContacts(ctx, filter)
+      : 0;
   const base = `/c/${ctx.tenant.slug}/contacts`;
   const query = new URLSearchParams(
     Object.entries(filter).filter(
@@ -154,6 +160,14 @@ export default async function ContactsPage({
         </form>
         {cursorError ? (
           <Alert tone="warning">That page link has expired; showing the first page.</Alert>
+        ) : null}
+        {matching > BULK_TAG_LIMIT ? (
+          <p className="text-sm text-muted-foreground">
+            More than {BULK_TAG_LIMIT.toLocaleString('en-IN')} contacts match these filters. Narrow
+            them to add or remove a tag on all of them at once.
+          </p>
+        ) : matching > 0 ? (
+          <BulkTagForm slug={ctx.tenant.slug} filter={filter} count={matching} />
         ) : null}
         {list.items.length === 0 ? (
           <EmptyState

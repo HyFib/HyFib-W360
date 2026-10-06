@@ -226,6 +226,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   transaction, batched by 500); export streams CSV from keyset batches, each in its own read-only
   transaction. Erasure is `app.erase_contact` (SECURITY DEFINER), leaving an empty tombstone row so
   conversations and delivery history keep their foreign keys.
+  Bulk tag edits (`bulkTagContacts`, ADR-213) lock the contacts the page's filters match
+  (`filterConditions`, at most 10,000, ordered by id) in one transaction, refuse a count other than
+  the one the member saw, then insert the tag for those without it and below the tag cap, or delete
+  it, recording one audit entry.
 - **Consent** (`packages/domain/src/consent`): append-only `consent_events`; a definer trigger
   maintains `contact_consents` (later wins, opt-out wins ties). Sources: keyword messages (matched
   in ingestion on newly stored text, button and interactive replies), member notes, import

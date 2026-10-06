@@ -433,6 +433,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-212 has no migration: until the web rollout ends, an old web server shows no "Download
    transcript" link and answers its address with 404.
 
+   ADR-213 has no migration: until the web rollout ends, an old web server shows the contacts page
+   without the bulk tag form.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back
