@@ -8231,3 +8231,29 @@ Decision:
 
 Not built: reminders while a campaign keeps waiting, email preferences, and emails when a running
 campaign pauses or completes (its page and `campaign.status_changed` say so).
+
+## ADR-206 Reading saved segments through the API (P5-08) (2026-10-06)
+
+Context: a draft's audience can be one of the company's saved segments (ADR-186), but a key had no
+way to find a segment's id: segments were only on members' Segments page.
+
+Decision:
+
+- **Reads with `campaigns.read`:** `GET /segments` lists the company's segments that are not
+  archived, newest first on keyset pages, and `GET /segments/{id}` reads one; members read segments
+  with the permission of the same name. Reads continue while the company is suspended, as other
+  reads do.
+- **In the API's words:** each segment gives its conditions as `POST /contacts/search` and drafts'
+  audiences take them (segments store them so, ADR-117), its version, and `problem`: why it cannot
+  be used now, as members' segment page says (a custom field deleted since, a comparison its field
+  no longer takes, a tag or date that is not valid, a campaign that does not exist), checked by
+  segments' rules; conditions HyFib can no longer read give a null definition with a problem.
+- **Counts only:** one segment adds `count`, how many contacts match it now (erased contacts left
+  out), counted by segments' own SQL with dates in the company's time zone, as members' page counts
+  it; null when it has a problem. Contacts themselves are found with `POST /contacts/search` and
+  `contacts.read`, so this read gives no contact.
+- **Not found:** an archived segment and another company's, as members' page.
+- **No migration.**
+
+Not built: creating, changing or archiving segments through the API, and segments' members as pages
+(`POST /contacts/search` with the same conditions finds them).

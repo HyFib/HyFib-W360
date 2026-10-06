@@ -784,6 +784,11 @@ Phase 5 rules (Public API, P5-08):
   the company and never for their own action. The email names the approver and the campaign, carries
   the approver's note (written for that member) and links to the campaign's page, which authorizes
   as usual; it carries no contact data. A key's submission emails nobody.
+- Segments (ADR-206): a key with `campaigns.read` reads its company's segments that are not
+  archived, in a read-only transaction in the company's scope: names, conditions (tags, field keys
+  and values, consent, dates, campaign ids), versions and how many contacts one matches now. No
+  contact is given (finding them needs `POST /contacts/search` and `contacts.read`); archived
+  segments and other companies' are not found.
 - Media from links (ADR-194): a key with `messages.reply` sends a photo, a video, audio or a
   document by a link WhatsApp fetches, within the 24-hour window. HyFib never fetches the link, so
   it cannot be used to reach HyFib's network; it takes only https links with a host and no user name

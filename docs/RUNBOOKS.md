@@ -1845,6 +1845,13 @@ and only while they are an active member; a key's submission emails nobody (its 
 `campaign-review:<campaign id>:<version>:<user id>`) and sent by the email worker. The campaign's
 history on its page shows what happened and the note in any case.
 
+**A segment read through the API has a problem, or another count than expected (ADR-206).**
+`problem` says what members' segment page says: usually a condition on a custom field deleted or
+changed since, which a member fixes on the segment's page; until then a draft with it cannot be
+submitted, and `count` is null. `count` is read when asked, from the contacts as they are then
+(erased contacts left out), with dates in the company's time zone, so it changes as contacts do; an
+archived segment is not found.
+
 **A draft's review through the API shows no estimate, or other counts than expected (ADR-193).**
 `GET /campaigns/{id}/review` reads the saved draft as members' review does, now: save the draft
 first. `estimate` is null without a currency (the spending cap's, or else Settings → Messaging),

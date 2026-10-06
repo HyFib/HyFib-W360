@@ -6,9 +6,11 @@ import {
   apiCancelCampaign,
   apiCreateCampaign,
   apiGetCampaign,
+  apiGetSegment,
   apiListCampaignRecipients,
   apiListCampaigns,
   apiListMessages,
+  apiListSegments,
   apiPauseCampaign,
   apiResumeCampaign,
   apiReviewCampaign,
@@ -2531,5 +2533,142 @@ describe('emailing about campaigns waiting for approval (ADR-204, ADR-205)', () 
       s.c.owner.email,
       s.c.owner.email,
     ]);
+  });
+});
+
+describe('reading saved segments through the API (ADR-206)', () => {
+  it("lists the company's segments newest first with their conditions and problems, counts one as members' segment page does, and a draft takes one", async () => {
+    const s = await setup();
+    const segmentsService = createSegmentsService({ db: fx.dbs.app, clock: systemClock });
+    await s.contact('+919820008201', 'Asha');
+    await s.contact('+919820008202', 'Ravi');
+    await s.contact('+919820008203', 'Meena', false);
+    const create = (name: string, definition: unknown) =>
+      segmentsService.createSegment(s.owner, { name, definition }, {});
+    const vip = await create('VIP buyers', {
+      match: 'all',
+      conditions: [{ type: 'tag', op: 'has', tag: 'vip' }],
+    });
+    const optedIn = await create('Opted in', {
+      match: 'any',
+      conditions: [{ type: 'consent', purpose: 'marketing', status: 'opted_in' }],
+    });
+    const broken = await create('Gold tier', {
+      match: 'all',
+      conditions: [{ type: 'tag', op: 'has', tag: 'gold' }],
+    });
+    const unreadable = await create('Lost', {
+      match: 'all',
+      conditions: [{ type: 'tag', op: 'has', tag: 'lost' }],
+    });
+    const archived = await create('Old buyers', {
+      match: 'all',
+      conditions: [{ type: 'tag', op: 'has', tag: 'old' }],
+    });
+    await segmentsService.archiveSegment(s.owner, archived.id, {});
+    // Conditions that no longer hold: on a custom field deleted since, and ones HyFib cannot read.
+    await fx.query(`UPDATE app.segments SET definition = $2 WHERE id = $1`, [
+      broken.id,
+      JSON.stringify({
+        match: 'all',
+        conditions: [{ type: 'field', key: 'tier', op: 'equals', value: 'gold' }],
+      }),
+    ]);
+    await fx.query(
+      `UPDATE app.segments SET definition = '{"match": "all", "conditions": []}' WHERE id = $1`,
+      [unreadable.id],
+    );
+    const other = await setup();
+    const theirs = await segmentsService.createSegment(
+      other.owner,
+      { name: 'Theirs', definition: { conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] } },
+      {},
+    );
+    const reader = await apiKey(s.c, ['campaigns.read'], 'Segments');
+
+    // Newest first on exact pages; the archived segment and the other company's are left out.
+    const first = await apiListSegments(deps(), reader, { limit: '2' });
+    expect(first.data.map((x) => x.name)).toEqual(['Lost', 'Gold tier']);
+    expect(first.nextCursor).not.toBeNull();
+    const second = await apiListSegments(deps(), reader, {
+      limit: '2',
+      cursor: first.nextCursor!,
+    });
+    expect(second).toEqual({
+      data: [
+        {
+          id: optedIn.id,
+          name: 'Opted in',
+          definition: {
+            match: 'any',
+            conditions: [{ type: 'consent', purpose: 'marketing', status: 'opted_in' }],
+          },
+          problem: null,
+          version: 0,
+          createdAt: expect.any(String),
+          updatedAt: expect.any(String),
+        },
+        expect.objectContaining({
+          id: vip.id,
+          definition: { match: 'all', conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
+          problem: null,
+        }),
+      ],
+      nextCursor: null,
+    });
+    expect(first.data).toEqual([
+      expect.objectContaining({
+        id: unreadable.id,
+        definition: null,
+        problem: 'This segment’s conditions can no longer be read.',
+      }),
+      expect.objectContaining({
+        id: broken.id,
+        definition: {
+          match: 'all',
+          conditions: [{ type: 'field', key: 'tier', op: 'equals', value: 'gold' }],
+        },
+        problem: 'A condition uses a custom field that does not exist.',
+      }),
+    ]);
+
+    // One segment, counted now as members' segment page counts it; none with a problem.
+    for (const [segment, count] of [
+      [vip, 3],
+      [optedIn, 2],
+    ] as const) {
+      expect(await apiGetSegment(deps(), reader, segment.id)).toMatchObject({
+        id: segment.id,
+        problem: null,
+        count,
+      });
+      expect((await segmentsService.getSegment(s.owner, segment.id)).preview?.count).toBe(count);
+    }
+    for (const segment of [broken, unreadable]) {
+      expect(await apiGetSegment(deps(), reader, segment.id)).toMatchObject({
+        id: segment.id,
+        problem: expect.any(String),
+        count: null,
+      });
+    }
+    for (const id of [archived.id, theirs.id]) {
+      expect(await refusal(apiGetSegment(deps(), reader, id))).toEqual({
+        code: 'not_found',
+        paths: [],
+      });
+    }
+
+    // A draft's audience takes a listed segment by its id.
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Drafts');
+    const draft = await apiCreateCampaign(
+      writeDeps(),
+      writer,
+      { name: 'VIP offer', audience: { segmentId: vip.id } },
+      null,
+    );
+    expect(draft.status).toBe(201);
+    expect((draft.body as { data: { settings: { audience: unknown } } }).data.settings).toEqual(
+      expect.objectContaining({ audience: { segmentId: vip.id } }),
+    );
   });
 });

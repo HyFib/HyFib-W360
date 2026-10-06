@@ -30,6 +30,7 @@ import {
   apiWithdrawCampaign,
   toApiCampaignReview,
 } from './campaigns';
+import { apiGetSegment, apiListSegments } from './segments';
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import {
   campaignDraftInputOf,
@@ -6089,5 +6090,144 @@ describe('withdrawing campaign submissions through the API (ADR-203)', () => {
       "submit drafts, which then always wait for a member's approval, and take back what it submitted;",
     );
     expect(API_ROUTES).toContainEqual(['post', '/campaigns/{id}/withdraw']);
+  });
+});
+
+describe('reading saved segments through the API (ADR-206)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const id = '0190a000-0000-7000-8000-000000000004';
+  // A database that is reached only once every check before it has passed.
+  const reached = {
+    db: {
+      run: () => Promise.reject(new Error('the database was reached')),
+    },
+  } as never;
+
+  it('are refused before anything is read: without the scope, outside the plan, a bad id or a bad page; a suspended company still reads', async () => {
+    for (const scopes of [['campaigns.write'], ['contacts.read', 'campaigns.stop']]) {
+      expect(await code(apiListSegments(reached, ctx(scopes), {}))).toBe('forbidden');
+      expect(await code(apiGetSegment(reached, ctx(scopes), id))).toBe('forbidden');
+    }
+    await expect(apiListSegments(reached, ctx(['campaigns.write']), {})).rejects.toThrow(
+      'This API key does not have the campaigns.read scope.',
+    );
+    await expect(
+      apiGetSegment(reached, ctx(['campaigns.read'], 'active', ['contacts.read']), id),
+    ).rejects.toMatchObject({ code: 'forbidden', details: { apiReason: 'not_in_plan' } });
+    expect(await code(apiGetSegment(reached, ctx(['campaigns.read']), 'not-an-id'))).toBe(
+      'not_found',
+    );
+    for (const query of [
+      { limit: '0' },
+      { limit: '101' },
+      { cursor: 'not-a-cursor' },
+      { page: '2' },
+    ]) {
+      expect(await code(apiListSegments(reached, ctx(['campaigns.read']), query))).toBe(
+        'validation_failed',
+      );
+    }
+    for (const status of ['active', 'suspended', 'restricted']) {
+      await expect(apiListSegments(reached, ctx(['campaigns.read'], status), {})).rejects.toThrow(
+        'the database was reached',
+      );
+      await expect(apiGetSegment(reached, ctx(['campaigns.read'], status), id)).rejects.toThrow(
+        'the database was reached',
+      );
+    }
+  });
+
+  it('are described: newest first with their conditions and problem, one counted now, counts only', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const paths = doc.paths as unknown as Record<
+      string,
+      Record<
+        string,
+        {
+          operationId: string;
+          description: string;
+          parameters: { name?: string; $ref?: string }[];
+          responses: Record<string, { content?: unknown }>;
+        }
+      >
+    >;
+    const list = paths['/segments']?.get;
+    expect(list?.operationId).toBe('listSegments');
+    expect(list?.parameters.map((p) => p.name)).toEqual(['limit', 'cursor']);
+    expect(list?.responses['200']?.content).toMatchObject({
+      'application/json': {
+        schema: { properties: { data: { items: { $ref: '#/components/schemas/Segment' } } } },
+      },
+    });
+    for (const words of [
+      'Scope: `campaigns.read`.',
+      "The company's saved segments that are not archived, as members' Segments page lists them",
+      "conditions in the words POST /contacts/search and drafts' audiences take",
+      "A draft's audience takes a segment by its id (`segmentId`).",
+    ]) {
+      expect(list?.description).toContain(words);
+    }
+    const one = paths['/segments/{id}']?.get;
+    expect(one?.operationId).toBe('getSegment');
+    expect(one?.parameters).toEqual([{ $ref: '#/components/parameters/Id' }]);
+    expect(one?.responses['200']?.content).toEqual({
+      'application/json': {
+        schema: {
+          type: 'object',
+          properties: { data: { $ref: '#/components/schemas/SegmentWithCount' } },
+          required: ['data'],
+        },
+      },
+    });
+    expect(Object.keys(one?.responses ?? {})).toEqual(expect.arrayContaining(['200', '404']));
+    for (const words of [
+      'how many contacts match it now, erased contacts left out',
+      "Dates are read in the company's time zone.",
+      'Counts only: POST /contacts/search with the same conditions finds the contacts',
+      "An archived segment and another company's are not found.",
+    ]) {
+      expect(one?.description).toContain(words);
+    }
+    const schemas = (
+      doc.components as unknown as { schemas: Record<string, { properties: object }> }
+    ).schemas;
+    expect(Object.keys(schemas.Segment?.properties ?? {})).toEqual([
+      'id',
+      'name',
+      'definition',
+      'problem',
+      'version',
+      'createdAt',
+      'updatedAt',
+    ]);
+    expect(Object.keys(schemas.SegmentWithCount?.properties ?? {})).toEqual([
+      'id',
+      'name',
+      'definition',
+      'problem',
+      'version',
+      'createdAt',
+      'updatedAt',
+      'count',
+    ]);
+    expect(API_SCOPE_INFO['campaigns.read'].description).toContain(
+      "Also read the company's saved segments, their conditions and how many contacts each matches.",
+    );
+    expect(API_ROUTES).toEqual(
+      expect.arrayContaining([
+        ['get', '/segments'],
+        ['get', '/segments/{id}'],
+      ]),
+    );
   });
 });

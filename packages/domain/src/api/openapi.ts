@@ -73,6 +73,7 @@ import {
   apiSubmitCampaignSchema,
   apiUpdateCampaignSchema,
 } from './campaigns';
+import { apiSegmentDetailSchema, apiSegmentSchema } from './segments';
 import { apiContactFieldCreateSchema, apiContactFieldUpdateSchema } from './contact-fields';
 import { apiContactSearchSchema, apiUpdateMatchingContactsSchema } from './contact-search';
 import { apiContactSchema } from './contact-view';
@@ -814,7 +815,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, create, edit, review and submit campaign drafts for a member’s approval, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, read saved segments, create, edit, review and submit campaign drafts for a member’s approval, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -1649,6 +1650,33 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/segments': {
+        get: {
+          operationId: 'listSegments',
+          summary: 'Saved segments, newest first',
+          description: `${scopeNote('campaigns.read')} The company's saved segments that are not archived, as members' Segments page lists them, each with its conditions in the words POST /contacts/search and drafts' audiences take, and \`problem\` saying why it cannot be used now. A draft's audience takes a segment by its id (\`segmentId\`). GET /segments/{id} counts the contacts one matches. Members create, change and archive segments in the app.`,
+          parameters: [...pageParams],
+          responses: {
+            '200': { description: 'A page of segments.', content: pageOf('Segment') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/segments/{id}': {
+        get: {
+          operationId: 'getSegment',
+          summary: 'A saved segment with how many contacts match it now',
+          description: `${scopeNote('campaigns.read')} One of the company's segments that is not archived, with \`count\`: how many contacts match it now, erased contacts left out, as members' segment page counts them (null when it has a problem). Dates are read in the company's time zone. Counts only: POST /contacts/search with the same conditions finds the contacts, with \`contacts.read\`. An archived segment and another company's are not found.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The segment, counted now.',
+              content: json(dataOf(ref('SegmentWithCount'))),
+            },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+      },
       '/automations': {
         get: {
           operationId: 'listAutomations',
@@ -2333,6 +2361,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         UpdateCampaign: jsonSchema(apiUpdateCampaignSchema, 'input'),
         SubmitCampaign: jsonSchema(apiSubmitCampaignSchema, 'input'),
         CampaignRecipient: jsonSchema(apiCampaignRecipientSchema),
+        Segment: jsonSchema(apiSegmentSchema),
+        SegmentWithCount: jsonSchema(apiSegmentDetailSchema),
         Automation: jsonSchema(apiAutomationSchema),
         AutomationRun: jsonSchema(apiAutomationRunSchema),
         StartAutomationRun: jsonSchema(apiStartAutomationSchema, 'input'),
@@ -2412,6 +2442,8 @@ export const API_ROUTES = [
   ['post', '/campaigns/{id}/pause'],
   ['post', '/campaigns/{id}/resume'],
   ['post', '/campaigns/{id}/cancel'],
+  ['get', '/segments'],
+  ['get', '/segments/{id}'],
   ['get', '/automations'],
   ['post', '/automations/{id}/runs'],
   ['post', '/automations/{id}/runs/start-many'],

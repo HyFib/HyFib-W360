@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-06 — Phase 5: reading saved segments through the API (P5-08, ADR-206)
+
+Status: **Implemented; its database and browser tests run in CI only.** A draft's audience could be
+a saved segment, but keys could not find segments. The local PostgreSQL is unavailable (its Docker
+daemon stopped), so the integration test and the changed e2e test below were written but not run
+here.
+
+### Completed
+
+- **Design (ADR-206):** `GET /segments` and `GET /segments/{id}` with `campaigns.read`; conditions
+  in the API's words, `problem`, and a count for one; no migration.
+- **Domain:** `apiListSegments` and `apiGetSegment` (`api/segments.ts`) on segments' own checks and
+  SQL; the scope's description and the OpenAPI entries.
+- **Web:** the two routes.
+- **Tests:**
+  - Unit (2 new in `api.test.ts`): the refusals before anything is read (a suspended company still
+    reads), the OpenAPI entries.
+  - Integration (1 new in `api-campaigns.test.ts`): pages, problems, counts and a draft taking a
+    listed segment. Written for CI; not run here.
+  - E2E (1 changed in `api-contact-search.spec.ts`): the key reads the segment a member saves, and
+    its count. Written for CI; not run here.
+- **Docs:** ADR-206; SECURITY; ARCHITECTURE; THREAT-MODEL T200; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-08; feature matrix W-134, W-054 and H-033.
+- **Mutation checks:** 11 deliberate regressions tried, all caught on the unit-tested parts. The
+  reads themselves need the database, so their regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 898 passed (84 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 11 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Creating, changing or archiving segments through the API, reminders while a campaign keeps
+  waiting, and email preferences.
+
 ## 2026-10-06 — Phase 5: telling the member who submitted a campaign what its approver did (P5-08, ADR-205)
 
 Status: **Implemented; its database tests run in CI only.** Approvers were emailed when a campaign

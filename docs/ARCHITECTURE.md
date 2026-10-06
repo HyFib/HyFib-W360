@@ -976,6 +976,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   submitter read before the change (sending back clears it). For a member's submission acted on by
   someone else, while that member is active, it queues one `tenant.notice` written by
   `campaignReviewNotice`, with the dedupe key `campaign-review:<campaign>:<version>:<member>`.
+- **Segments (ADR-206):** `apiListSegments` and `apiGetSegment` (`api/segments.ts`) read
+  `app.segments` in a read-only transaction, check each definition with `segmentDefinitionSchema`
+  and `checkSegmentDefinition` (`campaigns/segments.ts`), as members' segment page does, and count
+  one with `segmentWhere` in the company's time zone.
 - **Media from links (ADR-194):** `apiSendMedia` (`api/resources.ts`) parses `type` `image`,
   `video`, `audio` or `document`, an https `link` (`isMediaLink`) and a caption except for audio,
   and sends through `sendReply` as text replies do: the content keeps the link and the caption, the

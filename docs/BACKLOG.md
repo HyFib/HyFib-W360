@@ -656,6 +656,9 @@ verification, app review, Embedded Signup configuration).
   **[Telling the submitter what the approver did built; its database tests run only in CI]**
   (ADR-205: the member who submitted a campaign is emailed when an approver approves it, sends it
   back with a note or takes it back; no migration).
+  **[Reading saved segments built; its database tests run only in CI]** (ADR-206: `GET /segments`
+  and `GET /segments/{id}` with `campaigns.read` give the company's segments with their conditions
+  in the API's words, why one cannot be used and how many contacts one matches now; no migration).
   Remaining: uploaded media, call-to-action messages through the API, taking
   reactions back,
   media downloads, changing a field's type,
