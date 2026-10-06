@@ -373,7 +373,7 @@ describe('automation triggers', () => {
         { type: 'conversation_started', hours: 'any', cooldownMinutes: 0 },
         { text: 'hi', newCase: true },
       ),
-    ).toBe(2);
+    ).toBe(3);
     expect(
       matchTrigger(
         { type: 'conversation_started', hours: 'any', cooldownMinutes: 0 },
@@ -385,7 +385,7 @@ describe('automation triggers', () => {
         { type: 'any_message', hours: 'any', cooldownMinutes: 0 },
         { text: null, newCase: false },
       ),
-    ).toBe(3);
+    ).toBe(4);
     expect(
       parseTrigger({
         type: 'keyword',
@@ -398,6 +398,39 @@ describe('automation triggers', () => {
       ok: false,
       message: 'Keywords need at least one letter or digit.',
     });
+  });
+
+  it('start on keywords with small typos only when asked, ranked below any match without them (ADR-240)', () => {
+    const base = {
+      type: 'keyword',
+      keywords: ['refund', 'menu'],
+      hours: 'any',
+      cooldownMinutes: 0,
+    };
+    const contains = parseTrigger({ ...base, match: 'contains', typos: true });
+    const exact = parseTrigger({ ...base, match: 'exact', typos: true });
+    const strict = parseTrigger({ ...base, match: 'contains' });
+    if (!contains.ok || !exact.ok || !strict.ok) throw new Error('trigger');
+    // Saved without the option, a trigger reads as before.
+    expect(strict.trigger).not.toHaveProperty('typos');
+    const at = (trigger: typeof contains.trigger, text: string) =>
+      matchTrigger(trigger, { text, newCase: false });
+    expect(at(contains.trigger, 'Refund')).toBe(0);
+    expect(at(contains.trigger, 'I want a refund')).toBe(1);
+    expect(at(contains.trigger, 'I want a refnud')).toBe(2);
+    expect(at(contains.trigger, 'the meny')).toBeNull();
+    expect(at(exact.trigger, 'refnud!')).toBe(2);
+    expect(at(exact.trigger, 'I want a refnud')).toBeNull();
+    expect(at(exact.trigger, 'I want a refund')).toBeNull();
+    expect(at(strict.trigger, 'I want a refnud')).toBeNull();
+    // A match with typos still ranks above a new conversation's automation.
+    expect(at(contains.trigger, 'refnud')).toBeLessThan(
+      matchTrigger(
+        { type: 'conversation_started', hours: 'any', cooldownMinutes: 0 },
+        { text: 'refnud', newCase: true },
+      ) ?? Infinity,
+    );
+    expect(parseTrigger({ ...base, match: 'contains', typos: 'yes' }).ok).toBe(false);
   });
 });
 

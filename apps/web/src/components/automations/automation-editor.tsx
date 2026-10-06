@@ -9,6 +9,7 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  Checkbox,
   Field,
   Input,
   Select,
@@ -50,6 +51,8 @@ interface TriggerForm {
   type: TriggerType;
   keywords: string;
   match: 'exact' | 'contains';
+  /** Also start on a keyword with a small typo (ADR-240). */
+  typos: boolean;
   hours: TriggerHours;
   cooldownMinutes: number;
   /** The inputs of an automation started through the API, separated by commas (ADR-077). */
@@ -62,6 +65,7 @@ function triggerForm(trigger: AutomationTrigger | null): TriggerForm {
       type: 'conversation_started',
       keywords: '',
       match: 'contains',
+      typos: false,
       hours: 'any',
       cooldownMinutes: 60,
       inputs: '',
@@ -71,6 +75,7 @@ function triggerForm(trigger: AutomationTrigger | null): TriggerForm {
     type: trigger.type,
     keywords: trigger.type === 'keyword' ? trigger.keywords.join(', ') : '',
     match: trigger.type === 'keyword' ? trigger.match : 'contains',
+    typos: trigger.type === 'keyword' && trigger.typos === true,
     hours: fromMessages ? trigger.hours : 'any',
     cooldownMinutes: fromMessages ? trigger.cooldownMinutes : 60,
     inputs: trigger.type === 'api' ? trigger.inputs.join(', ') : '',
@@ -99,6 +104,8 @@ function triggerInput(form: TriggerForm): unknown {
       .map((k) => k.trim())
       .filter(Boolean),
     match: form.match,
+    // Absent unless chosen, so a trigger saved before ADR-240 reads the same.
+    ...(form.typos ? { typos: true } : {}),
     ...common,
   };
 }
@@ -657,6 +664,23 @@ export function AutomationEditor({
                     </Select>
                   )}
                 </Field>
+                <div className="grid gap-1 sm:col-span-2">
+                  <label htmlFor="trigger-typos" className="flex items-center gap-2 text-sm">
+                    <Checkbox
+                      id="trigger-typos"
+                      checked={trigger.typos}
+                      onChange={(e) =>
+                        change(() => setTrigger({ ...trigger, typos: e.target.checked }))
+                      }
+                    />
+                    Also start when a keyword is written with a small typo
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    One typo in words of 5 to 8 letters, two in longer ones; the first letter must
+                    match, and shorter words and words with digits must match exactly. A message
+                    that matches another automation without typos starts that one.
+                  </p>
+                </div>
               </div>
             ) : null}
           </CardContent>

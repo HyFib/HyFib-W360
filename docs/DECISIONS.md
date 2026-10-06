@@ -9275,3 +9275,30 @@ Decision:
   (`crm.deals_exported`, with its filters). No migration.
 
 Not built: importing deals, exporting tasks, notes or timelines, and exports through the public API.
+
+## ADR-240 Keyword triggers that also match small typos (P4-01) (2026-10-06)
+
+Context: keyword triggers match whole words exactly (case, punctuation and Unicode forms aside).
+Customers type on phones: "refnud", "delivry" and "cancelation" started nothing, and the
+conversation waited for a person.
+
+Decision:
+
+- **Opt-in per trigger:** "Also start when a keyword is written with a small typo" (`typos` on the
+  keyword trigger, absent before, so every saved trigger reads as it did). It applies to both modes:
+  the message is a keyword, or contains one.
+- **What counts as a small typo:** per word of the keyword, a character inserted, deleted or
+  replaced, or two neighbours swapped (optimal string alignment distance, in characters rather than
+  UTF-16 units): one in words of 5 to 8 characters, two from 9. Shorter words ("menu", "help") have
+  too many neighbours and must match exactly, and so must any word with a digit, so an order number
+  is never taken for another. The first letter must match, which keeps "border" from starting
+  "order". Words are still whole: a typo never joins or splits them.
+- **A typo never beats a match without one:** triggers rank exact keyword, contained keyword,
+  keyword with typos, new conversation, any message; a run started by a typo is still a keyword
+  start. The builder warns when no keyword word allows a typo.
+- **No migration;** the trigger is part of the automation's JSON. The API does not expose keyword
+  triggers, so it is unchanged.
+
+Not built: typos in team routing keywords and in consent keywords (an opt-out matched by similarity
+would be a guess, so consent keywords stay whole-message matches in `consent/keywords.ts`), phonetic
+or transliteration matching (Hinglish spellings), and a per-trigger tolerance setting.

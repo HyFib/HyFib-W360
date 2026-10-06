@@ -1,6 +1,13 @@
 import { z } from 'zod';
 import { normalizeTag } from '../contacts/fields';
-import { equalsKeyword, matchesKeyword, normalizeRoutingText } from '../inbox/keywords';
+import {
+  equalsKeyword,
+  equalsKeywordWithTypos,
+  matchesKeyword,
+  matchesKeywordWithTypos,
+  normalizeRoutingText,
+  typoAllowance,
+} from '../inbox/keywords';
 import { TEMPLATE_LIMITS } from '../templates/definition';
 
 /**
@@ -572,6 +579,11 @@ export const triggerSchema = z.discriminatedUnion('type', [
       .max(AUTOMATION_LIMITS.keywords, `At most ${AUTOMATION_LIMITS.keywords} keywords.`)
       .transform((list) => [...new Set(list)]),
     match: z.enum(['exact', 'contains']),
+    /**
+     * Also start when a word of the message is a keyword word with a small typo (ADR-240); absent
+     * means words must match exactly, as before.
+     */
+    typos: z.boolean().optional(),
     ...triggerCommon,
   }),
   z.object({ type: z.literal('conversation_started'), ...triggerCommon }),
@@ -612,8 +624,11 @@ export const TRIGGER_LABELS: Record<TriggerType, string> = {
   api: 'A call from your systems through the HyFib W360 API',
 };
 
-/** How strongly a trigger matched; lower wins (exact keyword, keyword, new conversation, any). */
-export type TriggerRank = 0 | 1 | 2 | 3;
+/**
+ * How strongly a trigger matched; lower wins: the message is a keyword, contains one, matches one
+ * only with typos (ADR-240), a new conversation, any message.
+ */
+export type TriggerRank = 0 | 1 | 2 | 3 | 4;
 
 /**
  * Whether a customer message starts this trigger. `text` is the message text (or the tapped
@@ -628,15 +643,19 @@ export function matchTrigger(
     case 'keyword': {
       if (!message.text) return null;
       const text = message.text;
-      if (trigger.match === 'exact')
-        return trigger.keywords.some((k) => equalsKeyword(text, k)) ? 0 : null;
       if (trigger.keywords.some((k) => equalsKeyword(text, k))) return 0;
-      return trigger.keywords.some((k) => matchesKeyword(text, k)) ? 1 : null;
+      if (trigger.match === 'contains' && trigger.keywords.some((k) => matchesKeyword(text, k))) {
+        return 1;
+      }
+      // A match only with typos ranks below every match without them, of any automation.
+      if (!trigger.typos) return null;
+      const near = trigger.match === 'exact' ? equalsKeywordWithTypos : matchesKeywordWithTypos;
+      return trigger.keywords.some((k) => near(text, k)) ? 2 : null;
     }
     case 'conversation_started':
-      return message.newCase ? 2 : null;
+      return message.newCase ? 3 : null;
     case 'any_message':
-      return 3;
+      return 4;
     case 'store_event':
     case 'api':
       return null;
@@ -660,7 +679,7 @@ export function describeTrigger(trigger: AutomationTrigger): string {
     case 'keyword':
       return `${trigger.match === 'exact' ? 'A message is exactly' : 'A message contains'} ${trigger.keywords
         .map((k) => `“${k}”`)
-        .join(', ')}${hours}`;
+        .join(', ')}${trigger.typos ? `, allowing small typos${hours ? ',' : ''}` : ''}${hours}`;
     case 'conversation_started':
       return `A customer starts a conversation${hours}`;
     case 'any_message':
@@ -1008,6 +1027,20 @@ export function triggerIssues(
         level: 'error',
         nodeId: null,
         message: 'An automation started through the API sends from one WhatsApp number: choose it.',
+      },
+    ];
+  }
+  if (
+    trigger.type === 'keyword' &&
+    trigger.typos &&
+    !trigger.keywords.some((k) => k.split(' ').some((w) => typoAllowance(w) > 0))
+  ) {
+    return [
+      {
+        level: 'warning',
+        nodeId: null,
+        message:
+          'Typos are allowed only in words of five letters or more without digits, so these keywords still match exactly.',
       },
     ];
   }

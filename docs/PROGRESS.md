@@ -1,5 +1,44 @@
 # Progress
 
+## 2026-10-06 — Keyword triggers that also match small typos (P4-01, ADR-240)
+
+Status: **Implemented; its database test runs in CI only.** A keyword written with a typo started
+nothing. The local PostgreSQL is unavailable, so the integration test below was written but not run
+here.
+
+### Completed
+
+- **Domain:** `typoAllowance`, `withinEdits`, `matchesKeywordWithTypos` and `equalsKeywordWithTypos`
+  in `inbox/keywords.ts` (pure, usable in the browser); the keyword trigger's `typos`, its rank
+  below matches without typos (`matchTrigger`, ranks renumbered 0 to 4 and the run's trigger type
+  mapped in `dispatch.ts`), its description and a builder warning.
+- **Web:** the option under the keyword fields of the automation builder.
+- **Tests:**
+  - Unit (4 new in `keywords.test.ts`, 1 new in `interpreter.test.ts` with the renumbered ranks, 2
+    new in `api-trigger.test.ts`).
+  - Integration (1 new in `automations.test.ts`: a typo starts the automation that allows typos, as
+    a keyword start; a typo without the option starts nothing; a match without typos wins). Written
+    for CI; not run here.
+- **Docs:** ADR-240; ARCHITECTURE; BACKLOG P4-01; feature matrix W-078.
+- **Mutation checks:** 19 of 20 deliberate regressions caught (two only after tests were added; the
+  survivor removes a length shortcut that changes speed, not results).
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                                                                                                           |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                                                                                            |
+| `pnpm test` (unit)                                 | 1035 passed (107 files)                                                                                                                          |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it                                                                                    |
+| `pnpm build`                                       | passed                                                                                                                                           |
+| Mutation checks                                    | 19 of 20 deliberate regressions caught (two only after tests were added; the survivor removes a length shortcut that changes speed, not results) |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                                                                                                   |
+
+### Known gaps
+
+- No typos in team routing or consent keywords; no phonetic or transliteration matching; the
+  tolerance is fixed by word length.
+
 ## 2026-10-06 — Exporting deals as CSV (P4-04, ADR-239)
 
 Status: **Implemented; its database tests run in CI only.** Deals could be read on the board (200

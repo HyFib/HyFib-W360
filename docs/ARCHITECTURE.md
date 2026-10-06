@@ -543,9 +543,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Dispatch** (`automations/dispatch.ts`, inside the ingestion transaction): an opt-out keyword
   stops the active run; a run waiting for a reply receives the message (`input_message_id`, a job
   keyed by the message); otherwise, in an unassigned conversation of an active company with no
-  active run, the best match starts (exact keyword, contained keyword, new conversation, any
-  message; then name order), subject to business-hours filters, cooldowns and 10 runs per
-  conversation per hour.
+  active run, the best match starts (exact keyword, contained keyword, keyword with small typos when
+  the trigger allows them (ADR-240: optimal string alignment per word in `inbox/keywords.ts`), new
+  conversation, any message; then name order), subject to business-hours filters, cooldowns and 10
+  runs per conversation per hour.
 - **Runner** (`automations/runner.ts`, queue `automation.run`, ADR-035): one transaction per step,
   conversation lock then run lock; checks the hand-off lock, resolve and the 7-day age; loads the
   pinned version's graph (cached: versions never change) and the contact facts; applies effects —
@@ -590,8 +591,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`ops.automation_http_calls_due`). Settings → Web requests manages domains and secrets
   (`integrations.manage`); run pages list each call (method, host, path, outcome).
 - **Not built yet:** WhatsApp Flows steps (P4-03), catalog steps (P4-06), starting a run through the
-  public API (P5), fuzzy keyword matching, templates with media headers or variable buttons in
-  template steps, usage billing.
+  public API (P5), templates with media headers or variable buttons in template steps, usage
+  billing.
 
 ## 6F. CRM **[built — reminder emails verified through Mailpit only]**
 

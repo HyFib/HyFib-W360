@@ -537,6 +537,44 @@ describe('automation versions', () => {
   });
 });
 
+describe('keyword triggers with small typos (ADR-240)', () => {
+  it('start on a typo only when the trigger allows them, and lose to a match without typos', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const refunds = await publish(
+      owner,
+      'Refunds',
+      {
+        type: 'keyword',
+        keywords: ['refund'],
+        match: 'contains',
+        typos: true,
+        hours: 'any',
+        cooldownMinutes: 0,
+      },
+      menuGraph(),
+    );
+    const deliveries = await publish(owner, 'Deliveries', keyword('delivery'), menuGraph());
+    const startedBy = (conversationId: string) =>
+      fx.query<{ automation_id: string; trigger_type: string }>(
+        `SELECT automation_id, trigger_type FROM app.automation_runs WHERE conversation_id = $1`,
+        [conversationId],
+      );
+
+    // A typo starts the automation that allows them, as a keyword start.
+    const typo = await inbound(c, waId(), 'I want a refnud');
+    expect(await startedBy(typo)).toEqual([{ automation_id: refunds.id, trigger_type: 'keyword' }]);
+    // Without the option, a typo starts nothing.
+    const strict = await inbound(c, waId(), 'where is my delivry');
+    expect(await startedBy(strict)).toEqual([]);
+    // A message that matches another automation without typos starts that one.
+    const both = await inbound(c, waId(), 'refnud for my delivery');
+    expect(await startedBy(both)).toEqual([
+      { automation_id: deliveries.id, trigger_type: 'keyword' },
+    ]);
+  });
+});
+
 describe('automation runs', () => {
   it('runs buttons, a validated answer and a contact update, and hands off to a team', async () => {
     const c = await fx.company();
