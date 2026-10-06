@@ -1771,6 +1771,128 @@ describe('text replies (ADR-070)', () => {
     expect(count).toBe(2);
   });
 
+  it('send contact cards the same way, kept in WhatsApp’s words and read back as shared cards are (ADR-197)', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['messages.reply', 'conversations.read'], 'Front desk');
+    const waId = '919811101971';
+    await wrote(c, waId);
+    const conv = await conversationWith(c, `+${waId}`);
+    const sent = await apiSendMessage(
+      deps(),
+      ctx,
+      {
+        type: 'contacts',
+        to: `+${waId}`,
+        contacts: [
+          {
+            name: { formattedName: ' Harbour Dental Front Desk ', firstName: 'Front desk' },
+            phones: [{ phone: '+91 20 4000 1234', type: 'WORK' }],
+            emails: [{ email: 'desk@harbour.example', type: 'WORK' }],
+          },
+          {
+            name: { formattedName: 'Dr Rao', lastName: 'Rao', prefix: 'Dr' },
+            phones: [{ phone: '+91 98200 12345', type: 'WORK', waId: '919820012345' }],
+          },
+        ],
+      },
+      idem('cards-1', 'cards-1'),
+    );
+    expect(sent.status).toBe(201);
+    expect(sent.body.data).toMatchObject({ type: 'contacts', status: 'queued' });
+    const desk = {
+      name: { formatted_name: 'Harbour Dental Front Desk', first_name: 'Front desk' },
+      phones: [{ phone: '+91 20 4000 1234', type: 'WORK' }],
+      emails: [{ email: 'desk@harbour.example', type: 'WORK' }],
+    };
+    const rao = {
+      name: { formatted_name: 'Dr Rao', last_name: 'Rao', prefix: 'Dr' },
+      phones: [{ phone: '+91 98200 12345', type: 'WORK', wa_id: '919820012345' }],
+    };
+    const [stored] = await fx.query(
+      `SELECT m.type, m.content, m.sender_type, si.request
+         FROM app.messages m
+         JOIN app.send_intents si ON si.tenant_id = m.tenant_id AND si.message_id = m.id
+        WHERE m.id = $1`,
+      [idOf(sent)],
+    );
+    expect(stored).toEqual({
+      type: 'contacts',
+      content: { contacts: [desk, rao] },
+      sender_type: 'api',
+      request: {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: waId,
+        type: 'contacts',
+        contacts: [desk, rao],
+      },
+    });
+    expect((await conversationWith(c, `+${waId}`)).last_message_preview).toBe(
+      'Contact card: Harbour Dental Front Desk, Dr Rao',
+    );
+    // WhatsApp's contact objects through the send pipeline (the stand-in checks their shape).
+    expect(await sendAll(c)).toEqual(['accepted']);
+    const atStandIn = fx.standIn.state.requests.filter(
+      (r) => r.path.endsWith('/messages') && (r.body as { to?: string } | undefined)?.to === waId,
+    );
+    expect(atStandIn.map((r) => (r.body as { contacts?: unknown }).contacts)).toEqual([
+      [desk, rao],
+    ]);
+    // Read back as the cards customers share are read (ADR-196).
+    const { data } = await apiListConversationMessages(deps(), ctx, conv.id, {});
+    const card = data.find((m) => m.direction === 'outbound');
+    expect(card).toMatchObject({ type: 'contacts', text: null, sentBy: 'api' });
+    expect(card?.contacts?.map((x) => [x.name.formattedName, x.phones.map((p) => p.waId)])).toEqual(
+      [
+        ['Harbour Dental Front Desk', [null]],
+        ['Dr Rao', ['919820012345']],
+      ],
+    );
+    // Refused before anything is queued: a name without another part, a kind the spec does not
+    // name, and a number whose window has closed.
+    const nameless = await apiSendMessage(
+      deps(),
+      ctx,
+      { type: 'contacts', to: `+${waId}`, contacts: [{ name: { formattedName: 'Desk' } }] },
+      idem('cards-2', 'cards-2'),
+    ).catch((error: unknown) => error);
+    expect(isAppError(nameless) && nameless.issues?.[0]?.path).toBe('contacts.0.name.firstName');
+    const mobile = await apiSendMessage(
+      deps(),
+      ctx,
+      {
+        type: 'contacts',
+        to: `+${waId}`,
+        contacts: [
+          {
+            name: { formattedName: 'Dr Rao', lastName: 'Rao' },
+            phones: [{ phone: '+91 98200 12345', type: 'MOBILE' }],
+          },
+        ],
+      },
+      idem('cards-3', 'cards-3'),
+    ).catch((error: unknown) => error);
+    expect(isAppError(mobile) && mobile.code).toBe('validation_failed');
+    const lateWaId = '919811101972';
+    await wrote(c, lateWaId, 25 * 3600);
+    const late = await apiSendMessage(
+      deps(),
+      ctx,
+      {
+        type: 'contacts',
+        to: `+${lateWaId}`,
+        contacts: [{ name: { formattedName: 'Dr Rao', lastName: 'Rao' } }],
+      },
+      idem('cards-4', 'cards-4'),
+    ).catch((error: unknown) => error);
+    expect(reason(late)).toBe('window_closed');
+    const [{ count } = { count: -1 }] = await fx.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM app.messages WHERE tenant_id = $1 AND direction = 'outbound'`,
+      [c.tenant.id],
+    );
+    expect(count).toBe(1);
+  });
+
   it('send reply buttons and lists the same way, and give a tap back with its kind (ADR-080)', async () => {
     const c = await fx.company();
     const { ctx, id: keyId } = await apiKey(c, ['messages.reply', 'conversations.read'], 'Booking');

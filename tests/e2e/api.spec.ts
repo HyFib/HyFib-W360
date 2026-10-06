@@ -784,7 +784,7 @@ test('a key sends reply buttons and a list to a customer who wrote: the inbox sh
   await page.getByLabel('Name', { exact: true }).fill('Booking');
   await page
     .getByRole('checkbox', {
-      name: /Reply with text, buttons, lists, products, reactions, media and locations/,
+      name: /Reply with text, media and other messages/,
     })
     .check();
   await page.getByRole('checkbox', { name: /Read conversations/ }).check();
@@ -933,7 +933,7 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
   await page.getByLabel('Name', { exact: true }).fill('Front desk');
   await page
     .getByRole('checkbox', {
-      name: /Reply with text, buttons, lists, products, reactions, media and locations/,
+      name: /Reply with text, media and other messages/,
     })
     .check();
   await page.getByRole('checkbox', { name: /Read conversations/ }).check();
@@ -1018,19 +1018,46 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
   expect((await where.json()).data).toMatchObject({ type: 'location', status: 'queued' });
   const pole = await post({ type: 'location', to: `+${waId}`, latitude: 91, longitude: 0 });
   expect(pole.status()).toBe(422);
+  // And the dentist's contact card (ADR-197); a card with only a formatted name is refused.
+  const rao = {
+    name: { formattedName: 'Dr Meera Rao', firstName: 'Meera', lastName: 'Rao', prefix: 'Dr' },
+    phones: [{ phone: '+91 98200 12345', type: 'WORK' }],
+  };
+  const shared = await post({ type: 'contacts', to: `+${waId}`, contacts: [rao] });
+  expect(shared.status()).toBe(201);
+  expect((await shared.json()).data).toMatchObject({ type: 'contacts', status: 'queued' });
+  const bare = await post({
+    type: 'contacts',
+    to: `+${waId}`,
+    contacts: [{ name: { formattedName: 'Dr Meera Rao' } }],
+  });
+  expect(bare.status()).toBe(422);
 
-  // The worker sends all four, in any order, as Meta's spec describes them.
+  // The worker sends all five, in any order, as Meta's spec describes them.
   let sent: Awaited<ReturnType<typeof standInRequests>> = [];
   await expect(async () => {
     sent = (await standInRequests(request)).filter(
       (r) =>
         r.path === `/v26.0/${phoneNumberId}/messages` && (r.body as { to?: string }).to === waId,
     );
-    expect(sent).toHaveLength(4);
+    expect(sent).toHaveLength(5);
   }).toPass({ timeout: 30_000 });
   const ofType = (type: string) => sent.find((r) => (r.body as { type: string }).type === type);
   expect(ofType('document')?.body).toMatchObject({
     document: { link: leafletLink, caption: 'Before your visit' },
+  });
+  expect(ofType('contacts')?.body).toMatchObject({
+    contacts: [
+      {
+        name: {
+          formatted_name: 'Dr Meera Rao',
+          first_name: 'Meera',
+          last_name: 'Rao',
+          prefix: 'Dr',
+        },
+        phones: [{ phone: '+91 98200 12345', type: 'WORK' }],
+      },
+    ],
   });
   expect(ofType('location')?.body).toMatchObject({
     location: {
@@ -1068,6 +1095,10 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
   const sentPlace = thread.filter({ hasText: '12 Harbour Road, Pune' });
   await expect(sentPlace).toContainText('Location · Harbour Dental Clinic');
   await expect(sentPlace).toContainText('18.5204, 73.8567');
+  // The contact card shows the dentist's name and number.
+  const sentCard = thread.filter({ hasText: 'Shared a contact card' });
+  await expect(sentCard).toContainText('Dr Meera Rao');
+  await expect(sentCard).toContainText('+91 98200 12345');
   await expectNoHorizontalOverflow(page);
 
   // The customer reacts to the reply: the key reads which message the reaction is for.

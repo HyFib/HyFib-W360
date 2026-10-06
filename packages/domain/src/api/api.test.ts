@@ -118,7 +118,11 @@ import {
   apiMessageType,
   apiSendLocationSchema,
   decimalDegrees,
+  apiSendContactsSchema,
+  isCardLink,
+  whatsappContact,
 } from './resources';
+import { contactCards } from '../webhooks/payloads';
 import {
   apiCreateWebhookEndpointSchema,
   apiUpdateWebhookEndpointSchema,
@@ -757,11 +761,11 @@ describe('text replies (ADR-070)', () => {
       planScopes: null,
     } as unknown as ApiContext;
     const idem = { key: 'k-1', requestHash: 'h' };
-    // Stickers and contact cards are not sent through the API (ADR-194 sends media from links,
-    // ADR-195 locations).
+    // Stickers are not sent through the API (ADR-194 sends media from links, ADR-195 locations and
+    // ADR-197 contact cards).
     for (const body of [
       { type: 'sticker' },
-      { type: 'contacts' },
+      { type: 'CONTACTS' },
       { type: 'LOCATION' },
       { type: 'IMAGE' },
       { type: 'TEXT' },
@@ -3028,6 +3032,7 @@ describe('OpenAPI document', () => {
         { $ref: '#/components/schemas/SendAudio' },
         { $ref: '#/components/schemas/SendDocument' },
         { $ref: '#/components/schemas/SendLocation' },
+        { $ref: '#/components/schemas/SendContacts' },
       ],
     });
     for (const scope of API_SEND_SCOPES) expect(send.description).toContain(`\`${scope}\``);
@@ -5258,7 +5263,7 @@ describe('media from links through the API (ADR-194)', () => {
 
   it('are described in the send operation, each type with its own schema, and by the scope', () => {
     expect(API_SCOPE_INFO['messages.reply'].label).toBe(
-      'Reply with text, buttons, lists, products, reactions, media and locations',
+      'Reply with text, media and other messages',
     );
     expect(API_SCOPE_INFO['messages.reply'].description).toContain(
       'photos, videos, audio or documents from links',
@@ -5270,7 +5275,7 @@ describe('media from links through the API (ADR-194)', () => {
         Record<string, { summary: string; description: string }>
       >
     )['/messages']?.post;
-    expect(send?.summary).toContain('a reaction, media or a location');
+    expect(send?.summary).toContain('a reaction, media, a location or contacts');
     for (const words of [
       '`image`, `video`, `audio` or `document`',
       'https:// `link` that WhatsApp fetches when it sends the message',
@@ -5423,10 +5428,10 @@ describe('locations through the API (ADR-195)', () => {
 
   it('are described in the send operation, with their own schema, and by the scope', () => {
     expect(API_SCOPE_INFO['messages.reply'].label).toBe(
-      'Reply with text, buttons, lists, products, reactions, media and locations',
+      'Reply with text, media and other messages',
     );
     expect(API_SCOPE_INFO['messages.reply'].description).toContain(
-      'from links, and locations, to contacts who wrote',
+      'from links, locations and contact cards, to contacts who wrote',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const send = (
@@ -5435,10 +5440,10 @@ describe('locations through the API (ADR-195)', () => {
         Record<string, { summary: string; description: string }>
       >
     )['/messages']?.post;
-    expect(send?.summary).toContain('media or a location');
+    expect(send?.summary).toContain('media, a location or contacts');
     for (const words of [
-      '`document` or `location`) needs `messages.reply`',
-      'A text, buttons, a list, products, media or a location can quote',
+      '`document`, `location` or `contacts`) needs `messages.reply`',
+      'A text, buttons, a list, products, media, a location or contacts can quote',
       'A location (`location`) is a place given by its `latitude` and `longitude` in decimal degrees',
       `up to ${API_LIMITS.locationTextLength.toLocaleString('en')} characters each`,
     ]) {
@@ -5474,5 +5479,217 @@ describe('locations through the API (ADR-195)', () => {
     expect(message.properties.text.description).toContain(
       'a location’s name (its address if it has no name); for inbound messages also the title of a tapped reply, for outbound ones',
     );
+  });
+});
+
+describe('contact cards through the API (ADR-197)', () => {
+  const base = { type: 'contacts', to: '+919876543210' };
+  const lucia = {
+    name: { formattedName: ' Lucía Gómez ', firstName: 'Lucía', lastName: 'Gómez' },
+    phones: [{ phone: '+91 98765 43210', type: 'WORK', waId: '919876543210' }],
+    emails: [{ email: 'lucia@example.com', type: 'WORK' }],
+    urls: [{ url: 'https://harbour.example', type: 'WORK' }],
+    addresses: [
+      {
+        street: '12 Harbour Road',
+        city: 'Pune',
+        zip: '411001',
+        country: 'India',
+        countryCode: 'IN',
+        type: 'WORK',
+      },
+    ],
+    org: { company: 'Harbour Dental', title: 'Front desk' },
+    birthday: '1990-02-28',
+  };
+  const ravi = { name: { formattedName: 'Ravi', firstName: 'Ravi' } };
+
+  it('take 1 to 5 contacts as Meta’s spec describes them, each part checked', () => {
+    expect(apiSendContactsSchema.parse({ ...base, contacts: [lucia] }).contacts[0]?.name).toEqual({
+      formattedName: 'Lucía Gómez',
+      firstName: 'Lucía',
+      lastName: 'Gómez',
+    });
+    expect(apiSendContactsSchema.parse({ ...base, contacts: [ravi] }).contacts).toEqual([ravi]);
+    const five = Array.from({ length: 5 }, () => lucia);
+    expect(apiSendContactsSchema.safeParse({ ...base, contacts: five }).success).toBe(true);
+    expect(API_LIMITS.contactsPerCard).toBe(5);
+    const at = (change: Record<string, unknown>) => ({
+      ...base,
+      contacts: [{ ...lucia, ...change }],
+    });
+    const phone = '+91 98765 43210';
+    for (const [label, bad] of [
+      ['no contact', { ...base, contacts: [] }],
+      ['six contacts', { ...base, contacts: [...five, ravi] }],
+      ['only a formatted name', at({ name: { formattedName: 'Lucía Gómez' } })],
+      ['no formatted name', at({ name: { firstName: 'Lucía' } })],
+      ['a long name', at({ name: { formattedName: 'x'.repeat(257), firstName: 'x' } })],
+      ['a name part the spec does not send', at({ name: { ...ravi.name, nickname: 'R' } })],
+      ['a phone without digits', at({ phones: [{ phone: 'call me' }] })],
+      ['a WhatsApp id with letters', at({ phones: [{ phone, waId: '91abc12345' }] })],
+      ['a kind the spec does not name', at({ phones: [{ phone, type: 'MOBILE' }] })],
+      ['six phones', at({ phones: Array.from({ length: 6 }, () => ({ phone })) })],
+      ['an empty list', at({ phones: [] })],
+      ['an email address that is not one', at({ emails: [{ email: 'lucia@' }] })],
+      ['a script link', at({ urls: [{ url: 'javascript:alert(1)' }] })],
+      ['a link with a password', at({ urls: [{ url: 'https://u:p@harbour.example' }] })],
+      ['a password without a user name', at({ urls: [{ url: 'https://:p@harbour.example' }] })],
+      ['an address without parts', at({ addresses: [{ type: 'HOME' }] })],
+      ['a three-letter country code', at({ addresses: [{ city: 'Pune', countryCode: 'IND' }] })],
+      ['an empty organisation', at({ org: {} })],
+      ['a birthday that does not exist', at({ birthday: '1990-02-30' })],
+      ['a birthday written otherwise', at({ birthday: '28/02/1990' })],
+      ['a part the spec does not send', at({ photo: 'https://harbour.example/lucia.jpg' })],
+    ] as const) {
+      expect(apiSendContactsSchema.safeParse(bad).success, label).toBe(false);
+    }
+    expect(
+      apiSendContactsSchema.safeParse(at({ name: { formattedName: 'Lucía Gómez' } })).error
+        ?.issues[0],
+    ).toMatchObject({
+      path: ['contacts', 0, 'name', 'firstName'],
+      message: 'Give a first name, a last name or another part of the name too',
+    });
+    expect(isCardLink('http://harbour.example/team')).toBe(true);
+    expect(isCardLink('ftp://harbour.example')).toBe(false);
+  });
+
+  it('are sent and kept in WhatsApp’s words, which read back as received cards do', () => {
+    const card = apiSendContactsSchema.parse({ ...base, contacts: [lucia] }).contacts[0]!;
+    const kept = whatsappContact(card);
+    expect(kept).toEqual({
+      name: { formatted_name: 'Lucía Gómez', first_name: 'Lucía', last_name: 'Gómez' },
+      phones: [{ phone: '+91 98765 43210', type: 'WORK', wa_id: '919876543210' }],
+      emails: [{ email: 'lucia@example.com', type: 'WORK' }],
+      urls: [{ url: 'https://harbour.example', type: 'WORK' }],
+      addresses: [
+        {
+          street: '12 Harbour Road',
+          city: 'Pune',
+          zip: '411001',
+          country: 'India',
+          country_code: 'IN',
+          type: 'WORK',
+        },
+      ],
+      org: { company: 'Harbour Dental', title: 'Front desk' },
+      birthday: '1990-02-28',
+    });
+    expect(whatsappContact(ravi)).toEqual({ name: { formatted_name: 'Ravi', first_name: 'Ravi' } });
+    // Read back as a received card (ADR-196): the API gives what was sent.
+    expect(contactCards('contacts', { contacts: [kept] })).toEqual([
+      {
+        name: {
+          formattedName: 'Lucía Gómez',
+          firstName: 'Lucía',
+          lastName: 'Gómez',
+          middleName: null,
+          prefix: null,
+          suffix: null,
+        },
+        phones: [{ phone: '+91 98765 43210', waId: '919876543210', type: 'WORK' }],
+        emails: [{ email: 'lucia@example.com', type: 'WORK' }],
+        urls: [{ url: 'https://harbour.example', type: 'WORK' }],
+        addresses: [
+          {
+            street: '12 Harbour Road',
+            city: 'Pune',
+            state: null,
+            zip: '411001',
+            country: 'India',
+            countryCode: 'IN',
+            type: 'WORK',
+          },
+        ],
+        org: { company: 'Harbour Dental', department: null, title: 'Front desk' },
+        birthday: '1990-02-28',
+      },
+    ]);
+    expect(outboundText('contacts', { contacts: [kept] })).toBeNull();
+    expect(messageSnippet('outbound', 'contacts', { contacts: [kept] })).toBe('Contact card');
+  });
+
+  it('are chosen by their type, need a key that replies and must fit in a message', async () => {
+    const idem = { key: 'k-1', requestHash: 'h' };
+    const sending = {
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(['messages.send']) },
+      planScopes: null,
+    } as unknown as ApiContext;
+    await expect(
+      apiSendMessage({} as never, sending, { ...base, contacts: [ravi] }, idem),
+    ).rejects.toThrow('This API key does not have the messages.reply scope.');
+    const replying = {
+      ...sending,
+      key: { id: 'k', scopes: new Set(['messages.reply']) },
+    } as unknown as ApiContext;
+    // Each part within its bound, but five contacts of long four-byte text are more than a message
+    // may hold: refused before anything is read.
+    const wide = '𝒳'.repeat(128);
+    const place = { street: wide, city: wide, state: wide, zip: wide, country: wide };
+    const heavy = {
+      name: { formattedName: wide, firstName: wide, lastName: wide },
+      addresses: Array.from({ length: 5 }, () => place),
+    };
+    const big = { ...base, contacts: Array.from({ length: 5 }, () => heavy) };
+    expect(apiSendContactsSchema.safeParse(big).success).toBe(true);
+    const refused: unknown = await apiSendMessage({} as never, replying, big, idem).catch(
+      (caught: unknown) => caught,
+    );
+    expect(isAppError(refused) && refused.code).toBe('validation_failed');
+    expect(isAppError(refused) && refused.issues?.[0]?.path).toBe('contacts');
+  });
+
+  it('are described in the send operation, with their own schema, and by the scope', () => {
+    expect(API_SCOPE_INFO['messages.reply'].label).toBe(
+      'Reply with text, media and other messages',
+    );
+    expect(API_SCOPE_INFO['messages.reply'].description).toContain(
+      'locations and contact cards, to contacts who wrote',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const send = (
+      doc.paths as unknown as Record<
+        string,
+        Record<string, { summary: string; description: string }>
+      >
+    )['/messages']?.post;
+    expect(send?.summary).toContain('a location or contacts');
+    for (const words of [
+      '`location` or `contacts`) needs `messages.reply`',
+      'Contacts (`contacts`) share 1 to 5 contact cards, as Meta’s spec describes them',
+      'its `formattedName` and at least one other part',
+      'up to 5 of each, each with a `type` of HOME or WORK if wanted',
+      'each text up to 256 characters, a link up to 2,000',
+      'Messages read back give them in `contacts`',
+    ]) {
+      expect(send?.description).toContain(words);
+    }
+    type Shape = {
+      properties?: Record<string, Shape>;
+      required?: string[];
+      items?: Shape;
+      minItems?: number;
+      maxItems?: number;
+      enum?: string[];
+      additionalProperties?: unknown;
+    };
+    const schemas = (doc.components as { schemas: Record<string, Shape> }).schemas;
+    const contacts = schemas.SendContacts;
+    expect(Object.keys(contacts?.properties ?? {}).sort()).toEqual(
+      ['contacts', 'from', 'replyTo', 'to', 'type'].sort(),
+    );
+    expect([...(contacts?.required ?? [])].sort()).toEqual(['contacts', 'to', 'type']);
+    const list = contacts?.properties?.contacts;
+    expect(list).toMatchObject({ minItems: 1, maxItems: 5 });
+    const card = list?.items;
+    expect(card?.additionalProperties).toBe(false);
+    expect(Object.keys(card?.properties ?? {}).sort()).toEqual(
+      ['addresses', 'birthday', 'emails', 'name', 'org', 'phones', 'urls'].sort(),
+    );
+    expect(card?.required).toEqual(['name']);
+    expect(card?.properties?.phones).toMatchObject({ minItems: 1, maxItems: 5 });
+    expect(card?.properties?.phones?.items?.properties?.type?.enum).toEqual(['HOME', 'WORK']);
   });
 });

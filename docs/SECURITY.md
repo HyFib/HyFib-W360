@@ -781,6 +781,12 @@ Phase 5 rules (Public API, P5-08):
   company's endpoints taking it, as both already give messages' text; nothing new is stored. Erasing
   the customer redacts the card, so reads and deliveries after the erasure give no contacts. The
   inbox shows them as text only, never as links.
+- Contact cards sent through the API (ADR-197): a key with `messages.reply` shares up to 5 contacts
+  within the 24-hour window, with a reply's checks. HyFib sends what the key gives, bounded (5
+  contacts, 5 of each kind, 256 characters a text, links http or https without credentials, emails
+  and dates checked, no other part) and within the size a message may hold; it fetches nothing, and
+  the inbox shows the card as text only. The people on a card are the company's data like any
+  message's: redacted with the contact's messages and exported with them.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so

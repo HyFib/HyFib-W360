@@ -7959,3 +7959,40 @@ Decision:
 
 Not built: sending contact cards through the API (the spec describes the object a sent card uses,
 M-193), and adding a shared person as a contact.
+
+## ADR-197 Sending contact cards through the public API (P5-08) (2026-10-06)
+
+Context: keys read the contact cards customers share (ADR-196) but could not send one: a clinic
+could not give a patient the dentist's number as a card WhatsApp can save. Meta's published spec
+describes the contact object a sent card uses (research M-193).
+
+Decision:
+
+- **Contact cards:** `POST /messages` takes `type` `contacts` with `to`, an optional `from` and
+  `replyTo` as other replies take them, and `contacts`: 1 to 5 contacts in the words reads use
+  (ADR-196). Each has a `name` with `formattedName` and at least one other part, and if wanted
+  `phones` (a `phone` with a digit, a `waId` of 6 to 20 digits), `emails` (valid addresses), `urls`
+  (http or https, with a host and no user name or password) and `addresses` (at least one part,
+  `countryCode` two letters), up to 5 of each, each with a `type` of HOME or WORK; an `org` with at
+  least one part; and a `birthday` that exists (YYYY-MM-DD). Each text is trimmed and at most 256
+  characters long (a link 2,000), and nothing else is taken. It is a reply (ADR-070):
+  `messages.reply`, only within the 24-hour window, stopping an automation answering the
+  conversation.
+- **HyFib's own rules:** the spec's `NameObject` requires nothing, but the received card's schema
+  requires `formatted_name` and none of its examples has a formatted name alone, so HyFib asks for
+  one more part, which costs an integration little and avoids a card WhatsApp might refuse. The 256
+  characters and 5 entries of each kind are HyFib's bounds (the spec gives none), and contacts that
+  would make the message larger than received content may be (60 KB) are refused, so a message
+  always fits.
+- **Stored as received cards are:** the message's content and the Graph request hold the contacts in
+  WhatsApp's words (`formatted_name`, `wa_id`, `country_code`), parts not given left out, so reads
+  give sent and received cards alike through `contactCards`, and the inbox shows each one's name,
+  numbers and email addresses. The conversation's preview is "Contact card:" with the names. A card
+  WhatsApp refuses makes the message fail, which `GET /messages/{id}` and `message.status` report
+  with WhatsApp's error, as for any send.
+- **The scope's label** becomes "Reply with text, media and other messages", which stays true as
+  types are added; its description lists them.
+- **No migration:** `contacts` is already a message type.
+
+Not built: contact cards in the inbox's own reply box, and sending one of the company's contacts as
+a card.

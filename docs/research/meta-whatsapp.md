@@ -420,4 +420,5 @@ no paging for this list; HyFib does not follow a further page.
 - That an audio or sticker message sent from a link takes a caption, or a document one a `filename` (M-191).
 - That a location's coordinates must be strings rather than numbers, or the reverse, or that its name or address has a length limit (M-192).
 - That a contact card's `type` values are only HOME and WORK, or that any of its parts is always present (M-193).
+- That a sent contact card needs only `formatted_name` of a name, or that it needs more (M-193).
 - That coexistence numbers behave like regular Cloud API numbers (throughput, features, history) without confirmation.

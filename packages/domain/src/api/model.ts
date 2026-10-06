@@ -85,9 +85,9 @@ export const API_SCOPE_INFO: Record<
     writes: true,
   },
   'messages.reply': {
-    label: 'Reply with text, buttons, lists, products, reactions, media and locations',
+    label: 'Reply with text, media and other messages',
     description:
-      'Send text, reply buttons, list messages, products from the company’s WhatsApp catalogs, reactions, photos, videos, audio or documents from links, and locations, to contacts who wrote to the number in the last 24 hours, quoting their messages if wanted, and read the status of messages the API sent.',
+      'Send text, reply buttons, list messages, products from the company’s WhatsApp catalogs, reactions, photos, videos, audio or documents from links, locations and contact cards, to contacts who wrote to the number in the last 24 hours, quoting their messages if wanted, and read the status of messages the API sent.',
     permission: 'inbox.reply',
     writes: true,
   },
@@ -198,6 +198,12 @@ export const API_LIMITS = {
   captionLength: 1024,
   /** A location's name and address (ADR-195): HyFib's own bound; Meta's spec gives none (M-192). */
   locationTextLength: 1000,
+  /** Contacts one contact card shares (research M-193). */
+  contactsPerCard: 5,
+  /** A contact card's phones, emails, links or addresses, each (ADR-197): HyFib's own bound. */
+  contactCardEntries: 5,
+  /** Any text of a contact card but a link (ADR-197): HyFib's own bound; Meta's spec gives none. */
+  contactCardTextLength: 256,
   idempotencyKeyLength: 255,
   idempotencyHours: 24,
   /** Conversations one call to POST /conversations/update-many changes (ADR-120). */

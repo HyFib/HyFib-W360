@@ -397,6 +397,79 @@ function locationProblem(body: unknown): string | null {
   return null;
 }
 
+const CARD_TYPES = ['HOME', 'WORK'];
+const CARD_PARTS: Record<string, string[]> = {
+  phones: ['phone', 'type', 'wa_id'],
+  emails: ['email', 'type'],
+  urls: ['url', 'type'],
+  addresses: ['street', 'city', 'state', 'zip', 'country', 'country_code', 'type'],
+};
+const CARD_REQUIRED: Record<string, string> = { phones: 'phone', emails: 'email', urls: 'url' };
+const CARD_NAME_PARTS = [
+  'formatted_name',
+  'first_name',
+  'last_name',
+  'middle_name',
+  'prefix',
+  'suffix',
+];
+
+const isText = (value: unknown): value is string => typeof value === 'string' && value !== '';
+
+/**
+ * Checks a contacts message (research M-193): 1 to 5 contacts, each with only the parts of the
+ * spec's contact object, every value text, a phone, email or link with its value, each `type` HOME
+ * or WORK, and a birthday written YYYY-MM-DD.
+ */
+function contactsProblem(body: unknown): string | null {
+  const b = body as { type?: unknown; contacts?: unknown } | undefined;
+  if (b?.type !== 'contacts') return null;
+  const contacts = b.contacts;
+  if (!Array.isArray(contacts) || contacts.length < 1 || contacts.length > 5) return 'contacts';
+  for (const entry of contacts) {
+    if (typeof entry !== 'object' || entry === null) return 'contacts';
+    const contact = entry as Record<string, unknown>;
+    const allowed = ['name', 'birthday', 'org', ...Object.keys(CARD_PARTS)];
+    if (Object.keys(contact).some((key) => !allowed.includes(key))) return 'contacts';
+    const name = contact.name as Record<string, unknown> | undefined;
+    if (name !== undefined) {
+      if (typeof name !== 'object' || name === null) return 'contacts.name';
+      for (const [key, value] of Object.entries(name)) {
+        if (!CARD_NAME_PARTS.includes(key) || !isText(value)) return 'contacts.name';
+      }
+    }
+    for (const [list, parts] of Object.entries(CARD_PARTS)) {
+      const items = contact[list];
+      if (items === undefined) continue;
+      if (!Array.isArray(items)) return `contacts.${list}`;
+      for (const item of items as unknown[]) {
+        if (typeof item !== 'object' || item === null) return `contacts.${list}`;
+        const record = item as Record<string, unknown>;
+        for (const [key, value] of Object.entries(record)) {
+          if (!parts.includes(key) || !isText(value)) return `contacts.${list}`;
+          if (key === 'type' && !CARD_TYPES.includes(value)) return `contacts.${list}`;
+        }
+        const required = CARD_REQUIRED[list];
+        if (required && !isText(record[required])) return `contacts.${list}`;
+      }
+    }
+    const org = contact.org as Record<string, unknown> | undefined;
+    if (org !== undefined) {
+      if (typeof org !== 'object' || org === null) return 'contacts.org';
+      for (const [key, value] of Object.entries(org)) {
+        if (!['company', 'department', 'title'].includes(key) || !isText(value)) {
+          return 'contacts.org';
+        }
+      }
+    }
+    const birthday = contact.birthday;
+    if (birthday !== undefined && !(isText(birthday) && /^\d{4}-\d{2}-\d{2}$/.test(birthday))) {
+      return 'contacts.birthday';
+    }
+  }
+  return null;
+}
+
 /** Checks the `context` of a reply that quotes a message (research M-041, M-183). */
 function contextProblem(body: unknown): string | null {
   const context = (body as { context?: unknown } | undefined)?.context;
@@ -668,7 +741,8 @@ export async function startGraphStandIn(options: {
           contextProblem(body) ??
           reactionProblem(body) ??
           mediaProblem(body) ??
-          locationProblem(body);
+          locationProblem(body) ??
+          contactsProblem(body);
         if (shapeInvalid) {
           return graphError(res, 400, 100, `(#100) Invalid parameter: ${shapeInvalid}`);
         }

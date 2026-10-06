@@ -635,9 +635,12 @@ verification, app review, Embedded Signup configuration).
   **[Contact cards' contacts built; their database tests run only in CI]** (ADR-196: every message
   the API gives, and `message.received`, carry a contact card's contacts as WhatsApp gave them,
   every part optional; the inbox shows their names and numbers; no migration).
+  **[Sending contact cards built; its database tests run only in CI]** (ADR-197: a key shares 1 to 5
+  contacts as Meta's spec describes them, each part checked, within the 24-hour window; kept as
+  received cards are, so reads give them back; no migration).
   Remaining: uploaded media and stickers, call-to-action messages through the API, taking
   reactions back,
-  media downloads, sending contact cards, changing a field's type,
+  media downloads, changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
   resuming what members or HyFib paused, approving, scheduling and starting campaigns
   through the API, campaign

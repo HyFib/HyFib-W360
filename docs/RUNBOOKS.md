@@ -1779,6 +1779,13 @@ they were created with: create a key with both); `not_in_plan` means the plan le
 `outcome` the results do not count, a `cursor` that is not the previous page's `nextCursor`, or an
 unknown parameter.
 
+**A contact card sent through the API failed (ADR-197).** `GET /messages/{id}` (and the
+`message.status` webhook) gives WhatsApp's error. HyFib sends only the parts Meta's spec describes
+(research M-193), in WhatsApp's words, and requires a second part of the name besides
+`formattedName`; if WhatsApp refuses a card anyway, record its error code and title and review
+M-193. A refusal before sending (422) names the part, such as `contacts.0.phones.1.type`, and the
+inbox shows a card sent with its names and numbers.
+
 **A contact card's contacts are missing or partial through the API or a webhook (ADR-196).**
 `contacts` gives what WhatsApp sent and HyFib kept: parts the person did not or could not share are
 null or empty, a card larger than a message may hold keeps its first contacts (up to 20;

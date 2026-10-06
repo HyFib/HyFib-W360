@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AppError, clipText, isAppError, jsonbText, notFound, uuidv7 } from '@w360/core';
+import { AppError, clipText, isAppError, jsonbSize, jsonbText, notFound, uuidv7 } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -31,7 +31,12 @@ import {
   type ResolvedProductMessage,
 } from '../commerce/model';
 import { checkTemplateEligibility, recordConsentEvents } from '../consent/service';
-import { MAX_TAGS_PER_CONTACT, normalizeEmail, type AttributeValue } from '../contacts/fields';
+import {
+  MAX_TAGS_PER_CONTACT,
+  normalizeEmail,
+  validDate,
+  type AttributeValue,
+} from '../contacts/fields';
 import { normalizePhone, phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { contactForPhone } from '../contacts/service';
 import { emitTenantEvent } from '../messaging/events';
@@ -44,6 +49,7 @@ import {
   replyButtonsContent,
   replyButtonsInteractive,
 } from '../messaging/interactive';
+import { INBOUND_CONTENT_BUDGET } from '../messaging/meta-webhook';
 import { SERVICE_WINDOW_MS, type OutboundDeps } from '../messaging/outbound';
 import {
   answeredJoin,
@@ -343,6 +349,214 @@ export const apiSendLocationSchema = z
     address: placeTextField('address').describe('The address of the place.'),
   })
   .strict();
+
+/** The kinds of a contact card's phone, email, link or address, as Meta's spec names them (M-193). */
+export const CONTACT_CARD_TYPES = ['HOME', 'WORK'] as const;
+
+const cardTypeField = z
+  .enum(CONTACT_CARD_TYPES, { error: 'Use HOME or WORK' })
+  .optional()
+  .describe('HOME or WORK.');
+
+const cardTextField = (what: string, max: number = API_LIMITS.contactCardTextLength) =>
+  z
+    .string({ error: `Give the ${what} as text` })
+    .trim()
+    .min(1, `Give the ${what}, or leave it out`)
+    .max(max, `A contact card’s ${what} is limited to ${max} characters`);
+
+const cardListField = <T extends z.ZodType>(item: T, what: string) =>
+  z
+    .array(item)
+    .min(1, `Give at least one ${what}, or leave them out`)
+    .max(
+      API_LIMITS.contactCardEntries,
+      `A contact gives at most ${API_LIMITS.contactCardEntries} ${what}s`,
+    )
+    .optional();
+
+/** A link a contact card gives (ADR-197): http or https, with a host, without credentials. */
+export function isCardLink(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return (
+    (url.protocol === 'https:' || url.protocol === 'http:') &&
+    url.hostname !== '' &&
+    !url.username &&
+    !url.password
+  );
+}
+
+const CARD_NAME_PARTS = ['firstName', 'lastName', 'middleName', 'prefix', 'suffix'] as const;
+const CARD_ADDRESS_PARTS = ['street', 'city', 'state', 'zip', 'country', 'countryCode'] as const;
+
+/**
+ * A contact a contact card shares (ADR-197), in the API's words, as Meta's spec sends one (research
+ * M-193): a name with at least one part besides the formatted name, and if wanted phones, emails,
+ * links and addresses (up to 5 of each), the organisation and the birthday.
+ */
+export const apiContactCardInputSchema = z
+  .object({
+    name: z
+      .object({
+        formattedName: cardTextField('formatted name').describe('The name as the card shows it.'),
+        firstName: cardTextField('first name').optional(),
+        lastName: cardTextField('last name').optional(),
+        middleName: cardTextField('middle name').optional(),
+        prefix: cardTextField('prefix').optional(),
+        suffix: cardTextField('suffix').optional(),
+      })
+      .strict()
+      .refine((name) => CARD_NAME_PARTS.some((part) => name[part] !== undefined), {
+        message: 'Give a first name, a last name or another part of the name too',
+        path: ['firstName'],
+      })
+      .describe('The formatted name and at least one other part of the name.'),
+    phones: cardListField(
+      z
+        .object({
+          phone: cardTextField('phone number', 64)
+            .regex(/\d/, 'Give a phone number with digits')
+            .describe('The number as the card should show it, such as +91 98765 43210.'),
+          type: cardTypeField,
+          waId: z
+            .string({ error: 'Give the WhatsApp id as digits' })
+            .regex(/^\d{6,20}$/, 'A WhatsApp id is 6 to 20 digits')
+            .optional()
+            .describe('The WhatsApp id of the number, if it has one.'),
+        })
+        .strict(),
+      'phone number',
+    ),
+    emails: cardListField(
+      z
+        .object({
+          email: cardTextField('email address', 254).refine(
+            (email) => normalizeEmail(email).ok,
+            'Give a valid email address',
+          ),
+          type: cardTypeField,
+        })
+        .strict(),
+      'email address',
+    ),
+    urls: cardListField(
+      z
+        .object({
+          url: cardTextField('link', API_LIMITS.mediaLinkLength).refine(
+            isCardLink,
+            'Give an http:// or https:// link, without a user name or password',
+          ),
+          type: cardTypeField,
+        })
+        .strict(),
+      'link',
+    ),
+    addresses: cardListField(
+      z
+        .object({
+          street: cardTextField('street').optional(),
+          city: cardTextField('city').optional(),
+          state: cardTextField('state').optional(),
+          zip: cardTextField('postal code').optional(),
+          country: cardTextField('country').optional(),
+          countryCode: z
+            .string({ error: 'Give the country code as two letters' })
+            .regex(/^[A-Za-z]{2}$/, 'Give the country code as two letters, such as IN')
+            .optional(),
+          type: cardTypeField,
+        })
+        .strict()
+        .refine((address) => CARD_ADDRESS_PARTS.some((part) => address[part] !== undefined), {
+          message: 'Give at least one part of the address',
+        }),
+      'address',
+    ),
+    org: z
+      .object({
+        company: cardTextField('company').optional(),
+        department: cardTextField('department').optional(),
+        title: cardTextField('job title').optional(),
+      })
+      .strict()
+      .refine((org) => [org.company, org.department, org.title].some((v) => v !== undefined), {
+        message: 'Give the company, the department or the job title, or leave it out',
+      })
+      .optional(),
+    birthday: z
+      .string({ error: 'Give the birthday as YYYY-MM-DD' })
+      .refine(validDate, 'Give the birthday as a date that exists, written YYYY-MM-DD')
+      .optional()
+      .describe('YYYY-MM-DD.'),
+  })
+  .strict();
+
+export type ApiContactCardInput = z.infer<typeof apiContactCardInputSchema>;
+
+/** Contact cards, to a contact who wrote in the last 24 hours (ADR-197). */
+export const apiSendContactsSchema = z
+  .object({
+    type: z.literal('contacts'),
+    to: phoneField,
+    from: replyFromField,
+    replyTo: quoteField,
+    contacts: z
+      .array(apiContactCardInputSchema)
+      .min(1, 'Give at least one contact')
+      .max(
+        API_LIMITS.contactsPerCard,
+        `A message shares at most ${API_LIMITS.contactsPerCard} contacts`,
+      )
+      .describe(`The contacts to share, 1 to ${API_LIMITS.contactsPerCard}.`),
+  })
+  .strict();
+
+const defined = (entries: Record<string, unknown>): Record<string, unknown> =>
+  Object.fromEntries(Object.entries(entries).filter(([, value]) => value !== undefined));
+
+/**
+ * A contact as Meta's spec sends it (research M-193), and as HyFib keeps received ones: the same
+ * parts in WhatsApp's words, those not given left out (ADR-197).
+ */
+export function whatsappContact(card: ApiContactCardInput): Record<string, unknown> {
+  const { name } = card;
+  return defined({
+    name: defined({
+      formatted_name: name.formattedName,
+      first_name: name.firstName,
+      last_name: name.lastName,
+      middle_name: name.middleName,
+      prefix: name.prefix,
+      suffix: name.suffix,
+    }),
+    phones: card.phones?.map((p) => defined({ phone: p.phone, type: p.type, wa_id: p.waId })),
+    emails: card.emails?.map((e) => defined({ email: e.email, type: e.type })),
+    urls: card.urls?.map((u) => defined({ url: u.url, type: u.type })),
+    addresses: card.addresses?.map((a) =>
+      defined({
+        street: a.street,
+        city: a.city,
+        state: a.state,
+        zip: a.zip,
+        country: a.country,
+        country_code: a.countryCode,
+        type: a.type,
+      }),
+    ),
+    org: card.org
+      ? defined({
+          company: card.org.company,
+          department: card.org.department,
+          title: card.org.title,
+        })
+      : undefined,
+    birthday: card.birthday,
+  });
+}
 
 const LIMITS = INTERACTIVE_LIMITS;
 
@@ -1458,7 +1672,7 @@ interface BuiltReply {
 }
 
 interface ApiReply {
-  type: 'text' | 'interactive' | 'reaction' | ApiMediaType | 'location';
+  type: 'text' | 'interactive' | 'reaction' | ApiMediaType | 'location' | 'contacts';
   /** The message the reply quotes, or the reaction is for, as the request names it. */
   replyTo: string | undefined;
   /** Checks that do not depend on the number, made first (the plan's modules). */
@@ -1724,6 +1938,36 @@ export async function apiSendLocation(
   });
 }
 
+/**
+ * Contact cards (ADR-197); see `sendReply`. The message keeps the contacts as the Graph request
+ * gives them, in WhatsApp's words, as received cards are kept, so reads give both alike (ADR-196).
+ */
+export async function apiSendContacts(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'messages.reply');
+  const data = parseInput(apiSendContactsSchema, input);
+  const cards = data.contacts.map(whatsappContact);
+  // Within the budget received content keeps to, below what the database takes for a message.
+  if (jsonbSize({ contacts: cards }) > INBOUND_CONTENT_BUDGET) {
+    throw new AppError('validation_failed', 'These contacts are more than a message may hold.', {
+      issues: [{ path: 'contacts', message: 'Share fewer contacts, or less about them' }],
+    });
+  }
+  return sendReply(deps, ctx, data, idempotency, {
+    type: 'contacts',
+    replyTo: data.replyTo,
+    build: () => ({
+      content: { contacts: cards },
+      preview: `Contact card: ${data.contacts.map((c) => c.name.formattedName).join(', ')}`,
+      request: { type: 'contacts', contacts: cards },
+    }),
+  });
+}
+
 /** Reply buttons (ADR-080); see `sendReply`. */
 export async function apiSendButtons(
   deps: OutboundDeps,
@@ -1958,8 +2202,8 @@ export async function apiSendProducts(
 
 /**
  * POST /api/v1/messages: a template (the default), or a reply inside the service window as text,
- * reply buttons, a list, products (ADR-086), a reaction, media from a link (ADR-194) or a location
- * (ADR-195), by the body's `type`.
+ * reply buttons, a list, products (ADR-086), a reaction, media from a link (ADR-194), a location
+ * (ADR-195) or contact cards (ADR-197), by the body's `type`.
  */
 export async function apiSendMessage(
   deps: OutboundDeps,
@@ -1979,6 +2223,7 @@ export async function apiSendMessage(
     return apiSendMedia(deps, ctx, input, idempotency);
   }
   if (type === 'location') return apiSendLocation(deps, ctx, input, idempotency);
+  if (type === 'contacts') return apiSendContacts(deps, ctx, input, idempotency);
   if (type === 'product' || type === 'product_list' || type === 'catalog') {
     return apiSendProducts(deps, ctx, input, idempotency);
   }
@@ -1987,13 +2232,13 @@ export async function apiSendMessage(
   }
   throw new AppError(
     'validation_failed',
-    'Send a template, a text, buttons, a list, products, a reaction, media or a location.',
+    'Send a template, a text, buttons, a list, products, a reaction, media, a location or contacts.',
     {
       issues: [
         {
           path: 'type',
           message:
-            'Use template, text, buttons, list, product, product_list, catalog, reaction, image, video, audio, document or location.',
+            'Use template, text, buttons, list, product, product_list, catalog, reaction, image, video, audio, document, location or contacts.',
         },
       ],
     },

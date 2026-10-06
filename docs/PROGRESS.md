@@ -1,5 +1,52 @@
 # Progress
 
+## 2026-10-06 — Phase 5: sending contact cards through the public API (P5-08, ADR-197)
+
+Status: **Implemented; its database and browser tests run in CI only (test stand-in only).** Keys
+could read the cards customers share but not send one. The local PostgreSQL is unavailable (its
+Docker daemon stopped), so the integration test and the changed e2e test below were written but not
+run here.
+
+### Completed
+
+- **Design (ADR-197):** `type` `contacts` in `POST /messages`, 1 to 5 contacts as Meta's spec
+  describes them, each part checked, a second part of the name besides the formatted one, sent as a
+  reply within the 24-hour window and kept in WhatsApp's words so reads give them back; the scope's
+  label no longer lists every type; no migration.
+- **Domain:** `apiContactCardInputSchema`, `apiSendContactsSchema`, `isCardLink`, `whatsappContact`
+  and `apiSendContacts`, the size check, the dispatch and its refusal, the API limits, the scope's
+  label and description, and the OpenAPI entries (`SendContacts`).
+- **Test stand-in:** the Graph stand-in checks a contacts message (1 to 5 contacts, only the spec's
+  parts, text values, HOME or WORK, a phone, email or link with its value, a birthday written
+  YYYY-MM-DD).
+- **Tests:**
+  - Unit (4 new and 4 changed in `api.test.ts`): the rules, the mapping and its reading back, the
+    dispatch, the scope and the size, the OpenAPI entries, and the scope's new label.
+  - Integration (1 new in `api.test.ts`): two cards stored, sent and read back; the refusals.
+    Written for CI; not run here.
+  - E2E (1 changed in `api.spec.ts`, the scope's new label in it and in `commerce.spec.ts`): a key
+    shares the dentist's card and the inbox shows it. Written for CI; not run here.
+- **Docs:** ADR-197; research M-193 (what is not assumed); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T191; DEPLOYMENT and RUNBOOKS; DATA-RETENTION; BACKLOG P5-08; feature matrix H-033 and W-134.
+- **Mutation checks:** 25 deliberate regressions tried, all caught (one after a test was added) on
+  the unit-tested parts. The send itself needs the database and the stand-in, so its regressions are
+  left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                                                            |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                                             |
+| `pnpm test` (unit)                                 | 875 passed (82 files)                                                                             |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them                                   |
+| `pnpm build`                                       | passed                                                                                            |
+| Mutation checks                                    | 25 deliberate regressions tried, all caught (one after a test was added) on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                                                    |
+
+### Known gaps
+
+- Contact cards in the inbox's reply box, and sending one of the company's contacts as a card.
+
 ## 2026-10-06 — Phase 5: contact cards' contacts through the API and webhooks (P5-08, ADR-196)
 
 Status: **Implemented; its database and browser tests run in CI only.** The API and the
