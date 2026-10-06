@@ -152,6 +152,8 @@ describe('template drafts and submission', () => {
       'validation_failed',
       /example/,
     );
+    // A link that ends with a value needs its example, and the value must follow the website's
+    // address (ADR-228).
     await expectAppError(
       templates.createDraft(owner, {
         ...base,
@@ -162,7 +164,35 @@ describe('template drafts and submission', () => {
         },
       }),
       'validation_failed',
-      /not supported/,
+      /give an example of the link’s end/,
+    );
+    await expectAppError(
+      templates.createDraft(owner, {
+        ...base,
+        name: 'loose_url',
+        definition: {
+          ...promo,
+          buttons: [
+            { type: 'URL', text: 'Open', url: 'https://example.test{{1}}', example: '/orders' },
+          ],
+        },
+      }),
+      'validation_failed',
+      /Put \{\{1\}\} after the website’s address/,
+    );
+    await expectAppError(
+      templates.createDraft(owner, {
+        ...base,
+        name: 'middle_url',
+        definition: {
+          ...promo,
+          buttons: [
+            { type: 'URL', text: 'Open', url: 'https://example.test/{{1}}/x', example: 'a' },
+          ],
+        },
+      }),
+      'validation_failed',
+      /can end with one value/,
     );
     await expectAppError(
       templates.createDraft(owner, { ...base, name: 'Bad Name', definition: promo }),
@@ -729,6 +759,148 @@ describe('template sends', () => {
         },
       ),
       'not_found',
+    );
+  });
+});
+
+describe('website buttons whose link ends with a value (ADR-228)', () => {
+  const tracking: TemplateDefinition = {
+    category: 'UTILITY',
+    header: { type: 'none' },
+    body: { text: 'Hi {{1}}, order {{2}} has shipped.', examples: ['Asha', 'A-1001'] },
+    footer: null,
+    buttons: [
+      {
+        type: 'URL',
+        text: 'Track order',
+        url: 'https://shop.example/track/{{1}}',
+        example: 'A-1001',
+      },
+      { type: 'URL', text: 'Help centre', url: 'https://shop.example/help' },
+    ],
+  };
+
+  it('creates the button with its example, syncs it and sends the end of the link a member types', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const id = await draftSubmitApprove(c, 'order_tracking', tracking);
+    // The create request carried the link and its example (research M-198).
+    const create = fx.standIn.state.requests
+      .filter((r) => r.method === 'POST' && r.path.endsWith('/message_templates'))
+      .at(-1)!;
+    expect((create.body as { components: unknown[] }).components.at(-1)).toEqual({
+      type: 'BUTTONS',
+      buttons: [
+        {
+          type: 'URL',
+          text: 'Track order',
+          url: 'https://shop.example/track/{{1}}',
+          example: ['A-1001'],
+        },
+        { type: 'URL', text: 'Help centre', url: 'https://shop.example/help' },
+      ],
+    });
+    // Read back from Meta's listing, and sendable from a contact or a conversation.
+    const detail = await templates.getTemplate(owner, id);
+    expect(detail.sendable).toBe(true);
+    expect(detail.unsupportedReason).toBeNull();
+    expect(detail.definition?.buttons[0]).toEqual(tracking.buttons[0]);
+    expect((await templates.listTemplates(owner)).find((t) => t.id === id)?.sendable).toBe(true);
+
+    const contactId = (
+      await createContactsService({ db: fx.dbs.app, clock: systemClock }).createContact(owner, {
+        phone: '+919855500301',
+      })
+    ).id;
+    const queue = (buttons?: string[]) =>
+      queueTemplateMessage(
+        { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock: systemClock },
+        owner,
+        {
+          contactId,
+          channelAccountId: c.channelAccountId,
+          templateId: id,
+          params: { body: ['Asha', 'A-2002'], ...(buttons ? { buttons } : {}) },
+          clientKey: `ck_${uuidv7()}`,
+        },
+      );
+    await expectAppError(queue(), 'validation_failed', /Fill in every variable/);
+    await expectAppError(
+      queue(['A 2002']),
+      'validation_failed',
+      /^Track order: The end of a link cannot contain spaces\.$/,
+    );
+    const queued = await queue(['A-2002']);
+    const [intent] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.send_intents WHERE message_id = $1',
+      [queued.messageId],
+    );
+    expect(
+      await processSendIntent(
+        { ...workerDeps(), rate: { capacity: 100, refillPerSecond: 100 } },
+        scopeOf(c),
+        intent!.id,
+      ),
+    ).toMatchObject({ outcome: 'accepted' });
+    // The end of the link went as the button's text parameter (M-198).
+    const request = fx.standIn.state.requests.filter((r) => r.path.endsWith('/messages')).at(-1)!;
+    expect((request.body as { template: unknown }).template).toEqual({
+      name: 'order_tracking',
+      language: { policy: 'deterministic', code: 'en' },
+      components: [
+        {
+          type: 'body',
+          parameters: [
+            { type: 'text', text: 'Asha' },
+            { type: 'text', text: 'A-2002' },
+          ],
+        },
+        {
+          type: 'button',
+          sub_type: 'url',
+          index: '0',
+          parameters: [{ type: 'text', text: 'A-2002' }],
+        },
+      ],
+    });
+    // The conversation keeps the link as sent.
+    const [message] = await fx.query<{ content: { rendered: { buttons: unknown[] } } }>(
+      'SELECT content FROM app.messages WHERE id = $1',
+      [queued.messageId],
+    );
+    expect(message!.content.rendered.buttons).toEqual([
+      { type: 'URL', text: 'Track order', url: 'https://shop.example/track/A-2002' },
+      { type: 'URL', text: 'Help centre' },
+    ]);
+  });
+
+  it('shows a synced link whose value could change its website as not sendable', async () => {
+    const c = await fx.company();
+    fx.standIn.state.templates.set(c.wabaId, [
+      {
+        id: '7100000001',
+        name: 'loose_link',
+        language: 'en',
+        status: 'APPROVED',
+        category: 'UTILITY',
+        components: [
+          { type: 'BODY', text: 'Your order is ready.' },
+          {
+            type: 'BUTTONS',
+            buttons: [
+              { type: 'URL', text: 'Open', url: 'https://shop.example{{1}}', example: ['/o/1'] },
+            ],
+          },
+        ],
+      },
+    ]);
+    await syncTemplates(workerDeps(), scopeOf(c), c.whatsappAccountId);
+    const listed = (await templates.listTemplates(await fx.ctx(c, c.owner))).find(
+      (t) => t.name === 'loose_link',
+    )!;
+    expect(listed.sendable).toBe(false);
+    expect(listed.unsupportedReason).toBe(
+      'This template uses content HyFib cannot send yet (for example a location header or a button with a variable).',
     );
   });
 });

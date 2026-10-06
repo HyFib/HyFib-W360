@@ -4938,7 +4938,7 @@ describe('sending a template to many numbers in one call (ADR-163)', () => {
     expect(parse({ templateId, from: templateId, messages: many(2) }).success).toBe(true);
     // Values left out are none, as for one send.
     expect(parse({ templateId, messages: [{ to: '+919811100001' }] }).data?.messages).toEqual([
-      { to: '+919811100001', variables: { header: [], body: [] } },
+      { to: '+919811100001', variables: { header: [], body: [], buttons: [] } },
     ]);
     for (const body of [
       { templateId, messages: [] },
@@ -5851,7 +5851,7 @@ describe('templates with a photo, video or document header through the API (ADR-
     ).toEqual({
       to: '+919876543210',
       templateId,
-      variables: { header: [], body: [] },
+      variables: { header: [], body: [], buttons: [] },
       headerMedia: { link },
     });
     expect(apiSendMessageSchema.parse({ to: '+919876543210', templateId })).not.toHaveProperty(
@@ -5913,7 +5913,7 @@ describe('templates with a photo, video or document header through the API (ADR-
       expect(paths['/messages']?.post?.description).toContain(words);
     }
     expect(paths['/messages/send-many']?.post?.description).toContain(
-      'a header file missing or given when the template takes none (422, naming the place, as `messages.3.variables` or `messages.3.headerMedia`)',
+      'a header file missing or given when the template takes none (422, naming the place, as `messages.3.variables`, `messages.3.variables.buttons.0` or `messages.3.headerMedia`)',
     );
     const schemas = (
       doc.components as unknown as {
@@ -5941,6 +5941,75 @@ describe('templates with a photo, video or document header through the API (ADR-
     ).items;
     expect(Object.keys(items.properties)).toEqual(['to', 'variables', 'headerMedia']);
     expect(items.required).toEqual(['to']);
+  });
+});
+
+describe('templates whose website buttons’ links end with a value, through the API (ADR-228)', () => {
+  const templateId = '0192a1b2-0000-7000-8000-000000000001';
+
+  it('take the ends of the links in `variables.buttons`, at most two, each filled in', () => {
+    expect(
+      apiSendMessageSchema.parse({
+        to: '+919876543210',
+        templateId,
+        variables: { body: ['Asha'], buttons: [' A-1 '] },
+      }).variables,
+    ).toEqual({ header: [], body: ['Asha'], buttons: ['A-1'] });
+    for (const buttons of [['a', 'b', 'c'], [''], [' '], 'A-1', [1], ['x'.repeat(1001)]]) {
+      expect(
+        apiSendMessageSchema.safeParse({ to: '+919876543210', templateId, variables: { buttons } })
+          .success,
+        JSON.stringify(buttons).slice(0, 40),
+      ).toBe(false);
+    }
+    expect(
+      apiSendManyTemplatesSchema.parse({
+        templateId,
+        messages: [{ to: '+919811100001', variables: { buttons: ['A-1', 'B-2'] } }],
+      }).messages[0]?.variables.buttons,
+    ).toEqual(['A-1', 'B-2']);
+  });
+
+  it('are described: the list names the links, a send gives their ends', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const paths = doc.paths as unknown as Record<string, Record<string, { description: string }>>;
+    expect(paths['/templates']?.get?.description).toContain(
+      'and the website buttons whose link ends with a value a send gives (`links`)',
+    );
+    expect(paths['/messages']?.post?.description).toContain(
+      'A template whose website buttons’ links end with a value (its `links` in GET /templates) needs the end of each link in `variables.buttons`, in the order of `links`: it replaces the link’s {{1}}, holds no spaces and cannot change the website the button opens (422, naming the value, as `variables.buttons.0`).',
+    );
+    const schemas = (
+      doc.components as unknown as {
+        schemas: Record<
+          string,
+          { properties: Record<string, Record<string, unknown>>; required: string[] }
+        >;
+      }
+    ).schemas;
+    expect(schemas.Template?.properties.links).toMatchObject({
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { button: { type: 'string' }, url: { type: 'string' } },
+        required: ['button', 'url'],
+      },
+    });
+    expect(schemas.Template?.required).toContain('links');
+    expect(schemas.Template?.properties.variables).toMatchObject({
+      properties: { buttons: { type: 'integer' } },
+      required: ['header', 'body', 'buttons'],
+    });
+    expect(schemas.SendTemplate?.properties.variables).toMatchObject({
+      properties: {
+        buttons: {
+          type: 'array',
+          maxItems: 2,
+          items: { type: 'string', minLength: 1, maxLength: 1000 },
+        },
+      },
+      additionalProperties: false,
+    });
   });
 });
 

@@ -2,10 +2,15 @@ import { describe, expect, it } from 'vitest';
 import {
   buildTemplateSend,
   fromMetaComponents,
+  linkButtons,
+  linkPrefix,
+  linkValueProblem,
+  linkValuesProblem,
   positionalVariables,
   renderExample,
   sendSpecFor,
   templateDefinitionSchema,
+  templateParamsSchema,
   toMetaComponents,
   validateDefinition,
   type TemplateDefinition,
@@ -53,7 +58,7 @@ describe('template definitions', () => {
     );
     expect(
       issues({ buttons: [{ type: 'URL', text: 'Go', url: 'https://x.test/{{1}}' }] })[0],
-    ).toMatch(/not supported/);
+    ).toMatch(/give an example of the link’s end/);
     expect(issues({ buttons: [{ type: 'URL', text: 'Go', url: 'http://x.test' }] })[0]).toMatch(
       /https/,
     );
@@ -115,6 +120,7 @@ describe('template definitions', () => {
         supported: true,
         headerParams: 0,
         bodyParams: 1,
+        buttonParams: 0,
         headerMedia: media,
         definition: {
           category: 'UTILITY',
@@ -131,7 +137,10 @@ describe('template definitions', () => {
       withHeader('GIF'),
       [
         ...withHeader('IMAGE'),
-        { type: 'BUTTONS', buttons: [{ type: 'URL', text: 'Go', url: 'https://x.test/{{1}}' }] },
+        {
+          type: 'BUTTONS',
+          buttons: [{ type: 'URL', text: 'Go', url: 'https://x.test/{{1}}/more' }],
+        },
       ],
     ]) {
       expect(sendSpecFor('UTILITY', components, { mediaHeaders: true })).toEqual({
@@ -210,5 +219,248 @@ describe('template definitions', () => {
     ).toThrow();
     expect(renderExample(def).header).toBe('Order A-1');
     expect(positionalVariables('{{1}} and {{ 2 }}')).toEqual({ ok: true, numbers: [1, 2] });
+  });
+});
+
+describe('website buttons whose link ends with a value (ADR-228)', () => {
+  const tracked: TemplateDefinition = {
+    category: 'UTILITY',
+    header: { type: 'none' },
+    body: { text: 'Hi {{1}}, order {{2}} has shipped.', examples: ['Asha', 'A-1'] },
+    footer: null,
+    buttons: [
+      { type: 'QUICK_REPLY', text: 'Stop updates' },
+      { type: 'URL', text: 'Track', url: 'https://shop.example/track/{{1}}', example: 'A-1' },
+      { type: 'URL', text: 'Help', url: 'https://shop.example/help' },
+    ],
+  };
+  const linkIssues = (url: string, example?: string) =>
+    validateDefinition({
+      ...tracked,
+      buttons: [{ type: 'URL', text: 'Track', url, ...(example === undefined ? {} : { example }) }],
+    });
+
+  it('takes one value, {{1}}, at the end of the link, after the website’s address', () => {
+    expect(linkPrefix('https://shop.example/track/{{1}}')).toBe('https://shop.example/track/');
+    expect(linkPrefix('https://shop.example/?order={{1}}')).toBe('https://shop.example/?order=');
+    for (const url of [
+      'https://shop.example/track',
+      'https://shop.example/{{1}}/more',
+      'https://shop.example/{{2}}',
+      'https://shop.example/{{1}}{{1}}',
+      'https://shop.example/{{ 1 }}',
+      'https://shop.example/}}{{1}}',
+    ]) {
+      expect(linkPrefix(url), url).toBeNull();
+    }
+    expect(linkIssues('https://shop.example/track/{{1}}', 'A-1')).toEqual([]);
+    expect(linkIssues('https://shop.example:8443/t?o={{1}}', 'A-1')).toEqual([]);
+    // No example, or one the editor's field was emptied of.
+    for (const example of [undefined, '']) {
+      expect(linkIssues('https://shop.example/track/{{1}}', example)).toEqual([
+        {
+          path: 'buttons.0.example',
+          message: 'Website button: give an example of the link’s end.',
+        },
+      ]);
+    }
+    expect(linkIssues('https://shop.example/track/{{1}}', 'A 1')).toEqual([
+      { path: 'buttons.0.example', message: 'Example: The end of a link cannot contain spaces.' },
+    ]);
+    expect(linkIssues('https://shop.example/{{1}}/more', 'A-1')).toEqual([
+      {
+        path: 'buttons.0.url',
+        message:
+          'A website button’s link can end with one value, {{1}}, and hold no other variable.',
+      },
+    ]);
+    for (const url of [
+      'http://shop.example/{{1}}',
+      'https://{{1}}',
+      'https://me@shop.example/{{1}}',
+      'ftp://shop.example/{{1}}',
+    ]) {
+      expect(linkIssues(url, 'A-1'), url).toEqual([
+        { path: 'buttons.0.url', message: 'Website buttons need an https:// address.' },
+      ]);
+    }
+    // A value right after the host or the port could change the website.
+    for (const url of ['https://shop.example{{1}}', 'https://shop.example:8443{{1}}']) {
+      expect(linkIssues(url, '/A-1')[0], url).toMatchObject({
+        path: 'buttons.0.url',
+        message: expect.stringContaining('Put {{1}} after the website’s address'),
+      });
+    }
+  });
+
+  it('refuses values with spaces or invisible characters, and values that change the website', () => {
+    const url = 'https://shop.example/track/{{1}}';
+    expect(linkValueProblem(url, 'A-1')).toBeNull();
+    expect(linkValueProblem(url, '../../x?y=1#z')).toBeNull();
+    expect(linkValueProblem(url, '\\evil.example')).toBeNull();
+    expect(linkValueProblem(url, '')).toBe('Give the end of the link.');
+    expect(linkValueProblem(url, 'A 1')).toBe('The end of a link cannot contain spaces.');
+    expect(linkValueProblem(url, 'A\n1')).toBe('The end of a link cannot contain spaces.');
+    expect(linkValueProblem(url, 'A\u00071')).toBe(
+      'The end of a link cannot contain invisible characters.',
+    );
+    expect(linkValueProblem('https://shop.example/help', 'x')).toBe(
+      'This button’s link takes no value.',
+    );
+    // A synced link whose value follows the host keeps its website, or the value is refused.
+    const loose = 'https://shop.example{{1}}';
+    expect(linkValueProblem(loose, '/track/A-1')).toBeNull();
+    for (const value of ['.evil.example', '@evil.example', ':444', 'x']) {
+      expect(linkValueProblem(loose, value), value).toBe(
+        'This value would change the website the button opens.',
+      );
+    }
+    expect(linkValuesProblem(tracked, ['A-1'])).toBeNull();
+    expect(linkValuesProblem(tracked, ['A 1'])).toEqual({
+      index: 0,
+      message: 'Track: The end of a link cannot contain spaces.',
+    });
+    expect(linkValuesProblem(tracked, [])).toEqual({
+      index: 0,
+      message: 'Track: Give the end of the link.',
+    });
+  });
+
+  it('creates the button with its example and reads it back from Meta (M-198)', () => {
+    const components = toMetaComponents(tracked);
+    expect(components.at(-1)).toEqual({
+      type: 'BUTTONS',
+      buttons: [
+        { type: 'QUICK_REPLY', text: 'Stop updates' },
+        { type: 'URL', text: 'Track', url: 'https://shop.example/track/{{1}}', example: ['A-1'] },
+        { type: 'URL', text: 'Help', url: 'https://shop.example/help' },
+      ],
+    });
+    expect(fromMetaComponents('UTILITY', components)).toEqual(tracked);
+    // An example given as text, or none, is kept as it is: Meta reviewed it.
+    const read = (button: Record<string, unknown>) =>
+      fromMetaComponents('UTILITY', [
+        { type: 'BODY', text: 'Hi' },
+        { type: 'BUTTONS', buttons: [button] },
+      ])?.buttons;
+    const url = 'https://shop.example/track/{{1}}';
+    expect(
+      read({ type: 'URL', text: 'Track', url, example: 'https://shop.example/track/A-1' }),
+    ).toEqual([{ type: 'URL', text: 'Track', url, example: 'https://shop.example/track/A-1' }]);
+    expect(read({ type: 'URL', text: 'Track', url })).toEqual([
+      { type: 'URL', text: 'Track', url },
+    ]);
+    expect(
+      read({ type: 'URL', text: 'Track', url: 'https://shop.example/{{1}}/x' }),
+    ).toBeUndefined();
+    expect(read({ type: 'URL', text: 'Track', url: 'https://shop.example{{1}}' })).toBeUndefined();
+    // A static link carries no example even when the editor kept one.
+    expect(
+      toMetaComponents({
+        ...tracked,
+        buttons: [{ type: 'URL', text: 'Help', url: 'https://shop.example/help', example: 'x' }],
+      }).at(-1),
+    ).toEqual({
+      type: 'BUTTONS',
+      buttons: [{ type: 'URL', text: 'Help', url: 'https://shop.example/help' }],
+    });
+    expect(linkButtons(tracked)).toEqual([
+      { index: 1, text: 'Track', url: 'https://shop.example/track/{{1}}' },
+    ]);
+  });
+
+  it('is sendable only by callers that give the values, and sends each as its button’s text', () => {
+    const components = toMetaComponents(tracked);
+    expect(sendSpecFor('UTILITY', components)).toEqual({
+      supported: false,
+      reason:
+        'This template has a website button whose link ends with a value given when sending: HyFib sends such templates from a contact or a conversation and through the API, not yet from campaigns, automations or store messages.',
+    });
+    expect(sendSpecFor('UTILITY', components, { mediaHeaders: true }).supported).toBe(false);
+    const spec = sendSpecFor('UTILITY', components, { linkValues: true });
+    expect(spec).toMatchObject({
+      supported: true,
+      headerParams: 0,
+      bodyParams: 2,
+      buttonParams: 1,
+    });
+    if (!spec.supported) throw new Error('unsupported');
+    // Other templates need no link values.
+    expect(sendSpecFor('UTILITY', toMetaComponents(def), { linkValues: true })).toMatchObject({
+      supported: true,
+      buttonParams: 0,
+    });
+    const built = buildTemplateSend(
+      { name: 'order_shipped', language: 'en' },
+      spec,
+      { header: [], body: ['Ravi', 'B-2'], buttons: ['B-2?ref=wa'] },
+      { quickReplyPayloads: new Map([[0, 'STOP']]) },
+    );
+    expect(built.template.components).toEqual([
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: 'Ravi' },
+          { type: 'text', text: 'B-2' },
+        ],
+      },
+      {
+        type: 'button',
+        sub_type: 'quick_reply',
+        index: '0',
+        parameters: [{ type: 'payload', payload: 'STOP' }],
+      },
+      {
+        type: 'button',
+        sub_type: 'url',
+        index: '1',
+        parameters: [{ type: 'text', text: 'B-2?ref=wa' }],
+      },
+    ]);
+    // Button components follow the buttons' order, whichever kind comes first.
+    const linkFirst = sendSpecFor(
+      'UTILITY',
+      toMetaComponents({
+        ...tracked,
+        buttons: [tracked.buttons[1]!, { type: 'QUICK_REPLY', text: 'Stop updates' }],
+      }),
+      { linkValues: true },
+    );
+    if (!linkFirst.supported) throw new Error('unsupported');
+    expect(
+      buildTemplateSend(
+        { name: 'x', language: 'en' },
+        linkFirst,
+        { header: [], body: ['Ravi', 'B-2'], buttons: ['B-2'] },
+        { quickReplyPayloads: new Map([[1, 'STOP']]) },
+      ).template.components,
+    ).toMatchObject([
+      { type: 'body' },
+      { type: 'button', sub_type: 'url', index: '0' },
+      { type: 'button', sub_type: 'quick_reply', index: '1' },
+    ]);
+    // The conversation keeps the link as sent.
+    expect(built.rendered.buttons).toEqual([
+      { type: 'QUICK_REPLY', text: 'Stop updates' },
+      { type: 'URL', text: 'Track', url: 'https://shop.example/track/B-2?ref=wa' },
+      { type: 'URL', text: 'Help' },
+    ]);
+    const send = (buttons?: string[]) =>
+      buildTemplateSend({ name: 'x', language: 'en' }, spec, {
+        header: [],
+        body: ['Ravi', 'B-2'],
+        ...(buttons ? { buttons } : {}),
+      });
+    expect(() => send()).toThrow('Template parameter count mismatch');
+    expect(() => send(['B-2', 'B-3'])).toThrow('Template parameter count mismatch');
+    expect(() => send(['B 2'])).toThrow('Track: The end of a link cannot contain spaces.');
+    // Sends give at most two link values, each filled in.
+    expect(templateParamsSchema.parse({ body: ['x'] })).toEqual({
+      header: [],
+      body: ['x'],
+      buttons: [],
+    });
+    expect(templateParamsSchema.safeParse({ buttons: ['a', 'b', 'c'] }).success).toBe(false);
+    expect(templateParamsSchema.safeParse({ buttons: [' '] }).success).toBe(false);
   });
 });

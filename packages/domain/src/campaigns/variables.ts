@@ -92,7 +92,7 @@ export function resolveVariables(
     if (!text) return { ok: false, missing: `body.${i + 1}` };
     body.push(clipText(text, TEMPLATE_LIMITS.parameterValue));
   }
-  return { ok: true, params: { header, body } };
+  return { ok: true, params: { header, body, buttons: [] } };
 }
 
 /**

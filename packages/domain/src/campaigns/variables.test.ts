@@ -34,13 +34,13 @@ describe('campaign variables', () => {
       }),
     ).toEqual({
       ok: true,
-      params: { header: ['Diwali offer'], body: ['Asha Rao', 'Pune', '120'] },
+      params: { header: ['Diwali offer'], body: ['Asha Rao', 'Pune', '120'], buttons: [] },
     });
     expect(
       resolveVariables(variables, { displayName: null, attributes: { points: true } }),
     ).toEqual({
       ok: true,
-      params: { header: ['Diwali offer'], body: ['there', 'your city', 'Yes'] },
+      params: { header: ['Diwali offer'], body: ['there', 'your city', 'Yes'], buttons: [] },
     });
   });
 
@@ -54,6 +54,7 @@ describe('campaign variables', () => {
       params: {
         header: ['Diwali offer'],
         body: ['Asha', 'x'.repeat(TEMPLATE_LIMITS.parameterValue - 1), '1'],
+        buttons: [],
       },
     });
     expect(
@@ -63,7 +64,7 @@ describe('campaign variables', () => {
       ),
     ).toEqual({
       ok: true,
-      params: { header: ['x'.repeat(TEMPLATE_LIMITS.parameterValue - 1)], body: [] },
+      params: { header: ['x'.repeat(TEMPLATE_LIMITS.parameterValue - 1)], body: [], buttons: [] },
     });
   });
 

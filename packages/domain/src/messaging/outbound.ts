@@ -47,7 +47,12 @@ import { phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { csatSendBlock } from '../inbox/csat';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
-import { buildTemplateSend, sendSpecFor, templateParamsSchema } from '../templates/definition';
+import {
+  buildTemplateSend,
+  linkValuesProblem,
+  sendSpecFor,
+  templateParamsSchema,
+} from '../templates/definition';
 import { markTemplateFromSendError } from '../templates/service';
 import { requestAccessCheck } from './access';
 import { credentialAad } from './credentials';
@@ -439,13 +444,22 @@ export async function queueTemplateMessage(deps: OutboundDeps, ctx: TenantContex
     if (template.status !== 'approved') {
       throw new AppError('precondition_failed', 'Only templates approved by Meta can be sent.');
     }
-    const spec = sendSpecFor(template.category, template.components);
+    // The member types the ends of links, so templates whose links end with a value are sendable
+    // here (ADR-228).
+    const spec = sendSpecFor(template.category, template.components, { linkValues: true });
     if (!spec.supported) throw new AppError('unsupported', spec.reason);
     if (
       data.params.header.length !== spec.headerParams ||
-      data.params.body.length !== spec.bodyParams
+      data.params.body.length !== spec.bodyParams ||
+      data.params.buttons.length !== spec.buttonParams
     ) {
       throw new AppError('validation_failed', 'Fill in every variable of the template.');
+    }
+    const linkProblem = linkValuesProblem(spec.definition, data.params.buttons);
+    if (linkProblem) {
+      throw new AppError('validation_failed', linkProblem.message, {
+        issues: [{ path: `params.buttons.${linkProblem.index}`, message: linkProblem.message }],
+      });
     }
 
     const [channel] = await tx

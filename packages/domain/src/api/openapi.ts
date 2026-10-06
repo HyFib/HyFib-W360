@@ -142,7 +142,21 @@ export const apiTemplateSchema = z.object({
   variables: z.object({
     header: z.number().int().describe('How many header values the template needs (0 or 1).'),
     body: z.number().int().describe('How many body values the template needs.'),
+    buttons: z
+      .number()
+      .int()
+      .describe('How many ends of links the template needs (0 to 2): one for each of its `links`.'),
   }),
+  links: z
+    .array(
+      z.object({
+        button: z.string().describe('The website button’s text.'),
+        url: z.string().describe('Its link, ending with {{1}} where the value a send gives goes.'),
+      }),
+    )
+    .describe(
+      'The template’s website buttons whose link ends with a value, in the order a send gives their values in `variables.buttons`; empty for other templates.',
+    ),
   headerMedia: z
     .enum(TEMPLATE_HEADER_MEDIA)
     .nullable()
@@ -858,7 +872,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listTemplates',
           summary: 'Approved templates that can be sent',
-          description: `${scopeNote('templates.read')} Approved utility and marketing templates that HyFib can send, with how many values their variables need and, for a header that is a photo, a video or a document, which file a send gives (\`headerMedia\`).`,
+          description: `${scopeNote('templates.read')} Approved utility and marketing templates that HyFib can send, with how many values their variables need, for a header that is a photo, a video or a document, which file a send gives (\`headerMedia\`), and the website buttons whose link ends with a value a send gives (\`links\`).`,
           responses: {
             '200': {
               description: 'The templates.',
@@ -1213,6 +1227,7 @@ export function buildOpenApiDocument(serverUrl: string) {
             'A text, buttons, a list, products, media, a location or contacts can quote a message of the conversation with `replyTo`, its id from `GET /conversations/{id}/messages`, the `message.received` webhook or a send’s response: a message the contact sent, or one the business sent that WhatsApp accepted. A reaction (`type` `reaction`) puts one emoji on a message the contact sent in the last 30 days; reactions cannot be taken back through the API. A message of another conversation, or one that cannot be quoted or reacted to, is refused (422, `replyTo`).',
             'Media (`image`, `video`, `audio`, `document` or `sticker`) is sent from an https:// `link` that WhatsApp fetches when it sends the message, reachable from the internet without signing in; HyFib neither fetches nor keeps the media, and stores the link with the message. A photo, a video or a document may carry a `caption` of up to 1,024 characters; audio and stickers take none, and WhatsApp decides whether a file can be a sticker. A link WhatsApp cannot fetch, or media it does not accept, makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error. In place of a link, a photo, a video, audio or a document may name a file uploaded with `POST /media` for the number it is sent from in the last 30 days (`mediaId`); the file is sent as WhatsApp keeps it, a document under the name it was uploaded with.',
             'A template whose header is a photo, a video or a document (its `headerMedia` in GET /templates) needs the file in `headerMedia`: an https:// `link` that WhatsApp fetches when it sends the message, as for media below, shown without a caption. Documents must be PDF files. HyFib neither fetches nor keeps the file, and stores the link with the message. Other templates take no file (422, `headerMedia`). A file WhatsApp cannot fetch, or does not accept, makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
+            'A template whose website buttons’ links end with a value (its `links` in GET /templates) needs the end of each link in `variables.buttons`, in the order of `links`: it replaces the link’s {{1}}, holds no spaces and cannot change the website the button opens (422, naming the value, as `variables.buttons.0`). The message keeps the links as sent. Other templates take none.',
             'A location (`location`) is a place given by its `latitude` and `longitude` in decimal degrees, with its `name` and `address` if wanted, up to 1,000 characters each, all stored with the message. A location WhatsApp does not accept makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
             'Contacts (`contacts`) share 1 to 5 contact cards, as Meta’s spec describes them: each with a `name` (its `formattedName` and at least one other part) and, if wanted, `phones`, `emails`, `urls` and `addresses` (up to 5 of each, each with a `type` of HOME or WORK if wanted), an `org` and a `birthday` (YYYY-MM-DD); each text up to 256 characters, a link up to 2,000. Messages read back give them in `contacts`, as they give the cards customers share. A card WhatsApp does not accept makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
             'Buttons (up to 3) and lists (up to 10 rows) carry ids you choose: when the customer taps one, the `message.received` webhook gives it as `reply.id`, with `reply.type` (`button` or `list`). Ids cannot start with `w360`, which HyFib’s own buttons use.',
@@ -1292,7 +1307,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           description: [
             `${scopeNote('messages.send', 'messages.send_marketing')} Utility templates need \`messages.send\`, marketing templates \`messages.send_marketing\`. Sends the template to up to ${API_LIMITS.messagesPerSend} numbers, each with the values of its variables and each as POST /messages sends a template: the contact is created when new, and consent, the suppression list and the marketing frequency cap are checked for each. The call counts as one request against the rate and monthly limits, within the 64 KB a body may hold.`,
             'Each number is answered in its place, in the order given, with its message, queued, or with why it was not (the contact erased, opted out, on the suppression list or without the marketing opt-in the company asks for, or at the marketing frequency cap): a refused number changes nothing, a contact created for it included, and the others are still sent. Messages queued together may leave in any order.',
-            'Refused as a whole, sending nothing: a template or a WhatsApp number that cannot send (as for one message), a number that is not valid or given twice, values that do not fill the template’s variables, or a header file missing or given when the template takes none (422, naming the place, as `messages.3.variables` or `messages.3.headerMedia`). One call per `Idempotency-Key`: a retry answers as the first request did.',
+            'Refused as a whole, sending nothing: a template or a WhatsApp number that cannot send (as for one message), a number that is not valid or given twice, values that do not fill the template’s variables, the end of a link a button cannot open, or a header file missing or given when the template takes none (422, naming the place, as `messages.3.variables`, `messages.3.variables.buttons.0` or `messages.3.headerMedia`). One call per `Idempotency-Key`: a retry answers as the first request did.',
             'The call is one transaction holding the conversations it sends in until it ends. When it collides with another call taking several of them at the same moment in another order (another send to many numbers, say), it can be refused as a whole (409, sending nothing): send it again with the same `Idempotency-Key`.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],

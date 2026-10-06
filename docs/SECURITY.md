@@ -901,6 +901,12 @@ Phase 5 rules (Public API, P5-08):
   template's checks are unchanged (the scope of its category, consent, the suppression list, the
   marketing cap); only the API sends these templates, and the link is kept with the message and
   redacted with it.
+- Website buttons whose link ends with a value (ADR-228): no value can change the website a button
+  opens. A link must name its https website in full before `{{1}}` (the host followed by `/`, `?` or
+  `#`, no user name), refused when a draft is saved and not sendable when synced otherwise; every
+  value is checked again when sent, by the sender, the API and `buildTemplateSend` (no spaces or
+  control characters, the template's origin kept). The link as sent is kept with the message and
+  redacted with it, and the inbox shows it as an https anchor in a new tab without the referrer.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so

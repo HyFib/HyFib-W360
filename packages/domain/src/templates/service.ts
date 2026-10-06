@@ -250,7 +250,8 @@ export function createTemplatesService(deps: TemplateDeps) {
         { accessMode: 'read only' },
       );
       return rows.map((r) => {
-        const spec = sendSpecFor(r.category, r.components);
+        // Sendable from a contact or a conversation, which give the ends of links (ADR-228).
+        const spec = sendSpecFor(r.category, r.components, { linkValues: true });
         return {
           ...r,
           sendable: r.status === 'approved' && spec.supported,
@@ -296,7 +297,7 @@ export function createTemplatesService(deps: TemplateDeps) {
             .orderBy(desc(templateStatusEvents.occurredAt), desc(templateStatusEvents.id))
             .limit(50);
           const definition = fromMetaComponents(row.category, row.components);
-          const spec = sendSpecFor(row.category, row.components);
+          const spec = sendSpecFor(row.category, row.components, { linkValues: true });
           return {
             template: row,
             definition,

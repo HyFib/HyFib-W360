@@ -87,11 +87,13 @@ verification, app review, Embedded Signup configuration).
 - **P3-03 Templates** — _implemented (2026-09-26), not verified against Meta_: drafts, validation,
   write-ahead submission with lost-response reconciliation, Graph listing sync (webhook-triggered
   and periodic), deletion, status history, template sends from contacts and the inbox.
-  **Remaining:** creating media headers (Resumable Upload + media storage) and sending them outside
-  the API (which sends them with a link since ADR-201), URL buttons with variables (the
-  example format must be confirmed), named parameters, authentication/OTP, carousel, LTO, copy-code
-  and catalog templates, editing approved templates (`POST /{template-id}`), template library
-  (W-070), and a sandbox run with a real WABA.
+  **[Website buttons whose link ends with a value built; their database and browser tests run only
+  in CI]** (ADR-228: created with their example, synced, and sent from contacts, conversations and
+  the API). **Remaining:** creating media headers (Resumable Upload + media storage) and sending
+  them outside the API (which sends them with a link since ADR-201), link values in campaigns,
+  automations and store messages, named parameters, authentication/OTP, carousel, LTO, copy-code and
+  catalog templates, editing approved templates (`POST /{template-id}`), template library (W-070),
+  and a sandbox run with a real WABA.
 - **P3-04 Campaigns** — _implemented (2026-09-26), sends verified against the Graph stand-in
   only_: saved segments (incl. campaign-response retargeting), drafts with a review panel,
   audience snapshots re-checked when queued and before dispatch, optional four-eyes approval,
@@ -719,6 +721,9 @@ verification, app review, Embedded Signup configuration).
   **[Merging contacts through the API built; its database tests run only in CI]** (ADR-227,
   migration 0153: `POST /contacts/{id}/merge` with the `contacts.merge` scope merges a contact into
   another as owners and administrators do, answering the kept contact and what moved).
+  **[Website buttons whose link ends with a value built; their database and browser tests run only
+  in CI]** (ADR-228: GET /templates gives each such button's link in `links` and how many values a
+  send gives in `variables.buttons`; a send gives the end of each link in `variables.buttons`).
   Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,

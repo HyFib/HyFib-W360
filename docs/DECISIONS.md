@@ -8926,3 +8926,40 @@ Decision:
 
 Not built: naming the key on the merge record and on the carried opt-out, merging many pairs in one
 call, and suggesting duplicates through the API.
+
+## ADR-228 Website buttons whose link ends with a value (2026-10-06)
+
+Context: a utility template usually carries a link of its own for each customer (an order to track,
+a booking to manage), but HyFib refused website buttons with a variable because the format of their
+example was not confirmed. Meta's official OpenAPI description shows it (research M-198): a `URL`
+button whose `url` ends with `{{1}}` is created with `example: ['summer2023']`, the value rather
+than a whole link, and a send gives a `button` component (`sub_type` `url`, `index`) whose one
+`text` parameter is the "suffix that is appended to the predefined prefix URL".
+
+Decision:
+
+- **The link:** a website button's link may end with one value, `{{1}}`, placed after the website's
+  address in full: an https link whose host is followed by `/`, `?` or `#`, without a user name, so
+  no value can change the website the button opens (checked by appending values that would lengthen
+  the host, put it after a user name or add a port). A value elsewhere in the link, another
+  variable, or a value right after the host is refused when a draft is saved; a synced template with
+  one is shown as not sendable. The editor asks for an example, which goes to Meta as
+  `example: [value]`; an example Meta's listing gives as a list or as text is kept as it is.
+- **The values:** a send gives the end of each such link, in the order of the buttons:
+  `params.buttons` from a contact's or a conversation's sender, `variables.buttons` through the API,
+  whose template list gives `links` (each button's text and link) and `variables.buttons` (how
+  many). A value holds no spaces or control characters, at most 1,000 characters, and must leave the
+  link on the template's website; it is refused with the button's name, through the API as 422
+  naming `variables.buttons.N` (or `messages.N.variables.buttons.N`). It is sent as given, without
+  percent-encoding, as a `button` component with `sub_type` `url`, the button's `index` and one
+  `text` parameter; button components follow the order of the buttons.
+- **What is kept:** the message keeps each link as sent beside its button's text, and the inbox
+  shows it as an https link opening in a new tab without the referrer.
+- **Where they are sent:** from a contact or a conversation and through the API, and the template
+  list marks them sendable. Campaigns, automations and store messages do not send them yet: the
+  campaign editor and store messages leave them out of their template lists, automations list them
+  with the reason, and each refuses one with the reason.
+
+Not built: values from campaigns, automations and store messages, a value elsewhere than at the end
+of a link, more than one variable in a link, and encoding values for a link (a value must already be
+fit for one).

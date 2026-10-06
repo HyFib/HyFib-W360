@@ -513,6 +513,14 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    plan pages for a plan version including it), and `POST /api/v1/contacts/{id}/merge` with 404;
    rolling web servers back to an image from before it does the same. Workers are not affected.
 
+   ADR-228 has no migration. Until the web rollout ends, an old web server refuses a draft whose
+   website button's link ends with `{{1}}`, shows such templates as not sendable, leaves them out of
+   GET /api/v1/templates, and answers a send giving `variables.buttons` with 422 (a field it does
+   not know) and a send of such a template with 501; rolling web servers back to an image from
+   before it does the same and cannot open such a draft in the editor. Workers are not affected:
+   they send the request the web server stored, and their own template sends do not take these
+   templates.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

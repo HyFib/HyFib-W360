@@ -1,5 +1,50 @@
 # Progress
 
+## 2026-10-06 — Phase 3 follow-up: website buttons whose link ends with a value (P3-03, P5-08, ADR-228)
+
+Status: **Implemented; its database and browser tests run in CI only.** Templates could not carry a
+link of their own for each customer. The local PostgreSQL is unavailable, so the integration and
+browser tests below were written but not run here.
+
+### Completed
+
+- **Research (M-198):** the creation example and the send's button parameter in Meta's official
+  OpenAPI description.
+- **Design (ADR-228):** `{{1}}` at the end of a link whose website is named in full; values checked
+  against the template's website; sent from contacts, conversations and the API.
+- **Domain:** `linkPrefix`, `linkButtons`, `linkValueProblem`, `linkValuesProblem`;
+  `validateDefinition`, `toMetaComponents`, `fromMetaComponents`, `sendSpecFor` (`linkValues`,
+  `buttonParams`) and `buildTemplateSend`; the sender and the API take the values; no migration.
+- **Web:** the editor's example field, the sender's link fields and preview, the links in the
+  inbox's bubble.
+- **Tests:**
+  - Unit (6 new: 4 in `definition.test.ts`, 2 in `api.test.ts`; expectations updated where params
+    and the API's template gained the link values).
+  - Integration (2 new in `templates.test.ts`, 1 in `api.test.ts`; the draft refusals and the API's
+    template list updated; the Graph stand-in now checks a template's button parameters). Written
+    for CI; not run here.
+  - Browser (`templates.spec.ts` extended: the editor's website button with `{{1}}` and its example,
+    the inbox's sender filling the link, the request and the bubble). Written for CI; not run here.
+- **Docs:** ADR-228; research M-198; ARCHITECTURE; SECURITY; THREAT-MODEL T215; DEPLOYMENT; BACKLOG
+  P3-03 and P5-08; feature matrix W-059.
+- **Mutation checks:** 25/25 deliberate regressions caught on the unit-tested parts.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 986 passed (99 files)                                           |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 25/25 deliberate regressions caught on the unit-tested parts    |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Campaigns, automations and store messages do not send these templates yet; values are sent as
+  given (no encoding); never exercised against Meta.
+
 ## 2026-10-06 — Phase 5 follow-up: merging contacts through the API (P5-08, P3-01, ADR-227)
 
 Status: **Implemented; its database tests run in CI only.** Integrations could not merge the

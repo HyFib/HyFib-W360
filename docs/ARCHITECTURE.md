@@ -1102,6 +1102,18 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `mediaHeaders`, as the API's template list and `loadSendableTemplate` do; every other caller gets
   the reason. `buildTemplateSend` puts the link in the header's parameter and returns it, and
   `queueTemplateFor` keeps it as the content's `headerMedia`, which the inbox's bubble shows.
+- **Website buttons whose link ends with a value (ADR-228):** `linkPrefix`, `linkButtons` and
+  `linkValueProblem` (`templates/definition.ts`) read a `URL` button whose link ends with `{{1}}`.
+  `validateDefinition` requires the value after the website's address in full (`prefixFixesWebsite`
+  appends values that would change the link's origin) and an example, which `toMetaComponents` sends
+  as `example: [value]`. `sendSpecFor` gives `buttonParams` only to callers passing `linkValues`:
+  the contact and conversation sender (`sendableTemplates(ctx, { linkValues: true })`,
+  `queueTemplateMessage`), the template list and detail, and the API (`apiListTemplates`,
+  `loadSendableTemplate`); campaigns, automations and store messages get the reason.
+  `linkValuesProblem` names the first value a link cannot end with; `buildTemplateSend` checks the
+  values again, adds one `button` component with `sub_type` `url` per value, ordered with the
+  quick-reply payloads by button, and keeps each link as sent in the rendered buttons (`url`), which
+  the template preview and the inbox's bubble show.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions (`last_message` with `conversations.read` and `campaign` with
   `campaigns.read` since ADR-126, a named campaign checked to be the company's, `name` since

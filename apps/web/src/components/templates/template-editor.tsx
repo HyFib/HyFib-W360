@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import {
   COMMON_TEMPLATE_LANGUAGES,
   TEMPLATE_LIMITS,
+  linkPrefix,
   positionalVariables,
   renderExample,
   validateDefinition,
@@ -324,12 +325,17 @@ export function TemplateEditor({
                 )}
               </Field>
               {b.type === 'URL' ? (
-                <Field id={`tpl-button-url-${i}`} label="Address (https://)">
+                <Field
+                  id={`tpl-button-url-${i}`}
+                  label="Address (https://)"
+                  description="End it with {{1}} to add a value when sending, such as an order number."
+                >
                   {(aria) => (
                     <Input
                       {...aria}
                       type="url"
                       value={b.url}
+                      maxLength={TEMPLATE_LIMITS.url}
                       onChange={(e) => setButton(i, { ...b, url: e.target.value })}
                     />
                   )}
@@ -355,6 +361,23 @@ export function TemplateEditor({
               >
                 Remove
               </Button>
+              {b.type === 'URL' && linkPrefix(b.url) !== null ? (
+                <div className="sm:col-span-3">
+                  <Field
+                    id={`tpl-button-example-${i}`}
+                    label="Example for the link’s {{1}} (Meta reviews it)"
+                  >
+                    {(aria) => (
+                      <Input
+                        {...aria}
+                        value={b.example ?? ''}
+                        maxLength={TEMPLATE_LIMITS.exampleValue}
+                        onChange={(e) => setButton(i, { ...b, example: e.target.value })}
+                      />
+                    )}
+                  </Field>
+                </div>
+              ) : null}
             </div>
           ))}
           {def.buttons.length < TEMPLATE_LIMITS.buttons ? (

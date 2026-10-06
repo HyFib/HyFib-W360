@@ -36,6 +36,13 @@ test('a template is drafted, submitted, approved at Meta and sent after the serv
   await expect(page.getByLabel('Template preview')).toContainText(
     'Hi Asha, your order is on its way.',
   );
+  // A website button whose link ends with a value given when sending, with its example (ADR-228).
+  await page.getByRole('button', { name: 'Add website button' }).click();
+  await page.getByLabel('Website button text').fill('Track order');
+  await page.getByLabel('Address (https://)').fill('https://shop.example/track/{{1}}');
+  await expect(page.getByText('Website button: give an example of the link’s end.')).toBeVisible();
+  await page.getByLabel('Example for the link’s {{1}} (Meta reviews it)').fill('A-1001');
+  await expect(page.getByText('Website button: give an example of the link’s end.')).toHaveCount(0);
   await page.getByRole('button', { name: 'Save draft' }).click();
   await expect(page.getByRole('heading', { name: 'order_update', level: 1 })).toBeVisible();
   await expect(page.getByText('Draft', { exact: true })).toBeVisible();
@@ -45,6 +52,9 @@ test('a template is drafted, submitted, approved at Meta and sent after the serv
   await expect(page.getByText('Draft saved.')).toBeVisible();
   await page.reload();
   await expect(page.getByLabel('Footer (optional)')).toHaveValue('Reply STOP to opt out');
+  await expect(page.getByLabel('Example for the link’s {{1}} (Meta reviews it)')).toHaveValue(
+    'A-1001',
+  );
 
   await page.getByRole('button', { name: 'Submit to Meta' }).click();
   await page.getByRole('button', { name: 'Submit for review' }).click();
@@ -91,13 +101,19 @@ test('a template is drafted, submitted, approved at Meta and sent after the serv
   await expect(page.getByText('Window closed')).toBeVisible();
   await page.getByLabel('Template').selectOption({ label: 'order_update (en, utility)' });
   await page.getByLabel('Body variable {{1}}').fill('Priya');
+  await page.getByLabel('End of the “Track order” link').fill('A-2002');
   await expect(page.getByLabel('Message preview')).toContainText(
     'Hi Priya, your order is on its way.',
+  );
+  await expect(page.getByLabel('Message preview')).toContainText(
+    'https://shop.example/track/A-2002',
   );
   await page.getByRole('button', { name: 'Send template' }).click();
   await expect(page.getByText(/Template queued/)).toBeVisible();
   // The conversation updates live; reloading it could cancel a live refresh (see openFromNav).
   await expect(page.getByText('Sent to WhatsApp')).toBeVisible({ timeout: 30_000 });
+  // The conversation shows the link as sent.
+  await expect(page.getByRole('link', { name: 'https://shop.example/track/A-2002' })).toBeVisible();
   const sent = (await standInRequests(request))
     .filter((r) => r.path === `/v26.0/${phoneNumberId}/messages`)
     .pop();
@@ -107,7 +123,15 @@ test('a template is drafted, submitted, approved at Meta and sent after the serv
     template: {
       name: 'order_update',
       language: { policy: 'deterministic', code: 'en' },
-      components: [{ type: 'body', parameters: [{ type: 'text', text: 'Priya' }] }],
+      components: [
+        { type: 'body', parameters: [{ type: 'text', text: 'Priya' }] },
+        {
+          type: 'button',
+          sub_type: 'url',
+          index: '0',
+          parameters: [{ type: 'text', text: 'A-2002' }],
+        },
+      ],
     },
   });
 });
