@@ -889,7 +889,8 @@ export interface ApiTemplate {
 
 /**
  * The types of the messages the API sends, as a queued send and `GET /messages/{id}` give them:
- * templates, text, reply buttons and lists, reactions, and media from links (ADR-194).
+ * templates, text, reply buttons and lists, reactions, media and stickers from links (ADR-194,
+ * ADR-198), locations (ADR-195) and contact cards (ADR-197).
  */
 export const API_MESSAGE_TYPES = [
   'template',
@@ -900,6 +901,9 @@ export const API_MESSAGE_TYPES = [
   'video',
   'audio',
   'document',
+  'sticker',
+  'location',
+  'contacts',
 ] as const;
 export type ApiMessageType = (typeof API_MESSAGE_TYPES)[number];
 

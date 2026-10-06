@@ -1906,6 +1906,10 @@ describe('text replies (ADR-070)', () => {
     expect((await conversationWith(c, `+${waId}`)).last_message_preview).toBe('Sticker');
     // WhatsApp's sticker object through the send pipeline (the stand-in checks its shape).
     expect(await sendAll(c)).toEqual(['accepted']);
+    expect(await apiGetMessage(deps(), ctx, idOf(sent))).toMatchObject({
+      type: 'sticker',
+      status: 'accepted',
+    });
     const atStandIn = fx.standIn.state.requests.filter(
       (r) => r.path.endsWith('/messages') && (r.body as { to?: string } | undefined)?.to === waId,
     );
@@ -2000,6 +2004,12 @@ describe('text replies (ADR-070)', () => {
     expect((await conversationWith(c, `+${waId}`)).last_message_preview).toBe('Pier 3');
     // WhatsApp's location objects through the send pipeline (the stand-in checks their shape).
     expect(await sendAll(c)).toEqual(['accepted', 'accepted']);
+    for (const message of [clinic, pier]) {
+      expect(await apiGetMessage(deps(), ctx, idOf(message))).toMatchObject({
+        type: 'location',
+        status: 'accepted',
+      });
+    }
     const sent = fx.standIn.state.requests.filter(
       (r) => r.path.endsWith('/messages') && (r.body as { to?: string } | undefined)?.to === waId,
     );
@@ -2110,6 +2120,10 @@ describe('text replies (ADR-070)', () => {
     );
     // WhatsApp's contact objects through the send pipeline (the stand-in checks their shape).
     expect(await sendAll(c)).toEqual(['accepted']);
+    expect(await apiGetMessage(deps(), ctx, idOf(sent))).toMatchObject({
+      type: 'contacts',
+      status: 'accepted',
+    });
     const atStandIn = fx.standIn.state.requests.filter(
       (r) => r.path.endsWith('/messages') && (r.body as { to?: string } | undefined)?.to === waId,
     );

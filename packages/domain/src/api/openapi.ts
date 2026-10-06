@@ -160,7 +160,7 @@ export const apiQueuedMessageSchema = z.object({
   type: z
     .enum(API_MESSAGE_TYPES)
     .describe(
-      'interactive: reply buttons or a list; image, video, audio and document: media sent from a link.',
+      'interactive: reply buttons or a list; image, video, audio, document and sticker: media sent from a link; location: a place; contacts: contact cards.',
     ),
   status: z.literal('queued'),
   contactId: z.uuid(),
@@ -201,7 +201,7 @@ export const apiMessageSchema = z.object({
   type: z
     .enum(API_MESSAGE_TYPES)
     .describe(
-      'interactive: reply buttons or a list; image, video, audio and document: media sent from a link.',
+      'interactive: reply buttons or a list; image, video, audio, document and sticker: media sent from a link; location: a place; contacts: contact cards.',
     ),
   status: z
     .enum(OUTBOUND_STATUSES)

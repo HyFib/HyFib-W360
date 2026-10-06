@@ -5318,7 +5318,18 @@ describe('media from links through the API (ADR-194)', () => {
 
 describe('the types of the messages the API sends, in its answers (ADR-194)', () => {
   it('give media from links as their own type, as sent, never as a template', () => {
-    for (const type of ['image', 'video', 'audio', 'document', 'text', 'interactive', 'reaction']) {
+    for (const type of [
+      'image',
+      'video',
+      'audio',
+      'document',
+      'sticker',
+      'location',
+      'contacts',
+      'text',
+      'interactive',
+      'reaction',
+    ]) {
       expect(apiMessageType(type)).toBe(type);
     }
     expect(apiMessageType('template')).toBe('template');
@@ -5330,11 +5341,19 @@ describe('the types of the messages the API sends, in its answers (ADR-194)', ()
     for (const name of ['QueuedMessage', 'Message']) {
       expect(schemas[name]?.properties.type.enum).toEqual([...API_MESSAGE_TYPES]);
       expect(schemas[name]?.properties.type.description).toContain(
-        'image, video, audio and document: media sent from a link',
+        'image, video, audio, document and sticker: media sent from a link; location: a place; contacts: contact cards.',
       );
     }
     expect(API_MESSAGE_TYPES).toEqual(
-      expect.arrayContaining(['image', 'video', 'audio', 'document']),
+      expect.arrayContaining([
+        'image',
+        'video',
+        'audio',
+        'document',
+        'sticker',
+        'location',
+        'contacts',
+      ]),
     );
   });
 });

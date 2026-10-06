@@ -1,5 +1,15 @@
 # Progress
 
+## 2026-10-06 — Fix: stickers, locations and contact cards keep their type in message answers
+
+Status: **Fixed; the changed integration tests run in CI only.** Review on #34 found that
+`GET /messages/{id}` gave media as templates and that the `QueuedMessage` and `Message` schemas
+listed too few types; #34 fixed it for media. Stickers (ADR-198), locations (ADR-195) and contact
+cards (ADR-197) had the same gap: `API_MESSAGE_TYPES` now lists them, so both schemas and
+`GET /messages/{id}` give `sticker`, `location` and `contacts`. Unit: the type test covers them.
+Integration: the sticker, location and contact card tests read each message's status back (written
+for CI; not run here).
+
 ## 2026-10-06 — Phase 5: saying until when a waiting campaign can be approved (P5-08, ADR-209)
 
 Status: **Implemented; its database and browser tests run in CI only.** A waiting campaign could no
