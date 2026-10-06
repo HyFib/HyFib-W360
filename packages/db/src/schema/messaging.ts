@@ -181,6 +181,15 @@ export const conversationTags = appSchema.table('conversation_tags', {
   createdAt: tz('created_at').notNull().defaultNow(),
 });
 
+/** Members who have a conversation open (migration 0157, ADR-243), reported every 20 seconds. */
+export const conversationViewers = appSchema.table('conversation_viewers', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  conversationId: uuid('conversation_id').notNull(),
+  membershipId: uuid('membership_id').notNull(),
+  seenAt: tz('seen_at').notNull().defaultNow(),
+});
+
 export const MESSAGE_TYPES = [
   'text',
   'image',

@@ -9354,3 +9354,31 @@ Decision:
 
 Not built: chances per deal, forecasts in Reports or by month further ahead, won and lost history to
 suggest chances, and the forecast through the API.
+
+## ADR-243 Members who have a conversation open (P3-06) (2026-10-06)
+
+Context: nothing told a member that a teammate was reading the same conversation, so two members
+could answer the same customer at once; the send-time collision warning only refused the second
+reply after it was written.
+
+Decision:
+
+- **Reports from the page:** while a conversation's page is open and visible, it reports to
+  `/api/c/<company>/inbox/<conversation>/presence` every 20 seconds, at once when it becomes visible
+  again, and says the member left (DELETE, kept alive past the page) when the member moves to
+  another conversation or leaves the page. The route takes the member's session and HyFib's own
+  origin only.
+- **What the member sees:** the answer names the other active members reported within 45 seconds
+  (two reports, so one late report does not hide anyone) who can see the conversation by the inbox's
+  rule now, first three by name and the rest counted ("Ravi also has this conversation open."). A
+  report that fails says so instead of showing nobody. A member reports and hears only about
+  conversations they can see; another company's conversation, or one they lost sight of, is not
+  found.
+- **Storage:** one row per member and conversation in `app.conversation_viewers` (migration 0157):
+  ids and a time, nothing about the customer, its time moved forward by each report. Leaving deletes
+  the member's row; the worker's minute sweep deletes rows not reported for an hour through
+  `ops.purge_conversation_viewers`, a definer function whose policies let it see only such rows. The
+  rows are deleted with the company and left out of the account export.
+
+Not built: who is typing a reply or a note, presence in the conversation list, and presence through
+the API or webhooks.

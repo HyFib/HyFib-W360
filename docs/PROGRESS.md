@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-06 — Members who have a conversation open (P3-06, H-011, ADR-243)
+
+Status: **Implemented; its database and browser tests run in CI only.** Nothing told a member that a
+teammate had the same conversation open. The local PostgreSQL is unavailable, so migration 0157 and
+the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0157 (`app.conversation_viewers` with row-level security, its grants,
+  deletion step and policies; `ops.purge_conversation_viewers`, a definer function for the worker
+  that sees only rows not reported for an hour).
+- **Domain:** `inbox/presence.ts` (browser-safe: the 20- and 45-second constants and
+  `presenceText`), `inbox/presence-service.ts` (`report`, `leave`, `purgeConversationViewers`); the
+  inbox's `memberCanSee` is exported for it; the account export leaves the table out.
+- **Web:** the POST/DELETE route `/api/c/<company>/inbox/<conversation>/presence` (trusted origin,
+  the member's session) and `ConversationPresence` on the conversation page.
+- **Worker:** the minute messaging sweep purges rows not reported for an hour.
+- **Tests:**
+  - Unit (3 new in `presence.test.ts`).
+  - Integration (5 new in `presence.test.ts`: the window and one row per member, visibility and
+    suspended members, another company, leaving, the purge oldest first, row-level security; the
+    purge function in the isolation suite's list). Written for CI; not run here.
+  - E2e (`presence.spec.ts`: an owner and an agent see each other on the same conversation until the
+    agent leaves). Written for CI; not run here.
+- **Docs:** ADR-243; ARCHITECTURE; SECURITY; THREAT-MODEL T220; DATA-RETENTION; DEPLOYMENT; BACKLOG
+  P3-06; feature matrix H-011.
+- **Mutation checks:** 11/11 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                                     | Result                                                          |
+| ----------------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`          | clean                                                           |
+| `pnpm test` (unit)                                          | 1045 passed (110 files)                                         |
+| `pnpm test:integration`, `pnpm test:e2e`, `pnpm db:migrate` | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                                | passed                                                          |
+| Mutation checks                                             | 11/11 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes                       | no leaks found                                                  |
+
+### Known gaps
+
+- No typing presence, nothing in the conversation list, nothing through the API or webhooks.
+
 ## 2026-10-06 — Stage chances and a weighted forecast on the CRM board (P4-04, ADR-242)
 
 Status: **Implemented; its database and browser tests run in CI only.** The board showed each

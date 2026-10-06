@@ -162,10 +162,12 @@ verification, app review, Embedded Signup configuration).
   members can turn them off). **[A notice of overdue replies in the inbox built; its database test
   runs only in CI]** (ADR-241: above the conversation list, how many customers the member can see
   wait past the target, counted against the clock in the browser from due times only; no migration).
-  **Remaining:** per-team SLA targets and calendars, presence of members (who is viewing a
-  conversation), private team queues (would change visibility, ADR-029), CSAT by template outside
-  the window (needs a consent decision), CSAT with a real WABA (phone-number masking: P3-01,
-  ADR-226).
+  **[Presence of members built; its database and browser tests run only in CI]** (ADR-243, migration
+  0157: a conversation names the other members who have it open, reported every 20 seconds while its
+  page is visible; a member's row is deleted when they leave and an hour after their last report).
+  **Remaining:** per-team SLA targets and calendars, private team queues (would change visibility,
+  ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA
+  (phone-number masking: P3-01, ADR-226).
 
 ## Phase 4 — automation, Flows, CRM, commerce
 

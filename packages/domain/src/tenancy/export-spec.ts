@@ -22,6 +22,8 @@ export const EXPORT_EXCLUDED_TABLES: Readonly<Record<string, string>> = {
   'app.commerce_store_fetches': 'Bookkeeping of reads from stores.',
   'app.contact_changes':
     'Positions of the API’s contact change feed (ADR-114): which contact changed in which transaction; the contacts themselves are exported.',
+  'app.conversation_viewers':
+    'Which members had a conversation open in the last hour (ADR-243), deleted an hour after.',
   'app.flow_key_uploads': 'Bookkeeping of Flow key uploads to Meta.',
   'app.flow_keys':
     'Flow encryption keys: the private key is never exported and the public key is at Meta.',

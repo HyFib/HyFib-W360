@@ -181,6 +181,8 @@ describe('database roles', () => {
       'ops.api_key_usage_notices_due(integer)',
       // The purge of full rate limit buckets (0041), for the worker.
       'ops.purge_rate_limit_buckets(integer)',
+      // The purge of who had a conversation open, not reported for an hour (0157), for the worker.
+      'ops.purge_conversation_viewers(integer)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);

@@ -49,6 +49,7 @@ import {
   createContactsService,
   createEmailPreferencesService,
   createInboxService,
+  createPresenceService,
   createReceivedMediaService,
   createFileRepliesService,
   createOnboardingService,
@@ -106,6 +107,7 @@ import {
   type ContactsService,
   type EmailPreferencesService,
   type InboxService,
+  type PresenceService,
   type ReceivedMediaService,
   type FileRepliesService,
   type JobQueue,
@@ -176,6 +178,8 @@ export interface Runtime {
   /** Billing → Usage and rates: Meta's rates and this month's estimate (ADR-060). */
   billingUsage: BillingUsageService;
   inbox: InboxService;
+  /** Members who have a conversation open (ADR-243). */
+  presence: PresenceService;
   /** Files customers send, fetched from WhatsApp per request (ADR-216); null without Meta. */
   receivedMedia: ReceivedMediaService | null;
   /** Files members send from the inbox, uploaded to WhatsApp (ADR-218); null without Meta. */
@@ -353,6 +357,7 @@ async function init(): Promise<Runtime> {
   const platformReconciliation = createPlatformReconciliationService({ platformDb });
   const billingUsage = createBillingUsageService({ db, clock: systemClock });
   const inbox = createInboxService({ db, clock: systemClock, jobs, signer });
+  const presence = createPresenceService({ db, clock: systemClock });
   const emailPreferences = createEmailPreferencesService({ db });
   const teams = createTeamsService({ db, clock: systemClock });
   const businessHours = createBusinessHoursService({ db, clock: systemClock });
@@ -566,6 +571,7 @@ async function init(): Promise<Runtime> {
     platformReconciliation,
     billingUsage,
     inbox,
+    presence,
     receivedMedia,
     fileReplies,
     mediaGraph,

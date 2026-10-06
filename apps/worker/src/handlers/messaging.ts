@@ -23,6 +23,7 @@ import {
   purgeApiIdempotencyKeys,
   purgeDeadLetters,
   purgeRateLimitBuckets,
+  purgeConversationViewers,
   queueWaitLimits,
   recoverExpiredSend,
   remindExpiringApiKeys,
@@ -290,6 +291,9 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     // Token buckets that are full again limit nothing (ADR-068).
     const buckets = await purgeRateLimitBuckets(rt.db);
     if (buckets > 0) rt.logger.info({ buckets }, 'full rate limit buckets deleted');
+    // Who had a conversation open, not reported for an hour (ADR-243).
+    const viewers = await purgeConversationViewers(rt.db);
+    if (viewers > 0) rt.logger.info({ viewers }, 'old conversation presence deleted');
     // Contact changes a later change of the same contact replaced (ADR-114).
     const contactChanges = await compactContactChanges(rt.db);
     if (contactChanges > 0) rt.logger.info({ contactChanges }, 'replaced contact changes deleted');

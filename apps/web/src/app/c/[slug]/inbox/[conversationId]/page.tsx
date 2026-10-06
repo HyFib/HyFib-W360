@@ -15,6 +15,7 @@ import { ConversationControls, TeamControl } from '@/components/inbox/conversati
 import { ConversationTags } from '@/components/inbox/conversation-tags';
 import { InboxShell, inboxQueryString } from '@/components/inbox/inbox-shell';
 import { MarkRead } from '@/components/inbox/mark-read';
+import { ConversationPresence } from '@/components/inbox/conversation-presence';
 import { MessageBubble, type ThreadMessage } from '@/components/inbox/message-bubble';
 import { NoteForm } from '@/components/inbox/note-form';
 import { ReplyTimer } from '@/components/inbox/reply-timer';
@@ -211,6 +212,7 @@ export default async function ConversationPage({
                 />
               </p>
             ) : null}
+            <ConversationPresence slug={ctx.tenant.slug} conversationId={conv.id} />
             {thread.automation ? (
               <Alert tone="info">
                 <div className="flex flex-wrap items-center justify-between gap-3">

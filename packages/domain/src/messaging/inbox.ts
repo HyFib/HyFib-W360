@@ -198,7 +198,7 @@ function timerFields(target: ReplyTarget, waitingSince: Date | null, now: Date) 
  * SQL condition: the member `membershipId` (with `rolesColumn`) can see the conversation whose
  * assignee is `assigneeColumn`. Mirrors canSeeConversation for another member.
  */
-function memberCanSee(rolesColumn: SQL, membershipIdColumn: SQL, assigneeColumn: SQL): SQL {
+export function memberCanSee(rolesColumn: SQL, membershipIdColumn: SQL, assigneeColumn: SQL): SQL {
   return sql`(${rolesColumn} && ${sql.param(READ_ALL_ROLES)}::text[]
     or (${rolesColumn} && ${sql.param(READ_ASSIGNED_ROLES)}::text[]
         and (${assigneeColumn} is null or ${assigneeColumn} = ${membershipIdColumn})))`;

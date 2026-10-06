@@ -472,6 +472,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`message.read` or `message.typing`, the message's id as its reference) on the `message.read`
   queue. The worker's `messageReadHandler` verifies the envelope for the kind it claims and runs
   `sendReadReceipt`, which checks again and calls `GraphClient.markRead`.
+- **Presence** (`inbox/presence.ts`, `inbox/presence-service.ts`, ADR-243): the conversation page's
+  `ConversationPresence` posts to `/api/c/<company>/inbox/<conversation>/presence` every 20 seconds
+  while the page is visible and sends DELETE (keepalive) when it unmounts or on `pagehide`; `report`
+  checks the conversation's visibility, upserts the member's `conversation_viewers` row and names
+  the other active members reported within 45 seconds who can see it (`memberCanSee`). The minute
+  messaging sweep calls `purgeConversationViewers` (`ops.purge_conversation_viewers`).
 - **Files customers send** (`messaging/received-media.ts`, ADR-216): the route
   `/c/<company>/inbox/<conversation>/media/<message>` checks that the member can see the
   conversation and reads the message's media record and the receiving account's token in one

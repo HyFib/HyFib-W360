@@ -224,6 +224,13 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   turns them on (audited). Typing needs `inbox.reply` and sight of the conversation; jobs carry only
   the message's id in a signed envelope, and the worker re-reads everything in the company's scope
   and uses the receiving account's token only towards Graph. Nothing is sent for an erased contact.
+  Presence (ADR-243) is reported through `/api/c/<company>/inbox/<conversation>/presence`, which
+  takes the member's session and HyFib's own origin only. A member reports and hears about only the
+  conversations they can see by the inbox's rule, and hears only of other active members who can see
+  the conversation now. Rows hold the membership, the conversation and a time (company scope and
+  row-level security; the runtime role may update only the time); they are deleted when the member
+  leaves and an hour after the last report, by a definer function whose policies show it only such
+  rows, and are not exported.
   Files customers send (ADR-216) are given only to members who can see the conversation, fetched for
   each request with the receiving account's token, which goes only to Graph and to the https address
   Graph returned (no user name or password, no redirects; the address is never stored or logged),

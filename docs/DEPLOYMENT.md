@@ -557,6 +557,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    saving a pipeline there keeps the chances it does not know (its update names only names and
    positions). Rolling the web back hides them until it rolls forward.
 
+   Migration 0157 (ADR-243) adds `app.conversation_viewers` (with its deletion step and policies)
+   and `ops.purge_conversation_viewers` for the worker; workers roll out first, so the purge runs
+   before any page reports. Until the web rollout ends, an old web server's conversation pages
+   neither report nor show who else has a conversation open, so its members are not named to others;
+   a report from a new page that reaches an old server finds no route and the page says it could not
+   check, until a report reaches a new server.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back
