@@ -333,7 +333,11 @@ export default async function ConversationPage({
                 <CardTitle>Send a file</CardTitle>
               </CardHeader>
               <CardContent>
-                <FileSender slug={ctx.tenant.slug} conversationId={conv.id} />
+                <FileSender
+                  slug={ctx.tenant.slug}
+                  conversationId={conv.id}
+                  {...(latestMessageId ? { latestMessageId } : {})}
+                />
               </CardContent>
             </Card>
           ) : null}

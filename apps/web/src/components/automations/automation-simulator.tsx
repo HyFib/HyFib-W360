@@ -7,6 +7,7 @@ import {
   advance,
   httpHeaderText,
   initialRunState,
+  normalizeTag,
   type AutomationGraph,
   type OrderPlaceholderValues,
   type RunEffect,
@@ -86,21 +87,22 @@ interface SimFacts {
   businessOpen: boolean;
 }
 
-/** Tags typed with commas, as a run reads them (lower case, each once). */
+/** A typed tag as the inbox stores it, or null when it cannot be one. */
+const storedTag = (typed: string): string | null => {
+  const normalized = normalizeTag(typed);
+  return normalized.ok ? normalized.tag : null;
+};
+
+/** Tags typed with commas, as a run reads them: written as stored tags are, each once. */
 const tagSet = (typed: string): Set<string> =>
-  new Set(
-    typed
-      .split(',')
-      .map((t) => t.trim().toLowerCase())
-      .filter(Boolean),
-  );
+  new Set(typed.split(',').flatMap((t) => storedTag(t) ?? []));
 
 /** The typed tags without `tag`. */
 const withoutTag = (typed: string, tag: string): string =>
   typed
     .split(',')
     .map((t) => t.trim())
-    .filter((t) => t && t.toLowerCase() !== tag)
+    .filter((t) => t && storedTag(t) !== tag)
     .join(', ');
 
 function toFacts(sim: SimFacts, companyName: string, storeEvent: boolean): RunFacts {

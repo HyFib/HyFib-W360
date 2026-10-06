@@ -8597,9 +8597,10 @@ Decision:
   file" card. The browser posts the file and an optional caption to
   `/api/c/<company>/inbox/<conversation>/files`; HyFib checks the reply as it checks a text reply
   (`inbox.reply`, sight of the conversation, the number active, the 24-hour window, a WhatsApp
-  number), uploads the file for the conversation's number with its account's token, and queues a
-  reply naming the media id. The bytes pass through memory once; the message keeps the media id, the
-  caption, the type and a document's name, and so does its media record.
+  number, and the collision warning of ADR-033 against the newest message the page showed), uploads
+  the file for the conversation's number with its account's token, and queues a reply naming the
+  media id. The bytes pass through memory once; the message keeps the media id, the caption, the
+  type and a document's name, and so does its media record.
 - **What can be sent:** JPEG and PNG photos, MP4 and 3GPP videos, AAC, AMR, MP3, MP4 and OGG
   recordings, and PDF, text, Word, Excel and PowerPoint documents, up to 16 MB, HyFib's limit for a
   file through its servers (Meta's limits by type come from third-party copies, M-049). A caption of
@@ -8609,8 +8610,8 @@ Decision:
   uploading again. If the reply is refused after the upload, for example because the window closed
   meanwhile, the media is never sent and Meta deletes it (M-046).
 - **Refusals before anything is written:** a file of another type, empty or over 16 MB (422, naming
-  the file); the reply's own refusals (403, 404, 412); Meta refusing the upload (422, with Meta's
-  reason) or the account's token (412), or not answering (503).
+  the file); the reply's own refusals (403, 404, 409, 412); Meta refusing the upload (422, with
+  Meta's reason) or the account's token (412), or not answering (503).
 - **The route** is under /api, so Next's proxy neither buffers nor cuts a body over its 10 MB; only
   HyFib's own pages may post to it (the trusted-origin check of server actions), with the member's
   session, and it reads at most 16 MB and 64 KB.

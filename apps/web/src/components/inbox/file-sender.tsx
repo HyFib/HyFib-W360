@@ -33,9 +33,18 @@ const ACCEPT = [
 /**
  * Sends a photo, video, recording or document in the conversation while the customer service
  * window is open (ADR-218): the file goes to HyFib's upload route, which uploads it to WhatsApp and
- * queues the reply. A retry of the same file reuses its key, so it is sent once.
+ * queues the reply. A retry of the same file reuses its key, so it is sent once. Like a text reply,
+ * it names the newest message shown, so a file is not sent after another member's reply unseen.
  */
-export function FileSender({ slug, conversationId }: { slug: string; conversationId: string }) {
+export function FileSender({
+  slug,
+  conversationId,
+  latestMessageId,
+}: {
+  slug: string;
+  conversationId: string;
+  latestMessageId?: string;
+}) {
   const p = useId();
   const router = useRouter();
   // A new key empties the file picker after a send.
@@ -59,6 +68,7 @@ export function FileSender({ slug, conversationId }: { slug: string; conversatio
         form.set('file', file);
         form.set('caption', caption);
         form.set('clientKey', key);
+        if (latestMessageId) form.set('afterMessageId', latestMessageId);
         void fetch(`/api/c/${slug}/inbox/${conversationId}/files`, { method: 'POST', body: form })
           .then(async (res) => {
             const body = (await res.json().catch(() => null)) as {
@@ -67,6 +77,8 @@ export function FileSender({ slug, conversationId }: { slug: string; conversatio
             } | null;
             if (!res.ok || !body?.ok) {
               setError(body?.message ?? 'The file was not sent. Try again.');
+              // Someone else replied meanwhile: show their message; the file stays chosen.
+              if (res.status === 409) router.refresh();
               return;
             }
             setSent('File sent.');
