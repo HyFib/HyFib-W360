@@ -1,6 +1,6 @@
 import { randomBytes, randomInt } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { isAppError, systemClock, uuidv7 } from '@w360/core';
+import { isAppError, sha256Hex, systemClock, uuidv7 } from '@w360/core';
 import {
   apiContactChanges,
   apiErrorResponse,
@@ -630,7 +630,7 @@ describe('merging contacts (ADR-224)', () => {
     ).toMatchObject({ status: 403, code: 'forbidden' });
 
     const key = await keyWith(c, ['contacts.read', 'contacts.merge']);
-    const retry = { key: `merge-${randomInt(1e9)}`, requestHash: 'same-request' };
+    const retry = { key: `merge-${randomInt(1e9)}`, requestHash: sha256Hex('same-request') };
     const first = await apiMergeContacts(outbound(), key, kept, { mergeContactId: byUser }, retry);
     expect(first).toMatchObject({
       status: 200,

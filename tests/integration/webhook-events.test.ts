@@ -242,6 +242,29 @@ async function inbound(c: Company, from: string, text: string) {
   return row;
 }
 
+/**
+ * A customer who writes by WhatsApp user id only (no number) to the company's number `c`; the
+ * contact HyFib adds for them, which has no number.
+ */
+async function writesByUserId(c: Company) {
+  const user = `IN.${randomBytes(8).toString('hex')}`;
+  const body = fx.messagesBody(c, { messages: [{ text: 'Hello' }] }) as {
+    entry: {
+      changes: { value: { messages: { from?: string }[]; contacts: { user_id?: string }[] } }[];
+    }[];
+  };
+  const value = body.entry[0]!.changes[0]!.value;
+  value.messages[0]!.from = user;
+  value.contacts[0]!.user_id = user;
+  await fx.deliver(body);
+  const [row] = await fx.query<{ contact_id: string }>(
+    'SELECT contact_id FROM app.contact_identities WHERE tenant_id = $1 AND bsuid = $2',
+    [c.tenant.id, user],
+  );
+  if (!row) throw new Error('no contact for the user id');
+  return row.contact_id;
+}
+
 const versionOf = async (conversationId: string) =>
   (
     await fx.query<{ version: number }>('SELECT version FROM app.conversations WHERE id = $1', [
@@ -927,20 +950,23 @@ describe('contact events', () => {
       displayName: 'Gita',
       phone: '+919811100051',
     });
-    const { id: first } = await service.createContact(owner, {
-      displayName: 'Gita R',
-      email: 'gita@example.test',
-      tags: ['store'],
-    });
-    const { id: last } = await service.createContact(owner, { displayName: 'G. Rao' });
+    // The contacts merged into it have no number: customers who wrote by WhatsApp user id, each to
+    // a number of the company of its own (members add contacts with a number, and two contacts with
+    // conversations on one number are never merged).
+    const first = await writesByUserId(c);
+    const last = await writesByUserId(await fx.addNumber(c));
+    await service.addTags(owner, last, ['store']);
     await deliverDue(c);
-    expect(bodiesAt(all.path).map((b) => b.type)).toEqual([
-      'contact.created',
-      'contact.created',
-      'contact.created',
-    ]);
+    expect(
+      bodiesAt(all.path)
+        .map((b) => b.type)
+        .sort(),
+    ).toEqual(['contact.created', 'contact.created', 'contact.created', 'contact.updated']);
     // A change of the first contact, not yet delivered when it is merged.
-    await service.updateContact(owner, first, { displayName: 'Gita Rao' });
+    await service.updateContact(owner, first, {
+      displayName: 'Gita Rao',
+      email: 'gita@example.test',
+    });
 
     // The first into the last, then the last into the kept contact, before any delivery.
     await merges.mergeContacts(owner, { keepContactId: last, mergeContactId: first });
@@ -959,6 +985,8 @@ describe('contact events', () => {
         ['contact.merged', last, first, 2],
         ['contact.updated', first, null, 2],
         ['contact.updated', kept, null, 2],
+        // The tag added before (delivered), then the merge.
+        ['contact.updated', last, null, 2],
         ['contact.updated', last, null, 2],
       ].sort(),
     );
@@ -966,7 +994,7 @@ describe('contact events', () => {
     await deliverDue(c);
     // Each merge is delivered with the contact the merged one belongs to now: the kept contact,
     // through the later merge too. The changes of the contacts that are gone are not sent.
-    const sent = bodiesAt(all.path).slice(3);
+    const sent = bodiesAt(all.path).slice(4);
     expect(
       sent
         .map((b) => [b.type, (b.data.contact as { id: string }).id, b.data.mergedContactId ?? null])
@@ -1004,6 +1032,7 @@ describe('contact events', () => {
       ].sort(),
     );
     expect(bodiesAt(updatesOnly.path).map((b) => (b.data.contact as { id: string }).id)).toEqual([
+      last,
       kept,
     ]);
     expect(

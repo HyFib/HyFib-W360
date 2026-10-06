@@ -39,9 +39,15 @@ async function store(c: Company, name: string) {
   const [row] = await fx.query<{ id: string }>(
     `INSERT INTO app.commerce_stores (id, tenant_id, platform, store_url, name, webhook_public_id,
        webhook_secret_ciphertext, created_by_membership_id)
-     VALUES (gen_random_uuid(), $1, 'woocommerce', 'https://shop.example.test', $2, $3, 'x', $4)
+     VALUES (gen_random_uuid(), $1, 'woocommerce', $5, $2, $3, 'x', $4)
      RETURNING id`,
-    [c.tenant.id, name, webhookId(), c.tenant.ownerMembershipId],
+    [
+      c.tenant.id,
+      name,
+      webhookId(),
+      c.tenant.ownerMembershipId,
+      `https://${webhookId()}.example.test`,
+    ],
   );
   return row!.id;
 }

@@ -144,7 +144,7 @@ describe('the setup checklist (ADR-233)', () => {
     await fx.query(
       `INSERT INTO app.invitations (id, tenant_id, email, roles, token_hash, expires_at,
          invited_by_user_id)
-       VALUES (gen_random_uuid(), $1, 'late@example.test', '{agent}', md5(random()::text),
+       VALUES (gen_random_uuid(), $1, 'late@example.test', '{agent}', encode(sha256(random()::text::bytea), 'hex'),
          now() - interval '1 day', $2)`,
       [c.tenant.id, owner.user.id],
     );
@@ -152,7 +152,7 @@ describe('the setup checklist (ADR-233)', () => {
     await fx.query(
       `INSERT INTO app.invitations (id, tenant_id, email, roles, token_hash, expires_at,
          invited_by_user_id)
-       VALUES (gen_random_uuid(), $1, 'soon@example.test', '{agent}', md5(random()::text),
+       VALUES (gen_random_uuid(), $1, 'soon@example.test', '{agent}', encode(sha256(random()::text::bytea), 'hex'),
          now() + interval '1 day', $2)`,
       [c.tenant.id, owner.user.id],
     );

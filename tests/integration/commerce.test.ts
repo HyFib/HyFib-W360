@@ -714,8 +714,9 @@ describe('orders', () => {
     expect(lines).toHaveLength(2);
     expect(lines[1]).toContain(`${order.id},${order.reference},`);
     expect(lines[1]).toContain(',received,');
+    // Two items (as the orders list counts them), none unreadable.
     expect(lines[1]).toContain(
-      `,+${asha},2 × Product 001; 1 × unknown-sku,3,0,INR,40.08,Ring the bell`,
+      `,+${asha},2 × Product 001; 1 × unknown-sku,2,0,INR,40.08,Ring the bell`,
     );
     // The list's status filter applies; an unknown status is refused.
     expect(await read(owner, { status: 'confirmed' })).toEqual([ORDER_CSV_COLUMNS.join(',')]);
@@ -735,7 +736,7 @@ describe('orders', () => {
       suppress: false,
     });
     const after = await read(owner);
-    expect(after[1]).toContain(',Erased contact,,2 × Product 001; 1 × unknown-sku,3,0,INR,40.08,');
+    expect(after[1]).toContain(',Erased contact,,2 × Product 001; 1 × unknown-sku,2,0,INR,40.08,');
     expect(after[1]).not.toContain('Ring the bell');
     expect(after[1]).not.toContain(asha);
 

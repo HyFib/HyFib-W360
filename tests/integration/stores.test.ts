@@ -1389,7 +1389,7 @@ describe('Order messages', () => {
     shopify.upsertOrder(shop, {
       id: '7101',
       name: '#2001',
-      phone: '+919812370001',
+      phone: '+919812372101',
       shippingAddress: { name: 'Asha K', phone: null },
     });
     await orderSignal(shop, '7101', 'orders/create');
@@ -1414,7 +1414,7 @@ describe('Order messages', () => {
     await drain(c, storeId);
     expect(await runMessages(c, storeId)).toMatchObject([{ outcome: 'queued' }]);
     expect(await sendAll(c)).toEqual(['accepted']);
-    expect(templatesTo('919812370001')[0]?.components).toContainEqual({
+    expect(templatesTo('919812372101')[0]?.components).toContainEqual({
       type: 'button',
       sub_type: 'url',
       index: '0',

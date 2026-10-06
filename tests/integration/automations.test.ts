@@ -2195,8 +2195,9 @@ describe('automations that create CRM tasks (ADR-244)', () => {
       ...owner,
       permissions: new Set([...owner.permissions].filter((p) => p !== 'crm.write')),
     };
+    // (Each attempt creates its automation before publishing, so each has a name of its own.)
     await expectAppError(
-      publish(noCrm, 'Callbacks', keyword('call me'), callback(agent.membership.id)),
+      publish(noCrm, 'Agent callbacks', keyword('call me'), callback(agent.membership.id)),
       'forbidden',
       /permission to edit the CRM/,
     );
@@ -2409,10 +2410,11 @@ describe('automations that create CRM deals (ADR-245)', () => {
       'precondition_failed',
       /amount in INR/,
     );
+    // (Each attempt creates its automation before publishing, so each has a name of its own.)
     await expectAppError(
       publish(
         owner,
-        'Leads',
+        'Owned leads',
         keyword('price'),
         graph({ ownerMembershipId: marketer.membership.id }),
       ),
@@ -2421,7 +2423,7 @@ describe('automations that create CRM deals (ADR-245)', () => {
     );
     await fx.query(`UPDATE app.crm_stages SET archived_at = now() WHERE id = $1`, [stageId]);
     await expectAppError(
-      publish(owner, 'Leads', keyword('price'), graph({})),
+      publish(owner, 'Archived leads', keyword('price'), graph({})),
       'precondition_failed',
       /active stage of an active pipeline/,
     );
