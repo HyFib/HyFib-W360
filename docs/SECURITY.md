@@ -65,7 +65,8 @@ modules the company's plan leaves out (`automations.write`, `automations.publish
 `flows.publish`, `crm.write`, `commerce.manage`; ADR-051), minus permissions blocked while the
 company is suspended, restricted (its plan expired or was canceled) or pending deletion (the same
 "allowed while suspended" column) or while required MFA is overdue (only `tenant.read` and
-`members.read` remain).
+`members.read` remain). A company can also take `contacts.view_numbers` from the roles it chooses
+(ADR-226).
 
 | Permission               | owner | admin | supervisor | agent | marketer | analyst | billing | Allowed while suspended |
 | ------------------------ | :---: | :---: | :--------: | :---: | :------: | :-----: | :-----: | :---------------------: |
@@ -92,6 +93,7 @@ company is suspended, restricted (its plan expired or was canceled) or pending d
 | `contacts.import`        |   ✓   |   ✓   |     ✓      |       |    ✓     |         |         |                         |
 | `contacts.export`        |   ✓   |   ✓   |            |       |    ✓     |         |         |            ✓            |
 | `contacts.delete`        |   ✓   |   ✓   |            |       |          |         |         |            ✓            |
+| `contacts.view_numbers`  |   ✓   |   ✓   |     ✓      |   ✓   |    ✓     |    ✓    |         |            ✓            |
 | `templates.read`         |   ✓   |   ✓   |     ✓      |   ✓   |    ✓     |    ✓    |         |            ✓            |
 | `templates.write`        |   ✓   |   ✓   |            |       |    ✓     |         |         |                         |
 | `templates.submit`       |   ✓   |   ✓   |            |       |    ✓     |         |         |                         |
@@ -146,6 +148,13 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   contact's id. The trigger runs as the merge (the definer role) and captures for the merging
   company alone; the API reads `app.contact_merges` in the key's company scope, so another company's
   merged contact is plainly not found.
+- Customers' numbers (ADR-226): a company's owners and administrators choose the roles (supervisor,
+  agent, marketer, analyst) whose members see them masked; the context leaves out
+  `contacts.view_numbers` for a member whose every role that grants it is masked, and the services
+  mask every number they give such a member (pages, server actions, CSV exports, the transcript)
+  before it leaves the server. Their digit searches match whole numbers only, so hidden digits
+  cannot be found by narrowing a search. Unmasking a role needs a recent sign-in; both changes are
+  audited. Message content, the public API, webhooks and the owners' company export are not masked.
 - Notice email choices (ADR-215): a member changes only their own, through
   `app.set_own_email_opt_outs` (SECURITY DEFINER, executable by the runtime role only), which takes
   the membership from the scope, never an argument; the runtime role has no update on memberships.

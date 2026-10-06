@@ -73,8 +73,11 @@ verification, app review, Embedded Signup configuration).
   them; no migration). **[Merging contacts built; its database and browser tests run only in CI]**
   (ADR-224, H-019, migrations 0147 to 0149: owners and administrators merge a duplicate into the
   contact they keep after reviewing both; everything moves, the stricter consent stands, and the
-  duplicate is deleted with a record of the merge). **Remaining:** role-based number masking
-  (W-044), bulk edits of other fields, merges through the API, joining conversations.
+  duplicate is deleted with a record of the merge). **[Number masking built; its database and
+  browser tests run only in CI]** (ADR-226, W-044, migration 0152: owners and administrators choose
+  the roles whose members see customers' numbers masked, enforced in the services, with searches by
+  whole numbers only). **Remaining:** bulk edits of other fields, merges through the API, joining
+  conversations.
 - **P3-02 Consent & suppression** — _implemented (2026-09-26)_: consent events with provenance,
   opt-out/opt-in keywords, Meta 131050 opt-outs, suppression list, send-time enforcement (race test
   with a queued template, and with campaigns). **Remaining:** review Meta's
@@ -138,8 +141,8 @@ verification, app review, Embedded Signup configuration).
   opens the conversation and shows the customer a typing indicator while a member writes).
   **Remaining:** per-team SLA targets and calendars, SLA breach notifications (email or in-app),
   presence of members (who is viewing a conversation), private team queues (would change visibility,
-  ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA,
-  phone-number masking (W-044).
+  ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA
+  (phone-number masking: P3-01, ADR-226).
 
 ## Phase 4 — automation, Flows, CRM, commerce
 

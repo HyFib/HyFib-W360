@@ -8860,3 +8860,43 @@ Decision:
 
 Not built: merging through the API, filters on merge events, and naming the kept contact in a
 `consent.changed` of the merged contact delivered after the merge.
+
+## ADR-226 Hiding customers' numbers from chosen roles (W-044) (2026-10-06)
+
+Context: every member who could read contacts or conversations saw customers' whole phone numbers. A
+company that lets agents or temporary staff answer customers may not want them to copy those
+numbers, and WATI masks them for its operator role (research W-044).
+
+Decision:
+
+- **A permission and a company setting.** `contacts.view_numbers` ("see customers' phone numbers
+  whole") is granted to every role that reads contacts, conversations, campaigns or orders (owner,
+  admin, supervisor, agent, marketer, analyst), so nothing changes until a company chooses. Owners
+  and administrators choose, in Settings → Security, the roles whose members see numbers masked:
+  supervisors, agents, marketers and analysts (`app.tenants.masked_number_roles`, migration 0152);
+  owners and administrators always see them whole. The member's context, built for every request,
+  leaves the permission out when every role of the member that grants it is masked, so a member who
+  also has another role sees numbers whole. Showing numbers to a role again needs a recent sign-in
+  (as dropping two-factor does); both changes are audited.
+- **Masked on the server.** A masked number keeps the plus, at most the first three digits and the
+  last two, a dot for every other digit and at least three hidden (`+919•••••••45`). The services
+  that give members contact data mask before anything leaves the server: contacts (list, contact
+  page, its WhatsApp identities, the suppression list), the inbox (list, conversation, transcript,
+  mentions), the CRM (deal and task cards, the contact panel, the contact picker), campaign
+  recipients and their CSV, segment samples, store orders, the automation test picker, and contact
+  exports. The contact page asks the suppression list by contact instead of handling numbers itself.
+- **No digit-by-digit search.** For a masked member, searching contacts, conversations or store
+  orders by digits matches a whole number only; part of a number finds nothing, so the hidden digits
+  cannot be found by narrowing searches. Checks that tell whether a number the member types exists
+  (adding a contact or a suppression, a campaign test send) stay: they confirm a number the member
+  already has and reveal no other.
+- **What a masked member cannot do:** replace a number they cannot see (refused, naming the
+  setting); they can still add a number to a contact without one, and change everything else.
+- **Not masked:** what customers sent (a number in a message, a contact card, a Flow answer, a saved
+  answer of a run), free text members write, the public API and webhooks (they serve integrations;
+  keys are created by owners and administrators), the company export (owners), and the merge pages
+  (owners and administrators). A segment's calling-code condition takes up to four digits, so
+  combined with other conditions it can tell a masked member a fourth leading digit.
+
+Not built: masking per member rather than per role, masking emails, masking customers' numbers in
+message content, and masking for API keys.

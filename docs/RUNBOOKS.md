@@ -536,6 +536,13 @@ not yet delivered at the merge end as `event_gone` (Settings → Webhooks shows 
 receiver that still holds the merged contact deletes its copy or moves what it keeps to the kept
 contact.
 
+**A member sees customers' numbers masked, or whole when they should not (ADR-226).** Settings →
+Security lists the roles whose members see numbers masked; owners and administrators always see them
+whole, and a member with another role that is not masked sees them whole too. A change applies to
+the next page the member opens. The audit log has `tenant.number_masking_updated` with the roles
+before and after. Masked members find contacts, conversations and orders by a whole number only.
+Numbers customers wrote in messages, and those the public API and webhooks carry, are not masked.
+
 **Migration 0148 or 0149 failed.** They build `app.campaign_recipients_contact_idx` and
 `app.automation_runs_contact_idx` concurrently. If one failed, an INVALID index can remain: run
 `DROP INDEX CONCURRENTLY app.campaign_recipients_contact_idx;` (or

@@ -32,6 +32,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { shownNumber } from '../contacts/number-masking';
 import { permissionsForRoles } from '../authz/permissions';
 import { recordAudit, type RequestMeta } from '../audit';
 import {
@@ -2428,7 +2429,7 @@ export function createCampaignsService(deps: CampaignDeps) {
           id: r.id,
           contactId: r.contact_id,
           displayName: r.display_name,
-          phoneE164: r.phone_e164,
+          phoneE164: shownNumber(ctx, r.phone_e164),
           state: r.state,
           skipReason: r.skip_reason,
           messageStatus: r.message_status,
@@ -2500,7 +2501,8 @@ export function createCampaignsService(deps: CampaignDeps) {
           const iso = (v: string | number | null | undefined) =>
             v ? new Date(String(v)).toISOString() : '';
           chunk += csvLine([
-            r.phone_e164 as string | null,
+            // Numbers as the member may see them (ADR-226).
+            shownNumber(ctx, r.phone_e164 as string | null),
             r.display_name as string | null,
             r.state as string,
             r.skip_reason as string | null,

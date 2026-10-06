@@ -26,7 +26,7 @@ import {
   type SQL,
   type Tx,
 } from '@w360/db';
-import { assertCan, can, type TenantContext } from '../authz/context';
+import { NUMBERS_HIDDEN, assertCan, can, type TenantContext } from '../authz/context';
 import { recordAudit, type RequestMeta } from '../audit';
 import { recordConsentEvents, type ConsentEventInput } from '../consent/service';
 import { SERVICE_WINDOW_MS, canSeeConversation } from '../messaging/outbound';
@@ -48,6 +48,7 @@ import {
   parseConsentCell,
   type AttributeValue,
 } from './fields';
+import { seesNumbers, shownNumber } from './number-masking';
 import { CALLING_CODE_RE, normalizePhone, type PhoneInputMode } from './phone';
 
 /**
@@ -252,7 +253,13 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
     if (q) {
       const digits = q.replace(/[\s()+\-.]/g, '');
       if (/^[0-9]{3,15}$/.test(digits)) {
-        conditions.push(sql`${contacts.phoneE164} like ${likePattern(digits)}`);
+        // A member who sees numbers masked finds a contact by its whole number only: searching
+        // by parts of numbers would reveal them digit by digit (ADR-226).
+        conditions.push(
+          seesNumbers(ctx)
+            ? sql`${contacts.phoneE164} like ${likePattern(digits)}`
+            : eq(contacts.phoneE164, `+${digits}`),
+        );
       } else {
         const pattern = likePattern(q);
         conditions.push(
@@ -402,7 +409,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
       const items: ContactListItem[] = rows.slice(0, q.limit).map((r) => ({
         id: r.id,
         displayName: r.displayName,
-        phoneE164: r.phoneE164,
+        phoneE164: shownNumber(ctx, r.phoneE164),
         email: r.email,
         source: r.source,
         tags: r.tags,
@@ -613,9 +620,10 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
             .orderBy(desc(conversations.lastMessageAt));
           const fields = await loadFields(tx, ctx.tenant.id);
           return {
-            contact,
+            // Numbers as this member may see them (ADR-226).
+            contact: { ...contact, phoneE164: shownNumber(ctx, contact.phoneE164) },
             tags: tags.map((t) => t.tag),
-            identities,
+            identities: identities.map((i) => ({ ...i, waId: shownNumber(ctx, i.waId) })),
             conversations: threads.map((t) => ({
               id: t.id,
               channelAccountId: t.channelAccountId,
@@ -710,6 +718,10 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
           if (email.email !== current.email) set.email = email.email;
         }
         if (data.phone !== undefined) {
+          // A member who sees numbers masked cannot replace one they cannot see (ADR-226).
+          if (current.phoneE164 !== null && !seesNumbers(ctx)) {
+            throw new AppError('forbidden', NUMBERS_HIDDEN);
+          }
           const phone = normalizePhone(data.phone, { kind: 'explicit' });
           if (!phone.ok) throw new AppError('validation_failed', phone.message);
           if (phone.e164 !== current.phoneE164) {
@@ -1364,7 +1376,8 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
         let chunk = '';
         for (const r of batch) {
           chunk += csvLine([
-            r.phoneE164,
+            // As the member may see it (ADR-226): masked numbers stay masked in the file.
+            shownNumber(ctx, r.phoneE164),
             r.displayName,
             r.email,
             r.tags.join('; '),

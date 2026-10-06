@@ -1,5 +1,51 @@
 # Progress
 
+## 2026-10-06 — Phase 3 follow-up: hiding customers' numbers (P3-01, W-044, ADR-226)
+
+Status: **Implemented; its database and browser tests run in CI only.** Every member who read
+contacts saw customers' whole numbers. The local PostgreSQL is unavailable, so migration 0152 and
+the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-226):** `contacts.view_numbers` for every role that reads contacts; the roles a
+  company masks (Settings → Security); masking in the services; searches by whole numbers only for
+  masked members; replacing a hidden number refused; unmasking needs a recent sign-in.
+- **Migration:** 0152 (`app.tenants.masked_number_roles` with its check and grant).
+- **Domain:** `contacts/number-masking.ts` (`maskPhoneNumber`, `shownNumber`, the schema); the
+  context and `assertCan`; masking in the contacts, inbox, CRM, campaign, segment, store, consent
+  and automation services; `suppressionsForContact`; `updateNumberMasking`.
+- **Web:** the Settings → Security section; the contact page keeps a masked number read-only.
+- **Tests:**
+  - Unit (6 new in `number-masking.test.ts`): the mask, who may see numbers, the role rule, the
+    schema, the refusal.
+  - Integration (3 new in `number-masking.test.ts`): each service as masked and unmasked members,
+    searches, exports, the refusal, the setting, its audit and step-up. Written for CI; not run
+    here.
+  - E2E (1 new in `number-masking.spec.ts`): an owner masks agents; an agent's contact pages show
+    the number masked and hold it nowhere whole. Written for CI; not run here.
+- **Docs:** ADR-226; ARCHITECTURE; SECURITY (permission matrix and rules); THREAT-MODEL T213;
+  DEPLOYMENT and RUNBOOKS; BACKLOG P3-01; feature matrix W-044 (implemented).
+- **Mutation checks:** 14/14 deliberate regressions caught on the unit-tested parts. The context's
+  removal of the permission and each service's masking need the database, so their regressions are
+  left to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 978 passed (99 files)                                           |
+| `pnpm test:integration`, e2e, migration 0152       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 14/14 deliberate regressions caught on the unit-tested parts    |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Masking per member; masking numbers inside message content; masking for API keys; a segment's
+  calling-code condition can reveal a fourth leading digit.
+
 ## 2026-10-06 — Phase 5 follow-up: integrations hear of merges (P5-09, P5-08, ADR-225)
 
 Status: **Implemented; its database tests run in CI only.** A merge (ADR-224) deleted the merged

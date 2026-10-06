@@ -20,6 +20,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import type { NumberViewer } from '../contacts/number-masking';
 import { canSeeConversation } from '../messaging/outbound';
 import { parseInput } from '../validation';
 import {
@@ -208,6 +209,7 @@ async function dealCards(
   tenantId: string,
   rows: DealRow[],
   currencies: ReadonlyMap<string, string>,
+  viewer: NumberViewer,
 ): Promise<DealCard[]> {
   if (rows.length === 0) return [];
   const members = await memberRefs(
@@ -219,6 +221,7 @@ async function dealCards(
     tx,
     tenantId,
     rows.map((r) => r.contactId),
+    viewer,
   );
   const counts = await tx
     .select({ dealId: crmTasks.dealId, n: sql<number>`count(*)::int` })
@@ -435,6 +438,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             ctx.tenant.id,
             rows,
             new Map([[pipeline.id, pipeline.currency]]),
+            ctx,
           );
           return {
             pipeline,
@@ -498,6 +502,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
               ctx.tenant.id,
               page.map((r) => r.deal),
               await pipelineCurrencies(tx, ctx.tenant.id),
+              ctx,
             ),
             nextCursor:
               rows.length > LIST_PAGE && last
@@ -551,6 +556,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             ctx.tenant.id,
             [row.deal],
             new Map([[row.deal.pipelineId, row.currency]]),
+            ctx,
           );
           const people = await memberRefs(tx, ctx.tenant.id, [
             row.deal.closedByMembershipId,
@@ -572,8 +578,8 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             createdBy: people.get(row.deal.createdByMembershipId) ?? null,
             conversationId: visible ? row.deal.conversationId : null,
             tasks: {
-              open: await tasksWhere(tx, ctx.tenant.id, { dealId: id, status: 'open' }),
-              done: await tasksWhere(tx, ctx.tenant.id, { dealId: id, status: 'done' }),
+              open: await tasksWhere(tx, ctx.tenant.id, { dealId: id, status: 'open' }, ctx),
+              done: await tasksWhere(tx, ctx.tenant.id, { dealId: id, status: 'done' }, ctx),
             },
             timeline: await timeline(tx, ctx.tenant.id, { dealId: id }),
           };
@@ -589,7 +595,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
       return db.run(
         ctx.scope,
         async (tx) => {
-          const contact = (await contactRefs(tx, ctx.tenant.id, [contactId])).get(contactId);
+          const contact = (await contactRefs(tx, ctx.tenant.id, [contactId], ctx)).get(contactId);
           if (!contact) throw notFound('Contact');
           const rows = await tx
             .select()
@@ -604,8 +610,9 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
               ctx.tenant.id,
               rows,
               await pipelineCurrencies(tx, ctx.tenant.id),
+              ctx,
             ),
-            tasks: await tasksWhere(tx, ctx.tenant.id, { contactId, status: 'open' }),
+            tasks: await tasksWhere(tx, ctx.tenant.id, { contactId, status: 'open' }, ctx),
             timeline: await timeline(tx, ctx.tenant.id, { contactId }),
           };
         },

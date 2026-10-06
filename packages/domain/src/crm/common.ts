@@ -13,6 +13,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { permissionsForRoles } from '../authz/permissions';
+import { shownNumber, type NumberViewer } from '../contacts/number-masking';
 
 /** A contact as CRM pages show it (members with CRM access can read contacts). */
 export interface ContactRef {
@@ -109,6 +110,7 @@ export async function contactRefs(
   tx: Tx,
   tenantId: string,
   ids: readonly (string | null)[],
+  viewer: NumberViewer,
 ): Promise<Map<string, ContactRef>> {
   const wanted = [...new Set(ids.filter((id): id is string => id !== null))];
   if (wanted.length === 0) return new Map();
@@ -124,7 +126,8 @@ export async function contactRefs(
   return new Map(
     rows.map((r) => [
       r.id,
-      { id: r.id, name: r.name, phone: r.phone, erased: r.erasedAt !== null },
+      // The number as the member reading may see it (ADR-226).
+      { id: r.id, name: r.name, phone: shownNumber(viewer, r.phone), erased: r.erasedAt !== null },
     ]),
   );
 }

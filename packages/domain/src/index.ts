@@ -71,6 +71,7 @@ export * from './contacts/fields';
 export * from './contacts/service';
 export * from './contacts/bulk-tags';
 export * from './contacts/merge';
+export * from './contacts/number-masking';
 export * from './consent/keywords';
 export * from './consent/service';
 export * from './templates/definition';

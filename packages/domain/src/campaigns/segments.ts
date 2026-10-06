@@ -18,6 +18,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { shownNumber } from '../contacts/number-masking';
 import { recordAudit, type RequestMeta } from '../audit';
 import { NUMBER_RE, normalizeTag, validDate } from '../contacts/fields';
 import { likePattern, parseInput } from '../validation';
@@ -430,7 +431,11 @@ export function createSegmentsService(deps: { db: Database; clock: Clock }) {
           .orderBy(asc(contacts.createdAt), asc(contacts.id))
           .limit(SEGMENT_LIMITS.previewSample)
       : [];
-    return { count: counted?.count ?? 0, sample };
+    return {
+      count: counted?.count ?? 0,
+      // Numbers as the member may see them (ADR-226).
+      sample: sample.map((c) => ({ ...c, phoneE164: shownNumber(ctx, c.phoneE164) })),
+    };
   }
 
   return {

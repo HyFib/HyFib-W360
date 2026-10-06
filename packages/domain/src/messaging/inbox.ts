@@ -32,6 +32,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { seesNumbers, shownNumber } from '../contacts/number-masking';
 import { ROLE_PERMISSIONS, type Permission } from '../authz/permissions';
 import { recordAudit, type RequestMeta } from '../audit';
 import { DEFAULT_MESSAGING_SETTINGS } from '../consent/service';
@@ -281,9 +282,12 @@ export function createInboxService(deps: InboxDeps) {
       const now = clock.now();
       const search = q.q?.trim();
       const digits = search?.replace(/[\s()+\-.]/g, '') ?? '';
+      // A member who sees numbers masked finds a conversation by the whole number only (ADR-226).
       const searchCondition = search
         ? /^[0-9]{3,15}$/.test(digits)
-          ? sql`${contacts.phoneE164} like ${likePattern(digits)}`
+          ? seesNumbers(ctx)
+            ? sql`${contacts.phoneE164} like ${likePattern(digits)}`
+            : eq(contacts.phoneE164, `+${digits}`)
           : sql`${contacts.displayName} ilike ${likePattern(search)}`
         : undefined;
       // Turn start times carry microseconds but cursors carry milliseconds: order and page the
@@ -411,7 +415,7 @@ export function createInboxService(deps: InboxDeps) {
         id: r.id,
         status: r.status,
         contactName: r.contactName,
-        contactPhone: r.contactPhone,
+        contactPhone: shownNumber(ctx, r.contactPhone),
         channelName: r.channelName,
         lastMessageAt: r.lastMessageAt?.toISOString() ?? null,
         lastMessagePreview: r.lastMessagePreview,
@@ -652,7 +656,7 @@ export function createInboxService(deps: InboxDeps) {
               channelAccountId: conv.channelAccountId,
               whatsappAccountId: conv.whatsappAccountId,
               contactName: conv.contactName ?? identity?.profileName ?? null,
-              contactPhone: conv.contactPhone,
+              contactPhone: shownNumber(ctx, conv.contactPhone),
               identity: { hasPhone: Boolean(identity?.waId), hasUserId: Boolean(identity?.bsuid) },
               channelName: conv.channelName,
               channelActive: conv.channelStatus === 'active',
@@ -773,7 +777,7 @@ export function createInboxService(deps: InboxDeps) {
       const timeZone = ctx.tenant.timezone;
       yield transcriptHeader({
         contactName: conv.contactName,
-        contactPhone: conv.contactPhone,
+        contactPhone: shownNumber(ctx, conv.contactPhone),
         number: conv.number,
         companyName: ctx.tenant.name,
         timeZone,
@@ -1176,6 +1180,7 @@ export function createInboxService(deps: InboxDeps) {
       );
       return rows.map((r) => ({
         ...r,
+        contactPhone: shownNumber(ctx, r.contactPhone),
         readAt: r.readAt?.toISOString() ?? null,
         createdAt: r.createdAt.toISOString(),
       }));

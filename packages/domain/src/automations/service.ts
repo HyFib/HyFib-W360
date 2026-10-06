@@ -35,6 +35,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { shownNumber } from '../contacts/number-masking';
 import { recordAudit, type RequestMeta } from '../audit';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
@@ -1757,7 +1758,11 @@ export function createAutomationService(deps: AutomationServiceDeps) {
              limit 50`);
           return rows.rows
             .filter((r) => canSeeConversation(ctx, r.assigned))
-            .map((r) => ({ id: r.id, label: r.name ?? r.phone ?? 'Unknown contact' }));
+            .map((r) => ({
+              id: r.id,
+              // The number as the member may see it (ADR-226).
+              label: r.name ?? shownNumber(ctx, r.phone) ?? 'Unknown contact',
+            }));
         },
         { accessMode: 'read only' },
       );

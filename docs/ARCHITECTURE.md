@@ -90,8 +90,9 @@ session-level value. Scopes are branded TypeScript types created only by authori
 1. The proxy assigns a CSP nonce and correlation id.
 2. The page/action calls `requireTenant(slug)` (pages) or `tenantForAction(slug)` (actions):
    session → membership lookup in user scope → tenant status → effective permissions (role union,
-   minus suspended-blocked permissions, minus MFA-blocked permissions). Non-members and missing
-   companies both get 404.
+   minus `contacts.view_numbers` when the company masks every role of the member that grants it
+   (ADR-226), minus suspended-blocked permissions, minus MFA-blocked permissions). Non-members and
+   missing companies both get 404.
 3. The domain service asserts a permission, validates input with zod (`parseInput`, which also
    refuses the NUL character PostgreSQL text cannot hold, naming the field, ADR-130), and runs
    `db.run(ctx.scope)`. jsonb columns use `@w360/db`'s `jsonb` type, which writes half of an emoji
@@ -241,6 +242,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   again, moves every row naming the merged contact, records the stricter consent, deletes the merged
   contact and records the merge in `app.contact_merges`; the contact page follows a link to a merged
   contact through `mergedInto`.
+  Masking (`contacts/number-masking.ts`, ADR-226): `shownNumber(ctx, phone)` gives a number whole or
+  masked by the member's `contacts.view_numbers`; the contacts, inbox, CRM, campaign, segment, store
+  and consent services call it on every number they return to members, and their digit searches
+  match a whole number for masked members.
 - **Consent** (`packages/domain/src/consent`): append-only `consent_events`; a definer trigger
   maintains `contact_consents` (later wins, opt-out wins ties). Sources: keyword messages (matched
   in ingestion on newly stored text, button and interactive replies), member notes, import

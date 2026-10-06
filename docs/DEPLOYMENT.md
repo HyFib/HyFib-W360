@@ -501,6 +501,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    rolling workers back to such an image, turn the event off on the endpoints that take it; newer
    workers fail only that delivery (`payload_failed`, replayable).
 
+   Migration 0152 (ADR-226) adds `app.tenants.masked_number_roles` (an empty list, without rewriting
+   the table) with a check that reads the companies once under the migration's lock, and the runtime
+   role's grant to change it. Old servers ignore the column: until the web rollout ends, an old web
+   server shows no setting and masks nothing, so a company should choose roles once the rollout is
+   done.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back
