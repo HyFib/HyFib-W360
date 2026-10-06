@@ -303,6 +303,7 @@ describe('company report', () => {
       jobs: fx.jobs(),
       signer: fx.signer,
       clock: systemClock,
+      notices: fx.notices(),
     });
     await campaignsSvc.updateSettings(
       owner,

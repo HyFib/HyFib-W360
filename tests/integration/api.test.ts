@@ -1115,7 +1115,7 @@ describe('template sends', () => {
       evidence: 'Signed up at the store counter',
     });
     const owner = await fx.ctx(c, c.owner);
-    const campaigns = createCampaignsService(deps());
+    const campaigns = createCampaignsService({ ...deps(), notices: fx.notices() });
     await campaigns.updateSettings(
       owner,
       { approvalRequired: false, cap: { count: 1, days: 7 }, costCurrency: null },
@@ -1554,7 +1554,7 @@ describe('template sends', () => {
     await optIn('+919811100411');
     await optIn('+919811100412');
     const owner = await fx.ctx(c, c.owner);
-    const campaigns = createCampaignsService(deps());
+    const campaigns = createCampaignsService({ ...deps(), notices: fx.notices() });
     await campaigns.updateSettings(
       owner,
       { approvalRequired: false, cap: { count: 1, days: 7 }, costCurrency: null },

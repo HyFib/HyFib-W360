@@ -88,6 +88,7 @@ import {
   type PlanChoicesService,
   type RefundRequestsService,
   type BusinessHoursService,
+  type CampaignNoticeDeps,
   type CampaignsService,
   type CsatService,
   type GrowthService,
@@ -166,6 +167,8 @@ export interface Runtime {
   savedReplies: SavedRepliesService;
   csat: CsatService;
   outbound: OutboundDeps;
+  /** Emails to the members who can approve a campaign waiting for approval (ADR-204). */
+  campaignNotices: CampaignNoticeDeps;
   contacts: ContactsService;
   consent: ConsentService;
   templates: TemplatesService;
@@ -330,7 +333,14 @@ async function init(): Promise<Runtime> {
   const consent = createConsentService({ db, clock: systemClock });
   const templates = createTemplatesService({ db, jobs, signer, clock: systemClock });
   const segments = createSegmentsService({ db, clock: systemClock });
-  const campaigns = createCampaignsService({ db, jobs, signer, clock: systemClock });
+  const campaignNotices: CampaignNoticeDeps = { outbox, appBaseUrl: config.APP_BASE_URL };
+  const campaigns = createCampaignsService({
+    db,
+    jobs,
+    signer,
+    clock: systemClock,
+    notices: campaignNotices,
+  });
   const rateCards = createRateCardsService({ platformDb, clock: systemClock });
   const razorpay = razorpayConfigFrom(config);
   const razorpayClient = razorpay
@@ -511,6 +521,7 @@ async function init(): Promise<Runtime> {
     savedReplies,
     csat,
     outbound,
+    campaignNotices,
     contacts,
     consent,
     templates,

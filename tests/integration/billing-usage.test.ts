@@ -53,6 +53,7 @@ async function chooseCurrency(ctx: TenantContext, currency: string) {
     jobs: fx.jobs(),
     signer: fx.signer,
     clock: systemClock,
+    notices: fx.notices(),
   });
   await campaigns.updateSettings(
     ctx,

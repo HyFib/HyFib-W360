@@ -1829,6 +1829,15 @@ their authority, or sends it back with a note. A member who cannot send campaign
 button for it. The key that submitted it can take it back (`POST /campaigns/{id}/withdraw`,
 ADR-203), and a member can in the app; either makes it a draft at a new version.
 
+**An approver was not emailed about a waiting campaign (ADR-204).** The email goes, when the
+campaign starts waiting, to the company's active owners and administrators other than the member who
+submitted it (who cannot approve their own); for a key's submission, only to those who may also send
+campaigns. Where the only approver submitted it, nobody is emailed: another owner or administrator
+approves it. The email is queued in the submission's transaction (`ops.email_outbox`, dedupe key
+`campaign-approval:<campaign id>:<version>:<user id>`) and sent by the email worker: check its dead
+letters and the email provider as for other notices. Campaigns submitted before this release, or by
+an old web server during a rollout, emailed nobody.
+
 **A draft's review through the API shows no estimate, or other counts than expected (ADR-193).**
 `GET /campaigns/{id}/review` reads the saved draft as members' review does, now: save the draft
 first. `estimate` is null without a currency (the spending cap's, or else Settings → Messaging),

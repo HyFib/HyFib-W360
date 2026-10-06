@@ -963,6 +963,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Withdrawing submissions (ADR-203):** `apiWithdrawCampaign` locks the campaign and, for a
   submission waiting for approval that the key made, calls `returnLockedCampaignToDraft`
   (`campaigns/service.ts`), which members' withdrawal and rejection call too.
+- **Approval emails (ADR-204):** `emailCampaignApprovers` (`campaigns/service.ts`) runs in the
+  submission's transaction after `awaitCampaignApproval`, from members' `submitCampaign` and from
+  `apiSubmitCampaign`. It reads the campaign once it waits for approval, picks the active members
+  whose roles grant `campaigns.approve` (and `campaigns.send` for a key's submission) other than the
+  submitter, and queues one `tenant.notice` each through `enqueueEmail`, written by
+  `campaignApprovalNotice`, with the dedupe key `campaign-approval:<campaign>:<version>:<member>`.
+  `CampaignDeps.notices`, and `campaignNotices` for the API route, carry the outbox and the app's
+  base URL.
 - **Media from links (ADR-194):** `apiSendMedia` (`api/resources.ts`) parses `type` `image`,
   `video`, `audio` or `document`, an https `link` (`isMediaLink`) and a caption except for audio,
   and sends through `sendReply` as text replies do: the content keeps the link and the caption, the

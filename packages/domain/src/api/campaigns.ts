@@ -46,9 +46,11 @@ import {
   resumeLockedCampaign,
   reviewCampaignDraft,
   awaitCampaignApproval,
+  emailCampaignApprovers,
   returnLockedCampaignToDraft,
   submitLockedDraft,
   writeLockedCampaignDraft,
+  type CampaignNoticeDeps,
   type CampaignDraftInput,
   type CampaignDraftReview,
 } from '../campaigns/service';
@@ -1190,12 +1192,13 @@ export const SUBMIT_DRAFTS_ONLY = 'Only draft campaigns are submitted.';
  * locked: the draft must be at the version given, pass the checks members' review reads, and its
  * audience is taken then (`submitLockedDraft`). The submission always waits for a member's
  * approval, whatever the company's settings, so a key never starts a campaign: the member who
- * approves it must be able to send campaigns, and it sends under their authority. A campaign this
- * key submitted is answered as it is, so a retry changes nothing; any other campaign that is not a
- * draft is refused with 409, naming its status.
+ * approves it must be able to send campaigns, and it sends under their authority; those members are
+ * emailed in the same transaction (ADR-204). A campaign this key submitted is answered as it is, so a
+ * retry changes nothing; any other campaign that is not a draft is refused with 409, naming its
+ * status.
  */
 export async function apiSubmitCampaign(
-  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+  deps: Pick<OutboundDeps, 'db' | 'clock'> & { campaignNotices: CampaignNoticeDeps },
   ctx: ApiContext,
   campaignId: string,
   input: unknown,
@@ -1230,6 +1233,7 @@ export async function apiSubmitCampaign(
       now,
     );
     await awaitCampaignApproval(tx, ctx.tenant.id, c.id, submission);
+    await emailCampaignApprovers(deps.campaignNotices, tx, ctx.tenant.id, c.id);
     await recordSystemAudit(
       tx,
       ctx.tenant.id,

@@ -21,6 +21,7 @@ import {
   rateCards,
   segments,
   sql,
+  tenants,
   users,
   type CampaignEventType,
   type CampaignStatus,
@@ -39,10 +40,12 @@ import {
 } from '../consent/service';
 import { CSV_BOM, csvLine } from '../contacts/csv';
 import { normalizePhone } from '../contacts/phone';
+import { enqueueEmail, type OutboxDeps } from '../email/outbox';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { STATUS_RANK } from '../messaging/status';
 import { queueTemplateMessage } from '../messaging/outbound';
+import { formatCompanyTime } from '../tenancy/deletion';
 import { sendSpecFor } from '../templates/definition';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import {
@@ -104,6 +107,14 @@ export interface CampaignDeps {
   jobs: JobQueue;
   signer: JobSigner;
   clock: Clock;
+  /** Emails to the members who can approve a campaign waiting for approval (ADR-204). */
+  notices: CampaignNoticeDeps;
+}
+
+/** What emailing a company's approvers needs (ADR-204): the outbox and the links' base. */
+export interface CampaignNoticeDeps {
+  outbox: OutboxDeps;
+  appBaseUrl: string;
 }
 
 // Settings ---------------------------------------------------------------------------------------
@@ -1088,6 +1099,127 @@ export async function awaitCampaignApproval(
     .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
 }
 
+/**
+ * The email that a campaign waits for approval (ADR-204): who submitted it (a member, or a key whose
+ * submission sends under the approver's authority, ADR-202), how many contacts it would reach and
+ * when it would start once approved, in the campaign's time zone. Counts only, never contacts.
+ */
+export function campaignApprovalNotice(input: {
+  campaignName: string;
+  submitter: { kind: 'member' | 'key'; name: string };
+  pending: number;
+  total: number;
+  /** When it is set to start, or null when it starts once approved. */
+  startsAt: Date | null;
+  /** The campaign's time zone, the one its page shows its schedule in. */
+  timeZone: string;
+}): { subject: string; lines: string[] } {
+  const count = (n: number) => n.toLocaleString('en-IN');
+  const by =
+    input.submitter.kind === 'key' ? `The API key “${input.submitter.name}”` : input.submitter.name;
+  return {
+    subject: `Campaign “${input.campaignName}” waits for your approval`,
+    lines: [
+      `${by} submitted the campaign “${input.campaignName}”, and it waits for a member's approval.`,
+      `It would be sent to ${count(input.pending)} of the ${count(input.total)} ${input.total === 1 ? 'contact' : 'contacts'} in its audience.`,
+      input.startsAt
+        ? `Once approved, it starts at ${formatCompanyTime(input.startsAt, input.timeZone)}, or at once if that time has passed.`
+        : 'Once approved, it starts at once.',
+      input.submitter.kind === 'key'
+        ? 'Approving it needs permission to send campaigns, as it then sends under your authority. You can also send it back with a note.'
+        : 'Approve it, or send it back with a note, on its page.',
+    ],
+  };
+}
+
+/**
+ * Emails the members who can approve a campaign that now waits for approval (ADR-204), in the
+ * submission's transaction, so a refused submission emails nobody: active members whose roles
+ * grant `campaigns.approve`, except the member who submitted it, and for a key's submission only
+ * those who may also send campaigns, as approving it needs (ADR-202). Returns how many it emailed.
+ */
+export async function emailCampaignApprovers(
+  notices: CampaignNoticeDeps,
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+): Promise<number> {
+  const [c] = await tx
+    .select({
+      name: campaigns.name,
+      status: campaigns.status,
+      version: campaigns.version,
+      scheduleKind: campaigns.scheduleKind,
+      scheduledAt: campaigns.scheduledAt,
+      audienceCount: campaigns.audienceCount,
+      skippedCount: campaigns.skippedCount,
+      submittedByUserId: campaigns.submittedByUserId,
+      submittedByApiKeyId: campaigns.submittedByApiKeyId,
+      timezone: campaigns.timezone,
+      company: tenants.name,
+      slug: tenants.slug,
+    })
+    .from(campaigns)
+    .innerJoin(tenants, eq(tenants.id, campaigns.tenantId))
+    .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
+  if (!c || c.status !== 'pending_approval') return 0;
+  let submitter: { kind: 'member' | 'key'; name: string };
+  if (c.submittedByApiKeyId) {
+    const [key] = await tx
+      .select({ name: apiKeys.name })
+      .from(apiKeys)
+      .where(and(eq(apiKeys.tenantId, tenantId), eq(apiKeys.id, c.submittedByApiKeyId)));
+    // The foreign key keeps the key that submitted a campaign (migration 0140).
+    if (!key) throw new Error(`Campaign ${campaignId} names an API key that does not exist`);
+    submitter = { kind: 'key', name: key.name };
+  } else {
+    const [member] = c.submittedByUserId
+      ? await tx.select({ name: users.name }).from(users).where(eq(users.id, c.submittedByUserId))
+      : [];
+    submitter = { kind: 'member', name: member?.name ?? 'A member' };
+  }
+  const members = await tx
+    .select({ userId: users.id, email: users.email, roles: memberships.roles })
+    .from(memberships)
+    .innerJoin(users, eq(users.id, memberships.userId))
+    .where(and(eq(memberships.tenantId, tenantId), eq(memberships.status, 'active')))
+    .orderBy(users.id);
+  const approvers = members.filter((m) => {
+    const granted = permissionsForRoles(m.roles as TenantRole[]);
+    return (
+      granted.has('campaigns.approve') &&
+      m.userId !== c.submittedByUserId &&
+      (submitter.kind === 'member' || granted.has('campaigns.send'))
+    );
+  });
+  const { subject, lines } = campaignApprovalNotice({
+    campaignName: c.name,
+    submitter,
+    pending: c.audienceCount - c.skippedCount,
+    total: c.audienceCount,
+    startsAt: c.scheduleKind === 'now' ? null : c.scheduledAt,
+    timeZone: c.timezone,
+  });
+  const url = new URL(`/c/${c.slug}/campaigns/${campaignId}`, notices.appBaseUrl).toString();
+  for (const approver of approvers) {
+    await enqueueEmail(notices.outbox, tx, {
+      to: approver.email,
+      tenantId,
+      // One email per approver for each submission: a submission raises the campaign's version.
+      dedupeKey: `campaign-approval:${campaignId}:${c.version}:${approver.userId}`,
+      payload: {
+        kind: 'tenant.notice',
+        companyName: c.company,
+        subject,
+        lines,
+        url,
+        actionLabel: 'Review campaign',
+      },
+    });
+  }
+  return approvers.length;
+}
+
 // Service ----------------------------------------------------------------------------------------
 
 export function createCampaignsService(deps: CampaignDeps) {
@@ -1440,6 +1572,7 @@ export function createCampaignsService(deps: CampaignDeps) {
         const settings = await loadCampaignSettings(tx, ctx.tenant.id);
         if (settings.approvalRequired) {
           await awaitCampaignApproval(tx, ctx.tenant.id, campaignId, submission);
+          await emailCampaignApprovers(deps.notices, tx, ctx.tenant.id, campaignId);
         } else {
           await launch(
             tx,

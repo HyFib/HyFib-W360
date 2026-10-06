@@ -8175,3 +8175,32 @@ Decision:
 - **No migration.**
 
 Not built: notifying approvers of a waiting campaign, and a key withdrawing what a member submitted.
+
+## ADR-204 Emailing approvers when a campaign waits for approval (P5-08) (2026-10-06)
+
+Context: a campaign that waits for approval (a member's submission where the company requires
+approval, and every key's submission, ADR-202) waited until an approver happened to open Campaigns:
+nobody was told. A key's submission made this worse, as nobody in the company had pressed a button.
+
+Decision:
+
+- **Who:** the company's active members whose roles grant `campaigns.approve` (owners and
+  administrators), except the member who submitted it, who cannot approve their own (four-eyes); for
+  a key's submission only those who may also send campaigns, as approving it needs (ADR-202). Today
+  every role that approves also sends; the check keeps the rule if roles change.
+- **When:** in the submission's transaction, through the encrypted email outbox
+  (`emailCampaignApprovers`, called by members' `submitCampaign` and by `apiSubmitCampaign`), so a
+  refused submission emails nobody. The outbox's dedupe key is the campaign, its version after the
+  submission and the approver: a retry answered as it is adds nothing, and a new submission after a
+  withdrawal or a rejection is a new version and emails again. A submission that starts at once (no
+  approval needed) emails nobody.
+- **What:** a company notice naming who submitted it (the member, or the key by name), how many of
+  its audience it would reach, when it starts once approved (in the campaign's time zone, as its
+  page shows it) and a link to its page, where the member signs in and is authorized as usual.
+  Counts only, never contacts. For a key's submission it adds that approving needs permission to
+  send campaigns, as the campaign then sends under the approver's authority.
+- **No migration and no setting:** the email kind exists (`tenant.notice`), and the services'
+  dependencies now carry the outbox and the app's base URL (`CampaignDeps.notices`).
+
+Not built: telling the submitter that their campaign was approved or sent back, reminders while a
+campaign keeps waiting, and email preferences.

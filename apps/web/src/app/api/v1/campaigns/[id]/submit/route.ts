@@ -14,7 +14,14 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     request,
     async ({ ctx, runtime, body }) => ({
       status: 200,
-      body: { data: await apiSubmitCampaign(runtime.outbound, ctx, id, body) },
+      body: {
+        data: await apiSubmitCampaign(
+          { ...runtime.outbound, campaignNotices: runtime.campaignNotices },
+          ctx,
+          id,
+          body,
+        ),
+      },
     }),
     { json: true },
   );

@@ -1,5 +1,51 @@
 # Progress
 
+## 2026-10-06 — Phase 5: emailing approvers when a campaign waits for approval (P5-08, ADR-204)
+
+Status: **Implemented; its database and browser tests run in CI only.** A campaign waiting for
+approval, a key's submission included, waited until an approver opened Campaigns. The local
+PostgreSQL is unavailable (its Docker daemon stopped), so the integration tests and the changed e2e
+test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-204):** the active owners and administrators other than the submitter (for a key's
+  submission, those who may also send), emailed in the submission's transaction, once per
+  submission; counts and a link only; no migration.
+- **Domain:** `campaignApprovalNotice` and `emailCampaignApprovers`, called by members'
+  `submitCampaign` and by `apiSubmitCampaign`; `CampaignDeps.notices`.
+- **Web:** the runtime passes the outbox and the app's base URL to the campaigns service and to the
+  submit route.
+- **Tests:**
+  - Unit (3 new in `campaigns/approval-notice.test.ts`): the email's text for a member's and a key's
+    submission, its limits with the longest names and its escaping.
+  - Integration (2 new in `api-campaigns.test.ts`): who is emailed for a key's and a member's
+    submission, and when nobody is. The integration fixture gives services' notices
+    (`fx.notices()`). Written for CI; not run here.
+  - E2E (1 changed in `campaigns.spec.ts`): the owner receives the email for a key's submission and
+    its link opens the campaign. Written for CI; not run here.
+- **Docs:** ADR-204; SECURITY; ARCHITECTURE; THREAT-MODEL T198; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-08; feature matrix H-021 (whose authority line now names the approver of a key's submission).
+- **Mutation checks:** 10 deliberate regressions tried, all caught on the unit-tested parts.
+  Choosing the recipients needs the database, so its regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 893 passed (84 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 10 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Telling the submitter that their campaign was approved or sent back, reminders while a campaign
+  keeps waiting, email preferences, and a key withdrawing what a member submitted.
+
 ## 2026-10-06 — Phase 5: withdrawing a key's campaign submission through the API (P5-08, ADR-203)
 
 Status: **Implemented; its database and browser tests run in CI only.** A key submitted drafts but

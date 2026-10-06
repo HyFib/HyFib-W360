@@ -98,7 +98,7 @@ interface Setup {
 async function setup(): Promise<Setup> {
   const c = await fx.company();
   const clock = new TestClock();
-  const deps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock };
+  const deps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock, notices: fx.notices() };
   const templates = createTemplatesService(deps);
   const owner = await fx.ctx(c, c.owner);
   const { id: templateId } = await templates.createDraft(owner, {

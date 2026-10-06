@@ -8,7 +8,7 @@ import {
   standInRequests,
   statusUpdate,
 } from './messaging-support';
-import { signUpAndVerify, uniqueEmail } from './support';
+import { firstLink, signUpAndVerify, uniqueEmail, waitForEmailContaining } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
 const standIn = `http://127.0.0.1:${process.env.E2E_GRAPH_PORT}`;
@@ -541,7 +541,21 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
     data: { expectedVersion: launch.version + 2 },
   });
   expect(resubmitted.status()).toBe(200);
-  await page.goto(`/c/${slug}/campaigns/${launch.id}`);
+  // The owner, who approves and sends campaigns, is emailed each submission (ADR-204), with a link
+  // to the campaign's page.
+  const approvalMail = await waitForEmailContaining(
+    email,
+    'Campaign “Winter launch” waits for your approval',
+    'The API key “Campaign drafts” submitted the campaign “Winter launch”',
+    60_000,
+  );
+  expect(approvalMail).toContain(
+    `It would be sent to ${review.audience.eligible} of the ${review.audience.total}`,
+  );
+  expect(approvalMail).toContain('Approving it needs permission to send campaigns');
+  const reviewLink = firstLink(approvalMail);
+  expect(new URL(reviewLink).pathname).toBe(`/c/${slug}/campaigns/${launch.id}`);
+  await page.goto(reviewLink);
   await expect(
     page.getByText('Submitted through the API by the key “Campaign drafts”'),
   ).toBeVisible();

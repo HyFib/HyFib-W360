@@ -17,6 +17,7 @@ import {
   apiUpdateCampaign,
   apiWithdrawCampaign,
   authenticateApiToken,
+  campaignApprovalNotice,
   createApiKeysService,
   createCampaignsService,
   createConsentService,
@@ -25,6 +26,7 @@ import {
   createTemplatesService,
   createWebhooksService,
   processSendIntent,
+  outboxAad,
   processTemplateSubmit,
   runCampaignTick,
   syncTemplates,
@@ -35,6 +37,7 @@ import {
   type RecipientOutcome,
   type TemplateDefinition,
 } from '@w360/domain';
+import { acceptInvitation, createUser, invite } from './helpers';
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
 
 /**
@@ -78,6 +81,7 @@ beforeEach(() => {
 const scopeOf = (c: Company): TenantScope => authorizedTenantScope(c.tenant.id, null);
 const deps = () => ({ db: fx.dbs.app });
 const writeDeps = () => ({ db: fx.dbs.app, clock: systemClock });
+const submitDeps = () => ({ ...writeDeps(), campaignNotices: fx.notices() });
 
 const promo: TemplateDefinition = {
   category: 'MARKETING',
@@ -119,7 +123,13 @@ async function refusal(promise: Promise<unknown>) {
 async function setup() {
   const c = await fx.company();
   const clock = new TestClock();
-  const serviceDeps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock };
+  const serviceDeps = {
+    db: fx.dbs.app,
+    jobs: fx.jobs(),
+    signer: fx.signer,
+    clock,
+    notices: fx.notices(),
+  };
   const owner = await fx.ctx(c, c.owner);
   const templates = createTemplatesService(serviceDeps);
   const { id: templateId } = await templates.createDraft(owner, {
@@ -1875,6 +1885,7 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
       jobs: fx.jobs(),
       signer: fx.signer,
       clock: systemClock,
+      notices: fx.notices(),
     }).createDraft(otherOwner, { name: 'Theirs' }, {});
     expect(await refusal(apiReviewCampaign(writeDeps(), writer, theirs))).toMatchObject({
       code: 'not_found',
@@ -1929,7 +1940,7 @@ describe('submitting campaign drafts through the API (ADR-202)', () => {
 
     // A stale version and a draft the checks refuse are refused, and stay drafts.
     expect(
-      await refused(apiSubmitCampaign(writeDeps(), writer, id, { expectedVersion: version + 1 })),
+      await refused(apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: version + 1 })),
     ).toEqual({
       code: 'conflict',
       message: `This draft has changed since you read it: its version is ${version}. Read it again and give the version it has.`,
@@ -1938,7 +1949,7 @@ describe('submitting campaign drafts through the API (ADR-202)', () => {
     const emptyId = (started.body as { data: { id: string } }).data.id;
     expect(
       await refused(
-        apiSubmitCampaign(writeDeps(), writer, emptyId, {
+        apiSubmitCampaign(submitDeps(), writer, emptyId, {
           expectedVersion: await versionOf(emptyId),
         }),
       ),
@@ -1957,7 +1968,7 @@ describe('submitting campaign drafts through the API (ADR-202)', () => {
     }
 
     // Submitted: its audience taken, waiting for a member's approval, the key named.
-    const submitted = await apiSubmitCampaign(writeDeps(), writer, id, {
+    const submitted = await apiSubmitCampaign(submitDeps(), writer, id, {
       expectedVersion: version,
     });
     expect(submitted).toMatchObject({
@@ -2003,12 +2014,12 @@ describe('submitting campaign drafts through the API (ADR-202)', () => {
       },
     ]);
     // A retry is answered as it is; another key cannot submit what is no longer a draft.
-    expect(await apiSubmitCampaign(writeDeps(), writer, id, { expectedVersion: version })).toEqual(
+    expect(await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: version })).toEqual(
       submitted,
     );
     const other = await apiKey(s.c, ['campaigns.write'], 'Other drafts');
     expect(
-      await refused(apiSubmitCampaign(writeDeps(), other, id, { expectedVersion: version + 1 })),
+      await refused(apiSubmitCampaign(submitDeps(), other, id, { expectedVersion: version + 1 })),
     ).toEqual({
       code: 'conflict',
       message: "Only draft campaigns are submitted. This campaign's status is pending_approval.",
@@ -2037,7 +2048,7 @@ describe('submitting campaign drafts through the API (ADR-202)', () => {
       },
     ]);
     expect(
-      await apiSubmitCampaign(writeDeps(), writer, id, { expectedVersion: version }),
+      await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: version }),
     ).toMatchObject({
       id,
       status: 'scheduled',
@@ -2050,7 +2061,7 @@ describe('submitting campaign drafts through the API (ADR-202)', () => {
     await s.contact('+919820008011', 'Asha');
     const id = await s.draft('Diwali offer');
     const first = await versionOf(id);
-    await apiSubmitCampaign(writeDeps(), writer, id, { expectedVersion: first });
+    await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: first });
     await s.campaigns.rejectCampaign(s.owner, id, { note: 'Not this week' }, {});
     expect(await stateOf(id)).toEqual([
       {
@@ -2064,9 +2075,9 @@ describe('submitting campaign drafts through the API (ADR-202)', () => {
     expect(await recipientsOf(id)).toEqual([]);
     // The version it was submitted at no longer submits it; the current one does.
     expect(
-      (await refused(apiSubmitCampaign(writeDeps(), writer, id, { expectedVersion: first }))).code,
+      (await refused(apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: first }))).code,
     ).toBe('conflict');
-    await apiSubmitCampaign(writeDeps(), writer, id, { expectedVersion: await versionOf(id) });
+    await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: await versionOf(id) });
     // A member who approves campaigns takes a key's submission back.
     await s.campaigns.withdrawCampaign(s.owner, id, {});
     expect((await stateOf(id))[0]).toMatchObject({
@@ -2125,7 +2136,7 @@ describe('withdrawing campaign submissions through the API (ADR-203)', () => {
       status: 'draft',
     });
     expect(await versionOf(id)).toBe(version);
-    await apiSubmitCampaign(writeDeps(), writer, id, { expectedVersion: version });
+    await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: version });
 
     // Another key cannot take it back, and it keeps waiting with its audience.
     expect(await refused(apiWithdrawCampaign(writeDeps(), other, id))).toEqual({
@@ -2178,7 +2189,7 @@ describe('withdrawing campaign submissions through the API (ADR-203)', () => {
     ).toEqual([{ actor_type: 'api_key', actor_id: writer.key.id, metadata: { source: 'api' } }]);
 
     // It is submitted again from its new version; once approved it is no longer withdrawn.
-    await apiSubmitCampaign(writeDeps(), writer, id, { expectedVersion: version + 2 });
+    await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: version + 2 });
     await s.campaigns.approveCampaign(s.owner, id, {}, {});
     expect(await refused(apiWithdrawCampaign(writeDeps(), writer, id))).toEqual({
       code: 'conflict',
@@ -2201,6 +2212,202 @@ describe('withdrawing campaign submissions through the API (ADR-203)', () => {
     );
     expect((await refused(apiWithdrawCampaign(writeDeps(), writer, membersId))).code).toBe(
       'forbidden',
+    );
+  });
+});
+
+describe('emailing the members who approve a waiting campaign (ADR-204)', () => {
+  const versionOf = async (id: string) =>
+    (
+      await fx.query<{ version: number }>(`SELECT version FROM app.campaigns WHERE id = $1`, [id])
+    )[0]!.version;
+  /** The company's approval emails queued in the outbox, oldest first. */
+  async function approvalEmails(tenantId: string) {
+    const rows = await fx.query<{
+      id: string;
+      to_address: string;
+      dedupe_key: string;
+      payload_ciphertext: string;
+    }>(
+      `SELECT id, to_address, dedupe_key, payload_ciphertext FROM ops.email_outbox
+        WHERE tenant_id = $1 AND dedupe_key LIKE 'campaign-approval:%' ORDER BY id`,
+      [tenantId],
+    );
+    return rows.map((r) => ({
+      to: r.to_address,
+      dedupeKey: r.dedupe_key,
+      ...(JSON.parse(fx.keyring.decryptString(r.payload_ciphertext, outboxAad(r.id))) as {
+        kind: string;
+        companyName: string;
+        subject: string;
+        lines: string[];
+        url: string;
+        actionLabel: string;
+      }),
+    }));
+  }
+  async function member(c: Company, role: 'admin' | 'supervisor', status = 'active') {
+    const user = await createUser(fx.dbs, { name: `Campaign ${role}` });
+    const { token } = await invite(fx.dbs, c.tenant, c.owner, user.email, [role]);
+    await acceptInvitation(fx.dbs, user, token);
+    await fx.query(`UPDATE app.memberships SET status = $3 WHERE tenant_id = $1 AND user_id = $2`, [
+      c.tenant.id,
+      user.id,
+      status,
+    ]);
+    return user;
+  }
+  const companyName = async (c: Company) =>
+    (
+      await fx.query<{ name: string }>('SELECT name FROM app.tenants WHERE id = $1', [c.tenant.id])
+    )[0]!.name;
+
+  it("emails a key's submission once to the active members who approve and send campaigns, in its transaction, with its counts and a link", async () => {
+    const s = await setup();
+    const admin = await member(s.c, 'admin');
+    await member(s.c, 'admin', 'suspended');
+    await member(s.c, 'supervisor');
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Campaign drafts');
+    await s.contact('+919820008101', 'Asha');
+    await s.contact('+919820008102', 'Ravi');
+    await s.contact('+919820008103', 'Meena', false);
+    const id = await s.draft('Festive sale');
+    const version = await versionOf(id);
+    // A refused submission emails nobody.
+    await expect(
+      apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: version + 1 }),
+    ).rejects.toThrow('This draft has changed since you read it');
+    expect(await approvalEmails(s.c.tenant.id)).toEqual([]);
+
+    await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: version });
+    const expected = campaignApprovalNotice({
+      campaignName: 'Festive sale',
+      submitter: { kind: 'key', name: 'Campaign drafts' },
+      pending: 2,
+      total: 3,
+      startsAt: null,
+      timeZone: 'Asia/Kolkata',
+    });
+    expect(expected.lines.slice(0, 3)).toEqual([
+      "The API key “Campaign drafts” submitted the campaign “Festive sale”, and it waits for a member's approval.",
+      'It would be sent to 2 of the 3 contacts in its audience.',
+      'Once approved, it starts at once.',
+    ]);
+    const sent = await approvalEmails(s.c.tenant.id);
+    // The owner and the active administrator approve and send campaigns; the suspended
+    // administrator, the supervisor, the marketer and the agent do not.
+    expect(sent.map((e) => e.to).sort()).toEqual([admin.email, s.c.owner.email].sort());
+    for (const [email, userId] of [
+      [admin.email, admin.id],
+      [s.c.owner.email, s.c.owner.id],
+    ] as const) {
+      expect(sent.find((e) => e.to === email)).toEqual({
+        to: email,
+        dedupeKey: `campaign-approval:${id}:${version + 1}:${userId}`,
+        kind: 'tenant.notice',
+        companyName: await companyName(s.c),
+        subject: 'Campaign “Festive sale” waits for your approval',
+        lines: expected.lines,
+        url: `http://localhost:3000/c/${s.c.tenant.slug}/campaigns/${id}`,
+        actionLabel: 'Review campaign',
+      });
+    }
+
+    // A retry is answered as it is and emails nobody again, nor does a withdrawal.
+    await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: version });
+    await apiWithdrawCampaign(writeDeps(), writer, id);
+    expect(await approvalEmails(s.c.tenant.id)).toHaveLength(2);
+    // Submitted again, it is a new submission at a new version: each approver hears of it.
+    const again = await versionOf(id);
+    await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: again });
+    const all = await approvalEmails(s.c.tenant.id);
+    expect(
+      all
+        .map((e) => e.dedupeKey)
+        .slice(2)
+        .sort(),
+    ).toEqual(
+      [admin.id, s.c.owner.id].map((u) => `campaign-approval:${id}:${again + 1}:${u}`).sort(),
+    );
+  });
+
+  it("emails a member's submission to the other approvers when the company requires approval, and nobody when it starts at once", async () => {
+    const s = await setup();
+    const admin = await member(s.c, 'admin');
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Campaign drafts');
+    await s.contact('+919820008111', 'Asha');
+    // Without approval a member's submission starts: nobody is asked to approve it.
+    expect((await s.campaigns.getSettings(s.owner)).approvalRequired).toBe(false);
+    const flash = await s.draft('Flash sale');
+    await s.campaigns.submitCampaign(s.owner, flash, { expectedVersion: 1 }, {});
+    expect(
+      (
+        await fx.query<{ status: string }>(`SELECT status FROM app.campaigns WHERE id = $1`, [
+          flash,
+        ])
+      )[0]?.status,
+    ).toBe('scheduled');
+    expect(await approvalEmails(s.c.tenant.id)).toEqual([]);
+
+    await s.campaigns.updateSettings(
+      s.owner,
+      { approvalRequired: true, cap: null, costCurrency: null },
+      {},
+    );
+    // The marketer's submission goes to the owner and the administrator, naming the marketer.
+    const byMarketer = await s.draft('Diwali offer');
+    await s.campaigns.submitCampaign(
+      await fx.ctx(s.c, s.c.marketer),
+      byMarketer,
+      { expectedVersion: 1 },
+      {},
+    );
+    const first = await approvalEmails(s.c.tenant.id);
+    expect(first.map((e) => e.to).sort()).toEqual([admin.email, s.c.owner.email].sort());
+    expect(first[0]?.lines).toEqual(
+      campaignApprovalNotice({
+        campaignName: 'Diwali offer',
+        submitter: { kind: 'member', name: 'Marketer' },
+        pending: 1,
+        total: 1,
+        startsAt: null,
+        timeZone: 'Asia/Kolkata',
+      }).lines,
+    );
+
+    // The owner's own submission, set to start later in London, goes to the administrator only,
+    // with the start in the campaign's time zone.
+    const byOwner = await s.draft('Winter launch');
+    const local = `${new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10)}T09:30`;
+    await apiUpdateCampaign(deps(), writer, byOwner, {
+      expectedVersion: 1,
+      schedule: { kind: 'later', local, timezone: 'Europe/London' },
+    });
+    const edited = await versionOf(byOwner);
+    await s.campaigns.submitCampaign(s.owner, byOwner, { expectedVersion: edited }, {});
+    const [scheduled] = await fx.query<{ scheduled_at: Date }>(
+      `SELECT scheduled_at FROM app.campaigns WHERE id = $1`,
+      [byOwner],
+    );
+    const second = (await approvalEmails(s.c.tenant.id)).slice(2);
+    expect(second).toEqual([
+      expect.objectContaining({
+        to: admin.email,
+        dedupeKey: `campaign-approval:${byOwner}:${edited + 1}:${admin.id}`,
+        subject: 'Campaign “Winter launch” waits for your approval',
+        lines: campaignApprovalNotice({
+          campaignName: 'Winter launch',
+          submitter: { kind: 'member', name: 'Owner' },
+          pending: 1,
+          total: 1,
+          startsAt: scheduled!.scheduled_at,
+          timeZone: 'Europe/London',
+        }).lines,
+        url: `http://localhost:3000/c/${s.c.tenant.slug}/campaigns/${byOwner}`,
+      }),
+    ]);
+    expect(second[0]?.lines[2]).toMatch(
+      /^Once approved, it starts at \d+ \w+ \d{4} at 09:30 (GMT|BST), or at once/,
     );
   });
 });

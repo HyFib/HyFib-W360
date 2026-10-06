@@ -403,6 +403,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-203 has no migration: until the web rollout ends, an old web server answers
    `POST /campaigns/{id}/withdraw` with 404.
 
+   ADR-204 has no migration: until the web rollout ends, a submission an old web server takes emails
+   nobody, and approvers find it on the Campaigns page as before.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back
