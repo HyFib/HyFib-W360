@@ -239,6 +239,7 @@ test('an automation creates a CRM task and a deal about the customer (ADR-244, A
   await page.locator('#step-create-task-1-title').fill('Call {{name}} back');
   await page.locator('#step-create-task-1-assignee').selectOption({ label: 'Tomas Tasks' });
   await page.locator('#step-create-task-1-due').fill('4');
+  await page.locator('#step-create-task-1-remind').check();
   await page.locator('#step-welcome-next').selectOption('create-task-1');
   // Then a deal in the pipeline's first stage, worth ₹2,500.50, owned by the owner.
   await page.getByLabel('Add a step').selectOption('create_deal');
@@ -253,7 +254,9 @@ test('an automation creates a CRM task and a deal about the customer (ADR-244, A
   // The simulator says what the steps would do, and creates nothing.
   await page.getByRole('button', { name: 'Start', exact: true }).click();
   await expect(
-    page.getByText('CRM task “Call Asha back” created for Tomas Tasks, due in 4 hours.'),
+    page.getByText(
+      'CRM task “Call Asha back” created for Tomas Tasks, due in 4 hours, with a reminder email when due.',
+    ),
   ).toBeVisible();
   await expect(
     page.getByText(
@@ -278,6 +281,8 @@ test('an automation creates a CRM task and a deal about the customer (ADR-244, A
     await expect(task).toBeVisible({ timeout: 2_000 });
   }).toPass({ timeout: 60_000 });
   await expect(task.getByRole('link', { name: /Priya Customer/ })).toBeVisible();
+  // Its reminder is set for the due time (ADR-246).
+  await expect(task).toContainText('Reminder set');
   await expectNoHorizontalOverflow(page);
 
   // The deal is on the board (the run's next step), and its page says an automation created it.

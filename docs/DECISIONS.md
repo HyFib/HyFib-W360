@@ -9441,3 +9441,20 @@ Decision:
 
 Not built: moving an existing deal from an automation, setting the expected close date, and choosing
 what happens when an open deal exists (update it, or create another).
+
+## ADR-246 Reminder emails for the tasks automations create (P4-01, P4-04) (2026-10-06)
+
+Context: a task an automation created (ADR-244) reached its member only through the CRM's task list,
+while a member creating a task can ask for a reminder email.
+
+Decision:
+
+- A task step may ask to email the member a reminder when the task is due (`remind`, only with a due
+  time; publishing refuses a reminder without one). The task is created with its reminder at the due
+  time and the `crm.reminder` job queued in the step's transaction, exactly as a member's task with
+  a reminder, so the reminder rules apply unchanged: it is sent once, only while the task is open
+  and the member can still use the CRM, and not when more than a day late. Versions saved before
+  have no `remind` and send no reminder. No migration.
+
+Not built: a reminder at another time than the due time, and reminders for the deals automations
+create.

@@ -140,6 +140,8 @@ export type RunEffect =
       title: string;
       assigneeMembershipId: string;
       dueInHours: number | null;
+      /** Email the member when the task is due (ADR-246): only with a due time. */
+      remind: boolean;
     }
   /**
    * A CRM deal for the run's contact and conversation, created by the automation (ADR-245): the
@@ -590,6 +592,7 @@ export function advance(input: AdvanceInput): StepResult {
           ),
           assigneeMembershipId: current.assigneeMembershipId,
           dueInHours: current.dueInHours,
+          remind: current.remind === true && current.dueInHours !== null,
         };
         return moveTo(current.next, base, [effect], 'created', null);
       }

@@ -253,7 +253,7 @@ export function AutomationSimulator({
           out.push({
             who: 'note',
             text: effect.title
-              ? `CRM task “${effect.title}” created for ${member?.name ?? 'a member'}${due}.`
+              ? `CRM task “${effect.title}” created for ${member?.name ?? 'a member'}${due}${effect.remind ? ', with a reminder email when due' : ''}.`
               : 'No CRM task created: its title is empty after filling in placeholders.',
           });
           break;

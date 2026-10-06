@@ -1,6 +1,6 @@
 'use client';
 import type { ReactNode } from 'react';
-import { Button, Field, Input, Select, Textarea } from '@w360/ui';
+import { Button, Checkbox, Field, Input, Select, Textarea } from '@w360/ui';
 import {
   ANSWER_FORMATS,
   AUTOMATION_LIMITS,
@@ -788,6 +788,16 @@ export function NodeFields({
               )}
             </Field>
           </div>
+          <label htmlFor={`${p}-remind`} className="flex items-center gap-2 text-sm">
+            <Checkbox
+              id={`${p}-remind`}
+              checked={node.remind === true}
+              onChange={(e) =>
+                patch(node, e.target.checked ? { remind: true } : { remind: undefined })
+              }
+            />
+            Email them a reminder when it is due
+          </label>
           <NextSelect
             id={`${p}-next`}
             label="Then"

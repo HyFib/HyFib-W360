@@ -580,6 +580,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    automations with deal steps on old web servers. Until the web rollout ends, an old web server
    shows a deal an automation created without saying who created it.
 
+   ADR-246 has no migration. An old worker reads a task step's reminder as absent and creates the
+   task without it, so roll the workers out before the web tier as usual.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

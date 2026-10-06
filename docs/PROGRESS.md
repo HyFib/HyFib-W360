@@ -1,5 +1,32 @@
 # Progress
 
+## 2026-10-06 — Reminder emails for the tasks automations create (P4-01, P4-04, ADR-246)
+
+Status: **Implemented; its database and browser tests run in CI only.** No migration. The local
+PostgreSQL is unavailable, so the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Domain:** `remind` on task steps (checked against a due time), the effect's `remind`, and
+  `applyTaskEffect` setting the reminder at the due time and queuing the `crm.reminder` job.
+- **Web:** "Email them a reminder when it is due" on the task step, and its line in the simulator.
+- **Tests:** unit (1 new in `task-step.test.ts`); integration (1 new in `automations.test.ts`: the
+  pending reminder at the due time and its job); e2e (the task step's reminder ticked and shown on
+  the task list). The integration and e2e tests were written for CI; not run here.
+- **Docs:** ADR-246; SECURITY; DEPLOYMENT; BACKLOG P4-04; feature matrix H-012.
+- **Mutation checks:** 6/6 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 1056 passed (112 files)                                         |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 6/6 deliberate regressions caught                               |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
 ## 2026-10-06 — Automation steps that create a CRM deal (P4-01, P4-04, H-012, ADR-245)
 
 Status: **Implemented; its database and browser tests run in CI only.** Automations could create

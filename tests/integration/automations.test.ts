@@ -2039,7 +2039,7 @@ describe('automations that tag the conversation (ADR-222)', () => {
 
 describe('automations that create CRM tasks (ADR-244)', () => {
   /** A callback task for `assignee`, due in 4 hours, then a message to the customer. */
-  const callback = (assignee: string) => ({
+  const callback = (assignee: string, task: Record<string, unknown> = {}) => ({
     version: 1,
     start: 'task',
     nodes: [
@@ -2050,6 +2050,7 @@ describe('automations that create CRM tasks (ADR-244)', () => {
         assigneeMembershipId: assignee,
         dueInHours: 4,
         next: 'thanks',
+        ...task,
       },
       { id: 'thanks', type: 'send_text', text: 'Someone will call you soon.', next: null },
     ],
@@ -2125,6 +2126,36 @@ describe('automations that create CRM tasks (ADR-244)', () => {
         ['thanks', 'sent', null],
       ]),
     );
+  });
+
+  it('emails the member a reminder when the task is due, when the step asks (ADR-246)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    await publish(
+      owner,
+      'Callbacks',
+      keyword('call me'),
+      callback(agent.membership.id, { remind: true }),
+    );
+    const conversationId = await inbound(c, waId(), 'call me tomorrow');
+    const run = await onlyRun(conversationId);
+    expect((await drive(c, conversationId, run.id)).outcome).toBe('ended');
+    const [task] = await fx.query<{
+      id: string;
+      due_at: Date;
+      remind_at: Date | null;
+      reminder_state: string;
+    }>(`SELECT id, due_at, remind_at, reminder_state FROM app.crm_tasks WHERE tenant_id = $1`, [
+      c.tenant.id,
+    ]);
+    expect(task).toMatchObject({ reminder_state: 'pending', remind_at: task!.due_at });
+    // The reminder job waits for the due time, as for a member's task with a reminder.
+    const [job] = await fx.query<{ start_after: Date }>(
+      `SELECT start_after FROM pgboss.job WHERE name = $1 AND singleton_key = $2`,
+      [QUEUES.crmReminder.name, `${task!.id}:${task!.due_at.getTime()}`],
+    );
+    expect(job?.start_after).toEqual(task!.due_at);
   });
 
   it('creates no task for a member who can no longer use the CRM, says why and goes on', async () => {

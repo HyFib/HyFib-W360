@@ -401,6 +401,8 @@ const createTaskNode = z.object({
     .min(1, 'At least 1 hour.')
     .max(AUTOMATION_LIMITS.taskDueHours, 'At most 90 days (2160 hours).')
     .nullable(),
+  /** Email the member when the task is due (ADR-246); needs a due time. Absent: no reminder. */
+  remind: z.boolean().optional(),
   next: nextSchema,
 });
 
@@ -1496,6 +1498,13 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
     }
     if (node.type === 'handoff' && node.teamId && refs.teamIds && !refs.teamIds.has(node.teamId)) {
       issues.push({ level: 'error', nodeId: node.id, message: 'The team no longer exists.' });
+    }
+    if (node.type === 'create_task' && node.remind && node.dueInHours === null) {
+      issues.push({
+        level: 'error',
+        nodeId: node.id,
+        message: 'Give the task a due time for its reminder, or send no reminder.',
+      });
     }
     if (
       node.type === 'create_task' &&

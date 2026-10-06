@@ -143,6 +143,7 @@ describe('steps that create a CRM task (ADR-244)', () => {
           title: 'Call Asha Rao about the blue kettle',
           assigneeMembershipId: MEMBER,
           dueInHours: 24,
+          remind: false,
         },
       ],
       status: 'running',
@@ -162,7 +163,13 @@ describe('steps that create a CRM task (ADR-244)', () => {
       now: NOW,
     });
     expect(none.effects).toEqual([
-      { kind: 'create_task', title: '', assigneeMembershipId: MEMBER, dueInHours: null },
+      {
+        kind: 'create_task',
+        title: '',
+        assigneeMembershipId: MEMBER,
+        dueInHours: null,
+        remind: false,
+      },
     ]);
     // Only spaces and line breaks filled in: empty too.
     const blank = advance({
@@ -195,5 +202,42 @@ describe('steps that create a CRM task (ADR-244)', () => {
     });
     const title = (long.effects[0] as { title: string }).title;
     expect([...title]).toHaveLength(AUTOMATION_LIMITS.taskTitleLength);
+  });
+
+  it('emails the member a reminder when the task is due, only when asked and with a due time (ADR-246)', () => {
+    const graph = graphOf(graphInput({ remind: true }));
+    expect(checkGraph(graph, { crmMemberIds: new Set([MEMBER]) })).toEqual([]);
+    const result = advance({
+      graph,
+      state: atTask(graph, { product: 'kettle' }),
+      event: { kind: 'continue' },
+      facts,
+      runId: RUN,
+      now: NOW,
+    });
+    expect(result.effects).toMatchObject([{ kind: 'create_task', dueInHours: 24, remind: true }]);
+    // Without a due time a reminder has no time: refused when published.
+    const undated = graphOf(graphInput({ remind: true, dueInHours: null }));
+    expect(checkGraph(undated, { crmMemberIds: new Set([MEMBER]) })).toEqual([
+      {
+        level: 'error',
+        nodeId: 'task',
+        message: 'Give the task a due time for its reminder, or send no reminder.',
+      },
+    ]);
+    // Run anyway (a draft tested in the browser), it creates the task without a reminder.
+    expect(
+      advance({
+        graph: undated,
+        state: atTask(undated, { product: 'kettle' }),
+        event: { kind: 'continue' },
+        facts,
+        runId: RUN,
+        now: NOW,
+      }).effects,
+    ).toMatchObject([{ kind: 'create_task', dueInHours: null, remind: false }]);
+    // Absent (versions saved before) or false: no reminder.
+    expect(graphOf(graphInput()).nodes.find((n) => n.id === 'task')).not.toHaveProperty('remind');
+    expect(checkGraph(graphOf(graphInput({ remind: false, dueInHours: null })))).toEqual([]);
   });
 });

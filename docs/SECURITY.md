@@ -278,6 +278,9 @@ Phase 4 rules (automations, P4-01):
   longer use the CRM is left out); the deal is for the run's contact and conversation, in an active
   stage of an active pipeline checked when publishing and again when the step runs, and is recorded
   as created by the automation. A contact with an open deal in the pipeline gets no second one.
+- Task reminders (ADR-246) follow the CRM's reminder rules: one email to the task's member at the
+  due time, only while the task is open and the member can still use the CRM, carrying the task's
+  title and a link to the task list, never the conversation.
 
 Phase 4 rules (automation web requests, P4-02):
 

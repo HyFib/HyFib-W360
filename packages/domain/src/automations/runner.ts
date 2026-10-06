@@ -35,6 +35,7 @@ import { lockCampaignSends, marketingCapReached } from '../campaigns/frequency-c
 import { checkTemplateEligibility } from '../consent/service';
 import { MAX_TAGS_PER_CONTACT, coerceFieldValue } from '../contacts/fields';
 import { addActivity, memberRefs } from '../crm/common';
+import { scheduleTaskReminder } from '../crm/reminders';
 import { phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { businessStatusAt, loadBusinessCalendar } from '../inbox/business-hours';
 import { MAX_TAGS_PER_CONVERSATION } from '../inbox/conversation-tags';
@@ -704,6 +705,7 @@ async function applyConversationEffect(
  */
 async function applyTaskEffect(
   tx: Tx,
+  deps: AutomationRunnerDeps,
   run: AutomationRun,
   effect: Extract<RunEffect, { kind: 'create_task' }>,
   now: Date,
@@ -720,16 +722,24 @@ async function applyTaskEffect(
   );
   if (!assignee?.active) return 'task_assignee_unavailable';
   const id = uuidv7();
+  const dueAt =
+    effect.dueInHours === null ? null : new Date(now.getTime() + effect.dueInHours * 3_600_000);
+  // A reminder is emailed when the task is due (ADR-246), as for a member's task with a reminder.
+  const remindAt = effect.remind ? dueAt : null;
   await tx.insert(crmTasks).values({
     id,
     tenantId: run.tenantId,
     title: effect.title,
     contactId: run.contactId,
     assigneeMembershipId: effect.assigneeMembershipId,
-    dueAt:
-      effect.dueInHours === null ? null : new Date(now.getTime() + effect.dueInHours * 3_600_000),
+    dueAt,
+    remindAt,
+    reminderState: remindAt ? 'pending' : 'none',
     createdByAutomationId: run.automationId,
   });
+  if (remindAt) {
+    await scheduleTaskReminder(deps, tx, { tenantId: run.tenantId, taskId: id, remindAt });
+  }
   await addActivity(tx, {
     tenantId: run.tenantId,
     contactId: run.contactId,
@@ -1101,7 +1111,7 @@ async function runStep(
         const note = await applyConversationEffect(tx, run, conv.assignedMembershipId, effect);
         if (note) notes.push(note);
       } else if (effect.kind === 'create_task') {
-        const note = await applyTaskEffect(tx, run, effect, now);
+        const note = await applyTaskEffect(tx, deps, run, effect, now);
         if (note) {
           notes.push(note);
           skipped = true;
