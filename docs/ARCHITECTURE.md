@@ -273,6 +273,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   all/any. They compile to parameterised SQL over `app.contacts`; erased contacts never match. A
   name condition compares the name with its surrounding spaces removed, a name of spaces only
   counted as none (ADR-143).
+  Conditions on store orders (ADR-231): `orders` and `spend` compile to a correlated `count(*)` or
+  `coalesce(sum(total_minor), 0)` over `app.commerce_store_orders` matched by
+  `customer_phone = contacts.phone_e164`, leaving out test, cancelled, deleted, refunded, voided,
+  failed, trash and draft orders, with the store and the period as parameters.
+  `assertCanUseDefinition` refuses them to a member without `commerce.read` in the preview, saving a
+  segment and a draft's audience; `preview` gives such a member a saved segment's count without its
+  sample.
 - **Campaign lifecycle** (`campaigns/service.ts`): draft → (pending_approval →) scheduled → running
   → completed, with paused and canceled. Submitting runs the readiness checks, freezes the audience
   (`campaign_recipients`, one row per contact, pending or skipped with a reason, no personal data)
@@ -1141,6 +1148,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   campaigns named; `segmentCondition` checks each one as before, naming its place; and
   `contactSearchSql` joins the search's items by its `match`, compiling a group with
   `segmentConditionsSql` as a segment of its own and a single condition as a segment of one.
+- **Conditions on store orders (ADR-231):** `orders` and `spend` are parsed as segments hold them;
+  `assertOrderConditionScope` asks for `orders.read` in searches, segments, a segment's contacts and
+  drafts' audiences, `assertStoresExist` checks a named store is the company's, and
+  `segmentCondition` refuses a currency the runtime does not know.
 - **Changing the contacts a search finds (ADR-165):** `POST /contacts/update-matching`
   (`apiUpdateMatchingContacts`) reads one page through the search's own steps (`searchPage`, shared
   with `apiSearchContacts`), then `changeContactsAlike` (`api/contacts.ts`) checks the change's

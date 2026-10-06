@@ -9033,3 +9033,40 @@ Decision:
 
 Not built: in-app notices, a second email when a wait drags on, per-team targets and calendars,
 escalation to supervisors when the assignee does not answer, and a digest across sweeps.
+
+## ADR-231 Segment conditions on store orders (W-051) (2026-10-06)
+
+Context: companies with a connected Shopify or WooCommerce store keep a copy of its orders (P4-06b),
+and members see each contact's orders, but campaigns could not be aimed at contacts by what they
+bought: those who ordered twice, those who have not ordered in 90 days, those who spent ₹5,000.
+Segments only knew contacts' own data and messages.
+
+Decision:
+
+- **Two conditions:** `orders` counts a contact's orders (at least, or fewer than, a number from 1
+  to 10,000) and `spend` totals them in one currency (at least, or less than, an amount in the
+  currency's minor unit, ISO 4217 codes the runtime knows). Each can look at the last 1 to 3,650
+  days and at one of the company's stores; left out, every order and every store. They combine with
+  the other conditions under all/any, in saved segments, campaign audiences and API searches alike.
+- **Which orders:** matched to the contact by number (`customer_phone` against the contact's E.164
+  number, as the inbox's order panel matches them); a contact without a number has none. An order
+  counts unless the store marked it as a test, cancelled, deleted, or with a status of cancelled,
+  refunded, failed, trash or checkout-draft, or a payment status of refunded, voided or expired.
+  Spend adds the totals the store reported, in the condition's currency only: no conversion, and a
+  partial refund is not taken off.
+- **SQL:** a correlated count or sum over `app.commerce_store_orders` per contact, every value a
+  parameter, filtered by the company as well as by RLS so the existing
+  `(tenant_id, customer_phone, placed_at)` index serves it. No migration.
+- **Who:** previewing or saving a segment with such a condition, and giving a campaign draft such an
+  audience, needs `commerce.read` as well as the segment or campaign permission. A saved segment
+  with one shows members who cannot read store orders how many contacts it matches, never which.
+  Through the API the conditions need `orders.read` too, wherever a key gives them (searches,
+  changing matching contacts, segments, a segment's contacts, drafts' audiences), and a store named
+  must be the company's (another company's reads as one that does not exist).
+- **Builder:** the condition types appear when the member can read store orders and the company has
+  a store (spend also needs orders in some currency); the currency list is the currencies of the
+  company's orders, and amounts are typed in major units.
+
+Not built: products or categories bought, the first or last order date, average order value, refunds
+taken off spend, and orders matched by email. Contacts without a number never match an order
+condition.

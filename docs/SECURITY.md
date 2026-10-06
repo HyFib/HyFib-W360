@@ -170,6 +170,11 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   authority and the runner pauses the campaign if that member leaves or loses `campaigns.send`.
   Per-recipient lists need `contacts.read`; the per-recipient CSV export needs `contacts.export`.
   Campaign settings (approval, frequency cap, estimate currency) need `tenant.settings.manage`.
+- Segment conditions on store orders (ADR-231: how many orders a contact placed, what they spent)
+  need `commerce.read` as well to preview or save a segment and to give a campaign draft such an
+  audience. A saved segment with one shows members without `commerce.read` how many contacts it
+  matches, never which; a store it names must be the company's. They reveal whether a contact
+  matches, never an order's contents.
 - Rate cards are platform data: only platform administrators create, publish and withdraw them
   (platform audit log). The app role reads published and withdrawn cards; estimates and Billing →
   Usage and rates use published cards only.
@@ -873,6 +878,10 @@ Phase 5 rules (Public API, P5-08):
   `contacts.read`, and `conversations.read` for a segment with a `last_message` condition, as a
   search with the same conditions does, so a segment never gives what a search could not; it reads
   in the key's company scope, erased contacts left out.
+- Conditions on store orders (ADR-231): `orders` and `spend` also need `orders.read` (granted with
+  `commerce.read`) in searches, changes to matching contacts, segments, a segment's contacts and
+  drafts' audiences, checked before anything is read; a store named must be the company's, another
+  company's answering as one that does not exist.
 - Media from links (ADR-194): a key with `messages.reply` sends a photo, a video, audio or a
   document by a link WhatsApp fetches, within the 24-hour window. HyFib never fetches the link, so
   it cannot be used to reach HyFib's network; it takes only https links with a host and no user name

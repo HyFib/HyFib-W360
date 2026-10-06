@@ -539,6 +539,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    keep their setting). Rolling workers back stops the emails; the notices stay and are honoured
    again when workers roll forward.
 
+   Segment conditions on store orders (ADR-231) need no migration. Only web servers read segments'
+   conditions: until the web rollout ends, an old web server refuses the new conditions and reports
+   a segment or a draft's audience holding one as one it cannot read (the segment page, a campaign's
+   review and the API say so). Rolling the web back leaves them so until it rolls forward; campaigns
+   already submitted keep the recipients frozen when submitted.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

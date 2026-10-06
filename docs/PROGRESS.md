@@ -1,5 +1,47 @@
 # Progress
 
+## 2026-10-06 — Segments by store orders (W-051, ADR-231)
+
+Status: **Implemented; its database tests run in CI only.** Campaigns could not be aimed at contacts
+by what they bought from the company's stores. The local PostgreSQL is unavailable, so the
+integration tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-231):** `orders` and `spend` segment conditions over the company's store orders,
+  matched by number, with a period and a store; store order access needed to use them; keys need
+  `orders.read` too; no migration.
+- **Domain:** the conditions in `campaigns/segments.ts` (schema, checks, SQL,
+  `assertCanUseDefinition`, the preview without a sample for members without store access); campaign
+  drafts' audiences checked; the API's conditions, scope checks, store and currency checks in
+  `api/contact-search.ts`, `api/segments.ts` and `api/campaigns.ts`; `orderCurrencies` in the store
+  service; OpenAPI descriptions.
+- **Web:** the segment builder's "Store orders" and "Spent in stores" conditions (count or amount,
+  period, store, currency from the company's orders) in segments and campaign drafts.
+- **Tests:**
+  - Unit (8 new in `segments.test.ts` and `contact-search.test.ts`; counts of condition types
+    updated in the API reference tests).
+  - Integration (4 in `order-segments.test.ts`). Written for CI; not run here.
+- **Docs:** ADR-231; ARCHITECTURE; SECURITY; THREAT-MODEL T218; DEPLOYMENT; BACKLOG P3-04; feature
+  matrix W-051.
+- **Mutation checks:** 27/27 deliberate regressions caught on the unit-tested parts.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 100 files, 1005 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| Mutation checks                                    | 27/27 deliberate regressions caught on the unit-tested parts  |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+### Known gaps
+
+- No browser test (it needs a connected store with orders); partial refunds are not taken off spend;
+  contacts without a number never match; products bought and order dates are not conditions.
+
 ## 2026-10-06 — Phase 3 follow-up: emails when a reply is overdue (P3-06, H-011, ADR-230)
 
 Status: **Implemented; its database tests run in CI only.** Nobody was told when a waiting

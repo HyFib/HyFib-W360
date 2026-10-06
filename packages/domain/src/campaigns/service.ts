@@ -73,6 +73,7 @@ import {
   type ScheduleAdjustment,
 } from './schedule';
 import {
+  assertCanUseDefinition,
   loadFieldTypes,
   segmentDefinitionSchema,
   checkSegmentDefinition,
@@ -1907,6 +1908,12 @@ export function createCampaignsService(deps: CampaignDeps) {
       if (!z.uuid().safeParse(campaignId).success) throw notFound('Campaign');
       const { expectedVersion, ...data } = parseInput(updateCampaignSchema, input);
       const draft = prepareCampaignDraft(data);
+      if (draft.data.audience.kind === 'conditions') {
+        assertCanUseDefinition(
+          ctx,
+          parseInput(segmentDefinitionSchema, draft.data.audience.definition),
+        );
+      }
       return db.run(ctx.scope, async (tx) => {
         const c = await lockCampaign(tx, ctx.tenant.id, campaignId);
         if (c.status !== 'draft') throw new AppError('conflict', DRAFTS_ONLY);

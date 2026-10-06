@@ -6630,7 +6630,7 @@ describe("listing a segment's contacts through the API (ADR-208)", () => {
     expect(Object.keys(op?.responses ?? {})).toEqual(expect.arrayContaining(['404', '412']));
     for (const words of [
       'Scope: `campaigns.read`.',
-      'Also needs `contacts.read`, and `conversations.read` for a segment with a `last_message` condition',
+      'Also needs `contacts.read`, `conversations.read` for a segment with a `last_message` condition and `orders.read` for one with an `orders` or `spend` condition',
       'newest first, erased contacts left out, pages that never skip or repeat a contact',
       'Each page reads at most 2,000 of the company',
       'A segment with a `problem` (GET /segments/{id}) is refused with 412 saying it',

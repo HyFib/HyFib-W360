@@ -8,6 +8,7 @@ import { FormError, FormSuccess } from '@/components/form-status';
 import {
   SegmentBuilder,
   type BuilderField,
+  type BuilderStore,
   type Definition,
 } from '@/components/segments/segment-builder';
 import type { SendableTemplate, SenderChannel } from '@/components/templates/template-sender';
@@ -70,6 +71,8 @@ export function CampaignEditor({
   segments,
   fields,
   campaigns,
+  stores,
+  orderCurrencies,
   timezones,
   currencies,
 }: {
@@ -80,6 +83,9 @@ export function CampaignEditor({
   segments: { id: string; name: string }[];
   fields: BuilderField[];
   campaigns: { id: string; name: string }[];
+  /** For audience conditions on store orders (ADR-231). */
+  stores: BuilderStore[];
+  orderCurrencies: string[];
   timezones: string[];
   currencies: string[];
 }) {
@@ -344,6 +350,8 @@ export function CampaignEditor({
             }}
             fields={fields}
             campaigns={campaigns.filter((x) => x.id !== c.id)}
+            stores={stores}
+            orderCurrencies={orderCurrencies}
             idPrefix="cmp-seg"
           />
         )}

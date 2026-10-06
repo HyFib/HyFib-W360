@@ -110,9 +110,13 @@ verification, app review, Embedded Signup configuration).
   built; its database and browser tests run only in CI]** (ADR-214: the member it sent under is told
   it finished, or that its sending period ended and how many contacts it had not reached, with its
   counts; no migration). Keys draft, review and submit campaigns for a member's approval through the
-  public API (ADR-186, ADR-193, ADR-202). **Remaining:** the 10k run in staging with real dispatch,
-  per-recipient time zones, A/B variants, messaging-tier awareness (read the number's limit from
-  Meta), media-header templates (only the API sends them, ADR-201).
+  public API (ADR-186, ADR-193, ADR-202). **[Segment conditions on store orders built; their
+  database tests run only in CI]** (ADR-231, W-051: how many orders a contact placed, or what they
+  spent in one currency, in the last days or ever, in one store or all, matched by number; members
+  need store order access to use them and keys `orders.read`; no migration). **Remaining:** the 10k
+  run in staging with real dispatch, per-recipient time zones, A/B variants, messaging-tier
+  awareness (read the number's limit from Meta), media-header templates (only the API sends them,
+  ADR-201).
 - **P3-05 Reports** — _implemented (2026-09-26); provider data verified against the Graph stand-in
   only_: persisted, versioned metric definitions; periods of whole days in the company time zone;
   messaging outcomes with denominators; estimated Meta charges from Meta's billable flag and

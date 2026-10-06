@@ -237,6 +237,28 @@ export function createStoreService(deps: StoreServiceDeps) {
       );
     },
 
+    /** The currencies of the company's store orders, for segments' spend condition (ADR-231). */
+    async orderCurrencies(ctx: TenantContext): Promise<string[]> {
+      assertCan(ctx, 'commerce.read');
+      const rows = await db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .selectDistinct({ currency: commerceStoreOrders.currency })
+            .from(commerceStoreOrders)
+            .where(
+              and(
+                eq(commerceStoreOrders.tenantId, ctx.tenant.id),
+                sql`${commerceStoreOrders.currency} is not null`,
+              ),
+            )
+            .orderBy(asc(commerceStoreOrders.currency))
+            .limit(20),
+        { accessMode: 'read only' },
+      );
+      return rows.flatMap((r) => (r.currency ? [r.currency] : []));
+    },
+
     async store(ctx: TenantContext, id: string) {
       assertCan(ctx, 'commerce.read');
       const { id: storeId } = parseInput(idSchema, { id });

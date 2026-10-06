@@ -152,7 +152,7 @@ export const API_SCOPE_INFO: Record<
   'orders.read': {
     label: 'Read WhatsApp orders',
     description:
-      "List the orders customers send from the company's WhatsApp catalog and read each one's items, total, note and status, with its conversation and contact ids. Never Payment Links or payment ids. Needs Commerce in the company's plan.",
+      "List the orders customers send from the company's WhatsApp catalog and read each one's items, total, note and status, with its conversation and contact ids. Also find contacts, and build segments and campaign audiences, by how many orders they placed in the company's connected stores and what they spent there. Never Payment Links or payment ids. Needs Commerce in the company's plan.",
     permission: 'commerce.read',
     writes: false,
   },

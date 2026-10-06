@@ -1,13 +1,19 @@
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
-import type { Tx } from '@w360/db';
+import type { TenantRole, Tx } from '@w360/db';
+import type { TenantContext } from '../authz/context';
+import { permissionsForRoles } from '../authz/permissions';
 import { validDate } from '../contacts/fields';
 import {
   FIELD_COMPARISONS,
   NAME_COMPARISONS,
+  assertCanUseDefinition,
   checkSegmentDefinition,
   comparisonTakesValue,
   fieldComparisonsFor,
   fieldConditionProblem,
+  readsStoreOrders,
+  segmentConditionsSql,
   segmentDefinitionSchema,
   type SegmentDefinition,
 } from './segments';
@@ -125,5 +131,138 @@ describe('name conditions (ADR-143)', () => {
     expect(parse({ type: 'name', op: 'equals', value: 'x'.repeat(201) }).success).toBe(false);
     expect(parse({ type: 'name', op: 'greater_than', value: 'a' }).success).toBe(false);
     expect(parse({ type: 'name', op: 'is_true' }).success).toBe(false);
+  });
+});
+
+describe('conditions on store orders (ADR-231)', () => {
+  const STORE = '0192a4c6-7a10-7000-8000-000000000001';
+  const parse = (condition: Record<string, unknown>) =>
+    segmentDefinitionSchema.safeParse({ conditions: [condition] });
+  /** A transaction whose only read finds these stores. */
+  const storesTx = (ids: string[]) =>
+    ({
+      select: () => ({ from: () => ({ where: async () => ids.map((id) => ({ id })) }) }),
+    }) as unknown as Tx;
+  const check = (conditions: SegmentDefinition['conditions'], tx: Tx = noTx) =>
+    checkSegmentDefinition(tx, 'tenant', { match: 'all', conditions }, new Map());
+
+  it('reads order counts and spend within their bounds, a store and a period optional', () => {
+    expect(parse({ type: 'orders', op: 'at_least', count: 2 }).data?.conditions).toEqual([
+      { type: 'orders', op: 'at_least', count: 2 },
+    ]);
+    expect(
+      parse({ type: 'orders', op: 'fewer_than', count: '1', days: '90', storeId: STORE }).data
+        ?.conditions,
+    ).toEqual([{ type: 'orders', op: 'fewer_than', count: 1, days: 90, storeId: STORE }]);
+    for (const wrong of [
+      { type: 'orders', op: 'at_least', count: 0 },
+      { type: 'orders', op: 'at_least', count: 10_001 },
+      { type: 'orders', op: 'at_least', count: 1.5 },
+      { type: 'orders', op: 'at_least', count: 1, days: 0 },
+      { type: 'orders', op: 'at_least', count: 1, days: 3651 },
+      { type: 'orders', op: 'more_than', count: 1 },
+      { type: 'orders', op: 'at_least', count: 1, storeId: 'store' },
+      { type: 'spend', op: 'at_least', currency: 'inr', amountMinor: 100 },
+      { type: 'spend', op: 'at_least', currency: 'INR', amountMinor: -1 },
+      { type: 'spend', op: 'at_least', currency: 'INR', amountMinor: 1.5 },
+      { type: 'spend', op: 'fewer_than', currency: 'INR', amountMinor: 1 },
+    ]) {
+      expect(parse(wrong).success, JSON.stringify(wrong)).toBe(false);
+    }
+    expect(
+      parse({ type: 'spend', op: 'less_than', currency: 'INR', amountMinor: 250_000 }).success,
+    ).toBe(true);
+  });
+
+  it('refuses a currency HyFib does not know and a store the company does not have', async () => {
+    expect(
+      await check([{ type: 'spend', op: 'at_least', currency: 'XQZ', amountMinor: 100 }]),
+    ).toBe('Choose a currency HyFib knows.');
+    expect(
+      await check([{ type: 'spend', op: 'at_least', currency: 'INR', amountMinor: 100 }]),
+    ).toBeNull();
+    const inStore = [
+      { type: 'orders' as const, op: 'at_least' as const, count: 1, storeId: STORE },
+    ];
+    expect(await check(inStore, storesTx([]))).toBe(
+      'A condition refers to a store that is no longer connected.',
+    );
+    expect(await check(inStore, storesTx([STORE]))).toBeNull();
+    const spentInStore = [
+      {
+        type: 'spend' as const,
+        op: 'at_least' as const,
+        currency: 'INR',
+        amountMinor: 1,
+        storeId: STORE,
+      },
+    ];
+    expect(await check(spentInStore, storesTx([]))).toBe(
+      'A condition refers to a store that is no longer connected.',
+    );
+  });
+
+  it('needs access to store orders to use them', () => {
+    const ctxOf = (roles: TenantRole[]) =>
+      ({ permissions: permissionsForRoles(roles) }) as unknown as TenantContext;
+    const orders: SegmentDefinition = {
+      match: 'any',
+      conditions: [
+        { type: 'tag', op: 'has', tag: 'vip' },
+        { type: 'spend', op: 'at_least', currency: 'INR', amountMinor: 1 },
+      ],
+    };
+    const tags: SegmentDefinition = {
+      match: 'all',
+      conditions: [{ type: 'tag', op: 'has', tag: 'vip' }],
+    };
+    expect(readsStoreOrders(orders)).toBe(true);
+    expect(readsStoreOrders(tags)).toBe(false);
+    expect(() => assertCanUseDefinition(ctxOf(['marketer']), orders)).not.toThrow();
+    expect(() => assertCanUseDefinition(ctxOf(['analyst']), orders)).toThrow(
+      expect.objectContaining({ code: 'forbidden' }),
+    );
+    expect(() => assertCanUseDefinition(ctxOf(['analyst']), tags)).not.toThrow();
+  });
+
+  it('counts the orders that count, by number, with every value a parameter', () => {
+    const render = (condition: SegmentDefinition['conditions'][number]) =>
+      new PgDialect().sqlToQuery(
+        segmentConditionsSql({ match: 'all', conditions: [condition] }, 'Asia/Kolkata', new Map()),
+      );
+    const placed = render({ type: 'orders', op: 'at_least', count: 3, days: 30, storeId: STORE });
+    expect(placed.sql).toContain('o.tenant_id = "app"."contacts"."tenant_id"');
+    expect(placed.sql).toContain('o.customer_phone = "app"."contacts"."phone_e164"');
+    expect(placed.sql).toContain('and o.store_id = $1::uuid');
+    expect(placed.sql).toContain('and o.placed_at > now() - make_interval(days => $2)');
+    expect(placed.sql).toContain('not o.test and o.deleted_at is null and o.cancelled_at is null');
+    expect(placed.sql).toContain(
+      "o.status not in ('cancelled', 'refunded', 'failed', 'trash', 'checkout-draft')",
+    );
+    expect(placed.sql).toContain(
+      "coalesce(o.financial_status, '') not in ('refunded', 'voided', 'expired')",
+    );
+    expect(placed.sql).toMatch(
+      /\(select count\(\*\) from app\.commerce_store_orders o[\s\S]*\) >= \$\d/,
+    );
+    expect(placed.params).toEqual([STORE, 30, 3]);
+    expect(placed.sql).not.toContain(STORE);
+    const anyTime = render({ type: 'orders', op: 'fewer_than', count: 1 });
+    expect(anyTime.sql).not.toContain('store_id');
+    expect(anyTime.sql).not.toContain('placed_at');
+    expect(anyTime.sql).toMatch(/\) < \$1\)/);
+    const spent = render({ type: 'spend', op: 'less_than', currency: 'INR', amountMinor: 500_000 });
+    expect(spent.sql).toContain('coalesce(sum(o.total_minor), 0)');
+    expect(spent.sql).toMatch(/and o\.currency = \$1\) < \$2/);
+    expect(spent.params).toEqual(['INR', 500_000]);
+    const enough = render({
+      type: 'spend',
+      op: 'at_least',
+      currency: 'INR',
+      amountMinor: 1,
+      days: 7,
+    });
+    expect(enough.sql).toMatch(/and o\.currency = \$2\) >= \$3/);
+    expect(enough.params).toEqual([7, 'INR', 1]);
   });
 });

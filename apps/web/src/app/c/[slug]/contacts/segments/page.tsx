@@ -99,6 +99,8 @@ export default async function SegmentsPage({ params }: { params: Promise<{ slug:
                 slug={ctx.tenant.slug}
                 fields={inputs.fields}
                 campaigns={inputs.campaigns}
+                stores={inputs.stores}
+                orderCurrencies={inputs.orderCurrencies}
               />
             </CardContent>
           </Card>

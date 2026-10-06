@@ -132,7 +132,9 @@ async function DraftView({
     editable ? templates.sendChannels(ctx) : Promise.resolve([]),
     editable ? sendableTemplates(ctx) : Promise.resolve([]),
     editable ? segments.listSegments(ctx) : Promise.resolve([]),
-    editable ? segmentBuilderInputs(ctx) : Promise.resolve({ fields: [], campaigns: [] }),
+    editable
+      ? segmentBuilderInputs(ctx)
+      : Promise.resolve({ fields: [], campaigns: [], stores: [], orderCurrencies: [] }),
   ]);
   const zones = Intl.supportedValuesOf('timeZone');
   const timezones = zones.includes(c.timezone) ? zones : [c.timezone, ...zones];
@@ -183,6 +185,8 @@ async function DraftView({
               segments={segmentList.map((s) => ({ id: s.id, name: s.name }))}
               fields={inputs.fields}
               campaigns={inputs.campaigns}
+              stores={inputs.stores}
+              orderCurrencies={inputs.orderCurrencies}
               timezones={timezones}
               currencies={currencies}
             />

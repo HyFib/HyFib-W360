@@ -1,5 +1,6 @@
 'use client';
 import { useState } from 'react';
+import { minorToInput, parseAmountToMinor } from '@w360/domain/crm-money';
 import { Button, Field, Input, Select } from '@w360/ui';
 import { previewSegmentAction } from '@/app/actions/campaigns';
 import { ClientButton } from '@/components/client-form';
@@ -26,7 +27,28 @@ export type Condition =
       type: 'campaign';
       campaignId: string;
       outcome: 'delivered' | 'not_delivered' | 'read' | 'replied' | 'not_replied';
+    }
+  | {
+      type: 'orders';
+      op: 'at_least' | 'fewer_than';
+      count: number;
+      days?: number | undefined;
+      storeId?: string | undefined;
+    }
+  | {
+      type: 'spend';
+      op: 'at_least' | 'less_than';
+      currency: string;
+      amountMinor: number;
+      days?: number | undefined;
+      storeId?: string | undefined;
     };
+
+/** A store whose orders conditions can count (ADR-231). */
+export interface BuilderStore {
+  id: string;
+  name: string;
+}
 
 export interface Definition {
   match: 'all' | 'any';
@@ -97,12 +119,15 @@ const TYPES: { value: Condition['type']; label: string }[] = [
   { value: 'last_message', label: 'Last message from them' },
   { value: 'calling_code', label: 'Country calling code' },
   { value: 'campaign', label: 'Response to a campaign' },
+  { value: 'orders', label: 'Store orders' },
+  { value: 'spend', label: 'Spent in stores' },
 ];
 
 function blank(
   type: Condition['type'],
   fields: BuilderField[],
   campaigns: { id: string }[],
+  orderCurrencies: string[],
 ): Condition {
   switch (type) {
     case 'tag':
@@ -123,6 +148,10 @@ function blank(
       return { type, prefix: '91' };
     case 'campaign':
       return { type, campaignId: campaigns[0]?.id ?? '', outcome: 'replied' };
+    case 'orders':
+      return { type, op: 'at_least', count: 1 };
+    case 'spend':
+      return { type, op: 'at_least', currency: orderCurrencies[0] ?? 'INR', amountMinor: 0 };
   }
 }
 
@@ -132,6 +161,8 @@ export function SegmentBuilder({
   onChange,
   fields,
   campaigns,
+  stores = [],
+  orderCurrencies = [],
   idPrefix = 'seg',
 }: {
   slug: string;
@@ -139,6 +170,10 @@ export function SegmentBuilder({
   onChange: (next: Definition) => void;
   fields: BuilderField[];
   campaigns: { id: string; name: string }[];
+  /** The company's stores, when the member can read their orders (ADR-231). */
+  stores?: BuilderStore[];
+  /** The currencies the company's store orders are in. */
+  orderCurrencies?: string[];
   idPrefix?: string;
 }) {
   const [preview, setPreview] = useState<{
@@ -162,7 +197,9 @@ export function SegmentBuilder({
   const types = TYPES.filter(
     (t) =>
       (t.value !== 'field' || fields.length > 0) &&
-      (t.value !== 'campaign' || campaigns.length > 0),
+      (t.value !== 'campaign' || campaigns.length > 0) &&
+      (t.value !== 'orders' || stores.length > 0) &&
+      (t.value !== 'spend' || (stores.length > 0 && orderCurrencies.length > 0)),
   );
 
   return (
@@ -194,7 +231,15 @@ export function SegmentBuilder({
                   {...aria}
                   value={c.type}
                   onChange={(e) =>
-                    set(i, blank(e.target.value as Condition['type'], fields, campaigns))
+                    set(
+                      i,
+                      blank(
+                        e.target.value as Condition['type'],
+                        fields,
+                        campaigns,
+                        orderCurrencies,
+                      ),
+                    )
                   }
                 >
                   {types.map((t) => (
@@ -210,6 +255,8 @@ export function SegmentBuilder({
               condition={c}
               fields={fields}
               campaigns={campaigns}
+              stores={stores}
+              orderCurrencies={orderCurrencies}
               onChange={(next) => set(i, next)}
             />
             <Button type="button" variant="ghost" onClick={() => remove(i)}>
@@ -228,7 +275,7 @@ export function SegmentBuilder({
               setPreview(null);
               onChange({
                 ...value,
-                conditions: [...value.conditions, blank('tag', fields, campaigns)],
+                conditions: [...value.conditions, blank('tag', fields, campaigns, orderCurrencies)],
               });
             }}
           >
@@ -276,17 +323,121 @@ export function SegmentBuilder({
   );
 }
 
+/** An optional number of days back; empty means any time. */
+function daysValue(text: string): number | undefined {
+  const n = Number(text);
+  return text.trim() && Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+/** The orders' store: any of them, or one (ADR-231). */
+function StoreField({
+  id,
+  stores,
+  storeId,
+  onChange,
+}: {
+  id: string;
+  stores: BuilderStore[];
+  storeId: string | undefined;
+  onChange: (storeId: string | undefined) => void;
+}) {
+  return (
+    <Field id={`${id}-store`} label="Store">
+      {(aria) => (
+        <Select
+          {...aria}
+          value={storeId ?? ''}
+          onChange={(e) => onChange(e.target.value || undefined)}
+        >
+          <option value="">any store</option>
+          {stores.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </Select>
+      )}
+    </Field>
+  );
+}
+
+function DaysField({
+  id,
+  days,
+  onChange,
+}: {
+  id: string;
+  days: number | undefined;
+  onChange: (days: number | undefined) => void;
+}) {
+  return (
+    <Field id={`${id}-days`} label="In the last (days)" description="Leave empty for any time.">
+      {(aria) => (
+        <Input
+          {...aria}
+          type="number"
+          min={1}
+          max={3650}
+          value={days === undefined ? '' : String(days)}
+          onChange={(e) => onChange(daysValue(e.target.value))}
+        />
+      )}
+    </Field>
+  );
+}
+
+/** An amount typed in major units, kept in minor units once it reads as one. */
+function AmountField({
+  id,
+  currency,
+  amountMinor,
+  onChange,
+}: {
+  id: string;
+  currency: string;
+  amountMinor: number;
+  onChange: (amountMinor: number) => void;
+}) {
+  const [text, setText] = useState(() => minorToInput(amountMinor, currency));
+  const valid = parseAmountToMinor(text, currency) !== null;
+  return (
+    <Field
+      id={`${id}-amount`}
+      label="Amount"
+      {...(valid ? {} : { error: 'Enter an amount like 2500 or 2500.50.' })}
+    >
+      {(aria) => (
+        <Input
+          {...aria}
+          inputMode="decimal"
+          value={text}
+          maxLength={20}
+          onChange={(e) => {
+            setText(e.target.value);
+            const minor = parseAmountToMinor(e.target.value, currency);
+            if (minor !== null) onChange(minor);
+          }}
+        />
+      )}
+    </Field>
+  );
+}
+
 function ConditionFields({
   id,
   condition: c,
   fields,
   campaigns,
+  stores,
+  orderCurrencies,
   onChange,
 }: {
   id: string;
   condition: Condition;
   fields: BuilderField[];
   campaigns: { id: string; name: string }[];
+  stores: BuilderStore[];
+  orderCurrencies: string[];
   onChange: (next: Condition) => void;
 }) {
   switch (c.type) {
@@ -576,6 +727,99 @@ function ConditionFields({
               </Select>
             )}
           </Field>
+        </div>
+      );
+    case 'orders':
+      return (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field id={`${id}-op`} label="Placed">
+            {(aria) => (
+              <Select
+                {...aria}
+                value={c.op}
+                onChange={(e) =>
+                  onChange({
+                    ...c,
+                    op: e.target.value === 'fewer_than' ? 'fewer_than' : 'at_least',
+                  })
+                }
+              >
+                <option value="at_least">at least</option>
+                <option value="fewer_than">fewer than</option>
+              </Select>
+            )}
+          </Field>
+          <Field id={`${id}-count`} label="Orders">
+            {(aria) => (
+              <Input
+                {...aria}
+                type="number"
+                min={1}
+                max={10000}
+                value={String(c.count)}
+                onChange={(e) => onChange({ ...c, count: Number(e.target.value) || 1 })}
+              />
+            )}
+          </Field>
+          <DaysField id={id} days={c.days} onChange={(days) => onChange({ ...c, days })} />
+          <StoreField
+            id={id}
+            stores={stores}
+            storeId={c.storeId}
+            onChange={(storeId) => onChange({ ...c, storeId })}
+          />
+        </div>
+      );
+    case 'spend':
+      return (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field id={`${id}-op`} label="Spent">
+            {(aria) => (
+              <Select
+                {...aria}
+                value={c.op}
+                onChange={(e) =>
+                  onChange({ ...c, op: e.target.value === 'less_than' ? 'less_than' : 'at_least' })
+                }
+              >
+                <option value="at_least">at least</option>
+                <option value="less_than">less than</option>
+              </Select>
+            )}
+          </Field>
+          <Field id={`${id}-currency`} label="Currency">
+            {(aria) => (
+              <Select
+                {...aria}
+                value={c.currency}
+                onChange={(e) => onChange({ ...c, currency: e.target.value, amountMinor: 0 })}
+              >
+                {/* A saved condition keeps its currency after the last order in it goes. */}
+                {(orderCurrencies.includes(c.currency)
+                  ? orderCurrencies
+                  : [c.currency, ...orderCurrencies]
+                ).map((code) => (
+                  <option key={code} value={code}>
+                    {code}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+          <AmountField
+            key={c.currency}
+            id={id}
+            currency={c.currency}
+            amountMinor={c.amountMinor}
+            onChange={(amountMinor) => onChange({ ...c, amountMinor })}
+          />
+          <DaysField id={id} days={c.days} onChange={(days) => onChange({ ...c, days })} />
+          <StoreField
+            id={id}
+            stores={stores}
+            storeId={c.storeId}
+            onChange={(storeId) => onChange({ ...c, storeId })}
+          />
         </div>
       );
   }

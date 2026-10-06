@@ -25,7 +25,11 @@ import {
 } from '../campaigns/segments';
 import type { OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
-import { apiSearchConditionSchema, apiSegmentConditions } from './contact-search';
+import {
+  apiSearchConditionSchema,
+  apiSegmentConditions,
+  assertOrderConditionScope,
+} from './contact-search';
 import type { ApiContact } from './contact-view';
 import { apiContactPage } from './contacts';
 import { apiActor, assertScope, type ApiContext } from './context';
@@ -324,6 +328,7 @@ export async function apiCreateSegment(
 ): Promise<ApiResponse> {
   assertScope(ctx, 'campaigns.write');
   const given = parseInput(apiCreateSegmentSchema, input);
+  assertOrderConditionScope(ctx, given.definition.conditions);
   try {
     return await deps.db.run(ctx.scope, async (tx) => {
       const conditions = await apiSegmentConditions(
@@ -378,6 +383,7 @@ export async function apiUpdateSegment(
   assertScope(ctx, 'campaigns.write');
   if (!z.uuid().safeParse(segmentId).success) throw notFound('Segment');
   const { expectedVersion, ...given } = parseInput(apiUpdateSegmentSchema, input);
+  assertOrderConditionScope(ctx, given.definition?.conditions ?? []);
   try {
     return await deps.db.run(ctx.scope, async (tx) => {
       const [row] = await tx
@@ -484,7 +490,8 @@ export const apiSegmentContactsQuerySchema = z
  * into SQL by segments' own code, as a campaign takes its audience, with dates in the company's time
  * zone, in one snapshot. Needs `campaigns.read` (segments) and `contacts.read` (contacts); a segment
  * with a `last_message` condition also needs `conversations.read`, as a search with one does
- * (ADR-126). A segment with a problem is refused with 412 saying it; an archived one and another
+ * (ADR-126), and one with an `orders` or `spend` condition `orders.read` (ADR-231). A segment with a
+ * problem is refused with 412 saying it; an archived one and another
  * company's are not found.
  */
 export async function apiListSegmentContacts(
@@ -523,6 +530,7 @@ export async function apiListSegmentContacts(
       if (usable.conditions.some((c) => c.type === 'last_message')) {
         assertScope(ctx, 'conversations.read');
       }
+      assertOrderConditionScope(ctx, usable.conditions);
       const [company] = await tx
         .select({ timezone: tenants.timezone })
         .from(tenants)
