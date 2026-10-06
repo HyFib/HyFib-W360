@@ -274,6 +274,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   re-checks each with fresh data and queues ordinary messages + send intents + `message.send` jobs
   (batch insert). Campaign threads are created resolved; a reply reopens them. The per-minute
   messaging sweep re-signals ticks through `ops.campaigns_due` (active companies only).
+  When it pauses a campaign by itself it calls `emailCampaignPaused` (`campaigns/service.ts`) in the
+  same transaction, as `pauseCampaignForRemovedLauncher` does (ADR-210): one `tenant.notice` written
+  by `campaignPauseNotice` to the member whose authority the sends use while they may still send
+  campaigns, otherwise to each active member who may approve and send campaigns, with the dedupe key
+  `campaign-paused:<campaign>:<version>:<member>`. `CampaignRunnerDeps.notices` carries the outbox
+  and the app's base URL.
 - **Guardrails:** marketing frequency cap per contact (company setting; counts marketing templates
   from campaigns and the inbox), message cap, estimated spending cap (rate cards, ADR-023), pacing,
   approval, sending window, deadline. Meta's own limits (per-user marketing limit 131049, messaging

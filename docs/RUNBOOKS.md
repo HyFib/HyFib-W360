@@ -373,6 +373,14 @@ template, then resume), number inactive (reconnect, then resume), spending or me
 campaign and are sent then), or no rate card for the cap's currency (platform staff publish one,
 or remove the cap).
 
+**Nobody was emailed when HyFib paused a campaign (ADR-210).** The email goes to the member whose
+authority the campaign sends under, while they are active and may send campaigns; otherwise to the
+company's active owners and administrators. Pauses by members or keys email nobody. It is queued in
+the pause's transaction (`ops.email_outbox`, dedupe key
+`campaign-paused:<campaign id>:<version>:<user id>`) and sent by the email worker: check its dead
+letters and the email provider as for other notices. Campaigns paused before this release, or by an
+old worker during a rollout, emailed nobody; the campaign's page gives the reason in any case.
+
 **Many failures with 131049.** Meta's per-user marketing limit: those customers received too many
 marketing messages from businesses. Do not resend; wait at least 24 hours (M-062) and consider the
 company's frequency cap.

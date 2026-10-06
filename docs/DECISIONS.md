@@ -8335,3 +8335,33 @@ Decision:
 
 Not built: a reminder before the time passes, and letting an approver extend the sending period on
 approval.
+
+## ADR-210 Emailing members when HyFib pauses a campaign by itself (P3-04) (2026-10-06)
+
+Context: the runner pauses a campaign by itself when its spending or message cap is reached, its
+template is no longer approved by Meta (or no longer takes the campaign's variables), its number is
+not active, the member whose authority it sends under left or lost `campaigns.send`, or no rate card
+is published for its cap's currency. The pause showed only on the campaign's page and in its
+outgoing webhook event, so a member who was not looking could learn of it after its sending period
+had ended, when the contacts still waiting are skipped.
+
+Decision:
+
+- **Who:** the member whose authority it sends under, while they are an active member who may send
+  campaigns, as they can fix and resume it; otherwise (they left or lost the permission) the
+  company's active members who may approve and send campaigns, its owners and administrators, as one
+  of them must resume it. Members' and keys' own pauses email nobody.
+- **When:** in the pause's transaction, from the runner's pause and from the job that pauses a
+  campaign whose member left, so a pause that rolls back emails nobody; one email per member for
+  each pause (the dedupe key holds the campaign's version, which every pause raises).
+- **What:** the cause and what a member does about it (raise or remove the cap; resume once Meta
+  approves the template again, or cancel; reconnect the number in Settings → Channels; resume under
+  another member's authority; wait for a rate card or remove the cap), and that messages not sent
+  yet wait for the resume until its sending period ends, given in the campaign's time zone, after
+  which the contacts still waiting are skipped; for a campaign that had not started, that nothing
+  was sent. No counts: messages still queued when a cap pauses it are held back by the send worker
+  afterwards, so a count would be out of date.
+- **No migration and no setting;** the worker sends it.
+
+Not built: an email when a campaign completes or its sending period ends, a digest of pauses, email
+preferences, and in-app notifications.

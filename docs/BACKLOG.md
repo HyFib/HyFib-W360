@@ -85,10 +85,13 @@ verification, app review, Embedded Signup configuration).
   results with denominators, CSV export. Local 10,000-recipient run: snapshot 0.6 s, all recipients
   queued in 21 ticks. Segments refuse dates that do not exist (ADR-117; a creation day of 30
   February used to fail the preview, the segment page and a campaign's audience), and compare
-  contacts' names (ADR-143). **Remaining:** the 10k run in staging with real dispatch, per-recipient time
-  zones, A/B variants, messaging-tier awareness (read the number's limit from Meta), campaign
-  sends through the public API (the API sends single templates since P5-08), media-header
-  templates.
+  contacts' names (ADR-143). **[Emails when HyFib pauses a campaign by itself built; its database
+  tests run only in CI]** (ADR-210: the member it sends under, or the owners and administrators once
+  that member left or lost the permission, are emailed once per pause with the cause and what to do;
+  members' and keys' own pauses email nobody; no migration). **Remaining:** the 10k run in staging
+  with real dispatch, per-recipient time zones, A/B variants, messaging-tier awareness (read the
+  number's limit from Meta), campaign sends through the public API (the API sends single templates
+  since P5-08), media-header templates, an email when a campaign completes.
 - **P3-05 Reports** — _implemented (2026-09-26); provider data verified against the Graph stand-in
   only_: persisted, versioned metric definitions; periods of whole days in the company time zone;
   messaging outcomes with denominators; estimated Meta charges from Meta's billable flag and

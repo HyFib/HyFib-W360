@@ -2953,7 +2953,14 @@ describe('campaign events (ADR-087)', () => {
       },
       tick(campaignId: string) {
         return runCampaignTick(
-          { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock, sendRatePerSecond: 100 },
+          {
+            db: fx.dbs.app,
+            jobs: fx.jobs(),
+            signer: fx.signer,
+            clock,
+            sendRatePerSecond: 100,
+            notices: fx.notices(),
+          },
           scope,
           campaignId,
         );

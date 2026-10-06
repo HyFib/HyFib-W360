@@ -24,6 +24,7 @@ import {
   tenants,
   users,
   type CampaignEventType,
+  type CampaignPauseReason,
   type CampaignStatus,
   type Database,
   type SQL,
@@ -1358,6 +1359,134 @@ export async function emailCampaignSubmitter(
     },
   });
   return true;
+}
+
+/** The pauses HyFib makes by itself, which members are emailed about (ADR-210). */
+export type AutomaticPauseReason = Exclude<CampaignPauseReason, 'manual' | 'api'>;
+
+/** Each automatic pause: the end of the email's subject, and why it paused and what to do. */
+const AUTOMATIC_PAUSES: Record<AutomaticPauseReason, { subject: string; line: string }> = {
+  budget_reached: {
+    subject: 'its spending cap was reached',
+    line: 'It reached its spending cap. Raise or remove the cap on its page, then resume it.',
+  },
+  message_cap_reached: {
+    subject: 'its message cap was reached',
+    line: 'It reached its message cap. Raise or remove the cap on its page, then resume it.',
+  },
+  template_not_approved: {
+    subject: 'its template can no longer be sent',
+    line: 'Its template is no longer approved by Meta, or no longer takes the variables the campaign fills in. Resume it once Meta approves the template again; if the template’s variables changed, cancel it and create a new campaign.',
+  },
+  channel_inactive: {
+    subject: 'its WhatsApp number is not active',
+    line: 'The WhatsApp number it sends from is not active. An administrator can reconnect it in Settings → Channels; then resume the campaign.',
+  },
+  launcher_removed: {
+    subject: 'another member must resume it',
+    line: 'The member whose authority it sent under is no longer an active member of the company. A member who can send campaigns can resume it, and it then sends under their authority.',
+  },
+  launcher_not_permitted: {
+    subject: 'another member must resume it',
+    line: 'The member whose authority it sent under can no longer send campaigns. A member who can send campaigns can resume it, and it then sends under their authority.',
+  },
+  rate_card_missing: {
+    subject: 'its costs cannot be checked',
+    line: 'No rate card is published for the currency of its spending cap, so its costs cannot be checked against the cap. Resume it once one is published, or remove the cap on its page first.',
+  },
+};
+
+/**
+ * The email that HyFib paused a campaign by itself (ADR-210): why, what a member does about it, and
+ * what happens to the messages it has not sent, in the campaign's time zone. No counts: messages
+ * still queued at the pause are held back by the send worker, so they would be out of date.
+ */
+export function campaignPauseNotice(input: {
+  campaignName: string;
+  reason: AutomaticPauseReason;
+  /** When its sending period ends, or null when it had not started. */
+  sendUntil: Date | null;
+  /** The campaign's time zone, the one its page shows its schedule in. */
+  timeZone: string;
+}): { subject: string; lines: string[] } {
+  const pause = AUTOMATIC_PAUSES[input.reason];
+  return {
+    subject: `Campaign “${input.campaignName}” paused: ${pause.subject}`,
+    lines: [
+      `HyFib paused the campaign “${input.campaignName}”, and it sends nothing more until it is resumed.`,
+      pause.line,
+      input.sendUntil
+        ? `Messages that had not gone out yet wait until it is resumed. Its sending period ends at ${formatCompanyTime(input.sendUntil, input.timeZone)}, and contacts it has not sent to by then are skipped.`
+        : 'It had not started, so nothing was sent. Once resumed, it starts at its scheduled time, or at once if that time has passed.',
+    ],
+  };
+}
+
+/**
+ * Emails the members who can act on a campaign HyFib paused by itself (ADR-210), in the pause's
+ * transaction: the member whose authority it sends under, while they may still send campaigns, as
+ * they can resume it; otherwise the active members who may approve and send campaigns (owners and
+ * administrators), as one of them must resume it. Members' and keys' own pauses are not emailed.
+ * Returns how many it emailed.
+ */
+export async function emailCampaignPaused(
+  notices: CampaignNoticeDeps,
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+  reason: AutomaticPauseReason,
+): Promise<number> {
+  const [c] = await tx
+    .select({
+      name: campaigns.name,
+      version: campaigns.version,
+      launchedByUserId: campaigns.launchedByUserId,
+      deadlineAt: campaigns.deadlineAt,
+      timezone: campaigns.timezone,
+      company: tenants.name,
+      slug: tenants.slug,
+    })
+    .from(campaigns)
+    .innerJoin(tenants, eq(tenants.id, campaigns.tenantId))
+    .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
+  if (!c) return 0;
+  const members = await tx
+    .select({ userId: users.id, email: users.email, roles: memberships.roles })
+    .from(memberships)
+    .innerJoin(users, eq(users.id, memberships.userId))
+    .where(and(eq(memberships.tenantId, tenantId), eq(memberships.status, 'active')))
+    .orderBy(users.id);
+  const grants = (m: { roles: string[] }) => permissionsForRoles(m.roles as TenantRole[]);
+  const launcher = members.find(
+    (m) => m.userId === c.launchedByUserId && grants(m).has('campaigns.send'),
+  );
+  const recipients = launcher
+    ? [launcher]
+    : members.filter((m) => grants(m).has('campaigns.approve') && grants(m).has('campaigns.send'));
+  const { subject, lines } = campaignPauseNotice({
+    campaignName: c.name,
+    reason,
+    sendUntil: c.deadlineAt,
+    timeZone: c.timezone,
+  });
+  const url = new URL(`/c/${c.slug}/campaigns/${campaignId}`, notices.appBaseUrl).toString();
+  for (const member of recipients) {
+    await enqueueEmail(notices.outbox, tx, {
+      to: member.email,
+      tenantId,
+      // A pause raises the campaign's version: one email per member for each pause.
+      dedupeKey: `campaign-paused:${campaignId}:${c.version}:${member.userId}`,
+      payload: {
+        kind: 'tenant.notice',
+        companyName: c.company,
+        subject,
+        lines,
+        url,
+        actionLabel: 'Open campaign',
+      },
+    });
+  }
+  return recipients.length;
 }
 
 // Service ----------------------------------------------------------------------------------------

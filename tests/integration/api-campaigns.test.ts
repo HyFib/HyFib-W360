@@ -211,7 +211,14 @@ async function setup() {
     },
     tick(id: string) {
       return runCampaignTick(
-        { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock, sendRatePerSecond: 100 },
+        {
+          db: fx.dbs.app,
+          jobs: fx.jobs(),
+          signer: fx.signer,
+          clock,
+          sendRatePerSecond: 100,
+          notices: fx.notices(),
+        },
         scopeOf(c),
         id,
       );

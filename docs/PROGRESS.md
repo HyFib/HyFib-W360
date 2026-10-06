@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-06 — Phase 3 follow-up: emailing members when HyFib pauses a campaign (P3-04, ADR-210)
+
+Status: **Implemented; its database tests run in CI only.** A campaign HyFib paused by itself (a cap
+reached, its template or number no longer usable, its sending member gone or no longer permitted, no
+rate card) showed the pause only on its page and in its webhook event. The local PostgreSQL is
+unavailable (its Docker daemon stopped), so the new and changed integration tests below were written
+but not run here.
+
+### Completed
+
+- **Design (ADR-210):** the member it sends under while they may send campaigns, otherwise the
+  owners and administrators; in the pause's transaction; one email per member for each pause; no
+  counts; no migration.
+- **Domain:** `campaignPauseNotice` and `emailCampaignPaused` (`campaigns/service.ts`), called by
+  the runner's pause and by `pauseCampaignForRemovedLauncher`; `CampaignRunnerDeps.notices`.
+- **Worker:** the campaign handler passes the runtime's notice dependencies.
+- **Tests:**
+  - Unit (4 new in `campaigns/pause-notice.test.ts`): every pause's subject and line, the line for a
+    campaign that had not started, the email's limits and escaping.
+  - Integration (2 new and 1 changed in `campaigns.test.ts`): the sending member for a template
+    pause, once per pause, and nobody for a member's pause; owners and administrators when that
+    member lost the permission or left; the cap pauses. Written for CI; not run here.
+- **Docs:** ADR-210; ARCHITECTURE; DEPLOYMENT and RUNBOOKS; BACKLOG P3-04; feature matrix H-022.
+- **Mutation checks:** 13 deliberate regressions tried, all caught on the unit-tested parts. Who is
+  emailed and when needs the database, so those regressions are left to the integration tests, which
+  run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 910 passed (86 files)                                                |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it        |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 13 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- An email when a campaign completes or its sending period ends, a digest of pauses, email
+  preferences and in-app notifications.
+
 ## 2026-10-06 — Fix: stickers, locations and contact cards keep their type in message answers
 
 Status: **Fixed; the changed integration tests run in CI only.** Review on #34 found that
