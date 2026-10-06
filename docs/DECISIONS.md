@@ -8551,3 +8551,34 @@ Not built: files through the public API, byte ranges (Safari and iOS play record
 from servers that answer byte-range requests, so members there download them with the link below the
 player), keeping files beyond WhatsApp's lifetime, thumbnails, scanning documents for malware
 (members' devices open them), and sending files from the inbox.
+
+## ADR-217 Downloading the files customers send through the public API (P5-08) (2026-10-06)
+
+Context: keys read a message a customer sent with a file as its type, its caption (`text`) and
+`mimeType` (`GET /messages`, `message.received`), but not the file: an integration filing a
+customer's invoice or photo had someone download it by hand. Members open these files in the inbox
+since ADR-216.
+
+Decision:
+
+- **`GET /api/v1/messages/{id}/media`** with `conversations.read`, whose description now says it
+  includes the files contacts sent: the file of a message a customer sent with one (`direction`
+  `inbound`, `type` `image`, `video`, `audio`, `document` or `sticker`), fetched from WhatsApp for
+  the request with ADR-216's calls and passed on as it arrives. HyFib keeps no copy.
+- **As WhatsApp gave it:** `Content-Type` is the type WhatsApp gave the file, without its
+  parameters, or `application/octet-stream` without one; `Content-Disposition` is always
+  `attachment`, with the name ADR-216 gives. Unlike the inbox, every type is given: the API is
+  called with a key in a header, never with a browser's cookies, so no file runs as a page of HyFib.
+  The answer also carries `nosniff` and a `sandbox` policy.
+- **Refusals before the first byte, as the API's JSON errors:** 404 for a message not in the company
+  or of an erased contact (as its conversation is), or with reason `no_file` (no file from the
+  customer) or `file_expired` (WhatsApp no longer gives it); 412 with `channel_disconnected`,
+  `access_refused` or `file_too_large`; 503 when WhatsApp does not answer. Keys, scopes, the plan
+  and the limits apply as to every call.
+- **One implementation:** a member's and a key's request share the lookup and the fetch
+  (`createReceivedMediaService`), and the API's handler can now answer with a stream
+  (`handleApiRequest`'s file result) that carries the request's id.
+- **No migration.** The OpenAPI document and the reference describe the call.
+
+Not built: thumbnails, files in webhook events (they keep the type and `mimeType`), a link that
+works without the key, and the files the business sent.

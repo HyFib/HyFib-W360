@@ -2144,6 +2144,40 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/messages/{id}/media': {
+        get: {
+          operationId: 'getMessageMedia',
+          summary: 'The file a customer sent with a message',
+          description: [
+            `${scopeNote('conversations.read')} The photo, video, recording, document or sticker a customer sent with a message (\`direction\` \`inbound\`, \`type\` \`image\`, \`video\`, \`audio\`, \`document\` or \`sticker\`, as \`GET /messages\` and \`message.received\` give it), fetched from WhatsApp for this request and passed on as it arrives. HyFib keeps no copy and WhatsApp keeps a file for a limited time, so fetch it soon after it arrives if you need it.`,
+            'The answer is the file itself, with the type WhatsApp gave it in `Content-Type` (`application/octet-stream` when it gave none) and `Content-Disposition: attachment` naming it: the name a document came with, or `whatsapp-<type>-<message>.<extension>`. A file is at most 100 MB. Refusals come before the first byte, as JSON errors.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The file, as WhatsApp gave it.',
+              content: {
+                'application/octet-stream': { schema: { type: 'string', format: 'binary' } },
+              },
+            },
+            ...errors(401, 403, 429, 500),
+            '404': {
+              description:
+                'Not found in the company (a message of an erased contact is not found), or no file to give: the message has none from the customer (reason no_file), or WhatsApp no longer gives it (reason file_expired).',
+              content: json(ref('Error')),
+            },
+            '412': {
+              description:
+                'The WhatsApp account that received the file is disconnected (reason channel_disconnected), or WhatsApp refused its access (reason access_refused): an administrator reconnects it in Settings → Channels. Or the file is larger than 100 MB (reason file_too_large).',
+              content: json(ref('Error')),
+            },
+            '503': {
+              description: 'WhatsApp did not answer or did not give the file: retry later.',
+              content: json(ref('Error')),
+            },
+          },
+        },
+      },
       '/message-changes': {
         get: {
           operationId: 'listMessageChanges',
@@ -2489,6 +2523,7 @@ export const API_ROUTES = [
   ['post', '/messages/send-many'],
   ['get', '/messages'],
   ['get', '/messages/{id}'],
+  ['get', '/messages/{id}/media'],
   ['get', '/message-changes'],
   ['get', '/conversations'],
   ['get', '/conversations/{id}'],

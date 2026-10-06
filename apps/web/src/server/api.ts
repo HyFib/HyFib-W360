@@ -33,7 +33,13 @@ export interface ApiCall {
   query: Record<string, string>;
 }
 
-type HandlerResult = ApiResponse | { status: number; body: Record<string, unknown> };
+/** A file the handler passes on as it arrives (ADR-217), with the headers that describe it. */
+interface FileResult {
+  status: number;
+  file: { body: ReadableStream<Uint8Array>; headers: Record<string, string> };
+}
+
+type HandlerResult = ApiResponse | { status: number; body: Record<string, unknown> } | FileResult;
 
 // Responses are never cached: next.config sets `Cache-Control: private, no-store` for them.
 const baseHeaders = (requestId: string): HeadersInit => ({
@@ -212,6 +218,12 @@ export async function handleApiRequest(
       },
       'api request',
     );
+    if ('file' in result) {
+      return new Response(result.file.body, {
+        status: result.status,
+        headers: { ...result.file.headers, 'X-Request-Id': requestId },
+      });
+    }
     return respond(
       result.status,
       result.body,

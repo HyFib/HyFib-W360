@@ -1,15 +1,18 @@
 import { z } from 'zod';
-import { AppError, notFound, preconditionFailed, type Keyring } from '@w360/core';
+import { AppError, notFound, type AppErrorCode, type Keyring } from '@w360/core';
 import {
   and,
   channelAccounts,
+  contacts,
   conversations,
   eq,
   mediaObjects,
   messages,
   whatsappAccounts,
   type Database,
+  type TenantScope,
 } from '@w360/db';
+import { assertScope, type ApiContext } from '../api/context';
 import type { TenantContext } from '../authz/context';
 import { credentialAad } from './credentials';
 import type { GraphClient, GraphFailureKind, MediaDownload } from './graph';
@@ -140,21 +143,27 @@ const ACCESS_REFUSED =
   'WhatsApp refused HyFib’s access to the account that received this file. An administrator can reconnect it in Settings → Channels.';
 const TOO_LARGE = 'This file is larger than the 100 MB HyFib passes on.';
 
-/** What a failed request for a file's address tells the member. */
+/** A refusal with the reason the public API names (ADR-217); members read its message. */
+const refusal = (code: AppErrorCode, message: string, apiReason: string) =>
+  new AppError(code, message, { details: { apiReason } });
+
+/** What a failed request for a file's address says. */
 export function mediaLocationFailure(kind: GraphFailureKind): AppError {
-  if (kind === 'auth') return preconditionFailed(ACCESS_REFUSED);
+  if (kind === 'auth') return refusal('precondition_failed', ACCESS_REFUSED, 'access_refused');
   if (kind === 'permanent') {
-    return new AppError(
+    return refusal(
       'not_found',
       'WhatsApp no longer gives this file. It keeps the files customers send for a limited time.',
+      'file_expired',
     );
   }
   return new AppError('provider_unavailable', 'WhatsApp did not answer. Try again in a moment.');
 }
 
-/** What a failed download tells the member. */
+/** What a failed download says. */
 export function mediaDownloadFailure(failure: Extract<MediaDownload, { ok: false }>): AppError {
-  if (failure.kind === 'auth') return preconditionFailed(ACCESS_REFUSED);
+  if (failure.kind === 'auth')
+    return refusal('precondition_failed', ACCESS_REFUSED, 'access_refused');
   return new AppError(
     'provider_unavailable',
     'WhatsApp did not give the file. Try again in a moment.',
@@ -168,7 +177,7 @@ export interface ReceivedMediaDeps {
 }
 
 export interface ReceivedMediaFile {
-  /** A type shown or played in the page, or `application/octet-stream`. */
+  /** The file's type, or `application/octet-stream` when it is not given one. */
   contentType: string;
   disposition: 'inline' | 'attachment';
   filename: string;
@@ -177,8 +186,118 @@ export interface ReceivedMediaFile {
 
 const isUuid = (value: string) => z.uuid().safeParse(value).success;
 
+/**
+ * A message of the company with its conversation's assignee and contact, its number's account and
+ * its media record, read in the company's scope; in one conversation when `conversationId` is set.
+ */
+async function findReceivedFile(
+  db: Database,
+  scope: TenantScope,
+  tenantId: string,
+  messageId: string,
+  conversationId: string | null,
+) {
+  const [row] = await db.run(
+    scope,
+    (tx) =>
+      tx
+        .select({
+          direction: messages.direction,
+          type: messages.type,
+          assignedMembershipId: conversations.assignedMembershipId,
+          contactErasedAt: contacts.erasedAt,
+          whatsappAccountId: whatsappAccounts.id,
+          accountStatus: whatsappAccounts.status,
+          credential: whatsappAccounts.credentialCiphertext,
+          providerMediaId: mediaObjects.providerMediaId,
+          mimeType: mediaObjects.mimeType,
+          filename: mediaObjects.filename,
+        })
+        .from(messages)
+        .innerJoin(
+          conversations,
+          and(
+            eq(conversations.tenantId, messages.tenantId),
+            eq(conversations.id, messages.conversationId),
+          ),
+        )
+        .innerJoin(
+          contacts,
+          and(
+            eq(contacts.tenantId, conversations.tenantId),
+            eq(contacts.id, conversations.contactId),
+          ),
+        )
+        .innerJoin(
+          channelAccounts,
+          and(
+            eq(channelAccounts.tenantId, messages.tenantId),
+            eq(channelAccounts.id, messages.channelAccountId),
+          ),
+        )
+        .innerJoin(
+          whatsappAccounts,
+          and(
+            eq(whatsappAccounts.tenantId, channelAccounts.tenantId),
+            eq(whatsappAccounts.id, channelAccounts.whatsappAccountId),
+          ),
+        )
+        .leftJoin(
+          mediaObjects,
+          and(
+            eq(mediaObjects.tenantId, messages.tenantId),
+            eq(mediaObjects.messageId, messages.id),
+          ),
+        )
+        .where(
+          and(
+            eq(messages.tenantId, tenantId),
+            eq(messages.id, messageId),
+            ...(conversationId ? [eq(messages.conversationId, conversationId)] : []),
+          ),
+        )
+        .limit(1),
+    { accessMode: 'read only' },
+  );
+  return row ?? null;
+}
+
 export function createReceivedMediaService(deps: ReceivedMediaDeps) {
   const { db, keyring, graph } = deps;
+
+  /** Fetches the file of a message the caller may read, refusing with the reason it cannot. */
+  async function fetchFile(
+    tenantId: string,
+    messageId: string,
+    row: NonNullable<Awaited<ReturnType<typeof findReceivedFile>>>,
+  ): Promise<{ mimeType: string | null; filename: string; body: ReadableStream<Uint8Array> }> {
+    // An erased customer's files are gone with their media rows.
+    if (row.direction !== 'inbound' || !RECEIVED_MEDIA_TYPES.has(row.type) || !row.providerMediaId)
+      throw refusal('not_found', 'This message has no file from the customer.', 'no_file');
+    if (row.accountStatus !== 'connected' || !row.credential)
+      throw refusal('precondition_failed', DISCONNECTED, 'channel_disconnected');
+    const token = keyring.decryptString(
+      row.credential,
+      credentialAad(tenantId, row.whatsappAccountId),
+    );
+    const location = await graph.getMedia(row.providerMediaId, token);
+    if (!location.ok) throw mediaLocationFailure(location.kind);
+    if (location.data.fileSize !== null && location.data.fileSize > MEDIA_MAX_BYTES)
+      throw refusal('precondition_failed', TOO_LARGE, 'file_too_large');
+    const download = await graph.downloadMedia(location.data.url, token);
+    if (!download.ok) throw mediaDownloadFailure(download);
+    if (download.contentLength !== null && download.contentLength > MEDIA_MAX_BYTES) {
+      await download.body.cancel();
+      throw refusal('precondition_failed', TOO_LARGE, 'file_too_large');
+    }
+    const mimeType = location.data.mimeType ?? row.mimeType;
+    return {
+      mimeType,
+      filename: mediaFilename({ type: row.type, mimeType, filename: row.filename, messageId }),
+      body: limitedStream(download.body, MEDIA_MAX_BYTES),
+    };
+  }
+
   return {
     /**
      * The file a customer sent in a message of a conversation the member can see, fetched from
@@ -190,89 +309,28 @@ export function createReceivedMediaService(deps: ReceivedMediaDeps) {
       messageId: string,
     ): Promise<ReceivedMediaFile> {
       if (!isUuid(conversationId) || !isUuid(messageId)) throw notFound('Message');
-      const [row] = await db.run(
-        ctx.scope,
-        (tx) =>
-          tx
-            .select({
-              direction: messages.direction,
-              type: messages.type,
-              assignedMembershipId: conversations.assignedMembershipId,
-              whatsappAccountId: whatsappAccounts.id,
-              accountStatus: whatsappAccounts.status,
-              credential: whatsappAccounts.credentialCiphertext,
-              providerMediaId: mediaObjects.providerMediaId,
-              mimeType: mediaObjects.mimeType,
-              filename: mediaObjects.filename,
-            })
-            .from(messages)
-            .innerJoin(
-              conversations,
-              and(
-                eq(conversations.tenantId, messages.tenantId),
-                eq(conversations.id, messages.conversationId),
-              ),
-            )
-            .innerJoin(
-              channelAccounts,
-              and(
-                eq(channelAccounts.tenantId, messages.tenantId),
-                eq(channelAccounts.id, messages.channelAccountId),
-              ),
-            )
-            .innerJoin(
-              whatsappAccounts,
-              and(
-                eq(whatsappAccounts.tenantId, channelAccounts.tenantId),
-                eq(whatsappAccounts.id, channelAccounts.whatsappAccountId),
-              ),
-            )
-            .leftJoin(
-              mediaObjects,
-              and(
-                eq(mediaObjects.tenantId, messages.tenantId),
-                eq(mediaObjects.messageId, messages.id),
-              ),
-            )
-            .where(
-              and(
-                eq(messages.tenantId, ctx.tenant.id),
-                eq(messages.id, messageId),
-                eq(messages.conversationId, conversationId),
-              ),
-            )
-            .limit(1),
-        { accessMode: 'read only' },
-      );
+      const row = await findReceivedFile(db, ctx.scope, ctx.tenant.id, messageId, conversationId);
       if (!row || !canSeeConversation(ctx, row.assignedMembershipId)) throw notFound('Message');
-      // An erased customer's files are gone with their media rows.
-      if (
-        row.direction !== 'inbound' ||
-        !RECEIVED_MEDIA_TYPES.has(row.type) ||
-        !row.providerMediaId
-      )
-        throw new AppError('not_found', 'This message has no file from the customer.');
-      if (row.accountStatus !== 'connected' || !row.credential)
-        throw preconditionFailed(DISCONNECTED);
-      const token = keyring.decryptString(
-        row.credential,
-        credentialAad(ctx.tenant.id, row.whatsappAccountId),
-      );
-      const location = await graph.getMedia(row.providerMediaId, token);
-      if (!location.ok) throw mediaLocationFailure(location.kind);
-      if (location.data.fileSize !== null && location.data.fileSize > MEDIA_MAX_BYTES)
-        throw preconditionFailed(TOO_LARGE);
-      const download = await graph.downloadMedia(location.data.url, token);
-      if (!download.ok) throw mediaDownloadFailure(download);
-      if (download.contentLength !== null && download.contentLength > MEDIA_MAX_BYTES) {
-        await download.body.cancel();
-        throw preconditionFailed(TOO_LARGE);
-      }
-      const mimeType = location.data.mimeType ?? row.mimeType;
+      const file = await fetchFile(ctx.tenant.id, messageId, row);
+      return { ...mediaPresentation(file.mimeType), filename: file.filename, body: file.body };
+    },
+
+    /**
+     * GET /api/v1/messages/{id}/media (ADR-217): the file a customer sent, for a key that reads
+     * conversations, as a download with its type. A message of an erased contact is not found, as
+     * its conversation is to keys.
+     */
+    async openReceivedMediaForKey(ctx: ApiContext, messageId: string): Promise<ReceivedMediaFile> {
+      assertScope(ctx, 'conversations.read');
+      if (!isUuid(messageId)) throw notFound('Message');
+      const row = await findReceivedFile(db, ctx.scope, ctx.tenant.id, messageId, null);
+      if (!row || row.contactErasedAt !== null) throw notFound('Message');
+      const file = await fetchFile(ctx.tenant.id, messageId, row);
       return {
-        ...mediaPresentation(mimeType),
-        filename: mediaFilename({ type: row.type, mimeType, filename: row.filename, messageId }),
-        body: limitedStream(download.body, MEDIA_MAX_BYTES),
+        contentType: baseMediaType(file.mimeType) ?? 'application/octet-stream',
+        disposition: 'attachment',
+        filename: file.filename,
+        body: file.body,
       };
     },
   };

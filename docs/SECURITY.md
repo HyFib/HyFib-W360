@@ -510,8 +510,10 @@ Phase 5 rules (Public API, P5-08):
   `conversations.read` reads every conversation of the company and what contacts wrote, so only a
   member who reads every conversation (`inbox.read_all`) can grant it. The conversations of erased
   contacts are neither listed nor read. A conversation names its member and team by id only
-  (ADR-093); messages carry their text and the media type, never the media, internal notes or
-  member names.
+  (ADR-093); messages carry their text and the media type, never internal notes or member names. The
+  file a customer sent comes only from `GET /messages/{id}/media` (ADR-217), with the same scope,
+  fetched from WhatsApp per request and given as an attachment; a key cannot be sent by a browser on
+  its own, so the file keeps its type.
   Keyset cursors carry a timestamp and an id that are checked before they reach a query.
 - Resolving and reopening conversations through the API (ADR-075) needs `conversations.write`,
   which only members who resolve every conversation in the inbox (`inbox.supervise`: owners,

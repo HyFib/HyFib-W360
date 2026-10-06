@@ -6,9 +6,11 @@ import {
   inboundMessages,
   listReply,
   messagingConfigured,
+  newMediaId,
   randomWaId,
   reactionMessage,
   sendSignedWebhook,
+  setStandInMedia,
   standInRequests,
   templateButtonReply,
 } from './messaging-support';
@@ -1559,4 +1561,71 @@ test('a key starts an automation made to start through the API: its template goe
       ),
     );
   }
+});
+
+test('a key downloads the document a customer sent, as WhatsApp gave it (ADR-217)', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('apifiles');
+  const slug = `apifiles-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Fara Files', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('File Readers');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Document reader');
+  await page.getByRole('checkbox', { name: /Read conversations/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${token}` };
+
+  // The customer sends a document; WhatsApp keeps the file.
+  const fileId = newMediaId();
+  const invoice = Buffer.from('%PDF-1.4 invoice 2026-10');
+  await setStandInMedia(request, { id: fileId, mimeType: 'application/pdf', bytes: invoice });
+  await sendSignedWebhook(
+    request,
+    inboundMessages(wabaId, phoneNumberId, randomWaId(), [
+      {
+        type: 'document',
+        document: { id: fileId, mime_type: 'application/pdf', filename: 'Invoice October.pdf' },
+      },
+    ]),
+  );
+  let messageId = '';
+  await expect(async () => {
+    const listed = await request.get('/api/v1/conversations', { headers: auth });
+    const [conversation] = ((await listed.json()) as { data: { id: string }[] }).data;
+    expect(conversation).toBeDefined();
+    const thread = await request.get(`/api/v1/conversations/${conversation!.id}/messages`, {
+      headers: auth,
+    });
+    const [message] = ((await thread.json()) as { data: Record<string, unknown>[] }).data;
+    expect(message).toMatchObject({
+      direction: 'inbound',
+      type: 'document',
+      mimeType: 'application/pdf',
+    });
+    messageId = message!.id as string;
+  }).toPass({ timeout: 30_000 });
+
+  // The file itself, with its type and name.
+  const file = await request.get(`/api/v1/messages/${messageId}/media`, { headers: auth });
+  expect(file.status()).toBe(200);
+  expect(file.headers()['content-type']).toBe('application/pdf');
+  expect(file.headers()['content-disposition']).toBe(
+    `attachment; filename="Invoice October.pdf"; filename*=UTF-8''Invoice%20October.pdf`,
+  );
+  expect(file.headers()['x-content-type-options']).toBe('nosniff');
+  expect((await file.body()).equals(invoice)).toBe(true);
+  // Without a key, and for a message without a file, the API answers in JSON.
+  expect((await request.get(`/api/v1/messages/${messageId}/media`)).status()).toBe(401);
+  const missing = await request.get(`/api/v1/messages/${randomUUID()}/media`, { headers: auth });
+  expect(missing.status()).toBe(404);
+  expect((await missing.json()).error.code).toBe('not_found');
 });

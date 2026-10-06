@@ -1,7 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { systemClock } from '@w360/core';
-import { createContactsService, createReceivedMediaService } from '@w360/domain';
+import { systemClock, uuidv7 } from '@w360/core';
+import {
+  authenticateApiToken,
+  createApiKeysService,
+  createContactsService,
+  createReceivedMediaService,
+  type ApiScope,
+} from '@w360/domain';
 import {
   nextExternalId,
   startWhatsAppFixture,
@@ -239,6 +245,108 @@ describe('files customers send (ADR-216)', () => {
     ).rejects.toMatchObject({
       code: 'not_found',
       publicMessage: 'This message has no file from the customer.',
+    });
+  });
+});
+
+describe('files customers send, through the API (ADR-217)', () => {
+  it('gives a key that reads conversations the file with its type, and refuses with reasons', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const key = async (scopes: ApiScope[]) => {
+      const created = await keys.create(owner, { name: 'Files', scopes, expiresInDays: 0 });
+      const ctx = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+      if (!ctx) throw new Error('a new key does not authenticate');
+      return ctx;
+    };
+    const reader = await key(['conversations.read']);
+    const waId = '919845000401';
+    const pdf = { bytes: Buffer.from('%PDF-1.4 menu'), mimeType: 'application/pdf' };
+    const menu = await receive(
+      c,
+      waId,
+      'document',
+      { mime_type: 'application/pdf', filename: 'Menu.pdf' },
+      pdf,
+    );
+
+    // A download with the type WhatsApp gave, under the name the document came with.
+    const file = await service().openReceivedMediaForKey(reader, menu.messageId);
+    expect(file).toMatchObject({
+      contentType: 'application/pdf',
+      disposition: 'attachment',
+      filename: 'Menu.pdf',
+    });
+    expect((await readAll(file.body)).toString()).toBe('%PDF-1.4 menu');
+    const photo = await receive(
+      c,
+      waId,
+      'image',
+      { mime_type: 'image/jpeg' },
+      { bytes: randomBytes(32), mimeType: 'image/jpeg' },
+    );
+    const image = await service().openReceivedMediaForKey(reader, photo.messageId);
+    expect(image).toMatchObject({ contentType: 'image/jpeg', disposition: 'attachment' });
+    await image.body.cancel();
+
+    // A key that does not read conversations, another company's key, an unknown id.
+    await expect(
+      service().openReceivedMediaForKey(await key(['messages.reply']), menu.messageId),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    const other = await fx.company();
+    const otherOwner = await fx.ctx(other, other.owner);
+    const otherKey = await keys.create(otherOwner, {
+      name: 'Other',
+      scopes: ['conversations.read'],
+      expiresInDays: 0,
+    });
+    await expect(
+      service().openReceivedMediaForKey(
+        (await authenticateApiToken(fx.dbs.app, otherKey.token, uuidv7()))!,
+        menu.messageId,
+      ),
+    ).rejects.toMatchObject({ code: 'not_found', publicMessage: 'Message not found.' });
+    await expect(service().openReceivedMediaForKey(reader, 'nope')).rejects.toMatchObject({
+      code: 'not_found',
+    });
+
+    // The reasons the API names: no file, a file WhatsApp no longer gives, a disconnected account.
+    await fx.deliver(fx.messagesBody(c, { messages: [{ waId, text: 'And the prices?' }] }));
+    const [textMessage] = await fx.query<{ id: string }>(
+      `SELECT id FROM app.messages WHERE conversation_id = $1 AND type = 'text'`,
+      [menu.conversationId],
+    );
+    await expect(service().openReceivedMediaForKey(reader, textMessage!.id)).rejects.toMatchObject({
+      code: 'not_found',
+      details: { apiReason: 'no_file' },
+    });
+    const gone = await receive(c, waId, 'image', { mime_type: 'image/jpeg' }, null);
+    await expect(service().openReceivedMediaForKey(reader, gone.messageId)).rejects.toMatchObject({
+      code: 'not_found',
+      details: { apiReason: 'file_expired' },
+    });
+    await fx.query(
+      `UPDATE app.whatsapp_accounts SET status = 'disconnected', credential_ciphertext = NULL WHERE id = $1`,
+      [c.whatsappAccountId],
+    );
+    await expect(service().openReceivedMediaForKey(reader, menu.messageId)).rejects.toMatchObject({
+      code: 'precondition_failed',
+      details: { apiReason: 'channel_disconnected' },
+    });
+
+    // A message of an erased contact is not found, as its conversation is to keys.
+    const [contact] = await fx.query<{ contact_id: string }>(
+      'SELECT contact_id FROM app.conversations WHERE id = $1',
+      [menu.conversationId],
+    );
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(owner, {
+      contactId: contact!.contact_id,
+      suppress: false,
+    });
+    await expect(service().openReceivedMediaForKey(reader, menu.messageId)).rejects.toMatchObject({
+      code: 'not_found',
+      publicMessage: 'Message not found.',
     });
   });
 });

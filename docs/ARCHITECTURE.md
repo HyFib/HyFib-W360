@@ -412,6 +412,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   downloads it with the token (`downloadMedia`: https or the Graph origin only, no redirects),
   passing the bytes on through a stream that stops past 100 MB. Nothing is stored;
   `mediaPresentation` decides the response's type and disposition.
+  Keys get the same file from `GET /api/v1/messages/{id}/media` (ADR-217,
+  `openReceivedMediaForKey`): `conversations.read`, the message in the key's company and not of an
+  erased contact, then the same fetch, answered as an attachment with the file's own type through
+  `handleApiRequest`'s file result.
 - **Collision warning** (`queueTextMessage` `afterMessageId`): under the conversation row lock, a
   reply is refused once when another member's reply is newer than the newest message the sender had
   seen; the composer refreshes the thread and keeps the draft (ADR-033).

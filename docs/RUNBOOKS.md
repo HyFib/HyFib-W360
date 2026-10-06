@@ -408,6 +408,13 @@ limited time; there is nothing to restore, since HyFib keeps no copy), or WhatsA
 (try again, and check the web tier's outbound https to Meta). Safari and iOS do not play recordings
 and videos from HyFib: members download them with the link below the player.
 
+**An integration cannot download a file a customer sent (ADR-217).** The JSON error's reason says
+why: `no_file` (the message has no file from the customer: check its `direction` and `type`),
+`file_expired` (WhatsApp no longer keeps it; integrations should fetch files soon after
+`message.received`), `channel_disconnected` or `access_refused` (reconnect the account in Settings →
+Channels), `file_too_large` (over 100 MB); a 503 means WhatsApp did not answer, so retry later. The
+key needs `conversations.read`.
+
 **Many failures with 131049.** Meta's per-user marketing limit: those customers received too many
 marketing messages from businesses. Do not resend; wait at least 24 hours (M-062) and consider the
 company's frequency cap.

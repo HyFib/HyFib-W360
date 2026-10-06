@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { API_ROUTES, buildOpenApiDocument } from '../api/openapi';
 import { GraphClient } from './graph';
 import {
   MEDIA_MAX_BYTES,
@@ -251,5 +252,45 @@ describe('the Graph client’s media calls (research M-047)', () => {
       ok: false,
       kind: 'retryable',
     });
+  });
+});
+
+describe('files customers send, through the API (ADR-217)', () => {
+  it('names the reason of each refusal for the API', () => {
+    expect(mediaLocationFailure('auth').details).toEqual({ apiReason: 'access_refused' });
+    expect(mediaLocationFailure('permanent').details).toEqual({ apiReason: 'file_expired' });
+    expect(mediaLocationFailure('retryable').details).toBeUndefined();
+    expect(mediaDownloadFailure({ ok: false, kind: 'auth', title: 'HTTP 401' }).details).toEqual({
+      apiReason: 'access_refused',
+    });
+  });
+
+  it('describes GET /messages/{id}/media: the scope, the file and the reasons', () => {
+    expect(API_ROUTES).toEqual(expect.arrayContaining([['get', '/messages/{id}/media']]));
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const operation = (
+      doc.paths as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            description: string;
+            responses: Record<string, { description: string; content: Record<string, unknown> }>;
+          }
+        >
+      >
+    )['/messages/{id}/media']!.get!;
+    expect(operation.operationId).toBe('getMessageMedia');
+    expect(operation.description).toContain('Scope: `conversations.read`.');
+    expect(operation.description).toContain('HyFib keeps no copy');
+    expect(Object.keys(operation.responses['200']!.content)).toEqual(['application/octet-stream']);
+    expect(operation.responses['404']!.description).toMatch(/no_file.*file_expired/);
+    expect(operation.responses['412']!.description).toMatch(
+      /channel_disconnected.*access_refused.*file_too_large/,
+    );
+    expect(Object.keys(operation.responses)).toEqual(
+      expect.arrayContaining(['401', '403', '429', '500', '503']),
+    );
   });
 });

@@ -1,5 +1,47 @@
 # Progress
 
+## 2026-10-06 — Phase 5: downloading the files customers send through the API (P5-08, ADR-217)
+
+Status: **Implemented; its database and browser tests run in CI only.** Keys read a message a
+customer sent with a file, but not the file. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so the new integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-217):** `GET /api/v1/messages/{id}/media` with `conversations.read`; the file as
+  WhatsApp gives it, as an attachment; refusals as JSON errors with reasons.
+- **Domain:** `openReceivedMediaForKey` beside the members' call, sharing the lookup and the fetch;
+  refusals carry their API reason; the scope's description names the files.
+- **Web:** the route, and file results in `handleApiRequest`.
+- **API document:** `getMessageMedia`, its file and its reasons.
+- **Tests:**
+  - Unit (2 new in `messaging/received-media.test.ts`): the reasons, the OpenAPI entry.
+  - Integration (1 new in `received-media.test.ts`): the file with its type, a key without the
+    scope, another company's key, the reasons, an erased contact's message. Written for CI; not run
+    here.
+  - E2E (1 new in `api.spec.ts`): a key downloads a document a customer sent. Written for CI; not
+    run here.
+- **Docs:** ADR-217; ARCHITECTURE; SECURITY; THREAT-MODEL T204; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-08; feature matrix W-134.
+- **Mutation checks:** 7 deliberate regressions tried, all caught on the unit-tested parts. The
+  key's checks need the database, so their regressions are left to the integration tests, which run
+  in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 943 passed (92 files)                                               |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 7 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Thumbnails, files in webhook events, links that work without the key.
+
 ## 2026-10-06 — Phase 2 follow-up: viewing the files customers send (P2-09, P5-08, ADR-216)
 
 Status: **Implemented; its database and browser tests run in CI only.** The inbox showed only the

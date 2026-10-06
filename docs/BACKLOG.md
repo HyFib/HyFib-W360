@@ -688,9 +688,12 @@ verification, app review, Embedded Signup configuration).
   **[Saying until when a waiting campaign can be approved built; its database tests run only in
   CI]** (ADR-209: the approval email and the campaign's page give the end of its sending period,
   after which approving is refused, and the page then offers no Approve button; no migration).
+  **[Downloading the files customers send built; its database and browser tests run only in CI]**
+  (ADR-217: `GET /messages/{id}/media` gives a key that reads conversations the file of a message a
+  customer sent, as WhatsApp gives it, with reasons when it cannot; no migration).
   Remaining: uploaded media, call-to-action messages through the API, taking
   reactions back,
-  media downloads (members open them in the inbox since ADR-216), changing a field's type,
+  changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
   resuming what members or HyFib paused, campaign
   recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose
