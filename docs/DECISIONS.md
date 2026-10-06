@@ -4644,8 +4644,9 @@ Decision:
   them, which the API answers with 409 `conflict` (retryable), as for any deadlock.
 
 Not built: choosing contacts to change by a filter (all with a tag, a segment), changes that partly
-succeed, adding contacts in the same call, changing numbers, and the same change for many contacts
-in the inbox (members change contacts one at a time, or by import).
+succeed, adding contacts in the same call, changing numbers (typed numbers: built by ADR-188), and
+the same change for many contacts in the inbox (members change contacts one at a time, or by
+import).
 
 ## ADR-123 Choosing the contact changes a webhook endpoint receives (2026-10-03)
 
@@ -4680,8 +4681,9 @@ Decision:
   endpoints per company), the runtime role's update of the column, and
   `app.capture_contact_webhook_event` replaced with the same signature.
 
-Not built: field keys chosen one by one (built by ADR-184), filters for `contact.created` or
-`contact.erased`, and filters on a contact's values (a tag, a field's value).
+Not built: field keys chosen one by one (built by ADR-184), filters for `contact.created` (by where
+the contact came from: built by ADR-190) or `contact.erased`, and filters on a contact's values (a
+tag, a field's value).
 
 ## ADR-124 Finding contacts by name through the public API (2026-10-03)
 
@@ -7182,6 +7184,15 @@ Decision:
 Not built: a refresh for one template rather than the account's whole list, and showing on the
 Templates page when the refresh ran.
 
+Amended (2026-10-05, found in review): the template.sync queue is exclusive, so a job sent under the
+key of a sync already waiting collapses into it, and the waiting job kept its own priority: a
+refresh, or the sweep's sync of an account asked for, that found a routine sync still waiting waited
+at routine priority after all. Both now raise the waiting job to the priority asked for
+(`JobQueue.raisePriority`: a job created or due a retry, under the account's key, never lowered; a
+running job is left alone, and the next sweep queues what was asked meanwhile, as before). The
+refresh raises it in its own transaction, after the account is found in the member's company; the
+runtime role already writes pg-boss's tables, so there is no migration.
+
 ## ADR-179 Acknowledging webhook receipts on the operations console (P5-10) (2026-10-05)
 
 Context: Operations → Integrations lists the Meta and Razorpay receipts that used all their attempts
@@ -7243,8 +7254,8 @@ Decision:
   moving two contacts to one number at once: the unique number index refuses the second (409).
   Consent stays with the contact, as when members change a number.
 
-Not built: numbers in calls that change many contacts, clearing a number, and moving a WhatsApp
-identity to another contact.
+Not built: numbers in calls that change many contacts (built by ADR-188), clearing a number, and
+moving a WhatsApp identity to another contact.
 
 ## ADR-181 Choosing the members whose assigned conversations' events a webhook endpoint receives (P5-09) (2026-10-05)
 
@@ -7538,7 +7549,8 @@ Decision:
 
 Not built: submitting, approving, scheduling or starting campaigns through the API (a key is not a
 member), cancelling drafts (built by ADR-187) or deleting them, test sends, a draft's review (the
-audience breakdown and the cost estimate) through the API, and creating many drafts in one call.
+audience breakdown and the cost estimate) through the API (built by ADR-193), and creating many
+drafts in one call.
 
 ## ADR-187 Cancelling campaign drafts through the public API (P5-08) (2026-10-05)
 
@@ -7566,3 +7578,308 @@ Decision:
 
 Not built: deleting drafts (a cancelled draft is kept, as members' are) and cancelling many
 campaigns in one call.
+
+## ADR-188 Changing typed numbers in calls that change many contacts (P5-08) (2026-10-05)
+
+Context: ADR-180 lets `PATCH /contacts/{id}` change a number typed for a contact and kept numbers
+out of `POST /contacts/update-many` (ADR-122): two contacts in one call could swap numbers, which
+each contact's check alone would not see. A CRM or shop fixing the numbers an import or a checkout
+form mistyped still made one request per contact, each counted against its limits, and a failure
+halfway left some fixed.
+
+Decision:
+
+- **`phone` on each contact of `POST /contacts/update-many`,** as `PATCH /contacts/{id}` takes it,
+  under the same `contacts.write` scope, all of them or none, as the call's other changes. A number
+  changes as members change it (ADR-180): a contact whose number WhatsApp gave keeps it (412), a
+  number on the company's suppression list is refused (412), and a number another contact has is
+  refused with 409, without naming that contact.
+- **Never swapped or moved within a call:** every new number is checked after the contacts are
+  locked and before the first change is written, against the numbers contacts have before the call.
+  A number one of the call's own contacts has is therefore another contact's, whatever the order,
+  even when that contact is given another number in the same call, so a call never swaps two
+  contacts' numbers or moves one from a contact to another; that takes separate calls, each checked
+  on its own. A number given to two contacts of the call, in any form, is refused with 422 before
+  anything is read ("Give each number once.").
+- **The refusal names its place:** the 409 and 412 carry `issues` with `contacts.<index>.phone` (a
+  bad number is refused with 422 naming the same place), so the integration knows which contact to
+  fix; nothing in the call is changed. `PATCH /contacts/{id}`'s answers are unchanged.
+- **The same change for many contacts** (`POST /contacts/update-matching`, ADR-165) still takes no
+  number: one number cannot go to many contacts.
+- **As any change:** each contact through `changeLockedContact`, in the order given; audited as
+  `contact.updated` with `phone` among what changed, never the number; `contact.updated` webhooks
+  name `phone` (ADR-121) and the contact feed lists the contact (ADR-114). Two calls giving one
+  number to two contacts at once: the unique number index refuses the second (409), as for `PATCH`.
+- **No migration.**
+
+Not built: swapping numbers in one call (a contact needs a free number first), numbers in the same
+change for many contacts, clearing a number, and moving a WhatsApp identity to another contact.
+
+## ADR-189 Choosing the consent changes a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint that takes `consent.changed` receives every opt-in and opt-out the company
+records, for both purposes, whatever recorded it (a keyword, a member, an import, Meta, a key, a
+store, an erasure). A receiver often wants some of them only: a mailing tool kept in step with
+marketing opt-outs, a compliance log of utility opt-ins and opt-outs. Each was sent every change and
+had to read `purpose` and `action` and drop the rest. ADR-119 to ADR-185 built such filters for
+other event types; consent changes had none.
+
+Decision:
+
+- **A list of consent changes per endpoint,** for `consent.changed` only: `marketing_opt_in`,
+  `marketing_opt_out`, `utility_opt_in` and `utility_opt_out`, the event's `purpose` and `action`
+  together, so any mix can be chosen. Null receives every change, as before; a list holds 1 to 4 of
+  them, kept marketing first, opt-in before opt-out. It is chosen in Settings → Webhooks under
+  "Consent changed" ("Consent changes sent": all ticked unless some are unticked; saving them all
+  ticked keeps none) and shown on the endpoint as "Consent changes sent: …", and through the API as
+  `consentChanges` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every
+  endpoint the API answers.
+- **Only with the event:** a list given for an endpoint that does not take `consent.changed` is
+  refused (`consentChanges`; 422 through the API). A change that removes the event clears it, and a
+  `PATCH` that leaves it out keeps it; Settings always sends it. A check in the database holds the
+  same rule (null, or 1 to 4 known changes, one dimension, without a null, while `consent.changed`
+  is among the endpoint's events).
+- **Matched as captured:** `app.capture_webhook_event` creates a `consent.changed` delivery only for
+  the active endpoints whose list is null or holds the change, read from the purpose and the action
+  the consent trigger has always stored in the event's detail (ADR-053), and writes no event when no
+  endpoint takes it. An erasure's opt-outs (both purposes) go through the same filter. Other events
+  are not narrowed; replays and test events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `consentChanges` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0135:** `consent_changes text[]` on `app.webhook_endpoints` with the check, validated
+  at once (a company has at most 10 endpoints), an update grant on the column for the runtime role,
+  and `app.capture_webhook_event` replaced with the same signature, so its owner and grants stay.
+  Existing endpoints keep null; nothing is backfilled.
+
+Not built: filters on what recorded a change (its source: a keyword, a member, an import, Meta, a
+key, a store or an erasure), on the contact's other consent, and for `contact.created` (by where the
+contact came from: built by ADR-190), `contact.erased` and `order.received`.
+
+## ADR-190 Choosing where the added contacts a webhook endpoint receives came from (P5-09) (2026-10-05)
+
+Context: an endpoint that takes `contact.created` receives every contact the company adds, wherever
+it came from: a customer writing on WhatsApp, a member in the app, a CSV import, an API key, a
+store's customer. An integration that adds contacts itself through the API was sent each of them
+back and had to recognise its own, or risk adding them again; a receiver that follows people who
+wrote on WhatsApp was sent every import. ADR-123 and ADR-189 left filters for `contact.created`
+unbuilt.
+
+Decision:
+
+- **A list of sources per endpoint,** for `contact.created` only: `whatsapp`, `manual`, `import`,
+  `api` and `store`, the source the payload reports as `contact.source`. Null receives every
+  contact, as before; a list holds 1 to 5 of them, kept in that order. It is chosen in Settings →
+  Webhooks under "Contact added" ("New contacts sent, by where they came from": all ticked unless
+  some are unticked; saving them all ticked keeps none) and shown on the endpoint as "New contacts
+  sent: …", and through the API as `contactSources` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers, whose description advises
+  leaving out `api` not to hear of the contacts the integration's own keys add.
+- **Only with the event:** a list given for an endpoint that does not take `contact.created` is
+  refused (`contactSources`; 422 through the API). A change that removes the event clears it, and a
+  `PATCH` that leaves it out keeps it; Settings always sends it. A check in the database holds the
+  same rule (null, or 1 to 5 known sources, one dimension, without a null, while `contact.created`
+  is among the endpoint's events).
+- **Matched as captured:** `app.capture_contact_webhook_event` creates a `contact.created` delivery
+  only for the active endpoints whose list is null or holds the contact's source, read from the
+  contact (the trigger runs after the insert, so the row is there) and only when an active endpoint
+  of the company names sources. A contact's source is set when it is added and never changes. The
+  event is still written when an endpoint takes `contact.created` or `contact.updated`, so changes
+  later in the same transaction fold into it as before, reaching no endpoint the source left out;
+  later changes are `contact.updated` events, which the list does not narrow, nor `contact.erased`.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `contactSources` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0136:** `contact_sources text[]` on `app.webhook_endpoints` with the check, validated
+  at once (a company has at most 10 endpoints), an update grant on the column for the runtime role,
+  and `app.capture_contact_webhook_event` replaced with the same signature, so its owner and grants
+  stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: filters on which key added a contact (one integration's key among several), on the source
+for `contact.updated` and `contact.erased`, and filters for `order.received`.
+
+## ADR-191 Choosing the types of the received messages a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint that takes `message.received` receives every message customers send, or those
+its numbers, teams and members keep (ADR-170, ADR-174, ADR-181), whatever its type. A receiver often
+handles some kinds only: a chatbot answers text and taps on its buttons and lists, an order system
+takes carts, an archive keeps documents and photos. Each was sent every reaction, sticker and
+account notice and had to read `message.type` and drop the rest.
+
+Decision:
+
+- **A list of types per endpoint,** for `message.received` only: `text`, `image`, `video`, `audio`,
+  `document`, `sticker`, `location`, `contacts`, `interactive` (taps on reply buttons and list
+  rows), `button` (taps on a template's quick-reply buttons), `reaction`, `order`, `system` and
+  `unsupported`, the type the payload reports as `message.type`; `template` is only ever sent, so it
+  is no choice. Null receives every type, as before; a list holds 1 to 14 of them, kept in the order
+  message types are defined. It is chosen in Settings → Webhooks under "Message received" ("Received
+  messages sent, by type": all ticked unless some are unticked; saving them all ticked keeps none)
+  and shown on the endpoint as "Received messages sent: …", and through the API as `messageTypes` on
+  `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every endpoint the API
+  answers.
+- **Only with the event:** a list given for an endpoint that does not take `message.received` is
+  refused (`messageTypes`; 422 through the API). A change that removes the event clears it, and a
+  `PATCH` that leaves it out keeps it; Settings always sends it. A check in the database holds the
+  same rule (null, or 1 to 14 known types, one dimension, without a null, while `message.received`
+  is among the endpoint's events).
+- **Matched as captured:** `app.capture_webhook_event` creates a `message.received` delivery only
+  for the active endpoints whose list is null or holds the message's type, as the message trigger
+  has always stored it in the event's detail (ADR-053), applied with the endpoints' numbers, teams
+  and members, and writes no event when no endpoint takes it. A message's type is set when it is
+  received and never changes. Other events, `message.status` included, are not narrowed; replays and
+  test events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `messageTypes` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0137:** `message_types text[]` on `app.webhook_endpoints` with the check, validated at
+  once (a company has at most 10 endpoints), an update grant on the column for the runtime role, and
+  `app.capture_webhook_event` replaced with the same signature, so its owner and grants stay.
+  Existing endpoints keep null; nothing is backfilled.
+
+Not built: filters on a received message's words or on the kind of an interactive reply (button or
+list), types for `message.status` (the messages HyFib sends), and filters on the contact who sent it
+(a tag, a field's value).
+
+## ADR-192 Choosing why the runs a webhook endpoint receives ended (P5-09) (2026-10-05)
+
+Context: an endpoint that takes `automation.run_ended` receives the end of every run, or of the
+automations, ends and triggers it chose (ADR-145, ADR-151, ADR-183). An end is coarse: "failed"
+covers a message that could not be sent, a step, loop, message or web request limit, a run older
+than 7 days and an error, and "completed" both an End step and a step with nothing after it. A
+receiver that acts on some reasons only (an alert when a message could not be sent, but not when a
+run grew old) was sent every end of the status and had to read `run.endReason` and drop the rest.
+
+Decision:
+
+- **A list of reasons per endpoint,** for `automation.run_ended` only: the 21 reasons a run ends
+  for, as the payload's `run.endReason` names them, each belonging to one end (completed:
+  `end_node`, `no_next`; handed_off: `handoff_node`; taken_over: `agent_replied`, `assigned`,
+  `take_over`, `api_replied`; stopped: `stopped_by_member`, `conversation_resolved`, `opted_out`,
+  `contact_erased`, `automation_archived`, `stopped_by_api`; failed: `budget_steps`, `budget_loop`,
+  `budget_messages`, `budget_http`, `expired`, `send_blocked`, `send_failed`, `error`). Null
+  receives every reason, as before; a list holds 1 to 21 of them, kept in that order. Through the
+  API it is `runEndReasons` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in
+  every endpoint the API answers.
+- **A list narrows the ends it names reasons of:** a run's end counts only when its reason is
+  listed, for an end the list names reasons of; the runs of the endpoint's other ends are narrowed
+  by the ends alone (ADR-151), as a list of custom fields narrows field changes and leaves the other
+  parts to the parts (ADR-184). An endpoint taking every end and naming `send_blocked` and
+  `send_failed` receives every completion, hand-off, take-over and stop and, of the failures, those
+  two only; one taking only the failed end with the same list receives those failures only. So a
+  list never hides the runs of an end it names no reason of, and an end added to the endpoint later
+  receives its every run, rather than none.
+- **Only reasons of the ends taken:** a reason of an end the endpoint does not take could never
+  match, so a list naming one is refused (`runEndReasons`, "Choose end reasons only of the ends the
+  endpoint receives."; 422 through the API), checked against the ends given with it, or else the
+  ends the endpoint keeps. A change of the ends that leaves the reasons out keeps those of the ends
+  kept; none left takes every reason. A list given for an endpoint that does not take
+  `automation.run_ended` is refused; a change that removes the event clears it, and a `PATCH` that
+  leaves it out keeps it. A check in the database holds the same rules (null, or 1 to 21 known
+  reasons, one dimension, without a null, while `automation.run_ended` is among the endpoint's
+  events and only of the ends it takes), so a change of the ends alone cannot strand a reason
+  either.
+- **Settings:** under "Automation ended", below the statuses, "Why the runs ended, by status" lists
+  the reasons of each status ticked, all ticked unless some are unticked. The last reason ticked of
+  a status stays ticked (unticking the status stops its runs), and a status with every reason ticked
+  is not narrowed, so saving everything ticked keeps no list. The endpoints list shows "Automation
+  ends narrowed to: …".
+- **Matched as captured:** `app.capture_webhook_event` creates an `automation.run_ended` delivery
+  only for the active endpoints whose list is null, holds the reason the run ended for, or names no
+  reason of the end the run ended with (its status, paired with its reasons in the function as the
+  runs' own check pairs them), applied with the endpoints' other filters, and writes no event when
+  no endpoint takes it. The run trigger has always passed the reason in the event's detail, and a
+  run's end and reason are set once. Run starts and other events are not narrowed; replays and test
+  events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `runEndReasons` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0138:** `run_end_reasons text[]` on `app.webhook_endpoints` with the check, validated
+  at once (a company has at most 10 endpoints), an update grant on the column for the runtime role,
+  and `app.capture_webhook_event` replaced with the same signature, so its owner and grants stay.
+  Existing endpoints keep null; nothing is backfilled.
+
+Not built: filters on the step a run failed at or on the API key that started or stopped it, and
+reasons for `automation.run_started` (a run starting has none; its trigger is chosen with ADR-183).
+A reason added to automations later needs a migration that adds it to the check and to the capture's
+pairs, as it needs one for the runs' own check.
+
+## ADR-193 Reviewing campaign drafts through the public API (P5-08) (2026-10-05)
+
+Context: since ADR-186 keys create and edit drafts, but only members could see what submitting one
+would do: what still blocks it, how many contacts it would reach and why the others would be
+skipped, and what it would cost. An integration that prepares drafts for members (a store that
+drafts its weekly offer, say) could not tell whether its draft was ready, or warn before a member
+submitted a draft that would reach few contacts or cost more than expected.
+
+Decision:
+
+- **`GET /campaigns/{id}/review`** answers a draft's review as members' review shows it, read now:
+  `problems` (what must change before a member can submit it, in members' words and order, empty
+  when nothing blocks it), `audience` (the contacts the segment or conditions match, those who can
+  receive the campaign now, and why the others would be skipped, the commonest first; null until the
+  draft has a number, a template and an audience, or when the audience is over 50,000), `estimate`
+  (an upper bound of Meta's charges for the contacts who can receive it, from the rate card HyFib
+  publishes from Meta's rates for when it would start, in major units by market, with the recipients
+  in markets without a price counted apart; null without a currency, a rate card in it or a contact
+  who can receive it), `costCurrency`, `scheduledAt` and `scheduleAdjustment`, `approvalRequired`
+  and `frequencyCap`, and the `version` reviewed, which `PATCH` takes as `expectedVersion`. Counts
+  only: never contacts or members.
+- **One implementation:** members' review and the API both call `reviewCampaignDraft`
+  (`campaigns/service.ts`), which checks readiness (now given the company's id and time zone rather
+  than a member's context), counts the audience and estimates the cost; the API maps it to its words
+  (`toApiCampaignReview`). A member's submission checks everything again, so a review is advice, not
+  a promise.
+- **For keys that write drafts:** it needs `campaigns.write`, the scope that already reads a draft's
+  settings (ADR-186), because it shows costs and the audience, which keys that only read campaigns
+  never see (ADR-125). It changes nothing, so it is answered whatever the company's status, as reads
+  are; the key's company decides the campaign (another company's is not found).
+- **Drafts only:** any other status is refused with 409 naming it: a submitted campaign keeps the
+  audience frozen when it was submitted, and `GET /campaigns/{id}` counts its results.
+- **One snapshot, no writes:** a read-only transaction at repeatable read, so the counts, the
+  estimate and the problems agree with one another.
+- **No migration.**
+
+Not built: reviewing a draft's settings before saving them (the review reads the saved draft),
+submitting, approving, scheduling or starting campaigns through the API (a key is not a member), and
+the frequency cap's effect on the audience (applied when the campaign sends, as members' review
+says).
+
+## ADR-194 Sending media from links through the public API (P5-08) (2026-10-06)
+
+Context: keys reply with text, buttons, lists, products and reactions (ADR-070, ADR-080, ADR-082,
+ADR-086), but not with a photo, a video, a voice note or a document: a clinic could not send its
+leaflet, nor a shop a product photo, to a customer who had just written. HyFib keeps no media
+(inbound media is metadata only, and uploads need storage it does not have), but Meta's published
+spec lets a message name its media by an http(s) `link` that WhatsApp fetches (research M-191).
+
+Decision:
+
+- **Media from a link:** `POST /messages` takes `type` `image`, `video`, `audio` or `document` with
+  `to`, an optional `from` and `replyTo` as other replies take them, a `link`, and for a photo, a
+  video or a document an optional `caption` (trimmed, 1 to 1,024 characters); audio takes none. It
+  is a reply (ADR-070): `messages.reply`, only to a number that wrote to the WhatsApp number in the
+  last 24 hours (`window_closed` otherwise), stopping an automation answering the conversation.
+- **Links:** https only, with a host and without a user name or password, at most 2,000 characters,
+  trimmed; HyFib never fetches it. WhatsApp fetches it when it sends the message, so it must be
+  reachable from the internet without signing in; a link it cannot fetch, or media it does not
+  accept, makes the message fail, which `GET /messages/{id}` and `message.status` report with
+  WhatsApp's error, as for any send.
+- **Stored as sent:** the message's content is the link and the caption (`type` the media's), and
+  its send intent the Graph request (`{type}: {link, caption}`), sent through the same pipeline and
+  send job as every reply; the conversation's preview is the caption, or the kind of media. The API
+  reads the caption as the message's `text` (`mimeType` stays null: HyFib does not know it), and so
+  do webhooks. The inbox shows the kind, the caption and the link, which opens in a new tab (only an
+  https link is shown as one). Erasing the contact redacts the content as for any message.
+- **Not uploads, not stickers:** no `id` of uploaded media (HyFib has no media storage), no
+  `filename` for documents and no stickers: Meta's spec shows a filename only for a document sent by
+  id, and a caption on an audio or sticker message nowhere (M-191). The scope's label and
+  description name media.
+- **No migration:** the media types are already message types.
+
+Not built: sending uploaded media (needs media storage and Meta's upload), media in the inbox's own
+reply box, stickers, a document's file name, checking a link before sending it, and media downloads.

@@ -85,9 +85,9 @@ export const API_SCOPE_INFO: Record<
     writes: true,
   },
   'messages.reply': {
-    label: 'Reply with text, buttons, lists, products and reactions',
+    label: 'Reply with text, buttons, lists, products, reactions and media',
     description:
-      'Send text, reply buttons, list messages, products from the company’s WhatsApp catalogs and reactions to contacts who wrote to the number in the last 24 hours, quoting their messages if wanted, and read the status of messages the API sent.',
+      'Send text, reply buttons, list messages, products from the company’s WhatsApp catalogs, reactions, and photos, videos, audio or documents from links, to contacts who wrote to the number in the last 24 hours, quoting their messages if wanted, and read the status of messages the API sent.',
     permission: 'inbox.reply',
     writes: true,
   },
@@ -115,7 +115,7 @@ export const API_SCOPE_INFO: Record<
   'campaigns.write': {
     label: 'Create and edit campaign drafts',
     description:
-      'Create campaign drafts and edit them as members do: the name, the number and template, the variables, the audience (a segment or conditions), the schedule, the sending window and the caps; and cancel drafts. A draft sends nothing: members submit and start it in the app, under the authority of a member allowed to send campaigns.',
+      'Create campaign drafts and edit them as members do: the name, the number and template, the variables, the audience (a segment or conditions), the schedule, the sending window and the caps; review drafts as members do before they submit them (who they would reach and what they would cost); and cancel drafts. A draft sends nothing: members submit and start it in the app, under the authority of a member allowed to send campaigns.',
     permission: 'campaigns.write',
     writes: true,
   },
@@ -192,6 +192,10 @@ export const API_LIMITS = {
   pageSize: 100,
   /** A text message's characters, as WhatsApp and the inbox allow. */
   textLength: 4096,
+  /** A media message's link (ADR-194): HyFib's own bound, an address meant to be fetched. */
+  mediaLinkLength: 2000,
+  /** A media message's caption (research M-191). */
+  captionLength: 1024,
   idempotencyKeyLength: 255,
   idempotencyHours: 24,
   /** Conversations one call to POST /conversations/update-many changes (ADR-120). */

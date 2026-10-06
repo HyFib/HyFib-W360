@@ -6,6 +6,7 @@ import { expect, test } from './fixtures';
 import {
   connectTestChannel,
   inboundMessage,
+  inboundMessages,
   messagingConfigured,
   orderMessage,
   randomWaId,
@@ -68,7 +69,7 @@ function signatureValid(headers: IncomingHttpHeaders, body: string, secret: stri
     });
 }
 
-test('conversation and contact events reach an endpoint: a customer writes, a member resolves, tags, renames and erases', async ({
+test('conversation and contact events reach an endpoint: a customer writes, a member resolves, tags, renames and erases; an endpoint can take chosen consent changes only (ADR-189), and another the contacts from chosen sources only (ADR-190)', async ({
   page,
   request,
 }) => {
@@ -104,6 +105,53 @@ test('conversation and contact events reach an endpoint: a customer writes, a me
   const secret = await secretField.inputValue();
   await page.getByRole('button', { name: 'I have stored the secret' }).click();
 
+  // A second endpoint takes marketing opt-outs only (ADR-189).
+  const optOutPath = `${path}/opt-outs`;
+  const optOuts = () =>
+    received
+      .filter((r) => r.path === optOutPath)
+      .map((r) => JSON.parse(r.body) as { type: string; data: Record<string, unknown> });
+  const consentBox = (name: string) => page.getByRole('checkbox', { name, exact: true });
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${optOutPath}`);
+  await page.getByRole('checkbox', { name: /Consent changed/ }).check();
+  for (const name of [
+    'Marketing opt-ins (marketing_opt_in)',
+    'Utility opt-ins (utility_opt_in)',
+    'Utility opt-outs (utility_opt_out)',
+  ]) {
+    await consentBox(name).uncheck();
+  }
+  await expect(consentBox('Marketing opt-outs (marketing_opt_out)')).toBeChecked();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await expect(secretField).toBeVisible();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  await page.reload();
+  await expect(page.getByText('Consent changes sent: Marketing opt-outs')).toBeVisible();
+
+  // A third endpoint takes the contacts who wrote on WhatsApp only (ADR-190).
+  const wrotePath = `${path}/wrote`;
+  const wroteOnly = () =>
+    received
+      .filter((r) => r.path === wrotePath)
+      .map((r) => JSON.parse(r.body) as { type: string; data: Record<string, unknown> });
+  const sourceBox = (name: string) => page.getByRole('checkbox', { name, exact: true });
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${wrotePath}`);
+  await page.getByRole('checkbox', { name: /Contact added/ }).check();
+  for (const name of [
+    'Added in the app (manual)',
+    'Imported from a file (import)',
+    'Added through the API (api)',
+    'From a store (store)',
+  ]) {
+    await sourceBox(name).uncheck();
+  }
+  await expect(sourceBox('Wrote on WhatsApp (whatsapp)')).toBeChecked();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await expect(secretField).toBeVisible();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  await page.reload();
+  await expect(page.getByText('New contacts sent: Wrote on WhatsApp')).toBeVisible();
+
   // A customer writes for the first time: the contact is added.
   const waId = randomWaId();
   await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, waId, 'Hello there'));
@@ -118,6 +166,12 @@ test('conversation and contact events reach an endpoint: a customer writes, a me
     },
   });
   const contactId = added.json.data.contact!.id;
+  // The third endpoint hears of the contact too: it wrote on WhatsApp.
+  await expect(async () => expect(wroteOnly()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(wroteOnly()[0]).toMatchObject({
+    type: 'contact.created',
+    data: { contact: { id: contactId, source: 'whatsapp' } },
+  });
 
   // A member resolves the conversation in the inbox.
   await page.goto(`/c/${slug}/inbox`);
@@ -172,6 +226,21 @@ test('conversation and contact events reach an endpoint: a customer writes, a me
   });
   await expect(page.getByRole('heading', { name: 'Priya Sharma', level: 1 })).toBeVisible();
 
+  // A member records a marketing opt-in, then an opt-out: only the opt-out reaches the second
+  // endpoint (ADR-189), and the first, which takes no consent changes, hears neither.
+  await page.getByLabel('How and when did they tell you?').fill('Agreed at the counter');
+  await page.getByRole('button', { name: 'Record consent' }).click();
+  await expect(page.getByText('Consent recorded.')).toBeVisible();
+  await page.getByLabel('Customer said').selectOption('opt_out');
+  await page.getByLabel('How and when did they tell you?').fill('Asked us to stop offers');
+  await page.getByRole('button', { name: 'Record consent' }).click();
+  await expect(page.getByText('Marketing: opted out').first()).toBeVisible();
+  await expect(async () => expect(optOuts()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(optOuts()[0]).toMatchObject({
+    type: 'consent.changed',
+    data: { purpose: 'marketing', action: 'opt_out', source: 'agent' },
+  });
+
   // Erasing sends one event, without personal data (the tags it removes send nothing).
   await page.getByRole('button', { name: 'Erase contact' }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: 'Erase contact' }).click();
@@ -191,6 +260,47 @@ test('conversation and contact events reach an endpoint: a customer writes, a me
   // Nothing else arrives for these changes.
   await page.goto(`/c/${slug}/settings/webhooks`);
   expect(forUs()).toHaveLength(5);
+  // Erasure ends both purposes with opt-outs: the second endpoint hears the marketing one only.
+  await expect(async () => expect(optOuts()).toHaveLength(2)).toPass({ timeout: 30_000 });
+  expect(optOuts()[1]).toMatchObject({
+    type: 'consent.changed',
+    data: { purpose: 'marketing', action: 'opt_out', source: 'erasure' },
+  });
+  await page
+    .getByRole('list', { name: 'Endpoints' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Consent changes sent: Marketing opt-outs' })
+    .getByRole('link', { name: /Deliveries and settings/ })
+    .click();
+  await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Deliveries' }).getByRole('listitem')).toHaveCount(2);
+  await expect(consentBox('Marketing opt-outs (marketing_opt_out)')).toBeChecked();
+  await expect(consentBox('Marketing opt-ins (marketing_opt_in)')).not.toBeChecked();
+  expect(optOuts()).toHaveLength(2);
+
+  // A member adds a contact in the app: the first endpoint hears of it, the third does not.
+  await page.goto(`/c/${slug}/contacts/new`);
+  await page.getByLabel('Name').fill('Meena Manual');
+  await page.getByLabel('Phone number').fill(`+${randomWaId()}`);
+  await page.getByRole('button', { name: 'Add contact' }).click();
+  await expect(page.getByRole('heading', { name: 'Meena Manual', level: 1 })).toBeVisible();
+  await expect(async () => expect(forUs()).toHaveLength(6)).toPass({ timeout: 30_000 });
+  expect(forUs()[5]!.json).toMatchObject({
+    type: 'contact.created',
+    data: { contact: { name: 'Meena Manual', source: 'manual' } },
+  });
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page
+    .getByRole('list', { name: 'Endpoints' })
+    .getByRole('listitem')
+    .filter({ hasText: 'New contacts sent: Wrote on WhatsApp' })
+    .getByRole('link', { name: /Deliveries and settings/ })
+    .click();
+  await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Deliveries' }).getByRole('listitem')).toHaveCount(1);
+  await expect(sourceBox('Wrote on WhatsApp (whatsapp)')).toBeChecked();
+  await expect(sourceBox('Added in the app (manual)')).not.toBeChecked();
+  expect(wroteOnly()).toHaveLength(1);
 });
 
 test('conversation team and assignment events name the team and the member: a member moves and assigns a conversation, and deleting the team sends its change', async ({
@@ -301,7 +411,7 @@ test('conversation team and assignment events name the team and the member: a me
   expect(forUs()).toHaveLength(3);
 });
 
-test("an endpoint for one team receives only its conversations' events: messages once a conversation joins the team, and the change of team when it leaves (ADR-174)", async ({
+test("an endpoint for one team receives only its conversations' events: messages once a conversation joins the team, and the change of team when it leaves (ADR-174); another the received messages of chosen types only (ADR-191)", async ({
   page,
   request,
 }) => {
@@ -396,6 +506,69 @@ test("an endpoint for one team receives only its conversations' events: messages
     'conversation.team_changed',
   ]);
   expect(forUs().some((r) => r.body.includes('For billing'))).toBe(false);
+
+  // A second endpoint takes received locations only (ADR-191).
+  const locationPath = `${path}/locations`;
+  const locations = () =>
+    received.filter((r) => r.path === locationPath).map((r) => JSON.parse(r.body) as EventBody);
+  const typeBox = (name: string) => page.getByRole('checkbox', { name, exact: true });
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${locationPath}`);
+  await page.getByRole('checkbox', { name: /Message received/ }).check();
+  for (const name of [
+    'Text (text)',
+    'Photos (image)',
+    'Videos (video)',
+    'Audio (audio)',
+    'Documents (document)',
+    'Stickers (sticker)',
+    'Contact cards (contacts)',
+    'Replies to buttons and lists (interactive)',
+    'Template button replies (button)',
+    'Reactions (reaction)',
+    'Orders (order)',
+    'WhatsApp account updates (system)',
+    'Unsupported messages (unsupported)',
+  ]) {
+    await typeBox(name).uncheck();
+  }
+  await expect(typeBox('Locations (location)')).toBeChecked();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await expect(secretField).toBeVisible();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  await page.reload();
+  await expect(page.getByText('Received messages sent: Locations')).toBeVisible();
+  // The customer writes and then shares a location: the team's endpoint hears both (the
+  // conversation is back in Returns), the second only the location.
+  await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, waId, 'I am at home'));
+  await expect(async () =>
+    expect(forUs().some((r) => r.body.includes('I am at home'))).toBe(true),
+  ).toPass({ timeout: 30_000 });
+  await sendSignedWebhook(
+    request,
+    inboundMessages(wabaId, phoneNumberId, waId, [
+      {
+        type: 'location',
+        location: { latitude: 12.97, longitude: 77.59, name: 'Home', address: 'MG Road' },
+      },
+    ]),
+  );
+  await expect(async () => expect(locations()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(locations()[0]).toMatchObject({
+    type: 'message.received',
+    data: { message: { type: 'location' } },
+  });
+  await page
+    .getByRole('list', { name: 'Endpoints' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Received messages sent: Locations' })
+    .getByRole('link', { name: /Deliveries and settings/ })
+    .click();
+  await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Deliveries' }).getByRole('listitem')).toHaveCount(1);
+  await expect(typeBox('Locations (location)')).toBeChecked();
+  await expect(typeBox('Text (text)')).not.toBeChecked();
+  expect(locations()).toHaveLength(1);
 });
 
 test('an endpoint for one member receives only the events of the conversations assigned to them, and the change of assignee when a conversation leaves them (ADR-181)', async ({
@@ -498,7 +671,7 @@ interface RunEventBody {
   };
 }
 
-test('automation run events reach an endpoint: a live run starts and ends, a member’s test run sends nothing, an endpoint can take chosen automations only, and another only the ends it chooses', async ({
+test('automation run events reach an endpoint: a live run starts and ends, a member’s test run sends nothing, an endpoint can take chosen automations only, another only the ends it chooses, and another the runs of an end that ended for chosen reasons only (ADR-192)', async ({
   page,
   request,
 }) => {
@@ -721,8 +894,39 @@ test('automation run events reach an endpoint: a live run starts and ends, a mem
   await page.reload();
   await expect(page.getByText('Automation runs started by: API')).toBeVisible();
 
+  // A fourth endpoint takes the ends of runs, completions only when nothing came next (ADR-192):
+  // the reasons of the other ends stay ticked, and the last one ticked of an end stays.
+  const reasonsPath = `${path}/reasons`;
+  const forReasons = () =>
+    received.filter((r) => r.path === reasonsPath).map((r) => JSON.parse(r.body) as RunEventBody);
+  const reasonBox = (name: string) => page.getByRole('checkbox', { name, exact: true });
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${reasonsPath}`);
+  await page.getByRole('checkbox', { name: /Automation ended/ }).check();
+  await reasonBox('Reached an End step (end_node)').uncheck();
+  await expect(reasonBox('Reached a step with nothing after it (no_next)')).toBeDisabled();
+  await expect(reasonBox('Older than 7 days (expired)')).toBeChecked();
+  await page.getByRole('button', { name: 'Add endpoint' }).click();
+  await expect(page.getByLabel('Signing secret')).toBeVisible();
+  await page.getByRole('button', { name: 'I have stored the secret' }).click();
+  await page.reload();
+  await expect(
+    page.getByText('Automation ends narrowed to: Reached a step with nothing after it'),
+  ).toBeVisible();
+  await page
+    .getByRole('list', { name: 'Endpoints' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Automation ends narrowed to:' })
+    .getByRole('link', { name: /Deliveries and settings/ })
+    .click();
+  await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
+  await expect(reasonBox('Reached an End step (end_node)')).not.toBeChecked();
+  await expect(reasonBox('Reached a step with nothing after it (no_next)')).toBeChecked();
+  // It names no reason a run fails for, so it takes every failure.
+  await expect(reasonBox('A message could not be sent (send_blocked)')).toBeChecked();
+
   // A fifth customer writes "bye": Farewell's run starts and completes, and the first endpoint
-  // hears both. The completion is captured for no other endpoint: the second has no delivery.
+  // hears both. The second endpoint, which takes no completion, has no delivery.
   const fifth = randomWaId();
   await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, fifth, 'bye'));
   await expect(async () => expect(forUs()).toHaveLength(8)).toPass({ timeout: 30_000 });
@@ -751,6 +955,12 @@ test('automation run events reach an endpoint: a live run starts and ends, a mem
   await expect(triggerBox('API (api)')).toBeChecked();
   await expect(triggerBox('Keyword (keyword)')).not.toBeChecked();
   expect(forApi()).toEqual([]);
+  // Nothing came after Farewell's message, so the fourth endpoint hears its completion.
+  await expect(async () => expect(forReasons()).toHaveLength(1)).toPass({ timeout: 30_000 });
+  expect(forReasons()[0]).toMatchObject({
+    type: 'automation.run_ended',
+    data: { run: { status: 'completed', endReason: 'no_next' }, contact: { phone: `+${fifth}` } },
+  });
 
   // Both automations are archived: Greeter, not chosen, is no longer offered; Farewell, chosen,
   // stays listed and ticked, marked archived.

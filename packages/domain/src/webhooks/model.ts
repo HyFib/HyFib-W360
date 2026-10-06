@@ -1,6 +1,9 @@
 import type {
+  AutomationEndReason,
   ChannelStatus,
+  ContactSource,
   WebhookCampaignStatus,
+  WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
   WebhookEventType,
@@ -8,12 +11,16 @@ import type {
   WebhookMessageStatus,
   WebhookOrderStatus,
   WebhookRunEndStatus,
+  WebhookReceivedMessageType,
   WebhookRunTrigger,
   WebhookTemplateStatus,
 } from '@w360/db';
 
 export type {
+  AutomationEndReason,
+  ContactSource,
   WebhookCampaignStatus,
+  WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
   WebhookEventType,
@@ -21,6 +28,7 @@ export type {
   WebhookMessageStatus,
   WebhookOrderStatus,
   WebhookRunEndStatus,
+  WebhookReceivedMessageType,
   WebhookRunTrigger,
   WebhookTemplateStatus,
 } from '@w360/db';
@@ -353,6 +361,191 @@ export const WEBHOOK_RUN_TRIGGER_LABELS: Record<WebhookRunTrigger, string> = {
   any_message: 'Any message',
   store_event: 'Order messages',
   api: 'API',
+};
+
+/**
+ * The consent changes an endpoint taking `consent.changed` can choose (ADR-189): the event's
+ * purpose and action, marketing first, as the contact page lists consent.
+ */
+export const WEBHOOK_CONSENT_CHANGES = [
+  'marketing_opt_in',
+  'marketing_opt_out',
+  'utility_opt_in',
+  'utility_opt_out',
+] as const satisfies readonly WebhookConsentChange[];
+
+/** How Settings names a consent change (ADR-189). */
+export const WEBHOOK_CONSENT_CHANGE_LABELS: Record<WebhookConsentChange, string> = {
+  marketing_opt_in: 'Marketing opt-ins',
+  marketing_opt_out: 'Marketing opt-outs',
+  utility_opt_in: 'Utility opt-ins',
+  utility_opt_out: 'Utility opt-outs',
+};
+
+/**
+ * Where a contact came from (`contact.source`), which an endpoint taking `contact.created` can
+ * choose (ADR-190), in the order contacts' sources are defined.
+ */
+export const WEBHOOK_CONTACT_SOURCES = [
+  'whatsapp',
+  'manual',
+  'import',
+  'api',
+  'store',
+] as const satisfies readonly ContactSource[];
+
+/** How Settings names where a contact came from (ADR-190). */
+export const WEBHOOK_CONTACT_SOURCE_LABELS: Record<ContactSource, string> = {
+  whatsapp: 'Wrote on WhatsApp',
+  manual: 'Added in the app',
+  import: 'Imported from a file',
+  api: 'Added through the API',
+  store: 'From a store',
+};
+
+/**
+ * The types a received message has, which an endpoint taking `message.received` can choose
+ * (ADR-191), in the order message types are defined; `template` is only sent, never received.
+ */
+export const WEBHOOK_RECEIVED_MESSAGE_TYPES = [
+  'text',
+  'image',
+  'video',
+  'audio',
+  'document',
+  'sticker',
+  'location',
+  'contacts',
+  'interactive',
+  'button',
+  'reaction',
+  'order',
+  'system',
+  'unsupported',
+] as const satisfies readonly WebhookReceivedMessageType[];
+
+/** How Settings names a received message's type (ADR-191). */
+export const WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS: Record<WebhookReceivedMessageType, string> = {
+  text: 'Text',
+  image: 'Photos',
+  video: 'Videos',
+  audio: 'Audio',
+  document: 'Documents',
+  sticker: 'Stickers',
+  location: 'Locations',
+  contacts: 'Contact cards',
+  interactive: 'Replies to buttons and lists',
+  button: 'Template button replies',
+  reaction: 'Reactions',
+  order: 'Orders',
+  system: 'WhatsApp account updates',
+  unsupported: 'Unsupported messages',
+};
+
+/**
+ * The reasons a run ends for (`run.endReason`) by the end they belong to (ADR-192), as automations
+ * define them, in the order of `WEBHOOK_RUN_END_STATUSES`.
+ */
+export const WEBHOOK_RUN_END_REASONS_BY_END = {
+  completed: ['end_node', 'no_next'],
+  handed_off: ['handoff_node'],
+  taken_over: ['agent_replied', 'assigned', 'take_over', 'api_replied'],
+  stopped: [
+    'stopped_by_member',
+    'conversation_resolved',
+    'opted_out',
+    'contact_erased',
+    'automation_archived',
+    'stopped_by_api',
+  ],
+  failed: [
+    'budget_steps',
+    'budget_loop',
+    'budget_messages',
+    'budget_http',
+    'expired',
+    'send_blocked',
+    'send_failed',
+    'error',
+  ],
+} as const satisfies Record<WebhookRunEndStatus, readonly AutomationEndReason[]>;
+
+/**
+ * The reasons a run ends for, which an endpoint taking `automation.run_ended` can choose (ADR-192),
+ * grouped by end.
+ */
+export const WEBHOOK_RUN_END_REASONS = WEBHOOK_RUN_END_STATUSES.flatMap(
+  (end) => WEBHOOK_RUN_END_REASONS_BY_END[end],
+) as unknown as readonly [AutomationEndReason, ...AutomationEndReason[]];
+
+/**
+ * Whether an endpoint taking these ends (null: every end) takes runs that end for `reason`
+ * (ADR-192): its end reasons narrow the ends it takes, and are chosen only among theirs.
+ */
+export function webhookRunEndTakesReason(
+  ends: readonly WebhookRunEndStatus[] | null,
+  reason: AutomationEndReason,
+): boolean {
+  return (ends ?? WEBHOOK_RUN_END_STATUSES).some((end) =>
+    (WEBHOOK_RUN_END_REASONS_BY_END[end] as readonly AutomationEndReason[]).includes(reason),
+  );
+}
+
+/**
+ * The reasons Settings shows ticked for an endpoint's end reasons (ADR-192): those it names, and
+ * every reason of an end it names none of (null: of every end), as its events are taken.
+ */
+export function webhookRunEndReasonsTicked(
+  stored: readonly AutomationEndReason[] | null,
+): AutomationEndReason[] {
+  return WEBHOOK_RUN_END_STATUSES.flatMap((end) => {
+    const reasons: readonly AutomationEndReason[] = WEBHOOK_RUN_END_REASONS_BY_END[end];
+    const named = reasons.filter((reason) => stored?.includes(reason));
+    return named.length > 0 ? named : [...reasons];
+  });
+}
+
+/**
+ * The end reasons Settings sends for the reasons ticked (ADR-192): for each end taken (null: every
+ * end), those ticked unless every reason of the end is; null when no end is narrowed.
+ */
+export function webhookRunEndReasonsChosen(
+  ends: readonly WebhookRunEndStatus[] | null,
+  ticked: readonly AutomationEndReason[],
+): AutomationEndReason[] | null {
+  const chosen = WEBHOOK_RUN_END_STATUSES.filter((end) => !ends || ends.includes(end)).flatMap(
+    (end) => {
+      const reasons: readonly AutomationEndReason[] = WEBHOOK_RUN_END_REASONS_BY_END[end];
+      const kept = reasons.filter((reason) => ticked.includes(reason));
+      return kept.length < reasons.length ? kept : [];
+    },
+  );
+  return chosen.length > 0 ? chosen : null;
+}
+
+/** How Settings names the reason a run ended for (ADR-192), as the run pages say it. */
+export const WEBHOOK_RUN_END_REASON_LABELS: Record<AutomationEndReason, string> = {
+  end_node: 'Reached an End step',
+  no_next: 'Reached a step with nothing after it',
+  handoff_node: 'Handed the conversation to people',
+  agent_replied: 'A member replied',
+  assigned: 'Assigned to a member',
+  take_over: 'A member took it over',
+  api_replied: 'A reply was sent through the API',
+  stopped_by_member: 'Stopped by a member',
+  conversation_resolved: 'The conversation was resolved',
+  opted_out: 'The customer opted out',
+  contact_erased: 'The contact was erased',
+  automation_archived: 'The automation was archived',
+  stopped_by_api: 'Stopped through the API',
+  budget_steps: 'Step limit reached',
+  budget_loop: 'Loop limit reached',
+  budget_messages: 'Message limit reached',
+  budget_http: 'Web request limit reached',
+  expired: 'Older than 7 days',
+  send_blocked: 'A message could not be sent',
+  send_failed: 'A message did not reach the customer',
+  error: 'Could not continue',
 };
 
 export const WEBHOOK_LIMITS = {

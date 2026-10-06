@@ -422,14 +422,116 @@ describe('contact custom fields through the public API (ADR-112)', () => {
       await apiUpdateContact(deps(), ctx, other.id, { phone: other.phone, name: 'From WhatsApp' }),
     ).toMatchObject({ phone: other.phone, name: 'From WhatsApp' });
     expect((await apiGetContact(deps(), ctx, typed.id)).phone).toBe(fresh);
-    // Only PATCH changes numbers: changing many contacts at once refuses the key.
-    expect(
-      (
-        await refusal(
-          apiUpdateManyContacts(deps(), ctx, { contacts: [{ id: typed.id, phone: nextPhone() }] }),
-        )
-      ).code,
-    ).toBe('validation_failed');
+  });
+
+  it('changes typed numbers in a call that changes many contacts, each free before the call and given once, naming the refused place and saving nothing (ADR-188)', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['contacts.read', 'contacts.write']);
+    const create = async (name: string) =>
+      (await apiCreateContact(deps(), ctx, { phone: nextPhone(), name }, null)).body.data as {
+        id: string;
+        phone: string;
+      };
+    const asha = await create('Asha');
+    const bina = await create('Bina');
+    const chitra = await create('Chitra');
+    const many = (items: Record<string, unknown>[]) =>
+      apiUpdateManyContacts(deps(), ctx, { contacts: items });
+    const read = () =>
+      Promise.all([asha, bina, chitra].map((x) => apiGetContact(deps(), ctx, x.id)));
+
+    // Two numbers fixed in one call, with other changes, answered in the order given.
+    const [fresh1, fresh2] = [nextPhone(), nextPhone()];
+    const fixed = await many([
+      { id: bina.id, phone: fresh2, name: 'Bina Rao' },
+      { id: asha.id, phone: fresh1 },
+      { id: chitra.id, addTags: ['webinar'] },
+    ]);
+    expect(fixed.map((x) => [x.id, x.phone, x.name])).toEqual([
+      [bina.id, fresh2, 'Bina Rao'],
+      [asha.id, fresh1, 'Asha'],
+      [chitra.id, chitra.phone, 'Chitra'],
+    ]);
+    expect((await updateAudits(bina.id)).map((a) => a.metadata.changed)).toEqual([
+      ['name', 'phone'],
+    ]);
+    expect((await updateAudits(asha.id)).map((a) => a.metadata.changed)).toEqual([['phone']]);
+    // The number a contact has, in another form, changes nothing.
+    await many([{ id: asha.id, phone: fresh1.replace(/^\+91/, '+91 ') }]);
+    expect(await updateAudits(asha.id)).toHaveLength(1);
+
+    // Two contacts' numbers are never swapped: each is one of the call's contacts' before it.
+    const swap = await refusal(
+      many([
+        { id: asha.id, phone: fresh2 },
+        { id: bina.id, phone: fresh1 },
+      ]),
+    );
+    expect([swap.code, swap.paths, swap.error.publicMessage]).toEqual([
+      'conflict',
+      ['contacts.0.phone'],
+      'Another contact already has this phone number.',
+    ]);
+    // Nor moved, even when the contact that has the number is given another before it.
+    const moved = await refusal(
+      many([
+        { id: bina.id, phone: nextPhone() },
+        { id: asha.id, phone: fresh2, name: 'Asha Rao' },
+      ]),
+    );
+    expect([moved.code, moved.paths]).toEqual(['conflict', ['contacts.1.phone']]);
+
+    // One number given twice, in two forms, refused before anything is read.
+    const twice = nextPhone();
+    const repeated = await refusal(
+      many([
+        { id: asha.id, phone: twice },
+        { id: chitra.id, phone: twice.replace(/^\+91/, '+91 ') },
+      ]),
+    );
+    expect([repeated.code, repeated.paths, repeated.error.publicMessage]).toEqual([
+      'validation_failed',
+      ['contacts.1.phone'],
+      'Give each number once.',
+    ]);
+
+    // A suppressed number, and a contact whose number WhatsApp gave, by their place.
+    const suppressed = nextPhone();
+    await fx.query(
+      `INSERT INTO app.suppressions (id, tenant_id, phone_e164, reason) VALUES ($1, $2, $3, 'manual')`,
+      [uuidv7(), c.tenant.id, suppressed],
+    );
+    const onList = await refusal(
+      many([
+        { id: chitra.id, name: 'Chitra K' },
+        { id: asha.id, phone: suppressed },
+      ]),
+    );
+    expect([onList.code, onList.paths]).toEqual(['precondition_failed', ['contacts.1.phone']]);
+    await fx.query(
+      `INSERT INTO app.contact_identities (id, tenant_id, contact_id, whatsapp_account_id, wa_id)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [uuidv7(), c.tenant.id, chitra.id, c.whatsappAccountId, chitra.phone.slice(1)],
+    );
+    const identity = await refusal(
+      many([
+        { id: asha.id, name: 'Asha Rao' },
+        { id: chitra.id, phone: nextPhone() },
+      ]),
+    );
+    expect([identity.code, identity.paths, identity.error.publicMessage]).toEqual([
+      'precondition_failed',
+      ['contacts.1.phone'],
+      'This number comes from WhatsApp and cannot be changed.',
+    ]);
+
+    // None of the refused calls changed anything.
+    expect((await read()).map((x) => [x.phone, x.name])).toEqual([
+      [fresh1, 'Asha'],
+      [fresh2, 'Bina Rao'],
+      [chitra.phone, 'Chitra'],
+    ]);
+    for (const x of [asha, bina, chitra]) expect(await updateAudits(x.id)).toHaveLength(1);
   });
 
   it('refuses unknown fields, other types, bad values and too many tags, saving nothing', async () => {

@@ -1061,6 +1061,9 @@ describe('automation runs', () => {
       async enqueueMany(tx, queue, jobs) {
         return fx.jobs().enqueueMany(tx, queue, jobs);
       },
+      async raisePriority(tx, queue, singletonKey, priority) {
+        return fx.jobs().raisePriority(tx, queue, singletonKey, priority);
+      },
     };
     await expect(
       advanceAutomationRun(
@@ -1152,6 +1155,9 @@ describe('automation runs', () => {
       },
       async enqueueMany(tx, queue, jobs) {
         return fx.jobs().enqueueMany(tx, queue, jobs);
+      },
+      async raisePriority(tx, queue, singletonKey, priority) {
+        return fx.jobs().raisePriority(tx, queue, singletonKey, priority);
       },
     };
     const attempt = () =>

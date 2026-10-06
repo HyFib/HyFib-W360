@@ -24,6 +24,10 @@ import {
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_RUN_TRIGGERS,
+  WEBHOOK_CONSENT_CHANGES,
+  WEBHOOK_CONTACT_SOURCES,
+  WEBHOOK_RECEIVED_MESSAGE_TYPES,
+  WEBHOOK_RUN_END_REASONS,
   WEBHOOK_RETRY_SECONDS,
   WEBHOOK_TEMPLATE_STATUSES,
 } from '../webhooks/model';
@@ -61,6 +65,7 @@ import {
 import {
   apiCampaignRecipientSchema,
   apiCampaignDetailSchema,
+  apiCampaignReviewSchema,
   apiCampaignSchema,
   apiCreateCampaignSchema,
   apiUpdateCampaignSchema,
@@ -96,6 +101,11 @@ import {
   apiSendManyTemplatesSchema,
   apiSendMessageSchema,
   apiSendTextSchema,
+  apiSendImageSchema,
+  apiSendVideoSchema,
+  apiSendAudioSchema,
+  apiSendDocumentSchema,
+  API_MESSAGE_TYPES,
 } from './resources';
 import {
   apiCreateWebhookEndpointSchema,
@@ -130,8 +140,10 @@ export const apiTemplateSchema = z.object({
 export const apiQueuedMessageSchema = z.object({
   id: z.uuid(),
   type: z
-    .enum(['template', 'text', 'interactive', 'reaction'])
-    .describe('interactive: reply buttons or a list.'),
+    .enum(API_MESSAGE_TYPES)
+    .describe(
+      'interactive: reply buttons or a list; image, video, audio and document: media sent from a link.',
+    ),
   status: z.literal('queued'),
   contactId: z.uuid(),
   channelId: z.uuid(),
@@ -169,8 +181,10 @@ const OUTBOUND_STATUSES = [
 export const apiMessageSchema = z.object({
   id: z.uuid(),
   type: z
-    .enum(['template', 'text', 'interactive', 'reaction'])
-    .describe('interactive: reply buttons or a list.'),
+    .enum(API_MESSAGE_TYPES)
+    .describe(
+      'interactive: reply buttons or a list; image, video, audio and document: media sent from a link.',
+    ),
   status: z
     .enum(OUTBOUND_STATUSES)
     .describe(
@@ -539,6 +553,30 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       'What started the runs whose events (automation.run_started and automation.run_ended) the endpoint receives, as run.trigger names it; null receives every run.',
     ),
+  consentChanges: z
+    .array(z.enum(WEBHOOK_CONSENT_CHANGES))
+    .nullable()
+    .describe(
+      'The consent changes the endpoint receives as consent.changed, by the event’s purpose and action; null receives every change.',
+    ),
+  contactSources: z
+    .array(z.enum(WEBHOOK_CONTACT_SOURCES))
+    .nullable()
+    .describe(
+      'Where the contacts whose contact.created the endpoint receives came from, as contact.source names it; null receives every contact.',
+    ),
+  messageTypes: z
+    .array(z.enum(WEBHOOK_RECEIVED_MESSAGE_TYPES))
+    .nullable()
+    .describe(
+      'The types of the received messages the endpoint receives as message.received, as message.type names them; null receives every type.',
+    ),
+  runEndReasons: z
+    .array(z.enum(WEBHOOK_RUN_END_REASONS))
+    .nullable()
+    .describe(
+      'The reasons the runs the endpoint receives as automation.run_ended ended for, as run.endReason names them, each narrowing the end it belongs to; null receives every reason.',
+    ),
   channelIds: z
     .array(z.uuid())
     .nullable()
@@ -763,7 +801,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, create, edit and review campaign drafts for members to submit, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -936,7 +974,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         patch: {
           operationId: 'updateContact',
           summary: 'Change a contact’s name, email, number, custom fields or tags',
-          description: `${scopeNote('contacts.write')} A field's value must have its type (GET /contact-fields); a refusal names \`fields.<key>\` and saves nothing. Tags are lower-cased, 50 at most per contact. A number changes only when it was typed for the contact, as members change it: one WhatsApp gave (the contact wrote to one of the company's numbers) is the contact's identity and is refused with 412, as is a number on the company's suppression list; a number another contact has is refused with 409, without naming that contact. Only this call changes numbers. What the contact already has changes nothing, so a retry is safe without an \`Idempotency-Key\`. Erased contacts are not found.`,
+          description: `${scopeNote('contacts.write')} A field's value must have its type (GET /contact-fields); a refusal names \`fields.<key>\` and saves nothing. Tags are lower-cased, 50 at most per contact. A number changes only when it was typed for the contact, as members change it: one WhatsApp gave (the contact wrote to one of the company's numbers) is the contact's identity and is refused with 412, as is a number on the company's suppression list; a number another contact has is refused with 409, without naming that contact. POST /contacts/update-many changes numbers too; the same change for many contacts does not. What the contact already has changes nothing, so a retry is safe without an \`Idempotency-Key\`. Erased contacts are not found.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           requestBody: { required: true, content: json(ref('ContactUpdate')) },
           responses: {
@@ -951,9 +989,10 @@ export function buildOpenApiDocument(serverUrl: string) {
       '/contacts/update-many': {
         post: {
           operationId: 'updateManyContacts',
-          summary: 'Change many contacts’ names, emails, custom fields or tags at once',
+          summary: 'Change many contacts’ names, emails, numbers, custom fields or tags at once',
           description: [
             `${scopeNote('contacts.write')} Up to ${API_LIMITS.contactsPerChange} contacts, each with its \`id\` and what PATCH /contacts/{id} takes, each changed as that changes one. All of them or none: a contact of another company or an erased one, a value of another type, an unknown field or a 51st tag refuses the call (422, naming the place, as \`contacts.3.fields.plan\`), and nothing is changed.`,
+            'A number changes as PATCH /contacts/{id} changes one: one WhatsApp gave, or one on the company’s suppression list, is refused with 412, and one another contact has with 409. Each number must be free before the call, so a number one of the call’s own contacts has is refused too, whatever the order and even when that contact is given another: a call never swaps or moves numbers between contacts. A number given twice, in any form, is refused with 422. These refusals name the place, as `contacts.2.phone`, and nothing is changed.',
             'The contacts are changed in the order given and answered in it. A call counts as one request against the rate and monthly limits, within the 64 KB a body may hold. What a contact already has changes nothing, so a retry is safe without an `Idempotency-Key`.',
           ].join('\n\n'),
           requestBody: { required: true, content: json(ref('UpdateManyContacts')) },
@@ -966,7 +1005,7 @@ export function buildOpenApiDocument(serverUrl: string) {
                 required: ['data'],
               }),
             },
-            ...errors(400, 401, 403, 415, 422, 423, 429, 500),
+            ...errors(400, 401, 403, 409, 412, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -1108,13 +1147,14 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'sendMessage',
           summary:
-            'Send an approved template, or a reply: text, buttons, a list, products or a reaction',
+            'Send an approved template, or a reply: text, buttons, a list, products, a reaction or media',
           description: [
             `${scopeNote('messages.send', 'messages.send_marketing', 'messages.reply')}`,
             'A template (`type` `template` or left out): utility templates need `messages.send`, marketing templates `messages.send_marketing`. The contact is created when new; consent, the suppression list and the marketing frequency cap are checked.',
-            'A reply (`type` `text`, `buttons`, `list`, `product`, `product_list`, `catalog` or `reaction`) needs `messages.reply` and goes only to a number that wrote to the WhatsApp number in the last 24 hours (WhatsApp’s customer service window); otherwise it is refused with reason `window_closed`, and nothing tells whether the number is a contact. Any reply but a reaction stops an automation answering the conversation, and the conversation keeps waiting for a member of the team. The window is checked again when the message is sent.',
+            'A reply (`type` `text`, `buttons`, `list`, `product`, `product_list`, `catalog`, `reaction`, `image`, `video`, `audio` or `document`) needs `messages.reply` and goes only to a number that wrote to the WhatsApp number in the last 24 hours (WhatsApp’s customer service window); otherwise it is refused with reason `window_closed`, and nothing tells whether the number is a contact. Any reply but a reaction stops an automation answering the conversation, and the conversation keeps waiting for a member of the team. The window is checked again when the message is sent.',
             'Products (`product`: one; `product_list`: up to 30 in sections, with a header; `catalog`: the catalog, opened from a product’s picture) need Commerce in the company’s plan (403, reason `not_in_plan`, otherwise). They are named by their content ids (`retailerId`) in a catalog HyFib has read from Meta for the WhatsApp number (Commerce → Catalogs), still connected, and not removed at Meta; all from one catalog, which `catalogId` names when more than one has them all. Unknown ids are refused by name (422, `products`).',
-            'A text, buttons, a list or products can quote a message of the conversation with `replyTo`, its id from `GET /conversations/{id}/messages`, the `message.received` webhook or a send’s response: a message the contact sent, or one the business sent that WhatsApp accepted. A reaction (`type` `reaction`) puts one emoji on a message the contact sent in the last 30 days; reactions cannot be taken back through the API. A message of another conversation, or one that cannot be quoted or reacted to, is refused (422, `replyTo`).',
+            'A text, buttons, a list, products or media can quote a message of the conversation with `replyTo`, its id from `GET /conversations/{id}/messages`, the `message.received` webhook or a send’s response: a message the contact sent, or one the business sent that WhatsApp accepted. A reaction (`type` `reaction`) puts one emoji on a message the contact sent in the last 30 days; reactions cannot be taken back through the API. A message of another conversation, or one that cannot be quoted or reacted to, is refused (422, `replyTo`).',
+            'Media (`image`, `video`, `audio` or `document`) is sent from an https:// `link` that WhatsApp fetches when it sends the message, reachable from the internet without signing in; HyFib neither fetches nor keeps the media, and stores the link with the message. A photo, a video or a document may carry a `caption` of up to 1,024 characters; audio takes none. A link WhatsApp cannot fetch, or media it does not accept, makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
             'Buttons (up to 3) and lists (up to 10 rows) carry ids you choose: when the customer taps one, the `message.received` webhook gives it as `reply.id`, with `reply.type` (`button` or `list`). Ids cannot start with `w360`, which HyFib’s own buttons use.',
             'Messages queued one after the other may be sent in either order: to be sure the customer sees one before the next, send the next once `GET /messages/{id}` reports the first `accepted`.',
           ].join('\n\n'),
@@ -1131,6 +1171,10 @@ export function buildOpenApiDocument(serverUrl: string) {
                 ref('SendProductList'),
                 ref('SendCatalog'),
                 ref('SendReaction'),
+                ref('SendImage'),
+                ref('SendVideo'),
+                ref('SendAudio'),
+                ref('SendDocument'),
               ],
             }),
           },
@@ -1452,6 +1496,24 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('CampaignWithResults'))),
             },
             ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/campaigns/{id}/review': {
+        get: {
+          operationId: 'reviewCampaign',
+          summary: 'What submitting a campaign draft would do now',
+          description: [
+            `${scopeNote('campaigns.write')} The draft's review as members see it in the app before they submit it, read now: what must change before a member can submit it, how many contacts it would reach and why the others would be skipped, an upper bound of Meta's charges from the rate card HyFib publishes, when it would start, and whether it would wait for a member's approval. It changes nothing, and is answered whatever the company's status. Counts only: never contacts or members.`,
+            'Only a draft is reviewed: any other status is refused with 409, naming it (a submitted campaign keeps the audience it was submitted with, and GET /campaigns/{id} counts its results). A member submits the draft in the app, and the submission checks it again.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The review, as read now.',
+              content: json(dataOf(ref('CampaignReview'))),
+            },
+            ...errors(401, 403, 404, 409, 429, 500),
           },
         },
       },
@@ -2165,6 +2227,10 @@ export function buildOpenApiDocument(serverUrl: string) {
         SendManyTemplates: jsonSchema(apiSendManyTemplatesSchema, 'input'),
         TemplateSend: jsonSchema(apiTemplateSendSchema),
         SendText: jsonSchema(apiSendTextSchema, 'input'),
+        SendImage: jsonSchema(apiSendImageSchema, 'input'),
+        SendVideo: jsonSchema(apiSendVideoSchema, 'input'),
+        SendAudio: jsonSchema(apiSendAudioSchema, 'input'),
+        SendDocument: jsonSchema(apiSendDocumentSchema, 'input'),
         SendButtons: jsonSchema(apiSendButtonsSchema, 'input'),
         SendList: jsonSchema(apiSendListSchema, 'input'),
         SendReaction: jsonSchema(apiSendReactionSchema, 'input'),
@@ -2203,6 +2269,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         Order: jsonSchema(apiOrderSchema),
         UpdateOrder: jsonSchema(apiUpdateOrderSchema, 'input'),
         CampaignWithResults: jsonSchema(apiCampaignDetailSchema),
+        CampaignReview: jsonSchema(apiCampaignReviewSchema),
         CreateCampaign: jsonSchema(apiCreateCampaignSchema, 'input'),
         UpdateCampaign: jsonSchema(apiUpdateCampaignSchema, 'input'),
         CampaignRecipient: jsonSchema(apiCampaignRecipientSchema),
@@ -2278,6 +2345,7 @@ export const API_ROUTES = [
   ['post', '/campaigns'],
   ['get', '/campaigns/{id}'],
   ['patch', '/campaigns/{id}'],
+  ['get', '/campaigns/{id}/review'],
   ['get', '/campaigns/{id}/recipients'],
   ['post', '/campaigns/{id}/pause'],
   ['post', '/campaigns/{id}/resume'],

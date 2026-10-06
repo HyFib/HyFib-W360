@@ -24,6 +24,7 @@ import {
   webhookDeliveries,
   webhookEndpoints,
   webhookEvents,
+  type ContactSource,
   type Database,
   type Tx,
   type WebhookDeliveryState,
@@ -45,6 +46,10 @@ import {
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_RUN_TRIGGERS,
+  WEBHOOK_CONSENT_CHANGES,
+  WEBHOOK_CONTACT_SOURCES,
+  WEBHOOK_RECEIVED_MESSAGE_TYPES,
+  WEBHOOK_RUN_END_REASONS,
   WEBHOOK_MESSAGE_SENDERS,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
@@ -55,6 +60,7 @@ import {
   webhookTakesCampaignEvents,
   webhookTakesChannelEvents,
   webhookTakesFieldChanges,
+  webhookRunEndTakesReason,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   type WebhookAssigneeChoice,
@@ -78,6 +84,9 @@ import {
   type WebhookOrderStatus,
   type WebhookRunEndStatus,
   type WebhookRunTrigger,
+  type WebhookConsentChange,
+  type WebhookReceivedMessageType,
+  type AutomationEndReason,
   type WebhookTeamChoice,
   type WebhookTemplateChoice,
   type WebhookTemplateStatus,
@@ -496,6 +505,133 @@ export function webhookRunTriggersFor(
   if (!webhookTakesAutomationRuns(eventTypes)) return null;
   const kept = given === undefined ? current : given;
   return kept ? [...kept] : null;
+}
+
+/**
+ * The consent changes an endpoint takes as `consent.changed` (ADR-189), by purpose and action, in
+ * the order Settings lists them; null takes every change.
+ */
+export const webhookConsentChangesSchema = z
+  .array(z.enum(WEBHOOK_CONSENT_CHANGES, { error: 'Choose consent changes from the list.' }))
+  .min(1, 'Choose at least one consent change, or take every change.')
+  .max(WEBHOOK_CONSENT_CHANGES.length, 'Give each consent change once.')
+  .transform((chosen) => WEBHOOK_CONSENT_CHANGES.filter((change) => chosen.includes(change)))
+  .nullable();
+
+export const WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT =
+  'Choose consent changes only for an endpoint that receives Consent changed.';
+
+/**
+ * The consent changes an endpoint keeps after it is added or changed: every change (null) unless
+ * it takes `consent.changed`; then those given, or else the ones it had.
+ */
+export function webhookConsentChangesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookConsentChange[] | null | undefined,
+  current: readonly WebhookConsentChange[] | null,
+): WebhookConsentChange[] | null {
+  if (!eventTypes.includes('consent.changed')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Where the contacts whose `contact.created` an endpoint takes came from (ADR-190), in the order
+ * contacts' sources are defined; null takes every contact.
+ */
+export const webhookContactSourcesSchema = z
+  .array(
+    z.enum(WEBHOOK_CONTACT_SOURCES, { error: 'Choose where contacts came from from the list.' }),
+  )
+  .min(1, 'Choose at least one place contacts come from, or take every contact.')
+  .max(WEBHOOK_CONTACT_SOURCES.length, 'Give each place contacts come from once.')
+  .transform((chosen) => WEBHOOK_CONTACT_SOURCES.filter((source) => chosen.includes(source)))
+  .nullable();
+
+export const WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT =
+  'Choose where contacts came from only for an endpoint that receives Contact added.';
+
+/**
+ * The contact sources an endpoint keeps after it is added or changed: every contact (null) unless
+ * it takes `contact.created`; then those given, or else the ones it had.
+ */
+export function webhookContactSourcesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly ContactSource[] | null | undefined,
+  current: readonly ContactSource[] | null,
+): ContactSource[] | null {
+  if (!eventTypes.includes('contact.created')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * The types of the received messages an endpoint takes as `message.received` (ADR-191), in the
+ * order message types are defined; null takes every type.
+ */
+export const webhookMessageTypesSchema = z
+  .array(z.enum(WEBHOOK_RECEIVED_MESSAGE_TYPES, { error: 'Choose message types from the list.' }))
+  .min(1, 'Choose at least one message type, or take every message.')
+  .max(WEBHOOK_RECEIVED_MESSAGE_TYPES.length, 'Give each message type once.')
+  .transform((chosen) => WEBHOOK_RECEIVED_MESSAGE_TYPES.filter((type) => chosen.includes(type)))
+  .nullable();
+
+export const WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT =
+  'Choose message types only for an endpoint that receives Message received.';
+
+/**
+ * The message types an endpoint keeps after it is added or changed: every type (null) unless it
+ * takes `message.received`; then those given, or else the ones it had.
+ */
+export function webhookMessageTypesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookReceivedMessageType[] | null | undefined,
+  current: readonly WebhookReceivedMessageType[] | null,
+): WebhookReceivedMessageType[] | null {
+  if (!eventTypes.includes('message.received')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * The reasons the runs an endpoint takes as `automation.run_ended` ended for (ADR-192), grouped by
+ * end; null takes every reason. A list narrows the ends it names reasons of (the ends chosen,
+ * ADR-151, narrow the others), and holds reasons of the ends taken only.
+ */
+export const webhookRunEndReasonsSchema = z
+  .array(z.enum(WEBHOOK_RUN_END_REASONS, { error: 'Choose end reasons from the list.' }))
+  .min(1, 'Choose at least one end reason, or take every end.')
+  .max(WEBHOOK_RUN_END_REASONS.length, 'Give each end reason once.')
+  .transform((chosen) => WEBHOOK_RUN_END_REASONS.filter((reason) => chosen.includes(reason)))
+  .nullable();
+
+export const WEBHOOK_RUN_END_REASONS_NEED_THE_EVENT =
+  'Choose end reasons only for an endpoint that receives Automation ended.';
+
+export const WEBHOOK_RUN_END_REASONS_NEED_THE_ENDS =
+  'Choose end reasons only of the ends the endpoint receives.';
+
+/** A list naming a reason of an end the endpoint does not take is refused (ADR-192). */
+export const webhookRunEndReasonsNeedTheEnds = () =>
+  new AppError('validation_failed', WEBHOOK_RUN_END_REASONS_NEED_THE_ENDS, {
+    issues: [{ path: 'runEndReasons', message: WEBHOOK_RUN_END_REASONS_NEED_THE_ENDS }],
+  });
+
+/**
+ * The end reasons an endpoint keeps after it is added or changed, given the ends it keeps: every
+ * reason (null) unless it takes `automation.run_ended`; then those given, or else those it had of
+ * the ends it keeps (none left: every reason).
+ */
+export function webhookRunEndReasonsFor(
+  eventTypes: readonly WebhookEventType[],
+  ends: readonly WebhookRunEndStatus[] | null,
+  given: readonly AutomationEndReason[] | null | undefined,
+  current: readonly AutomationEndReason[] | null,
+): AutomationEndReason[] | null {
+  if (!eventTypes.includes('automation.run_ended')) return null;
+  if (given !== undefined) return given ? [...given] : null;
+  const kept = current?.filter((reason) => webhookRunEndTakesReason(ends, reason)) ?? [];
+  return kept.length > 0 ? kept : null;
 }
 
 /**
@@ -1037,6 +1173,14 @@ const endpointFields = z.object({
   runEndStatuses: webhookRunEndStatusesSchema.optional(),
   /** Given, what started the runs it takes (null: every run, ADR-183); left out, they stay. */
   runTriggers: webhookRunTriggersSchema.optional(),
+  /** Given, the consent changes it takes (null: every change, ADR-189); left out, they stay. */
+  consentChanges: webhookConsentChangesSchema.optional(),
+  /** Given, where the contacts it takes came from (null: every one, ADR-190); left out, they stay. */
+  contactSources: webhookContactSourcesSchema.optional(),
+  /** Given, the types of the received messages it takes (null: every type, ADR-191); left out, they stay. */
+  messageTypes: webhookMessageTypesSchema.optional(),
+  /** Given, why the runs it takes ended (null: every reason, ADR-192); left out, they stay. */
+  runEndReasons: webhookRunEndReasonsSchema.optional(),
   /**
    * Given, the numbers whose events it takes (null: every number, ADR-170); left out, they stay.
    */
@@ -1127,6 +1271,30 @@ const runTriggersNeedTheEvents = {
     !data.runTriggers || webhookTakesAutomationRuns(data.eventTypes),
   options: { path: ['runTriggers'], message: WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS },
 };
+/** Consent changes are chosen only for an endpoint that takes `consent.changed` (ADR-189). */
+const consentChangesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; consentChanges?: unknown }) =>
+    !data.consentChanges || data.eventTypes.includes('consent.changed'),
+  options: { path: ['consentChanges'], message: WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT },
+};
+/** Where contacts came from is chosen only for an endpoint that takes `contact.created` (ADR-190). */
+const contactSourcesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; contactSources?: unknown }) =>
+    !data.contactSources || data.eventTypes.includes('contact.created'),
+  options: { path: ['contactSources'], message: WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT },
+};
+/** Message types are chosen only for an endpoint that takes `message.received` (ADR-191). */
+const messageTypesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; messageTypes?: unknown }) =>
+    !data.messageTypes || data.eventTypes.includes('message.received'),
+  options: { path: ['messageTypes'], message: WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT },
+};
+/** End reasons are chosen only for an endpoint that takes `automation.run_ended` (ADR-192). */
+const runEndReasonsNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; runEndReasons?: unknown }) =>
+    !data.runEndReasons || data.eventTypes.includes('automation.run_ended'),
+  options: { path: ['runEndReasons'], message: WEBHOOK_RUN_END_REASONS_NEED_THE_EVENT },
+};
 /** Numbers are chosen only for an endpoint that takes events of numbers (ADR-170). */
 const channelsNeedTheEvents = {
   check: (data: { eventTypes: WebhookEventType[]; channelIds?: unknown }) =>
@@ -1168,6 +1336,10 @@ const endpointSchema = endpointFields
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
   .refine(runTriggersNeedTheEvents.check, runTriggersNeedTheEvents.options)
+  .refine(consentChangesNeedTheEvent.check, consentChangesNeedTheEvent.options)
+  .refine(contactSourcesNeedTheEvent.check, contactSourcesNeedTheEvent.options)
+  .refine(messageTypesNeedTheEvent.check, messageTypesNeedTheEvent.options)
+  .refine(runEndReasonsNeedTheEvent.check, runEndReasonsNeedTheEvent.options)
   .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
   .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
   .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options)
@@ -1186,6 +1358,10 @@ const updateSchema = endpointFields
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
   .refine(runTriggersNeedTheEvents.check, runTriggersNeedTheEvents.options)
+  .refine(consentChangesNeedTheEvent.check, consentChangesNeedTheEvent.options)
+  .refine(contactSourcesNeedTheEvent.check, contactSourcesNeedTheEvent.options)
+  .refine(messageTypesNeedTheEvent.check, messageTypesNeedTheEvent.options)
+  .refine(runEndReasonsNeedTheEvent.check, runEndReasonsNeedTheEvent.options)
   .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
   .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
   .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options)
@@ -1247,6 +1423,14 @@ export interface WebhookEndpointView {
   runEndStatuses: WebhookRunEndStatus[] | null;
   /** What started the runs whose events it takes (ADR-183); null takes every run's. */
   runTriggers: WebhookRunTrigger[] | null;
+  /** The consent changes it takes as `consent.changed` (ADR-189); null takes every change. */
+  consentChanges: WebhookConsentChange[] | null;
+  /** Where the contacts whose `contact.created` it takes came from (ADR-190); null: every contact. */
+  contactSources: ContactSource[] | null;
+  /** The types of the received messages it takes as `message.received` (ADR-191); null: every type. */
+  messageTypes: WebhookReceivedMessageType[] | null;
+  /** Why the runs it takes as `automation.run_ended` ended (ADR-192); null takes every reason. */
+  runEndReasons: AutomationEndReason[] | null;
   /** The numbers whose events it takes (ADR-170), as stored, named; null takes every number. */
   channels: WebhookEndpointChannel[] | null;
   /**
@@ -1496,6 +1680,10 @@ export async function lockWebhookEndpoint(
       conversationStatuses: webhookEndpoints.conversationStatuses,
       runEndStatuses: webhookEndpoints.runEndStatuses,
       runTriggers: webhookEndpoints.runTriggers,
+      consentChanges: webhookEndpoints.consentChanges,
+      contactSources: webhookEndpoints.contactSources,
+      messageTypes: webhookEndpoints.messageTypes,
+      runEndReasons: webhookEndpoints.runEndReasons,
       channelAccountIds: webhookEndpoints.channelAccountIds,
       teamIds: webhookEndpoints.teamIds,
       templateIds: webhookEndpoints.templateIds,
@@ -1549,6 +1737,10 @@ export async function insertWebhookEndpoint(
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
     runTriggers: WebhookRunTrigger[] | null;
+    consentChanges: WebhookConsentChange[] | null;
+    contactSources: ContactSource[] | null;
+    messageTypes: WebhookReceivedMessageType[] | null;
+    runEndReasons: AutomationEndReason[] | null;
     channelAccountIds: string[] | null;
     teamIds: string[] | null;
     templateIds: string[] | null;
@@ -1591,6 +1783,10 @@ export async function insertWebhookEndpoint(
     conversationStatuses: input.conversationStatuses,
     runEndStatuses: input.runEndStatuses,
     runTriggers: input.runTriggers,
+    consentChanges: input.consentChanges,
+    contactSources: input.contactSources,
+    messageTypes: input.messageTypes,
+    runEndReasons: input.runEndReasons,
     channelAccountIds: input.channelAccountIds,
     teamIds: input.teamIds,
     templateIds: input.templateIds,
@@ -1982,6 +2178,10 @@ export function createWebhooksService(deps: {
               conversationStatuses: webhookEndpoints.conversationStatuses,
               runEndStatuses: webhookEndpoints.runEndStatuses,
               runTriggers: webhookEndpoints.runTriggers,
+              consentChanges: webhookEndpoints.consentChanges,
+              contactSources: webhookEndpoints.contactSources,
+              messageTypes: webhookEndpoints.messageTypes,
+              runEndReasons: webhookEndpoints.runEndReasons,
               channelAccountIds: webhookEndpoints.channelAccountIds,
               teamIds: webhookEndpoints.teamIds,
               templateIds: webhookEndpoints.templateIds,
@@ -2412,6 +2612,21 @@ export function createWebhooksService(deps: {
         );
         const runEndStatuses = webhookRunEndStatusesFor(data.eventTypes, data.runEndStatuses, null);
         const runTriggers = webhookRunTriggersFor(data.eventTypes, data.runTriggers, null);
+        const consentChanges = webhookConsentChangesFor(data.eventTypes, data.consentChanges, null);
+        const contactSources = webhookContactSourcesFor(data.eventTypes, data.contactSources, null);
+        const messageTypes = webhookMessageTypesFor(data.eventTypes, data.messageTypes, null);
+        // Reasons narrow the ends taken: refused for an end it does not take (ADR-192).
+        if (
+          data.runEndReasons?.some((reason) => !webhookRunEndTakesReason(runEndStatuses, reason))
+        ) {
+          throw webhookRunEndReasonsNeedTheEnds();
+        }
+        const runEndReasons = webhookRunEndReasonsFor(
+          data.eventTypes,
+          runEndStatuses,
+          data.runEndReasons,
+          null,
+        );
         const channelIds = webhookChannelIdsFor(data.eventTypes, data.channelIds, null);
         await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
         const teamIds = webhookTeamIdsFor(data.eventTypes, data.teamIds, null);
@@ -2446,6 +2661,10 @@ export function createWebhooksService(deps: {
           conversationStatuses,
           runEndStatuses,
           runTriggers,
+          consentChanges,
+          contactSources,
+          messageTypes,
+          runEndReasons,
           channelAccountIds: channelIds,
           teamIds,
           templateIds,
@@ -2476,6 +2695,10 @@ export function createWebhooksService(deps: {
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
               ...(runTriggers ? { runTriggers } : {}),
+              ...(consentChanges ? { consentChanges } : {}),
+              ...(contactSources ? { contactSources } : {}),
+              ...(messageTypes ? { messageTypes } : {}),
+              ...(runEndReasons ? { runEndReasons } : {}),
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),
@@ -2570,6 +2793,33 @@ export function createWebhooksService(deps: {
           data.runTriggers,
           endpoint.runTriggers,
         );
+        const consentChanges = webhookConsentChangesFor(
+          data.eventTypes,
+          data.consentChanges,
+          endpoint.consentChanges,
+        );
+        const contactSources = webhookContactSourcesFor(
+          data.eventTypes,
+          data.contactSources,
+          endpoint.contactSources,
+        );
+        const messageTypes = webhookMessageTypesFor(
+          data.eventTypes,
+          data.messageTypes,
+          endpoint.messageTypes,
+        );
+        // Reasons narrow the ends it keeps: refused for an end it does not take (ADR-192).
+        if (
+          data.runEndReasons?.some((reason) => !webhookRunEndTakesReason(runEndStatuses, reason))
+        ) {
+          throw webhookRunEndReasonsNeedTheEnds();
+        }
+        const runEndReasons = webhookRunEndReasonsFor(
+          data.eventTypes,
+          runEndStatuses,
+          data.runEndReasons,
+          endpoint.runEndReasons,
+        );
         const channelIds = webhookChannelIdsFor(
           data.eventTypes,
           data.channelIds,
@@ -2637,6 +2887,10 @@ export function createWebhooksService(deps: {
             conversationStatuses,
             runEndStatuses,
             runTriggers,
+            consentChanges,
+            contactSources,
+            messageTypes,
+            runEndReasons,
             channelAccountIds: channelIds,
             teamIds,
             templateIds,
@@ -2678,6 +2932,10 @@ export function createWebhooksService(deps: {
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
               ...(runTriggers ? { runTriggers } : {}),
+              ...(consentChanges ? { consentChanges } : {}),
+              ...(contactSources ? { contactSources } : {}),
+              ...(messageTypes ? { messageTypes } : {}),
+              ...(runEndReasons ? { runEndReasons } : {}),
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),

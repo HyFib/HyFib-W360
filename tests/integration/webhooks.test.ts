@@ -3620,6 +3620,552 @@ describe('campaign filters (ADR-185)', () => {
   });
 });
 
+describe('consent change filters (ADR-189)', () => {
+  it('are refused without consent.changed, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to the event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], consentChanges: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, consentChanges }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvent = /only for an endpoint that receives Consent changed/;
+    await refused(['contact.created', 'contact.updated'], ['marketing_opt_out'], needsTheEvent);
+    await refused(['consent.changed'], [], /at least one consent change/);
+    await refused(['consent.changed'], ['opt_out'], /from the list/);
+    await refused(['consent.changed'], ['marketing'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['consent.changed', 'contact.created'],
+      consentChanges: ['utility_opt_out', 'marketing_opt_out', 'utility_opt_out'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({
+      consentChanges: ['marketing_opt_out', 'utility_opt_out'],
+    });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['consent.changed', 'contact.created'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.consentChanges;
+    expect(await current()).toEqual(['marketing_opt_out', 'utility_opt_out']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['marketing_opt_out', 'utility_opt_out']);
+    await change({ consentChanges: ['marketing_opt_in'] });
+    expect(await current()).toEqual(['marketing_opt_in']);
+    const updates = await fx.query<{ metadata: { consentChanges?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.consentChanges)).toEqual([
+      ['marketing_opt_out', 'utility_opt_out'],
+      ['marketing_opt_in'],
+    ]);
+    await change({ consentChanges: null });
+    expect(await current()).toBeNull();
+    await change({ consentChanges: ['utility_opt_in'] });
+    // The database refuses an empty list, more than four entries, an unknown change or a missing
+    // one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET consent_changes = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{marketing_opt_in,marketing_opt_out,utility_opt_in,utility_opt_out,utility_opt_out}'`,
+      `'{marketing_opt_in,opt_out}'`,
+      `'{marketing}'`,
+      `ARRAY['utility_opt_in', NULL]::text[]`,
+      `ARRAY[['utility_opt_in']]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_consent_changes/);
+    }
+    await change({ eventTypes: ['contact.created'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['contact.created'], consentChanges: ['utility_opt_in'] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // …and any list for an endpoint that does not take it.
+    await expect(setInDatabase(`'{utility_opt_in}'`)).rejects.toThrow(
+      /webhook_endpoints_consent_changes/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'consent_changes', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('sends an endpoint that names consent changes only those, others every change, and captures none nobody takes (ADR-189)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const path = `/ok/${randomBytes(6).toString('hex')}`;
+    const optOuts = await webhooks().create(owner, {
+      url: `http://${HOST}:${port}${path}`,
+      eventTypes: ['consent.changed'],
+      consentChanges: ['marketing_opt_out', 'utility_opt_out'],
+    });
+    const consent = createConsentService({ db: fx.dbs.app, clock: systemClock });
+    const { contact_id: contactId } = await inbound(c, waId(), 'Hello');
+    const record = (purpose: 'marketing' | 'utility', action: 'opt_in' | 'opt_out') =>
+      consent.recordConsent(owner, { contactId, purpose, action });
+    // Only the opt-outs are taken, so the opt-in is not captured at all.
+    await record('marketing', 'opt_in');
+    await record('marketing', 'opt_out');
+    expect((await eventsOf(c)).filter((e) => e.type === 'consent.changed')).toEqual([
+      expect.objectContaining({
+        detail: { purpose: 'marketing', action: 'opt_out', source: 'agent' },
+      }),
+    ]);
+    // An endpoint taking every change gets the rest; the opt-out endpoint the utility opt-out.
+    const every = await addEndpoint(c, 'ok', ['consent.changed']);
+    await record('utility', 'opt_in');
+    await record('utility', 'opt_out');
+    const changes = (await eventsOf(c))
+      .filter((e) => e.type === 'consent.changed')
+      .map((e) => `${String(e.detail.purpose)}_${String(e.detail.action)}`);
+    expect(changes).toEqual(['marketing_opt_out', 'utility_opt_in', 'utility_opt_out']);
+    const takenBy = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).map((d) => d.type);
+    expect(await takenBy(optOuts.id)).toEqual(['consent.changed', 'consent.changed']);
+    expect(await takenBy(every.id)).toEqual(['consent.changed', 'consent.changed']);
+
+    await deliverDue(c);
+    const sentTo = (to: string) =>
+      requestsTo(to).map((r) => {
+        const { purpose, action } = consentChangedPayloadSchema.parse(JSON.parse(r.body)).data;
+        return `${purpose}_${action}`;
+      });
+    expect(sentTo(path).sort()).toEqual(['marketing_opt_out', 'utility_opt_out']);
+    expect(sentTo(every.path).sort()).toEqual(['utility_opt_in', 'utility_opt_out']);
+  });
+});
+
+describe('contact source filters (ADR-190)', () => {
+  it('are refused without contact.created, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to the event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], contactSources: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, contactSources }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvent = /only for an endpoint that receives Contact added/;
+    await refused(['contact.updated', 'contact.erased'], ['whatsapp'], needsTheEvent);
+    await refused(['contact.created'], [], /at least one place contacts come from/);
+    await refused(['contact.created'], ['agent'], /from the list/);
+    await refused(['contact.created'], ['flow'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['contact.created', 'contact.updated'],
+      contactSources: ['store', 'whatsapp', 'store'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ contactSources: ['whatsapp', 'store'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['contact.created', 'contact.updated'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.contactSources;
+    expect(await current()).toEqual(['whatsapp', 'store']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['whatsapp', 'store']);
+    await change({ contactSources: ['api'] });
+    expect(await current()).toEqual(['api']);
+    const updates = await fx.query<{ metadata: { contactSources?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.contactSources)).toEqual([['whatsapp', 'store'], ['api']]);
+    await change({ contactSources: null });
+    expect(await current()).toBeNull();
+    await change({ contactSources: ['import'] });
+    // The database refuses an empty list, more than five entries, an unknown source or a missing
+    // one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET contact_sources = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{whatsapp,manual,import,api,store,store}'`,
+      `'{whatsapp,agent}'`,
+      `'{flow}'`,
+      `ARRAY['import', NULL]::text[]`,
+      `ARRAY[['import']]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_contact_sources/);
+    }
+    await change({ eventTypes: ['contact.updated'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['contact.updated'], contactSources: ['import'] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // …and any list for an endpoint that does not take it.
+    await expect(setInDatabase(`'{import}'`)).rejects.toThrow(/webhook_endpoints_contact_sources/);
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'contact_sources', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('sends an endpoint that names sources the added contacts from them only, others every contact, and narrows no other contact event (ADR-190)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const path = `/ok/${randomBytes(6).toString('hex')}`;
+    const fromWhatsApp = await webhooks().create(owner, {
+      url: `http://${HOST}:${port}${path}`,
+      eventTypes: ['contact.created', 'contact.updated'],
+      contactSources: ['whatsapp'],
+    });
+    const every = await addEndpoint(c, 'ok', ['contact.created']);
+    const contacts = createContactsService({ db: fx.dbs.app, clock: systemClock });
+    // A customer writes on WhatsApp; a member adds a contact in the app, tagged in the same
+    // transaction, which folds into its added event as before.
+    const { contact_id: wrote } = await inbound(c, waId(), 'Hello');
+    const { id: added } = await contacts.createContact(owner, {
+      phone: `+${waId()}`,
+      displayName: 'Meena',
+      tags: ['vip'],
+    });
+    const created = (await eventsOf(c)).filter((e) => e.type === 'contact.created');
+    expect(created).toHaveLength(2);
+    const takenBy = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).map((d) => [d.type, d.event_id]);
+    const [wroteEvent, addedEvent] = created.map((e) => e.id);
+    expect(await takenBy(fromWhatsApp.id)).toEqual([['contact.created', wroteEvent]]);
+    expect(await takenBy(every.id)).toEqual([
+      ['contact.created', wroteEvent],
+      ['contact.created', addedEvent],
+    ]);
+    // A later change of the member's contact is not narrowed by where it came from.
+    await contacts.updateContact(owner, added, { displayName: 'Meena Rao' });
+    const updates = (await deliveriesOf(fromWhatsApp.id)).filter(
+      (d) => d.type === 'contact.updated',
+    );
+    expect(updates).toHaveLength(1);
+
+    await deliverDue(c);
+    const sourcesAt = (to: string) =>
+      requestsTo(to)
+        .map(
+          (r) =>
+            JSON.parse(r.body) as {
+              type: string;
+              data: { contact: { id: string; source: string } };
+            },
+        )
+        .map((b) => [b.type, b.data.contact.id, b.data.contact.source]);
+    expect(sourcesAt(path)).toEqual(
+      expect.arrayContaining([
+        ['contact.created', wrote, 'whatsapp'],
+        ['contact.updated', added, 'manual'],
+      ]),
+    );
+    expect(sourcesAt(path)).toHaveLength(2);
+    expect(sourcesAt(every.path).sort()).toEqual(
+      [
+        ['contact.created', added, 'manual'],
+        ['contact.created', wrote, 'whatsapp'],
+      ].sort(),
+    );
+  });
+});
+
+describe('message type filters (ADR-191)', () => {
+  it('are refused without message.received, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to the event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], messageTypes: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, messageTypes }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvent = /only for an endpoint that receives Message received/;
+    await refused(['message.status'], ['text'], needsTheEvent);
+    await refused(['message.received'], [], /at least one message type/);
+    await refused(['message.received'], ['template'], /from the list/);
+    await refused(['message.received'], ['list_reply'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['message.received', 'message.status'],
+      messageTypes: ['order', 'text', 'order'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ messageTypes: ['text', 'order'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['message.received', 'message.status'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.messageTypes;
+    expect(await current()).toEqual(['text', 'order']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['text', 'order']);
+    await change({ messageTypes: ['interactive', 'button'] });
+    expect(await current()).toEqual(['interactive', 'button']);
+    const updates = await fx.query<{ metadata: { messageTypes?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.messageTypes)).toEqual([
+      ['text', 'order'],
+      ['interactive', 'button'],
+    ]);
+    await change({ messageTypes: null });
+    expect(await current()).toBeNull();
+    await change({ messageTypes: ['location'] });
+    // The database refuses an empty list, more than fourteen entries, a template, an unknown type
+    // or a missing one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET message_types = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{text,image,video,audio,document,sticker,location,contacts,interactive,button,reaction,order,system,unsupported,text}'`,
+      `'{text,template}'`,
+      `'{list_reply}'`,
+      `ARRAY['text', NULL]::text[]`,
+      `ARRAY[['text']]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_message_types/);
+    }
+    await change({ eventTypes: ['message.status'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['message.status'], messageTypes: ['text'] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // …and any list for an endpoint that does not take it.
+    await expect(setInDatabase(`'{text}'`)).rejects.toThrow(/webhook_endpoints_message_types/);
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'message_types', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('sends an endpoint that names message types only those messages, others every message, and captures none nobody takes (ADR-191)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const path = `/ok/${randomBytes(6).toString('hex')}`;
+    const replies = await webhooks().create(owner, {
+      url: `http://${HOST}:${port}${path}`,
+      eventTypes: ['message.received'],
+      messageTypes: ['text', 'interactive'],
+    });
+    const from = waId();
+    const send = (message: Record<string, unknown>) =>
+      fx.deliver(fx.messagesBody(c, { messages: [{ waId: from, ...message }] }));
+    // A location only an endpoint taking every message would take: none does yet, so it is not
+    // captured at all.
+    await send({
+      type: 'location',
+      extra: { location: { latitude: 12.97, longitude: 77.59, name: 'Home', address: 'MG Road' } },
+    });
+    expect((await eventsOf(c)).filter((e) => e.type === 'message.received')).toEqual([]);
+    const every = await addEndpoint(c, 'ok', ['message.received']);
+    await send({ text: 'Which size fits me?' });
+    await send({
+      type: 'interactive',
+      extra: {
+        interactive: {
+          type: 'list_reply',
+          list_reply: { id: 'size-m', title: 'Medium', description: 'Chest 40 in' },
+        },
+      },
+    });
+    await send({
+      type: 'location',
+      extra: { location: { latitude: 12.97, longitude: 77.59, name: 'Home', address: 'MG Road' } },
+    });
+    const received = (await eventsOf(c)).filter((e) => e.type === 'message.received');
+    expect(received.map((e) => e.detail.messageType)).toEqual(['text', 'interactive', 'location']);
+    const takenBy = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).map((d) => d.event_id);
+    const [text, tap, place] = received.map((e) => e.id);
+    expect(await takenBy(replies.id)).toEqual([text, tap]);
+    expect(await takenBy(every.id)).toEqual([text, tap, place]);
+
+    await deliverDue(c);
+    const typesAt = (to: string) =>
+      requestsTo(to)
+        .map((r) => messageReceivedPayloadSchema.parse(JSON.parse(r.body)).data.message.type)
+        .sort();
+    expect(typesAt(path)).toEqual(['interactive', 'text']);
+    expect(typesAt(every.path)).toEqual(['interactive', 'location', 'text']);
+  });
+});
+
+describe('run end reason filters (ADR-192)', () => {
+  it('are refused without automation.run_ended, unknown, empty or of an end not taken, kept by a change that leaves them out (less those of ends dropped) and cleared with the event; the database keeps them to the event and the ends', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (
+      eventTypes: string[],
+      runEndStatuses: unknown,
+      runEndReasons: unknown,
+      message: RegExp,
+    ) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, runEndStatuses, runEndReasons }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvent = /only for an endpoint that receives Automation ended/;
+    const needsTheEnds = /only of the ends the endpoint receives/;
+    await refused(['automation.run_started'], undefined, ['expired'], needsTheEvent);
+    await refused(['automation.run_ended'], undefined, [], /at least one end reason/);
+    await refused(['automation.run_ended'], undefined, ['failed'], /from the list/);
+    await refused(['automation.run_ended'], undefined, ['budget'], /from the list/);
+    // A reason of an end the endpoint does not take would never be sent.
+    await refused(['automation.run_ended'], ['completed'], ['send_failed'], needsTheEnds);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['automation.run_ended', 'consent.changed'],
+      runEndStatuses: ['completed', 'failed'],
+      runEndReasons: ['send_failed', 'end_node', 'send_failed'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ runEndReasons: ['end_node', 'send_failed'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['automation.run_ended', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.runEndReasons;
+    expect(await current()).toEqual(['end_node', 'send_failed']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['end_node', 'send_failed']);
+    await change({ runEndReasons: ['no_next', 'expired'] });
+    expect(await current()).toEqual(['no_next', 'expired']);
+    const updates = await fx.query<{ metadata: { runEndReasons?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.runEndReasons)).toEqual([
+      ['end_node', 'send_failed'],
+      ['no_next', 'expired'],
+    ]);
+    // Dropping an end drops its reasons; none left takes every reason of the ends kept.
+    await change({ runEndStatuses: ['completed'] });
+    expect(await current()).toEqual(['no_next']);
+    await change({ runEndStatuses: ['failed'] });
+    expect(await current()).toBeNull();
+    // Reasons given are checked against the ends given, or else the ends the endpoint keeps.
+    await expectAppError(
+      change({ runEndReasons: ['end_node'] }),
+      'validation_failed',
+      needsTheEnds,
+    );
+    await expectAppError(
+      change({ runEndStatuses: ['stopped', 'failed'], runEndReasons: ['expired', 'end_node'] }),
+      'validation_failed',
+      needsTheEnds,
+    );
+    await change({ runEndStatuses: null, runEndReasons: ['end_node'] });
+    expect(await current()).toEqual(['end_node']);
+    await change({ runEndReasons: null });
+    expect(await current()).toBeNull();
+    await change({ runEndReasons: ['take_over'] });
+    // The database refuses an empty list, more than twenty-one entries, a status, an unknown reason
+    // or a missing one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET ${value} WHERE id = $1`, [created.id]);
+    for (const bad of [
+      `run_end_reasons = '{}'`,
+      `run_end_reasons = '{end_node,no_next,handoff_node,agent_replied,assigned,take_over,api_replied,stopped_by_member,conversation_resolved,opted_out,contact_erased,automation_archived,stopped_by_api,budget_steps,budget_loop,budget_messages,budget_http,expired,send_blocked,send_failed,error,error}'`,
+      `run_end_reasons = '{take_over,failed}'`,
+      `run_end_reasons = '{budget}'`,
+      `run_end_reasons = ARRAY['take_over', NULL]::text[]`,
+      `run_end_reasons = ARRAY[['take_over']]::text[]`,
+      // …a reason of an end it does not take, however the ends or the reasons change…
+      `run_end_statuses = '{completed,stopped}'`,
+      `run_end_statuses = '{failed}', run_end_reasons = '{take_over}'`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_run_end_reasons/);
+    }
+    await setInDatabase(`run_end_statuses = '{taken_over}'`);
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], runEndReasons: ['expired'] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // …and any list for an endpoint that does not take it, run starts included.
+    await change({ eventTypes: ['automation.run_started'] });
+    await expect(setInDatabase(`run_end_reasons = '{expired}'`)).rejects.toThrow(
+      /webhook_endpoints_run_end_reasons/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'run_end_reasons',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('event capture', () => {
   it('records an event only for subscribed types, with one delivery per active subscribed endpoint, and none from a rolled-back change', async () => {
     const c = await fx.company();

@@ -2036,6 +2036,91 @@ describe('automation run events (ADR-078)', () => {
     ).toEqual([['automation.run_started', 1]]);
   });
 
+  it('sends an endpoint that names why runs ended only those runs of the ends it names reasons of, the runs of its other ends all, and captures no end nobody takes (ADR-192)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await publishAutomation(owner, 'Brochure', keyword('brochure'), sayGraph('Here it is.'));
+    await publishAutomation(owner, 'Farewell', keyword('farewell'), {
+      version: 1,
+      start: 'say',
+      nodes: [
+        { id: 'say', type: 'send_text', text: 'Goodbye.', next: 'bye' },
+        { id: 'bye', type: 'end' },
+      ],
+    });
+    const endpointFor = async (runEndStatuses: string[] | null, runEndReasons: string[]) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: ['automation.run_ended'],
+        runEndStatuses,
+        runEndReasons,
+      });
+      return { ...created, path };
+    };
+    // Every end; completions at an End step and every other end; failures to send only; and
+    // completions with nothing next, failures for age only.
+    const everyEnd = await addEndpoint(c, ['automation.run_ended']);
+    const atEndSteps = await endpointFor(null, ['end_node']);
+    const blocked = await endpointFor(['failed'], ['send_blocked']);
+    const nothingNextOrOld = await endpointFor(['completed', 'failed'], ['no_next', 'expired']);
+    const runOf = async (text: string, clock: Clock = systemClock) => {
+      const { conversation_id: conversationId } = await inbound(c, waId(), text);
+      const [run] = await runsIn(conversationId);
+      if (!run) throw new Error(`no run started by “${text}”`);
+      expect(await driveRun(c, run.id, clock)).toBe('ended');
+      return run.id;
+    };
+    const nothingNext = await runOf('brochure');
+    const atEnd = await runOf('farewell');
+    // A day later the customer's window has closed: the text cannot be sent and the run fails.
+    const failed = await runOf('brochure', { now: () => new Date(Date.now() + 25 * 3600_000) });
+    expect(
+      (await eventsOf(c, 'automation.')).map((e) => [
+        e.detail.runId,
+        e.status,
+        e.detail.endReason,
+        e.deliveries,
+      ]),
+    ).toEqual([
+      [nothingNext, 'completed', 'no_next', 2],
+      [atEnd, 'completed', 'end_node', 2],
+      [failed, 'failed', 'send_blocked', 3],
+    ]);
+
+    await deliverDue(c);
+    const endsAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) => {
+          const { run } = automationRunEndedPayloadSchema.parse(b).data;
+          return [run.id, run.status, run.endReason];
+        })
+        .sort();
+    expect(endsAt(everyEnd.path)).toEqual(
+      [
+        [nothingNext, 'completed', 'no_next'],
+        [atEnd, 'completed', 'end_node'],
+        [failed, 'failed', 'send_blocked'],
+      ].sort(),
+    );
+    // A failure is an end the list names no reason of: it is sent with the End steps.
+    expect(endsAt(atEndSteps.path)).toEqual(
+      [
+        [atEnd, 'completed', 'end_node'],
+        [failed, 'failed', 'send_blocked'],
+      ].sort(),
+    );
+    expect(endsAt(blocked.path)).toEqual([[failed, 'failed', 'send_blocked']]);
+    expect(endsAt(nothingNextOrOld.path)).toEqual([[nothingNext, 'completed', 'no_next']]);
+
+    // With every end and the End steps turned off, no endpoint takes a completion at an End step:
+    // the next one is not captured.
+    await webhooks().setEnabled(owner, { endpointId: everyEnd.id, enabled: false });
+    await webhooks().setEnabled(owner, { endpointId: atEndSteps.id, enabled: false });
+    const later = await runOf('farewell');
+    expect((await eventsOf(c, 'automation.')).filter((e) => e.detail.runId === later)).toEqual([]);
+  });
+
   it('sends an endpoint that names what started the runs only those runs, others every run, and captures no run event nobody takes (ADR-183)', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);

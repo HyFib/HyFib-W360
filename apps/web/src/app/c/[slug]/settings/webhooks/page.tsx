@@ -12,6 +12,10 @@ import {
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_RUN_END_STATUS_LABELS,
   WEBHOOK_RUN_TRIGGER_LABELS,
+  WEBHOOK_CONSENT_CHANGE_LABELS,
+  WEBHOOK_CONTACT_SOURCE_LABELS,
+  WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS,
+  WEBHOOK_RUN_END_REASON_LABELS,
   WEBHOOK_MESSAGE_SENDER_LABELS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
@@ -217,6 +221,32 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Automation runs started by:{' '}
                         {e.runTriggers.map((t) => WEBHOOK_RUN_TRIGGER_LABELS[t]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.consentChanges ? (
+                      <p className="text-xs text-muted-foreground">
+                        Consent changes sent:{' '}
+                        {e.consentChanges.map((c) => WEBHOOK_CONSENT_CHANGE_LABELS[c]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.contactSources ? (
+                      <p className="text-xs text-muted-foreground">
+                        New contacts sent:{' '}
+                        {e.contactSources.map((c) => WEBHOOK_CONTACT_SOURCE_LABELS[c]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.messageTypes ? (
+                      <p className="text-xs text-muted-foreground">
+                        Received messages sent:{' '}
+                        {e.messageTypes
+                          .map((t) => WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS[t])
+                          .join(', ')}
+                      </p>
+                    ) : null}
+                    {e.runEndReasons ? (
+                      <p className="text-xs text-muted-foreground">
+                        Automation ends narrowed to:{' '}
+                        {e.runEndReasons.map((r) => WEBHOOK_RUN_END_REASON_LABELS[r]).join(', ')}
                       </p>
                     ) : null}
                     {e.channels ? (

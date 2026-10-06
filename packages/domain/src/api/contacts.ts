@@ -97,29 +97,30 @@ const someChange = [
 ] as const;
 
 /**
- * `PATCH /contacts/{id}`: what any change takes, and a number typed for the contact (ADR-180), which
- * only this call changes: changing many contacts' numbers at once could swap them.
+ * A number typed for the contact (ADR-180), which `PATCH /contacts/{id}` and
+ * `POST /contacts/update-many` (ADR-188) change; the same change for many contacts never takes one.
  */
-export const apiContactUpdateSchema = z
-  .object({
-    ...contactChange,
-    phone: z
-      .string()
-      .max(40)
-      .optional()
-      .describe(
-        "The contact's number with its country code, starting with + (for example +919876543210). Only a number typed for the contact changes: one WhatsApp gave (the contact wrote to one of the company's numbers) is its identity and is refused, and so is a number another contact has or one on the company's suppression list.",
-      ),
-  })
-  .strict()
-  .refine(
-    (v) => someChange[0](v) || v.phone !== undefined,
-    'Give name, email, phone, fields, addTags or removeTags.',
+const phoneChange = z
+  .string()
+  .max(40)
+  .optional()
+  .describe(
+    "The contact's number with its country code, starting with + (for example +919876543210). Only a number typed for the contact changes: one WhatsApp gave (the contact wrote to one of the company's numbers) is its identity and is refused, and so is a number another contact has or one on the company's suppression list.",
   );
+const someChangeOrNumber = [
+  (v: ContactChangeInput & { phone?: string }) => someChange[0](v) || v.phone !== undefined,
+  'Give name, email, phone, fields, addTags or removeTags.',
+] as const;
+
+/** `PATCH /contacts/{id}`: what any change takes, and a number typed for the contact (ADR-180). */
+export const apiContactUpdateSchema = z
+  .object({ ...contactChange, phone: phoneChange })
+  .strict()
+  .refine(...someChangeOrNumber);
 
 /**
  * `POST /contacts/update-many` (ADR-122): 1 to 100 contacts, each once, each with what
- * `PATCH /contacts/{id}` takes.
+ * `PATCH /contacts/{id}` takes, a number included (ADR-188).
  */
 export const apiUpdateManyContactsSchema = z
   .object({
@@ -129,9 +130,10 @@ export const apiUpdateManyContactsSchema = z
           .object({
             id: z.uuid().describe('The contact to change.'),
             ...contactChange,
+            phone: phoneChange,
           })
           .strict()
-          .refine(...someChange),
+          .refine(...someChangeOrNumber),
       )
       .min(1, 'Give at least one contact.')
       .max(API_LIMITS.contactsPerChange, `Give at most ${API_LIMITS.contactsPerChange} contacts.`)
@@ -446,7 +448,7 @@ export async function apiListContactFields(
 export interface ContactChange {
   name: string | null | undefined;
   email: string | null | undefined;
-  /** The number to give the contact, as E.164 (ADR-180; `PATCH /contacts/{id}` only). */
+  /** The number to give the contact, as E.164 (ADR-180, and in calls changing many: ADR-188). */
   phone: string | undefined;
   fields: Record<string, unknown> | undefined;
   addTags: string[];
@@ -500,14 +502,18 @@ interface LockedContact {
 /**
  * Refuses a new number for a contact unless members could give it the same (ADR-180): a contact
  * whose number WhatsApp gave keeps it (it is the contact's identity), no other contact of the company
- * has the number, and it is not on the company's suppression list, as `POST /contacts` refuses.
+ * has the number, and it is not on the company's suppression list, as `POST /contacts` refuses. A
+ * call changing many contacts gives the refusal's place (ADR-188).
  */
 async function assertNumberFree(
   tx: Tx,
   tenantId: string,
   contactId: string,
   phone: string,
+  place?: string,
 ): Promise<void> {
+  const refuse = (code: 'conflict' | 'precondition_failed', message: string) =>
+    new AppError(code, message, place ? { issues: [{ path: place, message }] } : {});
   const [identity] = await tx
     .select({ id: contactIdentities.id })
     .from(contactIdentities)
@@ -516,10 +522,7 @@ async function assertNumberFree(
     )
     .limit(1);
   if (identity) {
-    throw new AppError(
-      'precondition_failed',
-      'This number comes from WhatsApp and cannot be changed.',
-    );
+    throw refuse('precondition_failed', 'This number comes from WhatsApp and cannot be changed.');
   }
   const [suppressed] = await tx
     .select({ id: suppressions.id })
@@ -527,7 +530,7 @@ async function assertNumberFree(
     .where(and(eq(suppressions.tenantId, tenantId), eq(suppressions.phoneE164, phone)))
     .limit(1);
   if (suppressed) {
-    throw new AppError(
+    throw refuse(
       'precondition_failed',
       'This number is on the company’s suppression list, so no contact is given it.',
     );
@@ -537,7 +540,7 @@ async function assertNumberFree(
     .from(contacts)
     .where(and(eq(contacts.tenantId, tenantId), eq(contacts.phoneE164, phone)))
     .limit(1);
-  if (taken) throw new AppError('conflict', 'Another contact already has this phone number.');
+  if (taken) throw refuse('conflict', 'Another contact already has this phone number.');
 }
 
 /**
@@ -741,8 +744,10 @@ const unknownContact = (index: number) =>
  * them or none (ADR-122). Every field any change names is locked first, in one statement, as a
  * field's deletion takes them; then the contacts, in id order, so calls naming the same contacts
  * take turns. A contact of another company, an erased one, a value of the wrong type or too many
- * tags refuses the call naming its place (`contacts.<index>.…`) and nothing is changed. The
- * contacts are changed in the order given and answered in it.
+ * tags refuses the call naming its place (`contacts.<index>.…`) and nothing is changed. Numbers
+ * (ADR-188) are given once each and checked before anything changes, against the numbers contacts
+ * have before the call, so a call never swaps or moves numbers between its contacts. The contacts
+ * are changed in the order given and answered in it.
  */
 export async function apiUpdateManyContacts(
   deps: Pick<OutboundDeps, 'db'>,
@@ -755,6 +760,15 @@ export async function apiUpdateManyContacts(
     id: item.id,
     change: prepareContactChange(item, `contacts.${index}.`),
   }));
+  // Each number once, however it is written (ADR-188).
+  const numbers = new Set<string>();
+  for (const [index, { change }] of changes.entries()) {
+    if (change.phone === undefined) continue;
+    if (numbers.has(change.phone)) {
+      throw invalidField(`contacts.${index}.phone`, 'Give each number once.');
+    }
+    numbers.add(change.phone);
+  }
   const ids = changes.map((c) => c.id);
   return deps.db.run(ctx.scope, async (tx) => {
     const keys = [...new Set(changes.flatMap((c) => Object.keys(c.change.fields ?? {})))].sort();
@@ -774,6 +788,13 @@ export async function apiUpdateManyContacts(
       if (!row || row.erasedAt) throw unknownContact(index);
       return { row, change: c.change, fields: fieldChanges[index] ?? {} };
     });
+    // Every new number is checked before the first change, so a number one of these contacts has
+    // is another contact's whatever the order: the call never swaps or moves numbers (ADR-188).
+    for (const [index, w] of work.entries()) {
+      const phone = w.change.phone;
+      if (phone === undefined || phone === w.row.phone) continue;
+      await assertNumberFree(tx, ctx.tenant.id, w.row.id, phone, `contacts.${index}.phone`);
+    }
     for (const [index, w] of work.entries()) {
       await changeLockedContact(tx, ctx, w.row, w.change, w.fields, `contacts.${index}.`);
     }

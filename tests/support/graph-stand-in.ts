@@ -332,6 +332,37 @@ function reactionProblem(body: unknown): string | null {
   return null;
 }
 
+const MEDIA_MESSAGE_TYPES = new Set(['image', 'video', 'audio', 'document', 'sticker']);
+
+/**
+ * Checks a media message (research M-191): an `id` or an http(s) `link`, not both, and a caption
+ * of at most 1,024 characters for a photo, a video or a document only.
+ */
+function mediaProblem(body: unknown): string | null {
+  const b = body as Record<string, unknown> | undefined;
+  const type = typeof b?.type === 'string' ? b.type : '';
+  if (!MEDIA_MESSAGE_TYPES.has(type)) return null;
+  const media = b?.[type] as Record<string, unknown> | undefined;
+  if (typeof media !== 'object' || media === null) return type;
+  const allowed =
+    type === 'audio' || type === 'sticker' ? ['id', 'link'] : ['id', 'link', 'caption'];
+  if (Object.keys(media).some((key) => !allowed.includes(key))) return type;
+  if ((media.id === undefined) === (media.link === undefined)) return `${type}.link`;
+  if (
+    media.link !== undefined &&
+    (typeof media.link !== 'string' || !/^https?:\/\/\S+$/.test(media.link))
+  ) {
+    return `${type}.link`;
+  }
+  if (
+    media.caption !== undefined &&
+    (typeof media.caption !== 'string' || !media.caption || media.caption.length > 1024)
+  ) {
+    return `${type}.caption`;
+  }
+  return null;
+}
+
 /** Checks the `context` of a reply that quotes a message (research M-041, M-183). */
 function contextProblem(body: unknown): string | null {
   const context = (body as { context?: unknown } | undefined)?.context;
@@ -599,7 +630,7 @@ export async function startGraphStandIn(options: {
             ? null
             : interactiveProblem(body);
         if (invalid) return graphError(res, 400, 100, `(#100) Invalid parameter: ${invalid}`);
-        const shapeInvalid = contextProblem(body) ?? reactionProblem(body);
+        const shapeInvalid = contextProblem(body) ?? reactionProblem(body) ?? mediaProblem(body);
         if (shapeInvalid) {
           return graphError(res, 400, 100, `(#100) Invalid parameter: ${shapeInvalid}`);
         }

@@ -950,6 +950,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   draft and `campaigns.stop` for any other campaign it cancels; a cancelled or completed campaign is
   answered to either. It calls `cancelLockedCampaign` as members' cancel does, with the key named in
   the event and the audit.
+- **Reviewing drafts (ADR-193):** `apiReviewCampaign` takes `campaigns.write` as a read (whatever
+  the company's status), reads the draft and the company's time zone in one read-only snapshot and
+  calls `reviewCampaignDraft`, as members' review does; `toApiCampaignReview` answers it with the
+  skip reasons commonest first and amounts in major units. Other statuses get 409.
+- **Media from links (ADR-194):** `apiSendMedia` (`api/resources.ts`) parses `type` `image`,
+  `video`, `audio` or `document`, an https `link` (`isMediaLink`) and a caption except for audio,
+  and sends through `sendReply` as text replies do: the content keeps the link and the caption, the
+  send intent the Graph request. `outboundText` reads the caption, and the inbox shows the link.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions (`last_message` with `conversations.read` and `campaign` with
   `campaigns.read` since ADR-126, a named campaign checked to be the company's, `name` since
@@ -1233,6 +1241,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   id that is not one of the company's live contacts (naming `contacts.<index>.id`), and applies
   `changeLockedContact`, the function `PATCH` uses, to each in the order given; it answers the
   contacts in that order.
+- **Numbers in many contacts' changes (ADR-188):** `apiUpdateManyContacts` refuses a number two
+  contacts of the call give (compared as E.164, naming `contacts.<index>.phone`) before the
+  transaction, and after locking the contacts checks every new number with `assertNumberFree`, given
+  the place, before `changeLockedContact` writes anything: the numbers the call's own contacts have
+  are still theirs then, so a call never swaps or moves numbers. `changeLockedContact` checks each
+  number again as it writes it, as for `PATCH`.
 - **Keyset cursors** (`encodeKeysetCursor`, `exactTimestamp`): a cursor carries the last row's
   timestamp as PostgreSQL keeps it, to the microsecond, and its id, and pages compare
   `(time, id) < (cursor time, cursor id)`; cursors made with milliseconds still read. Cursors built
@@ -1577,6 +1591,34 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   prepared. Settings (radio buttons and checkboxes under "Campaigns", the 200 newest campaigns) and
   the API (`campaignIds`) set it; the services check the campaigns of a list given; a change that
   drops both events clears it.
+- **Consent change filters** (migration 0135, ADR-189): `consent_changes` on an endpoint lists the
+  `consent.changed` changes it takes, each its purpose and action together (`marketing_opt_out`),
+  null for every change; a check keeps it to 1 to 4 known changes and to endpoints taking the event.
+  `app.capture_webhook_event` (replaced with the same signature) matches the purpose and action the
+  consent trigger stores in the detail against the list. Settings (checkboxes under "Consent
+  changed") and the API (`consentChanges`) set it; a change that drops the event clears it.
+- **Contact source filters** (migration 0136, ADR-190): `contact_sources` on an endpoint lists where
+  the contacts whose `contact.created` it takes came from (`contact.source`), null for every
+  contact; a check keeps it to 1 to 5 known sources and to endpoints taking the event.
+  `app.capture_contact_webhook_event` (replaced with the same signature) reads the contact's source
+  when an active endpoint of the company names sources and creates a `contact.created` delivery only
+  where it is listed. Settings (checkboxes under "Contact added") and the API (`contactSources`) set
+  it; a change that drops the event clears it.
+- **Message type filters** (migration 0137, ADR-191): `message_types` on an endpoint lists the types
+  of the received messages it takes as `message.received`, null for every type; a check keeps it to
+  1 to 14 known types (never `template`) and to endpoints taking the event.
+  `app.capture_webhook_event` (replaced with the same signature) matches the `messageType` the
+  message trigger stores in the detail against the list, with the endpoint's other filters. Settings
+  (checkboxes under "Message received") and the API (`messageTypes`) set it; a change that drops the
+  event clears it.
+- **Run end reason filters** (migration 0138, ADR-192): `run_end_reasons` on an endpoint lists the
+  reasons a run ended for that it takes as `automation.run_ended`, null for every reason; a check
+  keeps it to 1 to 21 known reasons, to endpoints taking the event and to reasons of the ends they
+  take. `app.capture_webhook_event` (replaced with the same signature) matches the `endReason` the
+  run trigger stores in the detail against the list for the ends it names reasons of (each status
+  paired with its reasons in the function); the runs of other ends pass on the end filter alone.
+  Settings (reasons by status under "Automation ended") and the API (`runEndReasons`) set it; a
+  change of the ends keeps the reasons of the ends kept, and one that drops the event clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and

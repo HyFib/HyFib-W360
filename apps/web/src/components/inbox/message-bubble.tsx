@@ -2,6 +2,7 @@ import { formatMinor } from '@w360/domain/crm-money';
 import { cn } from '@w360/ui/cn';
 import { formatDateTime } from '@/lib/format';
 import { flowAnswerText } from '@/lib/flow-labels';
+import { isHttpsLink } from '@/lib/links';
 import { UnknownOutcomeActions } from './unknown-outcome-actions';
 
 export interface ThreadMessage {
@@ -88,15 +89,29 @@ function Body({
     case 'video':
     case 'audio':
     case 'document':
-    case 'sticker':
+    case 'sticker': {
+      const link = text(c.link);
       return (
         <p className="whitespace-pre-wrap break-words">
           <span className="font-medium capitalize">{type}</span>
           {text(c.filename) ? ` · ${text(c.filename)}` : ''}
           {text(c.caption) ? <span className="block">{text(c.caption)}</span> : null}
-          <span className="block text-xs opacity-80">Media download is not available yet.</span>
+          {/* Sent through the API from a link (ADR-194), which the API only takes as https. */}
+          {isHttpsLink(link) ? (
+            <a
+              href={link}
+              target="_blank"
+              rel="noopener noreferrer nofollow"
+              className="block break-all text-xs underline opacity-80"
+            >
+              {link}
+            </a>
+          ) : (
+            <span className="block text-xs opacity-80">Media download is not available yet.</span>
+          )}
         </p>
       );
+    }
     case 'location':
       return (
         <p>

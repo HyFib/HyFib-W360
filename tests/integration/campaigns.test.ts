@@ -1191,6 +1191,12 @@ describe('a 10,000-recipient campaign', () => {
          FROM app.contacts WHERE tenant_id = $1`,
       [s.c.tenant.id],
     );
+    // Statistics as autovacuum leaves them after a bulk import. Without them, the audience count
+    // could be planned on statistics from before the 10,000 rows and outrun the statement timeout,
+    // depending on when autovacuum ran (it did once in CI); the test is about the campaign path.
+    await fx.query(
+      'ANALYZE app.contacts, app.contact_tags, app.consent_events, app.contact_consents',
+    );
     const seeded = Date.now() - t0;
     const { id } = await s.draft('Ten thousand');
     const t1 = Date.now();

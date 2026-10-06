@@ -9,7 +9,9 @@ import {
   CAMPAIGN_PAUSE_REASONS,
   CAMPAIGN_STATUSES,
   CHANNEL_STATUSES,
+  CONTACT_SOURCES,
   CONVERSATION_STATUSES,
+  MESSAGE_TYPES,
   ORDER_STATUSES,
   TEMPLATE_STATUSES,
 } from '@w360/db';
@@ -36,6 +38,15 @@ import {
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_RUN_TRIGGER_LABELS,
   WEBHOOK_RUN_TRIGGERS,
+  WEBHOOK_CONSENT_CHANGE_LABELS,
+  WEBHOOK_CONSENT_CHANGES,
+  WEBHOOK_CONTACT_SOURCE_LABELS,
+  WEBHOOK_CONTACT_SOURCES,
+  WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS,
+  WEBHOOK_RECEIVED_MESSAGE_TYPES,
+  WEBHOOK_RUN_END_REASON_LABELS,
+  WEBHOOK_RUN_END_REASONS,
+  WEBHOOK_RUN_END_REASONS_BY_END,
   WEBHOOK_CAMPAIGN_EVENTS,
   WEBHOOK_TEAM_EVENTS,
   WEBHOOK_TEMPLATE_EVENTS,
@@ -70,6 +81,9 @@ import {
   webhookTakesTemplateEvents,
   webhookTeamText,
   webhookTemplateText,
+  webhookRunEndReasonsChosen,
+  webhookRunEndReasonsTicked,
+  webhookRunEndTakesReason,
 } from './model';
 import {
   automationRunEndedPayloadSchema,
@@ -128,6 +142,16 @@ import {
   webhookRunEndStatusesSchema,
   webhookRunTriggersFor,
   webhookRunTriggersSchema,
+  webhookConsentChangesFor,
+  webhookConsentChangesSchema,
+  webhookContactSourcesFor,
+  webhookContactSourcesSchema,
+  webhookMessageTypesFor,
+  webhookMessageTypesSchema,
+  webhookRunEndReasonsFor,
+  webhookRunEndReasonsNeedTheEnds,
+  webhookRunEndReasonsSchema,
+  WEBHOOK_RUN_END_REASONS_NEED_THE_ENDS,
   webhookHeadersAad,
   webhookHeadersSchema,
   webhookMessageSendersFor,
@@ -2513,5 +2537,319 @@ describe('custom field filters (ADR-184)', () => {
   it('name a field by its label and key, or say it was deleted', () => {
     expect(webhookFieldText({ key: 'city', label: 'City' })).toBe('City (city)');
     expect(webhookFieldText({ key: 'tier', label: null })).toBe('tier (deleted)');
+  });
+});
+
+describe('consent change filters (ADR-189)', () => {
+  it('take 1 to 4 consent changes, once each in the order Settings lists them; null takes every change', () => {
+    expect(WEBHOOK_CONSENT_CHANGES).toEqual([
+      'marketing_opt_in',
+      'marketing_opt_out',
+      'utility_opt_in',
+      'utility_opt_out',
+    ]);
+    expect(webhookConsentChangesSchema.parse(['utility_opt_out', 'marketing_opt_out'])).toEqual([
+      'marketing_opt_out',
+      'utility_opt_out',
+    ]);
+    expect(webhookConsentChangesSchema.parse([...WEBHOOK_CONSENT_CHANGES].reverse())).toEqual([
+      ...WEBHOOK_CONSENT_CHANGES,
+    ]);
+    expect(webhookConsentChangesSchema.parse(null)).toBeNull();
+    for (const refused of [
+      [],
+      ['opt_in'],
+      ['marketing'],
+      ['marketing_opt_in', null],
+      'marketing_opt_in',
+      [...WEBHOOK_CONSENT_CHANGES, 'utility_opt_out'],
+    ]) {
+      expect(webhookConsentChangesSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookConsentChangesSchema.safeParse(['opt_in']).error?.issues[0]?.message).toBe(
+      'Choose consent changes from the list.',
+    );
+    expect(webhookConsentChangesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one consent change, or take every change.',
+    );
+    expect(
+      webhookConsentChangesSchema.safeParse([...WEBHOOK_CONSENT_CHANGES, 'utility_opt_out']).error
+        ?.issues[0]?.message,
+    ).toBe('Give each consent change once.');
+  });
+
+  it('are every purpose and action consent.changed reports, each named', () => {
+    const data = consentChangedPayloadSchema.shape.data.shape;
+    expect(
+      data.purpose.options.flatMap((purpose) =>
+        data.action.options.map((action) => `${purpose}_${action}`),
+      ),
+    ).toEqual([...WEBHOOK_CONSENT_CHANGES]);
+    expect(WEBHOOK_CONSENT_CHANGE_LABELS).toEqual({
+      marketing_opt_in: 'Marketing opt-ins',
+      marketing_opt_out: 'Marketing opt-outs',
+      utility_opt_in: 'Utility opt-ins',
+      utility_opt_out: 'Utility opt-outs',
+    });
+  });
+
+  it('are kept only while the endpoint takes consent.changed: given, kept, or cleared', () => {
+    expect(webhookConsentChangesFor(['consent.changed'], ['utility_opt_in'], null)).toEqual([
+      'utility_opt_in',
+    ]);
+    expect(
+      webhookConsentChangesFor(['consent.changed', 'contact.updated'], undefined, [
+        'marketing_opt_out',
+      ]),
+    ).toEqual(['marketing_opt_out']);
+    expect(webhookConsentChangesFor(['consent.changed'], null, ['marketing_opt_out'])).toBeNull();
+    expect(webhookConsentChangesFor(['consent.changed'], undefined, null)).toBeNull();
+    expect(
+      webhookConsentChangesFor(
+        ['contact.updated', 'message.received'],
+        ['utility_opt_in'],
+        ['utility_opt_in'],
+      ),
+    ).toBeNull();
+  });
+});
+
+describe('contact source filters (ADR-190)', () => {
+  it('take 1 to 5 of the places contacts come from, once each in their order; null takes every contact', () => {
+    expect(WEBHOOK_CONTACT_SOURCES).toEqual(['whatsapp', 'manual', 'import', 'api', 'store']);
+    expect(webhookContactSourcesSchema.parse(['store', 'whatsapp'])).toEqual(['whatsapp', 'store']);
+    expect(webhookContactSourcesSchema.parse([...WEBHOOK_CONTACT_SOURCES].reverse())).toEqual([
+      ...WEBHOOK_CONTACT_SOURCES,
+    ]);
+    expect(webhookContactSourcesSchema.parse(null)).toBeNull();
+    for (const refused of [
+      [],
+      ['agent'],
+      ['WhatsApp'],
+      ['api', null],
+      'api',
+      [...WEBHOOK_CONTACT_SOURCES, 'api'],
+    ]) {
+      expect(webhookContactSourcesSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookContactSourcesSchema.safeParse(['agent']).error?.issues[0]?.message).toBe(
+      'Choose where contacts came from from the list.',
+    );
+    expect(webhookContactSourcesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one place contacts come from, or take every contact.',
+    );
+    expect(
+      webhookContactSourcesSchema.safeParse([...WEBHOOK_CONTACT_SOURCES, 'api']).error?.issues[0]
+        ?.message,
+    ).toBe('Give each place contacts come from once.');
+  });
+
+  it('are every source a contact has, each named', () => {
+    expect([...WEBHOOK_CONTACT_SOURCES]).toEqual([...CONTACT_SOURCES]);
+    expect(WEBHOOK_CONTACT_SOURCE_LABELS).toEqual({
+      whatsapp: 'Wrote on WhatsApp',
+      manual: 'Added in the app',
+      import: 'Imported from a file',
+      api: 'Added through the API',
+      store: 'From a store',
+    });
+  });
+
+  it('are kept only while the endpoint takes contact.created: given, kept, or cleared', () => {
+    expect(webhookContactSourcesFor(['contact.created'], ['whatsapp'], null)).toEqual(['whatsapp']);
+    expect(
+      webhookContactSourcesFor(['contact.created', 'contact.updated'], undefined, ['import']),
+    ).toEqual(['import']);
+    expect(webhookContactSourcesFor(['contact.created'], null, ['import'])).toBeNull();
+    expect(webhookContactSourcesFor(['contact.created'], undefined, null)).toBeNull();
+    expect(
+      webhookContactSourcesFor(['contact.updated', 'contact.erased'], ['api'], ['api']),
+    ).toBeNull();
+  });
+});
+
+describe('message type filters (ADR-191)', () => {
+  it('take 1 to 14 of the types a received message has, once each in their order; null takes every message', () => {
+    expect(WEBHOOK_RECEIVED_MESSAGE_TYPES).toHaveLength(14);
+    expect(webhookMessageTypesSchema.parse(['order', 'text', 'order'])).toEqual(['text', 'order']);
+    expect(webhookMessageTypesSchema.parse([...WEBHOOK_RECEIVED_MESSAGE_TYPES].reverse())).toEqual([
+      ...WEBHOOK_RECEIVED_MESSAGE_TYPES,
+    ]);
+    expect(webhookMessageTypesSchema.parse(null)).toBeNull();
+    // A template is only ever sent, so it is no choice; nor is anything else.
+    for (const refused of [
+      [],
+      ['template'],
+      ['Text'],
+      ['list_reply'],
+      ['text', null],
+      'text',
+      [...WEBHOOK_RECEIVED_MESSAGE_TYPES, 'text'],
+    ]) {
+      expect(webhookMessageTypesSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookMessageTypesSchema.safeParse(['template']).error?.issues[0]?.message).toBe(
+      'Choose message types from the list.',
+    );
+    expect(webhookMessageTypesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one message type, or take every message.',
+    );
+    expect(
+      webhookMessageTypesSchema.safeParse([...WEBHOOK_RECEIVED_MESSAGE_TYPES, 'text']).error
+        ?.issues[0]?.message,
+    ).toBe('Give each message type once.');
+  });
+
+  it('are every message type but a template, each named', () => {
+    expect([...WEBHOOK_RECEIVED_MESSAGE_TYPES]).toEqual(
+      MESSAGE_TYPES.filter((type) => type !== 'template'),
+    );
+    expect(Object.keys(WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS)).toEqual([
+      ...WEBHOOK_RECEIVED_MESSAGE_TYPES,
+    ]);
+    expect(WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS).toMatchObject({
+      text: 'Text',
+      interactive: 'Replies to buttons and lists',
+      button: 'Template button replies',
+      system: 'WhatsApp account updates',
+    });
+  });
+
+  it('are kept only while the endpoint takes message.received: given, kept, or cleared', () => {
+    expect(webhookMessageTypesFor(['message.received'], ['order'], null)).toEqual(['order']);
+    expect(
+      webhookMessageTypesFor(['message.received', 'message.status'], undefined, ['text']),
+    ).toEqual(['text']);
+    expect(webhookMessageTypesFor(['message.received'], null, ['text'])).toBeNull();
+    expect(webhookMessageTypesFor(['message.received'], undefined, null)).toBeNull();
+    expect(webhookMessageTypesFor(['message.status'], ['text'], ['text'])).toBeNull();
+  });
+});
+
+describe('run end reason filters (ADR-192)', () => {
+  it('take 1 to 21 of the reasons a run ends for, once each in their order; null takes every reason', () => {
+    expect(WEBHOOK_RUN_END_REASONS).toHaveLength(21);
+    expect(webhookRunEndReasonsSchema.parse(['send_failed', 'end_node', 'send_failed'])).toEqual([
+      'end_node',
+      'send_failed',
+    ]);
+    expect(webhookRunEndReasonsSchema.parse([...WEBHOOK_RUN_END_REASONS].reverse())).toEqual([
+      ...WEBHOOK_RUN_END_REASONS,
+    ]);
+    expect(webhookRunEndReasonsSchema.parse(null)).toBeNull();
+    // A status is no reason, nor is anything else.
+    for (const refused of [
+      [],
+      ['failed'],
+      ['Expired'],
+      ['budget'],
+      ['expired', null],
+      'expired',
+      [...WEBHOOK_RUN_END_REASONS, 'expired'],
+    ]) {
+      expect(webhookRunEndReasonsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookRunEndReasonsSchema.safeParse(['failed']).error?.issues[0]?.message).toBe(
+      'Choose end reasons from the list.',
+    );
+    expect(webhookRunEndReasonsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one end reason, or take every end.',
+    );
+    expect(
+      webhookRunEndReasonsSchema.safeParse([...WEBHOOK_RUN_END_REASONS, 'expired']).error?.issues[0]
+        ?.message,
+    ).toBe('Give each end reason once.');
+  });
+
+  it('are the reasons runs end for, by the end they belong to, each named', () => {
+    expect(WEBHOOK_RUN_END_REASONS_BY_END).toEqual(AUTOMATION_END_REASONS);
+    expect(Object.keys(WEBHOOK_RUN_END_REASONS_BY_END)).toEqual([...WEBHOOK_RUN_END_STATUSES]);
+    expect([...WEBHOOK_RUN_END_REASONS]).toEqual(Object.values(AUTOMATION_END_REASONS).flat());
+    expect(Object.keys(WEBHOOK_RUN_END_REASON_LABELS)).toEqual([...WEBHOOK_RUN_END_REASONS]);
+    expect(WEBHOOK_RUN_END_REASON_LABELS).toMatchObject({
+      end_node: 'Reached an End step',
+      stopped_by_api: 'Stopped through the API',
+      expired: 'Older than 7 days',
+      send_failed: 'A message did not reach the customer',
+    });
+  });
+
+  it('narrow the ends they name reasons of, and are chosen among the ends taken only', () => {
+    expect(webhookRunEndTakesReason(null, 'expired')).toBe(true);
+    expect(webhookRunEndTakesReason(['failed'], 'expired')).toBe(true);
+    expect(webhookRunEndTakesReason(['completed', 'failed'], 'end_node')).toBe(true);
+    expect(webhookRunEndTakesReason(['completed'], 'expired')).toBe(false);
+    expect(webhookRunEndTakesReason(['taken_over', 'stopped'], 'handoff_node')).toBe(false);
+    const refused = webhookRunEndReasonsNeedTheEnds();
+    expect(isAppError(refused) && refused.code).toBe('validation_failed');
+    expect(refused.message).toBe('Choose end reasons only of the ends the endpoint receives.');
+    expect(refused.issues).toEqual([
+      { path: 'runEndReasons', message: WEBHOOK_RUN_END_REASONS_NEED_THE_ENDS },
+    ]);
+  });
+
+  it('are kept only while the endpoint takes automation.run_ended: given, kept for the ends kept, or cleared', () => {
+    const ended = ['automation.run_ended'] as const;
+    expect(webhookRunEndReasonsFor([...ended], null, ['send_failed'], null)).toEqual([
+      'send_failed',
+    ]);
+    expect(webhookRunEndReasonsFor([...ended], ['failed'], ['expired'], ['send_failed'])).toEqual([
+      'expired',
+    ]);
+    expect(
+      webhookRunEndReasonsFor([...ended], null, undefined, ['end_node', 'send_failed']),
+    ).toEqual(['end_node', 'send_failed']);
+    // The reasons of an end it no longer takes go; none left takes every reason.
+    expect(
+      webhookRunEndReasonsFor([...ended], ['failed'], undefined, ['end_node', 'send_failed']),
+    ).toEqual(['send_failed']);
+    expect(webhookRunEndReasonsFor([...ended], ['completed'], undefined, ['send_failed'])).toBe(
+      null,
+    );
+    expect(webhookRunEndReasonsFor([...ended], ['failed'], null, ['send_failed'])).toBeNull();
+    expect(webhookRunEndReasonsFor([...ended], null, undefined, null)).toBeNull();
+    expect(
+      webhookRunEndReasonsFor(['automation.run_started'], null, ['expired'], ['expired']),
+    ).toBeNull();
+  });
+
+  it('are shown ticked as the runs are taken, and sent for the ends they narrow only', () => {
+    expect(webhookRunEndReasonsTicked(null)).toEqual([...WEBHOOK_RUN_END_REASONS]);
+    // An end the list names no reason of takes its every run, so all of its reasons show ticked.
+    const ticked = webhookRunEndReasonsTicked(['send_failed', 'no_next']);
+    expect(ticked).toEqual([
+      'no_next',
+      ...AUTOMATION_END_REASONS.handed_off,
+      ...AUTOMATION_END_REASONS.taken_over,
+      ...AUTOMATION_END_REASONS.stopped,
+      'send_failed',
+    ]);
+    expect(webhookRunEndReasonsChosen(null, ticked)).toEqual(['no_next', 'send_failed']);
+    expect(webhookRunEndReasonsChosen(null, [...WEBHOOK_RUN_END_REASONS])).toBeNull();
+    expect(webhookRunEndReasonsChosen(['failed'], [...WEBHOOK_RUN_END_REASONS])).toBeNull();
+    // An end not taken sends none of its reasons, however they are ticked.
+    expect(webhookRunEndReasonsChosen(['completed', 'stopped'], ticked)).toEqual(['no_next']);
+    expect(webhookRunEndReasonsChosen(['handed_off'], ticked)).toBeNull();
+    expect(
+      webhookRunEndReasonsChosen(
+        ['failed'],
+        WEBHOOK_RUN_END_REASONS.filter((r) => r !== 'expired' && r !== 'error'),
+      ),
+    ).toEqual([
+      'budget_steps',
+      'budget_loop',
+      'budget_messages',
+      'budget_http',
+      'send_blocked',
+      'send_failed',
+    ]);
   });
 });

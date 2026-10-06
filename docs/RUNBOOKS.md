@@ -1482,19 +1482,24 @@ repeating a call is harmless. A call takes at most 100 conversations, each once 
 `conversationIds`), and counts as one request against the key's limits. Each conversation's change
 is audited as a single change is, all with the call's correlation id.
 
-**A call to change many contacts is refused with 422 naming `contacts.<n>.…`.** The contact at that
-place in the list (counting from 0) could not be changed as asked (ADR-122): `contacts.<n>.id` names
-none of the company's live contacts (another company's, an erased one, or none at all);
-`contacts.<n>.fields.<key>` is a field the company does not have or a value of another type
-(`GET /api/v1/contact-fields` lists the fields and types); `contacts.<n>.email` is not an email;
-`contacts.<n>.addTags` would give the contact more than 50 tags; `contacts.<n>.removeTags` names a
-tag also being added. Nothing in the call was changed, the other contacts included:
-`POST /contacts/update-many` changes all of them or none. Correct that contact's change and send
-the call again; what a contact already has changes nothing, so repeating a call is harmless. A call
-takes at most 100 contacts, each once (422 naming `contacts`), and counts as one request. A 409
-`conflict` (retryable) means it met another transaction changing the same contacts in another order,
-such as a CSV import, and PostgreSQL ended it: send it again. Each contact's change is audited as a
-single change is, all with the call's correlation id.
+**A call to change many contacts is refused with 409, 412 or 422 naming `contacts.<n>.…`.** The
+contact at that place in the list (counting from 0) could not be changed as asked (ADR-122):
+`contacts.<n>.id` names none of the company's live contacts (another company's, an erased one, or
+none at all); `contacts.<n>.fields.<key>` is a field the company does not have or a value of another
+type (`GET /api/v1/contact-fields` lists the fields and types); `contacts.<n>.email` is not an
+email; `contacts.<n>.addTags` would give the contact more than 50 tags; `contacts.<n>.removeTags`
+names a tag also being added. `contacts.<n>.phone` with 422 is not a number with its country code
+and a leading +, or a number another contact of the call is given too ("Give each number once.");
+with 409 or 412 it is refused as `PATCH /api/v1/contacts/{id}` refuses it (ADR-180, below), and 409
+also when one of the call's own contacts has the number: a call never swaps or moves numbers between
+its contacts (ADR-188), so give the contact that has it another number in a call of its own first.
+Nothing in the call was changed, the other contacts included: `POST /contacts/update-many` changes
+all of them or none. Correct that contact's change and send the call again; what a contact already
+has changes nothing, so repeating a call is harmless. A call takes at most 100 contacts, each once
+(422 naming `contacts`), and counts as one request. A 409 `conflict` that names no place (retryable)
+means it met another transaction changing the same contacts in another order, such as a CSV import,
+and PostgreSQL ended it: send it again. Each contact's change is audited as a single change is, all
+with the call's correlation id.
 
 **An API key expired without a reminder, or the reminder came twice.** Owners and administrators
 are emailed once, 7 days before a key expires (ADR-067): `app.api_keys.expiry_reminded_at` says when
@@ -1773,6 +1778,24 @@ they were created with: create a key with both); `not_in_plan` means the plan le
 (ADR-092). 404 means the id is not one of the key's company's campaigns. 422 names the parameter: an
 `outcome` the results do not count, a `cursor` that is not the previous page's `nextCursor`, or an
 unknown parameter.
+
+**A photo, video, audio or document sent through the API failed (ADR-194).** WhatsApp fetches the
+media from the message's link when it sends it, and HyFib records what WhatsApp answers:
+`GET /messages/{id}` (and the `message.status` webhook) gives the error. The usual causes are a link
+that needs signing in or has expired, one not reachable from the internet, or media WhatsApp does
+not accept (its type or size). HyFib never fetches the link, so its logs say nothing of the media;
+fix the link and send the message again with a new Idempotency-Key. The link is stored with the
+message and shown in the inbox.
+
+**A draft's review through the API shows no estimate, or other counts than expected (ADR-193).**
+`GET /campaigns/{id}/review` reads the saved draft as members' review does, now: save the draft
+first. `estimate` is null without a currency (the spending cap's, or else Settings → Messaging),
+without a rate card published in it (platform staff publish one), or when no contact can receive the
+campaign; recipients in markets the card has no price for are in `unpricedCount`, left out of the
+total. The total is an upper bound (every message at its market's list price). `audience` is null
+until the draft has a number, a template and an audience, or when the audience is over 50,000
+contacts. 403 means the key lacks `campaigns.write`; 409, that the campaign was submitted (its
+results are on `GET /campaigns/{id}`).
 
 **A campaign was paused or cancelled through the API, or `POST /api/v1/campaigns/{id}/pause` or
 `/cancel` answers 403, 404, 409 or 423 (ADR-128).** The campaign's page says "Paused through the
@@ -2260,6 +2283,44 @@ to replay. To take more, tick the templates under "Templates" on the endpoint's 
 `templateIds` (null for every template). Removing both Message status and Template status clears the
 list.
 
+**A receiver misses automation ends (ADR-192).** An endpoint can take the runs of an end that ended
+for chosen reasons only. The endpoints list shows them ("Automation ends narrowed to: …"), and the
+API answers `runEndReasons` (null takes every reason). A list narrows only the ends it names reasons
+of: a run that ended with one of them goes only when its reason is listed (a failure for `expired`
+is never queued for an endpoint naming `send_failed` only), and when no endpoint of the company
+takes an end, it is not recorded at all, so there is nothing to replay. The runs of its other ends
+go as before. To take more, tick the reasons by status under "Automation ended" on the endpoint's
+page, or `PATCH /webhook-endpoints/{id}` with `runEndReasons` (null for every reason). A reason of
+an end the endpoint does not take is refused: take its status first. Removing Automation ended
+clears the list.
+
+**A receiver misses received messages (ADR-191).** An endpoint can take the received messages of
+chosen types only. The endpoints list shows them ("Received messages sent: …"), and the API answers
+`messageTypes` (null takes every type). A message goes by its type (`message.type`): those of other
+types are never queued for the endpoint, and when no endpoint of the company takes a message, it is
+not recorded at all, so there is nothing to replay. A tap on reply buttons or a list row is
+`interactive`; a tap on a template's quick-reply button is `button`. To take more, tick the types
+under "Message received" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with
+`messageTypes` (null for every type). Removing Message received clears the list.
+
+**A receiver misses added contacts (ADR-190).** An endpoint can take the `contact.created` of the
+contacts from chosen sources only. The endpoints list shows them ("New contacts sent: …"), and the
+API answers `contactSources` (null takes every contact). An added contact goes by its source
+(`contact.source`): one from another source is never queued for the endpoint, and its later changes
+are `contact.updated` events, which the list does not narrow. To take more, tick the sources under
+"Contact added" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `contactSources`
+(null for every contact). Removing Contact added clears the list. A receiver that is sent its own
+contacts back should leave out `api`.
+
+**A receiver misses consent changes (ADR-189).** An endpoint can take chosen consent changes only.
+The endpoints list shows them ("Consent changes sent: …"), and the API answers `consentChanges`
+(null takes every change). A change goes by its purpose and action (`marketing_opt_out`): the others
+are never queued for the endpoint, and when no endpoint of the company takes a change, it is not
+recorded at all, so there is nothing to replay. An erasure records opt-outs for both purposes, which
+the same list narrows. To take more, tick the changes under "Consent changed" on the endpoint's
+page, or `PATCH /webhook-endpoints/{id}` with `consentChanges` (null for every change). Removing
+Consent changed clears the list.
+
 **A receiver misses a campaign's message statuses or changes (ADR-185).** An endpoint can take the
 statuses and changes of chosen campaigns only. The endpoints list shows them ("Campaigns whose
 statuses and changes are sent: …"), and the API answers `campaignIds` (null takes every campaign's).
@@ -2585,8 +2646,8 @@ numbers: its number is its identity and stays (members cannot change it either);
 suppression list means the new number is suppressed (remove it from the list in the app first, if
 that is right). 409 means another contact of the company has the number: find it with
 `GET /contacts?phone=` (with `contacts.read`) and merge or fix them in the app. 422 naming `phone`
-means it is not a number with its country code and a leading +. Calls that change many contacts do
-not take `phone`.
+means it is not a number with its country code and a leading +. `POST /api/v1/contacts/update-many`
+gives the same answers naming `contacts.<n>.phone` (ADR-188).
 
 **A dead letter of those three queues stays unsettled.** The sweep leaves one alone while its
 company is being deleted, while a job for the same work waits or runs (the company started it again,
@@ -2866,6 +2927,38 @@ servers of the previous release work with it.
 transaction; a failure rolls it all back (usually a lock held on one of the tables: run the
 migrations again). Web servers of this release need it before a key or plan version holds the new
 scope; those of the previous release work with it.
+
+**Migration 0135 failed.** It adds `consent_changes` to `app.webhook_endpoints` with the check
+`webhook_endpoints_consent_changes`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event`, in one transaction; a failure rolls it all back (usually the bootstrap
+roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
+release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
+endpoints name the column); workers of either release and web servers of the previous release work
+with it.
+
+**Migration 0136 failed.** It adds `contact_sources` to `app.webhook_endpoints` with the check
+`webhook_endpoints_contact_sources`, grants its update to the runtime role, and replaces
+`app.capture_contact_webhook_event`, in one transaction; a failure rolls it all back (usually the
+bootstrap roles, or a lock held on the table: fix it and run the migrations again). Web servers of
+this release need it before they start, or Settings → Webhooks and the endpoints API fail (their
+reads of endpoints name the column); workers of either release and web servers of the previous
+release work with it.
+
+**Migration 0137 failed.** It adds `message_types` to `app.webhook_endpoints` with the check
+`webhook_endpoints_message_types`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event`, in one transaction; a failure rolls it all back (usually the bootstrap
+roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
+release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
+endpoints name the column); workers of either release and web servers of the previous release work
+with it.
+
+**Migration 0138 failed.** It adds `run_end_reasons` to `app.webhook_endpoints` with the check
+`webhook_endpoints_run_end_reasons`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event`, in one transaction; a failure rolls it all back (usually the bootstrap
+roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
+release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
+endpoints name the column); workers of either release and web servers of the previous release work
+with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

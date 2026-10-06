@@ -30,7 +30,27 @@ export interface JobQueue {
     queue: QueueName,
     jobs: { envelope: JobEnvelope; options?: EnqueueOptions }[],
   ): Promise<void>;
+  /**
+   * Raises to `priority` the job of the queue waiting under `singletonKey` (created, or due a
+   * retry) when its priority is lower. An exclusive queue collapses a job sent under the key of
+   * one already waiting, which keeps its own priority; raising it keeps the priority the later
+   * request asked for (ADR-178). A running job is left alone. Returns how many jobs it raised.
+   */
+  raisePriority(
+    tx: Tx | null,
+    queue: QueueName,
+    singletonKey: string,
+    priority: number,
+  ): Promise<number>;
 }
+
+/** The job table of the pg-boss schema both runtimes configure (`pgboss`, see db/migrate.ts). */
+const PGBOSS_JOB_TABLE = 'pgboss.job';
+
+/** pg-boss 12 orders job states created < retry < active: below active, a job still waits. */
+export const RAISE_WAITING_JOB_PRIORITY_SQL = `UPDATE ${PGBOSS_JOB_TABLE} SET priority = $3
+  WHERE name = $1 AND singleton_key = $2 AND state < 'active' AND priority < $3
+  RETURNING id`;
 
 /** Adapts a drizzle transaction to pg-boss's minimal database interface. */
 function transactionExecutor(tx: Tx) {
@@ -88,6 +108,16 @@ export class PgBossJobQueue implements JobQueue {
       })),
       { returnId: false, ...(tx ? { db: transactionExecutor(tx) } : {}) },
     );
+  }
+
+  async raisePriority(tx: Tx | null, queue: QueueName, singletonKey: string, priority: number) {
+    const db = tx ? transactionExecutor(tx) : this.boss.getDb();
+    const { rows } = await db.executeSql(RAISE_WAITING_JOB_PRIORITY_SQL, [
+      queue,
+      singletonKey,
+      priority,
+    ]);
+    return rows.length;
   }
 }
 
@@ -162,5 +192,17 @@ export class RecordingJobQueue implements JobQueue {
   ) {
     for (const job of jobs)
       this.jobs.push({ queue, envelope: job.envelope, options: job.options ?? {} });
+  }
+
+  /** Every recorded job counts as waiting. */
+  async raisePriority(_tx: Tx | null, queue: QueueName, singletonKey: string, priority: number) {
+    const waiting = this.jobs.filter(
+      (j) =>
+        j.queue === queue &&
+        j.options.singletonKey === singletonKey &&
+        (j.options.priority ?? 0) < priority,
+    );
+    for (const job of waiting) job.options = { ...job.options, priority };
+    return waiting.length;
   }
 }

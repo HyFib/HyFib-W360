@@ -618,10 +618,21 @@ verification, app review, Embedded Signup configuration).
   **[Cancelling campaign drafts built; its database tests run only in CI]** (ADR-187:
   `POST /campaigns/{id}/cancel` cancels a draft for a key holding `campaigns.write`, as members
   cancel drafts; anything else still needs `campaigns.stop`; no migration).
-  Remaining: media messages, call-to-action messages through the API, taking reactions back,
+  **[Changing typed numbers in calls that change many contacts built; its database tests run only in
+  CI]** (ADR-188: `POST /contacts/update-many` takes `phone` for each contact, as `PATCH` does;
+  every number must be free before the call and is given once, so a call never swaps or moves
+  numbers, and a refusal names its place; no migration).
+  **[Reviewing campaign drafts built; its database tests run only in CI]** (ADR-193:
+  `GET /campaigns/{id}/review` answers a draft's review as members see it, for a key holding
+  `campaigns.write`: what blocks it, who it would reach and an upper bound of its cost; no
+  migration).
+  **[Sending media from links built; its database tests run only in CI]** (ADR-194: a key replies
+  with a photo, a video, audio or a document WhatsApp fetches from an https link, with a caption
+  except for audio, within the 24-hour window; HyFib keeps the link, never the media; no migration).
+  Remaining: uploaded media and stickers, call-to-action messages through the API, taking
+  reactions back,
   media downloads, a contact card's contacts (Meta's
-  contact object is not confirmed), changing a field's type, changing
-  numbers in calls that change many contacts,
+  contact object is not confirmed), changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
   resuming what members or HyFib paused, approving, scheduling and starting campaigns
   through the API, campaign
@@ -743,9 +754,20 @@ verification, app review, Embedded Signup configuration).
   it takes, or every field's as before). **[Campaign filters built; their database tests run only in
   CI]** (ADR-185: `message.status` names the campaign that sent the message, and an endpoint takes
   the statuses of the messages of the campaigns it chooses and their changes, 1 to 50 of the
-  company's campaigns, in Settings or through the API, or every campaign's as before). Remaining:
+  company's campaigns, in Settings or through the API, or every campaign's as before). **[Consent
+  change filters built; their database tests run only in CI]** (ADR-189: an endpoint takes the
+  consent changes it chooses, by purpose and action, in Settings or through the API, or every change
+  as before). **[Contact source filters built; their database tests run only in CI]** (ADR-190: an
+  endpoint takes the `contact.created` of the contacts from the sources it chooses, such as all but
+  `api` for an integration that adds contacts itself, or every contact's as before). **[Message type
+  filters built; their database tests run only in CI]** (ADR-191: an endpoint takes the received
+  messages of the types it chooses, such as text and button and list replies for a chatbot, or every
+  message as before). **[Run end reason filters built; their database tests run only in CI]**
+  (ADR-192: an endpoint takes the ends of the runs that ended for the reasons it chooses, each
+  narrowing the end it belongs to, such as only the failures to send among failed runs, or every end
+  as before). Remaining:
   filters for other event types and on a message's or contact's values (such as by tag or a field's
-  value, or a run's end reason or key), other authentication (headers computed
+  value, or the key that started a run), other authentication (headers computed
   per delivery, other OAuth grants),
   mutual TLS, fixed egress addresses, events for store orders, Payment Links and each step of a run,
   `createdAt` finer than the millisecond, load tests.

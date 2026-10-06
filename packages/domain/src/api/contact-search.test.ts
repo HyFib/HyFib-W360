@@ -417,6 +417,8 @@ describe('changing the contacts a search finds (ADR-165)', () => {
       body({ change: {} }),
       body({ change: { name: 'Asha' } }),
       body({ change: { email: 'a@example.com' } }),
+      // The same number for many contacts is never a change (ADR-188).
+      body({ change: { phone: '+919876543210' } }),
       body({ change: { ...vip, extra: true } }),
       body({ conditions: [] }),
       body({ order: 'name' }),

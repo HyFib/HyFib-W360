@@ -48,6 +48,14 @@ export async function createWebhookEndpointAction(
     runEndStatuses: string[] | null;
     /** What started the runs whose events it takes (ADR-183); null takes every run's. */
     runTriggers: string[] | null;
+    /** The consent changes it takes as `consent.changed` (ADR-189); null takes every change. */
+    consentChanges: string[] | null;
+    /** Where the contacts whose `contact.created` it takes came from (ADR-190); null: every one. */
+    contactSources: string[] | null;
+    /** The types of the received messages it takes (ADR-191); null takes every type. */
+    messageTypes: string[] | null;
+    /** Why the runs it takes as `automation.run_ended` ended (ADR-192); null: every reason. */
+    runEndReasons: string[] | null;
     /** The WhatsApp numbers whose events it takes (ADR-170); null takes every number. */
     channelIds: string[] | null;
     /** The teams whose conversations' events it takes (ADR-174); null takes every one's. */
@@ -102,6 +110,14 @@ export async function updateWebhookEndpointAction(
     runEndStatuses: string[] | null;
     /** What started the runs whose events it takes (ADR-183); null takes every run's. */
     runTriggers: string[] | null;
+    /** The consent changes it takes as `consent.changed` (ADR-189); null takes every change. */
+    consentChanges: string[] | null;
+    /** Where the contacts whose `contact.created` it takes came from (ADR-190); null: every one. */
+    contactSources: string[] | null;
+    /** The types of the received messages it takes (ADR-191); null takes every type. */
+    messageTypes: string[] | null;
+    /** Why the runs it takes as `automation.run_ended` ended (ADR-192); null: every reason. */
+    runEndReasons: string[] | null;
     /** The WhatsApp numbers whose events it takes (ADR-170); null takes every number. */
     channelIds: string[] | null;
     /** The teams whose conversations' events it takes (ADR-174); null takes every one's. */

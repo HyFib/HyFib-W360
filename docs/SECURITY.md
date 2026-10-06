@@ -532,6 +532,13 @@ Phase 5 rules (Public API, P5-08):
   refuses the whole call, naming its place in the list, and changes nothing (tested), so a call never
   reveals or touches another company's contacts beyond saying an id is not one of the company's. A
   call counts as one request against the key's limits.
+- Numbers in calls that change many contacts (ADR-188): each contact's new number is refused as
+  `PATCH /contacts/{id}` refuses it (a WhatsApp identity's, another contact's without naming it, a
+  suppressed one), and every number is checked against the numbers contacts have before the call,
+  after their rows are locked and before anything is written, so a key never swaps or moves numbers
+  between the call's contacts (a person's messages then reaching another) in one call; a number
+  given twice is refused before anything is read. A refusal names the place in the list, never
+  another contact.
 - Starting automations through the API (ADR-077) needs `automations.start`, which only members who
   publish automations (`automations.publish`: owners and administrators) can grant, as a started run
   messages contacts as a published version does; an automation whose version sends a marketing
@@ -752,6 +759,17 @@ Phase 5 rules (Public API, P5-08):
   writing scopes before anything is read, and the campaign is locked in the key's company. A leaked
   key with `campaigns.write` can cancel the company's drafts until it is revoked; a cancelled draft
   is kept, and its history names the key.
+- Reviewing drafts (ADR-193): `GET /campaigns/{id}/review` answers a draft's review only to a key
+  holding `campaigns.write`, which already reads drafts' settings: it shows counts of the audience
+  and an estimate of Meta's charges, never contacts or members, and keys that only read campaigns
+  get 403. It reads one draft of the key's company in a read-only transaction and changes nothing,
+  so a company that is not active still reads it.
+- Media from links (ADR-194): a key with `messages.reply` sends a photo, a video, audio or a
+  document by a link WhatsApp fetches, within the 24-hour window. HyFib never fetches the link, so
+  it cannot be used to reach HyFib's network; it takes only https links with a host and no user name
+  or password, so no credentials are stored with the message or shown in the inbox, and the inbox
+  opens the link only as an https anchor in a new tab without the referrer. The link is the
+  company's own data: it is redacted with the contact's messages and exported with them.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so
@@ -1014,6 +1032,32 @@ Phase 5 rules (outgoing webhooks, P5-09):
   stored with the event; the payload's `campaignId` is read from the message in the company's scope
   when the delivery is prepared, an id without personal data. Audited with the list (unit tests;
   integration and e2e tests, run in CI only).
+- An endpoint can take chosen consent changes only (ADR-189), chosen the same way. A list holds only
+  the four known changes, is kept only while the endpoint takes `consent.changed` (a database check
+  too, which also refuses a null entry), and is applied in `app.capture_webhook_event` to the
+  purpose and action the consent trigger stores: it narrows what one endpoint receives and never
+  adds an event or a delivery for another endpoint or company, and an event still holds no personal
+  data. Audited with the list (unit tests; integration and e2e tests, run in CI only).
+- An endpoint can take the added contacts from chosen sources only (ADR-190), chosen the same way. A
+  list holds only the five known sources, is kept only while the endpoint takes `contact.created` (a
+  database check too, which also refuses a null entry), and is applied in
+  `app.capture_contact_webhook_event` to the source of the contact the insert added, read in the
+  company's scope: it narrows what one endpoint receives and never adds an event or a delivery for
+  another endpoint or company. Audited with the list (unit tests; integration and e2e tests, run in
+  CI only).
+- An endpoint can take the received messages of chosen types only (ADR-191), chosen the same way. A
+  list holds only the fourteen types a received message has, is kept only while the endpoint takes
+  `message.received` (a database check too, which also refuses a null entry), and is applied in
+  `app.capture_webhook_event` to the type the message trigger stores: it narrows what one endpoint
+  receives and never adds an event or a delivery for another endpoint or company. Audited with the
+  list (unit tests; integration and e2e tests, run in CI only).
+- An endpoint can take the runs of an end that ended for chosen reasons only (ADR-192), chosen the
+  same way. A list holds only the 21 reasons a run ends for, is kept only while the endpoint takes
+  `automation.run_ended` and only with reasons of the ends it takes (a database check too, which
+  also refuses a null entry), and is applied in `app.capture_webhook_event` to the reason the run
+  trigger stores: it narrows what one endpoint receives and never adds an event or a delivery for
+  another endpoint or company. Audited with the list (unit tests; integration and e2e tests, run in
+  CI only).
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

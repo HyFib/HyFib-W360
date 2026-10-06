@@ -55,6 +55,7 @@ function signatureValid(headers: IncomingHttpHeaders, body: string, secret: stri
 interface ApiContactBody {
   id: string;
   name: string | null;
+  phone: string | null;
   tags: string[];
   fields: Record<string, string | number | boolean>;
 }
@@ -217,7 +218,7 @@ test('a key sets and changes a contact’s custom fields, the contact page shows
   });
 });
 
-test('a key changes several contacts in one call, all of them or none, and the contact pages show it (ADR-122)', async ({
+test('a key changes several contacts in one call, all of them or none, a number included but never swapped, and the contact pages show it (ADR-122, ADR-188)', async ({
   page,
   request,
 }) => {
@@ -298,11 +299,37 @@ test('a key changes several contacts in one call, all of them or none, and the c
     [asha.id, 'Asha Rao', ['webinar'], {}],
   ]);
 
+  // Such a call fixes typed numbers too (ADR-188), but never swaps two contacts' numbers.
+  const swapped = await request.post('/api/v1/contacts/update-many', {
+    headers: auth,
+    data: {
+      contacts: [
+        { id: asha.id, phone: bina.phone },
+        { id: bina.id, phone: asha.phone },
+      ],
+    },
+  });
+  expect(swapped.status()).toBe(409);
+  expect(((await swapped.json()) as { error: { issues: unknown } }).error.issues).toEqual([
+    { path: 'contacts.0.phone', message: 'Another contact already has this phone number.' },
+  ]);
+  expect((await read(asha.id)).phone).toBe(asha.phone);
+  const fixedPhone = `+9197${String(Date.now()).slice(-7)}3`;
+  const fixed = await request.post('/api/v1/contacts/update-many', {
+    headers: auth,
+    data: { contacts: [{ id: bina.id, phone: fixedPhone }] },
+  });
+  expect(fixed.status()).toBe(200);
+  expect(((await fixed.json()) as { data: ApiContactBody[] }).data.map((c) => c.phone)).toEqual([
+    fixedPhone,
+  ]);
+
   // The contact pages show the changes.
   await page.goto(`/c/${slug}/contacts/${asha.id}`);
   await expect(page.getByRole('heading', { name: 'Asha Rao', level: 1 })).toBeVisible();
   await expect(page.getByRole('list', { name: 'Tags' })).toContainText('webinar');
   await page.goto(`/c/${slug}/contacts/${bina.id}`);
+  await expect(page.getByText(fixedPhone, { exact: true }).first()).toBeVisible();
   await expect(page.getByLabel('Plan', { exact: true })).toHaveValue('gold');
   await expect(page.getByRole('list', { name: 'Tags' })).toContainText('webinar');
   await expectNoHorizontalOverflow(page);

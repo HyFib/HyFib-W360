@@ -23,6 +23,9 @@ import {
   apiDraftInputFrom,
   apiUpdateCampaign,
   apiUpdateCampaignSchema,
+  apiCampaignReviewSchema,
+  apiReviewCampaign,
+  toApiCampaignReview,
 } from './campaigns';
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import {
@@ -30,6 +33,7 @@ import {
   microsToAmount,
   prepareCampaignDraft,
   type CampaignDraftInput,
+  type CampaignDraftReview,
 } from '../campaigns/service';
 import { allowedNetworksSchema, bearerToken, generateApiToken, networkEntryProblem } from './keys';
 import {
@@ -85,7 +89,7 @@ import {
   replyButtonsContent,
   replyButtonsInteractive,
 } from '../messaging/interactive';
-import { messageSnippet, SNIPPET_LENGTH } from '../messaging/message-text';
+import { messageSnippet, outboundText, SNIPPET_LENGTH } from '../messaging/message-text';
 import { NOTE_MAX_LENGTH } from '../messaging/notes';
 import {
   answerProblem,
@@ -107,6 +111,11 @@ import {
   apiSendProductSchema,
   apiSendReactionSchema,
   apiSendTextSchema,
+  API_MEDIA_TYPES,
+  apiSendMediaSchema,
+  isMediaLink,
+  API_MESSAGE_TYPES,
+  apiMessageType,
 } from './resources';
 import {
   apiCreateWebhookEndpointSchema,
@@ -119,6 +128,11 @@ import {
 import {
   WEBHOOK_FIELDS_NEED_THE_PART,
   WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
+  WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT,
+  WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT,
+  WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT,
+  WEBHOOK_RUN_END_REASONS_NEED_THE_EVENT,
+  WEBHOOK_RUN_END_REASONS_NEED_THE_ENDS,
   WEBHOOK_ASSIGNEES_NEED_THE_EVENTS,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS,
@@ -741,7 +755,14 @@ describe('text replies (ADR-070)', () => {
       planScopes: null,
     } as unknown as ApiContext;
     const idem = { key: 'k-1', requestHash: 'h' };
-    for (const body of [{ type: 'image' }, { type: 'TEXT' }, { type: null }]) {
+    // Stickers and locations are not sent through the API (ADR-194 sends media from links).
+    for (const body of [
+      { type: 'sticker' },
+      { type: 'location' },
+      { type: 'IMAGE' },
+      { type: 'TEXT' },
+      { type: null },
+    ]) {
       const error: unknown = await apiSendMessage(
         {} as never,
         ctx,
@@ -1375,8 +1396,10 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'campaignIds',
       'campaignStatuses',
       'channelIds',
+      'consentChanges',
       'contactFieldKeys',
       'contactParts',
+      'contactSources',
       'conversationStatuses',
       'description',
       'enabled',
@@ -1384,8 +1407,10 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'headers',
       'messageSenders',
       'messageStatuses',
+      'messageTypes',
       'oauth',
       'orderStatuses',
+      'runEndReasons',
       'runEndStatuses',
       'runTriggers',
       'teamIds',
@@ -1814,6 +1839,237 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(
       Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
     ).toContain('runTriggers');
+  });
+
+  it('take consent changes only with consent.changed, each once, and a list of them alone is a change (ADR-189)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['consent.changed'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        consentChanges: ['utility_opt_in', 'marketing_opt_out', 'utility_opt_in'],
+      }).consentChanges,
+    ).toEqual(['marketing_opt_out', 'utility_opt_in']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['contact.created', 'contact.updated'],
+      consentChanges: ['marketing_opt_out'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['consentChanges', WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, consentChanges: [] },
+      { ...base, consentChanges: ['opt_out'] },
+      { ...base, consentChanges: ['marketing'] },
+      { ...base, consentChanges: ['Marketing_opt_out'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, consentChanges: null }).consentChanges,
+    ).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ consentChanges: null })).toEqual({
+      consentChanges: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ consentChanges: ['utility_opt_out'] })).toEqual({
+      consentChanges: ['utility_opt_out'],
+    });
+    // Answered as a list of the changes, or null.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: unknown } }[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.consentChanges?.anyOf?.find((c) => c.items)?.items?.enum).toEqual([
+      'marketing_opt_in',
+      'marketing_opt_out',
+      'utility_opt_in',
+      'utility_opt_out',
+    ]);
+    expect(answered.required).toContain('consentChanges');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('consentChanges');
+  });
+
+  it('take where contacts came from only with contact.created, each once, and a list of them alone is a change (ADR-190)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        contactSources: ['store', 'whatsapp', 'store'],
+      }).contactSources,
+    ).toEqual(['whatsapp', 'store']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['contact.updated', 'contact.erased'],
+      contactSources: ['whatsapp'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['contactSources', WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, contactSources: [] },
+      { ...base, contactSources: ['agent'] },
+      { ...base, contactSources: ['flow'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, contactSources: null }).contactSources,
+    ).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ contactSources: null })).toEqual({
+      contactSources: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ contactSources: ['import', 'api'] })).toEqual({
+      contactSources: ['import', 'api'],
+    });
+    // Answered as a list of sources, or null.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: unknown } }[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.contactSources?.anyOf?.find((c) => c.items)?.items?.enum).toEqual([
+      'whatsapp',
+      'manual',
+      'import',
+      'api',
+      'store',
+    ]);
+    expect(answered.required).toContain('contactSources');
+    const create = schemas.CreateWebhookEndpoint as {
+      properties: Record<string, { description?: string }>;
+    };
+    expect(create.properties.contactSources?.description).toContain(
+      'Leave out `api` not to hear of the contacts your own keys add.',
+    );
+  });
+
+  it('take the types of received messages only with message.received, each once, and a list of them alone is a change (ADR-191)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['message.received'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, messageTypes: ['order', 'text', 'order'] })
+        .messageTypes,
+    ).toEqual(['text', 'order']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.status'],
+      messageTypes: ['text'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['messageTypes', WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, messageTypes: [] },
+      { ...base, messageTypes: ['template'] },
+      { ...base, messageTypes: ['button_reply'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiCreateWebhookEndpointSchema.parse({ ...base, messageTypes: null }).messageTypes).toBe(
+      null,
+    );
+    expect(apiUpdateWebhookEndpointSchema.parse({ messageTypes: null })).toEqual({
+      messageTypes: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ messageTypes: ['interactive'] })).toEqual({
+      messageTypes: ['interactive'],
+    });
+    // Answered as a list of types, or null.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: unknown[] } }[] }>;
+      required?: string[];
+    };
+    const answeredTypes = answered.properties.messageTypes?.anyOf?.find((t) => t.items)?.items
+      ?.enum;
+    expect(answeredTypes).toHaveLength(14);
+    expect(answeredTypes).not.toContain('template');
+    expect(answered.required).toContain('messageTypes');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('messageTypes');
+  });
+
+  it('take end reasons only with automation.run_ended and of the ends chosen, each once, and a list of them alone is a change (ADR-192)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['automation.run_ended'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        runEndReasons: ['send_failed', 'end_node', 'send_failed'],
+      }).runEndReasons,
+    ).toEqual(['end_node', 'send_failed']);
+    const withoutTheEvent = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['automation.run_started'],
+      runEndReasons: ['expired'],
+    });
+    expect(withoutTheEvent.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['runEndReasons', WEBHOOK_RUN_END_REASONS_NEED_THE_EVENT],
+    ]);
+    // A reason of an end the endpoint does not take would never be sent.
+    const ofAnotherEnd = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      runEndStatuses: ['completed', 'stopped'],
+      runEndReasons: ['end_node', 'send_failed'],
+    });
+    expect(ofAnotherEnd.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['runEndReasons', WEBHOOK_RUN_END_REASONS_NEED_THE_ENDS],
+    ]);
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        runEndStatuses: ['completed', 'failed'],
+        runEndReasons: ['send_failed'],
+      }).runEndReasons,
+    ).toEqual(['send_failed']);
+    for (const body of [
+      { ...base, runEndReasons: [] },
+      { ...base, runEndReasons: ['failed'] },
+      { ...base, runEndReasons: ['budget'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, runEndReasons: null }).runEndReasons,
+    ).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ runEndReasons: null })).toEqual({
+      runEndReasons: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ runEndReasons: ['expired'] })).toEqual({
+      runEndReasons: ['expired'],
+    });
+    // Answered as a list of reasons, or null.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: unknown[] } }[] }>;
+      required?: string[];
+    };
+    const answeredReasons = answered.properties.runEndReasons?.anyOf?.find((t) => t.items)?.items
+      ?.enum;
+    expect(answeredReasons).toHaveLength(21);
+    expect(answeredReasons).not.toContain('failed');
+    expect(answered.required).toContain('runEndReasons');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('runEndReasons');
   });
 
   it('take members only with an event of a conversation, each once, and a list of them alone is a change (ADR-181)', () => {
@@ -2720,6 +2976,10 @@ describe('OpenAPI document', () => {
         { $ref: '#/components/schemas/SendProductList' },
         { $ref: '#/components/schemas/SendCatalog' },
         { $ref: '#/components/schemas/SendReaction' },
+        { $ref: '#/components/schemas/SendImage' },
+        { $ref: '#/components/schemas/SendVideo' },
+        { $ref: '#/components/schemas/SendAudio' },
+        { $ref: '#/components/schemas/SendDocument' },
       ],
     });
     for (const scope of API_SEND_SCOPES) expect(send.description).toContain(`\`${scope}\``);
@@ -2859,6 +3119,7 @@ describe('OpenAPI document', () => {
       'fields',
       'addTags',
       'removeTags',
+      'phone',
     ]);
   });
 
@@ -3015,7 +3276,7 @@ describe('contact custom fields and changes (ADR-112)', () => {
       addTags: ['vip'],
       removeTags: ['new'],
     });
-    // A number alone is a change (ADR-180); only PATCH takes one.
+    // A number alone is a change (ADR-180), in a call changing many contacts too (ADR-188).
     expect(apiContactUpdateSchema.parse({ phone: '+919876543210' })).toEqual({
       phone: '+919876543210',
     });
@@ -3026,7 +3287,7 @@ describe('contact custom fields and changes (ADR-112)', () => {
       apiUpdateManyContactsSchema.safeParse({
         contacts: [{ id: '0190a000-0000-7000-8000-000000000001', phone: '+919876543210' }],
       }).success,
-    ).toBe(false);
+    ).toBe(true);
     for (const bad of [
       {},
       { phone: null },
@@ -3090,6 +3351,9 @@ describe('contact custom fields and changes (ADR-112)', () => {
         ],
       },
       { contacts: ids(API_LIMITS.contactsPerChange).map((c) => ({ id: c, removeTags: ['new'] })) },
+      // A number alone, or with other changes (ADR-188).
+      { contacts: [{ id, phone: '+919876543210' }] },
+      { contacts: [{ id, name: 'A', phone: '+919876543210' }] },
     ]) {
       expect(apiUpdateManyContactsSchema.parse(body)).toEqual(body);
     }
@@ -3105,8 +3369,8 @@ describe('contact custom fields and changes (ADR-112)', () => {
       { contacts: [{ id: 'not-a-uuid', name: 'A' }] },
       { contacts: [{ name: 'A' }] },
       { contacts: [{ id }] },
-      { contacts: [{ id, phone: '+919876543210' }] },
-      { contacts: [{ id, name: 'A', phone: '+919876543210' }] },
+      { contacts: [{ id, phone: null }] },
+      { contacts: [{ id, phone: 919876543210 }] },
       { contacts: { id, name: 'A' } },
       { contacts: [{ id, name: 'A' }], dryRun: true },
       {},
@@ -3148,8 +3412,72 @@ describe('contact custom fields and changes (ADR-112)', () => {
       { path: 'contacts.1.removeTags', message: 'The tag vip cannot be both added and removed.' },
     ]);
     expect(await issues({})).toEqual([
-      { path: 'contacts.1', message: 'Give name, email, fields, addTags or removeTags.' },
+      { path: 'contacts.1', message: 'Give name, email, phone, fields, addTags or removeTags.' },
     ]);
+  });
+
+  it('take numbers in a call that changes many contacts, each given once, refused by its place before anything is read (ADR-188)', async () => {
+    const other = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';
+    const third = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f03';
+    const many = (body: unknown) =>
+      apiUpdateManyContacts({} as never, ctx(['contacts.write']), body).catch(
+        (error: unknown) => error,
+      );
+    const refusal = async (body: unknown) => {
+      const error = await many(body);
+      return isAppError(error) ? { code: error.code, issues: error.issues } : error;
+    };
+    // A number that is not one, by its place.
+    expect(
+      await refusal({
+        contacts: [
+          { id, name: 'Priya' },
+          { id: other, phone: '98111' },
+        ],
+      }),
+    ).toMatchObject({ code: 'validation_failed', issues: [{ path: 'contacts.1.phone' }] });
+    // The same number twice, written two ways: the second is named.
+    expect(
+      await refusal({
+        contacts: [
+          { id, phone: '+919876543210' },
+          { id: other, name: 'Bina' },
+          { id: third, phone: '+91 98765 43210' },
+        ],
+      }),
+    ).toEqual({
+      code: 'validation_failed',
+      issues: [{ path: 'contacts.2.phone', message: 'Give each number once.' }],
+    });
+    // Different numbers pass every check that needs no database, and reach it (none is given).
+    expect(
+      await many({
+        contacts: [
+          { id, phone: '+919876543210' },
+          { id: other, phone: '+919876543211' },
+        ],
+      }),
+    ).toBeInstanceOf(TypeError);
+    // Described: what a number needs, that the call never swaps or moves them, and the refusals.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const paths = doc.paths as unknown as Record<
+      string,
+      Record<string, { summary: string; description: string; responses: Record<string, unknown> }>
+    >;
+    const updateMany = paths['/contacts/update-many']?.post;
+    expect(updateMany?.summary).toContain('numbers');
+    for (const words of [
+      'A number changes as PATCH /contacts/{id} changes one',
+      'Each number must be free before the call',
+      'a call never swaps or moves numbers between contacts',
+      'A number given twice, in any form, is refused with 422',
+      '`contacts.2.phone`',
+    ]) {
+      expect(updateMany?.description).toContain(words);
+    }
+    expect(Object.keys(updateMany?.responses ?? {})).toEqual(
+      expect.arrayContaining(['409', '412', '422']),
+    );
   });
 
   it('are described: the fields in every contact, their definitions, and the change', () => {
@@ -3165,7 +3493,7 @@ describe('contact custom fields and changes (ADR-112)', () => {
       'A number changes only when it was typed for the contact, as members change it',
       'is refused with 412, as is a number on the company',
       'a number another contact has is refused with 409, without naming that contact',
-      'Only this call changes numbers.',
+      'POST /contacts/update-many changes numbers too; the same change for many contacts does not.',
     ]) {
       expect(paths['/contacts/{id}']?.patch?.description).toContain(words);
     }
@@ -4631,6 +4959,312 @@ describe('sending a template to many numbers in one call (ADR-163)', () => {
     const queued = answer.properties.message?.anyOf?.find((o) => o.properties);
     expect(Object.keys(queued?.properties ?? {})).toEqual(
       expect.arrayContaining(['id', 'status', 'contactId', 'channelId', 'templateId']),
+    );
+  });
+});
+
+describe('reviewing campaign drafts through the API (ADR-193)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const review = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    apiReviewCampaign({} as never, ctx(scopes, status, planScopes), 'not-an-id');
+  const id = '0190a000-0000-7000-8000-000000000193';
+
+  it('take a key that writes drafts, whatever the company’s status, checked before anything is read', async () => {
+    // A review changes nothing: a key that writes drafts passes the checks made before the campaign
+    // is read (a bad id is then not found) even while the company is not active.
+    for (const status of ['active', 'suspended', 'restricted']) {
+      expect(await code(review(['campaigns.write'], status)), status).toBe('not_found');
+    }
+    // It shows costs and the audience, which reading campaigns never does.
+    await expect(review(['campaigns.read', 'campaigns.stop', 'campaigns.resume'])).rejects.toThrow(
+      'This API key does not have the campaigns.write scope.',
+    );
+    await expect(review(['campaigns.write'], 'active', ['campaigns.read'])).rejects.toMatchObject({
+      code: 'forbidden',
+      details: { apiReason: 'not_in_plan' },
+    });
+  });
+
+  it('answer members’ review in the API’s words: skip reasons commonest first, amounts in major units, times in ISO 8601', () => {
+    const members: CampaignDraftReview = {
+      problems: ['The template is not approved by Meta.'],
+      audience: {
+        total: 12,
+        eligible: 5,
+        skipped: { opted_out: 2, suppressed: 2, missing_variable: 3, no_phone: 0 },
+      },
+      estimate: {
+        currency: 'INR',
+        totalMicros: 4_312_500,
+        pricedCount: 4,
+        unpricedCount: 1,
+        byMarket: [
+          { market: 'India', count: 3, micros: 2_587_500 },
+          { market: 'United Arab Emirates', count: 1, micros: 1_725_000 },
+        ],
+      },
+      costCurrency: 'INR',
+      scheduledAt: new Date('2026-11-01T03:30:00Z'),
+      adjustment: null,
+      approvalRequired: true,
+      frequencyCap: { count: 2, days: 7 },
+    };
+    const answered = toApiCampaignReview({ id, version: 4 }, members);
+    expect(answered).toEqual({
+      campaignId: id,
+      version: 4,
+      problems: ['The template is not approved by Meta.'],
+      audience: {
+        total: 12,
+        eligible: 5,
+        // Ties in alphabetical order; a reason no contact has is not listed.
+        skipReasons: [
+          { reason: 'missing_variable', count: 3 },
+          { reason: 'opted_out', count: 2 },
+          { reason: 'suppressed', count: 2 },
+        ],
+      },
+      estimate: {
+        currency: 'INR',
+        total: '4.3125',
+        pricedCount: 4,
+        unpricedCount: 1,
+        byMarket: [
+          { market: 'India', count: 3, amount: '2.5875' },
+          { market: 'United Arab Emirates', count: 1, amount: '1.725' },
+        ],
+      },
+      costCurrency: 'INR',
+      scheduledAt: '2026-11-01T03:30:00.000Z',
+      scheduleAdjustment: null,
+      approvalRequired: true,
+      frequencyCap: { count: 2, days: 7 },
+    });
+    expect(apiCampaignReviewSchema.parse(answered)).toEqual(answered);
+    // A draft without an audience or an estimate yet, at a local time the clocks skip.
+    const incomplete = toApiCampaignReview(
+      { id, version: 0 },
+      {
+        ...members,
+        problems: ['Choose the WhatsApp number to send from.', 'Choose an approved template.'],
+        audience: null,
+        estimate: null,
+        costCurrency: null,
+        scheduledAt: null,
+        adjustment: 'gap_shifted',
+        approvalRequired: false,
+        frequencyCap: null,
+      },
+    );
+    expect(incomplete).toEqual({
+      campaignId: id,
+      version: 0,
+      problems: ['Choose the WhatsApp number to send from.', 'Choose an approved template.'],
+      audience: null,
+      estimate: null,
+      costCurrency: null,
+      scheduledAt: null,
+      scheduleAdjustment: 'gap_shifted',
+      approvalRequired: false,
+      frequencyCap: null,
+    });
+    expect(apiCampaignReviewSchema.parse(incomplete)).toEqual(incomplete);
+  });
+
+  it('are described as a read of drafts for keys that write them, never of contacts', () => {
+    expect(API_SCOPE_INFO['campaigns.write'].description).toContain(
+      'review drafts as members do before they submit them (who they would reach and what they would cost)',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    expect(doc.info.description).toContain(
+      'create, edit and review campaign drafts for members to submit',
+    );
+    const op = (
+      doc.paths as unknown as Record<
+        string,
+        Record<string, { operationId: string; description: string; responses: object }>
+      >
+    )['/campaigns/{id}/review']?.get;
+    expect(op?.operationId).toBe('reviewCampaign');
+    for (const words of [
+      'Scope: `campaigns.write`.',
+      "It changes nothing, and is answered whatever the company's status.",
+      'Counts only: never contacts or members.',
+      'Only a draft is reviewed: any other status is refused with 409, naming it',
+    ]) {
+      expect(op?.description).toContain(words);
+    }
+    // Answered whatever the company's status, so never 423.
+    expect(Object.keys(op?.responses ?? {}).sort()).toEqual(
+      ['200', '401', '403', '404', '409', '429', '500'].sort(),
+    );
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const reviewSchema = schemas.CampaignReview as {
+      properties: Record<string, unknown>;
+      required?: string[];
+    };
+    const fields = [
+      'approvalRequired',
+      'audience',
+      'campaignId',
+      'costCurrency',
+      'estimate',
+      'frequencyCap',
+      'problems',
+      'scheduleAdjustment',
+      'scheduledAt',
+      'version',
+    ];
+    expect(Object.keys(reviewSchema.properties).sort()).toEqual(fields);
+    expect([...(reviewSchema.required ?? [])].sort()).toEqual(fields);
+    expect(API_ROUTES).toEqual(expect.arrayContaining([['get', '/campaigns/{id}/review']]));
+  });
+});
+
+describe('media from links through the API (ADR-194)', () => {
+  const base = { to: '+919876543210', link: 'https://cdn.example.com/menu.pdf' };
+
+  it('take an https link without a user name or password, and a trimmed caption except for audio', () => {
+    expect([...API_MEDIA_TYPES]).toEqual(['image', 'video', 'audio', 'document']);
+    expect(
+      apiSendMediaSchema.parse({ ...base, type: 'document', caption: '  Our menu  ' }),
+    ).toEqual({ ...base, type: 'document', caption: 'Our menu' });
+    expect(
+      apiSendMediaSchema.parse({ ...base, type: 'image', link: ' https://x.example/a.jpg ' }),
+    ).toMatchObject({ link: 'https://x.example/a.jpg' });
+    expect(apiSendMediaSchema.parse({ ...base, type: 'audio' })).toEqual({
+      ...base,
+      type: 'audio',
+    });
+    expect(
+      apiSendMediaSchema.parse({ ...base, type: 'video', caption: 'c'.repeat(1024) }),
+    ).toMatchObject({ caption: 'c'.repeat(1024) });
+    for (const link of [
+      'http://cdn.example.com/menu.pdf',
+      'https://user:secret@cdn.example.com/menu.pdf',
+      'https://user@cdn.example.com/menu.pdf',
+      'https://:secret@cdn.example.com/menu.pdf',
+      'ftp://cdn.example.com/menu.pdf',
+      'javascript:alert(1)',
+      'cdn.example.com/menu.pdf',
+      '',
+      `https://cdn.example.com/${'a'.repeat(2000)}`,
+    ]) {
+      expect(isMediaLink(link) && link.length <= 2000, link).toBe(false);
+      expect(apiSendMediaSchema.safeParse({ ...base, type: 'image', link }).success, link).toBe(
+        false,
+      );
+    }
+    for (const bad of [
+      { ...base, type: 'audio', caption: 'A voice note' },
+      { ...base, type: 'image', caption: '   ' },
+      { ...base, type: 'image', caption: 'c'.repeat(1025) },
+      { ...base, type: 'document', filename: 'menu.pdf' },
+      { ...base, type: 'image', id: '1003383421387256' },
+      { to: base.to, type: 'image' },
+      { ...base, type: 'sticker' },
+    ]) {
+      expect(apiSendMediaSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+    expect(
+      apiSendMediaSchema.safeParse({ ...base, type: 'image', link: 'http://x.example/a.jpg' }).error
+        ?.issues[0]?.message,
+    ).toBe('Give an https:// link to the media, without a user name or password');
+  });
+
+  it('are chosen by their type and need a key that replies', async () => {
+    const ctx = {
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(['messages.send']) },
+      planScopes: null,
+    } as unknown as ApiContext;
+    for (const type of API_MEDIA_TYPES) {
+      await expect(
+        apiSendMessage({} as never, ctx, { ...base, type }, { key: 'k-1', requestHash: 'h' }),
+      ).rejects.toThrow('This API key does not have the messages.reply scope.');
+    }
+  });
+
+  it('name the media by its caption, or by what it is', () => {
+    expect(outboundText('image', { link: base.link, caption: 'Today’s menu' })).toBe(
+      'Today’s menu',
+    );
+    expect(outboundText('document', { link: base.link, caption: 'Menu' })).toBe('Menu');
+    expect(outboundText('audio', { link: base.link })).toBeNull();
+    expect(messageSnippet('outbound', 'video', { link: base.link })).toBe('Video');
+    expect(messageSnippet('outbound', 'image', { link: base.link, caption: 'New\n stock' })).toBe(
+      'New stock',
+    );
+  });
+
+  it('are described in the send operation, each type with its own schema, and by the scope', () => {
+    expect(API_SCOPE_INFO['messages.reply'].label).toBe(
+      'Reply with text, buttons, lists, products, reactions and media',
+    );
+    expect(API_SCOPE_INFO['messages.reply'].description).toContain(
+      'photos, videos, audio or documents from links',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const send = (
+      doc.paths as unknown as Record<
+        string,
+        Record<string, { summary: string; description: string }>
+      >
+    )['/messages']?.post;
+    expect(send?.summary).toContain('a reaction or media');
+    for (const words of [
+      '`image`, `video`, `audio` or `document`',
+      'https:// `link` that WhatsApp fetches when it sends the message',
+      'HyFib neither fetches nor keeps the media',
+      'a `caption` of up to 1,024 characters; audio takes none',
+    ]) {
+      expect(send?.description).toContain(words);
+    }
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    for (const name of ['SendImage', 'SendVideo', 'SendDocument']) {
+      const schema = schemas[name] as { properties: object; required: string[] };
+      expect(Object.keys(schema.properties).sort(), name).toEqual(
+        ['caption', 'from', 'link', 'replyTo', 'to', 'type'].sort(),
+      );
+      expect([...schema.required].sort(), name).toEqual(['link', 'to', 'type']);
+    }
+    const audio = schemas.SendAudio as { properties: object; additionalProperties: unknown };
+    expect(Object.keys(audio.properties)).not.toContain('caption');
+    expect(audio.additionalProperties).toBe(false);
+  });
+});
+
+describe('the types of the messages the API sends, in its answers (ADR-194)', () => {
+  it('give media from links as their own type, as sent, never as a template', () => {
+    for (const type of ['image', 'video', 'audio', 'document', 'text', 'interactive', 'reaction']) {
+      expect(apiMessageType(type)).toBe(type);
+    }
+    expect(apiMessageType('template')).toBe('template');
+    const schemas = (
+      buildOpenApiDocument('https://app.example.com/api/v1').components as unknown as {
+        schemas: Record<string, { properties: { type: { enum: string[]; description: string } } }>;
+      }
+    ).schemas;
+    for (const name of ['QueuedMessage', 'Message']) {
+      expect(schemas[name]?.properties.type.enum).toEqual([...API_MESSAGE_TYPES]);
+      expect(schemas[name]?.properties.type.description).toContain(
+        'image, video, audio and document: media sent from a link',
+      );
+    }
+    expect(API_MESSAGE_TYPES).toEqual(
+      expect.arrayContaining(['image', 'video', 'audio', 'document']),
     );
   });
 });
