@@ -8657,3 +8657,32 @@ Decision:
 
 Not built: listing or deleting uploads, uploads for template headers (they take links, ADR-201),
 stickers, files over 16 MB, and purging upload rows after their 30 days.
+
+## ADR-220 Conversation tags (P3-06, W-035) (2026-10-06)
+
+Context: the inbox filtered conversations by team, number and customer, but members had no way to
+label a conversation ("refund", "follow up") and find the labelled ones again; contact tags describe
+the person, not the conversation. WATI's inbox tags chats, from tags managed in its settings
+(research W-035).
+
+Decision:
+
+- **Tags on conversations** in `app.conversation_tags` (migration 0145), written as contact tags
+  are: lower case, trimmed, spaces collapsed, 1 to 40 characters, no commas or control characters;
+  at most 20 on a conversation, counted under the conversation's row lock. They are free text, as
+  contact tags are: there is no central list, and the editor suggests the tags already in use.
+- **Who:** members with `inbox.reply` add and remove tags on the conversations they can see (the
+  sight rule of replies and notes); everyone who sees a conversation sees its tags. The conversation
+  of an erased contact takes no new tags. Each change emits a `conversation.tags` live event, so
+  open inboxes refresh. Changes are not audited, as contact tags' are not.
+- **Inbox:** each conversation in the list shows its tags. The filter's Tag choice lists the tags on
+  conversations the member can see (at most 200, alphabetically), so an agent never learns the tags
+  of conversations they cannot open, and lists the conversations with the tag chosen. The
+  conversation page shows its tags with an editor that takes several at once, separated by commas.
+- **Erasure and deletion:** erasing a contact deletes the tags of their conversations, as it deletes
+  the conversations' notes: 0145 replaces `app.erase_contact` with that one statement added, and
+  w360_definer reads and deletes only the current company's tags. The company's deletion deletes
+  them before its conversations (step 365); the company data export carries them.
+
+Not built: tags through the public API or webhooks, automations that tag, a central list of allowed
+tags, renaming a tag everywhere, and reports by tag.

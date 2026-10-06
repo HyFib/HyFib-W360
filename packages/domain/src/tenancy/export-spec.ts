@@ -834,6 +834,10 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
     ],
   },
   {
+    table: 'app.conversation_tags',
+    columns: ['id', 'conversation_id', 'tag', 'created_at'],
+  },
+  {
     table: 'app.conversation_turns',
     columns: [
       'id',

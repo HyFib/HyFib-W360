@@ -95,6 +95,7 @@ export * from './inbox/sla';
 export * from './inbox/saved-replies';
 export * from './inbox/csat';
 export * from './inbox/mention-emails';
+export * from './inbox/conversation-tags';
 export * from './automations/graph';
 export * from './automations/interpreter';
 export * from './automations/runs';

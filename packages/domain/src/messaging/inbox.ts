@@ -10,6 +10,7 @@ import {
   contacts,
   conversationNotes,
   conversations,
+  conversationTags,
   conversationTurns,
   desc,
   eq,
@@ -37,6 +38,7 @@ import { DEFAULT_MESSAGING_SETTINGS } from '../consent/service';
 import { endRunForHuman } from '../automations/runs';
 import { automationStateForConversation } from '../automations/service';
 import { latestConversationSource } from '../growth/sources';
+import { conversationHasTag, conversationTagsOf } from '../inbox/conversation-tags';
 import { latestCsatSurvey, queueCsatSurvey } from '../inbox/csat';
 import { MENTION_EMAIL_DELAY_MS, scheduleMentionEmail } from '../inbox/mention-emails';
 import {
@@ -69,6 +71,8 @@ export const listConversationsSchema = z.object({
   /** A team id, or 'none' for conversations without a team. */
   team: z.union([z.uuid(), z.literal('none')]).optional(),
   channel: z.uuid().optional(),
+  /** Conversations with this tag (ADR-220), as a member typed it. */
+  tag: z.string().trim().max(100).optional(),
   /** Contact name, or at least three digits of the phone number. */
   q: z.string().trim().max(100).optional(),
   /** 'waiting': conversations whose customer awaits a reply, longest wait first. */
@@ -126,6 +130,8 @@ export interface ConversationSummary {
   assignedName: string | null;
   teamId: string | null;
   teamName: string | null;
+  /** The conversation's tags, alphabetically (ADR-220). */
+  tags: string[];
   windowOpen: boolean;
   /** Start of the open reply turn (the customer is waiting), if any. */
   waitingSince: string | null;
@@ -314,6 +320,7 @@ export function createInboxService(deps: InboxDeps) {
               assignedName: users.name,
               teamId: conversations.teamId,
               teamName: teams.name,
+              tags: conversationTagsOf(sql`${conversations.tenantId}`, sql`${conversations.id}`),
               lastInboundAt: conversations.lastInboundAt,
               waitingSince: conversationTurns.startedAt,
               automationActive: sql<boolean>`exists (select 1 from app.automation_runs r
@@ -373,6 +380,13 @@ export function createInboxService(deps: InboxDeps) {
                     ? eq(conversations.teamId, q.team)
                     : undefined,
                 q.channel ? eq(conversations.channelAccountId, q.channel) : undefined,
+                q.tag
+                  ? conversationHasTag(
+                      sql`${conversations.tenantId}`,
+                      sql`${conversations.id}`,
+                      q.tag,
+                    )
+                  : undefined,
                 searchCondition,
                 waitingOrder ? sql`${conversationTurns.id} is not null` : undefined,
                 visibilityFilter(ctx),
@@ -404,6 +418,7 @@ export function createInboxService(deps: InboxDeps) {
         assignedName: r.assignedName,
         teamId: r.teamId,
         teamName: r.teamName,
+        tags: r.tags,
         windowOpen: Boolean(
           r.lastInboundAt && now.getTime() - r.lastInboundAt.getTime() <= SERVICE_WINDOW_MS,
         ),
@@ -606,6 +621,16 @@ export function createInboxService(deps: InboxDeps) {
                       isNull(conversationTurns.endedAt),
                     ),
                   );
+          const tags = await tx
+            .select({ tag: conversationTags.tag })
+            .from(conversationTags)
+            .where(
+              and(
+                eq(conversationTags.tenantId, ctx.tenant.id),
+                eq(conversationTags.conversationId, conv.id),
+              ),
+            )
+            .orderBy(asc(conversationTags.tag));
           const target = await loadReplyTarget(tx, ctx.tenant.id, ctx.tenant.timezone);
           const survey = await latestCsatSurvey(tx, ctx.tenant.id, conv.id);
           const automation = await automationStateForConversation(tx, ctx.tenant.id, conv.id);
@@ -620,6 +645,7 @@ export function createInboxService(deps: InboxDeps) {
               assignedMembershipId: conv.assignedMembershipId,
               teamId: conv.teamId,
               teamName: conv.teamName,
+              tags: tags.map((t) => t.tag),
               contactId: conv.contactId,
               channelAccountId: conv.channelAccountId,
               whatsappAccountId: conv.whatsappAccountId,

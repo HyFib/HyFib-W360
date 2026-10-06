@@ -405,6 +405,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the audit entry in one transaction, then yields the header and pages of 500 messages (keyset on
   the exact `created_at` and the id, read-only transactions) formatted as plain text; the route
   `/c/<company>/inbox/<conversation>/transcript` streams it as an attachment.
+- **Conversation tags** (`inbox/conversation-tags.ts`, ADR-220): `addTags` and `removeTag` check
+  `inbox.reply`, lock the conversation when the member can see it (`canSeeConversation`), count and
+  change its rows in `app.conversation_tags` (migration 0145) and emit `conversation.tags`;
+  `tagsInUse` groups the tags of the conversations the member can see. The inbox list selects each
+  conversation's tags (`conversationTagsOf`) and filters with `conversationHasTag`;
+  `app.erase_contact` deletes the tags of the contact's conversations.
 - **Files customers send** (`messaging/received-media.ts`, ADR-216): the route
   `/c/<company>/inbox/<conversation>/media/<message>` checks that the member can see the
   conversation and reads the message's media record and the receiving account's token in one

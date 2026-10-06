@@ -111,3 +111,30 @@ export async function setConversationTeamAction(
     return result;
   });
 }
+
+/** Adds one tag, or several separated by commas, to a conversation (ADR-220). */
+export async function addConversationTagsAction(
+  slug: string,
+  input: { conversationId: string; tags: string },
+): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { conversationTags } = await getRuntime();
+    await conversationTags.addTags(ctx, input);
+    refresh();
+    return null;
+  });
+}
+
+export async function removeConversationTagAction(
+  slug: string,
+  input: { conversationId: string; tag: string },
+): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { conversationTags } = await getRuntime();
+    await conversationTags.removeTag(ctx, input);
+    refresh();
+    return null;
+  });
+}

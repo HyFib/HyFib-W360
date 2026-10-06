@@ -172,6 +172,15 @@ export const conversationNotes = appSchema.table('conversation_notes', {
   createdAt: tz('created_at').notNull().defaultNow(),
 });
 
+/** Tags members put on a conversation (migration 0145, ADR-220), written as contact tags are. */
+export const conversationTags = appSchema.table('conversation_tags', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  conversationId: uuid('conversation_id').notNull(),
+  tag: text('tag').notNull(),
+  createdAt: tz('created_at').notNull().defaultNow(),
+});
+
 export const MESSAGE_TYPES = [
   'text',
   'image',

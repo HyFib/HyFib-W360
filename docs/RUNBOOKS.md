@@ -497,6 +497,12 @@ otherwise the conversation page shows no "Download transcript" link and its addr
 conversation's id. A transcript leaves internal notes out by design; a download cut short mid-file
 is logged by the web server as `transcript export failed mid-stream`, so download it again.
 
+**A member cannot tag a conversation (ADR-220).** Tagging needs `inbox.reply` and a conversation the
+member can see (agents see those assigned to them and the unassigned ones). A conversation takes at
+most 20 tags of up to 40 characters, without commas, and the conversation of an erased contact takes
+none ("This contact was erased."). The inbox's Tag filter offers only the tags on conversations the
+member can see, so two members may be offered different tags.
+
 **Migration 0010 failed.** It builds `app.conversations_team_idx` concurrently. If it failed, an
 INVALID index can remain: run `DROP INDEX CONCURRENTLY app.conversations_team_idx;` and run the
 migrations again.

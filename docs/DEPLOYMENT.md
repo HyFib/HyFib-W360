@@ -466,6 +466,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    that path too. Until the web rollout ends, an old web server answers it with 404 and refuses
    `mediaId` in `POST /messages`.
 
+   Migration 0145 (ADR-220) creates `app.conversation_tags` and replaces `app.erase_contact` with
+   the same function deleting the conversations' tags too; the new table starts empty, so the
+   migration holds its locks briefly. Old servers ignore the table and erase contacts through the
+   new function. Until the web rollout ends, an old web server shows no tags and ignores the inbox's
+   `tag` filter.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

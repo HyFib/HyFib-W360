@@ -65,6 +65,7 @@ import {
   pgBossQueueInspector,
   createRateCardsService,
   createSavedRepliesService,
+  createConversationTagsService,
   createSegmentsService,
   createTeamsService,
   createTemplatesService,
@@ -115,6 +116,7 @@ import {
   type PlatformOpsService,
   type RateCardsService,
   type SavedRepliesService,
+  type ConversationTagsService,
   type SegmentsService,
   type TeamsService,
   type TemplatesService,
@@ -178,6 +180,8 @@ export interface Runtime {
   teams: TeamsService;
   businessHours: BusinessHoursService;
   savedReplies: SavedRepliesService;
+  /** Tags members put on conversations (ADR-220). */
+  conversationTags: ConversationTagsService;
   csat: CsatService;
   outbound: OutboundDeps;
   /** Emails to the members who can approve a campaign waiting for approval (ADR-204). */
@@ -341,6 +345,7 @@ async function init(): Promise<Runtime> {
   const teams = createTeamsService({ db, clock: systemClock });
   const businessHours = createBusinessHoursService({ db, clock: systemClock });
   const savedReplies = createSavedRepliesService({ db, clock: systemClock });
+  const conversationTags = createConversationTagsService({ db });
   const csat = createCsatService({ db, clock: systemClock });
   const outbound: OutboundDeps = { db, jobs, signer, clock: systemClock };
   const contacts = createContactsService({ db, clock: systemClock });
@@ -553,6 +558,7 @@ async function init(): Promise<Runtime> {
     teams,
     businessHours,
     savedReplies,
+    conversationTags,
     csat,
     outbound,
     campaignNotices,

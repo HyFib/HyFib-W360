@@ -1,5 +1,53 @@
 # Progress
 
+## 2026-10-06 — Phase 3 follow-up: conversation tags (P3-06, W-035, ADR-220)
+
+Status: **Implemented; its database and browser tests run in CI only.** Members filtered the inbox
+by team, number and customer but could not label conversations. The local PostgreSQL is unavailable
+(its Docker daemon stopped), so migration 0145 and the new integration and e2e tests below were
+written but not run here.
+
+### Completed
+
+- **Design (ADR-220):** free-text tags on conversations, written as contact tags are, at most 20;
+  `inbox.reply` and sight of the conversation; the inbox filters by a tag among those on
+  conversations the member can see.
+- **Migration 0145:** `app.conversation_tags` (RLS, grants, deletion step 365, policies for erasure
+  and deletion) and `app.erase_contact` deleting the conversations' tags.
+- **Domain:** `inbox/conversation-tags.ts` (`parseTagList`, `addTags`, `removeTag`, `tagsInUse`);
+  tags in the inbox list and the conversation, and the `tag` filter.
+- **Web:** each conversation's tags in the list, a Tag filter, and a tag editor on the conversation
+  page.
+- **Tests:**
+  - Unit (3 new in `inbox/conversation-tags.test.ts`): the parsing, its refusals, and the checks
+    before the database.
+  - Integration (3 new in `conversation-tags.test.ts`): adding, repeats, the limit, live events, the
+    filter and the tags in use within what a member can see, roles, other companies, erasure.
+    Written for CI; not run here.
+  - E2E (1 new in `inbox.spec.ts`): a member tags a conversation, filters the inbox by a tag and
+    removes it. Written for CI; not run here.
+- **Docs:** ADR-220; ARCHITECTURE; SECURITY; THREAT-MODEL T207; DEPLOYMENT and RUNBOOKS;
+  DATA-RETENTION; BACKLOG P3-06; feature matrix W-035 (implemented).
+- **Mutation checks:** 12 deliberate regressions tried, all caught (one only after a test was
+  strengthened) on the unit-tested parts. The limit, the sight rule, the filter and erasure need the
+  database, so their regressions are left to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                                                         |
+| `pnpm test` (unit)                                 | 955 passed (95 files)                                                                                         |
+| `pnpm test:integration`, e2e, migration 0145       | not run here: the local PostgreSQL is unavailable; CI runs them                                               |
+| `pnpm build`                                       | passed                                                                                                        |
+| Mutation checks                                    | 12 deliberate regressions tried, all caught (one only after a test was strengthened) on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                                                                |
+
+### Known gaps
+
+- Tags through the public API, webhooks and automations; a central list of allowed tags; renaming a
+  tag everywhere; reports by tag.
+
 ## 2026-10-06 — Phase 5: uploading files through the API to send by id (P5-08, ADR-219)
 
 Status: **Implemented; its database and browser tests run in CI only.** Keys sent media only from

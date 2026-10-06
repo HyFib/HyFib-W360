@@ -270,6 +270,56 @@ test('a member sends a document from the conversation, uploaded to WhatsApp and 
   expect((await readFile(await download.path())).equals(pdf)).toBe(true);
 });
 
+test('a member tags a conversation and lists the inbox by its tags (ADR-220)', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('inbox-tags');
+  const slug = `tags-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Tara Tags', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Tagging Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  await sendSignedWebhook(
+    request,
+    inboundMessage(wabaId, phoneNumberId, randomWaId(), 'My refund has not arrived'),
+  );
+  await page.getByRole('link', { name: 'Inbox' }).click();
+  const conversation = page.getByRole('link', { name: /Priya Customer/ });
+  await expect(conversation).toBeVisible({ timeout: 20_000 });
+  await conversation.click();
+
+  // Tags are written in lower case, once each.
+  const tags = page.getByRole('list', { name: 'Conversation tags' });
+  await page.getByLabel('Add tags to this conversation').fill('Refund, VIP, refund');
+  await page.getByRole('button', { name: 'Add tags' }).click();
+  await expect(tags.getByRole('listitem')).toHaveCount(2);
+  await expect(page.getByRole('button', { name: 'Remove tag refund' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Remove tag vip' })).toBeVisible();
+
+  // The list shows them, and its filter offers the tags in use and lists the conversations with
+  // the one chosen.
+  await page.goto(`/c/${slug}/inbox`);
+  await expect(conversation).toContainText('refund');
+  await expect(conversation).toContainText('vip');
+  await page.getByLabel('Tag', { exact: true }).selectOption('vip');
+  await page.getByRole('button', { name: 'Apply filters' }).click();
+  await expect(page).toHaveURL(/[?&]tag=vip/);
+  await expect(conversation).toBeVisible();
+
+  // Once the tag is removed, the conversation leaves the list filtered by it.
+  await conversation.click();
+  await page.getByRole('button', { name: 'Remove tag vip' }).click();
+  await expect(tags.getByRole('listitem')).toHaveCount(1);
+  await page.goto(`/c/${slug}/inbox?view=all&status=open&tag=vip`);
+  await expect(page.getByText('No conversations here')).toBeVisible();
+  await page.goto(`/c/${slug}/inbox?view=all&status=open&tag=refund`);
+  await expect(conversation).toBeVisible();
+});
+
 test('webhooks with a bad signature are refused and store nothing', async ({ request }) => {
   const res = await request.post('/api/webhooks/meta', {
     data: JSON.stringify({ object: 'whatsapp_business_account', entry: [] }),

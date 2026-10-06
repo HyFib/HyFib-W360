@@ -127,10 +127,13 @@ verification, app review, Embedded Signup configuration).
   audited, without notes; a new `inbox.export` permission; no migration). **[Email preferences
   built; their database and browser tests run only in CI]** (ADR-215, migration 0142: each member
   turns off, per company, the notice emails about mentions and campaigns; security, sign-in and
-  billing emails stay on). **Remaining:** per-team SLA targets and calendars, SLA breach
-  notifications (email or in-app), presence and typing indicators, conversation tags (W-035),
-  private team queues (would change visibility, ADR-029), CSAT by template outside the window (needs
-  a consent decision), CSAT with a real WABA, phone-number masking (W-044).
+  billing emails stay on). **[Conversation tags built; their database and browser tests run only in
+  CI]** (ADR-220, W-035, migration 0145: members who can reply tag the conversations they can see,
+  and the inbox shows the tags and filters by one; erasing the contact deletes them). **Remaining:**
+  per-team SLA targets and calendars, SLA breach notifications (email or in-app), presence and
+  typing indicators, private team queues (would change visibility, ADR-029), CSAT by template
+  outside the window (needs a consent decision), CSAT with a real WABA, phone-number masking
+  (W-044).
 
 ## Phase 4 — automation, Flows, CRM, commerce
 

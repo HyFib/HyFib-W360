@@ -14,6 +14,8 @@ export interface InboxQuery {
   /** A team id, or 'none'. */
   team?: string;
   channel?: string;
+  /** Conversations with this tag. */
+  tag?: string;
   q?: string;
   order: 'recent' | 'waiting';
 }
@@ -21,12 +23,15 @@ export interface InboxQuery {
 export interface InboxFilters {
   teams: { id: string; name: string }[];
   channels: { id: string; label: string }[];
+  /** Tags on conversations the member can see, alphabetically. */
+  tags: string[];
 }
 
 export function inboxQueryString(q: InboxQuery): string {
   const params = new URLSearchParams({ view: q.view, status: q.status });
   if (q.team) params.set('team', q.team);
   if (q.channel) params.set('channel', q.channel);
+  if (q.tag) params.set('tag', q.tag);
   if (q.q) params.set('q', q.q);
   if (q.order === 'waiting') params.set('order', 'waiting');
   return `?${params.toString()}`;
@@ -173,6 +178,24 @@ export function InboxShell({
                     {filters.channels.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.label}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              ) : null}
+              {filters.tags.length > 0 || query.tag ? (
+                <div className="grid gap-1">
+                  <Label htmlFor="inbox-tag" className="text-xs">
+                    Tag
+                  </Label>
+                  <Select id="inbox-tag" name="tag" defaultValue={query.tag ?? ''}>
+                    <option value="">All tags</option>
+                    {query.tag && !filters.tags.includes(query.tag) ? (
+                      <option value={query.tag}>{query.tag}</option>
+                    ) : null}
+                    {filters.tags.map((tag) => (
+                      <option key={tag} value={tag}>
+                        {tag}
                       </option>
                     ))}
                   </Select>

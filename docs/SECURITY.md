@@ -168,6 +168,11 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   Transcripts need `inbox.export` (owners, administrators, supervisors) and sight of the
   conversation, are audited (`conversation.transcript_exported`, no content), are plain text so no
   spreadsheet runs a formula from them, and leave internal notes out (ADR-212).
+  Conversation tags (ADR-220) need `inbox.reply` and sight of the conversation, checked under its
+  row lock; whoever sees a conversation sees its tags, and the inbox's filter offers only the tags
+  on conversations the member can see. Erasing a contact deletes the tags of their conversations
+  (the definer function's policies reach only the current company's rows), and an erased contact's
+  conversation takes no new tags.
   Files customers send (ADR-216) are given only to members who can see the conversation, fetched for
   each request with the receiving account's token, which goes only to Graph and to the https address
   Graph returned (no user name or password, no redirects; the address is never stored or logged),

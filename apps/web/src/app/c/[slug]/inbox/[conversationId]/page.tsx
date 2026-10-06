@@ -12,6 +12,7 @@ import { FlowSender } from '@/components/flows/flow-sender';
 import { Composer } from '@/components/inbox/composer';
 import { FileSender } from '@/components/inbox/file-sender';
 import { ConversationControls, TeamControl } from '@/components/inbox/conversation-controls';
+import { ConversationTags } from '@/components/inbox/conversation-tags';
 import { InboxShell, inboxQueryString } from '@/components/inbox/inbox-shell';
 import { MarkRead } from '@/components/inbox/mark-read';
 import { MessageBubble, type ThreadMessage } from '@/components/inbox/message-bubble';
@@ -273,6 +274,13 @@ export default async function ConversationPage({
                 teams={filters.teams}
               />
             ) : null}
+            <ConversationTags
+              slug={ctx.tenant.slug}
+              conversationId={conv.id}
+              tags={conv.tags}
+              suggestions={filters.tags}
+              canEdit={canReply}
+            />
             {can(ctx, 'inbox.export') ? (
               <a
                 href={`/c/${ctx.tenant.slug}/inbox/${conv.id}/transcript`}
