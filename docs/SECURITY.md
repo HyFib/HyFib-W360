@@ -267,6 +267,9 @@ Phase 4 rules (automation web requests, P4-02):
   belongs to another domain, that use secrets outside header values, or whose host contains
   placeholders. The worker re-checks the current domain list and secrets when it makes each call
   (removing a domain or secret takes effect on the next call).
+- Form bodies (ADR-236): placeholder values are URL-encoded in a form body, as in the address, so a
+  customer's text cannot add or end a field; a JSON body's values stay JSON-escaped. HyFib sets the
+  form's Content-Type itself and refuses a step's own beside a form body.
 - A company that allows a server which echoes request headers back exposes its secrets to anyone
   who can edit automations; the settings page says so. Automation editors cannot choose the host at
   run time and cannot place secrets in the address or body.

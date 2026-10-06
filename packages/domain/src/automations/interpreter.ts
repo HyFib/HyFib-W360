@@ -6,7 +6,9 @@ import {
   HTTP_BODY_METHODS,
   HTTP_WAIT_MINUTES,
   RUN_BUDGETS,
+  encodeFormValue,
   encodeJsonString,
+  FORM_CONTENT_TYPE,
   httpPathTemplate,
   renderHttpHeader,
   renderHttpText,
@@ -557,18 +559,24 @@ export function advance(input: AdvanceInput): StepResult {
         if (base.httpCalls + 1 > RUN_BUDGETS.maxHttpCalls)
           return fail('budget_http', 'budget_http', base);
         const vals = values(base.variables);
+        const sendsBody = current.body !== null && HTTP_BODY_METHODS.has(current.method);
+        // A form body's values are URL-encoded and it says so (ADR-236); JSON is the default.
+        const form = sendsBody && current.bodyFormat === 'form';
         const effect: RunEffect = {
           kind: 'http_request',
           method: current.method,
           url: renderHttpText(current.url, vals, encodeURIComponent),
           path: httpPathTemplate(current.url),
-          headers: current.headers.map((h) => ({
-            name: h.name,
-            parts: renderHttpHeader(h.value, vals),
-          })),
+          headers: [
+            ...current.headers.map((h) => ({
+              name: h.name,
+              parts: renderHttpHeader(h.value, vals),
+            })),
+            ...(form ? [{ name: 'Content-Type', parts: [{ text: FORM_CONTENT_TYPE }] }] : []),
+          ],
           body:
-            current.body && HTTP_BODY_METHODS.has(current.method)
-              ? renderHttpText(current.body, vals, encodeJsonString)
+            sendsBody && current.body
+              ? renderHttpText(current.body, vals, form ? encodeFormValue : encodeJsonString)
               : null,
           save: current.save.map((item) => ({ path: item.path, saveAs: item.saveAs })),
         };

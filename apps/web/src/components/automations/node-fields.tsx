@@ -5,6 +5,7 @@ import {
   ANSWER_FORMATS,
   AUTOMATION_LIMITS,
   COMPARISONS,
+  FORM_CONTENT_TYPE,
   HTTP_BODY_METHODS,
   HTTP_METHODS,
   HTTP_WAIT_MINUTES,
@@ -1277,10 +1278,28 @@ function HttpRequestFields({
         ) : null}
       </fieldset>
       {hasBody ? (
+        <Field id={`${p}-format`} label="Body format">
+          {(aria) => (
+            <Select
+              {...aria}
+              value={node.bodyFormat ?? 'json'}
+              onChange={(e) => patch({ bodyFormat: e.target.value === 'form' ? 'form' : 'json' })}
+            >
+              <option value="json">JSON (application/json)</option>
+              <option value="form">Form fields ({FORM_CONTENT_TYPE})</option>
+            </Select>
+          )}
+        </Field>
+      ) : null}
+      {hasBody ? (
         <Field
           id={`${p}-body`}
           label="Body (optional)"
-          description={`JSON, sent as application/json. Put placeholders inside quotes, for example {"order": "{{answer.order_no}}"}; their values are escaped.`}
+          description={
+            node.bodyFormat === 'form'
+              ? 'Fields as name=value joined by &, written URL-encoded, for example phone={{answer.phone}}&note=Hello%20there; placeholder values are URL-encoded. Do not add a Content-Type header.'
+              : `JSON, sent as application/json. Put placeholders inside quotes, for example {"order": "{{answer.order_no}}"}; their values are escaped.`
+          }
         >
           {(aria) => (
             <Textarea

@@ -545,6 +545,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    review and the API say so). Rolling the web back leaves them so until it rolls forward; campaigns
    already submitted keep the recipients frozen when submitted.
 
+   Form bodies for HTTP steps (ADR-236) need no migration. Workers make the calls, so roll them out
+   before the web (as step 4 does): until the web rollout ends, an old web server neither shows nor
+   keeps a step's body format, and saving an automation there turns its form body back into one
+   checked as JSON. Rolling workers back while an automation with a form body is published would
+   send that body as JSON: unpublish such automations first.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -1,5 +1,38 @@
 # Progress
 
+## 2026-10-06 — Form bodies for automation HTTP steps (P4-02, ADR-236)
+
+Status: **Implemented; its database test runs in CI only.** HTTP steps could only send JSON bodies.
+The local PostgreSQL is unavailable, so the integration test below was written but not run here.
+
+### Completed
+
+- **Domain:** `bodyFormat` on HTTP steps (`HTTP_BODY_FORMATS`), `formBodyProblem` and the
+  Content-Type refusal in the step's checks, `encodeFormValue`; the interpreter renders form values
+  URL-encoded and adds the form Content-Type.
+- **Web:** "Body format" on the HTTP step with an example per format.
+- **Tests:**
+  - Unit (2 new in `interpreter.test.ts`: the checks; the rendered request and its header).
+  - Integration (1 new in `automation-http.test.ts`: the body and header a local server receives).
+    Written for CI; not run here.
+- **Docs:** ADR-236; ARCHITECTURE; SECURITY; DEPLOYMENT; BACKLOG P4-02; feature matrix H-027.
+- **Mutation checks:** 9/9 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 103 files, 1018 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| Mutation checks                                    | 9/9 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+### Known gaps
+
+- No browser test of the editor's format choice; no multipart bodies.
+
 ## 2026-10-06 — Exporting WhatsApp orders as CSV (P4-06a, ADR-235)
 
 Status: **Implemented; its database test runs in CI only.** Orders could be read fifty at a time on

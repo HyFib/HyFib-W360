@@ -9176,3 +9176,28 @@ Decision:
 
 Not built: order reports (totals by day or product), exports through the public API, and a choice of
 columns or time zone.
+
+## ADR-236 Form bodies for automation HTTP steps (P4-02) (2026-10-06)
+
+Context: an automation's "Call a web address" step sends a JSON body, its placeholders JSON-escaped.
+Many company systems (SMS gateways, older CRMs, payment and form endpoints) take
+`application/x-www-form-urlencoded` fields instead, and a JSON body could not reach them.
+
+Decision:
+
+- **A body format per step:** `bodyFormat` is `json` (the default, and what a step without it means,
+  so every saved automation is unchanged) or `form`. A form body is written as fields, `name=value`
+  joined by `&`, already URL-encoded (`%20` or `+` for a space), with placeholders for values, for
+  example `phone={{answer.phone}}&note=Hello%20there`.
+- **Encoding:** a placeholder's value is URL-encoded in a form body (`encodeURIComponent`), as it is
+  in the address, so a customer's text can neither add a field nor end one; in a JSON body it stays
+  JSON-escaped. A form body is sent as `application/x-www-form-urlencoded`: the runner adds the
+  header to the written-ahead request, and the egress client keeps it.
+- **Checks at publish:** a form body must be fields as above (each with a name, no stray spaces, a %
+  only starting an encoded character); a Content-Type header beside it is refused, since HyFib sets
+  it. A JSON body is checked as before.
+- **Editor:** "Body format" on the step (JSON or form fields), with an example for each. No
+  migration: the format lives in the automation's graph.
+
+Not built: multipart bodies, form bodies built field by field in the editor, and secrets in bodies
+(still header values only).

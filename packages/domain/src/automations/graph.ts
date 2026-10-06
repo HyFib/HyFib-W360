@@ -262,6 +262,14 @@ export const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;
 export type HttpMethod = (typeof HTTP_METHODS)[number];
 /** Methods that send a body. */
 export const HTTP_BODY_METHODS: ReadonlySet<HttpMethod> = new Set(['POST', 'PUT', 'PATCH']);
+/**
+ * How an HTTP step's body is written and sent (ADR-236): JSON (application/json, the default when
+ * a step does not say), or form fields (application/x-www-form-urlencoded), whose placeholders are
+ * URL-encoded.
+ */
+export const HTTP_BODY_FORMATS = ['json', 'form'] as const;
+export type HttpBodyFormat = (typeof HTTP_BODY_FORMATS)[number];
+export const FORM_CONTENT_TYPE = 'application/x-www-form-urlencoded';
 /** How long a run waits for an HTTP call's result before taking the failure branch. */
 export const HTTP_WAIT_MINUTES = 2;
 const HTTP_HEADER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,59}$/;
@@ -326,6 +334,8 @@ const httpRequestNode = z.object({
     )
     .nullable()
     .transform((v) => (v && v.trim() ? v : null)),
+  /** The body's format; left out, JSON (ADR-236). */
+  bodyFormat: z.enum(HTTP_BODY_FORMATS).optional(),
   /** Values to save from a JSON response, as answers. */
   save: z
     .array(
@@ -743,6 +753,31 @@ function placeholderValue(name: string, values: TextValues): string | null {
 /** Escapes a value for use inside a JSON string of an HTTP body. */
 export const encodeJsonString = (value: string): string => JSON.stringify(value).slice(1, -1);
 
+/** Encodes a value for a field of a form body (ADR-236): every character but A–Z a–z 0–9 -_.!~*'(). */
+export const encodeFormValue = (value: string): string => encodeURIComponent(value);
+
+/** A form field as written, placeholders taken as values: a name, `=`, a value, URL-encoded. */
+const FORM_FIELD_RE = /^[A-Za-z0-9._~*'()!\-[\]%+]+=[A-Za-z0-9._~*'()!\-[\]%+]*$/;
+
+/**
+ * Why a form body (ADR-236) cannot be sent as written, or null: fields joined by &, each a name
+ * and a value already URL-encoded (%20 or + for a space), placeholders standing for values.
+ */
+export function formBodyProblem(body: string): string | null {
+  const fields = body.replace(PLACEHOLDER_RE, 'x').split('&');
+  for (const field of fields) {
+    if (!FORM_FIELD_RE.test(field)) {
+      return 'A form body is name=value fields joined by &, written URL-encoded, for example phone={{answer.phone}}&note=Hello%20there.';
+    }
+    try {
+      decodeURIComponent(field.replace(/\+/g, ' '));
+    } catch {
+      return 'A % in a form body starts an encoded character, like %20 for a space.';
+    }
+  }
+  return null;
+}
+
 const utf8 = new TextEncoder();
 /**
  * Makes a value safe in a header value: printable ASCII other than % stays; anything else (line
@@ -887,6 +922,12 @@ function httpStepIssues(node: NodeOf<'http_request'>, refs: GraphReferences): st
   }
   if (node.body && !HTTP_BODY_METHODS.has(node.method)) {
     out.push(`${node.method} requests have no body.`);
+  } else if (node.body && node.bodyFormat === 'form') {
+    const problem = formBodyProblem(node.body);
+    if (problem) out.push(problem);
+    if (node.headers.some((h) => h.name.toLowerCase() === 'content-type')) {
+      out.push(`HyFib sends form bodies as ${FORM_CONTENT_TYPE}: remove the Content-Type header.`);
+    }
   } else if (node.body) {
     try {
       JSON.parse(node.body.replace(PLACEHOLDER_RE, 'x'));

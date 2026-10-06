@@ -192,9 +192,11 @@ verification, app review, Embedded Signup configuration).
   outcomes on run pages; erasure and retention of saved values. T: egress unit suite (blocked
   ranges and notations, pinning, redirects, limits, headers), `automation-http.test.ts` (made once,
   refusals, crash and late results, timeouts, cancellation, sweep, erasure, retention, settings,
-  isolation), e2e `web-requests.spec.ts`. **Remaining:** calls against a real company API in an
-  authorized environment (release checklist), response headers or non-JSON bodies as values,
-  retries a company opts into for idempotent requests, form-encoded bodies, OAuth client flows.
+  isolation), e2e `web-requests.spec.ts`. **[Form bodies built; their database test runs only in
+  CI]** (ADR-236: a step's body as URL-encoded form fields, placeholders URL-encoded, sent as
+  `application/x-www-form-urlencoded`; no migration). **Remaining:** calls against a real company
+  API in an authorized environment (release checklist), response headers or non-JSON bodies as
+  values, retries a company opts into for idempotent requests, OAuth client flows.
 - **P4-03 WhatsApp Flows** — _implemented and locally verified (2026-09-27) against the Graph
   stand-in and signed, encrypted test requests; no live WhatsApp traffic yet_: Flow JSON written as
   text with checks while typing; drafts sent to Meta by the worker, one written-ahead operation at a
