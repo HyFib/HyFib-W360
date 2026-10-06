@@ -9302,3 +9302,30 @@ Decision:
 Not built: typos in team routing keywords and in consent keywords (an opt-out matched by similarity
 would be a guess, so consent keywords stay whole-message matches in `consent/keywords.ts`), phonetic
 or transliteration matching (Hinglish spellings), and a per-trigger tolerance setting.
+
+## ADR-241 A notice of overdue replies in the inbox (P3-06) (2026-10-06)
+
+Context: the inbox marks each overdue reply in its list, and ADR-230 emails the member responsible.
+A member working in the inbox had to scan the list, and the marks were computed when the page
+loaded: a customer whose wait passed the target while the member read a thread stayed unmarked until
+something else refreshed the page.
+
+Decision:
+
+- **Where:** above the conversation list on the inbox, conversation and mentions pages, for members
+  with inbox access: "3 customers are waiting past the reply target, 1 of them assigned to you",
+  with a link to the open conversations by longest wait.
+- **Whose waits:** those of the open conversations the member can see, by the inbox's own rule (all
+  of them with `inbox.read_all`; the member's own and the unassigned ones with
+  `inbox.read_assigned`), each due as the list computes it (the first-response target, in business
+  hours when they are on). None without a target.
+- **Following the clock:** `waitingReplies` gives the page the due times of at most the 200 earliest
+  waits and whether each is the member's, nothing else (no customer, conversation or message); the
+  notice counts those past due every 10 seconds in the browser, so a wait turning overdue shows
+  without a reload, and live updates bring new waits. When more customers wait than came and all
+  that came are overdue, it says "at least". The first render uses the server's time, so the page
+  matches its HTML.
+- **No migration;** the API is unchanged.
+
+Not built: a notice outside the inbox (the navigation or other pages), a sound or browser
+notification, per-team targets, and presence of members.

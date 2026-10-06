@@ -1,5 +1,42 @@
 # Progress
 
+## 2026-10-06 — A notice of overdue replies in the inbox (P3-06, ADR-241)
+
+Status: **Implemented; its database test runs in CI only.** Overdue replies were marked in the list
+only, as of the page's load. The local PostgreSQL is unavailable, so the integration test below was
+written but not run here.
+
+### Completed
+
+- **Domain:** `inbox/overdue-notice.ts` (browser-safe: `countOverdue`, `overdueNoticeText`,
+  `WAITING_REPLY_LIMIT`, exported as `@w360/domain/overdue-notice`) and `waitingReplies` in the
+  inbox service (the due times of the waits the member can see).
+- **Web:** `OverdueNotice` (a clock in 10-second steps through `useSyncExternalStore`, the server's
+  time first) in the inbox shell, fed by `loadInboxList`.
+- **Tests:**
+  - Unit (3 new in `overdue-notice.test.ts`).
+  - Integration (1 new in `overdue-replies.test.ts`: the due times in order, whose they are, an
+    agent's sight, a resolved conversation, a member without the inbox, another company, no target).
+    Written for CI; not run here.
+- **Docs:** ADR-241; SECURITY; BACKLOG P3-06; feature matrix H-011.
+- **Mutation checks:** 8/8 deliberate regressions caught on the count and the notice.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 1038 passed (108 files)                                       |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| Mutation checks                                    | 8/8 deliberate regressions caught on the count and the notice |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+### Known gaps
+
+- No browser test: a wait turns overdue a minute after it starts at the earliest, longer than an
+  end-to-end step should wait. No notice outside the inbox.
+
 ## 2026-10-06 — Keyword triggers that also match small typos (P4-01, ADR-240)
 
 Status: **Implemented; its database test runs in CI only.** A keyword written with a typo started

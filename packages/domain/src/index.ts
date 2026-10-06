@@ -101,6 +101,7 @@ export * from './inbox/saved-replies';
 export * from './inbox/csat';
 export * from './inbox/mention-emails';
 export * from './inbox/overdue-replies';
+export * from './inbox/overdue-notice';
 export * from './inbox/conversation-tags';
 export * from './inbox/read-receipts';
 export * from './automations/graph';

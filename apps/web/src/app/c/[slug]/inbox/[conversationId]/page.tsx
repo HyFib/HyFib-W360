@@ -57,7 +57,7 @@ export default async function ConversationPage({
   // Store orders carry customers' details: contacts.read too (as on the store pages).
   const showStoreOrders = showCommerce && can(ctx, 'contacts.read');
   const [
-    { query, views, list, filters, unreadMentions, available },
+    { query, views, list, filters, unreadMentions, available, waiting },
     members,
     templates,
     mentionable,
@@ -130,6 +130,7 @@ export default async function ConversationPage({
       filters={filters}
       unreadMentions={unreadMentions}
       available={available}
+      waiting={waiting}
     >
       <MarkRead slug={ctx.tenant.slug} conversationId={conv.id} unread={unread} />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_18rem]">

@@ -13,7 +13,8 @@
     "./store-messages-model": "./src/stores/messages-model.ts",
     "./plan-model": "./src/plans/model.ts",
     "./api-model": "./src/api/model.ts",
-    "./webhook-model": "./src/webhooks/model.ts"
+    "./webhook-model": "./src/webhooks/model.ts",
+    "./overdue-notice": "./src/inbox/overdue-notice.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"

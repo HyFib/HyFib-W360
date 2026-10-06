@@ -294,3 +294,59 @@ describe('emails when a waiting customer’s reply is overdue (ADR-230)', () => 
     ).rejects.toThrow(/cannot change/);
   });
 });
+
+describe('the inbox’s notice of overdue replies (ADR-241)', () => {
+  it('gives the reply due times of the waits a member can see, earliest first, and none without a target', async () => {
+    const { c, owner } = await companyWithTarget(30);
+    const inbox = createInboxService({ db: fx.dbs.app, clock: systemClock });
+    const agent = await fx.ctx(c, c.agent);
+    const first = await waitingCustomer(c, '919845100101');
+    const second = await waitingCustomer(c, '919845100102');
+    const third = await waitingCustomer(c, '919845100103');
+    const assign = (turn: { conversation_id: string }, membershipId: string) =>
+      fx.query(
+        `UPDATE app.conversations SET assigned_membership_id = $1 WHERE tenant_id = $2 AND id = $3`,
+        [membershipId, c.tenant.id, turn.conversation_id],
+      );
+    // The first is the agent's, the second the owner's, the third nobody's.
+    await assign(first, agent.membership.id);
+    await assign(second, owner.membership.id);
+    const due = (turn: { started_at: Date }) => later(turn.started_at, 30).toISOString();
+
+    // Only times and whose they are: the owner sees all three, the agent their own and the queue's.
+    expect(await inbox.waitingReplies(owner)).toEqual({
+      waits: [
+        { dueAt: due(first), mine: false },
+        { dueAt: due(second), mine: true },
+        { dueAt: due(third), mine: false },
+      ],
+      capped: false,
+    });
+    expect(await inbox.waitingReplies(agent)).toEqual({
+      waits: [
+        { dueAt: due(first), mine: true },
+        { dueAt: due(third), mine: false },
+      ],
+      capped: false,
+    });
+
+    // A resolved conversation waits for nobody.
+    await fx.query(
+      `UPDATE app.conversations SET status = 'resolved' WHERE tenant_id = $1 AND id = $2`,
+      [c.tenant.id, third.conversation_id],
+    );
+    expect((await inbox.waitingReplies(agent)).waits).toEqual([{ dueAt: due(first), mine: true }]);
+
+    // Members without the inbox and other companies get none.
+    expect(await inbox.waitingReplies(await fx.ctx(c, c.marketer))).toEqual({
+      waits: [],
+      capped: false,
+    });
+    const other = await companyWithTarget(30);
+    expect(await inbox.waitingReplies(other.owner)).toEqual({ waits: [], capped: false });
+
+    // Without a first-response target, nothing is due.
+    await inbox.updateResponseTarget(owner, { minutes: null });
+    expect(await inbox.waitingReplies(owner)).toEqual({ waits: [], capped: false });
+  });
+});

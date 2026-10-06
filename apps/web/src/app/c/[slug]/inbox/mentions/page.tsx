@@ -19,10 +19,8 @@ export default async function MentionsPage({ params }: { params: Promise<{ slug:
   if (!canUseInbox(ctx)) notFound();
   const since = await liveEventCursor(ctx);
   const { inbox } = await getRuntime();
-  const [{ query, views, filters, unreadMentions, available }, mentions] = await Promise.all([
-    loadInboxList(ctx, {}),
-    inbox.listMentions(ctx),
-  ]);
+  const [{ query, views, filters, unreadMentions, available, waiting }, mentions] =
+    await Promise.all([loadInboxList(ctx, {}), inbox.listMentions(ctx)]);
   const tz = ctx.tenant.timezone;
   const list =
     mentions.length === 0 ? (
@@ -74,6 +72,7 @@ export default async function MentionsPage({ params }: { params: Promise<{ slug:
       filters={filters}
       unreadMentions={unreadMentions}
       available={available}
+      waiting={waiting}
       mentionsActive
       list={list}
     >

@@ -159,10 +159,13 @@ verification, app review, Embedded Signup configuration).
   **[Emails when a reply is overdue built; their database tests run only in CI]** (ADR-230,
   migrations 0154 and 0155: the member it is assigned to, else its team, else the members who assign
   conversations, once per wait, one email per member per sweep, never the customer's details;
-  members can turn them off). **Remaining:** per-team SLA targets and calendars, in-app notices of
-  overdue replies, presence of members (who is viewing a conversation), private team queues (would
-  change visibility, ADR-029), CSAT by template outside the window (needs a consent decision), CSAT
-  with a real WABA (phone-number masking: P3-01, ADR-226).
+  members can turn them off). **[A notice of overdue replies in the inbox built; its database test
+  runs only in CI]** (ADR-241: above the conversation list, how many customers the member can see
+  wait past the target, counted against the clock in the browser from due times only; no migration).
+  **Remaining:** per-team SLA targets and calendars, presence of members (who is viewing a
+  conversation), private team queues (would change visibility, ADR-029), CSAT by template outside
+  the window (needs a consent decision), CSAT with a real WABA (phone-number masking: P3-01,
+  ADR-226).
 
 ## Phase 4 — automation, Flows, CRM, commerce
 

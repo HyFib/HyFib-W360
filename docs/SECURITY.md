@@ -204,6 +204,9 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   members who turned them off. They carry the target, the reason, the time the customer started
   waiting and a link where access is checked again; never the customer's name, number or messages.
   The sweep's definer function returns ids only; the decisions run in each company's own scope.
+  The inbox's notice of overdue replies (ADR-241) reads the waits of conversations the member can
+  see by the same rule, and gives the page only due times and whether each conversation is the
+  member's.
   Transcripts need `inbox.export` (owners, administrators, supervisors) and sight of the
   conversation, are audited (`conversation.transcript_exported`, no content), are plain text so no
   spreadsheet runs a formula from them, and leave internal notes out (ADR-212).

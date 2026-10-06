@@ -51,7 +51,8 @@ import {
 } from '../inbox/routing';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
-import { loadReplyTarget, replyTimer, type ReplyTarget } from '../inbox/sla';
+import { WAITING_REPLY_LIMIT, type WaitingReply } from '../inbox/overdue-notice';
+import { loadReplyTarget, replyDueAt, replyTimer, type ReplyTarget } from '../inbox/sla';
 import { decodeKeysetCursor, encodeKeysetCursor, likePattern } from '../validation';
 import { emitTenantEvent } from './events';
 import { messageSnippet } from './message-text';
@@ -1184,6 +1185,58 @@ export function createInboxService(deps: InboxDeps) {
         readAt: r.readAt?.toISOString() ?? null,
         createdAt: r.createdAt.toISOString(),
       }));
+    },
+
+    /**
+     * When the replies to the customers waiting in conversations the member can see are due
+     * (ADR-241), the earliest first and at most WAITING_REPLY_LIMIT, for the inbox's notice of
+     * overdue replies; none without a first-response target. Only times and whether each
+     * conversation is the member's: nothing about the customers, conversations or messages.
+     */
+    async waitingReplies(ctx: TenantContext): Promise<{ waits: WaitingReply[]; capped: boolean }> {
+      if (!can(ctx, 'inbox.read_all') && !can(ctx, 'inbox.read_assigned')) {
+        return { waits: [], capped: false };
+      }
+      return db.run(
+        ctx.scope,
+        async (tx) => {
+          const target = await loadReplyTarget(tx, ctx.tenant.id, ctx.tenant.timezone);
+          if (!target.minutes) return { waits: [], capped: false };
+          // A due time follows its start (business minutes only move it later), so the earliest
+          // starts are the earliest due.
+          const rows = await tx
+            .select({
+              startedAt: conversationTurns.startedAt,
+              assignedMembershipId: conversations.assignedMembershipId,
+            })
+            .from(conversationTurns)
+            .innerJoin(
+              conversations,
+              and(
+                eq(conversations.tenantId, conversationTurns.tenantId),
+                eq(conversations.id, conversationTurns.conversationId),
+              ),
+            )
+            .where(
+              and(
+                eq(conversationTurns.tenantId, ctx.tenant.id),
+                isNull(conversationTurns.endedAt),
+                or(eq(conversations.status, 'open'), eq(conversations.status, 'pending')),
+                visibilityFilter(ctx),
+              ),
+            )
+            .orderBy(asc(conversationTurns.startedAt), asc(conversationTurns.id))
+            .limit(WAITING_REPLY_LIMIT + 1);
+          const waits = rows.slice(0, WAITING_REPLY_LIMIT).flatMap((r) => {
+            const due = replyDueAt(target, r.startedAt);
+            return due
+              ? [{ dueAt: due.toISOString(), mine: r.assignedMembershipId === ctx.membership.id }]
+              : [];
+          });
+          return { waits, capped: rows.length > WAITING_REPLY_LIMIT };
+        },
+        { accessMode: 'read only' },
+      );
     },
 
     /** Unread mentions of the current member in conversations they can see. */
