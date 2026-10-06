@@ -177,11 +177,13 @@ verification, app review, Embedded Signup configuration).
   person never answer at once. Template steps (send a template, ask with a template's quick replies)
   and the order-event trigger came with P4-06e. **[Steps that tag the conversation built; their
   database and browser tests run only in CI]** (ADR-222: a step adds or removes a tag on the run's
-  conversation and a condition reads its tags; no migration). **Remaining:** Flow and catalog steps
+  conversation and a condition reads its tags; no migration). **[Run export built; its database test
+  runs only in CI]** (ADR-237: the runs the list shows as CSV, with its filters, without customer
+  data, with `automations.read`, audited; no migration). **Remaining:** Flow and catalog steps
   (sending a WhatsApp Flow or products from a run), starting runs from the public API or campaigns,
   enrolling contacts or segments in a sequence without a customer message or order event, fuzzy
-  keyword matching, a drag-and-drop canvas (ADR-034), run export, usage billing for automation
-  steps, a real sandbox run (release checklist).
+  keyword matching, a drag-and-drop canvas (ADR-034), usage billing for automation steps, a real
+  sandbox run (release checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
   local target server only_: "Call a web address" steps (method, address with URL-encoded
   placeholders, headers, JSON body, values saved from the response, success and failure branches);

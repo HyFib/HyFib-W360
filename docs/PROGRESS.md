@@ -1,5 +1,39 @@
 # Progress
 
+## 2026-10-06 — Exporting automation runs as CSV (P4-01, ADR-237)
+
+Status: **Implemented; its database test runs in CI only.** Runs could be read fifty at a time on
+screen only. The local PostgreSQL is unavailable, so the integration test below was written but not
+run here.
+
+### Completed
+
+- **Domain:** `automations/runs-csv.ts` (`RUN_CSV_COLUMNS`, `runCsvLine`) and `exportRuns` in the
+  automation service (the list's filters, batches of 500, the audit).
+- **Web:** `GET /c/{slug}/automations/runs/export` and "Export CSV" on the runs page, keeping its
+  filters.
+- **Tests:**
+  - Unit (2 new in `runs-csv.test.ts`).
+  - Integration (1 new in `automations.test.ts`: the line, no customer data, the filters, an unknown
+    status, an agent refused, the audit, another company). Written for CI; not run here.
+- **Docs:** ADR-237; SECURITY; BACKLOG P4-01; feature matrix H-026.
+- **Mutation checks:** 6/6 deliberate regressions caught on the CSV lines.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 104 files, 1020 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| Mutation checks                                    | 6/6 deliberate regressions caught on the CSV lines            |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+### Known gaps
+
+- No browser test of the download; a run's steps and answers are not exported.
+
 ## 2026-10-06 — Form bodies for automation HTTP steps (P4-02, ADR-236)
 
 Status: **Implemented; its database test runs in CI only.** HTTP steps could only send JSON bodies.

@@ -23,6 +23,7 @@ import {
   findDueAutomationRuns,
   MAX_STEP_FAILURES,
   PgBossJobQueue,
+  RUN_CSV_COLUMNS,
   processSendIntent,
   queueTextMessage,
   routeDueConversations,
@@ -648,6 +649,60 @@ describe('automation runs', () => {
       start_reason: 'handoff',
       end_reason: 'replied',
     });
+  });
+
+  it('exports the runs the list shows as CSV, without customer data, audited (ADR-237)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const { id: automationId } = await publish(owner, 'Menu, main', keyword('menu'), menuGraph());
+    const from = waId();
+    const conv = await inbound(c, from, 'Menu');
+    const run = await onlyRun(conv);
+    await advance(c, run.id);
+    const { status } = await onlyRun(conv);
+    expect(['running', 'waiting']).toContain(status);
+    const svc = automations();
+    const read = async (ctx: TenantContext, input: unknown = {}) => {
+      let out = '';
+      for await (const chunk of svc.exportRuns(ctx, input, { ipAddress: '203.0.113.9' })) {
+        out += chunk;
+      }
+      return out
+        .replace(/^\uFEFF/, '')
+        .trimEnd()
+        .split('\r\n');
+    };
+
+    const lines = await read(owner);
+    expect(lines[0]).toBe(RUN_CSV_COLUMNS.join(','));
+    expect(lines).toHaveLength(2);
+    expect(lines[1]?.startsWith(`${run.id},"Menu, main",1,live,${status},`)).toBe(true);
+    expect(lines[1]).toContain(',keyword,');
+    // Nothing about the customer: neither the number nor the conversation.
+    expect(lines[1]).not.toContain(from);
+    expect(lines[1]).not.toContain(conv);
+    // The list's filters apply; an unknown status is refused.
+    expect(await read(owner, { automationId, status: 'active' })).toHaveLength(2);
+    expect(await read(owner, { status: 'completed' })).toEqual([RUN_CSV_COLUMNS.join(',')]);
+    await expectAppError(read(owner, { status: 'paused' }), 'validation_failed');
+    // Agents do not read automations.
+    await expectAppError(read(agent), 'forbidden');
+    const audits = await fx.query<{
+      metadata: { automationId: string | null; status: string | null };
+    }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'automation.runs_exported' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(audits.map((a) => a.metadata)).toEqual([
+      { automationId: null, status: null },
+      { automationId, status: 'active' },
+      { automationId: null, status: 'completed' },
+    ]);
+    // Another company's export holds none of these runs.
+    const other = await fx.company();
+    expect(await read(await fx.ctx(other, other.owner))).toEqual([RUN_CSV_COLUMNS.join(',')]);
   });
 
   it('never lets the bot and a person answer at once', async () => {

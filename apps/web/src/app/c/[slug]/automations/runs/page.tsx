@@ -72,15 +72,28 @@ export default async function AutomationRunsPage({
     });
     return `${base}/runs${search.size ? `?${search}` : ''}`;
   };
+  const exportSearch = new URLSearchParams({
+    ...(filters.automationId ? { automation: filters.automationId } : {}),
+    ...(filters.status ? { status: filters.status } : {}),
+  });
+  const exportHref = `${base}/runs/export${exportSearch.size ? `?${exportSearch}` : ''}`;
   return (
     <>
       <PageHeader
         title="Automation runs"
         description="Each run executes one version in one conversation. Runs end when the automation finishes, hands off, or a member takes over."
         actions={
-          <Link href={base} className="text-sm text-primary underline-offset-4 hover:underline">
-            All automations
-          </Link>
+          <>
+            <Button asChild size="sm" variant="outline">
+              {/* The runs this list shows, as CSV (ADR-237). */}
+              <a href={exportHref} download>
+                Export CSV
+              </a>
+            </Button>
+            <Link href={base} className="text-sm text-primary underline-offset-4 hover:underline">
+              All automations
+            </Link>
+          </>
         }
       />
       <nav aria-label="Filter runs" className="mb-4 flex flex-wrap gap-2">

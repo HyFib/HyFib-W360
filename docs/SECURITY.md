@@ -247,6 +247,10 @@ Phase 4 rules (automations, P4-01):
   can see (audited). Any member reply, template send, assignment or resolve also ends the run.
 - Run lists and logs show the conversation link, captured answers and message links only to members
   who can see that conversation; analysts and marketers see outcomes and step codes only.
+- Exporting runs (ADR-237) needs `automations.read`, as the list: the file holds each run's
+  automation, version, status, end reason, trigger, times and counts, never the contact, the
+  conversation or captured answers, and each export is audited (`automation.runs_exported`, with its
+  filters).
 - Automations start only in unassigned conversations of an active (not suspended) company, never
   after an opt-out keyword, and every bot message re-checks the channel, the 24-hour window and the
   contact's WhatsApp number when queued (a template step checks its template and the contact's

@@ -9201,3 +9201,24 @@ Decision:
 
 Not built: multipart bodies, form bodies built field by field in the editor, and secrets in bodies
 (still header values only).
+
+## ADR-237 Exporting automation runs as CSV (P4-01) (2026-10-06)
+
+Context: the runs list shows fifty runs at a time with each run's automation, version, status, end
+reason, trigger, times and counts. A company measuring its automations (how many runs hand off, fail
+or finish, by version) had to read them page by page.
+
+Decision:
+
+- **What:** one line per run the list shows, newest first, with its filters (an automation, a
+  status, "active" for running and waiting): the run id, the automation's name, the version number,
+  live or test, the status, the end reason, the trigger, when it started and ended (UTC, ISO 8601),
+  and its step and message counts.
+- **No customer data:** neither the contact nor the conversation nor the answers a run captured, so
+  the export needs only `automations.read`, as the list does; analysts and marketers export what
+  they already see. Names are formula-neutralised (`csvLine`).
+- **How:** `exportRuns` streams batches of 500 by start time and id through
+  `GET /c/{slug}/automations/runs/export`, which checks the permission and the filters before the
+  first byte; each export is audited (`automation.runs_exported`, with its filters). No migration.
+
+Not built: exporting a run's steps or captured answers, and exports through the public API.

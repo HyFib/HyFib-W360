@@ -44,6 +44,8 @@ import { canSeeConversation, SERVICE_WINDOW_MS } from '../messaging/outbound';
 import { STORE_MESSAGE_EVENT_INFO } from '../stores/messages-model';
 import { linkButtons, renderPlaceholders, sendSpecFor } from '../templates/definition';
 import { parseInput } from '../validation';
+import { CSV_BOM, csvLine } from '../contacts/csv';
+import { RUN_CSV_COLUMNS, runCsvLine, type RunCsvRow } from './runs-csv';
 import {
   apiInputValues,
   canonicalJson,
@@ -124,6 +126,11 @@ const listRunsSchema = z.object({
     .optional(),
   cursor: z.string().max(200).optional(),
 });
+
+/** A runs export's filters, as the list's (ADR-237). */
+const exportRunsSchema = listRunsSchema.omit({ cursor: true });
+/** Runs one batch of an export reads (ADR-237). */
+const RUN_EXPORT_BATCH = 500;
 
 export interface AutomationSummary {
   id: string;
@@ -1410,6 +1417,95 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         },
         { accessMode: 'read only' },
       );
+    },
+
+    /**
+     * The runs the list shows as CSV (ADR-237), newest first, with its filters (an automation, a
+     * status), streamed in batches. No customer data, so `automations.read` is enough; audited
+     * before the first line.
+     */
+    async *exportRuns(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta = {},
+    ): AsyncGenerator<string> {
+      assertCan(ctx, 'automations.read');
+      const data = parseInput(exportRunsSchema, input ?? {});
+      await db.run(ctx.scope, (tx) =>
+        recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'automation.runs_exported',
+            subjectType: 'tenant',
+            subjectId: ctx.tenant.id,
+            metadata: { automationId: data.automationId ?? null, status: data.status ?? null },
+          },
+          meta,
+        ),
+      );
+      yield CSV_BOM + csvLine(RUN_CSV_COLUMNS);
+      let before: { at: Date; id: string } | null = null;
+      for (;;) {
+        const cursor: { at: Date; id: string } | null = before;
+        const rows: RunCsvRow[] = await db.run(
+          ctx.scope,
+          (tx) =>
+            tx
+              .select({
+                id: automationRuns.id,
+                automationName: automations.name,
+                versionNumber: automationVersions.number,
+                mode: automationRuns.mode,
+                status: automationRuns.status,
+                endReason: automationRuns.endReason,
+                triggerType: automationRuns.triggerType,
+                startedAt: automationRuns.startedAt,
+                endedAt: automationRuns.endedAt,
+                steps: automationRuns.stepCount,
+                messages: automationRuns.messageCount,
+              })
+              .from(automationRuns)
+              .innerJoin(
+                automations,
+                and(
+                  eq(automations.tenantId, automationRuns.tenantId),
+                  eq(automations.id, automationRuns.automationId),
+                ),
+              )
+              .innerJoin(
+                automationVersions,
+                and(
+                  eq(automationVersions.tenantId, automationRuns.tenantId),
+                  eq(automationVersions.id, automationRuns.versionId),
+                ),
+              )
+              .where(
+                and(
+                  eq(automationRuns.tenantId, ctx.tenant.id),
+                  data.automationId
+                    ? eq(automationRuns.automationId, data.automationId)
+                    : undefined,
+                  data.status === 'active'
+                    ? inArray(automationRuns.status, ['running', 'waiting'])
+                    : data.status
+                      ? eq(automationRuns.status, data.status)
+                      : undefined,
+                  cursor
+                    ? sql`(${automationRuns.startedAt}, ${automationRuns.id}) < (${cursor.at.toISOString()}::timestamptz, ${cursor.id}::uuid)`
+                    : undefined,
+                ),
+              )
+              .orderBy(desc(automationRuns.startedAt), desc(automationRuns.id))
+              .limit(RUN_EXPORT_BATCH),
+          { accessMode: 'read only' },
+        );
+        if (rows.length === 0) break;
+        yield rows.map(runCsvLine).join('');
+        const last = rows.at(-1);
+        if (!last || rows.length < RUN_EXPORT_BATCH) break;
+        before = { at: last.startedAt, id: last.id };
+      }
     },
 
     async getRun(ctx: TenantContext, runId: string): Promise<RunDetail> {
