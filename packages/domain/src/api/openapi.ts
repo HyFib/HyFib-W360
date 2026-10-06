@@ -1173,7 +1173,7 @@ export function buildOpenApiDocument(serverUrl: string) {
             'A reply (`type` `text`, `buttons`, `list`, `product`, `product_list`, `catalog`, `reaction`, `image`, `video`, `audio`, `document`, `sticker`, `location` or `contacts`) needs `messages.reply` and goes only to a number that wrote to the WhatsApp number in the last 24 hours (WhatsApp’s customer service window); otherwise it is refused with reason `window_closed`, and nothing tells whether the number is a contact. Any reply but a reaction stops an automation answering the conversation, and the conversation keeps waiting for a member of the team. The window is checked again when the message is sent.',
             'Products (`product`: one; `product_list`: up to 30 in sections, with a header; `catalog`: the catalog, opened from a product’s picture) need Commerce in the company’s plan (403, reason `not_in_plan`, otherwise). They are named by their content ids (`retailerId`) in a catalog HyFib has read from Meta for the WhatsApp number (Commerce → Catalogs), still connected, and not removed at Meta; all from one catalog, which `catalogId` names when more than one has them all. Unknown ids are refused by name (422, `products`).',
             'A text, buttons, a list, products, media, a location or contacts can quote a message of the conversation with `replyTo`, its id from `GET /conversations/{id}/messages`, the `message.received` webhook or a send’s response: a message the contact sent, or one the business sent that WhatsApp accepted. A reaction (`type` `reaction`) puts one emoji on a message the contact sent in the last 30 days; reactions cannot be taken back through the API. A message of another conversation, or one that cannot be quoted or reacted to, is refused (422, `replyTo`).',
-            'Media (`image`, `video`, `audio`, `document` or `sticker`) is sent from an https:// `link` that WhatsApp fetches when it sends the message, reachable from the internet without signing in; HyFib neither fetches nor keeps the media, and stores the link with the message. A photo, a video or a document may carry a `caption` of up to 1,024 characters; audio and stickers take none, and WhatsApp decides whether a file can be a sticker. A link WhatsApp cannot fetch, or media it does not accept, makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
+            'Media (`image`, `video`, `audio`, `document` or `sticker`) is sent from an https:// `link` that WhatsApp fetches when it sends the message, reachable from the internet without signing in; HyFib neither fetches nor keeps the media, and stores the link with the message. A photo, a video or a document may carry a `caption` of up to 1,024 characters; audio and stickers take none, and WhatsApp decides whether a file can be a sticker. A link WhatsApp cannot fetch, or media it does not accept, makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error. In place of a link, a photo, a video, audio or a document may name a file uploaded with `POST /media` for the number it is sent from in the last 30 days (`mediaId`); the file is sent as WhatsApp keeps it, a document under the name it was uploaded with.',
             'A template whose header is a photo, a video or a document (its `headerMedia` in GET /templates) needs the file in `headerMedia`: an https:// `link` that WhatsApp fetches when it sends the message, as for media below, shown without a caption. Documents must be PDF files. HyFib neither fetches nor keeps the file, and stores the link with the message. Other templates take no file (422, `headerMedia`). A file WhatsApp cannot fetch, or does not accept, makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
             'A location (`location`) is a place given by its `latitude` and `longitude` in decimal degrees, with its `name` and `address` if wanted, up to 1,000 characters each, all stored with the message. A location WhatsApp does not accept makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
             'Contacts (`contacts`) share 1 to 5 contact cards, as Meta’s spec describes them: each with a `name` (its `formattedName` and at least one other part) and, if wanted, `phones`, `emails`, `urls` and `addresses` (up to 5 of each, each with a `type` of HOME or WORK if wanted), an `org` and a `birthday` (YYYY-MM-DD); each text up to 256 characters, a link up to 2,000. Messages read back give them in `contacts`, as they give the cards customers share. A card WhatsApp does not accept makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
@@ -2144,6 +2144,54 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/media': {
+        post: {
+          operationId: 'uploadMedia',
+          summary: 'Upload a file to send by id',
+          description: [
+            `${scopeNote('messages.reply')} Uploads a photo (JPEG, PNG), a video (MP4, 3GPP), audio (AAC, AMR, MP3, MP4, OGG) or a document (PDF, text, Word, Excel, PowerPoint) of up to 16 MB to WhatsApp for one of the company's numbers, as multipart form data: \`file\`, and \`from\` (the number's id) when the company has several active numbers. The answer's \`id\` goes in \`POST /messages\` as \`mediaId\`, from that number, as often as needed for 30 days, as long as WhatsApp keeps the file. HyFib keeps no copy.`,
+            'WhatsApp may refuse a file it cannot send (422, with its reason). Retrying an upload uploads the file again: it takes no Idempotency-Key.',
+          ].join('\n\n'),
+          requestBody: {
+            required: true,
+            content: {
+              'multipart/form-data': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    file: {
+                      type: 'string',
+                      format: 'binary',
+                      description: 'The file, with its type.',
+                    },
+                    from: {
+                      type: 'string',
+                      format: 'uuid',
+                      description: 'The id of the number to send it from (`GET /channels`).',
+                    },
+                  },
+                  required: ['file'],
+                },
+              },
+            },
+          },
+          responses: {
+            '201': {
+              description: 'The file was uploaded.',
+              content: json(dataOf(ref('UploadedMedia'))),
+            },
+            ...errors(400, 401, 403, 404, 412, 415, 422, 429, 500),
+            '413': {
+              description: 'The body is larger than 16 MB.',
+              content: json(ref('Error')),
+            },
+            '503': {
+              description: 'WhatsApp did not answer, so the file was not uploaded: retry later.',
+              content: json(ref('Error')),
+            },
+          },
+        },
+      },
       '/messages/{id}/media': {
         get: {
           operationId: 'getMessageMedia',
@@ -2385,6 +2433,45 @@ export function buildOpenApiDocument(serverUrl: string) {
         },
       },
       schemas: {
+        UploadedMedia: {
+          type: 'object',
+          description: 'A file uploaded for a number to send by id (ADR-219).',
+          properties: {
+            id: { type: 'string', format: 'uuid', description: 'Give it as `mediaId`.' },
+            channelId: {
+              type: 'string',
+              format: 'uuid',
+              description: 'The number it was uploaded for, the only one it is sent from.',
+            },
+            type: {
+              type: 'string',
+              enum: ['image', 'video', 'audio', 'document'],
+              description: 'The `type` of the messages that send it.',
+            },
+            mimeType: { type: 'string' },
+            size: { type: 'integer', description: 'In bytes.' },
+            fileName: {
+              type: 'string',
+              description: 'The name a document is sent under.',
+            },
+            createdAt: { type: 'string', format: 'date-time' },
+            expiresAt: {
+              type: 'string',
+              format: 'date-time',
+              description: '30 days after the upload: WhatsApp no longer keeps the file after it.',
+            },
+          },
+          required: [
+            'id',
+            'channelId',
+            'type',
+            'mimeType',
+            'size',
+            'fileName',
+            'createdAt',
+            'expiresAt',
+          ],
+        },
         Contact: jsonSchema(apiContactSchema),
         ContactCreate: jsonSchema(apiContactCreateSchema, 'input'),
         ContactUpdate: jsonSchema(apiContactUpdateSchema, 'input'),
@@ -2524,6 +2611,7 @@ export const API_ROUTES = [
   ['get', '/messages'],
   ['get', '/messages/{id}'],
   ['get', '/messages/{id}/media'],
+  ['post', '/media'],
   ['get', '/message-changes'],
   ['get', '/conversations'],
   ['get', '/conversations/{id}'],

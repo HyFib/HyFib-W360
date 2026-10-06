@@ -1,5 +1,49 @@
 # Progress
 
+## 2026-10-06 — Phase 5: uploading files through the API to send by id (P5-08, ADR-219)
+
+Status: **Implemented; its database and browser tests run in CI only.** Keys sent media only from
+public links. The local PostgreSQL is unavailable (its Docker daemon stopped), so migrations 0143
+and 0144 and the new integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-219):** `POST /media` uploads a file for a number; `POST /messages` sends it by
+  `mediaId` from that number, of its kind, for 30 days.
+- **Migrations 0143 and 0144:** `app.media_objects.channel_account_id` and `api_key_id`, their
+  foreign keys and check, then their validation.
+- **Domain:** `api/media.ts` (`apiUploadMedia`); `mediaId` in the media send schemas and
+  `uploadedFileFor`; replies through the API record a media row for a file sent by id.
+- **Web:** `POST /api/v1/media`; multipart bodies in `handleApiRequest`.
+- **API document:** `uploadMedia`, `UploadedMedia`, and `mediaId` on media sends.
+- **Tests:**
+  - Unit (3 new in `api/media.test.ts`, 1 changed in `api/api.test.ts`): one source, the upload's
+    refusals before anything is reached, the OpenAPI entries.
+  - Integration (2 new in `api-media-uploads.test.ts`): the upload, its row, two sends by id, a
+    member opening one, every refusal. Written for CI; not run here.
+  - E2E (1 new in `api.spec.ts`): a key uploads a price list and sends it. Written for CI; not run
+    here.
+- **Docs:** ADR-219; ARCHITECTURE; SECURITY; THREAT-MODEL T206; DEPLOYMENT and RUNBOOKS;
+  DATA-RETENTION; BACKLOG P5-08; feature matrix W-134.
+- **Mutation checks:** 12 deliberate regressions tried, all caught on the unit-tested parts. The
+  upload's row and the send's checks need the database, so their regressions are left to the
+  integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                                | Result                                                               |
+| ------------------------------------------------------ | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`     | clean                                                                |
+| `pnpm test` (unit)                                     | 952 passed (94 files)                                                |
+| `pnpm test:integration`, e2e, migrations 0143 and 0144 | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                           | passed                                                               |
+| Mutation checks                                        | 12 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes                  | no leaks found                                                       |
+
+### Known gaps
+
+- Listing and deleting uploads, uploads for template headers, purging old upload rows.
+
 ## 2026-10-06 — Phase 2 follow-up: sending files from the inbox (P2-09, ADR-218)
 
 Status: **Implemented; its database and browser tests run in CI only.** Members could reply with

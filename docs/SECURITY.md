@@ -518,6 +518,10 @@ Phase 5 rules (Public API, P5-08):
   file a customer sent comes only from `GET /messages/{id}/media` (ADR-217), with the same scope,
   fetched from WhatsApp per request and given as an attachment; a key cannot be sent by a browser on
   its own, so the file keeps its type.
+  Uploads (ADR-219) need `messages.reply`, are checked as members' files are (listed types, at most
+  16 MB) and are uploaded from the server with the account's token. A send names only the company's
+  own upload, for the number it goes from, of its type, within 30 days; another company's id is not
+  found.
   Keyset cursors carry a timestamp and an id that are checked before they reach a query.
 - Resolving and reopening conversations through the API (ADR-075) needs `conversations.write`,
   which only members who resolve every conversation in the inbox (`inbox.supervise`: owners,

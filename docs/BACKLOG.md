@@ -694,7 +694,10 @@ verification, app review, Embedded Signup configuration).
   **[Downloading the files customers send built; its database and browser tests run only in CI]**
   (ADR-217: `GET /messages/{id}/media` gives a key that reads conversations the file of a message a
   customer sent, as WhatsApp gives it, with reasons when it cannot; no migration).
-  Remaining: uploaded media, call-to-action messages through the API, taking
+  **[Uploading files to send by id built; its database and browser tests run only in CI]** (ADR-219,
+  migrations 0143 and 0144: `POST /media` uploads a file for a number, which `POST /messages` sends
+  as `mediaId` from that number for 30 days).
+  Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),

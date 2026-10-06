@@ -15,6 +15,7 @@ import {
   inArray,
   isNotNull,
   isNull,
+  mediaObjects,
   messageTemplates,
   messages,
   sendIntents,
@@ -40,6 +41,7 @@ import {
 import { normalizePhone, phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { contactForPhone } from '../contacts/service';
 import { emitTenantEvent } from '../messaging/events';
+import { REPLY_FILE_TYPES, UPLOADED_MEDIA_LIFETIME_MS } from '../messaging/file-replies';
 import {
   INTERACTIVE_LIMITS,
   RESERVED_REPLY_ID_PREFIX,
@@ -278,30 +280,59 @@ const captionField = z
   .optional()
   .describe('Text shown with the media.');
 
+const mediaIdField = z
+  .uuid({ error: 'Give the id POST /media answered for the file' })
+  .optional()
+  .describe(
+    'The id `POST /media` answered for a file the company uploaded for the number the message is sent from, in the last 30 days (ADR-219). Give it in place of `link`.',
+  );
+
+/** A message's media: a link WhatsApp fetches, or a file uploaded for the number (ADR-219). */
 const mediaFrame = {
   to: phoneField,
   from: replyFromField,
   replyTo: quoteField,
-  link: mediaLinkField,
+  link: mediaLinkField.optional(),
+  mediaId: mediaIdField,
 };
 
-/** A photo WhatsApp fetches from a link (ADR-194). */
+/** Exactly one of `link` and `mediaId`. */
+const oneMediaSource = (value: { link?: string | undefined; mediaId?: string | undefined }) =>
+  (value.link === undefined) !== (value.mediaId === undefined);
+const ONE_MEDIA_SOURCE = {
+  message: 'Give the link to the media, or the id of a file you uploaded, but not both.',
+  path: ['link'],
+};
+
+/** A photo WhatsApp fetches from a link (ADR-194), or uploaded for the number (ADR-219). */
 export const apiSendImageSchema = z
   .object({ type: z.literal('image'), ...mediaFrame, caption: captionField })
-  .strict();
-/** A video WhatsApp fetches from a link (ADR-194). */
+  .strict()
+  .refine(oneMediaSource, ONE_MEDIA_SOURCE);
+/** A video WhatsApp fetches from a link (ADR-194), or uploaded for the number (ADR-219). */
 export const apiSendVideoSchema = z
   .object({ type: z.literal('video'), ...mediaFrame, caption: captionField })
-  .strict();
-/** Audio WhatsApp fetches from a link (ADR-194), without a caption. */
-export const apiSendAudioSchema = z.object({ type: z.literal('audio'), ...mediaFrame }).strict();
-/** A document WhatsApp fetches from a link (ADR-194). */
+  .strict()
+  .refine(oneMediaSource, ONE_MEDIA_SOURCE);
+/** Audio from a link (ADR-194) or uploaded for the number (ADR-219), without a caption. */
+export const apiSendAudioSchema = z
+  .object({ type: z.literal('audio'), ...mediaFrame })
+  .strict()
+  .refine(oneMediaSource, ONE_MEDIA_SOURCE);
+/** A document WhatsApp fetches from a link (ADR-194), or uploaded for the number (ADR-219). */
 export const apiSendDocumentSchema = z
   .object({ type: z.literal('document'), ...mediaFrame, caption: captionField })
-  .strict();
-/** A sticker WhatsApp fetches from a link (ADR-198), without a caption. */
+  .strict()
+  .refine(oneMediaSource, ONE_MEDIA_SOURCE);
+/** A sticker WhatsApp fetches from a link (ADR-198), without a caption; never uploaded. */
 export const apiSendStickerSchema = z
-  .object({ type: z.literal('sticker'), ...mediaFrame })
+  .object({
+    type: z.literal('sticker'),
+    to: phoneField,
+    from: replyFromField,
+    replyTo: quoteField,
+    link: mediaLinkField,
+  })
   .strict();
 
 /**
@@ -1287,12 +1318,14 @@ export async function apiRecordConsent(
  * The WhatsApp number a send uses: the one named by `from`, or the company's only active number.
  * Its state is checked by the caller, after checks that name the number's account.
  */
-async function sendingNumber(tx: Tx, ctx: ApiContext, from: string | undefined) {
+/** The number a key sends from: the one it names, or the company's only active number. */
+export async function sendingNumber(tx: Tx, ctx: ApiContext, from: string | undefined) {
   const numbers = await tx
     .select({
       id: channelAccounts.id,
       status: channelAccounts.status,
       whatsappAccountId: channelAccounts.whatsappAccountId,
+      phoneNumberId: channelAccounts.phoneNumberId,
     })
     .from(channelAccounts)
     .where(
@@ -1725,6 +1758,8 @@ interface BuiltReply {
   content: Record<string, unknown>;
   preview: string;
   request: Record<string, unknown>;
+  /** A file uploaded for the number that the message sends (ADR-219), recorded as its media. */
+  media?: { providerMediaId: string; mimeType: string; filename: string | null; sizeBytes: number };
 }
 
 interface ApiReply {
@@ -1740,7 +1775,7 @@ interface ApiReply {
    */
   build(
     answered: string | null,
-    sending: { tx: Tx; whatsappAccountId: string },
+    sending: { tx: Tx; whatsappAccountId: string; channelId: string },
   ): BuiltReply | Promise<BuiltReply>;
 }
 
@@ -1839,6 +1874,7 @@ async function sendReply(
       const built = await reply.build(answered, {
         tx,
         whatsappAccountId: channel.whatsappAccountId,
+        channelId: channel.id,
       });
       const messageId = uuidv7();
       const intentId = uuidv7();
@@ -1858,6 +1894,17 @@ async function sendReply(
         // reaction keeps it in its content, as inbound reactions do.
         contextExternalId: reaction ? null : answered,
       });
+      if (built.media) {
+        await tx.insert(mediaObjects).values({
+          id: uuidv7(),
+          tenantId: ctx.tenant.id,
+          messageId,
+          providerMediaId: built.media.providerMediaId,
+          mimeType: built.media.mimeType,
+          filename: built.media.filename,
+          sizeBytes: built.media.sizeBytes,
+        });
+      }
       await tx.insert(sendIntents).values({
         id: intentId,
         tenantId: ctx.tenant.id,
@@ -1947,7 +1994,38 @@ export async function apiSendMedia(
   assertScope(ctx, 'messages.reply');
   const data = parseInput(apiSendMediaSchema, input);
   const caption = data.type === 'audio' || data.type === 'sticker' ? undefined : data.caption;
-  const media = { link: data.link, ...(caption ? { caption } : {}) };
+  const mediaId = data.type === 'sticker' ? undefined : data.mediaId;
+  if (mediaId) {
+    return sendReply(deps, ctx, data, idempotency, {
+      type: data.type,
+      replyTo: data.replyTo,
+      build: async (_answered, { tx, channelId }) => {
+        const upload = await uploadedFileFor(tx, ctx, mediaId, {
+          type: data.type,
+          channelId,
+          now: deps.clock.now(),
+        });
+        const media = {
+          id: upload.providerMediaId,
+          ...(caption ? { caption } : {}),
+          // The spec's examples send a document's file name with its id (research M-197).
+          ...(data.type === 'document' && upload.filename ? { filename: upload.filename } : {}),
+        };
+        return {
+          content: { ...media, mime_type: upload.mimeType },
+          preview: caption ?? MEDIA_PREVIEWS[data.type],
+          request: { type: data.type, [data.type]: media },
+          media: {
+            providerMediaId: upload.providerMediaId,
+            mimeType: upload.mimeType,
+            filename: data.type === 'document' ? upload.filename : null,
+            sizeBytes: upload.sizeBytes,
+          },
+        };
+      },
+    });
+  }
+  const media = { link: data.link ?? '', ...(caption ? { caption } : {}) };
   return sendReply(deps, ctx, data, idempotency, {
     type: data.type,
     replyTo: data.replyTo,
@@ -1957,6 +2035,60 @@ export async function apiSendMedia(
       request: { type: data.type, [data.type]: media },
     }),
   });
+}
+
+/**
+ * A file the company uploaded through the API (ADR-219) that a message of `type` may send from the
+ * number `channelId`: uploaded for that number, of that kind, in the last 30 days.
+ */
+async function uploadedFileFor(
+  tx: Tx,
+  ctx: ApiContext,
+  mediaId: string,
+  send: { type: string; channelId: string; now: Date },
+) {
+  const [upload] = await tx
+    .select({
+      providerMediaId: mediaObjects.providerMediaId,
+      mimeType: mediaObjects.mimeType,
+      filename: mediaObjects.filename,
+      sizeBytes: mediaObjects.sizeBytes,
+      channelAccountId: mediaObjects.channelAccountId,
+      createdAt: mediaObjects.createdAt,
+    })
+    .from(mediaObjects)
+    .where(
+      and(
+        eq(mediaObjects.tenantId, ctx.tenant.id),
+        eq(mediaObjects.id, mediaId),
+        isNull(mediaObjects.messageId),
+        isNotNull(mediaObjects.apiKeyId),
+      ),
+    );
+  const refuse = (message: string) =>
+    new AppError('validation_failed', message, { issues: [{ path: 'mediaId', message }] });
+  if (!upload?.providerMediaId || !upload.mimeType)
+    throw refuse('No file with this id was uploaded for the company.');
+  if (upload.channelAccountId !== send.channelId) {
+    throw refuse(
+      'This file was uploaded for another WhatsApp number: upload it for the number you send from.',
+    );
+  }
+  const kind = REPLY_FILE_TYPES[upload.mimeType];
+  if (kind !== send.type) throw refuse(`This file is sent as type ${kind ?? 'document'}.`);
+  if (send.now.getTime() - upload.createdAt.getTime() > UPLOADED_MEDIA_LIFETIME_MS) {
+    throw new AppError(
+      'precondition_failed',
+      'This file was uploaded more than 30 days ago, so WhatsApp no longer keeps it: upload it again.',
+      { details: { apiReason: 'file_expired' } },
+    );
+  }
+  return {
+    providerMediaId: upload.providerMediaId,
+    mimeType: upload.mimeType,
+    filename: upload.filename,
+    sizeBytes: upload.sizeBytes ?? 0,
+  };
 }
 
 /**

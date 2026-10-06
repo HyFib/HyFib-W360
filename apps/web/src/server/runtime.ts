@@ -172,6 +172,8 @@ export interface Runtime {
   receivedMedia: ReceivedMediaService | null;
   /** Files members send from the inbox, uploaded to WhatsApp (ADR-218); null without Meta. */
   fileReplies: FileRepliesService | null;
+  /** The Graph client for files: uploads through the API (ADR-219); null without Meta. */
+  mediaGraph: GraphClient | null;
   emailPreferences: EmailPreferencesService;
   teams: TeamsService;
   businessHours: BusinessHoursService;
@@ -546,6 +548,7 @@ async function init(): Promise<Runtime> {
     inbox,
     receivedMedia,
     fileReplies,
+    mediaGraph,
     emailPreferences,
     teams,
     businessHours,

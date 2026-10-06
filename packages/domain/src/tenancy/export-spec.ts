@@ -1147,6 +1147,8 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'storage_key',
       'status',
       'failure_reason',
+      'channel_account_id',
+      'api_key_id',
       'created_at',
       'updated_at',
     ],

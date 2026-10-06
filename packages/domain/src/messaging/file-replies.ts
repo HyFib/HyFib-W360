@@ -38,6 +38,9 @@ export const REPLY_FILE_TYPES: Readonly<Record<string, 'image' | 'video' | 'audi
 /** The largest file a member sends through HyFib's servers. */
 export const REPLY_FILE_MAX_BYTES = 16 * 1024 * 1024;
 
+/** How long Meta keeps a file uploaded for a number to send (research M-046). */
+export const UPLOADED_MEDIA_LIFETIME_MS = 30 * 24 * 3600_000;
+
 /** What the conversation's list shows for a file sent without a caption. */
 const FILE_PREVIEWS = { image: 'Photo', video: 'Video', audio: 'Audio', document: 'Document' };
 

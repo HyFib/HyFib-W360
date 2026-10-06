@@ -8624,3 +8624,36 @@ Decision:
 
 Not built: uploads through the public API, several files at once, dragging and dropping, a progress
 bar, stickers, files over 16 MB, and files outside the window, where only templates go.
+
+## ADR-219 Uploading files through the public API to send by id (P5-08) (2026-10-06)
+
+Context: keys sent media only from https links WhatsApp fetches (ADR-194), so an integration with an
+invoice or a price list on its own servers had to publish it at a public address first. Members
+upload files since ADR-218, with Meta's upload and sending by id (research M-046, M-197).
+
+Decision:
+
+- **`POST /api/v1/media`** with `messages.reply`, as multipart form data: `file`, and `from` (the
+  number's id) when the company has several active numbers. The file is checked as members' files
+  are (the types of ADR-218, at most 16 MB), uploaded to WhatsApp for the number with its account's
+  token, and recorded as the company's upload: a media row without a message, naming the number, the
+  key and Meta's media. The answer (201) gives its `id`, the number, its `type`, type, size and
+  name, and `expiresAt`, 30 days after the upload, as long as Meta keeps it (M-046). HyFib keeps no
+  copy. An upload takes no Idempotency-Key: a retry uploads the file again.
+- **Sent by id:** `POST /messages` with `type` `image`, `video`, `audio` or `document` takes
+  `mediaId` in place of `link` (one of the two). The file must be the company's upload, for the
+  number the message goes from, of the message's type, and less than 30 days old; otherwise 422
+  naming `mediaId`, or 412 with reason `file_expired`. It can be sent as often as needed. The
+  message names Meta's media id, a document with the name it was uploaded under (as the spec's
+  example sends it), gets a media row of its own, and shows in the inbox as members' files do
+  (ADR-218). Stickers stay links (ADR-198).
+- **Migration 0143** adds `channel_account_id` and `api_key_id` to `app.media_objects`, with
+  composite foreign keys to the company's numbers and keys and a check that a key's upload names its
+  number and Meta's media and belongs to no message, all NOT VALID so the table stays writable;
+  **0144** validates them. The company data export carries the columns; erasure and the company's
+  deletion already delete media rows, before the numbers and keys they name.
+- **The API takes multipart bodies** for this call only (`handleApiRequest`'s `multipartBytes`: at
+  most 16 MB and 64 KB, form fields checked for NUL as JSON is).
+
+Not built: listing or deleting uploads, uploads for template headers (they take links, ADR-201),
+stickers, files over 16 MB, and purging upload rows after their 30 days.

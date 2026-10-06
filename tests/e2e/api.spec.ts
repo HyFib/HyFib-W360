@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test } from './fixtures';
 import {
+  E2E_CHANNEL_TOKEN,
   connectTestChannel,
   inboundMessage,
   inboundMessages,
@@ -1628,4 +1629,78 @@ test('a key downloads the document a customer sent, as WhatsApp gave it (ADR-217
   const missing = await request.get(`/api/v1/messages/${randomUUID()}/media`, { headers: auth });
   expect(missing.status()).toBe(404);
   expect((await missing.json()).error.code).toBe('not_found');
+});
+
+test('a key uploads a price list once and sends it by id to a customer who wrote (ADR-219)', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('apiupload');
+  const slug = `apiupload-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Uma Uploads', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Upload Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Price lists');
+  await page.getByRole('checkbox', { name: /Reply with text/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${token}` };
+
+  const waId = randomWaId();
+  await sendSignedWebhook(
+    request,
+    inboundMessage(wabaId, phoneNumberId, waId, 'What are your prices?'),
+  );
+  await page.goto(`/c/${slug}/inbox`);
+  await expect(page.getByRole('link', { name: /Priya Customer/ })).toBeVisible({
+    timeout: 20_000,
+  });
+
+  // The upload: once, for the company's number.
+  const prices = Buffer.from('%PDF-1.4 prices for Uma');
+  const uploaded = await request.post('/api/v1/media', {
+    headers: auth,
+    multipart: { file: { name: 'Prices.pdf', mimeType: 'application/pdf', buffer: prices } },
+  });
+  expect(uploaded.status()).toBe(201);
+  const media = (await uploaded.json()).data as { id: string; type: string; fileName: string };
+  expect(media).toMatchObject({ type: 'document', fileName: 'Prices.pdf' });
+
+  // The send names it, and WhatsApp gets the media's id with the document's name.
+  const sent = await request.post('/api/v1/messages', {
+    headers: { ...auth, 'Idempotency-Key': randomUUID() },
+    data: { type: 'document', to: `+${waId}`, mediaId: media.id, caption: 'Our prices' },
+  });
+  expect(sent.status()).toBe(201);
+  const queued = (await sent.json()).data as { id: string };
+  await expect(async () => {
+    const status = await request.get(`/api/v1/messages/${queued.id}`, { headers: auth });
+    expect((await status.json()).data).toMatchObject({ type: 'document', status: 'accepted' });
+  }).toPass({ timeout: 30_000 });
+  const requests = await standInRequests(request);
+  expect(
+    requests.filter((r) => r.path === `/v26.0/${phoneNumberId}/media`).map((r) => r.authorization),
+  ).toEqual([`Bearer ${E2E_CHANNEL_TOKEN}`]);
+  const send = requests
+    .filter(
+      (r) =>
+        r.path === `/v26.0/${phoneNumberId}/messages` &&
+        (r.body as { to?: string } | null)?.to === waId,
+    )
+    .pop();
+  expect(send?.body).toMatchObject({
+    type: 'document',
+    document: { caption: 'Our prices', filename: 'Prices.pdf' },
+  });
+
+  // The inbox shows the document the key sent, which members open.
+  await page.getByRole('link', { name: /Priya Customer/ }).click();
+  const thread = page.getByRole('list', { name: /^Messages with/ });
+  await expect(thread.getByRole('link', { name: 'Download Prices.pdf' })).toBeVisible();
 });

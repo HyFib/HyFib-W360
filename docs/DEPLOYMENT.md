@@ -459,6 +459,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `/api/c/*/inbox/*/files`, and each upload holds its file in the web server's memory once. Until
    the web rollout ends, an old web server shows no "Send a file" card.
 
+   Migration 0143 (ADR-219) adds `channel_account_id` and `api_key_id` to `app.media_objects`, with
+   their foreign keys and check NOT VALID, so the table stays writable; 0144 validates them, reading
+   the table without blocking writes. Old servers ignore the columns. `POST /api/v1/media` takes
+   bodies of up to 16 MB and 64 KB: a load balancer in front of the web tier must accept them on
+   that path too. Until the web rollout ends, an old web server answers it with 404 and refuses
+   `mediaId` in `POST /messages`.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

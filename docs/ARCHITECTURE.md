@@ -422,6 +422,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   retried client key with its message, checks the reply without writing (`prepareReply`), uploads
   the file (`GraphClient.uploadMedia`) and queues the reply through `queueReply`, which text replies
   use too, with a media record naming the upload.
+- **Files keys upload** (`api/media.ts`, ADR-219): `POST /api/v1/media` reads a multipart body
+  through `handleApiRequest` (`multipartBytes`), checks the file as members' files are, uploads it
+  for the sending number and inserts a media row without a message, with the number and the key
+  (migration 0143). `POST /messages` with `mediaId` finds that row in the company
+  (`uploadedFileFor`: the same number, the same kind, 30 days) and gives the message a media row of
+  its own.
 - **Collision warning** (`queueTextMessage` `afterMessageId`): under the conversation row lock, a
   reply is refused once when another member's reply is newer than the newest message the sender had
   seen; the composer refreshes the thread and keeps the draft (ADR-033).

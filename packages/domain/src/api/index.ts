@@ -26,3 +26,4 @@ export * from './automations';
 export * from './webhook-endpoints';
 export * from './campaigns';
 export * from './segments';
+export * from './media';

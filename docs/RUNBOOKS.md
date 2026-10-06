@@ -421,6 +421,13 @@ disconnected (reconnect it in Settings → Channels), or WhatsApp refused the fi
 shown) or did not answer (try again). A 413 from a load balancer before HyFib answers means its body
 limit is below the 16 MB HyFib accepts.
 
+**An integration cannot upload or send a file by id (ADR-219).** An upload is refused for its type
+or size (422 naming `file`), a number that is not the company's or not active, or WhatsApp refusing
+it (422 with its reason). A send by id is refused when the id is not the company's upload, was
+uploaded for another number or is of another kind (422 naming `mediaId`), or was uploaded more than
+30 days ago (412 `file_expired`): upload the file again. `app.media_objects` rows with an
+`api_key_id` and no `message_id` are the uploads.
+
 **Many failures with 131049.** Meta's per-user marketing limit: those customers received too many
 marketing messages from businesses. Do not resend; wait at least 24 hours (M-062) and consider the
 company's frequency cap.

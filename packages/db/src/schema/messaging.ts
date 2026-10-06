@@ -311,6 +311,10 @@ export const mediaObjects = appSchema.table('media_objects', {
     .notNull()
     .default('pending'),
   failureReason: text('failure_reason'),
+  /** The number a key uploaded the file for (ADR-219). */
+  channelAccountId: uuid('channel_account_id'),
+  /** The key that uploaded the file through the API (ADR-219). */
+  apiKeyId: uuid('api_key_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });

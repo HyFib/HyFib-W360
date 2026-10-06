@@ -5303,12 +5303,13 @@ describe('media from links through the API (ADR-194)', () => {
     }
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
       .schemas;
+    // The link, or since ADR-219 the id of a file uploaded for the number, one of the two.
     for (const name of ['SendImage', 'SendVideo', 'SendDocument']) {
       const schema = schemas[name] as { properties: object; required: string[] };
       expect(Object.keys(schema.properties).sort(), name).toEqual(
-        ['caption', 'from', 'link', 'replyTo', 'to', 'type'].sort(),
+        ['caption', 'from', 'link', 'mediaId', 'replyTo', 'to', 'type'].sort(),
       );
-      expect([...schema.required].sort(), name).toEqual(['link', 'to', 'type']);
+      expect([...schema.required].sort(), name).toEqual(['to', 'type']);
     }
     const audio = schemas.SendAudio as { properties: object; additionalProperties: unknown };
     expect(Object.keys(audio.properties)).not.toContain('caption');
@@ -5466,8 +5467,9 @@ describe('locations through the API (ADR-195)', () => {
     expect(API_SCOPE_INFO['messages.reply'].label).toBe(
       'Reply with text, media and other messages',
     );
+    // Since ADR-219 the scope also names files uploaded for the number.
     expect(API_SCOPE_INFO['messages.reply'].description).toContain(
-      'from links, locations and contact cards, to contacts who wrote',
+      'from links, or files uploaded for the number, locations and contact cards, to contacts who wrote',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const send = (
