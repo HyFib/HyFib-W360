@@ -9518,3 +9518,30 @@ Decision:
   permission check. No migration.
 
 Not built: a notice to the company when its automations skip steps after a change of plan.
+
+## ADR-250 Automation steps that move a CRM deal (P4-01, P4-04) (2026-10-06)
+
+Context: automations could create a deal for a customer (ADR-245) but not move it on, so a customer
+who paid, booked or answered a question still needed a member to drag their deal to the next stage.
+
+Decision:
+
+- **The step:** "Move the CRM deal" (`move_deal`) moves the run's contact's open deal in a chosen
+  pipeline to a chosen active stage of it, as a member's move does: the stage and the time it was
+  entered change, the deal's version moves on (so a member editing it at the same time is told it
+  changed), and a `stage_changed` activity without a member actor names the automation and the run,
+  which the timeline shows as "by an automation".
+- **Only when it is clear which deal:** nothing moves, the step is logged as `skipped` with the
+  reason and the run goes on, when the contact has no open deal in the pipeline (`deal_not_open`) or
+  more than one (`deal_ambiguous`: which one is meant is not known), when the deal is already in the
+  stage (`deal_in_stage`), when the stage or its pipeline was archived, when the contact was erased,
+  or when the plan no longer includes the CRM (ADR-249). Moving to another pipeline is left to
+  members.
+- **Checks and locks:** publishing checks the stage against the company's active pipelines;
+  publishing or testing needs `crm.write` and the CRM in the plan, as for the other CRM steps. The
+  runner locks the contact against erasure, shares the pipeline against archiving, then locks the
+  deals, the CRM's order. Run steps get the outcome `moved` (migrations 0162 and 0163: the outcome
+  check replaced NOT VALID, then validated).
+
+Not built: closing a deal as won or lost from an automation, moving it to another pipeline, and
+choosing which of several open deals to move.

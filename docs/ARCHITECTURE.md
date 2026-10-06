@@ -481,6 +481,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `send_flow` effect counted as a message; `queueBotMessage` runs a text's checks and `queueBotFlow`
   checks the plan and the form again, then inserts the message, its send intent
   (`buildFlowMessageRequest`) and a `flow_sends` row with a new token, as a member's send does.
+- **Automations that move CRM deals** (ADR-250): `move_deal` steps (checked against `crmPipelines`);
+  the interpreter gives a `move_deal` effect logged as `moved`; `applyMoveDealEffect` in the runner
+  checks the plan, locks the contact (key share) and shares the pipeline, reads the stage, locks the
+  contact's open deals in the pipeline (at most two), moves the only one and adds a `stage_changed`
+  activity without an actor; anything else is a note for a `skipped` step.
 - **Read receipts and typing indicators** (`inbox/read-receipts.ts`, ADR-223): `markRead` in
   `messaging/inbox.ts` calls `queueReadReceipt` in its transaction; the composer calls
   `showTypingAction` at most every 20 seconds, which `showTyping` checks and queues; both sign a job

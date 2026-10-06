@@ -61,6 +61,7 @@ export const STEP_OUTCOMES: Record<string, string> = {
   requested: 'Made a web request',
   responded: 'Web request finished',
   created: 'Created in the CRM',
+  moved: 'Moved the deal',
   skipped: 'Skipped the step',
 };
 
@@ -113,6 +114,11 @@ export const STEP_DETAILS: Record<string, string> = {
     'the deal has no owner: the member chosen is no longer an active member who can use the CRM',
   deal_value_invalid:
     'the deal has no value: the value is not an amount in the pipeline’s currency',
+  // Steps that move deals (ADR-250): why no deal moved.
+  deal_not_open: 'the contact has no open deal in the pipeline',
+  deal_ambiguous:
+    'the contact has more than one open deal in the pipeline, so which one to move is not known',
+  deal_in_stage: 'the deal was already in the stage',
   tester_not_member: 'the member running the test left the company',
   tester_not_permitted: 'the member running the test may no longer run tests',
   version_unreadable: 'the version could not be read',

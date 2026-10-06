@@ -267,6 +267,16 @@ function defaultNode(
         ownerMembershipId: null,
         next: null,
       };
+    case 'move_deal':
+      // A move usually goes forward: the pipeline's second stage when it has one.
+      return {
+        id,
+        type,
+        label: '',
+        pipelineId: pipeline?.id ?? '',
+        stageId: (pipeline?.stages[1] ?? pipeline?.stages[0])?.id ?? '',
+        next: null,
+      };
     case 'handoff':
       return { id, type, label: '', teamId: null };
     case 'end':
@@ -285,6 +295,7 @@ function retarget(node: AutomationNode, target: string, value: string | null): A
     case 'update_conversation':
     case 'create_task':
     case 'create_deal':
+    case 'move_deal':
     case 'wait':
       return { ...node, next: t(node.next) };
     case 'ask_template':

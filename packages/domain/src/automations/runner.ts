@@ -990,6 +990,84 @@ async function applyDealEffect(
   return { skipped: false, notes };
 }
 
+/**
+ * Moves the run's contact's open deal in the step's pipeline to the step's stage (ADR-250), as the
+ * automation, and puts the move on the deal's timeline as a member's move is. Nothing moves (a note
+ * for the step log, which says `skipped`) when the plan leaves out the CRM, the contact was erased,
+ * the stage or its pipeline is archived or gone, the contact has no open deal in the pipeline or more
+ * than one (which one is meant is not known), or the deal is already in the stage. Locks are taken
+ * in the CRM's order: the contact (against erasure), the pipeline (against archiving), the deals.
+ */
+async function applyMoveDealEffect(
+  tx: Tx,
+  run: AutomationRun,
+  effect: Extract<RunEffect, { kind: 'move_deal' }>,
+  now: Date,
+): Promise<string | null> {
+  if (!(await loadEntitlements(tx, run.tenantId)).modules.has('crm')) return 'crm_not_in_plan';
+  const [contact] = await tx
+    .select({ erasedAt: contacts.erasedAt })
+    .from(contacts)
+    .where(and(eq(contacts.tenantId, run.tenantId), eq(contacts.id, run.contactId)))
+    .for('key share');
+  if (!contact || contact.erasedAt) return 'contact_erased';
+  const [pipeline] = await tx
+    .select({ archivedAt: crmPipelines.archivedAt })
+    .from(crmPipelines)
+    .where(and(eq(crmPipelines.tenantId, run.tenantId), eq(crmPipelines.id, effect.pipelineId)))
+    .for('share');
+  const [stage] = await tx
+    .select({ archivedAt: crmStages.archivedAt })
+    .from(crmStages)
+    .where(
+      and(
+        eq(crmStages.tenantId, run.tenantId),
+        eq(crmStages.id, effect.stageId),
+        eq(crmStages.pipelineId, effect.pipelineId),
+      ),
+    );
+  if (!pipeline || pipeline.archivedAt || !stage || stage.archivedAt) {
+    return 'deal_stage_unavailable';
+  }
+  const open = await tx
+    .select({ id: crmDeals.id, stageId: crmDeals.stageId, version: crmDeals.version })
+    .from(crmDeals)
+    .where(
+      and(
+        eq(crmDeals.tenantId, run.tenantId),
+        eq(crmDeals.contactId, run.contactId),
+        eq(crmDeals.pipelineId, effect.pipelineId),
+        eq(crmDeals.status, 'open'),
+      ),
+    )
+    .orderBy(asc(crmDeals.id))
+    .limit(2)
+    .for('update');
+  const [deal] = open;
+  if (!deal) return 'deal_not_open';
+  if (open.length > 1) return 'deal_ambiguous';
+  if (deal.stageId === effect.stageId) return 'deal_in_stage';
+  await tx
+    .update(crmDeals)
+    .set({ stageId: effect.stageId, stageEnteredAt: now, version: deal.version + 1 })
+    .where(and(eq(crmDeals.tenantId, run.tenantId), eq(crmDeals.id, deal.id)));
+  await addActivity(tx, {
+    tenantId: run.tenantId,
+    contactId: run.contactId,
+    dealId: deal.id,
+    actorMembershipId: null,
+    kind: 'stage_changed',
+    data: {
+      fromStageId: deal.stageId,
+      toStageId: effect.stageId,
+      automationId: run.automationId,
+      runId: run.id,
+    },
+    at: now,
+  });
+  return null;
+}
+
 type StepOutcome =
   | { kind: 'progress' }
   | { kind: 'waiting' }
@@ -1271,6 +1349,12 @@ async function runStep(
         const deal = await applyDealEffect(tx, run, effect, now);
         notes.push(...deal.notes);
         skipped = deal.skipped;
+      } else if (effect.kind === 'move_deal') {
+        const note = await applyMoveDealEffect(tx, run, effect, now);
+        if (note) {
+          notes.push(note);
+          skipped = true;
+        }
       } else {
         const note = await applyContactEffect(tx, run, effect);
         if (note) notes.push(note);

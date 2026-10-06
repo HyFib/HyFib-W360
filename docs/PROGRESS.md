@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-06 — Automation steps that move a CRM deal (P4-01, P4-04, H-012, ADR-250)
+
+Status: **Implemented; its database and browser tests run in CI only.** Automations could create
+deals (ADR-245) but not move them. The local PostgreSQL is unavailable, so migrations 0162 and 0163
+and the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0162 (the run steps' outcome check with `moved`, NOT VALID) and 0163
+  (validates it).
+- **Domain:** the `move_deal` step (graph, its check against `crmPipelines`, the interpreter's
+  effect and `moved` outcome), `applyMoveDealEffect` in the runner, the CRM permission and plan
+  check for every CRM step; a doc comment that had drifted in `graph.ts` put back on
+  `reachableFrom`.
+- **Web:** the step in the automation editor (pipeline, stage), its line in the simulator, and the
+  run page's outcome and reasons.
+- **Tests:**
+  - Unit (4 new in `move-step.test.ts`).
+  - Integration (2 new in `automations.test.ts`: the move and its activity, no deal, the deal
+    already in the stage, two open deals, publishing refused; the plan test of ADR-249 also covers
+    the step). Written for CI; not run here.
+  - E2e (`automations.spec.ts`: the task and deal automation also moves the deal to Qualified,
+    checked in the simulator and on the deal's timeline). Written for CI; not run here.
+- **Docs:** ADR-250; ARCHITECTURE; SECURITY; THREAT-MODEL T221; DEPLOYMENT; BACKLOG P4-04; feature
+  matrix H-012.
+- **Mutation checks:** 10/10 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                                     | Result                                                          |
+| ----------------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`          | clean                                                           |
+| `pnpm test` (unit)                                          | 1066 passed (114 files)                                         |
+| `pnpm test:integration`, `pnpm test:e2e`, `pnpm db:migrate` | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                                | passed                                                          |
+| Mutation checks                                             | 10/10 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes                       | no leaks found                                                  |
+
+### Known gaps
+
+- No closing of deals from automations, no moves to another pipeline, and no choice among several
+  open deals.
+
 ## 2026-10-06 — Task and deal steps follow the plan's CRM (P4-01, P4-04, H-012, ADR-249)
 
 Status: **Implemented; its database test runs in CI only.** Found while adding the plan check to

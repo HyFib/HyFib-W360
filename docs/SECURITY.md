@@ -289,6 +289,10 @@ Phase 4 rules (automations, P4-01):
 - Task and deal steps need the CRM in the company's plan (ADR-249), as members' CRM writes do:
   publishing or testing such an automation is refused without it, and a run skips the step
   (`crm_not_in_plan`) and goes on.
+- Steps that move deals (ADR-250): the same permission and plan rules; only the run's contact's
+  single open deal in the chosen pipeline moves, to an active stage checked when publishing and
+  again when the step runs, recorded on the deal's timeline as the automation's. With none or
+  several open deals, nothing moves.
 
 Phase 4 rules (automation web requests, P4-02):
 

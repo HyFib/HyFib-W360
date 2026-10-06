@@ -286,6 +286,15 @@ export function AutomationSimulator({
           });
           break;
         }
+        case 'move_deal': {
+          const pipeline = crmPipelines.find((pl) => pl.id === effect.pipelineId);
+          const stage = pipeline?.stages.find((st) => st.id === effect.stageId);
+          out.push({
+            who: 'note',
+            text: `The contact’s open deal in ${pipeline?.name ?? 'a pipeline'} moved to ${stage?.name ?? 'a stage'}, if the contact has exactly one there.`,
+          });
+          break;
+        }
         case 'handoff': {
           const team = teams.find((t) => t.id === effect.teamId);
           out.push({
