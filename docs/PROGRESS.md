@@ -1,5 +1,41 @@
 # Progress
 
+## 2026-10-06 — Exporting deals as CSV (P4-04, ADR-239)
+
+Status: **Implemented; its database tests run in CI only.** Deals could be read on the board (200
+per stage) or fifty at a time in the won and lost lists only. The local PostgreSQL is unavailable,
+so the integration tests below were written but not run here.
+
+### Completed
+
+- **Domain:** `crm/deals-csv.ts` (`DEAL_CSV_COLUMNS`, `dealCsvLine`), and `dealExportSchema` and
+  `exportDeals` in the deal operations (the view's filters, batches of 500 on an exact creation
+  time, the audit).
+- **Web:** `GET /c/{slug}/crm/export` and "Export CSV" on the CRM page, exporting the view shown
+  (the board's pipeline and owner filter, or the won or lost list).
+- **Tests:**
+  - Unit (4 new in `deals-csv.test.ts`).
+  - Integration (2 new in `crm.test.ts`: the lines, the filters, an unknown status, another
+    company's pipeline, agents and marketers refused, numbers masked for a masked member, the audit,
+    and 501 deals created at the same moment exported once each). Written for CI; not run here.
+- **Docs:** ADR-239; SECURITY; BACKLOG P4-04; feature matrix H-012.
+- **Mutation checks:** 12/12 deliberate regressions caught on the CSV lines and the request.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 1028 passed (106 files)                                              |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it        |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 12/12 deliberate regressions caught on the CSV lines and the request |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- No browser test of the download; no deal import; tasks, notes and timelines are not exported.
+
 ## 2026-10-06 — Setting a custom field on every contact a filter matches (P3-01, ADR-238)
 
 Status: **Implemented; its database and browser tests run in CI only.** Bulk edits covered tags

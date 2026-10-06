@@ -4,7 +4,7 @@ import { notFound } from 'next/navigation';
 import { isAppError } from '@w360/core';
 import { can } from '@w360/domain';
 import { formatMinor } from '@w360/domain/crm-money';
-import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
+import { Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
 import { NewDealForm, StageSelect } from '@/components/crm/deal-forms';
 import { CrmTabs } from '@/components/crm/crm-tabs';
 import { PageHeader } from '@/components/page-header';
@@ -65,19 +65,44 @@ export default async function CrmPage({
     return s ? `${base}?${s}` : base;
   };
   const me = ctx.membership.id;
+  // The deals this view shows, all of them (ADR-239): deals carry customers' names and numbers.
+  const exportHref =
+    can(ctx, 'contacts.export') && (view !== 'board' || board !== null)
+      ? `${base}/export?${new URLSearchParams(
+          view === 'board' && board
+            ? {
+                status: 'open',
+                pipeline: board.pipeline.id,
+                ...(owner === 'all' ? {} : { owner }),
+              }
+            : { status: view },
+        ).toString()}`
+      : null;
+  const settings = can(ctx, 'tenant.settings.manage');
   return (
     <>
       <PageHeader
         title="CRM"
         description="Deals by stage, and the tasks that move them forward."
         actions={
-          can(ctx, 'tenant.settings.manage') ? (
-            <Link
-              href={`/c/${ctx.tenant.slug}/settings/pipelines`}
-              className="text-sm text-primary underline-offset-4 hover:underline"
-            >
-              Pipelines
-            </Link>
+          exportHref || settings ? (
+            <>
+              {exportHref ? (
+                <Button asChild variant="outline">
+                  <a href={exportHref} download>
+                    Export CSV
+                  </a>
+                </Button>
+              ) : null}
+              {settings ? (
+                <Link
+                  href={`/c/${ctx.tenant.slug}/settings/pipelines`}
+                  className="self-center text-sm text-primary underline-offset-4 hover:underline"
+                >
+                  Pipelines
+                </Link>
+              ) : null}
+            </>
           ) : null
         }
       />

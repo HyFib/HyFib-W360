@@ -305,6 +305,10 @@ Phase 4 rules (CRM, P4-04):
   notes. The contact picker in the deal form uses the contact search (`contacts.read`).
 - Reports show deal counts, values, pipeline and stage names (never deal titles, notes or contacts)
   to `reports.read`, including analysts and marketers, like the other report sections.
+- Exporting deals (ADR-239) needs `crm.read` and `contacts.export`: the file holds the deals the
+  view shows with customers' names and numbers (masked as for the member, ADR-226),
+  formula-neutralised; an erased contact's deals carry no number. Each export is audited
+  (`crm.deals_exported`, with its filters).
 - While a company is suspended, `crm.read` stays available and `crm.write` does not; reminder jobs
   wait, and the sweep sends reminders after reactivation unless they are more than a day late.
 

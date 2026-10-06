@@ -9251,3 +9251,27 @@ Decision:
 Not built: bulk changes of consent (each contact's consent needs its own provenance; an import
 carries an attestation), of names, emails or numbers (each contact's own), bulk edits from a segment
 or through the API, choosing contacts one by one, and undo.
+
+## ADR-239 Exporting deals as CSV (P4-04) (2026-10-06)
+
+Context: the board shows the open deals of one pipeline, at most 200 per stage, and the won and lost
+lists fifty at a time. A company reviewing its pipeline in a spreadsheet, or keeping its deals
+elsewhere as well, had no way to take them out.
+
+Decision:
+
+- **What:** one line per deal the view shows, all of them, newest first: the open deals of the
+  board's pipeline with its owner filter, or the won or lost deals. Each line holds the deal id,
+  title, pipeline, stage, status, currency, value (exact, in the currency's major unit), owner, the
+  contact's name and number, expected close date, when it was created, entered its stage and closed
+  (UTC, ISO 8601), the lost reason and its open tasks.
+- **Who:** deals carry customers' names and numbers, so the export needs `contacts.export` as well
+  as `crm.read`, as the orders export does (ADR-235): owners and administrators by default. Numbers
+  are shown as the member may see them (ADR-226); an erased contact is named as such, without a
+  number. Values are formula-neutralised (`csvLine`).
+- **How:** `exportDeals` streams batches of 500 by creation time (exact to the microsecond) and id
+  through `GET /c/{slug}/crm/export`, which checks the permissions and the filters (a status, a
+  pipeline of the company, an owner) before the first byte; each export is audited
+  (`crm.deals_exported`, with its filters). No migration.
+
+Not built: importing deals, exporting tasks, notes or timelines, and exports through the public API.

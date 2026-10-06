@@ -6,13 +6,17 @@ import { QUEUES } from '@w360/contracts';
 import { authorizedTenantScope } from '@w360/db';
 import {
   CRM_LIMITS,
+  DEAL_CSV_COLUMNS,
+  DEAL_EXPORT_BATCH,
   createContactsService,
   createCrmService,
   createReportsService,
   findDueReminders,
+  maskPhoneNumber,
   sendTaskReminder,
   type TenantContext,
 } from '@w360/domain';
+import { acceptInvitation, createUser, invite } from './helpers';
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
 
 /**
@@ -802,6 +806,167 @@ describe('crm races and edge cases', () => {
     expect(second.deals).toHaveLength(10);
     expect(second.nextCursor).toBeNull();
     expect(new Set([...first.deals, ...second.deals].map((d) => d.id)).size).toBe(60);
+  });
+});
+
+describe('crm deal export (ADR-239)', () => {
+  /** The export's lines without the byte order mark and the last line break. */
+  async function exported(ctx: TenantContext, input: unknown = {}) {
+    let csv = '';
+    for await (const chunk of crm().exportDeals(ctx, input, { ipAddress: '203.0.113.9' })) {
+      csv += chunk;
+    }
+    expect(csv.startsWith('\uFEFF')).toBe(true);
+    return csv.slice(1).split('\r\n').slice(0, -1);
+  }
+
+  async function phoneOf(contactId: string) {
+    const [row] = await fx.query<{ phone_e164: string }>(
+      'SELECT phone_e164 FROM app.contacts WHERE id = $1',
+      [contactId],
+    );
+    return row!.phone_e164;
+  }
+
+  it('writes the deals a view shows with its filters, numbers as the member may see them, and audits each export', async () => {
+    const { c, owner, agent, marketer, pipeline, newStage, qualified } = await setup();
+    const svc = crm();
+    const asha = await newContact(owner, 'Asha');
+    const bala = await newContact(owner, 'Bala');
+    const { id: openId } = await svc.createDeal(owner, {
+      contactId: asha,
+      pipelineId: pipeline.id,
+      stageId: newStage.id,
+      title: 'Annual plan',
+      value: '25,000.50',
+      ownerMembershipId: agent.membership.id,
+      expectedCloseOn: '2026-12-31',
+    });
+    await svc.createTask(owner, {
+      title: 'Send the proposal',
+      dealId: openId,
+      assigneeMembershipId: owner.membership.id,
+    });
+    const { id: lostId } = await svc.createDeal(owner, {
+      contactId: bala,
+      pipelineId: pipeline.id,
+      stageId: qualified.id,
+      title: '=HYPERLINK("http://x")',
+    });
+    await svc.closeDeal(owner, {
+      id: lostId,
+      expectedVersion: 1,
+      outcome: 'lost',
+      lostReason: 'Too expensive',
+    });
+
+    // Newest first; the formula in the title neutralised; values exact; times in UTC.
+    const all = await exported(owner);
+    expect(all).toHaveLength(3);
+    expect(all[0]).toBe(DEAL_CSV_COLUMNS.join(','));
+    const lost = all[1]!.split(',');
+    expect(lost.slice(0, 10)).toEqual([
+      lostId,
+      `"'=HYPERLINK(""http://x"")"`,
+      'Sales',
+      'Qualified',
+      'lost',
+      'INR',
+      '',
+      '',
+      'Bala',
+      await phoneOf(bala),
+    ]);
+    expect(lost.slice(13)).toEqual([expect.stringMatching(/^2\d{3}-.+Z$/), 'Too expensive', '0']);
+    const open = all[2]!.split(',');
+    expect([...open.slice(0, 11), ...open.slice(13)]).toEqual([
+      openId,
+      'Annual plan',
+      'Sales',
+      'New',
+      'open',
+      'INR',
+      '25000.50',
+      'Agent',
+      'Asha',
+      await phoneOf(asha),
+      '2026-12-31',
+      '',
+      '',
+      '1',
+    ]);
+    expect(new Date(open[11]!).toISOString()).toBe(open[11]);
+
+    // The filters of the board and the lists.
+    expect(await exported(owner, { status: 'open' })).toHaveLength(2);
+    expect(await exported(owner, { status: 'lost', pipelineId: pipeline.id })).toHaveLength(2);
+    expect(await exported(owner, { status: 'open', owner: 'mine' })).toHaveLength(1);
+    expect(await exported(owner, { owner: agent.membership.id })).toHaveLength(2);
+    await expectAppError(exported(owner, { status: 'closed' }), 'validation_failed');
+    const other = await setup();
+    await expectAppError(exported(owner, { pipelineId: other.pipeline.id }), 'not_found');
+    expect(await exported(other.owner)).toEqual([DEAL_CSV_COLUMNS.join(',')]);
+
+    // CRM access without contact exports, or contact exports without CRM access, is refused.
+    await expectAppError(exported(agent), 'forbidden');
+    await expectAppError(exported(marketer), 'forbidden');
+
+    // A member with both, whose roles the company masks, gets numbers masked (ADR-226).
+    const user = await createUser(fx.dbs, { name: 'Sales lead' });
+    const { token } = await invite(fx.dbs, c.tenant, c.owner, user.email, ['agent', 'marketer']);
+    await acceptInvitation(fx.dbs, user, token);
+    await fx.query(
+      `UPDATE app.tenants SET masked_number_roles = '{agent,marketer}' WHERE id = $1`,
+      [c.tenant.id],
+    );
+    const lead = await fx.ctx(c, user);
+    expect(lead.permissions.has('contacts.view_numbers')).toBe(false);
+    const masked = await exported(lead, { status: 'open' });
+    expect(masked[1]!.split(',')[9]).toBe(`'${maskPhoneNumber(await phoneOf(asha))}`);
+    expect(masked.join('\n')).not.toContain(await phoneOf(asha));
+
+    // Each export is audited with its filters; refused ones are not.
+    const audit = await fx.query<{ actor_id: string; metadata: Record<string, unknown> }>(
+      `SELECT actor_id, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'crm.deals_exported' ORDER BY id`,
+      [c.tenant.id],
+    );
+    expect(audit).toEqual([
+      { actor_id: c.owner.id, metadata: { status: null, pipelineId: null, owner: 'all' } },
+      { actor_id: c.owner.id, metadata: { status: 'open', pipelineId: null, owner: 'all' } },
+      { actor_id: c.owner.id, metadata: { status: 'lost', pipelineId: pipeline.id, owner: 'all' } },
+      { actor_id: c.owner.id, metadata: { status: 'open', pipelineId: null, owner: 'mine' } },
+      {
+        actor_id: c.owner.id,
+        metadata: { status: null, pipelineId: null, owner: agent.membership.id },
+      },
+      { actor_id: user.id, metadata: { status: 'open', pipelineId: null, owner: 'all' } },
+    ]);
+  });
+
+  it('exports more deals than one batch holds, created at the same moment, each once', async () => {
+    const { owner, pipeline, newStage } = await setup();
+    const contactId = await newContact(owner, 'Isha');
+    // Deals created in one statement share one creation time, to the microsecond.
+    await fx.query(
+      `insert into app.crm_deals (id, tenant_id, pipeline_id, stage_id, contact_id, title,
+         created_by_membership_id)
+       select gen_random_uuid(), $1, $2, $3, $4, 'Deal ' || g, $5
+         from generate_series(1, $6::int) g`,
+      [
+        owner.tenant.id,
+        pipeline.id,
+        newStage.id,
+        contactId,
+        owner.membership.id,
+        DEAL_EXPORT_BATCH + 1,
+      ],
+    );
+    const lines = await exported(owner);
+    expect(lines).toHaveLength(DEAL_EXPORT_BATCH + 2);
+    expect(new Set(lines.slice(1).map((line) => line.split(',')[0])).size).toBe(
+      DEAL_EXPORT_BATCH + 1,
+    );
   });
 });
 

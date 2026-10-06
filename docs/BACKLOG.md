@@ -231,7 +231,9 @@ verification, app review, Embedded Signup configuration).
   exactly once under repeated signals; erasure; isolation. **[Moving deals between pipelines in the
   app built; its database and browser tests run only in CI]** (ADR-234: the deal page offers the
   company's other active pipelines and their stages; the service keeps its rules; no migration).
-  **Remaining:** custom deal fields, products on deals, deal import and export, forecasting,
+  **[Deal export built; its database tests run only in CI]** (ADR-239: the deals a view shows as
+  CSV, with `crm.read` and `contacts.export`, numbers masked as for the member, audited; no
+  migration). **Remaining:** custom deal fields, products on deals, deal import, forecasting,
   automation steps that create deals or tasks, CRM connectors (HubSpot, Salesforce, Zoho:
   integrations), reminder emails through the production SMTP provider (release checklist).
 - **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad

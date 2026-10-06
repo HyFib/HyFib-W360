@@ -116,6 +116,7 @@ export * from './crm/common';
 export * from './crm/money';
 export * from './crm/pipelines';
 export * from './crm/deals';
+export * from './crm/deals-csv';
 export * from './crm/tasks';
 export * from './crm/time';
 export * from './crm/reminders';
