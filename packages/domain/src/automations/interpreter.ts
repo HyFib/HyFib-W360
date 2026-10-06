@@ -141,6 +141,18 @@ export type RunEffect =
       assigneeMembershipId: string;
       dueInHours: number | null;
     }
+  /**
+   * A CRM deal for the run's contact and conversation, created by the automation (ADR-245): the
+   * title as rendered (empty when its placeholders filled in nothing), the value as typed.
+   */
+  | {
+      kind: 'create_deal';
+      title: string;
+      pipelineId: string;
+      stageId: string;
+      value: string | null;
+      ownerMembershipId: string | null;
+    }
   | { kind: 'handoff'; teamId: string | null };
 
 export type StepStatus = 'running' | 'waiting' | 'completed' | 'handed_off' | 'failed';
@@ -170,7 +182,7 @@ export type StepLogOutcome =
   | 'requested'
   | 'responded'
   | 'created'
-  /** Recorded by the runner when a task step could not create its task (ADR-244). */
+  /** Recorded by the runner when a task or deal step created nothing (ADR-244, ADR-245). */
   | 'skipped';
 
 export interface StepResult {
@@ -578,6 +590,21 @@ export function advance(input: AdvanceInput): StepResult {
           ),
           assigneeMembershipId: current.assigneeMembershipId,
           dueInHours: current.dueInHours,
+        };
+        return moveTo(current.next, base, [effect], 'created', null);
+      }
+      case 'create_deal': {
+        const effect: RunEffect = {
+          kind: 'create_deal',
+          // One line, as for task titles.
+          title: clipText(
+            renderText(current.title, values(base.variables)).replace(/\s+/g, ' '),
+            AUTOMATION_LIMITS.dealTitleLength,
+          ),
+          pipelineId: current.pipelineId,
+          stageId: current.stageId,
+          value: current.value,
+          ownerMembershipId: current.ownerMembershipId,
         };
         return moveTo(current.next, base, [effect], 'created', null);
       }

@@ -9415,3 +9415,29 @@ Decision:
 
 Not built: steps that create deals, a reminder email for an automation's task, tasks for the
 conversation's team or in turn, and a link from the task to the run.
+
+## ADR-245 Automation steps that create a CRM deal (P4-01, P4-04) (2026-10-06)
+
+Context: after ADR-244 an automation could ask for a follow-up, but a customer who showed interest
+still reached the pipeline only when a member created the deal by hand.
+
+Decision:
+
+- **The step:** "Create a CRM deal" (`create_deal`) has a title (up to 120 characters, with the
+  placeholders of a message), a stage of an active pipeline, an optional value typed in the
+  pipeline's currency (read exactly by the CRM's money rules) and an optional owner. The deal is for
+  the run's contact and from the run's conversation, in the chosen stage, created by the automation
+  as tasks are (`crm_deals.created_by_automation_id`, migrations 0160 and 0161 with the same NOT
+  VALID then VALIDATE steps as 0158 and 0159). Its `deal_created` activity has no member actor and
+  names the automation and the run; the deal page says "by an automation".
+- **One open deal per pipeline:** no deal is created when the contact already has an open deal in
+  that pipeline, so a customer who asks twice is not counted twice; runs of the same contact in two
+  conversations take the contact's row lock one after the other.
+- **When the company changed:** an archived pipeline or stage, an erased contact, an open deal or an
+  empty title skips the step (logged as `skipped` with the reason); an owner who can no longer use
+  the CRM, or a value that is no longer an amount in the pipeline's currency, is left out of the
+  deal with a note. The run goes on in every case. Publishing checks the stage, the value and the
+  owner; publishing or testing needs `crm.write`, as for task steps.
+
+Not built: moving an existing deal from an automation, setting the expected close date, and choosing
+what happens when an open deal exists (update it, or create another).

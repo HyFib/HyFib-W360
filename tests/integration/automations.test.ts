@@ -17,6 +17,7 @@ import {
   createAutomationService,
   createBusinessHoursService,
   createContactsService,
+  createCrmService,
   createInboxService,
   createReportsService,
   createTeamsService,
@@ -2166,6 +2167,212 @@ describe('automations that create CRM tasks (ADR-244)', () => {
       publish(noCrm, 'Callbacks', keyword('call me'), callback(agent.membership.id)),
       'forbidden',
       /permission to edit the CRM/,
+    );
+  });
+});
+
+describe('automations that create CRM deals (ADR-245)', () => {
+  const crm = () =>
+    createCrmService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
+
+  /** A company with a Sales pipeline (INR) and an automation that opens a deal in its first stage. */
+  async function setup(
+    options: { owner?: (c: Company) => Promise<string | null>; value?: string | null } = {},
+  ) {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { id: pipelineId } = await crm().createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New', 'Qualified'],
+    });
+    const [pipeline] = (await crm().listPipelines(owner)).filter((p) => p.id === pipelineId);
+    const stageId = pipeline!.stages[0]!.id;
+    const dealOwner = options.owner ? await options.owner(c) : null;
+    const { id: automationId } = await publish(owner, 'Leads', keyword('price'), {
+      version: 1,
+      start: 'deal',
+      nodes: [
+        {
+          id: 'deal',
+          type: 'create_deal',
+          title: 'Kettles for {{name}}',
+          pipelineId,
+          stageId,
+          value: options.value === undefined ? '2,500.50' : options.value,
+          ownerMembershipId: dealOwner,
+          next: 'thanks',
+        },
+        { id: 'thanks', type: 'send_text', text: 'We will send you a quote.', next: null },
+      ],
+    });
+    return { c, owner, pipelineId, stageId, automationId };
+  }
+
+  const dealsOf = (tenantId: string) =>
+    fx.query<{
+      id: string;
+      title: string;
+      pipeline_id: string;
+      stage_id: string;
+      contact_id: string;
+      conversation_id: string | null;
+      value_minor: string | null;
+      owner_membership_id: string | null;
+      status: string;
+      created_by_membership_id: string | null;
+      created_by_automation_id: string | null;
+    }>(
+      `SELECT id, title, pipeline_id, stage_id, contact_id, conversation_id, value_minor,
+              owner_membership_id, status, created_by_membership_id, created_by_automation_id
+         FROM app.crm_deals WHERE tenant_id = $1 ORDER BY created_at, id`,
+      [tenantId],
+    );
+
+  it('creates the deal for the run’s contact and conversation, as the automation, once while it is open', async () => {
+    const s = await setup({ owner: async (c) => (await fx.ctx(c, c.agent)).membership.id });
+    const agent = await fx.ctx(s.c, s.c.agent);
+    const from = waId();
+    const conversationId = await inbound(s.c, from, 'what is the price?');
+    const run = await onlyRun(conversationId);
+    expect((await drive(s.c, conversationId, run.id)).outcome).toBe('ended');
+    const [contact] = await fx.query<{ contact_id: string }>(
+      'SELECT contact_id FROM app.conversations WHERE id = $1',
+      [conversationId],
+    );
+    const deals = await dealsOf(s.c.tenant.id);
+    expect(deals).toEqual([
+      expect.objectContaining({
+        title: 'Kettles for Priya Customer',
+        pipeline_id: s.pipelineId,
+        stage_id: s.stageId,
+        contact_id: contact!.contact_id,
+        conversation_id: conversationId,
+        value_minor: '250050',
+        owner_membership_id: agent.membership.id,
+        status: 'open',
+        created_by_membership_id: null,
+        created_by_automation_id: s.automationId,
+      }),
+    ]);
+    expect(
+      await fx.query(
+        `SELECT kind, actor_membership_id, data FROM app.crm_activities
+          WHERE tenant_id = $1 AND deal_id = $2`,
+        [s.c.tenant.id, deals[0]!.id],
+      ),
+    ).toEqual([
+      {
+        kind: 'deal_created',
+        actor_membership_id: null,
+        data: {
+          stageId: s.stageId,
+          valueMinor: 250050,
+          automationId: s.automationId,
+          runId: run.id,
+        },
+      },
+    ]);
+    // The deal page says an automation created it.
+    const detail = await crm().getDeal(s.owner, deals[0]!.id);
+    expect(detail).toMatchObject({ createdBy: null, createdByAutomation: true });
+
+    // The customer asks again: the open deal is not created twice, and the run goes on.
+    const again = await inbound(s.c, from, 'price again please');
+    const runs = await runsOf(again);
+    const second = runs.at(-1)!;
+    expect((await drive(s.c, again, second.id)).outcome).toBe('ended');
+    expect(await dealsOf(s.c.tenant.id)).toHaveLength(1);
+    const log = await stepLog(second.id);
+    expect(log.find((st) => st.node_id === 'deal')).toMatchObject({
+      outcome: 'skipped',
+      detail: 'deal_already_open',
+    });
+    expect(log.find((st) => st.node_id === 'thanks')?.outcome).toBe('sent');
+  });
+
+  it('leaves out an owner who can no longer use the CRM, and skips an archived stage', async () => {
+    const s = await setup({
+      owner: async (c) => (await fx.ctx(c, c.agent)).membership.id,
+      value: null,
+    });
+    const agent = await fx.ctx(s.c, s.c.agent);
+    await fx.query(`UPDATE app.memberships SET status = 'suspended' WHERE id = $1`, [
+      agent.membership.id,
+    ]);
+    const conversationId = await inbound(s.c, waId(), 'price?');
+    const run = await onlyRun(conversationId);
+    expect((await drive(s.c, conversationId, run.id)).outcome).toBe('ended');
+    expect(await dealsOf(s.c.tenant.id)).toEqual([
+      expect.objectContaining({ owner_membership_id: null, value_minor: null }),
+    ]);
+    expect((await stepLog(run.id)).find((st) => st.node_id === 'deal')).toMatchObject({
+      outcome: 'created',
+      detail: 'deal_owner_unavailable',
+    });
+
+    // The pipeline is archived: another customer's run creates nothing and goes on.
+    await fx.query(`UPDATE app.crm_pipelines SET archived_at = now() WHERE id = $1`, [
+      s.pipelineId,
+    ]);
+    const other = await inbound(s.c, waId(), 'price please');
+    const otherRun = await onlyRun(other);
+    expect((await drive(s.c, other, otherRun.id)).outcome).toBe('ended');
+    expect(await dealsOf(s.c.tenant.id)).toHaveLength(1);
+    expect((await stepLog(otherRun.id)).find((st) => st.node_id === 'deal')).toMatchObject({
+      outcome: 'skipped',
+      detail: 'deal_stage_unavailable',
+    });
+  });
+
+  it('is published only with an active stage, a value in the pipeline’s currency and an owner who can use the CRM', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const marketer = await fx.ctx(c, c.marketer);
+    const { id: pipelineId } = await crm().createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New'],
+    });
+    const [pipeline] = (await crm().listPipelines(owner)).filter((p) => p.id === pipelineId);
+    const stageId = pipeline!.stages[0]!.id;
+    const graph = (deal: Record<string, unknown>) => ({
+      version: 1,
+      start: 'deal',
+      nodes: [
+        {
+          id: 'deal',
+          type: 'create_deal',
+          title: 'Deal',
+          pipelineId,
+          stageId,
+          value: null,
+          ownerMembershipId: null,
+          next: null,
+          ...deal,
+        },
+      ],
+    });
+    await expectAppError(
+      publish(owner, 'Leads', keyword('price'), graph({ value: '12.345' })),
+      'precondition_failed',
+      /amount in INR/,
+    );
+    await expectAppError(
+      publish(
+        owner,
+        'Leads',
+        keyword('price'),
+        graph({ ownerMembershipId: marketer.membership.id }),
+      ),
+      'precondition_failed',
+      /own the deal/,
+    );
+    await fx.query(`UPDATE app.crm_stages SET archived_at = now() WHERE id = $1`, [stageId]);
+    await expectAppError(
+      publish(owner, 'Leads', keyword('price'), graph({})),
+      'precondition_failed',
+      /active stage of an active pipeline/,
     );
   });
 });

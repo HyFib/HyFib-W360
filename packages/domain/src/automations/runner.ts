@@ -11,6 +11,9 @@ import {
   contactTags,
   contacts,
   conversations,
+  crmDeals,
+  crmPipelines,
+  crmStages,
   crmTasks,
   conversationTags,
   eq,
@@ -44,7 +47,13 @@ import {
   linkValuesProblem,
   sendSpecFor,
 } from '../templates/definition';
-import { RUN_BUDGETS, graphSchema, type AutomationGraph, type AutomationNode } from './graph';
+import {
+  RUN_BUDGETS,
+  dealValueMinor,
+  graphSchema,
+  type AutomationGraph,
+  type AutomationNode,
+} from './graph';
 import {
   FINISHED_HTTP_STATES,
   httpCallDetail,
@@ -733,6 +742,97 @@ async function applyTaskEffect(
   return null;
 }
 
+/**
+ * Creates the CRM deal a step asks for (ADR-245) for the run's contact and conversation, as the
+ * automation, and puts it on the contact's CRM timeline. Nothing is created (`skipped`, with a note
+ * for the step log) for an erased contact, a pipeline or stage that is archived or gone, a contact
+ * who already has an open deal in the pipeline, or a title whose placeholders filled in nothing. An
+ * owner who can no longer use the CRM, or a value that is not an amount in the pipeline's currency,
+ * is left out of the deal with a note. The contact is held for no key update, so two runs of the
+ * same contact (in two conversations) create one deal, one after the other.
+ */
+async function applyDealEffect(
+  tx: Tx,
+  run: AutomationRun,
+  effect: Extract<RunEffect, { kind: 'create_deal' }>,
+  now: Date,
+): Promise<{ skipped: boolean; notes: string[] }> {
+  const skip = (note: string) => ({ skipped: true, notes: [note] });
+  if (!effect.title) return skip('deal_title_empty');
+  const [contact] = await tx
+    .select({ erasedAt: contacts.erasedAt })
+    .from(contacts)
+    .where(and(eq(contacts.tenantId, run.tenantId), eq(contacts.id, run.contactId)))
+    .for('no key update');
+  if (!contact || contact.erasedAt) return skip('contact_erased');
+  const [pipeline] = await tx
+    .select({ archivedAt: crmPipelines.archivedAt, currency: crmPipelines.currency })
+    .from(crmPipelines)
+    .where(and(eq(crmPipelines.tenantId, run.tenantId), eq(crmPipelines.id, effect.pipelineId)))
+    .for('share');
+  const [stage] = await tx
+    .select({ archivedAt: crmStages.archivedAt })
+    .from(crmStages)
+    .where(
+      and(
+        eq(crmStages.tenantId, run.tenantId),
+        eq(crmStages.id, effect.stageId),
+        eq(crmStages.pipelineId, effect.pipelineId),
+      ),
+    );
+  if (!pipeline || pipeline.archivedAt || !stage || stage.archivedAt) {
+    return skip('deal_stage_unavailable');
+  }
+  const [open] = await tx
+    .select({ id: crmDeals.id })
+    .from(crmDeals)
+    .where(
+      and(
+        eq(crmDeals.tenantId, run.tenantId),
+        eq(crmDeals.contactId, run.contactId),
+        eq(crmDeals.pipelineId, effect.pipelineId),
+        eq(crmDeals.status, 'open'),
+      ),
+    )
+    .limit(1);
+  if (open) return skip('deal_already_open');
+  const notes: string[] = [];
+  let owner = effect.ownerMembershipId;
+  if (owner && !(await memberRefs(tx, run.tenantId, [owner])).get(owner)?.active) {
+    owner = null;
+    notes.push('deal_owner_unavailable');
+  }
+  let valueMinor = dealValueMinor(effect.value, pipeline.currency);
+  if (valueMinor === undefined) {
+    valueMinor = null;
+    notes.push('deal_value_invalid');
+  }
+  const id = uuidv7();
+  await tx.insert(crmDeals).values({
+    id,
+    tenantId: run.tenantId,
+    pipelineId: effect.pipelineId,
+    stageId: effect.stageId,
+    contactId: run.contactId,
+    conversationId: run.conversationId,
+    title: effect.title,
+    valueMinor,
+    ownerMembershipId: owner,
+    stageEnteredAt: now,
+    createdByAutomationId: run.automationId,
+  });
+  await addActivity(tx, {
+    tenantId: run.tenantId,
+    contactId: run.contactId,
+    dealId: id,
+    actorMembershipId: null,
+    kind: 'deal_created',
+    data: { stageId: effect.stageId, valueMinor, automationId: run.automationId, runId: run.id },
+    at: now,
+  });
+  return { skipped: false, notes };
+}
+
 type StepOutcome =
   | { kind: 'progress' }
   | { kind: 'waiting' }
@@ -949,7 +1049,7 @@ async function runStep(
     let messageId: string | null = null;
     const notes: string[] = [];
     let blocked: string | null = null;
-    // A task step whose task could not be created (ADR-244): the step log says so and why.
+    // A task or deal step that created nothing (ADR-244, ADR-245): the step log says so and why.
     let skipped = false;
     let handoff: { teamId: string | null } | null = null;
     for (const effect of result.effects) {
@@ -1006,6 +1106,10 @@ async function runStep(
           notes.push(note);
           skipped = true;
         }
+      } else if (effect.kind === 'create_deal') {
+        const deal = await applyDealEffect(tx, run, effect, now);
+        notes.push(...deal.notes);
+        skipped = deal.skipped;
       } else {
         const note = await applyContactEffect(tx, run, effect);
         if (note) notes.push(note);

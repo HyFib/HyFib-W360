@@ -274,6 +274,10 @@ Phase 4 rules (automations, P4-01):
   published and again when the step runs (otherwise the step is skipped and says why); it is about
   the run's contact only, in the company's scope, never for an erased contact, and is recorded as
   created by the automation, never by a member.
+- Deal steps (ADR-245): the same permission and member rules for the owner (a member who can no
+  longer use the CRM is left out); the deal is for the run's contact and conversation, in an active
+  stage of an active pipeline checked when publishing and again when the step runs, and is recorded
+  as created by the automation. A contact with an open deal in the pipeline gets no second one.
 
 Phase 4 rules (automation web requests, P4-02):
 

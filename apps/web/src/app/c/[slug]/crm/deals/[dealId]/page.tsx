@@ -243,7 +243,11 @@ export default async function DealPage({
               ) : null}
               <span className="text-xs text-muted-foreground">
                 Created {formatDateTime(deal.createdAt, tz)}
-                {deal.createdBy ? ` by ${deal.createdBy.name}` : ''}
+                {deal.createdBy
+                  ? ` by ${deal.createdBy.name}`
+                  : deal.createdByAutomation
+                    ? ' by an automation'
+                    : ''}
                 {deal.owner ? ` · owner ${deal.owner.name}` : ' · no owner'}
                 {deal.expectedCloseOn ? ` · expected to close ${deal.expectedCloseOn}` : ''}
               </span>

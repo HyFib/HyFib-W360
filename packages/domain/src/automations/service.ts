@@ -46,6 +46,7 @@ import { linkButtons, renderPlaceholders, sendSpecFor } from '../templates/defin
 import { parseInput } from '../validation';
 import { CSV_BOM, csvLine } from '../contacts/csv';
 import { crmMembers } from '../crm/common';
+import { loadPipelines } from '../crm/pipelines';
 import { RUN_CSV_COLUMNS, runCsvLine, type RunCsvRow } from './runs-csv';
 import {
   apiInputValues,
@@ -181,12 +182,22 @@ export interface AutomationDetail {
     teams: { id: string; name: string }[];
     /** Active members who can use the CRM, whom task steps may create tasks for (ADR-244). */
     crmMembers: { id: string; name: string }[];
+    /** Active pipelines with their currency and active stages, for deal steps (ADR-245). */
+    crmPipelines: AutomationPipelineOption[];
     fields: { key: string; label: string; type: string }[];
     /** Domains HTTP steps may call, and the secrets they may use (never their values). */
     allowedDomains: string[];
     secrets: { name: string; domain: string }[];
     allowInsecureHttp: boolean;
   };
+}
+
+/** An active pipeline a deal step may create deals in, with its active stages (ADR-245). */
+export interface AutomationPipelineOption {
+  id: string;
+  name: string;
+  currency: string;
+  stages: { id: string; name: string }[];
 }
 
 export interface AutomationTemplateOption extends TemplateReference {
@@ -435,6 +446,14 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         id: m.membershipId,
         name: m.name,
       })),
+      crmPipelines: (await loadPipelines(tx, tenantId, { includeArchived: false })).map(
+        (p): AutomationPipelineOption => ({
+          id: p.id,
+          name: p.name,
+          currency: p.currency,
+          stages: p.stages.filter((st) => !st.archived).map((st) => ({ id: st.id, name: st.name })),
+        }),
+      ),
       domains: domainRows.map((d) => d.domain),
       secrets: secretRows,
       templates: templateRows.map(templateOption),
@@ -454,6 +473,12 @@ export function createAutomationService(deps: AutomationServiceDeps) {
     return {
       teamIds: new Set(refs.teamRows.map((t) => t.id)),
       crmMemberIds: new Set(refs.crmMembers.map((m) => m.id)),
+      crmPipelines: new Map(
+        refs.crmPipelines.map((p) => [
+          p.id,
+          { currency: p.currency, stageIds: new Set(p.stages.map((st) => st.id)) },
+        ]),
+      ),
       fieldKeys: new Set(refs.fieldRows.map((f) => f.key)),
       allowedDomains: refs.domains,
       secrets: new Map(refs.secrets.map((r) => [r.name, r.domain])),
@@ -506,17 +531,21 @@ export function createAutomationService(deps: AutomationServiceDeps) {
   }
 
   /**
-   * Publishing or testing a graph that creates CRM tasks needs `crm.write`, as creating a task in
-   * the CRM does (ADR-244).
+   * Publishing or testing a graph that creates CRM tasks or deals needs `crm.write`, as creating
+   * them in the CRM does (ADR-244, ADR-245).
    */
-  function assertMayCreateTasks(
+  function assertMayChangeCrm(
     ctx: TenantContext,
     graph: AutomationGraph,
     action: 'publish' | 'test',
   ) {
-    if (can(ctx, 'crm.write') || !graph.nodes.some((n) => n.type === 'create_task')) return;
+    if (
+      can(ctx, 'crm.write') ||
+      !graph.nodes.some((n) => n.type === 'create_task' || n.type === 'create_deal')
+    )
+      return;
     throw forbidden(
-      `${action === 'publish' ? 'Publishing' : 'Testing'} an automation that creates CRM tasks needs the permission to edit the CRM.`,
+      `${action === 'publish' ? 'Publishing' : 'Testing'} an automation that creates CRM tasks or deals needs the permission to edit the CRM.`,
     );
   }
 
@@ -840,6 +869,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               templates: refs.templates,
               teams: teamRows,
               crmMembers: refs.crmMembers,
+              crmPipelines: refs.crmPipelines,
               fields: fieldRows,
               allowedDomains: refs.domains,
               secrets: refs.secrets,
@@ -1016,7 +1046,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         if (row.status === 'draft') await assertLiveAutomationAvailable(tx, ctx.tenant.id, row.id);
         const { trigger, graph } = await runnableDraft(tx, row);
         await assertMayUseTemplates(tx, ctx, graph, 'publish');
-        assertMayCreateTasks(ctx, graph, 'publish');
+        assertMayChangeCrm(ctx, graph, 'publish');
         const sha = definitionSha({ trigger, graph, channelAccountId: row.draftChannelAccountId });
         if (row.activeVersionId) {
           const [current] = await tx
@@ -1218,7 +1248,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           throw new AppError('precondition_failed', 'Restore the automation before testing it.');
         const { trigger, graph } = await runnableDraft(tx, row);
         await assertMayUseTemplates(tx, ctx, graph, 'test');
-        assertMayCreateTasks(ctx, graph, 'test');
+        assertMayChangeCrm(ctx, graph, 'test');
         let storeOrderId: string | null = null;
         if (trigger.type === 'store_event') {
           // The steps send the order's customer details: seeing store orders needs both.

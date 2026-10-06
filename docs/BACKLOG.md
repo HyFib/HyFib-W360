@@ -246,9 +246,13 @@ verification, app review, Embedded Signup configuration).
   create a CRM task built; their database and browser tests run only in CI]** (ADR-244, migrations
   0158 and 0159: a step creates a task about the run's contact for an active member who can use the
   CRM, recorded as created by the automation; a member who left is skipped and the run goes on).
-  **Remaining:** custom deal fields, products on deals, deal import, forecasts in Reports,
-  automation steps that create deals, CRM connectors (HubSpot, Salesforce, Zoho: integrations),
-  reminder emails through the production SMTP provider (release checklist).
+  **[Automation steps that create a CRM deal built; their database and browser tests run only in
+  CI]** (ADR-245, migrations 0160 and 0161: a deal for the run's contact and conversation in a stage
+  of an active pipeline, with an optional value in its currency and owner, unless the contact
+  already has an open deal there). **Remaining:** custom deal fields, products on deals, deal
+  import, forecasts in Reports, automation steps that move deals, CRM connectors (HubSpot,
+  Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
+  checklist).
 - **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad
   traffic yet_: click-to-chat links (a short link that counts clicks per link and company day
   without any visitor data and redirects to wa.me with a pre-filled message and an optional

@@ -574,6 +574,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    would replace the draft, so do not edit automations with task steps until the web rollout ends.
    Old servers list the tasks automations create as before (they never show who created a task).
 
+   Migration 0160 (ADR-245) does the same for deals (`app.crm_deals.created_by_automation_id`,
+   `created_by_membership_id` nullable, the creator check and the foreign key NOT VALID) and 0161
+   validates them. The same rollout rules apply to deal steps: workers first, and no editing of
+   automations with deal steps on old web servers. Until the web rollout ends, an old web server
+   shows a deal an automation created without saying who created it.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

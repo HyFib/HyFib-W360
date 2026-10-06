@@ -40,7 +40,12 @@ import { ClientButton, useHydrated } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
 import { AutomationDiagram } from './automation-diagram';
 import { AutomationSimulator } from './automation-simulator';
-import { NodeFields, type EditorTemplate, type NodeFieldOptions } from './node-fields';
+import {
+  NodeFields,
+  type EditorPipeline,
+  type EditorTemplate,
+  type NodeFieldOptions,
+} from './node-fields';
 
 /**
  * The automation builder: trigger, steps (a structured list with a generated diagram), live
@@ -136,6 +141,7 @@ function defaultNode(
   allowedDomains: readonly string[],
   template: EditorTemplate | undefined,
   crmMember: string | undefined,
+  pipeline: EditorPipeline | undefined,
 ): AutomationNode {
   const id = newNodeId(graph, type);
   switch (type) {
@@ -236,6 +242,18 @@ function defaultNode(
         dueInHours: 24,
         next: null,
       };
+    case 'create_deal':
+      return {
+        id,
+        type,
+        label: '',
+        title: 'Deal with {{name}}',
+        pipelineId: pipeline?.id ?? '',
+        stageId: pipeline?.stages[0]?.id ?? '',
+        value: null,
+        ownerMembershipId: null,
+        next: null,
+      };
     case 'handoff':
       return { id, type, label: '', teamId: null };
     case 'end':
@@ -252,6 +270,7 @@ function retarget(node: AutomationNode, target: string, value: string | null): A
     case 'update_contact':
     case 'update_conversation':
     case 'create_task':
+    case 'create_deal':
     case 'wait':
       return { ...node, next: t(node.next) };
     case 'ask_template':
@@ -303,6 +322,7 @@ export function AutomationEditor({
   templates,
   teams,
   crmMembers,
+  crmPipelines,
   fields,
   web,
 }: {
@@ -316,6 +336,8 @@ export function AutomationEditor({
   teams: { id: string; name: string }[];
   /** Active members who can use the CRM, whom task steps may create tasks for. */
   crmMembers: { id: string; name: string }[];
+  /** Active pipelines with their currency and active stages, for deal steps. */
+  crmPipelines: EditorPipeline[];
   fields: { key: string; label: string; type: string }[];
   /** What web request steps may use: allowed domains and secrets (names and domains only). */
   web: {
@@ -375,6 +397,12 @@ export function AutomationEditor({
     () => ({
       teamIds: new Set(teams.map((t) => t.id)),
       crmMemberIds: new Set(crmMembers.map((m) => m.id)),
+      crmPipelines: new Map(
+        crmPipelines.map((pl) => [
+          pl.id,
+          { currency: pl.currency, stageIds: new Set(pl.stages.map((st) => st.id)) },
+        ]),
+      ),
       fieldKeys: new Set(fields.map((f) => f.key)),
       allowedDomains: web.allowedDomains,
       secrets: new Map(web.secrets.map((s) => [s.name, s.domain])),
@@ -384,7 +412,17 @@ export function AutomationEditor({
       apiInputs: apiInputs ? new Set(apiInputs) : undefined,
       channelWhatsappAccountId,
     }),
-    [teams, crmMembers, fields, web, templates, storeEvent, apiInputs, channelWhatsappAccountId],
+    [
+      teams,
+      crmMembers,
+      crmPipelines,
+      fields,
+      web,
+      templates,
+      storeEvent,
+      apiInputs,
+      channelWhatsappAccountId,
+    ],
   );
   const parsedGraph = useMemo(() => parseGraph(graph), [graph]);
   const issues: GraphIssue[] = useMemo(() => {
@@ -436,6 +474,7 @@ export function AutomationEditor({
     steps: stepChoices,
     teams,
     crmMembers,
+    crmPipelines,
     fields,
     answers,
     allowedDomains: web.allowedDomains,
@@ -892,6 +931,7 @@ export function AutomationEditor({
                             web.allowedDomains,
                             usableTemplates[0],
                             crmMembers[0]?.id,
+                            crmPipelines[0],
                           ),
                         ],
                       })),
@@ -940,6 +980,7 @@ export function AutomationEditor({
             companyName={companyName}
             teams={teams}
             crmMembers={crmMembers}
+            crmPipelines={crmPipelines}
             templates={templates}
             storeEvent={storeEvent}
             apiInputs={apiInputs}

@@ -471,6 +471,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `create_task` effect with the rendered title; `applyTaskEffect` in the runner checks the contact
   and the member and inserts the task with `created_by_automation_id`, adding a `task_created`
   activity without an actor. A skipped task logs the step as `skipped`.
+- **Automations that create CRM deals** (ADR-245): `create_deal` steps (checked against the
+  company's active pipelines and stages, `crmPipelines`, and `dealValueMinor` for the value in the
+  pipeline's currency); `applyDealEffect` in the runner holds the contact for no key update,
+  re-checks the stage, skips a contact with an open deal in the pipeline, and inserts the deal with
+  `created_by_automation_id` and a `deal_created` activity without an actor.
 - **Read receipts and typing indicators** (`inbox/read-receipts.ts`, ADR-223): `markRead` in
   `messaging/inbox.ts` calls `queueReadReceipt` in its transaction; the composer calls
   `showTypingAction` at most every 20 seconds, which `showTyping` checks and queues; both sign a job

@@ -24,6 +24,14 @@ export interface StepChoice {
   label: string;
 }
 
+/** An active pipeline a deal step may use, with its currency and active stages. */
+export interface EditorPipeline {
+  id: string;
+  name: string;
+  currency: string;
+  stages: { id: string; name: string }[];
+}
+
 /** A company template as the builder sees it (from the latest copy synced from Meta). */
 export interface EditorTemplate {
   id: string;
@@ -48,6 +56,8 @@ export interface NodeFieldOptions {
   teams: { id: string; name: string }[];
   /** Active members who can use the CRM, whom task steps may create tasks for. */
   crmMembers: { id: string; name: string }[];
+  /** Active pipelines with their currency and active stages, for deal steps. */
+  crmPipelines: EditorPipeline[];
   fields: { key: string; label: string; type: string }[];
   /** Answer names saved by questions and web requests in this automation. */
   answers: string[];
@@ -788,6 +798,122 @@ export function NodeFields({
           />
         </div>
       );
+    case 'create_deal': {
+      const pipeline = options.crmPipelines.find((pl) => pl.id === node.pipelineId);
+      return (
+        <div className="grid gap-4">
+          <Field
+            id={`${p}-title`}
+            label="Deal"
+            description={`The deal for the contact, from this conversation. ${hintFor(options)}`}
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                value={node.title}
+                maxLength={AUTOMATION_LIMITS.dealTitleLength}
+                onChange={(e) => patch(node, { title: e.target.value })}
+              />
+            )}
+          </Field>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field
+              id={`${p}-pipeline`}
+              label="Pipeline"
+              description="No deal is created when the contact already has an open deal in it."
+            >
+              {(aria) => (
+                <Select
+                  {...aria}
+                  value={node.pipelineId}
+                  onChange={(e) => {
+                    const next = options.crmPipelines.find((pl) => pl.id === e.target.value);
+                    patch(node, {
+                      pipelineId: e.target.value,
+                      stageId: next?.stages[0]?.id ?? '',
+                    });
+                  }}
+                >
+                  {pipeline ? null : <option value={node.pipelineId}>Choose a pipeline</option>}
+                  {options.crmPipelines.map((pl) => (
+                    <option key={pl.id} value={pl.id}>
+                      {pl.name}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+            <Field id={`${p}-stage`} label="Stage">
+              {(aria) => (
+                <Select
+                  {...aria}
+                  value={node.stageId}
+                  onChange={(e) => patch(node, { stageId: e.target.value })}
+                >
+                  {pipeline?.stages.some((st) => st.id === node.stageId) ? null : (
+                    <option value={node.stageId}>Choose a stage</option>
+                  )}
+                  {(pipeline?.stages ?? []).map((st) => (
+                    <option key={st.id} value={st.id}>
+                      {st.name}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+            <Field
+              id={`${p}-value`}
+              label={pipeline ? `Value (${pipeline.currency})` : 'Value'}
+              description="Left empty, the deal has no value."
+            >
+              {(aria) => (
+                <Input
+                  {...aria}
+                  inputMode="decimal"
+                  value={node.value ?? ''}
+                  maxLength={AUTOMATION_LIMITS.dealValueLength}
+                  onChange={(e) => patch(node, { value: e.target.value || null })}
+                />
+              )}
+            </Field>
+            <Field
+              id={`${p}-owner`}
+              label="Owner"
+              description="If they can no longer use the CRM when the step runs, the deal has no owner."
+            >
+              {(aria) => (
+                <Select
+                  {...aria}
+                  value={node.ownerMembershipId ?? ''}
+                  onChange={(e) => patch(node, { ownerMembershipId: e.target.value || null })}
+                >
+                  <option value="">Nobody</option>
+                  {node.ownerMembershipId &&
+                  !options.crmMembers.some((m) => m.id === node.ownerMembershipId) ? (
+                    <option value={node.ownerMembershipId}>
+                      A member who can no longer use the CRM
+                    </option>
+                  ) : null}
+                  {options.crmMembers.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+          </div>
+          <NextSelect
+            id={`${p}-next`}
+            label="Then"
+            value={node.next}
+            self={node.id}
+            options={options}
+            onChange={(next) => patch(node, { next })}
+          />
+        </div>
+      );
+    }
     case 'wait':
       return (
         <div className="grid gap-4 sm:grid-cols-2">

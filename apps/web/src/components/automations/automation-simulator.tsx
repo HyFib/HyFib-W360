@@ -1,10 +1,12 @@
 'use client';
 import { useState } from 'react';
 import { Button, Checkbox, Field, Input, Textarea } from '@w360/ui';
+import { formatMinor } from '@w360/domain/crm-money';
 import {
   HTTP_WAIT_MINUTES,
   RUN_BUDGETS,
   advance,
+  dealValueMinor,
   httpHeaderText,
   initialRunState,
   normalizeTag,
@@ -16,7 +18,7 @@ import {
   type RunState,
 } from '@w360/domain/automation-model';
 import { ClientButton, ClientForm, useHydrated } from '@/components/client-form';
-import type { EditorTemplate } from './node-fields';
+import type { EditorPipeline, EditorTemplate } from './node-fields';
 
 /**
  * Tries the current (unsaved) steps in the browser with the interpreter the worker uses. Nothing
@@ -127,6 +129,7 @@ export function AutomationSimulator({
   companyName,
   teams,
   crmMembers,
+  crmPipelines,
   templates,
   storeEvent,
   apiInputs,
@@ -135,8 +138,10 @@ export function AutomationSimulator({
   graph: AutomationGraph | null;
   companyName: string;
   teams: { id: string; name: string }[];
-  /** Members task steps may create tasks for, to name them. */
+  /** Members task steps may create tasks for, and deal steps may make owners, to name them. */
   crmMembers: { id: string; name: string }[];
+  /** Pipelines deal steps may use, to name them and their stages. */
+  crmPipelines: EditorPipeline[];
   templates: EditorTemplate[];
   /** Started by order messages: the run reads a sample order. */
   storeEvent: boolean;
@@ -250,6 +255,23 @@ export function AutomationSimulator({
             text: effect.title
               ? `CRM task “${effect.title}” created for ${member?.name ?? 'a member'}${due}.`
               : 'No CRM task created: its title is empty after filling in placeholders.',
+          });
+          break;
+        }
+        case 'create_deal': {
+          const pipeline = crmPipelines.find((pl) => pl.id === effect.pipelineId);
+          const stage = pipeline?.stages.find((st) => st.id === effect.stageId);
+          const owner = crmMembers.find((m) => m.id === effect.ownerMembershipId);
+          const minor = pipeline ? dealValueMinor(effect.value, pipeline.currency) : null;
+          const worth =
+            pipeline && typeof minor === 'number'
+              ? `, worth ${formatMinor(minor, pipeline.currency)}`
+              : '';
+          out.push({
+            who: 'note',
+            text: effect.title
+              ? `CRM deal “${effect.title}” created in ${pipeline?.name ?? 'a pipeline'} (${stage?.name ?? 'a stage'})${worth}${owner ? `, owned by ${owner.name}` : ''}, unless the contact already has an open deal there.`
+              : 'No CRM deal created: its title is empty after filling in placeholders.',
           });
           break;
         }

@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-06 — Automation steps that create a CRM deal (P4-01, P4-04, H-012, ADR-245)
+
+Status: **Implemented; its database and browser tests run in CI only.** Automations could create
+tasks (ADR-244) but not deals. The local PostgreSQL is unavailable, so migrations 0160 and 0161 and
+the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0160 (`crm_deals.created_by_automation_id`, the creator check and the
+  foreign key, NOT VALID) and 0161 (validates them).
+- **Domain:** the `create_deal` step (graph, `dealValueMinor`, checks against `crmPipelines` and
+  `crmMemberIds`, the interpreter's effect), `applyDealEffect` in the runner, the CRM permission
+  check for task and deal steps, the company's pipelines among the editor's options, the deal page's
+  `createdByAutomation`, the export column.
+- **Web:** the step in the automation editor (title, pipeline, stage, value, owner), its line in the
+  simulator, the run page's reasons, and "by an automation" on the deal page.
+- **Tests:**
+  - Unit (5 new in `deal-step.test.ts`).
+  - Integration (3 new in `automations.test.ts`: the deal and its activity and page, one open deal
+    per pipeline, an owner left out, an archived pipeline skipped, publishing refused for a stage, a
+    value or an owner). Written for CI; not run here.
+  - E2e (`automations.spec.ts`: the task step's automation also creates a deal, checked on the board
+    and the deal page). Written for CI; not run here.
+- **Docs:** ADR-245; ARCHITECTURE; SECURITY; THREAT-MODEL T221; DATA-RETENTION; DEPLOYMENT; BACKLOG
+  P4-04; feature matrix H-012.
+- **Mutation checks:** 17/17 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                                     | Result                                                          |
+| ----------------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`          | clean                                                           |
+| `pnpm test` (unit)                                          | 1055 passed (112 files)                                         |
+| `pnpm test:integration`, `pnpm test:e2e`, `pnpm db:migrate` | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                                | passed                                                          |
+| Mutation checks                                             | 17/17 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes                       | no leaks found                                                  |
+
+### Known gaps
+
+- No step that moves a deal, no expected close date from a step, no choice to update an open deal
+  instead of skipping.
+
 ## 2026-10-06 — Automation steps that create a CRM task (P4-01, P4-04, H-012, ADR-244)
 
 Status: **Implemented; its database and browser tests run in CI only.** Automations could not create

@@ -103,6 +103,8 @@ export interface DealDetail extends DealCard {
   closedBy: MemberRef | null;
   createdAt: string;
   createdBy: MemberRef | null;
+  /** The deal was created by an automation's run, not a member (ADR-245). */
+  createdByAutomation: boolean;
   /** Only for members who can see the conversation. */
   conversationId: string | null;
   tasks: { open: TaskItem[]; done: TaskItem[] };
@@ -735,7 +737,10 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
               ? (people.get(row.deal.closedByMembershipId) ?? null)
               : null,
             createdAt: row.deal.createdAt.toISOString(),
-            createdBy: people.get(row.deal.createdByMembershipId) ?? null,
+            createdBy: row.deal.createdByMembershipId
+              ? (people.get(row.deal.createdByMembershipId) ?? null)
+              : null,
+            createdByAutomation: row.deal.createdByAutomationId !== null,
             conversationId: visible ? row.deal.conversationId : null,
             tasks: {
               open: await tasksWhere(tx, ctx.tenant.id, { dealId: id, status: 'open' }, ctx),

@@ -55,7 +55,10 @@ export const crmDeals = appSchema.table('crm_deals', {
   closedAt: tz('closed_at'),
   closedByMembershipId: uuid('closed_by_membership_id'),
   version: integer('version').notNull().default(1),
-  createdByMembershipId: uuid('created_by_membership_id').notNull(),
+  /** The member who created the deal, or null when an automation did (migration 0160, ADR-245). */
+  createdByMembershipId: uuid('created_by_membership_id'),
+  /** The automation whose run created the deal (ADR-245); exactly one creator is set. */
+  createdByAutomationId: uuid('created_by_automation_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
