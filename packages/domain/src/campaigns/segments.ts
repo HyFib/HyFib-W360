@@ -9,6 +9,7 @@ import {
   contacts,
   eq,
   isNull,
+  isUniqueViolation,
   segments,
   sql,
   type ContactFieldType,
@@ -372,6 +373,18 @@ export async function parseSegmentDefinition(
   return def;
 }
 
+/** A second segment, not archived, with the same name whatever its case (`segments_name_uq`). */
+export const SEGMENT_NAME_TAKEN = 'Another segment already has this name.';
+
+/** The refusal of a segment's name another segment has (ADR-207); any other error as it is. */
+export function segmentNameRefusal(error: unknown): unknown {
+  return isUniqueViolation(error, 'segments_name_uq')
+    ? new AppError('conflict', SEGMENT_NAME_TAKEN, {
+        issues: [{ path: 'name', message: SEGMENT_NAME_TAKEN }],
+      })
+    : error;
+}
+
 export const saveSegmentSchema = z.object({
   name: z.string().trim().min(1, 'Enter a name').max(80),
   definition: z.unknown(),
@@ -480,74 +493,82 @@ export function createSegmentsService(deps: { db: Database; clock: Clock }) {
     async createSegment(ctx: TenantContext, input: unknown, meta: RequestMeta) {
       assertCan(ctx, 'campaigns.write');
       const data = parseInput(saveSegmentSchema, input);
-      return db.run(ctx.scope, async (tx) => {
-        const def = await parseSegmentDefinition(tx, ctx.tenant.id, data.definition);
-        const id = uuidv7();
-        await tx.insert(segments).values({
-          id,
-          tenantId: ctx.tenant.id,
-          name: data.name,
-          definition: def,
-          createdByUserId: ctx.user.id,
-          updatedByUserId: ctx.user.id,
+      try {
+        return await db.run(ctx.scope, async (tx) => {
+          const def = await parseSegmentDefinition(tx, ctx.tenant.id, data.definition);
+          const id = uuidv7();
+          await tx.insert(segments).values({
+            id,
+            tenantId: ctx.tenant.id,
+            name: data.name,
+            definition: def,
+            createdByUserId: ctx.user.id,
+            updatedByUserId: ctx.user.id,
+          });
+          await recordAudit(
+            tx,
+            ctx,
+            {
+              action: 'segment.created',
+              subjectType: 'segment',
+              subjectId: id,
+              metadata: { conditions: def.conditions.length },
+            },
+            meta,
+          );
+          return { id };
         });
-        await recordAudit(
-          tx,
-          ctx,
-          {
-            action: 'segment.created',
-            subjectType: 'segment',
-            subjectId: id,
-            metadata: { conditions: def.conditions.length },
-          },
-          meta,
-        );
-        return { id };
-      });
+      } catch (error) {
+        throw segmentNameRefusal(error);
+      }
     },
 
     async updateSegment(ctx: TenantContext, segmentId: string, input: unknown, meta: RequestMeta) {
       assertCan(ctx, 'campaigns.write');
       if (!z.uuid().safeParse(segmentId).success) throw notFound('Segment');
       const data = parseInput(updateSegmentSchema, input);
-      return db.run(ctx.scope, async (tx) => {
-        const def = await parseSegmentDefinition(tx, ctx.tenant.id, data.definition);
-        const [row] = await tx
-          .update(segments)
-          .set({
-            name: data.name,
-            definition: def,
-            version: sql`${segments.version} + 1`,
-            updatedByUserId: ctx.user.id,
-          })
-          .where(
-            and(
-              eq(segments.tenantId, ctx.tenant.id),
-              eq(segments.id, segmentId),
-              isNull(segments.archivedAt),
-              eq(segments.version, data.expectedVersion),
-            ),
-          )
-          .returning({ id: segments.id });
-        if (!row) {
-          throw new AppError(
-            'conflict',
-            'Someone else changed this segment. Reload the page to see their version.',
+      try {
+        return await db.run(ctx.scope, async (tx) => {
+          const def = await parseSegmentDefinition(tx, ctx.tenant.id, data.definition);
+          const [row] = await tx
+            .update(segments)
+            .set({
+              name: data.name,
+              definition: def,
+              version: sql`${segments.version} + 1`,
+              updatedByUserId: ctx.user.id,
+            })
+            .where(
+              and(
+                eq(segments.tenantId, ctx.tenant.id),
+                eq(segments.id, segmentId),
+                isNull(segments.archivedAt),
+                eq(segments.version, data.expectedVersion),
+              ),
+            )
+            .returning({ id: segments.id });
+          if (!row) {
+            throw new AppError(
+              'conflict',
+              'Someone else changed this segment. Reload the page to see their version.',
+            );
+          }
+          await recordAudit(
+            tx,
+            ctx,
+            {
+              action: 'segment.updated',
+              subjectType: 'segment',
+              subjectId: segmentId,
+              metadata: { conditions: def.conditions.length },
+            },
+            meta,
           );
-        }
-        await recordAudit(
-          tx,
-          ctx,
-          {
-            action: 'segment.updated',
-            subjectType: 'segment',
-            subjectId: segmentId,
-            metadata: { conditions: def.conditions.length },
-          },
-          meta,
-        );
-        return { id: segmentId };
-      });
+          return { id: segmentId };
+        });
+      } catch (error) {
+        throw segmentNameRefusal(error);
+      }
     },
 
     /** Archived segments disappear from lists; campaigns that used them keep their snapshots. */

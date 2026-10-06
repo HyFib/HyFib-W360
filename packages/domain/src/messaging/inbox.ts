@@ -4,6 +4,7 @@ import {
   and,
   apiKeys,
   asc,
+  campaigns,
   channelAccounts,
   contactIdentities,
   contacts,
@@ -37,6 +38,7 @@ import { endRunForHuman } from '../automations/runs';
 import { automationStateForConversation } from '../automations/service';
 import { latestConversationSource } from '../growth/sources';
 import { latestCsatSurvey, queueCsatSurvey } from '../inbox/csat';
+import { MENTION_EMAIL_DELAY_MS, scheduleMentionEmail } from '../inbox/mention-emails';
 import {
   INBOX_WORKER_ROLES,
   lockAssignableMember,
@@ -51,6 +53,7 @@ import { emitTenantEvent } from './events';
 import { messageSnippet } from './message-text';
 import { NOTE_MAX_LENGTH } from './notes';
 import { SERVICE_WINDOW_MS, canSeeConversation } from './outbound';
+import { transcriptEntry, transcriptHeader } from './transcript';
 import { answeredJoin, answeredMessages } from './reply-context';
 
 /**
@@ -195,7 +198,10 @@ function memberCanSee(rolesColumn: SQL, membershipIdColumn: SQL, assigneeColumn:
 export interface InboxDeps {
   db: Database;
   clock: Clock;
-  /** Needed to send CSAT surveys when a company turns them on. */
+  /**
+   * Needed to send CSAT surveys when a company turns them on, and to email members mentioned in a
+   * note who have not opened it (ADR-211).
+   */
   jobs?: JobQueue;
   signer?: JobSigner;
 }
@@ -204,6 +210,7 @@ export function createInboxService(deps: InboxDeps) {
   const { db, clock } = deps;
   const csatDeps =
     deps.jobs && deps.signer ? { jobs: deps.jobs, signer: deps.signer, clock } : null;
+  const mentionDeps = deps.jobs && deps.signer ? { jobs: deps.jobs, signer: deps.signer } : null;
 
   function visibilityFilter(ctx: TenantContext): SQL | undefined {
     if (can(ctx, 'inbox.read_all')) return undefined;
@@ -683,6 +690,151 @@ export function createInboxService(deps: InboxDeps) {
       );
     },
 
+    /**
+     * Streams a conversation's transcript as plain text (ADR-212), oldest message first, for a
+     * member with `inbox.export` who can see the conversation. The check and the audit entry come
+     * before the first byte, so a refused download is a 403 or 404, never a partial file.
+     */
+    async *exportTranscript(
+      ctx: TenantContext,
+      conversationId: string,
+      meta: RequestMeta = {},
+    ): AsyncGenerator<string> {
+      assertCan(ctx, 'inbox.export');
+      if (!z.uuid().safeParse(conversationId).success) throw notFound('Conversation');
+      const conv = await db.run(ctx.scope, async (tx) => {
+        const [row] = await tx
+          .select({
+            assignedMembershipId: conversations.assignedMembershipId,
+            contactName: contacts.displayName,
+            contactPhone: contacts.phoneE164,
+            number: channelAccounts.displayPhoneNumber,
+          })
+          .from(conversations)
+          .innerJoin(
+            contacts,
+            and(
+              eq(contacts.tenantId, conversations.tenantId),
+              eq(contacts.id, conversations.contactId),
+            ),
+          )
+          .innerJoin(
+            channelAccounts,
+            and(
+              eq(channelAccounts.tenantId, conversations.tenantId),
+              eq(channelAccounts.id, conversations.channelAccountId),
+            ),
+          )
+          .where(
+            and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.id, conversationId)),
+          );
+        if (!row || !canSeeConversation(ctx, row.assignedMembershipId))
+          throw notFound('Conversation');
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'conversation.transcript_exported',
+            subjectType: 'conversation',
+            subjectId: conversationId,
+          },
+          meta,
+        );
+        return row;
+      });
+      const timeZone = ctx.tenant.timezone;
+      yield transcriptHeader({
+        contactName: conv.contactName,
+        contactPhone: conv.contactPhone,
+        number: conv.number,
+        companyName: ctx.tenant.name,
+        timeZone,
+        downloadedBy: ctx.user.name,
+        downloadedAt: clock.now(),
+      });
+      /** The next 500 messages after `cursor`, oldest first. */
+      const page = (cursor: { at: string; id: string } | null) =>
+        db.run(
+          ctx.scope,
+          (tx) =>
+            tx
+              .select({
+                id: messages.id,
+                direction: messages.direction,
+                type: messages.type,
+                content: messages.content,
+                status: messages.status,
+                errorTitle: messages.errorTitle,
+                senderType: messages.senderType,
+                memberName: users.name,
+                apiKeyName: apiKeys.name,
+                campaignName: campaigns.name,
+                createdAt: messages.createdAt,
+                providerTimestamp: messages.providerTimestamp,
+                cursorAt: exactTimestamp(messages.createdAt),
+              })
+              .from(messages)
+              .leftJoin(
+                memberships,
+                and(
+                  eq(memberships.tenantId, messages.tenantId),
+                  eq(memberships.id, messages.senderMembershipId),
+                ),
+              )
+              .leftJoin(users, eq(users.id, memberships.userId))
+              .leftJoin(
+                apiKeys,
+                and(eq(apiKeys.tenantId, messages.tenantId), eq(apiKeys.id, messages.apiKeyId)),
+              )
+              .leftJoin(
+                campaigns,
+                and(
+                  eq(campaigns.tenantId, messages.tenantId),
+                  eq(campaigns.id, messages.campaignId),
+                ),
+              )
+              .where(
+                and(
+                  eq(messages.tenantId, ctx.tenant.id),
+                  eq(messages.conversationId, conversationId),
+                  cursor
+                    ? sql`(${messages.createdAt}, ${messages.id}) > (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
+                    : undefined,
+                ),
+              )
+              .orderBy(asc(messages.createdAt), asc(messages.id))
+              .limit(500),
+          { accessMode: 'read only' },
+        );
+      let after: { at: string; id: string } | null = null;
+      for (;;) {
+        const rows = await page(after);
+        const last = rows.at(-1);
+        if (!last) break;
+        yield rows
+          .map((m) =>
+            transcriptEntry(
+              {
+                direction: m.direction,
+                type: m.type,
+                content: m.content,
+                status: m.status,
+                errorTitle: m.errorTitle,
+                senderType: m.senderType,
+                memberName: m.memberName,
+                apiKeyName: m.apiKeyName,
+                campaignName: m.campaignName,
+                at: m.providerTimestamp ?? m.createdAt,
+              },
+              conv.contactName,
+              timeZone,
+            ),
+          )
+          .join('');
+        after = { at: last.cursorAt, id: last.id };
+      }
+    },
+
     async assign(ctx: TenantContext, input: unknown) {
       const data = parse(assignSchema, input);
       await withConversation(ctx, data.conversationId, async (tx, current) => {
@@ -825,7 +977,10 @@ export function createInboxService(deps: InboxDeps) {
       });
     },
 
-    /** Adds an internal note; mentioned members are notified and must be able to see the thread. */
+    /**
+     * Adds an internal note; mentioned members are notified and must be able to see the thread.
+     * Those who have not opened it a while later are emailed (ADR-211).
+     */
     async addNote(ctx: TenantContext, input: unknown) {
       assertCan(ctx, 'inbox.reply');
       const data = parse(noteSchema, input);
@@ -863,16 +1018,28 @@ export function createInboxService(deps: InboxDeps) {
           body: data.body,
         });
         if (mentionIds.length) {
-          await tx.insert(noteMentions).values(
-            mentionIds.map((membershipId) => ({
-              id: uuidv7(),
-              tenantId: ctx.tenant.id,
-              noteId,
-              membershipId,
-              // Mentioning yourself needs no notification.
-              readAt: membershipId === ctx.membership.id ? clock.now() : null,
-            })),
-          );
+          const now = clock.now();
+          const rows = mentionIds.map((membershipId) => ({
+            id: uuidv7(),
+            tenantId: ctx.tenant.id,
+            noteId,
+            membershipId,
+            // Mentioning yourself needs no notification.
+            readAt: membershipId === ctx.membership.id ? now : null,
+          }));
+          await tx.insert(noteMentions).values(rows);
+          const notified = rows.filter((row) => row.readAt === null);
+          if (notified.length) {
+            if (!mentionDeps) throw new Error('Mention emails need the job queue');
+            const at = new Date(now.getTime() + MENTION_EMAIL_DELAY_MS);
+            for (const row of notified) {
+              await scheduleMentionEmail(mentionDeps, tx, {
+                tenantId: ctx.tenant.id,
+                mentionId: row.id,
+                at,
+              });
+            }
+          }
         }
         await emitTenantEvent(tx, ctx.tenant.id, {
           type: mentionIds.length ? 'conversation.mention' : 'conversation.note',

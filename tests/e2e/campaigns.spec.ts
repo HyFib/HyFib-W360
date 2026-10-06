@@ -8,7 +8,7 @@ import {
   standInRequests,
   statusUpdate,
 } from './messaging-support';
-import { signUpAndVerify, uniqueEmail } from './support';
+import { firstLink, signUpAndVerify, uniqueEmail, waitForEmailContaining } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
 const standIn = `http://127.0.0.1:${process.env.E2E_GRAPH_PORT}`;
@@ -144,6 +144,13 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
       timeout: 1_000,
     });
   }).toPass({ timeout: 30_000 });
+  // The owner, whose authority it sent under, is emailed that it finished (ADR-214).
+  const finishedMail = await waitForEmailContaining(
+    email,
+    'finished sending',
+    'It handed 1 message to WhatsApp and skipped 1 of the 2 contacts in its audience',
+  );
+  expect(finishedMail).toContain(`/c/${slug}/campaigns/`);
 
   // Per-recipient outcomes and a formula-safe export.
   await page.getByRole('link', { name: 'Recipients' }).click();
@@ -373,7 +380,7 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
   // reads campaigns gets no settings.
   await page.goto(`/c/${slug}/settings/api-keys`);
   await page.getByLabel('Name', { exact: true }).fill('Campaign drafts');
-  await page.getByRole('checkbox', { name: /Create and edit campaign drafts/ }).check();
+  await page.getByRole('checkbox', { name: /Create, edit and submit campaign drafts/ }).check();
   await page.getByRole('checkbox', { name: /Read campaigns/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const draftField = page.getByLabel('API key', { exact: true });
@@ -489,4 +496,94 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
   await page.reload();
   await expect(page.getByText('Cancelled', { exact: true }).first()).toBeVisible();
   await expect(page.getByRole('listitem').filter({ hasText: byDrafts })).toHaveCount(3);
+
+  // The key submits a draft set to start in a month (ADR-202): it waits for a member's approval,
+  // though members' own campaigns start at once here; a key that only reads campaigns cannot, and a
+  // retry answers it as it is. The page names the key, and once the owner approves it, it is
+  // scheduled under the owner's authority; the stopping key then cancels it.
+  const inAMonth = new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 16);
+  const launchCreated = await request.post('/api/v1/campaigns', {
+    headers: { ...draftAuth, 'Idempotency-Key': randomUUID() },
+    data: {
+      name: 'Winter launch',
+      channelId: spring.channel.id,
+      templateId: spring.templateId,
+      variables: { body: [{ source: 'name', fallback: 'there' }] },
+      audience: { conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
+      schedule: { kind: 'later', local: inAMonth },
+    },
+  });
+  expect(launchCreated.status()).toBe(201);
+  const launch = ((await launchCreated.json()) as { data: { id: string; version: number } }).data;
+  const submitLaunch = (headers: Record<string, string>) =>
+    request.post(`/api/v1/campaigns/${launch.id}/submit`, {
+      headers,
+      data: { expectedVersion: launch.version },
+    });
+  expect((await submitLaunch(auth)).status()).toBe(403);
+  for (let i = 0; i < 2; i += 1) {
+    const submitted = await submitLaunch(draftAuth);
+    expect(submitted.status()).toBe(200);
+    expect(((await submitted.json()) as { data: unknown }).data).toMatchObject({
+      id: launch.id,
+      status: 'pending_approval',
+      // The same audience as the draft reviewed above, taken now.
+      audienceCount: review.audience.total,
+      skippedCount: review.audience.total - review.audience.eligible,
+    });
+  }
+  // The key takes its submission back (ADR-203), a draft at a new version, and submits it again
+  // from that version.
+  const withdrawn = await request.post(`/api/v1/campaigns/${launch.id}/withdraw`, {
+    headers: draftAuth,
+  });
+  expect(withdrawn.status()).toBe(200);
+  expect(((await withdrawn.json()) as { data: unknown }).data).toMatchObject({
+    id: launch.id,
+    status: 'draft',
+    audienceCount: 0,
+  });
+  const resubmitted = await request.post(`/api/v1/campaigns/${launch.id}/submit`, {
+    headers: draftAuth,
+    data: { expectedVersion: launch.version + 2 },
+  });
+  expect(resubmitted.status()).toBe(200);
+  // The owner, who approves and sends campaigns, is emailed each submission (ADR-204), with a link
+  // to the campaign's page.
+  const approvalMail = await waitForEmailContaining(
+    email,
+    'Campaign “Winter launch” waits for your approval',
+    'The API key “Campaign drafts” submitted the campaign “Winter launch”',
+    60_000,
+  );
+  expect(approvalMail).toContain(
+    `It would be sent to ${review.audience.eligible} of the ${review.audience.total}`,
+  );
+  expect(approvalMail).toContain('Approving it needs permission to send campaigns');
+  // Until when it can be approved: the end of its sending period, a day after its start (ADR-209).
+  expect(approvalMail).toContain('It can be approved until ');
+  const reviewLink = firstLink(approvalMail);
+  expect(new URL(reviewLink).pathname).toBe(`/c/${slug}/campaigns/${launch.id}`);
+  await page.goto(reviewLink);
+  await expect(
+    page.getByText('Submitted through the API by the key “Campaign drafts”'),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/It can be approved until .*, when its sending period ends\./),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('listitem').filter({ hasText: 'Submitted' }).filter({ hasText: byDrafts }),
+  ).toHaveCount(2);
+  await expect(
+    page.getByRole('listitem').filter({ hasText: 'Withdrawn' }).filter({ hasText: byDrafts }),
+  ).toHaveCount(1);
+  await page.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByText('Scheduled', { exact: true }).first()).toBeVisible();
+  await expect(
+    page.getByText('Sends under the authority of', { exact: true }).locator('..'),
+  ).toContainText('Cam Campaigns');
+  const launchCanceled = await request.post(`/api/v1/campaigns/${launch.id}/cancel`, {
+    headers: stopAuth,
+  });
+  expect(launchCanceled.status()).toBe(200);
 });

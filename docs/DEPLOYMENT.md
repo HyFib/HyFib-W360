@@ -370,6 +370,81 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-194 has no migration: until the web rollout ends, an old web server refuses media in
    `POST /messages` with 422, as before.
 
+   ADR-195 has no migration: until the web rollout ends, an old web server refuses locations in
+   `POST /messages` with 422, as before.
+
+   ADR-196 has no migration: until the web rollout ends, an old web server answers messages without
+   `contacts`, and until the worker rollout ends, an old worker posts `message.received` without it.
+
+   ADR-197 has no migration: until the web rollout ends, an old web server refuses contact cards in
+   `POST /messages` with 422, as before, and shows the scope's old label.
+
+   ADR-198 has no migration: until the web rollout ends, an old web server refuses stickers in
+   `POST /messages` with 422, as before.
+
+   Migration 0139 (ADR-199) creates `ops.quarantine_acknowledgements` (empty) and
+   `ops.platform_acknowledge_quarantine_entry`. Workers are not involved. Web servers of this
+   release need it, as the Integrations tab reads the table; web servers from before it show no
+   acknowledgements.
+
+   ADR-200 has no migration: until the web rollout ends, an old web server's export gives only the
+   rows its tab shows.
+
+   ADR-201 has no migration: until the web rollout ends, an old web server neither lists templates
+   with a photo, video or document header in `GET /templates` nor sends them, refusing `headerMedia`
+   with 422.
+
+   Migrations 0140 and 0141 (ADR-202) add `app.campaigns.submitted_by_api_key_id` with its check and
+   foreign key NOT VALID, then validate them; campaigns stay writable throughout. Web servers of
+   this release need 0140. Until the web rollout ends, an old web server answers
+   `POST /campaigns/{id}/submit` with 404, says a member submitted a key's submission, and fails
+   with an error when a member approves one: approve such campaigns once the rollout ends.
+
+   ADR-203 has no migration: until the web rollout ends, an old web server answers
+   `POST /campaigns/{id}/withdraw` with 404.
+
+   ADR-204 has no migration: until the web rollout ends, a submission an old web server takes emails
+   nobody, and approvers find it on the Campaigns page as before.
+
+   ADR-205 has no migration: until the web rollout ends, an approval, a rejection or a withdrawal an
+   old web server takes emails nobody.
+
+   ADR-206 has no migration: until the web rollout ends, an old web server answers `GET /segments`
+   and `GET /segments/{id}` with 404.
+
+   ADR-207 has no migration: until the web rollout ends, an old web server answers `POST /segments`
+   and `PATCH` and `DELETE /segments/{id}` with 404, and gives members the generic message for a
+   segment name another segment has.
+
+   ADR-208 has no migration: until the web rollout ends, an old web server answers
+   `GET /segments/{id}/contacts` with 404.
+
+   ADR-209 has no migration: until the web rollout ends, an old web server sends approval emails and
+   shows waiting campaigns without the time they can be approved until.
+
+   ADR-210 has no migration: until the worker rollout ends, an old worker pauses campaigns without
+   emailing anyone.
+
+   ADR-211 has no SQL migration but adds the `note.mention` queue, which the migration job creates:
+   run it before the web rollout, as a web server of this release queues a job whenever a note
+   mentions another member, and queueing to a missing queue fails the note. Workers roll out first,
+   so the jobs find a worker of this release.
+
+   ADR-212 has no migration: until the web rollout ends, an old web server shows no "Download
+   transcript" link and answers its address with 404.
+
+   ADR-213 has no migration: until the web rollout ends, an old web server shows the contacts page
+   without the bulk tag form.
+
+   ADR-214 has no migration: until the worker rollout ends, an old worker completes campaigns
+   without emailing anyone.
+
+   Migration 0142 (ADR-215) adds `app.memberships.email_opt_outs` with an empty default and a check
+   (memberships is small, so the check is validated at once) and creates
+   `app.set_own_email_opt_outs`, owned by `w360_definer` and executable by the runtime role only.
+   Old servers ignore the column: until the rollout ends, an old web server shows no Notifications
+   tab and old workers and web servers email members who turned a kind off.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

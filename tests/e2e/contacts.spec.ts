@@ -72,6 +72,14 @@ test('an owner adds a contact, records consent and tags, imports a CSV and expor
   expect(csv).toContain(`"'=HYPERLINK(""http://evil.test"")"`);
   expect(csv).toContain('+919876543210,Asha Rao');
 
+  // Every contact a filter matches gets a tag at once (ADR-213).
+  await page.goto(`/c/${slug}/contacts?q=Bina`);
+  await page.getByLabel('Tag for the 1 contact shown by these filters').fill('Wholesale');
+  await page.getByRole('button', { name: 'Add to 1 contact' }).click();
+  await expect(page.getByText('Added “wholesale” to 1 contact.')).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'gold, wholesale' })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
   // Consent keywords are company settings.
   await page.goto(`/c/${slug}/settings/messaging`);
   await page.getByLabel('Stop all messages').fill('stop, band karo');

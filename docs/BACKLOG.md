@@ -62,8 +62,11 @@ verification, app review, Embedded Signup configuration).
 
 - **P3-01 Contacts & CRM fields** — _implemented (2026-09-26)_: custom fields, tags, search and
   filters, import preview/mapping/row errors, one contact per number (dedupe across manual, import
-  and inbound), formula-safe export, erasure; saved segments (P3-04). **Remaining:** safe merge
-  (H-019), role-based number masking (W-044), bulk tag edits.
+  and inbound), formula-safe export, erasure; saved segments (P3-04). **[Bulk tag edits built; their
+  database and browser tests run only in CI]** (ADR-213: one tag added to or removed from up to
+  10,000 contacts the page's filters match, refused if the matches changed since the member saw
+  them; no migration). **Remaining:** safe merge (H-019), role-based number masking (W-044), bulk
+  edits of other fields.
 - **P3-02 Consent & suppression** — _implemented (2026-09-26)_: consent events with provenance,
   opt-out/opt-in keywords, Meta 131050 opt-outs, suppression list, send-time enforcement (race test
   with a queued template, and with campaigns). **Remaining:** review Meta's
@@ -71,7 +74,8 @@ verification, app review, Embedded Signup configuration).
 - **P3-03 Templates** — _implemented (2026-09-26), not verified against Meta_: drafts, validation,
   write-ahead submission with lost-response reconciliation, Graph listing sync (webhook-triggered
   and periodic), deletion, status history, template sends from contacts and the inbox.
-  **Remaining:** media headers (Resumable Upload + media storage), URL buttons with variables (the
+  **Remaining:** creating media headers (Resumable Upload + media storage) and sending them outside
+  the API (which sends them with a link since ADR-201), URL buttons with variables (the
   example format must be confirmed), named parameters, authentication/OTP, carousel, LTO, copy-code
   and catalog templates, editing approved templates (`POST /{template-id}`), template library
   (W-070), and a sandbox run with a real WABA.
@@ -84,10 +88,16 @@ verification, app review, Embedded Signup configuration).
   results with denominators, CSV export. Local 10,000-recipient run: snapshot 0.6 s, all recipients
   queued in 21 ticks. Segments refuse dates that do not exist (ADR-117; a creation day of 30
   February used to fail the preview, the segment page and a campaign's audience), and compare
-  contacts' names (ADR-143). **Remaining:** the 10k run in staging with real dispatch, per-recipient time
-  zones, A/B variants, messaging-tier awareness (read the number's limit from Meta), campaign
-  sends through the public API (the API sends single templates since P5-08), media-header
-  templates.
+  contacts' names (ADR-143). **[Emails when HyFib pauses a campaign by itself built; its database
+  tests run only in CI]** (ADR-210: the member it sends under, or the owners and administrators once
+  that member left or lost the permission, are emailed once per pause with the cause and what to do;
+  members' and keys' own pauses email nobody; no migration). **[Emails when a campaign finishes
+  built; its database and browser tests run only in CI]** (ADR-214: the member it sent under is told
+  it finished, or that its sending period ended and how many contacts it had not reached, with its
+  counts; no migration). Keys draft, review and submit campaigns for a member's approval through the
+  public API (ADR-186, ADR-193, ADR-202). **Remaining:** the 10k run in staging with real dispatch,
+  per-recipient time zones, A/B variants, messaging-tier awareness (read the number's limit from
+  Meta), media-header templates (only the API sends them, ADR-201).
 - **P3-05 Reports** — _implemented (2026-09-26); provider data verified against the Graph stand-in
   only_: persisted, versioned metric definitions; periods of whole days in the company time zone;
   messaging outcomes with denominators; estimated Meta charges from Meta's billable flag and
@@ -104,10 +114,18 @@ verification, app review, Embedded Signup configuration).
   business hours and closed days; reply-due timers and a longest-waiting order; team, number and
   customer filters; conversation cases and resolution times; business-hours report figures; saved
   replies; note mentions; a send-time collision warning; CSAT surveys with three reply buttons.
-  **Remaining:** per-team SLA targets and calendars, SLA breach notifications (email or in-app),
-  presence and typing indicators, conversation tags (W-035), private team queues (would change
-  visibility, ADR-029), mention emails, CSAT by template outside the window (needs a consent
-  decision), CSAT with a real WABA, transcript download (W-042), phone-number masking (W-044).
+  **[Emails about unread mentions built; its database tests run only in CI]** (ADR-211: a member
+  mentioned in a note who has not opened the conversation 10 minutes later is emailed who mentioned
+  them and a link, never the note or the customer; no SQL migration, one new queue). **[Transcript
+  download built; its database and browser tests run only in CI]** (ADR-212, W-042: owners,
+  administrators and supervisors who can see a conversation download its messages as plain text,
+  audited, without notes; a new `inbox.export` permission; no migration). **[Email preferences
+  built; their database and browser tests run only in CI]** (ADR-215, migration 0142: each member
+  turns off, per company, the notice emails about mentions and campaigns; security, sign-in and
+  billing emails stay on). **Remaining:** per-team SLA targets and calendars, SLA breach
+  notifications (email or in-app), presence and typing indicators, conversation tags (W-035),
+  private team queues (would change visibility, ADR-029), CSAT by template outside the window (needs
+  a consent decision), CSAT with a real WABA, phone-number masking (W-044).
 
 ## Phase 4 — automation, Flows, CRM, commerce
 
@@ -629,13 +647,50 @@ verification, app review, Embedded Signup configuration).
   **[Sending media from links built; its database tests run only in CI]** (ADR-194: a key replies
   with a photo, a video, audio or a document WhatsApp fetches from an https link, with a caption
   except for audio, within the 24-hour window; HyFib keeps the link, never the media; no migration).
-  Remaining: uploaded media and stickers, call-to-action messages through the API, taking
+  **[Sending locations built; its database tests run only in CI]** (ADR-195: a key replies with a
+  place's coordinates, and its name and address if wanted, within the 24-hour window, sent as Meta's
+  spec types them; no migration).
+  **[Contact cards' contacts built; their database tests run only in CI]** (ADR-196: every message
+  the API gives, and `message.received`, carry a contact card's contacts as WhatsApp gave them,
+  every part optional; the inbox shows their names and numbers; no migration).
+  **[Sending contact cards built; its database tests run only in CI]** (ADR-197: a key shares 1 to 5
+  contacts as Meta's spec describes them, each part checked, within the 24-hour window; kept as
+  received cards are, so reads give them back; no migration).
+  **[Sending stickers from links built; its database tests run only in CI]** (ADR-198: a key replies
+  with a sticker WhatsApp fetches from an https link, without a caption; no migration).
+  **[Sending templates with a photo, video or document header built; its database tests run only in
+  CI]** (ADR-201: a key gives the header's file by https link in each send, which WhatsApp fetches;
+  the inbox, campaigns and automations still cannot send them, and say why; no migration).
+  **[Submitting campaign drafts built; its database tests run only in CI]** (ADR-202: a key submits
+  a draft with members' checks, and the submission always waits for a member's approval, who must be
+  able to send campaigns and under whose authority it sends; migrations 0140 and 0141).
+  **[Withdrawing a key's submission built; its database tests run only in CI]** (ADR-203: the key
+  that submitted a campaign takes it back to a draft at a new version while it waits for approval;
+  no migration).
+  **[Emailing approvers of a waiting campaign built; its database tests run only in CI]** (ADR-204:
+  the company's owners and administrators other than the submitter are emailed when a member's or a
+  key's submission waits for approval, in the submission's transaction; no migration).
+  **[Telling the submitter what the approver did built; its database tests run only in CI]**
+  (ADR-205: the member who submitted a campaign is emailed when an approver approves it, sends it
+  back with a note or takes it back; no migration).
+  **[Reading saved segments built; its database tests run only in CI]** (ADR-206: `GET /segments`
+  and `GET /segments/{id}` with `campaigns.read` give the company's segments with their conditions
+  in the API's words, why one cannot be used and how many contacts one matches now; no migration).
+  **[Writing saved segments built; its database tests run only in CI]** (ADR-207: `POST /segments`,
+  `PATCH /segments/{id}` and `DELETE /segments/{id}` with `campaigns.write` create, change and
+  archive segments as members do, with conditions checked as searches are; a name another segment
+  has is refused with words that say so, for members too; no migration).
+  **[Listing a segment's contacts built; its database tests run only in CI]** (ADR-208:
+  `GET /segments/{id}/contacts` gives the contacts a segment holds now, on the pages of
+  `POST /contacts/search`, with the scopes a search with its conditions needs; no migration).
+  **[Saying until when a waiting campaign can be approved built; its database tests run only in
+  CI]** (ADR-209: the approval email and the campaign's page give the end of its sending period,
+  after which approving is refused, and the page then offers no Approve button; no migration).
+  Remaining: uploaded media, call-to-action messages through the API, taking
   reactions back,
-  media downloads, a contact card's contacts (Meta's
-  contact object is not confirmed), changing a field's type,
+  media downloads, changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
-  resuming what members or HyFib paused, approving, scheduling and starting campaigns
-  through the API, campaign
+  resuming what members or HyFib paused, campaign
   recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose
   per scope since ADR-092). The one-argument key lookup kept for rolling deploys (0051) is dropped
   (0074). Replaying many deliveries in one call is built with P5-09 (ADR-095).
@@ -765,7 +820,8 @@ verification, app review, Embedded Signup configuration).
   message as before). **[Run end reason filters built; their database tests run only in CI]**
   (ADR-192: an endpoint takes the ends of the runs that ended for the reasons it chooses, each
   narrowing the end it belongs to, such as only the failures to send among failed runs, or every end
-  as before). Remaining:
+  as before). **[Contact cards' contacts built; their database tests run only in CI]** (ADR-196:
+  `message.received` gives a contact card's contacts, as the API does). Remaining:
   filters for other event types and on a message's or contact's values (such as by tag or a field's
   value, or the key that started a run), other authentication (headers computed
   per delivery, other OAuth grants),
@@ -825,10 +881,16 @@ verification, app review, Embedded Signup configuration).
   **[Acknowledging webhook receipts built; its database tests run only in CI]** (ADR-179: a
   platform administrator acknowledges a Meta or Razorpay receipt that needs attention with a
   note, shown with who and when, replaced by a later note, audited and deleted with the
-  receipt; the CSV gives when, never who or the note). Remaining:
-  other alert channels, longer trends and charts, Meta's quality webhook (unconfirmed), exports
-  beyond the rows a tab lists, assigning failures and acknowledging quarantine entries, paging
-  and rollups for many companies.
+  receipt; the CSV gives when, never who or the note).
+  **[Acknowledging quarantine entries built; its database tests run only in CI]** (ADR-199: a
+  platform administrator acknowledges an open quarantine entry with a note, shown with who and when,
+  replaced by a later note, audited and deleted with the entry; a resolved entry takes none; the CSV
+  gives when, never who or the note).
+  **[Exports beyond the rows a tab shows built; its database tests run only in CI]** (ADR-200: a
+  list's CSV gives up to 5,000 rows, 1,000 failures and 500 signups, in the tab's order; the tabs
+  keep their rows). Remaining:
+  other alert channels, longer trends and charts, Meta's quality webhook (unconfirmed),
+  assigning failures, paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

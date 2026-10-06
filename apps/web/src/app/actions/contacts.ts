@@ -1,7 +1,12 @@
 'use server';
 import { refresh } from 'next/cache';
 import { AppError } from '@w360/core';
-import { IMPORT_LIMITS, queueTemplateMessage, type ImportResult } from '@w360/domain';
+import {
+  IMPORT_LIMITS,
+  bulkTagSummary,
+  queueTemplateMessage,
+  type ImportResult,
+} from '@w360/domain';
 import { getRuntime } from '@/server/runtime';
 import { runAction, type ActionResult } from '@/server/action';
 import { requestMeta } from '@/server/session';
@@ -73,6 +78,20 @@ export async function removeTagAction(
     await contacts.removeTag(ctx, String(contactId), String(tag));
     refresh();
     return null;
+  });
+}
+
+/** Adds or removes a tag on every contact the filters match (ADR-213); says what it did. */
+export async function bulkTagContactsAction(
+  slug: string,
+  input: unknown,
+): Promise<ActionResult<{ message: string }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { contacts } = await getRuntime();
+    const result = await contacts.bulkTagContacts(ctx, input, await requestMeta());
+    refresh();
+    return { message: bulkTagSummary(result) };
   });
 }
 

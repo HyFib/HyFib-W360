@@ -25,8 +25,20 @@ import {
   apiUpdateCampaignSchema,
   apiCampaignReviewSchema,
   apiReviewCampaign,
+  apiSubmitCampaign,
+  apiSubmitCampaignSchema,
+  apiWithdrawCampaign,
   toApiCampaignReview,
 } from './campaigns';
+import {
+  apiArchiveSegment,
+  apiCreateSegment,
+  apiGetSegment,
+  apiListSegmentContacts,
+  apiListSegments,
+  apiUpdateSegment,
+} from './segments';
+import { SEGMENT_NAME_TAKEN, segmentNameRefusal } from '../campaigns/segments';
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import {
   campaignDraftInputOf,
@@ -107,6 +119,7 @@ import {
   apiSendManyTemplates,
   apiSendManyTemplatesSchema,
   apiSendMessage,
+  apiSendMessageSchema,
   apiSendProductListSchema,
   apiSendProductSchema,
   apiSendReactionSchema,
@@ -116,7 +129,13 @@ import {
   isMediaLink,
   API_MESSAGE_TYPES,
   apiMessageType,
+  apiSendLocationSchema,
+  decimalDegrees,
+  apiSendContactsSchema,
+  isCardLink,
+  whatsappContact,
 } from './resources';
+import { contactCards } from '../webhooks/payloads';
 import {
   apiCreateWebhookEndpointSchema,
   apiUpdateWebhookEndpointSchema,
@@ -755,10 +774,14 @@ describe('text replies (ADR-070)', () => {
       planScopes: null,
     } as unknown as ApiContext;
     const idem = { key: 'k-1', requestHash: 'h' };
-    // Stickers and locations are not sent through the API (ADR-194 sends media from links).
+    // WhatsApp's own kinds the API sends otherwise (buttons and lists as `buttons` and `list`), and
+    // types in another case (ADR-194, ADR-195, ADR-197 and ADR-198 send the media, locations,
+    // contact cards and stickers named in lower case).
     for (const body of [
-      { type: 'sticker' },
-      { type: 'location' },
+      { type: 'interactive' },
+      { type: 'STICKER' },
+      { type: 'CONTACTS' },
+      { type: 'LOCATION' },
       { type: 'IMAGE' },
       { type: 'TEXT' },
       { type: null },
@@ -2946,6 +2969,49 @@ describe('OpenAPI document', () => {
     }
   });
 
+  it('gives a contact card’s contacts on every message and in message.received (ADR-196)', () => {
+    type Shape = {
+      required?: string[];
+      properties?: Record<string, Shape>;
+      type?: string;
+      items?: Shape;
+      anyOf?: Shape[];
+      description?: string;
+    };
+    const schemas = doc.components.schemas as Record<string, Shape>;
+    const received = schemas.WebhookMessageReceived?.properties?.data?.properties?.message;
+    for (const message of [schemas.ConversationMessage, schemas.FeedMessage, received]) {
+      expect(message?.required).toEqual(expect.arrayContaining(['contacts']));
+      const contacts = message?.properties?.contacts;
+      expect(contacts?.description).toContain('For a contact card: the contacts it shares');
+      expect(contacts?.anyOf?.map((branch) => branch.type).sort()).toEqual(['array', 'null']);
+      const card = contacts?.anyOf?.find((branch) => branch.type === 'array')?.items;
+      const parts = ['addresses', 'birthday', 'emails', 'name', 'org', 'phones', 'urls'];
+      expect(Object.keys(card?.properties ?? {}).sort()).toEqual(parts);
+      expect([...(card?.required ?? [])].sort()).toEqual(parts);
+      expect(Object.keys(card?.properties?.name?.properties ?? {}).sort()).toEqual([
+        'firstName',
+        'formattedName',
+        'lastName',
+        'middleName',
+        'prefix',
+        'suffix',
+      ]);
+      expect(Object.keys(card?.properties?.phones?.items?.properties ?? {}).sort()).toEqual([
+        'phone',
+        'type',
+        'waId',
+      ]);
+      expect(message?.properties?.contactsLeftOut?.description).toContain(
+        'The contacts kept are in `contacts`.',
+      );
+    }
+    // A received message's words name a location too.
+    expect(received?.properties?.text?.description).toContain(
+      'a location’s name (its address if it has no name)',
+    );
+  });
+
   it('names the plan refusals in the 403 and 429 responses and the error reason', () => {
     const responses = paths['/contacts']?.get?.responses as Record<string, { description: string }>;
     expect(responses['403']?.description).toContain('not_in_plan');
@@ -2980,6 +3046,9 @@ describe('OpenAPI document', () => {
         { $ref: '#/components/schemas/SendVideo' },
         { $ref: '#/components/schemas/SendAudio' },
         { $ref: '#/components/schemas/SendDocument' },
+        { $ref: '#/components/schemas/SendSticker' },
+        { $ref: '#/components/schemas/SendLocation' },
+        { $ref: '#/components/schemas/SendContacts' },
       ],
     });
     for (const scope of API_SEND_SCOPES) expect(send.description).toContain(`\`${scope}\``);
@@ -4219,14 +4288,15 @@ describe('campaign drafts through the API (ADR-186)', () => {
       API_SCOPE_KEYS.indexOf('campaigns.read') + 1,
     );
     expect(API_SCOPE_INFO['campaigns.write']).toMatchObject({
-      label: 'Create and edit campaign drafts',
+      label: 'Create, edit and submit campaign drafts',
       permission: 'campaigns.write',
       writes: true,
     });
     for (const words of [
       'Create campaign drafts and edit them as members do',
       'the audience (a segment or conditions)',
-      'A draft sends nothing: members submit and start it in the app, under the authority of a member allowed to send campaigns.',
+      "submit drafts, which then always wait for a member's approval",
+      "A key never starts a campaign: a member approves a key's submission, or submits a draft, in the app, and the campaign sends under the authority of a member allowed to send campaigns.",
     ]) {
       expect(API_SCOPE_INFO['campaigns.write'].description).toContain(words);
     }
@@ -4443,7 +4513,7 @@ describe('campaign drafts through the API (ADR-186)', () => {
     for (const words of [
       'Scope: `campaigns.write`.',
       "checked as members' drafts are",
-      'A draft sends nothing: members review, submit and start it in the app',
+      "A draft sends nothing: a member submits it in the app, or a key submits it for a member's approval (POST /campaigns/{id}/submit)",
       'One draft per `Idempotency-Key`',
     ]) {
       expect(create?.description).toContain(words);
@@ -5087,7 +5157,7 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     expect(doc.info.description).toContain(
-      'create, edit and review campaign drafts for members to submit',
+      'create, edit, review and submit campaign drafts for a member’s approval',
     );
     const op = (
       doc.paths as unknown as Record<
@@ -5136,7 +5206,7 @@ describe('media from links through the API (ADR-194)', () => {
   const base = { to: '+919876543210', link: 'https://cdn.example.com/menu.pdf' };
 
   it('take an https link without a user name or password, and a trimmed caption except for audio', () => {
-    expect([...API_MEDIA_TYPES]).toEqual(['image', 'video', 'audio', 'document']);
+    expect([...API_MEDIA_TYPES]).toEqual(['image', 'video', 'audio', 'document', 'sticker']);
     expect(
       apiSendMediaSchema.parse({ ...base, type: 'document', caption: '  Our menu  ' }),
     ).toEqual({ ...base, type: 'document', caption: 'Our menu' });
@@ -5173,7 +5243,7 @@ describe('media from links through the API (ADR-194)', () => {
       { ...base, type: 'document', filename: 'menu.pdf' },
       { ...base, type: 'image', id: '1003383421387256' },
       { to: base.to, type: 'image' },
-      { ...base, type: 'sticker' },
+      { ...base, type: 'sticker', caption: 'Thanks!' },
     ]) {
       expect(apiSendMediaSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
     }
@@ -5210,10 +5280,10 @@ describe('media from links through the API (ADR-194)', () => {
 
   it('are described in the send operation, each type with its own schema, and by the scope', () => {
     expect(API_SCOPE_INFO['messages.reply'].label).toBe(
-      'Reply with text, buttons, lists, products, reactions and media',
+      'Reply with text, media and other messages',
     );
     expect(API_SCOPE_INFO['messages.reply'].description).toContain(
-      'photos, videos, audio or documents from links',
+      'photos, videos, audio, documents or stickers from links',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const send = (
@@ -5222,12 +5292,12 @@ describe('media from links through the API (ADR-194)', () => {
         Record<string, { summary: string; description: string }>
       >
     )['/messages']?.post;
-    expect(send?.summary).toContain('a reaction or media');
+    expect(send?.summary).toContain('a reaction, media, a location or contacts');
     for (const words of [
-      '`image`, `video`, `audio` or `document`',
+      '`image`, `video`, `audio`, `document` or `sticker`',
       'https:// `link` that WhatsApp fetches when it sends the message',
       'HyFib neither fetches nor keeps the media',
-      'a `caption` of up to 1,024 characters; audio takes none',
+      'a `caption` of up to 1,024 characters; audio and stickers take none',
     ]) {
       expect(send?.description).toContain(words);
     }
@@ -5248,7 +5318,18 @@ describe('media from links through the API (ADR-194)', () => {
 
 describe('the types of the messages the API sends, in its answers (ADR-194)', () => {
   it('give media from links as their own type, as sent, never as a template', () => {
-    for (const type of ['image', 'video', 'audio', 'document', 'text', 'interactive', 'reaction']) {
+    for (const type of [
+      'image',
+      'video',
+      'audio',
+      'document',
+      'sticker',
+      'location',
+      'contacts',
+      'text',
+      'interactive',
+      'reaction',
+    ]) {
       expect(apiMessageType(type)).toBe(type);
     }
     expect(apiMessageType('template')).toBe('template');
@@ -5260,11 +5341,1200 @@ describe('the types of the messages the API sends, in its answers (ADR-194)', ()
     for (const name of ['QueuedMessage', 'Message']) {
       expect(schemas[name]?.properties.type.enum).toEqual([...API_MESSAGE_TYPES]);
       expect(schemas[name]?.properties.type.description).toContain(
-        'image, video, audio and document: media sent from a link',
+        'image, video, audio, document and sticker: media sent from a link; location: a place; contacts: contact cards.',
       );
     }
     expect(API_MESSAGE_TYPES).toEqual(
-      expect.arrayContaining(['image', 'video', 'audio', 'document']),
+      expect.arrayContaining([
+        'image',
+        'video',
+        'audio',
+        'document',
+        'sticker',
+        'location',
+        'contacts',
+      ]),
     );
+  });
+});
+
+describe('locations through the API (ADR-195)', () => {
+  const base = { type: 'location', to: '+919876543210', latitude: 18.5204, longitude: 73.8567 };
+
+  it('take coordinates within their ranges, and a trimmed name and address if given', () => {
+    expect(
+      apiSendLocationSchema.parse({
+        ...base,
+        name: '  Harbour Dental ',
+        address: ' 12 Harbour Road, Pune ',
+      }),
+    ).toEqual({ ...base, name: 'Harbour Dental', address: '12 Harbour Road, Pune' });
+    expect(apiSendLocationSchema.parse(base)).toEqual(base);
+    for (const [latitude, longitude] of [
+      [90, 180],
+      [-90, -180],
+      [0, 0],
+    ]) {
+      expect(
+        apiSendLocationSchema.safeParse({ ...base, latitude, longitude }).success,
+        `${latitude}, ${longitude}`,
+      ).toBe(true);
+    }
+    expect(API_LIMITS.locationTextLength).toBe(1000);
+    const longest = 'n'.repeat(API_LIMITS.locationTextLength);
+    expect(apiSendLocationSchema.parse({ ...base, name: longest, address: longest })).toMatchObject(
+      { name: longest, address: longest },
+    );
+    for (const bad of [
+      { ...base, latitude: 90.0001 },
+      { ...base, latitude: -91 },
+      { ...base, longitude: 180.5 },
+      { ...base, longitude: -181 },
+      { ...base, latitude: '18.5204' },
+      { ...base, latitude: undefined },
+      { ...base, longitude: null },
+      { ...base, name: '   ' },
+      { ...base, address: '' },
+      { ...base, name: 'n'.repeat(1001) },
+      { ...base, address: 'a'.repeat(1001) },
+      { ...base, url: 'https://harbour.example' },
+      { ...base, type: 'image' },
+    ]) {
+      expect(apiSendLocationSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+    expect(
+      apiSendLocationSchema.safeParse({ ...base, latitude: 91 }).error?.issues[0],
+    ).toMatchObject({ path: ['latitude'], message: 'A latitude runs from -90 to 90 degrees' });
+    expect(
+      apiSendLocationSchema.safeParse({ ...base, longitude: '73.8567' }).error?.issues[0]?.message,
+    ).toBe('Give the longitude as a number of degrees');
+    expect(
+      apiSendLocationSchema.safeParse({ ...base, address: 'a'.repeat(1001) }).error?.issues[0]
+        ?.message,
+    ).toBe('A location’s address is limited to 1000 characters');
+  });
+
+  it('give WhatsApp the coordinates as decimal text, never in exponent notation', () => {
+    expect(decimalDegrees(37.758056)).toBe('37.758056');
+    expect(decimalDegrees(-122.425332)).toBe('-122.425332');
+    expect(decimalDegrees(90)).toBe('90');
+    expect(decimalDegrees(0)).toBe('0');
+    expect(decimalDegrees(0.000001)).toBe('0.000001');
+    expect(decimalDegrees(1e-7)).toBe('0.0000001');
+    expect(decimalDegrees(-5e-7)).toBe('-0.0000005');
+    expect(decimalDegrees(1.5e-10)).toBe('0.00000000015');
+  });
+
+  it('are chosen by their type and need a key that replies', async () => {
+    const idem = { key: 'k-1', requestHash: 'h' };
+    const sending = {
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(['messages.send']) },
+      planScopes: null,
+    } as unknown as ApiContext;
+    await expect(apiSendMessage({} as never, sending, base, idem)).rejects.toThrow(
+      'This API key does not have the messages.reply scope.',
+    );
+    // A key that replies reaches the location's own checks before anything is read.
+    const replying = {
+      ...sending,
+      key: { id: 'k', scopes: new Set(['messages.reply']) },
+    } as unknown as ApiContext;
+    const refused: unknown = await apiSendMessage(
+      {} as never,
+      replying,
+      { ...base, longitude: 181 },
+      idem,
+    ).catch((caught: unknown) => caught);
+    expect(isAppError(refused) && refused.issues?.[0]?.path).toBe('longitude');
+  });
+
+  it('name the place, or its address without a name', () => {
+    const at = { latitude: 18.5204, longitude: 73.8567 };
+    expect(
+      outboundText('location', { ...at, name: 'Harbour Dental', address: '12 Harbour Road' }),
+    ).toBe('Harbour Dental');
+    expect(outboundText('location', { ...at, address: '12 Harbour Road' })).toBe('12 Harbour Road');
+    expect(outboundText('location', at)).toBeNull();
+    expect(messageSnippet('outbound', 'location', at)).toBe('Location');
+    expect(messageSnippet('outbound', 'location', { ...at, name: 'Harbour\n Dental' })).toBe(
+      'Harbour Dental',
+    );
+  });
+
+  it('are described in the send operation, with their own schema, and by the scope', () => {
+    expect(API_SCOPE_INFO['messages.reply'].label).toBe(
+      'Reply with text, media and other messages',
+    );
+    expect(API_SCOPE_INFO['messages.reply'].description).toContain(
+      'from links, locations and contact cards, to contacts who wrote',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const send = (
+      doc.paths as unknown as Record<
+        string,
+        Record<string, { summary: string; description: string }>
+      >
+    )['/messages']?.post;
+    expect(send?.summary).toContain('media, a location or contacts');
+    for (const words of [
+      '`location` or `contacts`) needs `messages.reply`',
+      'A text, buttons, a list, products, media, a location or contacts can quote',
+      'A location (`location`) is a place given by its `latitude` and `longitude` in decimal degrees',
+      `up to ${API_LIMITS.locationTextLength.toLocaleString('en')} characters each`,
+    ]) {
+      expect(send?.description).toContain(words);
+    }
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const location = schemas.SendLocation as {
+      properties: Record<string, Record<string, unknown>>;
+      required: string[];
+      additionalProperties: unknown;
+    };
+    expect(Object.keys(location.properties).sort()).toEqual(
+      ['address', 'from', 'latitude', 'longitude', 'name', 'replyTo', 'to', 'type'].sort(),
+    );
+    expect([...location.required].sort()).toEqual(['latitude', 'longitude', 'to', 'type']);
+    expect(location.additionalProperties).toBe(false);
+    expect(location.properties.latitude).toMatchObject({
+      type: 'number',
+      minimum: -90,
+      maximum: 90,
+    });
+    expect(location.properties.longitude).toMatchObject({
+      type: 'number',
+      minimum: -180,
+      maximum: 180,
+    });
+    expect(location.properties.address).toMatchObject({ type: 'string', maxLength: 1000 });
+    // A message's words: a location's name, or its address, whichever way it went.
+    const message = schemas.ConversationMessage as {
+      properties: { text: { description: string } };
+    };
+    expect(message.properties.text.description).toContain(
+      'a location’s name (its address if it has no name); for inbound messages also the title of a tapped reply, for outbound ones',
+    );
+  });
+});
+
+describe('contact cards through the API (ADR-197)', () => {
+  const base = { type: 'contacts', to: '+919876543210' };
+  const lucia = {
+    name: { formattedName: ' Lucía Gómez ', firstName: 'Lucía', lastName: 'Gómez' },
+    phones: [{ phone: '+91 98765 43210', type: 'WORK', waId: '919876543210' }],
+    emails: [{ email: 'lucia@example.com', type: 'WORK' }],
+    urls: [{ url: 'https://harbour.example', type: 'WORK' }],
+    addresses: [
+      {
+        street: '12 Harbour Road',
+        city: 'Pune',
+        zip: '411001',
+        country: 'India',
+        countryCode: 'IN',
+        type: 'WORK',
+      },
+    ],
+    org: { company: 'Harbour Dental', title: 'Front desk' },
+    birthday: '1990-02-28',
+  };
+  const ravi = { name: { formattedName: 'Ravi', firstName: 'Ravi' } };
+
+  it('take 1 to 5 contacts as Meta’s spec describes them, each part checked', () => {
+    expect(apiSendContactsSchema.parse({ ...base, contacts: [lucia] }).contacts[0]?.name).toEqual({
+      formattedName: 'Lucía Gómez',
+      firstName: 'Lucía',
+      lastName: 'Gómez',
+    });
+    expect(apiSendContactsSchema.parse({ ...base, contacts: [ravi] }).contacts).toEqual([ravi]);
+    const five = Array.from({ length: 5 }, () => lucia);
+    expect(apiSendContactsSchema.safeParse({ ...base, contacts: five }).success).toBe(true);
+    expect(API_LIMITS.contactsPerCard).toBe(5);
+    const at = (change: Record<string, unknown>) => ({
+      ...base,
+      contacts: [{ ...lucia, ...change }],
+    });
+    const phone = '+91 98765 43210';
+    for (const [label, bad] of [
+      ['no contact', { ...base, contacts: [] }],
+      ['six contacts', { ...base, contacts: [...five, ravi] }],
+      ['only a formatted name', at({ name: { formattedName: 'Lucía Gómez' } })],
+      ['no formatted name', at({ name: { firstName: 'Lucía' } })],
+      ['a long name', at({ name: { formattedName: 'x'.repeat(257), firstName: 'x' } })],
+      ['a name part the spec does not send', at({ name: { ...ravi.name, nickname: 'R' } })],
+      ['a phone without digits', at({ phones: [{ phone: 'call me' }] })],
+      ['a WhatsApp id with letters', at({ phones: [{ phone, waId: '91abc12345' }] })],
+      ['a kind the spec does not name', at({ phones: [{ phone, type: 'MOBILE' }] })],
+      ['six phones', at({ phones: Array.from({ length: 6 }, () => ({ phone })) })],
+      ['an empty list', at({ phones: [] })],
+      ['an email address that is not one', at({ emails: [{ email: 'lucia@' }] })],
+      ['a script link', at({ urls: [{ url: 'javascript:alert(1)' }] })],
+      ['a link with a password', at({ urls: [{ url: 'https://u:p@harbour.example' }] })],
+      ['a password without a user name', at({ urls: [{ url: 'https://:p@harbour.example' }] })],
+      ['an address without parts', at({ addresses: [{ type: 'HOME' }] })],
+      ['a three-letter country code', at({ addresses: [{ city: 'Pune', countryCode: 'IND' }] })],
+      ['an empty organisation', at({ org: {} })],
+      ['a birthday that does not exist', at({ birthday: '1990-02-30' })],
+      ['a birthday written otherwise', at({ birthday: '28/02/1990' })],
+      ['a part the spec does not send', at({ photo: 'https://harbour.example/lucia.jpg' })],
+    ] as const) {
+      expect(apiSendContactsSchema.safeParse(bad).success, label).toBe(false);
+    }
+    expect(
+      apiSendContactsSchema.safeParse(at({ name: { formattedName: 'Lucía Gómez' } })).error
+        ?.issues[0],
+    ).toMatchObject({
+      path: ['contacts', 0, 'name', 'firstName'],
+      message: 'Give a first name, a last name or another part of the name too',
+    });
+    expect(isCardLink('http://harbour.example/team')).toBe(true);
+    expect(isCardLink('ftp://harbour.example')).toBe(false);
+  });
+
+  it('are sent and kept in WhatsApp’s words, which read back as received cards do', () => {
+    const card = apiSendContactsSchema.parse({ ...base, contacts: [lucia] }).contacts[0]!;
+    const kept = whatsappContact(card);
+    expect(kept).toEqual({
+      name: { formatted_name: 'Lucía Gómez', first_name: 'Lucía', last_name: 'Gómez' },
+      phones: [{ phone: '+91 98765 43210', type: 'WORK', wa_id: '919876543210' }],
+      emails: [{ email: 'lucia@example.com', type: 'WORK' }],
+      urls: [{ url: 'https://harbour.example', type: 'WORK' }],
+      addresses: [
+        {
+          street: '12 Harbour Road',
+          city: 'Pune',
+          zip: '411001',
+          country: 'India',
+          country_code: 'IN',
+          type: 'WORK',
+        },
+      ],
+      org: { company: 'Harbour Dental', title: 'Front desk' },
+      birthday: '1990-02-28',
+    });
+    expect(whatsappContact(ravi)).toEqual({ name: { formatted_name: 'Ravi', first_name: 'Ravi' } });
+    // Read back as a received card (ADR-196): the API gives what was sent.
+    expect(contactCards('contacts', { contacts: [kept] })).toEqual([
+      {
+        name: {
+          formattedName: 'Lucía Gómez',
+          firstName: 'Lucía',
+          lastName: 'Gómez',
+          middleName: null,
+          prefix: null,
+          suffix: null,
+        },
+        phones: [{ phone: '+91 98765 43210', waId: '919876543210', type: 'WORK' }],
+        emails: [{ email: 'lucia@example.com', type: 'WORK' }],
+        urls: [{ url: 'https://harbour.example', type: 'WORK' }],
+        addresses: [
+          {
+            street: '12 Harbour Road',
+            city: 'Pune',
+            state: null,
+            zip: '411001',
+            country: 'India',
+            countryCode: 'IN',
+            type: 'WORK',
+          },
+        ],
+        org: { company: 'Harbour Dental', department: null, title: 'Front desk' },
+        birthday: '1990-02-28',
+      },
+    ]);
+    expect(outboundText('contacts', { contacts: [kept] })).toBeNull();
+    expect(messageSnippet('outbound', 'contacts', { contacts: [kept] })).toBe('Contact card');
+  });
+
+  it('are chosen by their type, need a key that replies and must fit in a message', async () => {
+    const idem = { key: 'k-1', requestHash: 'h' };
+    const sending = {
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(['messages.send']) },
+      planScopes: null,
+    } as unknown as ApiContext;
+    await expect(
+      apiSendMessage({} as never, sending, { ...base, contacts: [ravi] }, idem),
+    ).rejects.toThrow('This API key does not have the messages.reply scope.');
+    const replying = {
+      ...sending,
+      key: { id: 'k', scopes: new Set(['messages.reply']) },
+    } as unknown as ApiContext;
+    // Each part within its bound, but five contacts of long four-byte text are more than a message
+    // may hold: refused before anything is read.
+    const wide = '𝒳'.repeat(128);
+    const place = { street: wide, city: wide, state: wide, zip: wide, country: wide };
+    const heavy = {
+      name: { formattedName: wide, firstName: wide, lastName: wide },
+      addresses: Array.from({ length: 5 }, () => place),
+    };
+    const big = { ...base, contacts: Array.from({ length: 5 }, () => heavy) };
+    expect(apiSendContactsSchema.safeParse(big).success).toBe(true);
+    const refused: unknown = await apiSendMessage({} as never, replying, big, idem).catch(
+      (caught: unknown) => caught,
+    );
+    expect(isAppError(refused) && refused.code).toBe('validation_failed');
+    expect(isAppError(refused) && refused.issues?.[0]?.path).toBe('contacts');
+  });
+
+  it('are described in the send operation, with their own schema, and by the scope', () => {
+    expect(API_SCOPE_INFO['messages.reply'].label).toBe(
+      'Reply with text, media and other messages',
+    );
+    expect(API_SCOPE_INFO['messages.reply'].description).toContain(
+      'locations and contact cards, to contacts who wrote',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const send = (
+      doc.paths as unknown as Record<
+        string,
+        Record<string, { summary: string; description: string }>
+      >
+    )['/messages']?.post;
+    expect(send?.summary).toContain('a location or contacts');
+    for (const words of [
+      '`location` or `contacts`) needs `messages.reply`',
+      'Contacts (`contacts`) share 1 to 5 contact cards, as Meta’s spec describes them',
+      'its `formattedName` and at least one other part',
+      'up to 5 of each, each with a `type` of HOME or WORK if wanted',
+      'each text up to 256 characters, a link up to 2,000',
+      'Messages read back give them in `contacts`',
+    ]) {
+      expect(send?.description).toContain(words);
+    }
+    type Shape = {
+      properties?: Record<string, Shape>;
+      required?: string[];
+      items?: Shape;
+      minItems?: number;
+      maxItems?: number;
+      enum?: string[];
+      additionalProperties?: unknown;
+    };
+    const schemas = (doc.components as { schemas: Record<string, Shape> }).schemas;
+    const contacts = schemas.SendContacts;
+    expect(Object.keys(contacts?.properties ?? {}).sort()).toEqual(
+      ['contacts', 'from', 'replyTo', 'to', 'type'].sort(),
+    );
+    expect([...(contacts?.required ?? [])].sort()).toEqual(['contacts', 'to', 'type']);
+    const list = contacts?.properties?.contacts;
+    expect(list).toMatchObject({ minItems: 1, maxItems: 5 });
+    const card = list?.items;
+    expect(card?.additionalProperties).toBe(false);
+    expect(Object.keys(card?.properties ?? {}).sort()).toEqual(
+      ['addresses', 'birthday', 'emails', 'name', 'org', 'phones', 'urls'].sort(),
+    );
+    expect(card?.required).toEqual(['name']);
+    expect(card?.properties?.phones).toMatchObject({ minItems: 1, maxItems: 5 });
+    expect(card?.properties?.phones?.items?.properties?.type?.enum).toEqual(['HOME', 'WORK']);
+  });
+});
+
+describe('stickers from links through the API (ADR-198)', () => {
+  const base = {
+    type: 'sticker',
+    to: '+919876543210',
+    link: 'https://cdn.example.com/thanks.webp',
+  };
+
+  it('take an https link and no caption, as audio does', () => {
+    expect(apiSendMediaSchema.parse(base)).toEqual(base);
+    expect(apiSendMediaSchema.parse({ ...base, link: ' https://x.example/s.webp ' })).toMatchObject(
+      { link: 'https://x.example/s.webp' },
+    );
+    for (const bad of [
+      { ...base, caption: 'Thanks!' },
+      { ...base, link: 'http://cdn.example.com/thanks.webp' },
+      { ...base, link: 'https://:secret@cdn.example.com/thanks.webp' },
+      { ...base, id: '1003383421387256' },
+      { ...base, animated: true },
+    ]) {
+      expect(apiSendMediaSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+    expect(outboundText('sticker', { link: base.link })).toBeNull();
+    expect(messageSnippet('outbound', 'sticker', { link: base.link })).toBe('Sticker');
+  });
+
+  it('are chosen by their type and need a key that replies', async () => {
+    const idem = { key: 'k-1', requestHash: 'h' };
+    const sending = {
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(['messages.send']) },
+      planScopes: null,
+    } as unknown as ApiContext;
+    await expect(apiSendMessage({} as never, sending, base, idem)).rejects.toThrow(
+      'This API key does not have the messages.reply scope.',
+    );
+    const replying = {
+      ...sending,
+      key: { id: 'k', scopes: new Set(['messages.reply']) },
+    } as unknown as ApiContext;
+    const refused: unknown = await apiSendMessage(
+      {} as never,
+      replying,
+      { ...base, caption: 'Thanks!' },
+      idem,
+    ).catch((caught: unknown) => caught);
+    expect(isAppError(refused) && refused.code).toBe('validation_failed');
+  });
+
+  it('are described in the send operation, with their own schema', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const send = (doc.paths as unknown as Record<string, Record<string, { description: string }>>)[
+      '/messages'
+    ]?.post;
+    expect(send?.description).toContain('`document`, `sticker`, `location` or `contacts`) needs');
+    expect(send?.description).toContain('WhatsApp decides whether a file can be a sticker');
+    const sticker = (
+      doc.components as unknown as {
+        schemas: Record<
+          string,
+          { properties: object; required: string[]; additionalProperties: unknown }
+        >;
+      }
+    ).schemas.SendSticker;
+    expect(Object.keys(sticker?.properties ?? {}).sort()).toEqual(
+      ['from', 'link', 'replyTo', 'to', 'type'].sort(),
+    );
+    expect([...(sticker?.required ?? [])].sort()).toEqual(['link', 'to', 'type']);
+    expect(sticker?.additionalProperties).toBe(false);
+  });
+});
+
+describe('templates with a photo, video or document header through the API (ADR-201)', () => {
+  const templateId = '0192a1b2-0000-7000-8000-000000000001';
+  const link = 'https://cdn.example.com/parcel.jpg';
+
+  it('take the header’s file from an https link, for one number and for each of many', () => {
+    expect(
+      apiSendMessageSchema.parse({
+        to: '+919876543210',
+        templateId,
+        headerMedia: { link: ` ${link} ` },
+      }),
+    ).toEqual({
+      to: '+919876543210',
+      templateId,
+      variables: { header: [], body: [] },
+      headerMedia: { link },
+    });
+    expect(apiSendMessageSchema.parse({ to: '+919876543210', templateId })).not.toHaveProperty(
+      'headerMedia',
+    );
+    for (const headerMedia of [
+      { link: 'http://cdn.example.com/parcel.jpg' },
+      { link: 'https://user:secret@cdn.example.com/parcel.jpg' },
+      { link: `https://cdn.example.com/${'a'.repeat(API_LIMITS.mediaLinkLength)}` },
+      { link, caption: 'Your parcel' },
+      { link, filename: 'parcel.pdf' },
+      { id: '1003383421387256' },
+      {},
+      link,
+    ]) {
+      expect(
+        apiSendMessageSchema.safeParse({ to: '+919876543210', templateId, headerMedia }).success,
+        JSON.stringify(headerMedia).slice(0, 80),
+      ).toBe(false);
+    }
+    const many = apiSendManyTemplatesSchema.parse({
+      templateId,
+      messages: [
+        { to: '+919811100001', headerMedia: { link } },
+        { to: '+919811100002', headerMedia: { link: 'https://cdn.example.com/other.jpg' } },
+      ],
+    });
+    expect(many.messages.map((m) => m.headerMedia?.link)).toEqual([
+      link,
+      'https://cdn.example.com/other.jpg',
+    ]);
+    expect(
+      apiSendManyTemplatesSchema.safeParse({
+        templateId,
+        headerMedia: { link },
+        messages: [{ to: '+919811100001' }],
+      }).success,
+    ).toBe(false);
+    expect(
+      apiSendManyTemplatesSchema.safeParse({
+        templateId,
+        messages: [{ to: '+919811100001', headerMedia: { link: 'ftp://cdn.example.com/a.jpg' } }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('are described: the list names the file, a send gives it, each send of many its own', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const paths = doc.paths as unknown as Record<string, Record<string, { description: string }>>;
+    expect(paths['/templates']?.get?.description).toContain(
+      'for a header that is a photo, a video or a document, which file a send gives (`headerMedia`)',
+    );
+    for (const words of [
+      'A template whose header is a photo, a video or a document (its `headerMedia` in GET /templates) needs the file in `headerMedia`',
+      'Documents must be PDF files.',
+      'HyFib neither fetches nor keeps the file, and stores the link with the message.',
+      'Other templates take no file (422, `headerMedia`).',
+    ]) {
+      expect(paths['/messages']?.post?.description).toContain(words);
+    }
+    expect(paths['/messages/send-many']?.post?.description).toContain(
+      'a header file missing or given when the template takes none (422, naming the place, as `messages.3.variables` or `messages.3.headerMedia`)',
+    );
+    const schemas = (
+      doc.components as unknown as {
+        schemas: Record<
+          string,
+          { properties: Record<string, Record<string, unknown>>; required: string[] }
+        >;
+      }
+    ).schemas;
+    expect(schemas.Template?.properties.headerMedia).toMatchObject({
+      anyOf: [{ type: 'string', enum: ['image', 'video', 'document'] }, { type: 'null' }],
+    });
+    expect(schemas.Template?.required).toContain('headerMedia');
+    expect(schemas.SendTemplate?.properties.headerMedia).toMatchObject({
+      type: 'object',
+      properties: { link: { type: 'string', maxLength: API_LIMITS.mediaLinkLength } },
+      required: ['link'],
+      additionalProperties: false,
+    });
+    expect(schemas.SendTemplate?.required).toEqual(['to', 'templateId']);
+    const items = (
+      schemas.SendManyTemplates?.properties.messages as {
+        items: { properties: Record<string, unknown>; required: string[] };
+      }
+    ).items;
+    expect(Object.keys(items.properties)).toEqual(['to', 'variables', 'headerMedia']);
+    expect(items.required).toEqual(['to']);
+  });
+});
+
+describe('submitting campaign drafts through the API (ADR-202)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const id = '0190a000-0000-7000-8000-000000000003';
+
+  it("take the draft's version as read, and nothing else", () => {
+    expect(apiSubmitCampaignSchema.parse({ expectedVersion: 4 })).toEqual({ expectedVersion: 4 });
+    expect(apiSubmitCampaignSchema.parse({ expectedVersion: 0 })).toEqual({ expectedVersion: 0 });
+    for (const body of [
+      {},
+      { expectedVersion: -1 },
+      { expectedVersion: 1.5 },
+      { expectedVersion: '4' },
+      { expectedVersion: 4, approve: true },
+      { expectedVersion: 4, status: 'scheduled' },
+      null,
+    ]) {
+      expect(apiSubmitCampaignSchema.safeParse(body).success, JSON.stringify(body)).toBe(false);
+    }
+  });
+
+  it('are refused before anything is read: without the scope, outside the plan, while the company is not active, a bad id, and no version', async () => {
+    const body = { expectedVersion: 3 };
+    // Stopping, resuming or reading campaigns submits nothing.
+    for (const scopes of [['campaigns.read'], ['campaigns.stop', 'campaigns.resume']]) {
+      expect(await code(apiSubmitCampaign({} as never, ctx(scopes), id, body))).toBe('forbidden');
+    }
+    await expect(apiSubmitCampaign({} as never, ctx(['campaigns.read']), id, body)).rejects.toThrow(
+      'This API key does not have the campaigns.write scope.',
+    );
+    await expect(
+      apiSubmitCampaign(
+        {} as never,
+        ctx(['campaigns.write'], 'active', ['campaigns.read']),
+        id,
+        body,
+      ),
+    ).rejects.toMatchObject({ code: 'forbidden', details: { apiReason: 'not_in_plan' } });
+    for (const status of ['suspended', 'restricted']) {
+      expect(
+        await code(apiSubmitCampaign({} as never, ctx(['campaigns.write'], status), id, body)),
+      ).toBe('tenant_suspended');
+    }
+    expect(
+      await code(apiSubmitCampaign({} as never, ctx(['campaigns.write']), 'not-an-id', body)),
+    ).toBe('not_found');
+    expect(await code(apiSubmitCampaign({} as never, ctx(['campaigns.write']), id, {}))).toBe(
+      'validation_failed',
+    );
+  });
+
+  it("are described: members' checks, a member's approval always, the version and safe retries", () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const op = (
+      doc.paths as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            description: string;
+            requestBody: unknown;
+            responses: Record<string, { content?: unknown }>;
+          }
+        >
+      >
+    )['/campaigns/{id}/submit']?.post;
+    expect(op?.operationId).toBe('submitCampaign');
+    expect(op?.requestBody).toEqual({
+      required: true,
+      content: { 'application/json': { schema: { $ref: '#/components/schemas/SubmitCampaign' } } },
+    });
+    expect(op?.responses['200']?.content).toEqual({
+      'application/json': {
+        schema: {
+          type: 'object',
+          properties: { data: { $ref: '#/components/schemas/Campaign' } },
+          required: ['data'],
+        },
+      },
+    });
+    expect(Object.keys(op?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '403', '404', '409', '412', '422', '423']),
+    );
+    for (const words of [
+      'Scope: `campaigns.write`.',
+      'it must be at `expectedVersion` and pass the checks its review lists (GET /campaigns/{id}/review)',
+      "It then waits for a member's approval (`pending_approval`), whatever the company's settings: a key never starts a campaign.",
+      'A member who may approve and send campaigns approves it in the app, and it sends under their authority',
+      'A draft changed since you read it is refused with 409 and stays a draft',
+      'refused with 412, naming the first thing to change',
+      'A campaign this key submitted is answered as it is, so a retry changes nothing',
+    ]) {
+      expect(op?.description).toContain(words);
+    }
+    const schemas = (
+      doc.components as unknown as {
+        schemas: Record<
+          string,
+          {
+            properties: Record<string, { description?: string }>;
+            required: string[];
+            additionalProperties: unknown;
+          }
+        >;
+      }
+    ).schemas;
+    expect(Object.keys(schemas.SubmitCampaign?.properties ?? {})).toEqual(['expectedVersion']);
+    expect(schemas.SubmitCampaign?.required).toEqual(['expectedVersion']);
+    expect(schemas.SubmitCampaign?.additionalProperties).toBe(false);
+    expect(schemas.CampaignReview?.properties.approvalRequired?.description).toContain(
+      "A key's submission (POST /campaigns/{id}/submit) always waits for a member's approval.",
+    );
+    expect(schemas.CampaignReview?.properties.version?.description).toContain(
+      'POST /campaigns/{id}/submit',
+    );
+    expect(API_ROUTES).toContainEqual(['post', '/campaigns/{id}/submit']);
+  });
+});
+
+describe('withdrawing campaign submissions through the API (ADR-203)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const id = '0190a000-0000-7000-8000-000000000003';
+
+  it('are refused before anything is read: without the scope, outside the plan, while the company is not active, and a bad id', async () => {
+    for (const scopes of [['campaigns.read'], ['campaigns.stop', 'campaigns.resume']]) {
+      expect(await code(apiWithdrawCampaign({} as never, ctx(scopes), id))).toBe('forbidden');
+    }
+    await expect(apiWithdrawCampaign({} as never, ctx(['campaigns.read']), id)).rejects.toThrow(
+      'This API key does not have the campaigns.write scope.',
+    );
+    await expect(
+      apiWithdrawCampaign({} as never, ctx(['campaigns.write'], 'active', ['campaigns.read']), id),
+    ).rejects.toMatchObject({ code: 'forbidden', details: { apiReason: 'not_in_plan' } });
+    for (const status of ['suspended', 'restricted']) {
+      expect(
+        await code(apiWithdrawCampaign({} as never, ctx(['campaigns.write'], status), id)),
+      ).toBe('tenant_suspended');
+    }
+    expect(
+      await code(apiWithdrawCampaign({} as never, ctx(['campaigns.write']), 'not-an-id')),
+    ).toBe('not_found');
+  });
+
+  it('are described: the key that submitted it only, a draft again at a new version, safe retries', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const paths = doc.paths as unknown as Record<
+      string,
+      Record<
+        string,
+        {
+          operationId: string;
+          description: string;
+          requestBody?: unknown;
+          responses: Record<string, { content?: unknown }>;
+        }
+      >
+    >;
+    const op = paths['/campaigns/{id}/withdraw']?.post;
+    expect(op?.operationId).toBe('withdrawCampaign');
+    expect(op?.requestBody).toBeUndefined();
+    expect(op?.responses['200']?.content).toEqual({
+      'application/json': {
+        schema: {
+          type: 'object',
+          properties: { data: { $ref: '#/components/schemas/Campaign' } },
+          required: ['data'],
+        },
+      },
+    });
+    expect(Object.keys(op?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '403', '404', '409', '423']),
+    );
+    for (const words of [
+      'Scope: `campaigns.write`.',
+      "Takes a campaign this key submitted (POST /campaigns/{id}/submit) back to a draft while it waits for a member's approval",
+      'its audience is dropped (nothing was sent), its version goes up',
+      'A draft is answered as it is, so a retry changes nothing.',
+      'A submission a member or another key made is refused with 403 (members withdraw it in the app)',
+      'a campaign that no longer waits for approval with 409, naming its status',
+    ]) {
+      expect(op?.description).toContain(words);
+    }
+    expect(paths['/campaigns/{id}/submit']?.post?.description).toContain(
+      'or the key withdraws it (POST /campaigns/{id}/withdraw), and it is a draft again at a new version',
+    );
+    expect(API_SCOPE_INFO['campaigns.write'].description).toContain(
+      "submit drafts, which then always wait for a member's approval, and take back what it submitted;",
+    );
+    expect(API_ROUTES).toContainEqual(['post', '/campaigns/{id}/withdraw']);
+  });
+});
+
+describe('reading saved segments through the API (ADR-206)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const id = '0190a000-0000-7000-8000-000000000004';
+  // A database that is reached only once every check before it has passed.
+  const reached = {
+    db: {
+      run: () => Promise.reject(new Error('the database was reached')),
+    },
+  } as never;
+
+  it('are refused before anything is read: without the scope, outside the plan, a bad id or a bad page; a suspended company still reads', async () => {
+    for (const scopes of [['campaigns.write'], ['contacts.read', 'campaigns.stop']]) {
+      expect(await code(apiListSegments(reached, ctx(scopes), {}))).toBe('forbidden');
+      expect(await code(apiGetSegment(reached, ctx(scopes), id))).toBe('forbidden');
+    }
+    await expect(apiListSegments(reached, ctx(['campaigns.write']), {})).rejects.toThrow(
+      'This API key does not have the campaigns.read scope.',
+    );
+    await expect(
+      apiGetSegment(reached, ctx(['campaigns.read'], 'active', ['contacts.read']), id),
+    ).rejects.toMatchObject({ code: 'forbidden', details: { apiReason: 'not_in_plan' } });
+    expect(await code(apiGetSegment(reached, ctx(['campaigns.read']), 'not-an-id'))).toBe(
+      'not_found',
+    );
+    for (const query of [
+      { limit: '0' },
+      { limit: '101' },
+      { cursor: 'not-a-cursor' },
+      { page: '2' },
+    ]) {
+      expect(await code(apiListSegments(reached, ctx(['campaigns.read']), query))).toBe(
+        'validation_failed',
+      );
+    }
+    for (const status of ['active', 'suspended', 'restricted']) {
+      await expect(apiListSegments(reached, ctx(['campaigns.read'], status), {})).rejects.toThrow(
+        'the database was reached',
+      );
+      await expect(apiGetSegment(reached, ctx(['campaigns.read'], status), id)).rejects.toThrow(
+        'the database was reached',
+      );
+    }
+  });
+
+  it('are described: newest first with their conditions and problem, one counted now, counts only', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const paths = doc.paths as unknown as Record<
+      string,
+      Record<
+        string,
+        {
+          operationId: string;
+          description: string;
+          parameters: { name?: string; $ref?: string }[];
+          responses: Record<string, { content?: unknown }>;
+        }
+      >
+    >;
+    const list = paths['/segments']?.get;
+    expect(list?.operationId).toBe('listSegments');
+    expect(list?.parameters.map((p) => p.name)).toEqual(['limit', 'cursor']);
+    expect(list?.responses['200']?.content).toMatchObject({
+      'application/json': {
+        schema: { properties: { data: { items: { $ref: '#/components/schemas/Segment' } } } },
+      },
+    });
+    for (const words of [
+      'Scope: `campaigns.read`.',
+      "The company's saved segments that are not archived, as members' Segments page lists them",
+      "conditions in the words POST /contacts/search and drafts' audiences take",
+      "A draft's audience takes a segment by its id (`segmentId`).",
+    ]) {
+      expect(list?.description).toContain(words);
+    }
+    const one = paths['/segments/{id}']?.get;
+    expect(one?.operationId).toBe('getSegment');
+    expect(one?.parameters).toEqual([{ $ref: '#/components/parameters/Id' }]);
+    expect(one?.responses['200']?.content).toEqual({
+      'application/json': {
+        schema: {
+          type: 'object',
+          properties: { data: { $ref: '#/components/schemas/SegmentWithCount' } },
+          required: ['data'],
+        },
+      },
+    });
+    expect(Object.keys(one?.responses ?? {})).toEqual(expect.arrayContaining(['200', '404']));
+    for (const words of [
+      'how many contacts match it now, erased contacts left out',
+      "Dates are read in the company's time zone.",
+      'Counts only: POST /contacts/search with the same conditions finds the contacts',
+      "An archived segment and another company's are not found.",
+    ]) {
+      expect(one?.description).toContain(words);
+    }
+    const schemas = (
+      doc.components as unknown as { schemas: Record<string, { properties: object }> }
+    ).schemas;
+    expect(Object.keys(schemas.Segment?.properties ?? {})).toEqual([
+      'id',
+      'name',
+      'definition',
+      'problem',
+      'version',
+      'createdAt',
+      'updatedAt',
+    ]);
+    expect(Object.keys(schemas.SegmentWithCount?.properties ?? {})).toEqual([
+      'id',
+      'name',
+      'definition',
+      'problem',
+      'version',
+      'createdAt',
+      'updatedAt',
+      'count',
+    ]);
+    expect(API_SCOPE_INFO['campaigns.read'].description).toContain(
+      "Also read the company's saved segments, their conditions and how many contacts each matches.",
+    );
+    expect(API_ROUTES).toEqual(
+      expect.arrayContaining([
+        ['get', '/segments'],
+        ['get', '/segments/{id}'],
+      ]),
+    );
+  });
+});
+
+describe('writing saved segments through the API (ADR-207)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const refusal = (promise: Promise<unknown>) =>
+    promise.then(
+      () => ({ code: 'done', paths: [] as string[], message: '' }),
+      (error: unknown) =>
+        isAppError(error)
+          ? {
+              code: error.code,
+              paths: (error.issues ?? []).map((i) => i.path),
+              message: error.publicMessage,
+            }
+          : { code: String(error), paths: [], message: '' },
+    );
+  const id = '0190a000-0000-7000-8000-000000000005';
+  const reached = {
+    db: { run: () => Promise.reject(new Error('the database was reached')) },
+    clock: { now: () => new Date() },
+  } as never;
+  const writer = ctx(['campaigns.write']);
+  const vip = { match: 'all', conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] };
+
+  it('are refused before anything is read: without the scope, outside the plan, while the company is not active, a bad id or a bad body', async () => {
+    const all = (c: ApiContext) => [
+      apiCreateSegment(reached, c, { name: 'VIP', definition: vip }, null),
+      apiUpdateSegment(reached, c, id, { name: 'VIP' }),
+      apiArchiveSegment(reached, c, id),
+    ];
+    for (const attempt of all(ctx(['campaigns.read', 'contacts.write']))) {
+      expect(await refusal(attempt)).toMatchObject({
+        code: 'forbidden',
+        message: 'This API key does not have the campaigns.write scope.',
+      });
+    }
+    for (const attempt of all(ctx(['campaigns.write'], 'active', ['campaigns.read']))) {
+      await expect(attempt).rejects.toMatchObject({ details: { apiReason: 'not_in_plan' } });
+    }
+    for (const status of ['suspended', 'restricted']) {
+      for (const attempt of all(ctx(['campaigns.write'], status))) {
+        expect((await refusal(attempt)).code).toBe('tenant_suspended');
+      }
+    }
+    for (const attempt of [
+      apiUpdateSegment(reached, writer, 'not-an-id', { name: 'VIP' }),
+      apiArchiveSegment(reached, writer, 'not-an-id'),
+    ]) {
+      expect((await refusal(attempt)).code).toBe('not_found');
+    }
+    const tooMany = Array.from({ length: 21 }, (_, i) => ({
+      type: 'tag',
+      op: 'has',
+      tag: `t${i}`,
+    }));
+    for (const [body, paths] of [
+      [{}, ['name', 'definition']],
+      [{ name: ' ', definition: vip }, ['name']],
+      [{ name: 'N'.repeat(81), definition: vip }, ['name']],
+      [{ name: 'VIP', definition: { conditions: [] } }, ['definition.conditions']],
+      [{ name: 'VIP', definition: { conditions: tooMany } }, ['definition.conditions']],
+      [{ name: 'VIP', definition: { ...vip, extra: true } }, ['definition']],
+      [
+        {
+          name: 'VIP',
+          definition: { conditions: [{ type: 'group', match: 'any', conditions: vip.conditions }] },
+        },
+        ['definition.conditions.0.type'],
+      ],
+      [{ name: 'VIP', definition: vip, owner: 'me' }, ['']],
+    ] as const) {
+      expect(
+        await refusal(apiCreateSegment(reached, writer, body, null)),
+        JSON.stringify(body),
+      ).toMatchObject({ code: 'validation_failed', paths });
+    }
+    expect(await refusal(apiUpdateSegment(reached, writer, id, { expectedVersion: 1 }))).toEqual({
+      code: 'validation_failed',
+      paths: [''],
+      message: 'Give a name or conditions to change',
+    });
+    expect(
+      (await refusal(apiUpdateSegment(reached, writer, id, { expectedVersion: -1, name: 'x' })))
+        .paths,
+    ).toEqual(['expectedVersion']);
+    // A good request reaches the database.
+    for (const attempt of all(writer)) {
+      await expect(attempt).rejects.toThrow('the database was reached');
+    }
+  });
+
+  it('refuse a name another segment has with words that say so, members included', () => {
+    const taken = segmentNameRefusal(
+      new AppError('conflict', 'A record with the same unique value already exists.', {
+        details: { constraint: 'segments_name_uq' },
+      }),
+    );
+    expect(taken).toMatchObject({
+      code: 'conflict',
+      publicMessage: 'Another segment already has this name.',
+      issues: [{ path: 'name', message: SEGMENT_NAME_TAKEN }],
+    });
+    const other = new AppError('conflict', 'A record with the same unique value already exists.', {
+      details: { constraint: 'campaigns_pkey' },
+    });
+    expect(segmentNameRefusal(other)).toBe(other);
+    const unexpected = new Error('connection lost');
+    expect(segmentNameRefusal(unexpected)).toBe(unexpected);
+  });
+
+  it('are described: checked as searches are, a taken name refused, archiving answered as it is', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const paths = doc.paths as unknown as Record<
+      string,
+      Record<
+        string,
+        {
+          operationId: string;
+          description: string;
+          parameters: { $ref?: string }[];
+          requestBody?: { content: unknown };
+          responses: Record<string, { content?: unknown }>;
+        }
+      >
+    >;
+    const create = paths['/segments']?.post;
+    expect(create?.operationId).toBe('createSegment');
+    expect(create?.parameters).toEqual([
+      { $ref: '#/components/parameters/IdempotencyKeyOptional' },
+    ]);
+    expect(create?.requestBody?.content).toEqual({
+      'application/json': { schema: { $ref: '#/components/schemas/CreateSegment' } },
+    });
+    expect(Object.keys(create?.responses ?? {})).toEqual(
+      expect.arrayContaining(['201', '409', '422', '423']),
+    );
+    for (const words of [
+      'Scope: `campaigns.write`.',
+      'each condition is checked as POST /contacts/search checks it',
+      'naming the condition, like `definition.conditions.1.key`',
+      'A name another segment of the company has, whatever its case, is refused with 409.',
+      'One segment per `Idempotency-Key`',
+    ]) {
+      expect(create?.description).toContain(words);
+    }
+    const update = paths['/segments/{id}']?.patch;
+    expect(update?.operationId).toBe('updateSegment');
+    expect(update?.requestBody?.content).toEqual({
+      'application/json': { schema: { $ref: '#/components/schemas/UpdateSegment' } },
+    });
+    for (const words of [
+      'what is left out stays, new conditions replace its conditions',
+      'With `expectedVersion`, a segment changed since you read it is refused with 409',
+      'Campaigns already submitted keep the audience they were submitted with',
+    ]) {
+      expect(update?.description).toContain(words);
+    }
+    const archive = paths['/segments/{id}']?.delete;
+    expect(archive?.operationId).toBe('archiveSegment');
+    expect(archive?.requestBody).toBeUndefined();
+    for (const words of [
+      'it leaves the lists and reads, and its name is free again',
+      'A segment already archived is answered as it is, so a retry is harmless',
+    ]) {
+      expect(archive?.description).toContain(words);
+    }
+    const schemas = (
+      doc.components as unknown as { schemas: Record<string, { properties: object }> }
+    ).schemas;
+    expect(Object.keys(schemas.CreateSegment?.properties ?? {})).toEqual(['name', 'definition']);
+    expect(Object.keys(schemas.UpdateSegment?.properties ?? {})).toEqual([
+      'expectedVersion',
+      'name',
+      'definition',
+    ]);
+    expect(API_SCOPE_INFO['campaigns.write'].description).toContain(
+      "Also create, change and archive the company's saved segments.",
+    );
+    expect(API_ROUTES).toEqual(
+      expect.arrayContaining([
+        ['post', '/segments'],
+        ['patch', '/segments/{id}'],
+        ['delete', '/segments/{id}'],
+      ]),
+    );
+  });
+});
+
+describe("listing a segment's contacts through the API (ADR-208)", () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const id = '0190a000-0000-7000-8000-000000000006';
+  const reached = {
+    db: { run: () => Promise.reject(new Error('the database was reached')) },
+  } as never;
+  const both = ['campaigns.read', 'contacts.read'];
+
+  it('is refused before anything is read: without either scope, outside the plan, a bad id or a bad page; a suspended company still reads', async () => {
+    for (const [scopes, missing] of [
+      [['contacts.read', 'campaigns.write'], 'campaigns.read'],
+      [['campaigns.read', 'contacts.write'], 'contacts.read'],
+    ] as const) {
+      await expect(apiListSegmentContacts(reached, ctx([...scopes]), id, {})).rejects.toThrow(
+        `This API key does not have the ${missing} scope.`,
+      );
+    }
+    await expect(
+      apiListSegmentContacts(reached, ctx(both, 'active', ['campaigns.read']), id, {}),
+    ).rejects.toMatchObject({ code: 'forbidden', details: { apiReason: 'not_in_plan' } });
+    expect(await code(apiListSegmentContacts(reached, ctx(both), 'not-an-id', {}))).toBe(
+      'not_found',
+    );
+    for (const query of [{ limit: '0' }, { limit: '101' }, { cursor: 'nope' }, { tag: 'vip' }]) {
+      expect(await code(apiListSegmentContacts(reached, ctx(both), id, query))).toBe(
+        'validation_failed',
+      );
+    }
+    for (const status of ['active', 'suspended', 'restricted']) {
+      await expect(apiListSegmentContacts(reached, ctx(both, status), id, {})).rejects.toThrow(
+        'the database was reached',
+      );
+    }
+  });
+
+  it('is described: both scopes, pages as searches give them, a segment with a problem refused', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const op = (
+      doc.paths as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            description: string;
+            parameters: { name?: string; $ref?: string }[];
+            responses: Record<string, { content?: unknown }>;
+          }
+        >
+      >
+    )['/segments/{id}/contacts']?.get;
+    expect(op?.operationId).toBe('listSegmentContacts');
+    expect(op?.parameters.map((p) => p.$ref ?? p.name)).toEqual([
+      '#/components/parameters/Id',
+      'limit',
+      'cursor',
+    ]);
+    expect(op?.responses['200']?.content).toMatchObject({
+      'application/json': {
+        schema: { properties: { data: { items: { $ref: '#/components/schemas/Contact' } } } },
+      },
+    });
+    expect(Object.keys(op?.responses ?? {})).toEqual(expect.arrayContaining(['404', '412']));
+    for (const words of [
+      'Scope: `campaigns.read`.',
+      'Also needs `contacts.read`, and `conversations.read` for a segment with a `last_message` condition',
+      'newest first, erased contacts left out, pages that never skip or repeat a contact',
+      'Each page reads at most 2,000 of the company',
+      'A segment with a `problem` (GET /segments/{id}) is refused with 412 saying it',
+    ]) {
+      expect(op?.description).toContain(words);
+    }
+    expect(API_SCOPE_INFO['campaigns.read'].description).toContain(
+      'With contacts read as well, list the contacts each segment holds.',
+    );
+    expect(API_ROUTES).toContainEqual(['get', '/segments/{id}/contacts']);
   });
 });

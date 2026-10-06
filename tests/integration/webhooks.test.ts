@@ -4273,6 +4273,77 @@ describe('delivery', () => {
     );
   });
 
+  it('posts message.received with the contacts a card shares, and none once its sender is erased (ADR-196)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const e = await addEndpoint(c, 'ok', ['message.received']);
+    // Meta's example of a received card (research M-193).
+    const card = [
+      {
+        name: { first_name: 'Lucía', last_name: 'Gómez', formatted_name: 'Lucía Gómez' },
+        org: { company: 'Google' },
+        phones: [{ phone: '+1 (983) 555-2319', wa_id: '19835552319', type: 'MOBILE' }],
+      },
+    ];
+    const from = waId();
+    await fx.deliver(
+      fx.messagesBody(c, {
+        messages: [{ waId: from, type: 'contacts', extra: { contacts: card } }],
+      }),
+    );
+    expect(await deliverDue(c)).toMatchObject({ attempted: 1, succeeded: 1 });
+    const [sent] = requestsTo(e.path).map(
+      (r) => messageReceivedPayloadSchema.parse(JSON.parse(r.body)).data.message,
+    );
+    expect(sent).toMatchObject({
+      type: 'contacts',
+      text: null,
+      contactsLeftOut: 0,
+      contacts: [
+        {
+          name: {
+            formattedName: 'Lucía Gómez',
+            firstName: 'Lucía',
+            lastName: 'Gómez',
+            middleName: null,
+            prefix: null,
+            suffix: null,
+          },
+          phones: [{ phone: '+1 (983) 555-2319', waId: '19835552319', type: 'MOBILE' }],
+          emails: [],
+          urls: [],
+          addresses: [],
+          org: { company: 'Google', department: null, title: null },
+          birthday: null,
+        },
+      ],
+    });
+    // Another customer's card, delivered after they are erased: built when delivered, it shares
+    // nobody.
+    const erased = waId();
+    await fx.deliver(
+      fx.messagesBody(c, {
+        messages: [{ waId: erased, type: 'contacts', extra: { contacts: card } }],
+      }),
+    );
+    const [contact] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = $2',
+      [c.tenant.id, `+${erased}`],
+    );
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(owner, {
+      contactId: contact!.id,
+      suppress: false,
+    });
+    expect(await deliverDue(c)).toMatchObject({ attempted: 1, succeeded: 1 });
+    const later = requestsTo(e.path)[1];
+    expect(messageReceivedPayloadSchema.parse(JSON.parse(later!.body)).data.message).toMatchObject({
+      type: 'contacts',
+      contacts: null,
+      contactsLeftOut: 0,
+    });
+    expect(later!.body).not.toContain('Lucía');
+  });
+
   it('posts message.received signed, with the contact and the text, once', async () => {
     const c = await fx.company();
     const e = await addEndpoint(c, 'ok', ['message.received']);

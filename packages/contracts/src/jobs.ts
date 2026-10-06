@@ -299,6 +299,18 @@ export const QUEUES = {
     deadLetter: 'dead-letter',
     deleteAfterHours: 72,
   },
+  /** The email to a member mentioned in a note who has not opened it (ADR-211), due later. */
+  noteMention: {
+    name: 'note.mention',
+    policy: 'exclusive',
+    retryLimit: 5,
+    retryDelaySeconds: 30,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 600,
+    expireInSeconds: 60,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 72,
+  },
   /** One operation on a WhatsApp flow at Meta (create, upload, publish, deprecate, delete, refresh). */
   flowSync: {
     name: 'flow.sync',

@@ -45,6 +45,7 @@ import {
   createReportsService,
   createConsentService,
   createContactsService,
+  createEmailPreferencesService,
   createInboxService,
   createOnboardingService,
   createPlanAdminService,
@@ -88,12 +89,14 @@ import {
   type PlanChoicesService,
   type RefundRequestsService,
   type BusinessHoursService,
+  type CampaignNoticeDeps,
   type CampaignsService,
   type CsatService,
   type GrowthService,
   type ReportsService,
   type ConsentService,
   type ContactsService,
+  type EmailPreferencesService,
   type InboxService,
   type JobQueue,
   type OnboardingService,
@@ -161,11 +164,14 @@ export interface Runtime {
   /** Billing → Usage and rates: Meta's rates and this month's estimate (ADR-060). */
   billingUsage: BillingUsageService;
   inbox: InboxService;
+  emailPreferences: EmailPreferencesService;
   teams: TeamsService;
   businessHours: BusinessHoursService;
   savedReplies: SavedRepliesService;
   csat: CsatService;
   outbound: OutboundDeps;
+  /** Emails to the members who can approve a campaign waiting for approval (ADR-204). */
+  campaignNotices: CampaignNoticeDeps;
   contacts: ContactsService;
   consent: ConsentService;
   templates: TemplatesService;
@@ -321,6 +327,7 @@ async function init(): Promise<Runtime> {
   const platformReconciliation = createPlatformReconciliationService({ platformDb });
   const billingUsage = createBillingUsageService({ db, clock: systemClock });
   const inbox = createInboxService({ db, clock: systemClock, jobs, signer });
+  const emailPreferences = createEmailPreferencesService({ db });
   const teams = createTeamsService({ db, clock: systemClock });
   const businessHours = createBusinessHoursService({ db, clock: systemClock });
   const savedReplies = createSavedRepliesService({ db, clock: systemClock });
@@ -330,7 +337,14 @@ async function init(): Promise<Runtime> {
   const consent = createConsentService({ db, clock: systemClock });
   const templates = createTemplatesService({ db, jobs, signer, clock: systemClock });
   const segments = createSegmentsService({ db, clock: systemClock });
-  const campaigns = createCampaignsService({ db, jobs, signer, clock: systemClock });
+  const campaignNotices: CampaignNoticeDeps = { outbox, appBaseUrl: config.APP_BASE_URL };
+  const campaigns = createCampaignsService({
+    db,
+    jobs,
+    signer,
+    clock: systemClock,
+    notices: campaignNotices,
+  });
   const rateCards = createRateCardsService({ platformDb, clock: systemClock });
   const razorpay = razorpayConfigFrom(config);
   const razorpayClient = razorpay
@@ -506,11 +520,13 @@ async function init(): Promise<Runtime> {
     platformReconciliation,
     billingUsage,
     inbox,
+    emailPreferences,
     teams,
     businessHours,
     savedReplies,
     csat,
     outbound,
+    campaignNotices,
     contacts,
     consent,
     templates,

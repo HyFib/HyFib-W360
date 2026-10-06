@@ -161,7 +161,7 @@ test('a key finds contacts with segment conditions: comparisons, tags, all or an
   expect((await request.get('/api/v1/contacts/search', { headers: auth })).status()).toBe(405);
 });
 
-test('a key finds contacts by part of their name as members do, with name conditions in searches and segments too (ADR-143), and text holding the NUL character is refused where it is (ADR-124)', async ({
+test('a key finds contacts by part of their name as members do, with name conditions in searches and segments too (ADR-143) and the segment read back (ADR-206) and written through the API (ADR-207) with its contacts listed (ADR-208), and text holding the NUL character is refused where it is (ADR-124)', async ({
   page,
   request,
 }) => {
@@ -174,13 +174,15 @@ test('a key finds contacts by part of their name as members do, with name condit
   await page.getByRole('button', { name: 'Create company' }).click();
   await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
 
-  // A key that adds contacts and reads them.
+  // A key that adds contacts and reads them, and reads campaigns and segments.
   await page.goto(`/c/${slug}/settings/api-keys`);
   await page.getByLabel('Name', { exact: true }).fill('CRM names');
   await page.getByRole('checkbox', { name: /Read contacts/ }).check();
   await page
     .getByRole('checkbox', { name: /Create and change contacts and record consent/ })
     .check();
+  await page.getByRole('checkbox', { name: /Read campaigns/ }).check();
+  await page.getByRole('checkbox', { name: /Create, edit and submit campaign drafts/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const tokenField = page.getByLabel('API key', { exact: true });
   await expect(tokenField).toBeVisible();
@@ -265,6 +267,63 @@ test('a key finds contacts by part of their name as members do, with name condit
   await expect(page.getByRole('heading', { name: 'Martins', level: 1 })).toBeVisible();
   await expect(page.getByText('2 contacts match now', { exact: true })).toBeVisible();
   await expect(page.getByText('Élodie Martin, MARTINA Rao', { exact: true })).toBeVisible();
+
+  // The key reads the segment with its condition, and counts it as the page does (ADR-206).
+  const listed = await request.get('/api/v1/segments', { headers: auth });
+  expect(listed.status()).toBe(200);
+  const segments = (
+    (await listed.json()) as {
+      data: { id: string; name: string; definition: unknown; problem: unknown }[];
+    }
+  ).data;
+  expect(segments).toMatchObject([
+    {
+      name: 'Martins',
+      definition: { conditions: [{ type: 'name', op: 'contains', value: 'MART' }] },
+      problem: null,
+    },
+  ]);
+  const counted = await request.get(`/api/v1/segments/${segments[0]!.id}`, { headers: auth });
+  expect(counted.status()).toBe(200);
+  expect(((await counted.json()) as { data: unknown }).data).toMatchObject({
+    name: 'Martins',
+    count: 2,
+  });
+
+  // And lists the contacts it holds, as the search found them (ADR-208).
+  const held = await request.get(`/api/v1/segments/${segments[0]!.id}/contacts`, { headers: auth });
+  expect(held.status()).toBe(200);
+  expect(((await held.json()) as Page).data.map((c) => c.name)).toEqual([
+    'MARTINA Rao',
+    'Élodie Martin',
+  ]);
+
+  // The key creates a segment members then find on the Segments page, and archives it (ADR-207).
+  const made = await request.post('/api/v1/segments', {
+    headers: { ...auth, 'Idempotency-Key': `segment-${stamp}` },
+    data: {
+      name: 'Raos',
+      definition: { conditions: [{ type: 'name', op: 'contains', value: 'rao' }] },
+    },
+  });
+  expect(made.status()).toBe(201);
+  const raos = ((await made.json()) as { data: { id: string; count: number } }).data;
+  expect(raos.count).toBe(1);
+  const taken = await request.post('/api/v1/segments', {
+    headers: auth,
+    data: { name: 'MARTINS', definition: { conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] } },
+  });
+  expect([
+    taken.status(),
+    ((await taken.json()) as { error: { message: string } }).error.message,
+  ]).toEqual([409, 'Another segment already has this name.']);
+  await page.goto(`/c/${slug}/contacts/segments`);
+  await expect(page.getByRole('link', { name: 'Raos', exact: true })).toBeVisible();
+  const archived = await request.delete(`/api/v1/segments/${raos.id}`, { headers: auth });
+  expect(archived.status()).toBe(200);
+  await page.reload();
+  await expect(page.getByRole('link', { name: 'Martins', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Raos', exact: true })).toHaveCount(0);
 
   // Refusals name the parameter, or where the body holds the NUL character; nothing is saved.
   const issues = async (res: Awaited<ReturnType<typeof request.get>>) =>

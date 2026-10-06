@@ -12,6 +12,7 @@ import {
 import { automationHttpHandler, automationRunHandler } from './handlers/automations';
 import { campaignRunHandler } from './handlers/campaigns';
 import { crmReminderHandler } from './handlers/crm';
+import { noteMentionHandler } from './handlers/mentions';
 import { emailSendHandler, outboxSweepHandler } from './handlers/email';
 import { flowKeysHandler, flowSyncHandler } from './handlers/flows';
 import {
@@ -142,6 +143,11 @@ async function main(): Promise<void> {
     QUEUES.crmReminder.name,
     { localConcurrency: 2, batchSize: 1 },
     logFailures(rt, QUEUES.crmReminder.name, crmReminderHandler(rt)),
+  );
+  await rt.boss.work(
+    QUEUES.noteMention.name,
+    { localConcurrency: 2, batchSize: 1 },
+    logFailures(rt, QUEUES.noteMention.name, noteMentionHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.flowSync.name,

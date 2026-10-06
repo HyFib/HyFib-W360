@@ -71,6 +71,11 @@ export interface WhatsAppFixture {
   signer: JobSigner;
   keyring: Keyring;
   jobs(): PgBossJobQueue;
+  /** What a service's emails need: the outbox and the base of the app links they carry. */
+  notices(): {
+    outbox: { keyring: Keyring; jobs: PgBossJobQueue; signer: JobSigner };
+    appBaseUrl: string;
+  };
   company(): Promise<Company>;
   /**
    * Another WhatsApp number of the company's account, and the company as seen on that number:
@@ -125,6 +130,10 @@ export async function startWhatsAppFixture(): Promise<WhatsAppFixture> {
     signer,
     keyring,
     jobs,
+    notices: () => ({
+      outbox: { keyring, jobs: jobs(), signer },
+      appBaseUrl: 'http://localhost:3000',
+    }),
     async company() {
       const owner = await createUser(dbs, { name: 'Owner' });
       const tenant = await createTenant(dbs, owner);

@@ -3,6 +3,7 @@ import { expect, test } from './fixtures';
 import {
   connectTestChannel,
   inboundMessage,
+  inboundMessages,
   listReply,
   messagingConfigured,
   randomWaId,
@@ -22,8 +23,8 @@ test('an API key created in settings sends an approved template once, and stops 
   page,
   request,
 }) => {
-  // Two sends wait for WhatsApp after the template's review: more than the default minute.
-  test.setTimeout(120_000);
+  // Several sends wait for WhatsApp after the templates' review: more than the default minute.
+  test.setTimeout(180_000);
   const email = uniqueEmail('api');
   const slug = `api-${Date.now().toString(36)}`;
   await signUpAndVerify(page, { name: 'Arun Api', email, password: PASSWORD });
@@ -56,6 +57,32 @@ test('an API key created in settings sends an approved template once, and stops 
     data: { wabaId, name: 'shipping_update', status: 'APPROVED' },
   });
   expect(approved.status()).toBe(200);
+  // A template made in WhatsApp Manager with a photo header, which the editor cannot create: sent
+  // only through the API, which gives the photo's link (ADR-201).
+  const madeElsewhere = await request.post(`${standIn}/__stand-in/template`, {
+    data: {
+      wabaId,
+      template: {
+        name: 'delivery_photo',
+        language: 'en',
+        status: 'APPROVED',
+        category: 'UTILITY',
+        components: [
+          {
+            type: 'HEADER',
+            format: 'IMAGE',
+            example: { header_handle: ['4::aW1hZ2UvanBlZw==:ARZ'] },
+          },
+          {
+            type: 'BODY',
+            text: 'Your parcel {{1}} was delivered.',
+            example: { body_text: [['A-1001']] },
+          },
+        ],
+      },
+    },
+  });
+  expect(madeElsewhere.status()).toBe(200);
   await page.goto(`/c/${slug}/templates`);
   await expectNoHorizontalOverflow(page);
   await page.getByRole('button', { name: 'Refresh from Meta' }).click();
@@ -105,12 +132,21 @@ test('an API key created in settings sends an approved template once, and stops 
   expect(templates.status()).toBe(200);
   expect(templates.headers()['cache-control']).toBe('private, no-store');
   expect(templates.headers()['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
-  const template = (
+  const listed = (
     (await templates.json()) as {
-      data: { id: string; name: string; variables: { header: number; body: number } }[];
+      data: {
+        id: string;
+        name: string;
+        variables: { header: number; body: number };
+        headerMedia: string | null;
+      }[];
     }
-  ).data.find((t) => t.name === 'shipping_update');
+  ).data;
+  const template = listed.find((t) => t.name === 'shipping_update');
   expect(template?.variables).toEqual({ header: 0, body: 2 });
+  expect(template?.headerMedia).toBeNull();
+  const photoTemplate = listed.find((t) => t.name === 'delivery_photo');
+  expect(photoTemplate).toMatchObject({ variables: { header: 0, body: 1 }, headerMedia: 'image' });
 
   // Without contacts.read the key cannot list contacts.
   const forbidden = await request.get('/api/v1/contacts', { headers: auth });
@@ -244,6 +280,67 @@ test('an API key created in settings sends an approved template once, and stops 
     .map((r) => (r.body as { to?: string }).to)
     .filter((to) => to === optedOutWaId || manyWaIds.includes(to ?? ''));
   expect(sentMany.sort()).toEqual([...manyWaIds].sort());
+
+  // The template with a photo header (ADR-201): refused without the photo, by its place; sent with
+  // its link, which WhatsApp receives as the header's parameter and the inbox shows.
+  const photoWaId = randomWaId();
+  const kiran = await request.post('/api/v1/contacts', {
+    headers: auth,
+    data: { phone: `+${photoWaId}`, name: 'Kiran Photo' },
+  });
+  expect(kiran.status()).toBe(201);
+  const photoLink = 'https://cdn.example.com/deliveries/a-1001.jpg';
+  const sendPhoto = (data: Record<string, unknown>) =>
+    request.post('/api/v1/messages', {
+      headers: { ...auth, 'Idempotency-Key': randomUUID() },
+      data: { to: `+${photoWaId}`, templateId: photoTemplate!.id, ...data },
+    });
+  const withoutPhoto = await sendPhoto({ variables: { body: ['A-1001'] } });
+  expect(withoutPhoto.status()).toBe(422);
+  expect((await withoutPhoto.json()).error.issues).toEqual([
+    {
+      path: 'headerMedia',
+      message: 'This template has a photo header: give the link to its file.',
+    },
+  ]);
+  const photoSent = await sendPhoto({
+    variables: { body: ['A-1001'] },
+    headerMedia: { link: photoLink },
+  });
+  expect(photoSent.status()).toBe(201);
+  const photoMessage = (await photoSent.json()).data as { id: string };
+  await expect(async () => {
+    const status = await request.get(`/api/v1/messages/${photoMessage.id}`, { headers: auth });
+    expect((await status.json()).data.status).toBe('accepted');
+  }).toPass({ timeout: 30_000 });
+  const toKiran = (await standInRequests(request)).filter(
+    (r) =>
+      r.path === `/v26.0/${phoneNumberId}/messages` && (r.body as { to?: string }).to === photoWaId,
+  );
+  expect(toKiran.map((r) => r.body)).toEqual([
+    expect.objectContaining({
+      type: 'template',
+      template: expect.objectContaining({
+        name: 'delivery_photo',
+        components: [
+          { type: 'header', parameters: [{ type: 'image', image: { link: photoLink } }] },
+          { type: 'body', parameters: [{ type: 'text', text: 'A-1001' }] },
+        ],
+      }),
+    }),
+  ]);
+  // A template sent through the API leaves its conversation resolved.
+  await page.goto(`/c/${slug}/inbox?status=resolved`);
+  await page.getByRole('link', { name: /Kiran Photo/ }).click();
+  const photoBubble = page
+    .getByRole('list', { name: /^Messages with/ })
+    .getByRole('listitem')
+    .filter({ hasText: 'Your parcel A-1001 was delivered.' });
+  await expect(photoBubble.getByRole('link', { name: photoLink })).toBeVisible({
+    timeout: 20_000,
+  });
+  await expect(photoBubble).toContainText('Photo');
+  await page.goto(`/c/${slug}/settings/api-keys`);
 
   // Revoked in settings: the next request is refused.
   await page.getByRole('button', { name: 'Revoke Order system' }).click();
@@ -474,6 +571,59 @@ test('a key answers a customer who wrote, reads the conversation and resolves it
       (r.body as { to?: string } | null)?.to === waId,
   );
   expect(sentToCustomer).toHaveLength(1);
+
+  // The customer shares a colleague's contact card (ADR-196): the key reads its contacts as
+  // WhatsApp gave them, and the inbox shows the person's name and number.
+  await sendSignedWebhook(
+    request,
+    inboundMessages(wabaId, phoneNumberId, waId, [
+      {
+        type: 'contacts',
+        contacts: [
+          {
+            name: { formatted_name: 'Lucía Gómez', first_name: 'Lucía', last_name: 'Gómez' },
+            org: { company: 'Gómez Logistics' },
+            phones: [{ phone: '+91 98765 43210', wa_id: '919876543210', type: 'MOBILE' }],
+          },
+        ],
+      },
+    ]),
+  );
+  await expect(async () => {
+    const newestCard = await request.get(`/api/v1/conversations/${open!.id}/messages?limit=1`, {
+      headers: auth,
+    });
+    expect((await newestCard.json()).data).toEqual([
+      expect.objectContaining({
+        direction: 'inbound',
+        type: 'contacts',
+        text: null,
+        contactsLeftOut: 0,
+        contacts: [
+          {
+            name: {
+              formattedName: 'Lucía Gómez',
+              firstName: 'Lucía',
+              lastName: 'Gómez',
+              middleName: null,
+              prefix: null,
+              suffix: null,
+            },
+            phones: [{ phone: '+91 98765 43210', waId: '919876543210', type: 'MOBILE' }],
+            emails: [],
+            urls: [],
+            addresses: [],
+            org: { company: 'Gómez Logistics', department: null, title: null },
+            birthday: null,
+          },
+        ],
+      }),
+    ]);
+  }).toPass({ timeout: 20_000 });
+  await page.reload();
+  const card = thread.getByRole('listitem').filter({ hasText: 'Shared a contact card' });
+  await expect(card).toContainText('Lucía Gómez');
+  await expect(card).toContainText('+91 98765 43210');
 });
 
 test('a key assigns a conversation to a member and moves it to a team, and the inbox shows both', async ({
@@ -730,7 +880,7 @@ test('a key sends reply buttons and a list to a customer who wrote: the inbox sh
   await page.getByLabel('Name', { exact: true }).fill('Booking');
   await page
     .getByRole('checkbox', {
-      name: /Reply with text, buttons, lists, products, reactions and media/,
+      name: /Reply with text, media and other messages/,
     })
     .check();
   await page.getByRole('checkbox', { name: /Read conversations/ }).check();
@@ -879,7 +1029,7 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
   await page.getByLabel('Name', { exact: true }).fill('Front desk');
   await page
     .getByRole('checkbox', {
-      name: /Reply with text, buttons, lists, products, reactions and media/,
+      name: /Reply with text, media and other messages/,
     })
     .check();
   await page.getByRole('checkbox', { name: /Read conversations/ }).check();
@@ -951,19 +1101,79 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
     link: 'http://cdn.example.com/harbour-dental/map.png',
   });
   expect(insecure.status()).toBe(422);
+  // And where the clinic is (ADR-195); a latitude past the pole is refused.
+  const where = await post({
+    type: 'location',
+    to: `+${waId}`,
+    latitude: 18.5204,
+    longitude: 73.8567,
+    name: 'Harbour Dental Clinic',
+    address: '12 Harbour Road, Pune',
+  });
+  expect(where.status()).toBe(201);
+  expect((await where.json()).data).toMatchObject({ type: 'location', status: 'queued' });
+  const pole = await post({ type: 'location', to: `+${waId}`, latitude: 91, longitude: 0 });
+  expect(pole.status()).toBe(422);
+  // And the dentist's contact card (ADR-197); a card with only a formatted name is refused.
+  const rao = {
+    name: { formattedName: 'Dr Meera Rao', firstName: 'Meera', lastName: 'Rao', prefix: 'Dr' },
+    phones: [{ phone: '+91 98200 12345', type: 'WORK' }],
+  };
+  const shared = await post({ type: 'contacts', to: `+${waId}`, contacts: [rao] });
+  expect(shared.status()).toBe(201);
+  expect((await shared.json()).data).toMatchObject({ type: 'contacts', status: 'queued' });
+  const bare = await post({
+    type: 'contacts',
+    to: `+${waId}`,
+    contacts: [{ name: { formattedName: 'Dr Meera Rao' } }],
+  });
+  expect(bare.status()).toBe(422);
+  // And a thank-you sticker from a link (ADR-198); a caption on it is refused.
+  const stickerLink = 'https://cdn.example.com/harbour-dental/thanks.webp';
+  const sticker = await post({ type: 'sticker', to: `+${waId}`, link: stickerLink });
+  expect(sticker.status()).toBe(201);
+  const captioned = await post({
+    type: 'sticker',
+    to: `+${waId}`,
+    link: stickerLink,
+    caption: 'Thanks!',
+  });
+  expect(captioned.status()).toBe(422);
 
-  // The worker sends all three, in any order, as Meta's spec describes them.
+  // The worker sends all six, in any order, as Meta's spec describes them.
   let sent: Awaited<ReturnType<typeof standInRequests>> = [];
   await expect(async () => {
     sent = (await standInRequests(request)).filter(
       (r) =>
         r.path === `/v26.0/${phoneNumberId}/messages` && (r.body as { to?: string }).to === waId,
     );
-    expect(sent).toHaveLength(3);
+    expect(sent).toHaveLength(6);
   }).toPass({ timeout: 30_000 });
   const ofType = (type: string) => sent.find((r) => (r.body as { type: string }).type === type);
   expect(ofType('document')?.body).toMatchObject({
     document: { link: leafletLink, caption: 'Before your visit' },
+  });
+  expect(ofType('sticker')?.body).toMatchObject({ sticker: { link: stickerLink } });
+  expect(ofType('contacts')?.body).toMatchObject({
+    contacts: [
+      {
+        name: {
+          formatted_name: 'Dr Meera Rao',
+          first_name: 'Meera',
+          last_name: 'Rao',
+          prefix: 'Dr',
+        },
+        phones: [{ phone: '+91 98200 12345', type: 'WORK' }],
+      },
+    ],
+  });
+  expect(ofType('location')?.body).toMatchObject({
+    location: {
+      latitude: '18.5204',
+      longitude: '73.8567',
+      name: 'Harbour Dental Clinic',
+      address: '12 Harbour Road, Pune',
+    },
   });
   expect(ofType('text')?.body).toMatchObject({
     context: { message_id: questionWamid },
@@ -973,8 +1183,7 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
     reaction: { message_id: questionWamid, emoji: '👍' },
   });
 
-  // Members see the quote above the reply, and what the reaction is for (the conversation list
-  // shows the reaction as the last message too).
+  // Members see the quote above the reply, and what the reaction is for.
   await page.goto(`/c/${slug}/inbox`);
   await page.getByRole('link', { name: /Priya Customer/ }).click();
   const thread = page.getByRole('list', { name: /Messages with/ }).getByRole('listitem');
@@ -990,6 +1199,19 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
     leafletLink,
   );
   await expect(sentLeaflet).not.toContainText('Media download is not available yet.');
+  // The location shows the place, its address and its coordinates.
+  const sentPlace = thread.filter({ hasText: '12 Harbour Road, Pune' });
+  await expect(sentPlace).toContainText('Location · Harbour Dental Clinic');
+  await expect(sentPlace).toContainText('18.5204, 73.8567');
+  // The sticker shows the link it was sent from.
+  await expect(thread.getByRole('link', { name: stickerLink })).toHaveAttribute(
+    'href',
+    stickerLink,
+  );
+  // The contact card shows the dentist's name and number.
+  const sentCard = thread.filter({ hasText: 'Shared a contact card' });
+  await expect(sentCard).toContainText('Dr Meera Rao');
+  await expect(sentCard).toContainText('+91 98200 12345');
   await expectNoHorizontalOverflow(page);
 
   // The customer reacts to the reply: the key reads which message the reaction is for.

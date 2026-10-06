@@ -1,7 +1,12 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { Badge, Button, Card, CardContent, CardTitle } from '@w360/ui';
-import type { HealthIssue, HealthLevel, OpsExportList } from '@w360/domain';
+import {
+  OPS_LIST_ROWS,
+  type HealthIssue,
+  type HealthLevel,
+  type OpsExportList,
+} from '@w360/domain';
 
 /** One number on the operations overview, optionally linking to the page that explains it. */
 export function StatTile({
@@ -42,19 +47,39 @@ export function StatTile({
   );
 }
 
+/** How many rows a list's CSV gives at most, for the lists it gives beyond the tab's (ADR-200). */
+const EXPORT_ROWS: Partial<Record<OpsExportList, number>> = {
+  signups: OPS_LIST_ROWS.signups.exported,
+  'number-setups': OPS_LIST_ROWS.numberSetups.exported,
+  'new-companies': OPS_LIST_ROWS.newCompanies.exported,
+  failures: OPS_LIST_ROWS.failures.exported,
+  receipts: OPS_LIST_ROWS.receipts.exported,
+  quarantine: OPS_LIST_ROWS.quarantine.exported,
+  'dead-letters': OPS_LIST_ROWS.deadLetters.exported,
+};
+
 /**
- * A list's title with "Download CSV" for it (ADR-158). The link's name gives the list, so a tab
+ * A list's title with "Download CSV" for it (ADR-158), and how many rows it gives
+ * when that is more than the tab shows (ADR-200). The link's name gives the list, so a tab
  * with several lists tells their links apart.
  */
 export function ListTitle({ title, list }: { title: string; list: OpsExportList }) {
+  const rows = EXPORT_ROWS[list];
   return (
     <div className="flex flex-wrap items-center justify-between gap-2">
       <CardTitle>{title}</CardTitle>
-      <Button asChild variant="outline" size="sm">
-        <a href={`/platform/ops/export/${list}`} download aria-label={`Download CSV: ${title}`}>
-          Download CSV
-        </a>
-      </Button>
+      <div className="flex flex-wrap items-center gap-2">
+        {rows ? (
+          <span className="text-xs text-muted-foreground">
+            The CSV gives up to {rows.toLocaleString('en')} rows
+          </span>
+        ) : null}
+        <Button asChild variant="outline" size="sm">
+          <a href={`/platform/ops/export/${list}`} download aria-label={`Download CSV: ${title}`}>
+            Download CSV
+          </a>
+        </Button>
+      </div>
     </div>
   );
 }

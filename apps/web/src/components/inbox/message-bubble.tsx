@@ -51,6 +51,58 @@ function text(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
+/** The values a contact card gives under `key` in a list such as its phones (ADR-196). */
+function cardValues(list: unknown, key: string): string[] {
+  if (!Array.isArray(list)) return [];
+  return list.flatMap((entry: unknown) => {
+    const value =
+      typeof entry === 'object' && entry !== null
+        ? text((entry as Record<string, unknown>)[key])
+        : null;
+    return value ? [value] : [];
+  });
+}
+
+/** The people a contact card shares (ADR-196): each one's name, numbers and email addresses. */
+function cardPeople(content: Record<string, unknown>): { name: string; reach: string }[] {
+  const list: unknown[] = Array.isArray(content.contacts) ? content.contacts : [];
+  return list.flatMap((entry) => {
+    if (typeof entry !== 'object' || entry === null) return [];
+    const contact = entry as Record<string, unknown>;
+    const name = (
+      typeof contact.name === 'object' && contact.name !== null ? contact.name : {}
+    ) as Record<string, unknown>;
+    const parts = [text(name.first_name), text(name.last_name)].filter(Boolean).join(' ');
+    return [
+      {
+        name: text(name.formatted_name) ?? (parts || 'A contact without a name'),
+        reach: [
+          ...cardValues(contact.phones, 'phone'),
+          ...cardValues(contact.emails, 'email'),
+        ].join(', '),
+      },
+    ];
+  });
+}
+
+/** A location's coordinates in decimal degrees ("18.5204, 73.8567"), when it has both. */
+function coordinates(content: Record<string, unknown>): string | null {
+  const { latitude, longitude } = content;
+  return typeof latitude === 'number' &&
+    Number.isFinite(latitude) &&
+    typeof longitude === 'number' &&
+    Number.isFinite(longitude)
+    ? `${latitude}, ${longitude}`
+    : null;
+}
+
+/** What the file of a template's photo, video or document header is called (ADR-201). */
+const HEADER_FILE_NAMES: Record<string, string> = {
+  image: 'Photo',
+  video: 'Video',
+  document: 'Document',
+};
+
 /** One answer of a completed form as text (lists joined, other values as JSON, bounded). */
 /** Renders message content as plain text only (never HTML), by type. */
 function Body({
@@ -118,6 +170,9 @@ function Body({
           <span className="font-medium">Location</span>
           {text(c.name) ? ` · ${text(c.name)}` : ''}
           {text(c.address) ? <span className="block">{text(c.address)}</span> : null}
+          {coordinates(c) ? (
+            <span className="block text-xs opacity-80">{coordinates(c)}</span>
+          ) : null}
         </p>
       );
     case 'reaction':
@@ -290,6 +345,14 @@ function Body({
       return (
         <div className="grid gap-1">
           <p>Shared a contact card</p>
+          {cardPeople(c).map((person, index) => (
+            <p key={index} className="break-words">
+              <span className="font-medium">{person.name}</span>
+              {person.reach ? (
+                <span className="block text-xs opacity-80">{person.reach}</span>
+              ) : null}
+            </p>
+          ))}
           {omitted > 0 ? (
             <p className="text-xs opacity-80">
               {omitted} contact{omitted === 1 ? ' was' : 's were'} too large to keep
@@ -342,12 +405,30 @@ function Body({
       const buttons = Array.isArray(rendered.buttons)
         ? (rendered.buttons as { text?: unknown }[]).map((b) => text(b.text)).filter(Boolean)
         : [];
+      // A photo, video or document header sent through the API from an https link (ADR-201).
+      const headerMedia = (c.headerMedia ?? {}) as Record<string, unknown>;
+      const headerLink = text(headerMedia.link);
       return (
         <div className="grid gap-1">
           <p className="text-xs font-medium uppercase tracking-wide opacity-70">
             {text(campaign.name) ? `Campaign “${text(campaign.name)}” · ` : ''}Template ·{' '}
             {text(template.name) ?? 'unknown'}
           </p>
+          {headerLink?.startsWith('https://') ? (
+            <p>
+              <span className="font-medium">
+                {HEADER_FILE_NAMES[text(headerMedia.type) ?? ''] ?? 'File'}
+              </span>
+              <a
+                href={headerLink}
+                target="_blank"
+                rel="noopener noreferrer nofollow"
+                className="block break-all text-xs underline opacity-80"
+              >
+                {headerLink}
+              </a>
+            </p>
+          ) : null}
           {text(rendered.header) ? <p className="font-semibold">{text(rendered.header)}</p> : null}
           <p className="whitespace-pre-wrap break-words">{text(rendered.body) ?? ''}</p>
           {text(rendered.footer) ? (

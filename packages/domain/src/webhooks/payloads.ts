@@ -90,7 +90,70 @@ export const contactsLeftOutSchema = z
   .int()
   .min(0)
   .describe(
-    'For a contact card: how many of its contacts were left out because the card was larger than a message may hold; 0 otherwise. The cards’ contacts are not given.',
+    'For a contact card: how many of its contacts were left out because the card was larger than a message may hold; 0 otherwise. The contacts kept are in `contacts`.',
+  );
+
+const cardText = z.string().nullable();
+
+/**
+ * A contact a contact card shares (ADR-196), as WhatsApp gave it (research M-193) in the API's
+ * words: what the person who sent the card chose, or could, share, so any part may be missing.
+ */
+export const contactCardSchema = z
+  .object({
+    name: z.object({
+      formattedName: cardText.describe('The name as the card shows it.'),
+      firstName: cardText,
+      lastName: cardText,
+      middleName: cardText,
+      prefix: cardText,
+      suffix: cardText,
+    }),
+    phones: z.array(
+      z.object({
+        phone: z.string().describe('The number as the card gives it, not necessarily in E.164.'),
+        waId: cardText.describe(
+          'The WhatsApp id WhatsApp gave for the number, when it has one; it may differ from the number.',
+        ),
+        type: cardText.describe('Such as CELL, MOBILE, HOME or WORK, as the card names it.'),
+      }),
+    ),
+    emails: z.array(z.object({ email: z.string(), type: cardText })),
+    urls: z.array(
+      z.object({
+        url: z.string().describe('As the card gives it; not checked to be a working address.'),
+        type: cardText,
+      }),
+    ),
+    addresses: z.array(
+      z.object({
+        street: cardText,
+        city: cardText,
+        state: cardText,
+        zip: cardText,
+        country: cardText,
+        countryCode: cardText,
+        type: cardText,
+      }),
+    ),
+    org: z
+      .object({ company: cardText, department: cardText, title: cardText })
+      .nullable()
+      .describe('Where the person works, if the card says.'),
+    birthday: cardText.describe('As the card gives it, normally YYYY-MM-DD.'),
+  })
+  .describe(
+    'A contact the card shares, as WhatsApp gave it: what the person who sent the card chose, or could, share, so any part may be missing.',
+  );
+
+export type ContactCard = z.infer<typeof contactCardSchema>;
+
+/** The contacts of a contact card (ADR-196), on messages the API and webhooks give. */
+export const messageContactsSchema = z
+  .array(contactCardSchema)
+  .nullable()
+  .describe(
+    'For a contact card: the contacts it shares, those kept when it was larger than a message may hold (see contactsLeftOut). Null for other messages, and when the content was removed or too large to keep.',
   );
 
 export const messageReceivedPayloadSchema = envelope(
@@ -106,7 +169,9 @@ export const messageReceivedPayloadSchema = envelope(
       text: z
         .string()
         .nullable()
-        .describe('The text, a caption, the title of a tapped reply or a reaction; null if none.'),
+        .describe(
+          'The text, a caption, the title of a tapped reply, a reaction, or a location’s name (its address if it has no name); null if none.',
+        ),
       reply: tappedReplySchema,
       replyTo: z
         .uuid()
@@ -117,6 +182,7 @@ export const messageReceivedPayloadSchema = envelope(
       mimeType: z.string().nullable().describe('For media messages (the media is not attached).'),
       contentTooLarge: contentTooLargeSchema,
       contactsLeftOut: contactsLeftOutSchema,
+      contacts: messageContactsSchema,
       receivedAt: z.iso.datetime(),
     }),
     conversation: z.object({ id: z.uuid() }),
@@ -559,6 +625,69 @@ export function inboundSummary(
     default:
       return { text: null, reply: null, mimeType: null };
   }
+}
+
+const record = (value: unknown): Record<string, unknown> | null =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+const records = (value: unknown): Record<string, unknown>[] =>
+  Array.isArray(value)
+    ? value.map(record).filter((entry): entry is Record<string, unknown> => entry !== null)
+    : [];
+const filled = (value: unknown): value is string => typeof value === 'string' && value !== '';
+
+const ADDRESS_PARTS = ['street', 'city', 'state', 'zip', 'country', 'country_code'] as const;
+
+/**
+ * The contacts of a contact card (ADR-196), read from the contact objects WhatsApp sent and HyFib
+ * kept (research M-193), in the API's words; null for any other message, and for content removed
+ * or too large to keep. Every part is optional: a value of the wrong type is left out, as are a
+ * phone, email or link without its value and an address without any part.
+ */
+export function contactCards(type: string, content: Record<string, unknown>): ContactCard[] | null {
+  if (type !== 'contacts' || content.tooLarge === true || !Array.isArray(content.contacts)) {
+    return null;
+  }
+  return records(content.contacts).map((contact) => {
+    const name = record(contact.name);
+    const org = record(contact.org);
+    return {
+      name: {
+        formattedName: str(name?.formatted_name),
+        firstName: str(name?.first_name),
+        lastName: str(name?.last_name),
+        middleName: str(name?.middle_name),
+        prefix: str(name?.prefix),
+        suffix: str(name?.suffix),
+      },
+      phones: records(contact.phones).flatMap((p) =>
+        filled(p.phone) ? [{ phone: p.phone, waId: str(p.wa_id), type: str(p.type) }] : [],
+      ),
+      emails: records(contact.emails).flatMap((e) =>
+        filled(e.email) ? [{ email: e.email, type: str(e.type) }] : [],
+      ),
+      urls: records(contact.urls).flatMap((u) =>
+        filled(u.url) ? [{ url: u.url, type: str(u.type) }] : [],
+      ),
+      addresses: records(contact.addresses)
+        .filter((a) => ADDRESS_PARTS.some((part) => filled(a[part])))
+        .map((a) => ({
+          street: str(a.street),
+          city: str(a.city),
+          state: str(a.state),
+          zip: str(a.zip),
+          country: str(a.country),
+          countryCode: str(a.country_code),
+          type: str(a.type),
+        })),
+      org:
+        org && [org.company, org.department, org.title].some(filled)
+          ? { company: str(org.company), department: str(org.department), title: str(org.title) }
+          : null,
+      birthday: str(contact.birthday),
+    };
+  });
 }
 
 /**
@@ -1044,6 +1173,7 @@ export async function buildWebhookPayload(
               type: message.type,
               ...inboundSummary(message.type, message.content),
               ...inboundOmissions(message.type, message.content),
+              contacts: contactCards(message.type, message.content),
               replyTo: await findAnsweredMessageId(tx, tenantId, {
                 conversationId: message.conversationId,
                 channelAccountId: message.channelId,

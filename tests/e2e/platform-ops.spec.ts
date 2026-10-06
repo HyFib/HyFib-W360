@@ -150,7 +150,7 @@ test('staff read the operations console and repair a quarantined webhook event',
   const quarantineCsv = await downloadCsv(page, 'Download CSV: Quarantined webhook events');
   expect(quarantineCsv.name).toMatch(/^hyfib-quarantine-\d{4}-\d{2}-\d{2}\.csv$/);
   expect(quarantineCsv.text).toContain(
-    'Quarantined (UTC),Receipt,From,Reason,Provider ids,Staff emailed (UTC),Receipt can be retried\r\n',
+    'Quarantined (UTC),Receipt,From,Reason,Provider ids,Staff emailed (UTC),Receipt can be retried,Acknowledged (UTC)\r\n',
   );
   expect(quarantineCsv.text).toMatch(
     new RegExp(`,Meta \\(WhatsApp\\),Unknown account or number,[^,]*waba: ${wabaId}[^,]*,`),
@@ -178,6 +178,15 @@ test('staff read the operations console and repair a quarantined webhook event',
   await row.getByRole('button', { name: 'Retry receipt' }).click();
   // Back to processing: the receipt is no longer quarantined, so it cannot be retried again here.
   await expect(row.getByText('Retry', { exact: true })).toHaveCount(0);
+  // Before resolving it, the administrator notes what they found (ADR-199): the row shows the note,
+  // and a later one would replace it.
+  await row.getByText('Acknowledge', { exact: true }).click();
+  await row
+    .getByLabel('Note (what was found or done)')
+    .fill('A Meta test account: asked Meta to confirm.');
+  await row.getByRole('button', { name: 'Acknowledge entry' }).click();
+  await expect(row).toContainText('A Meta test account: asked Meta to confirm.');
+  await expect(row.getByText('Replace the note', { exact: true })).toBeVisible();
   await row.getByText('Resolve', { exact: true }).click();
   await row.getByLabel('Resolution').fill('Not a customer account: a Meta test account.');
   await row.getByRole('button', { name: 'Mark resolved' }).click();

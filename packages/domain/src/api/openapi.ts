@@ -39,6 +39,7 @@ import {
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
   contactsLeftOutSchema,
+  messageContactsSchema,
   contactUpdatedPayloadSchema,
   conversationAssignmentPayloadSchema,
   conversationStatusPayloadSchema,
@@ -57,6 +58,7 @@ import { SEGMENT_LIMITS } from '../campaigns/segments';
 import { ORDER_REFERENCE_RE } from '../commerce/model';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
+import { TEMPLATE_HEADER_MEDIA } from '../templates/definition';
 import {
   apiStartAutomationSchema,
   apiStartManyAutomationRunsSchema,
@@ -68,8 +70,15 @@ import {
   apiCampaignReviewSchema,
   apiCampaignSchema,
   apiCreateCampaignSchema,
+  apiSubmitCampaignSchema,
   apiUpdateCampaignSchema,
 } from './campaigns';
+import {
+  apiCreateSegmentSchema,
+  apiSegmentDetailSchema,
+  apiSegmentSchema,
+  apiUpdateSegmentSchema,
+} from './segments';
 import { apiContactFieldCreateSchema, apiContactFieldUpdateSchema } from './contact-fields';
 import { apiContactSearchSchema, apiUpdateMatchingContactsSchema } from './contact-search';
 import { apiContactSchema } from './contact-view';
@@ -106,6 +115,9 @@ import {
   apiSendAudioSchema,
   apiSendDocumentSchema,
   API_MESSAGE_TYPES,
+  apiSendStickerSchema,
+  apiSendLocationSchema,
+  apiSendContactsSchema,
 } from './resources';
 import {
   apiCreateWebhookEndpointSchema,
@@ -127,6 +139,12 @@ export const apiTemplateSchema = z.object({
     header: z.number().int().describe('How many header values the template needs (0 or 1).'),
     body: z.number().int().describe('How many body values the template needs.'),
   }),
+  headerMedia: z
+    .enum(TEMPLATE_HEADER_MEDIA)
+    .nullable()
+    .describe(
+      'For a template with a photo (`image`), video or document header, the file a send gives in its `headerMedia`, by link; null for other templates.',
+    ),
   text: z.object({
     header: z.string().nullable(),
     body: z.string(),
@@ -142,7 +160,7 @@ export const apiQueuedMessageSchema = z.object({
   type: z
     .enum(API_MESSAGE_TYPES)
     .describe(
-      'interactive: reply buttons or a list; image, video, audio and document: media sent from a link.',
+      'interactive: reply buttons or a list; image, video, audio, document and sticker: media sent from a link; location: a place; contacts: contact cards.',
     ),
   status: z.literal('queued'),
   contactId: z.uuid(),
@@ -183,7 +201,7 @@ export const apiMessageSchema = z.object({
   type: z
     .enum(API_MESSAGE_TYPES)
     .describe(
-      'interactive: reply buttons or a list; image, video, audio and document: media sent from a link.',
+      'interactive: reply buttons or a list; image, video, audio, document and sticker: media sent from a link; location: a place; contacts: contact cards.',
     ),
   status: z
     .enum(OUTBOUND_STATUSES)
@@ -367,7 +385,7 @@ export const apiConversationMessageSchema = z.object({
     .string()
     .nullable()
     .describe(
-      'The words of the message: the text, a caption, the title of a tapped reply, a reaction or a location’s name; for outbound messages the text, a template’s body with its values, an interactive message’s body or a reaction. Null if none.',
+      'The words of the message: the text, a caption, a reaction, or a location’s name (its address if it has no name); for inbound messages also the title of a tapped reply, for outbound ones a template’s body with its values or an interactive message’s body. Null if none.',
     ),
   reply: tappedReplySchema,
   replyTo: z
@@ -379,6 +397,7 @@ export const apiConversationMessageSchema = z.object({
   mimeType: z.string().nullable().describe('For media messages (the media is not attached).'),
   contentTooLarge: contentTooLargeSchema,
   contactsLeftOut: contactsLeftOutSchema,
+  contacts: messageContactsSchema,
   templateId: z.uuid().nullable(),
   templateName: z.string().nullable(),
   sentBy: z
@@ -801,7 +820,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, create, edit and review campaign drafts for members to submit, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, read and manage saved segments and list their contacts, create, edit, review and submit campaign drafts for a member’s approval, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -820,7 +839,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listTemplates',
           summary: 'Approved templates that can be sent',
-          description: scopeNote('templates.read'),
+          description: `${scopeNote('templates.read')} Approved utility and marketing templates that HyFib can send, with how many values their variables need and, for a header that is a photo, a video or a document, which file a send gives (\`headerMedia\`).`,
           responses: {
             '200': {
               description: 'The templates.',
@@ -1147,14 +1166,17 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'sendMessage',
           summary:
-            'Send an approved template, or a reply: text, buttons, a list, products, a reaction or media',
+            'Send an approved template, or a reply: text, buttons, a list, products, a reaction, media, a location or contacts',
           description: [
             `${scopeNote('messages.send', 'messages.send_marketing', 'messages.reply')}`,
             'A template (`type` `template` or left out): utility templates need `messages.send`, marketing templates `messages.send_marketing`. The contact is created when new; consent, the suppression list and the marketing frequency cap are checked.',
-            'A reply (`type` `text`, `buttons`, `list`, `product`, `product_list`, `catalog`, `reaction`, `image`, `video`, `audio` or `document`) needs `messages.reply` and goes only to a number that wrote to the WhatsApp number in the last 24 hours (WhatsApp’s customer service window); otherwise it is refused with reason `window_closed`, and nothing tells whether the number is a contact. Any reply but a reaction stops an automation answering the conversation, and the conversation keeps waiting for a member of the team. The window is checked again when the message is sent.',
+            'A reply (`type` `text`, `buttons`, `list`, `product`, `product_list`, `catalog`, `reaction`, `image`, `video`, `audio`, `document`, `sticker`, `location` or `contacts`) needs `messages.reply` and goes only to a number that wrote to the WhatsApp number in the last 24 hours (WhatsApp’s customer service window); otherwise it is refused with reason `window_closed`, and nothing tells whether the number is a contact. Any reply but a reaction stops an automation answering the conversation, and the conversation keeps waiting for a member of the team. The window is checked again when the message is sent.',
             'Products (`product`: one; `product_list`: up to 30 in sections, with a header; `catalog`: the catalog, opened from a product’s picture) need Commerce in the company’s plan (403, reason `not_in_plan`, otherwise). They are named by their content ids (`retailerId`) in a catalog HyFib has read from Meta for the WhatsApp number (Commerce → Catalogs), still connected, and not removed at Meta; all from one catalog, which `catalogId` names when more than one has them all. Unknown ids are refused by name (422, `products`).',
-            'A text, buttons, a list, products or media can quote a message of the conversation with `replyTo`, its id from `GET /conversations/{id}/messages`, the `message.received` webhook or a send’s response: a message the contact sent, or one the business sent that WhatsApp accepted. A reaction (`type` `reaction`) puts one emoji on a message the contact sent in the last 30 days; reactions cannot be taken back through the API. A message of another conversation, or one that cannot be quoted or reacted to, is refused (422, `replyTo`).',
-            'Media (`image`, `video`, `audio` or `document`) is sent from an https:// `link` that WhatsApp fetches when it sends the message, reachable from the internet without signing in; HyFib neither fetches nor keeps the media, and stores the link with the message. A photo, a video or a document may carry a `caption` of up to 1,024 characters; audio takes none. A link WhatsApp cannot fetch, or media it does not accept, makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
+            'A text, buttons, a list, products, media, a location or contacts can quote a message of the conversation with `replyTo`, its id from `GET /conversations/{id}/messages`, the `message.received` webhook or a send’s response: a message the contact sent, or one the business sent that WhatsApp accepted. A reaction (`type` `reaction`) puts one emoji on a message the contact sent in the last 30 days; reactions cannot be taken back through the API. A message of another conversation, or one that cannot be quoted or reacted to, is refused (422, `replyTo`).',
+            'Media (`image`, `video`, `audio`, `document` or `sticker`) is sent from an https:// `link` that WhatsApp fetches when it sends the message, reachable from the internet without signing in; HyFib neither fetches nor keeps the media, and stores the link with the message. A photo, a video or a document may carry a `caption` of up to 1,024 characters; audio and stickers take none, and WhatsApp decides whether a file can be a sticker. A link WhatsApp cannot fetch, or media it does not accept, makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
+            'A template whose header is a photo, a video or a document (its `headerMedia` in GET /templates) needs the file in `headerMedia`: an https:// `link` that WhatsApp fetches when it sends the message, as for media below, shown without a caption. Documents must be PDF files. HyFib neither fetches nor keeps the file, and stores the link with the message. Other templates take no file (422, `headerMedia`). A file WhatsApp cannot fetch, or does not accept, makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
+            'A location (`location`) is a place given by its `latitude` and `longitude` in decimal degrees, with its `name` and `address` if wanted, up to 1,000 characters each, all stored with the message. A location WhatsApp does not accept makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
+            'Contacts (`contacts`) share 1 to 5 contact cards, as Meta’s spec describes them: each with a `name` (its `formattedName` and at least one other part) and, if wanted, `phones`, `emails`, `urls` and `addresses` (up to 5 of each, each with a `type` of HOME or WORK if wanted), an `org` and a `birthday` (YYYY-MM-DD); each text up to 256 characters, a link up to 2,000. Messages read back give them in `contacts`, as they give the cards customers share. A card WhatsApp does not accept makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
             'Buttons (up to 3) and lists (up to 10 rows) carry ids you choose: when the customer taps one, the `message.received` webhook gives it as `reply.id`, with `reply.type` (`button` or `list`). Ids cannot start with `w360`, which HyFib’s own buttons use.',
             'Messages queued one after the other may be sent in either order: to be sure the customer sees one before the next, send the next once `GET /messages/{id}` reports the first `accepted`.',
           ].join('\n\n'),
@@ -1175,6 +1197,9 @@ export function buildOpenApiDocument(serverUrl: string) {
                 ref('SendVideo'),
                 ref('SendAudio'),
                 ref('SendDocument'),
+                ref('SendSticker'),
+                ref('SendLocation'),
+                ref('SendContacts'),
               ],
             }),
           },
@@ -1229,7 +1254,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           description: [
             `${scopeNote('messages.send', 'messages.send_marketing')} Utility templates need \`messages.send\`, marketing templates \`messages.send_marketing\`. Sends the template to up to ${API_LIMITS.messagesPerSend} numbers, each with the values of its variables and each as POST /messages sends a template: the contact is created when new, and consent, the suppression list and the marketing frequency cap are checked for each. The call counts as one request against the rate and monthly limits, within the 64 KB a body may hold.`,
             'Each number is answered in its place, in the order given, with its message, queued, or with why it was not (the contact erased, opted out, on the suppression list or without the marketing opt-in the company asks for, or at the marketing frequency cap): a refused number changes nothing, a contact created for it included, and the others are still sent. Messages queued together may leave in any order.',
-            'Refused as a whole, sending nothing: a template or a WhatsApp number that cannot send (as for one message), a number that is not valid or given twice, or values that do not fill the template’s variables (422, naming the place, as `messages.3.variables`). One call per `Idempotency-Key`: a retry answers as the first request did.',
+            'Refused as a whole, sending nothing: a template or a WhatsApp number that cannot send (as for one message), a number that is not valid or given twice, values that do not fill the template’s variables, or a header file missing or given when the template takes none (422, naming the place, as `messages.3.variables` or `messages.3.headerMedia`). One call per `Idempotency-Key`: a retry answers as the first request did.',
             'The call is one transaction holding the conversations it sends in until it ends. When it collides with another call taking several of them at the same moment in another order (another send to many numbers, say), it can be refused as a whole (409, sending nothing): send it again with the same `Idempotency-Key`.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],
@@ -1458,7 +1483,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'createCampaign',
           summary: 'Create a campaign draft',
-          description: `${scopeNote('campaigns.write')} A draft with the settings given, checked as members' drafts are: the number, template and segment must be the company's (a segment not archived), and conditions are checked by segments' rules (a field's comparisons by its type, a campaign of the company). Settings left out start as a member's new draft does: no number, template or audience, starting at once once submitted, in the company's time zone, sending for 24 hours. A draft sends nothing: members review, submit and start it in the app, under the authority of a member allowed to send campaigns, and a submission checks what a draft needs (an approved template of the number's WhatsApp account, every variable filled, an audience). Its history in the app names the key. One draft per \`Idempotency-Key\`: a retry answers with the draft as first created.`,
+          description: `${scopeNote('campaigns.write')} A draft with the settings given, checked as members' drafts are: the number, template and segment must be the company's (a segment not archived), and conditions are checked by segments' rules (a field's comparisons by its type, a campaign of the company). Settings left out start as a member's new draft does: no number, template or audience, starting at once once submitted, in the company's time zone, sending for 24 hours. A draft sends nothing: a member submits it in the app, or a key submits it for a member's approval (POST /campaigns/{id}/submit), and it sends under the authority of a member allowed to send campaigns; a submission checks what a draft needs (an approved template of the number's WhatsApp account, every variable filled, an audience). Its history in the app names the key. One draft per \`Idempotency-Key\`: a retry answers with the draft as first created.`,
           parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
           requestBody: { required: true, content: json(ref('CreateCampaign')) },
           responses: {
@@ -1505,7 +1530,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           summary: 'What submitting a campaign draft would do now',
           description: [
             `${scopeNote('campaigns.write')} The draft's review as members see it in the app before they submit it, read now: what must change before a member can submit it, how many contacts it would reach and why the others would be skipped, an upper bound of Meta's charges from the rate card HyFib publishes, when it would start, and whether it would wait for a member's approval. It changes nothing, and is answered whatever the company's status. Counts only: never contacts or members.`,
-            'Only a draft is reviewed: any other status is refused with 409, naming it (a submitted campaign keeps the audience it was submitted with, and GET /campaigns/{id} counts its results). A member submits the draft in the app, and the submission checks it again.',
+            'Only a draft is reviewed: any other status is refused with 409, naming it (a submitted campaign keeps the audience it was submitted with, and GET /campaigns/{id} counts its results). A member submits the draft in the app, or a key with POST /campaigns/{id}/submit, and the submission checks it again.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/Id' }],
           responses: {
@@ -1514,6 +1539,43 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('CampaignReview'))),
             },
             ...errors(401, 403, 404, 409, 429, 500),
+          },
+        },
+      },
+      '/campaigns/{id}/submit': {
+        post: {
+          operationId: 'submitCampaign',
+          summary: 'Submit a campaign draft for a member’s approval',
+          description: [
+            `${scopeNote('campaigns.write')} Submits the draft as a member submits it in the app: it must be at \`expectedVersion\` and pass the checks its review lists (GET /campaigns/{id}/review), and its audience is taken now (\`audienceCount\`, \`skippedCount\`). It then waits for a member's approval (\`pending_approval\`), whatever the company's settings: a key never starts a campaign. A member who may approve and send campaigns approves it in the app, and it sends under their authority from the time it was set to start, or at once when that time has passed; or a member rejects it with a note or takes it back, or the key withdraws it (POST /campaigns/{id}/withdraw), and it is a draft again at a new version. Its history in the app names the key.`,
+            'A draft changed since you read it is refused with 409 and stays a draft; one the checks refuse is refused with 412, naming the first thing to change, and stays a draft. A campaign this key submitted is answered as it is, so a retry changes nothing; any other campaign that is not a draft is refused with 409, naming its status.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('SubmitCampaign')) },
+          responses: {
+            '200': {
+              description: 'The campaign, waiting for a member’s approval.',
+              content: json(dataOf(ref('Campaign'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/campaigns/{id}/withdraw': {
+        post: {
+          operationId: 'withdrawCampaign',
+          summary: 'Take back a campaign submission this key made',
+          description: [
+            `${scopeNote('campaigns.write')} Takes a campaign this key submitted (POST /campaigns/{id}/submit) back to a draft while it waits for a member's approval, as a member takes back their own: its audience is dropped (nothing was sent), its version goes up, and it can be edited and submitted again. Its history in the app names the key.`,
+            'A draft is answered as it is, so a retry changes nothing. A submission a member or another key made is refused with 403 (members withdraw it in the app), and a campaign that no longer waits for approval with 409, naming its status.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The campaign, a draft again.',
+              content: json(dataOf(ref('Campaign'))),
+            },
+            ...errors(401, 403, 404, 409, 423, 429, 500),
           },
         },
       },
@@ -1590,6 +1652,95 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('Campaign'))),
             },
             ...errors(401, 403, 404, 409, 423, 429, 500),
+          },
+        },
+      },
+      '/segments': {
+        get: {
+          operationId: 'listSegments',
+          summary: 'Saved segments, newest first',
+          description: `${scopeNote('campaigns.read')} The company's saved segments that are not archived, as members' Segments page lists them, each with its conditions in the words POST /contacts/search and drafts' audiences take, and \`problem\` saying why it cannot be used now. A draft's audience takes a segment by its id (\`segmentId\`). GET /segments/{id} counts the contacts one matches. Members create, change and archive segments in the app.`,
+          parameters: [...pageParams],
+          responses: {
+            '200': { description: 'A page of segments.', content: pageOf('Segment') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+        post: {
+          operationId: 'createSegment',
+          summary: 'Create a saved segment',
+          description: `${scopeNote('campaigns.write')} A segment with the name and conditions given, as members create them on the Segments page: each condition is checked as POST /contacts/search checks it (a custom field of the company and a comparison its type takes, a valid tag or date, a campaign of the company), and a problem is refused with 422 naming the condition, like \`definition.conditions.1.key\`. A name another segment of the company has, whatever its case, is refused with 409. Members see it on the Segments page; the audit names the key. One segment per \`Idempotency-Key\`: a retry answers with the segment as first created.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateSegment')) },
+          responses: {
+            '201': {
+              description: 'The segment, counted now.',
+              content: json(dataOf(ref('SegmentWithCount'))),
+            },
+            ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/segments/{id}': {
+        get: {
+          operationId: 'getSegment',
+          summary: 'A saved segment with how many contacts match it now',
+          description: `${scopeNote('campaigns.read')} One of the company's segments that is not archived, with \`count\`: how many contacts match it now, erased contacts left out, as members' segment page counts them (null when it has a problem). Dates are read in the company's time zone. Counts only: POST /contacts/search with the same conditions finds the contacts, with \`contacts.read\`. An archived segment and another company's are not found.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The segment, counted now.',
+              content: json(dataOf(ref('SegmentWithCount'))),
+            },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+        patch: {
+          operationId: 'updateSegment',
+          summary: 'Change a saved segment',
+          description: `${scopeNote('campaigns.write')} Changes the name or the conditions given, as members change a segment: what is left out stays, new conditions replace its conditions and are checked as POST /contacts/search checks them, and its version goes up. With \`expectedVersion\`, a segment changed since you read it is refused with 409; so is a name another segment has. Campaigns already submitted keep the audience they were submitted with; drafts with this segment take its new conditions. The audit names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateSegment')) },
+          responses: {
+            '200': {
+              description: 'The segment as changed, counted now.',
+              content: json(dataOf(ref('SegmentWithCount'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+        delete: {
+          operationId: 'archiveSegment',
+          summary: 'Archive a saved segment',
+          description: `${scopeNote('campaigns.write')} Archives it, as members do: it leaves the lists and reads, and its name is free again. Campaigns already submitted keep their audience; a draft with it cannot be submitted until it takes another audience. A segment already archived is answered as it is, so a retry is harmless; another company's is not found. The audit names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'Archived.',
+              content: json(
+                dataOf({
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string', format: 'uuid' },
+                    archived: { const: true },
+                  },
+                  required: ['id', 'archived'],
+                }),
+              ),
+            },
+            ...errors(401, 403, 404, 423, 429, 500),
+          },
+        },
+      },
+      '/segments/{id}/contacts': {
+        get: {
+          operationId: 'listSegmentContacts',
+          summary: 'The contacts a saved segment holds now, newest first',
+          description: `${scopeNote('campaigns.read')} Also needs \`contacts.read\`, and \`conversations.read\` for a segment with a \`last_message\` condition, as POST /contacts/search does. The segment's conditions are read now as members' segment page and campaigns read them, with dates in the company's time zone, and its contacts answered as POST /contacts/search answers them: newest first, erased contacts left out, pages that never skip or repeat a contact. Each page reads at most ${API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US')} of the company's contacts, so a page can hold fewer contacts than \`limit\`, or none, and still give a \`nextCursor\`: follow it until it is \`null\`. A segment with a \`problem\` (GET /segments/{id}) is refused with 412 saying it; an archived segment and another company's are not found.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }, ...pageParams],
+          responses: {
+            '200': { description: 'A page of contacts.', content: pageOf('Contact') },
+            ...errors(401, 403, 404, 412, 422, 429, 500),
           },
         },
       },
@@ -2231,6 +2382,9 @@ export function buildOpenApiDocument(serverUrl: string) {
         SendVideo: jsonSchema(apiSendVideoSchema, 'input'),
         SendAudio: jsonSchema(apiSendAudioSchema, 'input'),
         SendDocument: jsonSchema(apiSendDocumentSchema, 'input'),
+        SendSticker: jsonSchema(apiSendStickerSchema, 'input'),
+        SendLocation: jsonSchema(apiSendLocationSchema, 'input'),
+        SendContacts: jsonSchema(apiSendContactsSchema, 'input'),
         SendButtons: jsonSchema(apiSendButtonsSchema, 'input'),
         SendList: jsonSchema(apiSendListSchema, 'input'),
         SendReaction: jsonSchema(apiSendReactionSchema, 'input'),
@@ -2272,7 +2426,12 @@ export function buildOpenApiDocument(serverUrl: string) {
         CampaignReview: jsonSchema(apiCampaignReviewSchema),
         CreateCampaign: jsonSchema(apiCreateCampaignSchema, 'input'),
         UpdateCampaign: jsonSchema(apiUpdateCampaignSchema, 'input'),
+        SubmitCampaign: jsonSchema(apiSubmitCampaignSchema, 'input'),
         CampaignRecipient: jsonSchema(apiCampaignRecipientSchema),
+        Segment: jsonSchema(apiSegmentSchema),
+        SegmentWithCount: jsonSchema(apiSegmentDetailSchema),
+        CreateSegment: jsonSchema(apiCreateSegmentSchema, 'input'),
+        UpdateSegment: jsonSchema(apiUpdateSegmentSchema, 'input'),
         Automation: jsonSchema(apiAutomationSchema),
         AutomationRun: jsonSchema(apiAutomationRunSchema),
         StartAutomationRun: jsonSchema(apiStartAutomationSchema, 'input'),
@@ -2346,10 +2505,18 @@ export const API_ROUTES = [
   ['get', '/campaigns/{id}'],
   ['patch', '/campaigns/{id}'],
   ['get', '/campaigns/{id}/review'],
+  ['post', '/campaigns/{id}/submit'],
+  ['post', '/campaigns/{id}/withdraw'],
   ['get', '/campaigns/{id}/recipients'],
   ['post', '/campaigns/{id}/pause'],
   ['post', '/campaigns/{id}/resume'],
   ['post', '/campaigns/{id}/cancel'],
+  ['get', '/segments'],
+  ['post', '/segments'],
+  ['get', '/segments/{id}'],
+  ['patch', '/segments/{id}'],
+  ['delete', '/segments/{id}'],
+  ['get', '/segments/{id}/contacts'],
   ['get', '/automations'],
   ['post', '/automations/{id}/runs'],
   ['post', '/automations/{id}/runs/start-many'],

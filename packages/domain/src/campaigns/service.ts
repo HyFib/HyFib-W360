@@ -21,8 +21,10 @@ import {
   rateCards,
   segments,
   sql,
+  tenants,
   users,
   type CampaignEventType,
+  type CampaignPauseReason,
   type CampaignStatus,
   type Database,
   type SQL,
@@ -39,10 +41,14 @@ import {
 } from '../consent/service';
 import { CSV_BOM, csvLine } from '../contacts/csv';
 import { normalizePhone } from '../contacts/phone';
+import { enqueueEmail, type OutboxDeps } from '../email/outbox';
+import { NOTICE_LINE_MAX, splitEmailText } from '../email/templates';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { STATUS_RANK } from '../messaging/status';
 import { queueTemplateMessage } from '../messaging/outbound';
+import { formatCompanyTime } from '../tenancy/deletion';
+import { wantsEmail } from '../tenancy/email-preferences';
 import { sendSpecFor } from '../templates/definition';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import {
@@ -104,6 +110,14 @@ export interface CampaignDeps {
   jobs: JobQueue;
   signer: JobSigner;
   clock: Clock;
+  /** Emails to the members who can approve a campaign waiting for approval (ADR-204). */
+  notices: CampaignNoticeDeps;
+}
+
+/** What emailing a company's approvers needs (ADR-204): the outbox and the links' base. */
+export interface CampaignNoticeDeps {
+  outbox: OutboxDeps;
+  appBaseUrl: string;
 }
 
 // Settings ---------------------------------------------------------------------------------------
@@ -1003,6 +1017,601 @@ export function campaignDraftInputOf(c: CampaignRow): CampaignDraftInput {
   };
 }
 
+/** Who submits a draft: a member, or a key through the API (ADR-202). */
+export type CampaignSubmitter = { userId: string } | { apiKeyId: string };
+
+/** What a submission took, for the caller that launches it or leaves it waiting for approval. */
+export interface CampaignSubmission {
+  snapshot: { total: number; pending: number; skipped: number };
+  schedule: { at: Date; adjustment: ScheduleAdjustment | null };
+  category: 'MARKETING' | 'UTILITY' | 'AUTHENTICATION';
+  /** The columns a submission sets, whatever follows it. */
+  submitted: Partial<typeof campaigns.$inferInsert>;
+}
+
+/**
+ * Submits a locked draft, for a member and for a key (ADR-202) alike: the readiness members' review
+ * reads, the audience's size and the snapshot of who it goes to, each refused as members are told,
+ * and the submission's event. The caller then launches it under a member's authority, or leaves it
+ * waiting for approval (`awaitCampaignApproval`), as a key's submission always is.
+ */
+export async function submitLockedDraft(
+  tx: Tx,
+  company: CampaignCompany,
+  c: CampaignRow,
+  by: CampaignSubmitter,
+  now: Date,
+): Promise<CampaignSubmission> {
+  const r = await evaluateReadiness(tx, company, c, now);
+  const first = r.problems[0];
+  if (first) throw new AppError('precondition_failed', first);
+  if (!r.rules || !r.where || !r.schedule || !r.definition || !r.template)
+    throw new Error('Readiness without an audience');
+  const total = await countAudience(tx, r.where);
+  if (total > MAX_AUDIENCE)
+    throw new AppError(
+      'precondition_failed',
+      `This audience has ${total} contacts; campaigns are limited to ${MAX_AUDIENCE}.`,
+    );
+  const snapshot = await insertSnapshot(tx, c.id, r.rules, r.where);
+  if (snapshot.pending === 0)
+    throw new AppError(
+      'precondition_failed',
+      'No contact in this audience can receive the campaign now.',
+    );
+  const member = 'userId' in by ? by.userId : null;
+  const key = 'apiKeyId' in by ? by.apiKeyId : null;
+  await recordCampaignEvent(tx, company.id, c.id, 'submitted', member, {
+    ...(key ? { apiKeyId: key } : {}),
+    audience: snapshot.total,
+    pending: snapshot.pending,
+    skipped: snapshot.skipped,
+  });
+  return {
+    snapshot,
+    schedule: r.schedule,
+    category: r.template.category,
+    submitted: {
+      audienceUsed: r.definition,
+      audienceCount: snapshot.total,
+      skippedCount: snapshot.skipped,
+      submittedByUserId: member,
+      submittedByApiKeyId: key,
+      submittedAt: now,
+      reviewNote: null,
+    },
+  };
+}
+
+/** Leaves a submitted campaign waiting for a member's approval, set to start when it would. */
+export async function awaitCampaignApproval(
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+  submission: CampaignSubmission,
+): Promise<void> {
+  await tx
+    .update(campaigns)
+    .set({
+      ...submission.submitted,
+      status: 'pending_approval',
+      scheduledAt: submission.schedule.at,
+      scheduleAdjustment: submission.schedule.adjustment,
+      version: sql`${campaigns.version} + 1`,
+    })
+    .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
+}
+
+/**
+ * Until when a campaign waiting for approval can be approved (ADR-209): the end of its sending
+ * period, counted from when it was set to start, which for a campaign that starts at once is its
+ * submission. Approving it later is refused: it has to be sent back and scheduled again.
+ */
+export function campaignApprovalDeadline(scheduledAt: Date, stopAfterHours: number): Date {
+  return new Date(scheduledAt.getTime() + stopAfterHours * 3_600_000);
+}
+
+/**
+ * The email that a campaign waits for approval (ADR-204): who submitted it (a member, or a key whose
+ * submission sends under the approver's authority, ADR-202), how many contacts it would reach and
+ * when it would start once approved, in the campaign's time zone. Counts only, never contacts.
+ */
+export function campaignApprovalNotice(input: {
+  campaignName: string;
+  submitter: { kind: 'member' | 'key'; name: string };
+  pending: number;
+  total: number;
+  /** When it is set to start, or null when it starts once approved. */
+  startsAt: Date | null;
+  /** Until when it can be approved (ADR-209), or null when that is not known. */
+  approveBy: Date | null;
+  /** The campaign's time zone, the one its page shows its schedule in. */
+  timeZone: string;
+}): { subject: string; lines: string[] } {
+  const count = (n: number) => n.toLocaleString('en-IN');
+  const by =
+    input.submitter.kind === 'key' ? `The API key “${input.submitter.name}”` : input.submitter.name;
+  return {
+    subject: `Campaign “${input.campaignName}” waits for your approval`,
+    lines: [
+      `${by} submitted the campaign “${input.campaignName}”, and it waits for a member's approval.`,
+      `It would be sent to ${count(input.pending)} of the ${count(input.total)} ${input.total === 1 ? 'contact' : 'contacts'} in its audience.`,
+      input.startsAt
+        ? `Once approved, it starts at ${formatCompanyTime(input.startsAt, input.timeZone)}, or at once if that time has passed.`
+        : 'Once approved, it starts at once.',
+      ...(input.approveBy
+        ? [
+            `It can be approved until ${formatCompanyTime(input.approveBy, input.timeZone)}, when its sending period ends; after that it has to be sent back and scheduled again.`,
+          ]
+        : []),
+      input.submitter.kind === 'key'
+        ? 'Approving it needs permission to send campaigns, as it then sends under your authority. You can also send it back with a note.'
+        : 'Approve it, or send it back with a note, on its page.',
+    ],
+  };
+}
+
+/**
+ * Emails the members who can approve a campaign that now waits for approval (ADR-204), in the
+ * submission's transaction, so a refused submission emails nobody: active members whose roles
+ * grant `campaigns.approve`, except the member who submitted it, and for a key's submission only
+ * those who may also send campaigns, as approving it needs (ADR-202). Returns how many it emailed.
+ */
+export async function emailCampaignApprovers(
+  notices: CampaignNoticeDeps,
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+): Promise<number> {
+  const [c] = await tx
+    .select({
+      name: campaigns.name,
+      status: campaigns.status,
+      version: campaigns.version,
+      scheduleKind: campaigns.scheduleKind,
+      scheduledAt: campaigns.scheduledAt,
+      stopAfterHours: campaigns.stopAfterHours,
+      audienceCount: campaigns.audienceCount,
+      skippedCount: campaigns.skippedCount,
+      submittedByUserId: campaigns.submittedByUserId,
+      submittedByApiKeyId: campaigns.submittedByApiKeyId,
+      timezone: campaigns.timezone,
+      company: tenants.name,
+      slug: tenants.slug,
+    })
+    .from(campaigns)
+    .innerJoin(tenants, eq(tenants.id, campaigns.tenantId))
+    .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
+  if (!c || c.status !== 'pending_approval') return 0;
+  let submitter: { kind: 'member' | 'key'; name: string };
+  if (c.submittedByApiKeyId) {
+    const [key] = await tx
+      .select({ name: apiKeys.name })
+      .from(apiKeys)
+      .where(and(eq(apiKeys.tenantId, tenantId), eq(apiKeys.id, c.submittedByApiKeyId)));
+    // The foreign key keeps the key that submitted a campaign (migration 0140).
+    if (!key) throw new Error(`Campaign ${campaignId} names an API key that does not exist`);
+    submitter = { kind: 'key', name: key.name };
+  } else {
+    const [member] = c.submittedByUserId
+      ? await tx.select({ name: users.name }).from(users).where(eq(users.id, c.submittedByUserId))
+      : [];
+    submitter = { kind: 'member', name: member?.name ?? 'A member' };
+  }
+  const members = await tx
+    .select({
+      userId: users.id,
+      email: users.email,
+      roles: memberships.roles,
+      optOuts: memberships.emailOptOuts,
+    })
+    .from(memberships)
+    .innerJoin(users, eq(users.id, memberships.userId))
+    .where(and(eq(memberships.tenantId, tenantId), eq(memberships.status, 'active')))
+    .orderBy(users.id);
+  const approvers = members.filter((m) => {
+    const granted = permissionsForRoles(m.roles as TenantRole[]);
+    return (
+      wantsEmail(m.optOuts, 'campaign_approvals') &&
+      granted.has('campaigns.approve') &&
+      m.userId !== c.submittedByUserId &&
+      (submitter.kind === 'member' || granted.has('campaigns.send'))
+    );
+  });
+  const { subject, lines } = campaignApprovalNotice({
+    campaignName: c.name,
+    submitter,
+    pending: c.audienceCount - c.skippedCount,
+    total: c.audienceCount,
+    startsAt: c.scheduleKind === 'now' ? null : c.scheduledAt,
+    approveBy: c.scheduledAt ? campaignApprovalDeadline(c.scheduledAt, c.stopAfterHours) : null,
+    timeZone: c.timezone,
+  });
+  const url = new URL(`/c/${c.slug}/campaigns/${campaignId}`, notices.appBaseUrl).toString();
+  for (const approver of approvers) {
+    await enqueueEmail(notices.outbox, tx, {
+      to: approver.email,
+      tenantId,
+      // One email per approver for each submission: a submission raises the campaign's version.
+      dedupeKey: `campaign-approval:${campaignId}:${c.version}:${approver.userId}`,
+      payload: {
+        kind: 'tenant.notice',
+        companyName: c.company,
+        subject,
+        lines,
+        url,
+        actionLabel: 'Review campaign',
+      },
+    });
+  }
+  return approvers.length;
+}
+
+/** What an approver did with a member's submission, for the email to that member (ADR-205). */
+export type CampaignReviewOutcome = 'approved' | 'rejected' | 'withdrawn';
+
+/**
+ * The email to the member who submitted a campaign about what an approver did with it (ADR-205):
+ * approved (when it starts, in the campaign's time zone, and that it sends under their authority),
+ * sent back with the approver's note, or taken back to a draft. A note is the approver's own words,
+ * split into lines as long notes are.
+ */
+export function campaignReviewNotice(input: {
+  campaignName: string;
+  outcome: CampaignReviewOutcome;
+  /** The member who approved it, sent it back or took it back. */
+  reviewer: string;
+  note: string | null;
+  /** When an approved campaign starts, or null when it starts at once. */
+  startsAt: Date | null;
+  /** The campaign's time zone, the one its page shows its schedule in. */
+  timeZone: string;
+}): { subject: string; lines: string[] } {
+  const name = `“${input.campaignName}”`;
+  const note = input.note
+    ? splitEmailText(`Their note: “${input.note}”`, NOTICE_LINE_MAX.tenant)
+    : [];
+  switch (input.outcome) {
+    case 'approved':
+      return {
+        subject: `Campaign ${name} was approved`,
+        lines: [
+          `${input.reviewer} approved your campaign ${name}.`,
+          input.startsAt
+            ? `It starts at ${formatCompanyTime(input.startsAt, input.timeZone)}.`
+            : 'It starts now.',
+          ...note,
+          'It sends under your authority, so it pauses if you leave the company or can no longer send campaigns. You can follow, pause or cancel it on its page.',
+        ],
+      };
+    case 'rejected':
+      return {
+        subject: `Campaign ${name} was sent back`,
+        lines: [
+          `${input.reviewer} sent your campaign ${name} back to you as a draft. Nothing was sent.`,
+          ...note,
+          'Change what is needed, then submit it again for approval.',
+        ],
+      };
+    case 'withdrawn':
+      return {
+        subject: `Campaign ${name} was taken back to a draft`,
+        lines: [
+          `${input.reviewer} took your campaign ${name} back to a draft while it waited for approval. Nothing was sent.`,
+          'Submit it again when it is ready.',
+        ],
+      };
+  }
+}
+
+/**
+ * Emails the member who submitted a campaign what an approver did with it (ADR-205), in the same
+ * transaction, so a refused approval emails nobody. Nobody is emailed for a key's submission (its
+ * integration reads `campaign.status_changed`), when the member acted on their own submission, or
+ * when they are no longer an active member. The submitter is passed in, as sending a campaign back
+ * clears it. Returns whether it emailed.
+ */
+export async function emailCampaignSubmitter(
+  notices: CampaignNoticeDeps,
+  tx: Tx,
+  tenant: { id: string; name: string; slug: string },
+  campaignId: string,
+  review: {
+    submittedByUserId: string | null;
+    reviewer: { id: string; name: string };
+    outcome: CampaignReviewOutcome;
+    note: string | null;
+    startsAt: Date | null;
+  },
+): Promise<boolean> {
+  const submitterId = review.submittedByUserId;
+  if (!submitterId || submitterId === review.reviewer.id) return false;
+  const [submitter] = await tx
+    .select({ email: users.email, optOuts: memberships.emailOptOuts })
+    .from(memberships)
+    .innerJoin(users, eq(users.id, memberships.userId))
+    .where(
+      and(
+        eq(memberships.tenantId, tenant.id),
+        eq(memberships.userId, submitterId),
+        eq(memberships.status, 'active'),
+      ),
+    );
+  if (!submitter || !wantsEmail(submitter.optOuts, 'campaign_reviews')) return false;
+  const [c] = await tx
+    .select({ name: campaigns.name, version: campaigns.version, timezone: campaigns.timezone })
+    .from(campaigns)
+    .where(and(eq(campaigns.tenantId, tenant.id), eq(campaigns.id, campaignId)));
+  if (!c) return false;
+  const { subject, lines } = campaignReviewNotice({
+    campaignName: c.name,
+    outcome: review.outcome,
+    reviewer: review.reviewer.name,
+    note: review.note,
+    startsAt: review.startsAt,
+    timeZone: c.timezone,
+  });
+  await enqueueEmail(notices.outbox, tx, {
+    to: submitter.email,
+    tenantId: tenant.id,
+    // Approving, sending back and taking back each raise the version: one email for each.
+    dedupeKey: `campaign-review:${campaignId}:${c.version}:${submitterId}`,
+    payload: {
+      kind: 'tenant.notice',
+      companyName: tenant.name,
+      subject,
+      lines,
+      url: new URL(`/c/${tenant.slug}/campaigns/${campaignId}`, notices.appBaseUrl).toString(),
+      actionLabel: 'Open campaign',
+    },
+  });
+  return true;
+}
+
+/** The pauses HyFib makes by itself, which members are emailed about (ADR-210). */
+export type AutomaticPauseReason = Exclude<CampaignPauseReason, 'manual' | 'api'>;
+
+/** Each automatic pause: the end of the email's subject, and why it paused and what to do. */
+const AUTOMATIC_PAUSES: Record<AutomaticPauseReason, { subject: string; line: string }> = {
+  budget_reached: {
+    subject: 'its spending cap was reached',
+    line: 'It reached its spending cap. Raise or remove the cap on its page, then resume it.',
+  },
+  message_cap_reached: {
+    subject: 'its message cap was reached',
+    line: 'It reached its message cap. Raise or remove the cap on its page, then resume it.',
+  },
+  template_not_approved: {
+    subject: 'its template can no longer be sent',
+    line: 'Its template is no longer approved by Meta, or no longer takes the variables the campaign fills in. Resume it once Meta approves the template again; if the template’s variables changed, cancel it and create a new campaign.',
+  },
+  channel_inactive: {
+    subject: 'its WhatsApp number is not active',
+    line: 'The WhatsApp number it sends from is not active. An administrator can reconnect it in Settings → Channels; then resume the campaign.',
+  },
+  launcher_removed: {
+    subject: 'another member must resume it',
+    line: 'The member whose authority it sent under is no longer an active member of the company. A member who can send campaigns can resume it, and it then sends under their authority.',
+  },
+  launcher_not_permitted: {
+    subject: 'another member must resume it',
+    line: 'The member whose authority it sent under can no longer send campaigns. A member who can send campaigns can resume it, and it then sends under their authority.',
+  },
+  rate_card_missing: {
+    subject: 'its costs cannot be checked',
+    line: 'No rate card is published for the currency of its spending cap, so its costs cannot be checked against the cap. Resume it once one is published, or remove the cap on its page first.',
+  },
+};
+
+/**
+ * The email that HyFib paused a campaign by itself (ADR-210): why, what a member does about it, and
+ * what happens to the messages it has not sent, in the campaign's time zone. No counts: messages
+ * still queued at the pause are held back by the send worker, so they would be out of date.
+ */
+export function campaignPauseNotice(input: {
+  campaignName: string;
+  reason: AutomaticPauseReason;
+  /** When its sending period ends, or null when it had not started. */
+  sendUntil: Date | null;
+  /** The campaign's time zone, the one its page shows its schedule in. */
+  timeZone: string;
+}): { subject: string; lines: string[] } {
+  const pause = AUTOMATIC_PAUSES[input.reason];
+  return {
+    subject: `Campaign “${input.campaignName}” paused: ${pause.subject}`,
+    lines: [
+      `HyFib paused the campaign “${input.campaignName}”, and it sends nothing more until it is resumed.`,
+      pause.line,
+      input.sendUntil
+        ? `Messages that had not gone out yet wait until it is resumed. Its sending period ends at ${formatCompanyTime(input.sendUntil, input.timeZone)}, and contacts it has not sent to by then are skipped.`
+        : 'It had not started, so nothing was sent. Once resumed, it starts at its scheduled time, or at once if that time has passed.',
+    ],
+  };
+}
+
+/**
+ * Emails the members who can act on a campaign HyFib paused by itself (ADR-210), in the pause's
+ * transaction: the member whose authority it sends under, while they may still send campaigns, as
+ * they can resume it; otherwise the active members who may approve and send campaigns (owners and
+ * administrators), as one of them must resume it. Members' and keys' own pauses are not emailed.
+ * Returns how many it emailed.
+ */
+export async function emailCampaignPaused(
+  notices: CampaignNoticeDeps,
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+  reason: AutomaticPauseReason,
+): Promise<number> {
+  const [c] = await tx
+    .select({
+      name: campaigns.name,
+      version: campaigns.version,
+      launchedByUserId: campaigns.launchedByUserId,
+      deadlineAt: campaigns.deadlineAt,
+      timezone: campaigns.timezone,
+      company: tenants.name,
+      slug: tenants.slug,
+    })
+    .from(campaigns)
+    .innerJoin(tenants, eq(tenants.id, campaigns.tenantId))
+    .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
+  if (!c) return 0;
+  const members = await tx
+    .select({
+      userId: users.id,
+      email: users.email,
+      roles: memberships.roles,
+      optOuts: memberships.emailOptOuts,
+    })
+    .from(memberships)
+    .innerJoin(users, eq(users.id, memberships.userId))
+    .where(and(eq(memberships.tenantId, tenantId), eq(memberships.status, 'active')))
+    .orderBy(users.id);
+  const grants = (m: { roles: string[] }) => permissionsForRoles(m.roles as TenantRole[]);
+  const launcher = members.find(
+    (m) => m.userId === c.launchedByUserId && grants(m).has('campaigns.send'),
+  );
+  // Who must act, then those of them who did not turn these emails off (ADR-215).
+  const recipients = (
+    launcher
+      ? [launcher]
+      : members.filter((m) => grants(m).has('campaigns.approve') && grants(m).has('campaigns.send'))
+  ).filter((m) => wantsEmail(m.optOuts, 'campaign_pauses'));
+  const { subject, lines } = campaignPauseNotice({
+    campaignName: c.name,
+    reason,
+    sendUntil: c.deadlineAt,
+    timeZone: c.timezone,
+  });
+  const url = new URL(`/c/${c.slug}/campaigns/${campaignId}`, notices.appBaseUrl).toString();
+  for (const member of recipients) {
+    await enqueueEmail(notices.outbox, tx, {
+      to: member.email,
+      tenantId,
+      // A pause raises the campaign's version: one email per member for each pause.
+      dedupeKey: `campaign-paused:${campaignId}:${c.version}:${member.userId}`,
+      payload: {
+        kind: 'tenant.notice',
+        companyName: c.company,
+        subject,
+        lines,
+        url,
+        actionLabel: 'Open campaign',
+      },
+    });
+  }
+  return recipients.length;
+}
+
+/**
+ * The email that a campaign finished (ADR-214): every contact in its audience was handed to
+ * WhatsApp or skipped, or its sending period ended and those it had not reached were skipped.
+ * Counts only, never contacts; deliveries keep arriving after it.
+ */
+export function campaignCompletionNotice(input: {
+  campaignName: string;
+  reason: 'all_processed' | 'deadline_passed';
+  audience: number;
+  queued: number;
+  skipped: number;
+  /** Contacts skipped because its sending period ended before it reached them. */
+  expired: number;
+  /** When its sending period ended, for a campaign stopped by it. */
+  sendUntil: Date | null;
+  timeZone: string;
+}): { subject: string; lines: string[] } {
+  const count = (n: number) => n.toLocaleString('en-IN');
+  const contacts = (n: number) => `${count(n)} ${n === 1 ? 'contact' : 'contacts'}`;
+  const name = input.campaignName;
+  const ended = input.reason === 'deadline_passed';
+  const until = input.sendUntil ? ` at ${formatCompanyTime(input.sendUntil, input.timeZone)}` : '';
+  return {
+    subject: ended
+      ? `Campaign “${name}” ended: its sending period is over`
+      : `Campaign “${name}” finished sending`,
+    lines: [
+      !ended
+        ? `The campaign “${name}” finished: every contact in its audience was handed to WhatsApp or skipped.`
+        : input.expired === 0
+          ? `The sending period of the campaign “${name}” ended${until}, after every contact in its audience was handed to WhatsApp or skipped.`
+          : `The sending period of the campaign “${name}” ended${until}, so the ${contacts(input.expired)} it had not reached ${input.expired === 1 ? 'was' : 'were'} skipped.`,
+      `It handed ${count(input.queued)} ${input.queued === 1 ? 'message' : 'messages'} to WhatsApp and skipped ${count(input.skipped)} of the ${contacts(input.audience)} in its audience; its page says why each was skipped.`,
+      'WhatsApp keeps reporting deliveries, reads and replies after this, and its page shows them as they arrive.',
+    ],
+  };
+}
+
+/**
+ * Emails the member a finished campaign sent under (ADR-214), in the transaction that completes
+ * it, while they are an active member. A cancelled campaign emails nobody: a member or key did it.
+ * Returns whether it emailed.
+ */
+export async function emailCampaignCompleted(
+  notices: CampaignNoticeDeps,
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+  reason: 'all_processed' | 'deadline_passed',
+): Promise<boolean> {
+  const [c] = await tx
+    .select({
+      name: campaigns.name,
+      version: campaigns.version,
+      launchedByUserId: campaigns.launchedByUserId,
+      audienceCount: campaigns.audienceCount,
+      queuedCount: campaigns.queuedCount,
+      skippedCount: campaigns.skippedCount,
+      deadlineAt: campaigns.deadlineAt,
+      timezone: campaigns.timezone,
+      company: tenants.name,
+      slug: tenants.slug,
+      expired: sql<number>`(select count(*)::int from app.campaign_recipients r
+        where r.tenant_id = ${campaigns.tenantId} and r.campaign_id = ${campaigns.id}
+          and r.state = 'skipped' and r.skip_reason = 'expired')`,
+    })
+    .from(campaigns)
+    .innerJoin(tenants, eq(tenants.id, campaigns.tenantId))
+    .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
+  if (!c?.launchedByUserId) return false;
+  const [member] = await tx
+    .select({ userId: users.id, email: users.email, optOuts: memberships.emailOptOuts })
+    .from(memberships)
+    .innerJoin(users, eq(users.id, memberships.userId))
+    .where(
+      and(
+        eq(memberships.tenantId, tenantId),
+        eq(memberships.userId, c.launchedByUserId),
+        eq(memberships.status, 'active'),
+      ),
+    );
+  if (!member || !wantsEmail(member.optOuts, 'campaign_completions')) return false;
+  const { subject, lines } = campaignCompletionNotice({
+    campaignName: c.name,
+    reason,
+    audience: c.audienceCount,
+    queued: c.queuedCount,
+    skipped: c.skippedCount,
+    expired: c.expired,
+    sendUntil: c.deadlineAt,
+    timeZone: c.timezone,
+  });
+  await enqueueEmail(notices.outbox, tx, {
+    to: member.email,
+    tenantId,
+    dedupeKey: `campaign-completed:${campaignId}:${c.version}:${member.userId}`,
+    payload: {
+      kind: 'tenant.notice',
+      companyName: c.company,
+      subject,
+      lines,
+      url: new URL(`/c/${c.slug}/campaigns/${campaignId}`, notices.appBaseUrl).toString(),
+      actionLabel: 'Open campaign',
+    },
+  });
+  return true;
+}
+
 // Service ----------------------------------------------------------------------------------------
 
 export function createCampaignsService(deps: CampaignDeps) {
@@ -1210,6 +1819,15 @@ export function createCampaignsService(deps: CampaignDeps) {
               ),
             );
           const nameOf = (id: string | null) => names.find((n) => n.id === id)?.name ?? null;
+          // The key that submitted it through the API (ADR-202), named as the timeline names keys.
+          const [submittingKey] = c.submittedByApiKeyId
+            ? await tx
+                .select({ name: apiKeys.name })
+                .from(apiKeys)
+                .where(
+                  and(eq(apiKeys.tenantId, ctx.tenant.id), eq(apiKeys.id, c.submittedByApiKeyId)),
+                )
+            : [];
           return {
             campaign: c,
             variables: readCampaignVariables(c.variables),
@@ -1236,6 +1854,7 @@ export function createCampaignsService(deps: CampaignDeps) {
             events,
             people: {
               submittedBy: nameOf(c.submittedByUserId),
+              submittedByKey: submittingKey?.name ?? null,
               approvedBy: nameOf(c.approvedByUserId),
               launchedBy: nameOf(c.launchedByUserId),
               createdBy: nameOf(c.createdByUserId),
@@ -1340,55 +1959,23 @@ export function createCampaignsService(deps: CampaignDeps) {
             'conflict',
             'Someone else changed this campaign. Reload the page to see their version.',
           );
-        const r = await evaluateReadiness(tx, ctx.tenant, c, now);
-        const first = r.problems[0];
-        if (first) throw new AppError('precondition_failed', first);
-        if (!r.rules || !r.where || !r.schedule || !r.definition || !r.template)
-          throw new Error('Readiness without an audience');
-        const total = await countAudience(tx, r.where);
-        if (total > MAX_AUDIENCE)
-          throw new AppError(
-            'precondition_failed',
-            `This audience has ${total} contacts; campaigns are limited to ${MAX_AUDIENCE}.`,
-          );
-        const snapshot = await insertSnapshot(tx, campaignId, r.rules, r.where);
-        if (snapshot.pending === 0)
-          throw new AppError(
-            'precondition_failed',
-            'No contact in this audience can receive the campaign now.',
-          );
+        const submission = await submitLockedDraft(tx, ctx.tenant, c, { userId: ctx.user.id }, now);
+        const { snapshot } = submission;
         const settings = await loadCampaignSettings(tx, ctx.tenant.id);
-        const submitted = {
-          audienceUsed: r.definition,
-          audienceCount: snapshot.total,
-          skippedCount: snapshot.skipped,
-          submittedByUserId: ctx.user.id,
-          submittedAt: now,
-          reviewNote: null,
-        };
-        await recordCampaignEvent(tx, ctx.tenant.id, campaignId, 'submitted', ctx.user.id, {
-          audience: snapshot.total,
-          pending: snapshot.pending,
-          skipped: snapshot.skipped,
-        });
         if (settings.approvalRequired) {
-          await tx
-            .update(campaigns)
-            .set({
-              ...submitted,
-              status: 'pending_approval',
-              scheduledAt: r.schedule.at,
-              scheduleAdjustment: r.schedule.adjustment,
-              version: sql`${campaigns.version} + 1`,
-            })
-            .where(and(eq(campaigns.tenantId, ctx.tenant.id), eq(campaigns.id, campaignId)));
+          await awaitCampaignApproval(tx, ctx.tenant.id, campaignId, submission);
+          await emailCampaignApprovers(deps.notices, tx, ctx.tenant.id, campaignId);
         } else {
           await launch(
             tx,
             ctx,
             c,
-            { launcherUserId: ctx.user.id, at: r.schedule.at, adjustment: r.schedule.adjustment },
-            submitted,
+            {
+              launcherUserId: ctx.user.id,
+              at: submission.schedule.at,
+              adjustment: submission.schedule.adjustment,
+            },
+            submission.submitted,
           );
         }
         await recordAudit(
@@ -1402,7 +1989,7 @@ export function createCampaignsService(deps: CampaignDeps) {
               audience: snapshot.total,
               pending: snapshot.pending,
               approvalRequired: settings.approvalRequired,
-              category: r.template.category,
+              category: submission.category,
             },
           },
           meta,
@@ -1415,7 +2002,11 @@ export function createCampaignsService(deps: CampaignDeps) {
       });
     },
 
-    /** Four-eyes approval: a member other than the submitter, holding `campaigns.approve`. */
+    /**
+     * Four-eyes approval: a member other than the submitter, holding `campaigns.approve`. A key's
+     * submission (ADR-202) is approved by any such member who may also send campaigns, under whose
+     * authority it then sends.
+     */
     async approveCampaign(
       ctx: TenantContext,
       campaignId: string,
@@ -1432,12 +2023,18 @@ export function createCampaignsService(deps: CampaignDeps) {
           throw new AppError('conflict', 'This campaign is not waiting for approval.');
         if (c.submittedByUserId === ctx.user.id)
           throw forbidden('A different member must approve a campaign you submitted.');
-        if (!c.submittedByUserId) throw new Error('Submitted campaign without submitter');
+        // A key's submission sends under the approving member's authority (ADR-202).
+        const launcherUserId = c.submittedByUserId ?? (c.submittedByApiKeyId ? ctx.user.id : null);
+        if (!launcherUserId) throw new Error('Submitted campaign without submitter');
+        if (launcherUserId === ctx.user.id && !can(ctx, 'campaigns.send'))
+          throw forbidden(
+            'An API key submitted this campaign, so it sends under the authority of the member who approves it: approving it needs permission to send campaigns.',
+          );
         const template = await loadTemplate(tx, ctx.tenant.id, c.templateId);
         if (!template || template.status !== 'approved')
           throw new AppError('precondition_failed', 'The template is no longer approved by Meta.');
         const scheduled = c.scheduledAt ?? now;
-        if (scheduled.getTime() + c.stopAfterHours * 3_600_000 <= now.getTime()) {
+        if (campaignApprovalDeadline(scheduled, c.stopAfterHours).getTime() <= now.getTime()) {
           throw new AppError(
             'precondition_failed',
             'The scheduled sending period has already ended. Reject the campaign so it can be rescheduled.',
@@ -1450,7 +2047,7 @@ export function createCampaignsService(deps: CampaignDeps) {
           ctx,
           c,
           {
-            launcherUserId: c.submittedByUserId,
+            launcherUserId,
             at,
             adjustment: c.scheduleAdjustment,
           },
@@ -1458,6 +2055,13 @@ export function createCampaignsService(deps: CampaignDeps) {
         );
         await recordCampaignEvent(tx, ctx.tenant.id, campaignId, 'approved', ctx.user.id, {
           ...(note ? { note } : {}),
+        });
+        await emailCampaignSubmitter(deps.notices, tx, ctx.tenant, campaignId, {
+          submittedByUserId: c.submittedByUserId,
+          reviewer: ctx.user,
+          outcome: 'approved',
+          note: note ?? null,
+          startsAt: at.getTime() === now.getTime() ? null : at,
         });
         await recordAudit(
           tx,
@@ -1483,6 +2087,13 @@ export function createCampaignsService(deps: CampaignDeps) {
           throw new AppError('conflict', 'This campaign is not waiting for approval.');
         await backToDraft(tx, ctx, c.id, { reviewNote: note });
         await recordCampaignEvent(tx, ctx.tenant.id, campaignId, 'rejected', ctx.user.id, { note });
+        await emailCampaignSubmitter(deps.notices, tx, ctx.tenant, campaignId, {
+          submittedByUserId: c.submittedByUserId,
+          reviewer: ctx.user,
+          outcome: 'rejected',
+          note,
+          startsAt: null,
+        });
         await recordAudit(
           tx,
           ctx,
@@ -1504,6 +2115,13 @@ export function createCampaignsService(deps: CampaignDeps) {
           throw forbidden('Only the member who submitted this campaign can withdraw it.');
         await backToDraft(tx, ctx, c.id, {});
         await recordCampaignEvent(tx, ctx.tenant.id, campaignId, 'withdrawn', ctx.user.id);
+        await emailCampaignSubmitter(deps.notices, tx, ctx.tenant, campaignId, {
+          submittedByUserId: c.submittedByUserId,
+          reviewer: ctx.user,
+          outcome: 'withdrawn',
+          note: null,
+          startsAt: null,
+        });
         await recordAudit(
           tx,
           ctx,
@@ -1908,30 +2526,42 @@ export function createCampaignsService(deps: CampaignDeps) {
     campaignId: string,
     extra: { reviewNote?: string },
   ) {
-    await tx
-      .delete(campaignRecipients)
-      .where(
-        and(
-          eq(campaignRecipients.tenantId, ctx.tenant.id),
-          eq(campaignRecipients.campaignId, campaignId),
-        ),
-      );
-    await tx
-      .update(campaigns)
-      .set({
-        status: 'draft',
-        audienceUsed: null,
-        audienceCount: 0,
-        skippedCount: 0,
-        submittedByUserId: null,
-        submittedAt: null,
-        scheduledAt: null,
-        scheduleAdjustment: null,
-        reviewNote: extra.reviewNote ?? null,
-        version: sql`${campaigns.version} + 1`,
-      })
-      .where(and(eq(campaigns.tenantId, ctx.tenant.id), eq(campaigns.id, campaignId)));
+    await returnLockedCampaignToDraft(tx, ctx.tenant.id, campaignId, extra);
   }
+}
+
+/**
+ * Takes a locked submission waiting for approval back to a draft, as a rejection, a member's
+ * withdrawal and a key's (ADR-203) do: its audience snapshot (nothing was sent) and submission are
+ * dropped, and its version goes up, so a submission made from the old version is refused.
+ */
+export async function returnLockedCampaignToDraft(
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+  extra: { reviewNote?: string },
+): Promise<void> {
+  await tx
+    .delete(campaignRecipients)
+    .where(
+      and(eq(campaignRecipients.tenantId, tenantId), eq(campaignRecipients.campaignId, campaignId)),
+    );
+  await tx
+    .update(campaigns)
+    .set({
+      status: 'draft',
+      audienceUsed: null,
+      audienceCount: 0,
+      skippedCount: 0,
+      submittedByUserId: null,
+      submittedByApiKeyId: null,
+      submittedAt: null,
+      scheduledAt: null,
+      scheduleAdjustment: null,
+      reviewNote: extra.reviewNote ?? null,
+      version: sql`${campaigns.version} + 1`,
+    })
+    .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
 }
 
 export type CampaignsService = ReturnType<typeof createCampaignsService>;

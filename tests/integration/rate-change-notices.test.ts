@@ -71,6 +71,7 @@ async function chooseCurrency(c: Company, currency: string) {
     jobs: fx.jobs(),
     signer: fx.signer,
     clock: systemClock,
+    notices: fx.notices(),
   });
   await campaigns.updateSettings(
     await fx.ctx(c, c.owner),

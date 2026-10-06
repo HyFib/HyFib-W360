@@ -40,6 +40,20 @@ export async function updateCompanySecurityAction(
   });
 }
 
+/** Sets which notice emails the member gets from this company (ADR-215). */
+export async function updateEmailPreferencesAction(
+  slug: string,
+  input: unknown,
+): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { emailPreferences } = await getRuntime();
+    await emailPreferences.updateEmailPreferences(ctx, input, await requestMeta());
+    refresh();
+    return null;
+  });
+}
+
 export async function inviteMemberAction(slug: string, input: unknown): Promise<ActionResult> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);

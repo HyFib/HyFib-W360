@@ -28,6 +28,7 @@ import {
   apiListConversations,
   apiListMembers,
   apiListMessages,
+  apiMessageChanges,
   apiListOrders,
   apiListTeams,
   apiListTemplates,
@@ -189,6 +190,48 @@ async function approvedTemplate(c: Company, definition: TemplateDefinition) {
   t.status = 'APPROVED';
   await syncTemplates(graphDeps, scope, c.whatsappAccountId);
   return { id, name };
+}
+
+/**
+ * A template made in WhatsApp Manager with a photo, video or document header, which HyFib's editor
+ * cannot create, approved at the stand-in and synced (ADR-201).
+ */
+async function syncedMediaTemplate(c: Company, format: 'IMAGE' | 'VIDEO' | 'DOCUMENT') {
+  templateCounter += 1;
+  const name = `api_media_${templateCounter}_${Date.now().toString(36)}`;
+  const list = fx.standIn.state.templates.get(c.wabaId) ?? [];
+  fx.standIn.state.templates.set(c.wabaId, list);
+  fx.standIn.state.templateCounter += 1;
+  list.push({
+    id: String(9_000_000_000 + fx.standIn.state.templateCounter),
+    name,
+    language: 'en',
+    status: 'APPROVED',
+    category: 'UTILITY',
+    components: [
+      { type: 'HEADER', format, example: { header_handle: ['4::aW1hZ2UvanBlZw==:ARZ'] } },
+      {
+        type: 'BODY',
+        text: 'Hi {{1}}, parcel {{2}} was delivered.',
+        example: { body_text: [['Asha', 'P-1']] },
+      },
+    ],
+  });
+  const graphDeps = {
+    db: fx.dbs.app,
+    jobs: fx.jobs(),
+    signer: fx.signer,
+    clock: systemClock,
+    keyring: fx.keyring,
+    graph: fx.graph,
+  };
+  await syncTemplates(graphDeps, authorizedTenantScope(c.tenant.id, null), c.whatsappAccountId);
+  const [row] = await fx.query<{ id: string }>(
+    'SELECT id FROM app.message_templates WHERE tenant_id = $1 AND name = $2',
+    [c.tenant.id, name],
+  );
+  if (!row) throw new Error('template not synced');
+  return { id: row.id, name };
 }
 
 /** Hands every queued send of the company to the Graph stand-in. */
@@ -863,6 +906,7 @@ describe('template sends', () => {
       language: 'en',
       category: 'utility',
       variables: { header: 0, body: 2 },
+      headerMedia: null,
       text: { header: null, body: 'Hi {{1}}, your order {{2}} has shipped.', footer: null },
       channels: [{ id: c.channelAccountId, phone: '+91 90000 00000' }],
     });
@@ -1071,7 +1115,7 @@ describe('template sends', () => {
       evidence: 'Signed up at the store counter',
     });
     const owner = await fx.ctx(c, c.owner);
-    const campaigns = createCampaignsService(deps());
+    const campaigns = createCampaignsService({ ...deps(), notices: fx.notices() });
     await campaigns.updateSettings(
       owner,
       { approvalRequired: false, cap: { count: 1, days: 7 }, costCurrency: null },
@@ -1183,6 +1227,179 @@ describe('template sends', () => {
     const failed = await apiGetMessage(deps(), ctx, (mine.body.data as { id: string }).id);
     expect(failed.status).toBe('failed');
     expect(failed.error).toMatchObject({ code: '131026' });
+  });
+
+  it('send a template with a photo or document header, each send giving its file by link (ADR-201)', async () => {
+    const photo = await syncedMediaTemplate(c, 'IMAGE');
+    const receipt = await syncedMediaTemplate(c, 'DOCUMENT');
+    const { ctx } = await apiKey(c, ['templates.read', 'messages.send']);
+    // Listed with the file a send gives; the header asks for no text value.
+    const { data } = await apiListTemplates(deps(), ctx);
+    expect(data.find((t) => t.id === photo.id)).toEqual({
+      id: photo.id,
+      name: photo.name,
+      language: 'en',
+      category: 'utility',
+      variables: { header: 0, body: 2 },
+      headerMedia: 'image',
+      text: { header: null, body: 'Hi {{1}}, parcel {{2}} was delivered.', footer: null },
+      channels: [{ id: c.channelAccountId, phone: '+91 90000 00000' }],
+    });
+    expect(data.find((t) => t.id === receipt.id)?.headerMedia).toBe('document');
+    // Members cannot send it from HyFib, and are told why.
+    const owner = await fx.ctx(c, c.owner);
+    const memberTemplates = createTemplatesService({
+      db: fx.dbs.app,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      clock: systemClock,
+    });
+    expect(
+      (await memberTemplates.listTemplates(owner)).find((t) => t.name === photo.name),
+    ).toMatchObject({
+      sendable: false,
+      unsupportedReason:
+        'This template has a photo header: HyFib sends such templates only through the API, which gives a link to the file.',
+    });
+
+    const link = 'https://cdn.example.com/parcels/p-501.jpg';
+    const sent = await apiSendTemplate(
+      deps(),
+      ctx,
+      {
+        to: '+919811100501',
+        templateId: photo.id,
+        variables: { body: ['Asha', 'P-501'] },
+        headerMedia: { link },
+      },
+      idem('media-tpl-1', 'media-tpl-1'),
+    );
+    expect(sent.status).toBe(201);
+    const queued = sent.body.data as { id: string };
+    const [stored] = await fx.query<{
+      content: Record<string, unknown>;
+      request: { template: { components: unknown[] } };
+    }>(
+      `SELECT m.content, si.request FROM app.messages m
+         JOIN app.send_intents si ON si.tenant_id = m.tenant_id AND si.message_id = m.id
+        WHERE m.id = $1`,
+      [queued.id],
+    );
+    expect(stored?.content).toMatchObject({
+      headerMedia: { type: 'image', link },
+      rendered: { header: null, body: 'Hi Asha, parcel P-501 was delivered.' },
+    });
+    const photoComponents = [
+      { type: 'header', parameters: [{ type: 'image', image: { link } }] },
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: 'Asha' },
+          { type: 'text', text: 'P-501' },
+        ],
+      },
+    ];
+    expect(stored?.request.template.components).toEqual(photoComponents);
+
+    // To many numbers, each with its own file.
+    const pdf = (n: number) => `https://cdn.example.com/receipts/p-${n}.pdf`;
+    const many = await apiSendManyTemplates(
+      deps(),
+      ctx,
+      {
+        templateId: receipt.id,
+        messages: [502, 503].map((n) => ({
+          to: `+919811100${n}`,
+          variables: { body: ['Ravi', `P-${n}`] },
+          headerMedia: { link: pdf(n) },
+        })),
+      },
+      idem('media-tpl-2', 'media-tpl-2'),
+    );
+    expect(
+      (many.body.data as { message: { status: string } | null }[]).map((a) => a.message?.status),
+    ).toEqual(['queued', 'queued']);
+
+    // Refused before anything is written: a file missing, or given to a template without one, by
+    // its place; a link that is not https.
+    const refuse = async (send: Promise<unknown>, message: string, paths: string[]) => {
+      const refused = await expectAppError(send, 'validation_failed');
+      expect(isAppError(refused) && refused.publicMessage).toBe(message);
+      expect(isAppError(refused) && refused.issues?.map((i) => i.path)).toEqual(paths);
+    };
+    const one = (input: Record<string, unknown>, key: string) =>
+      apiSendTemplate(deps(), ctx, { to: '+919811100504', ...input }, idem(key, key));
+    await refuse(
+      one({ templateId: photo.id, variables: { body: ['a', 'b'] } }, 'media-tpl-3'),
+      'This template has a photo header: give the link to its file.',
+      ['headerMedia'],
+    );
+    await refuse(
+      one(
+        { templateId: utility.id, variables: { body: ['a', 'b'] }, headerMedia: { link } },
+        'media-tpl-4',
+      ),
+      'This template has no photo, video or document header, so it takes no file.',
+      ['headerMedia'],
+    );
+    await refuse(
+      one(
+        {
+          templateId: photo.id,
+          variables: { body: ['a', 'b'] },
+          headerMedia: { link: 'http://cdn.example.com/p.jpg' },
+        },
+        'media-tpl-5',
+      ),
+      'Give an https:// link to the media, without a user name or password',
+      ['headerMedia.link'],
+    );
+    await refuse(
+      apiSendManyTemplates(
+        deps(),
+        ctx,
+        {
+          templateId: receipt.id,
+          messages: [
+            {
+              to: '+919811100505',
+              variables: { body: ['a', 'b'] },
+              headerMedia: { link: pdf(505) },
+            },
+            { to: '+919811100506', variables: { body: ['a', 'b'] } },
+          ],
+        },
+        idem('media-tpl-6', 'media-tpl-6'),
+      ),
+      'This template has a document header: give the link to its file.',
+      ['messages.1.headerMedia'],
+    );
+    expect(
+      await fx.query(
+        'SELECT 1 FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = ANY($2::text[])',
+        [c.tenant.id, ['+919811100504', '+919811100505', '+919811100506']],
+      ),
+    ).toHaveLength(0);
+
+    // WhatsApp gets each file as its header's one parameter; reads never give the file.
+    expect((await sendAll(c)).filter((outcome) => outcome !== 'accepted')).toEqual([]);
+    const toPhoto = templatesTo('919811100501');
+    expect(toPhoto).toHaveLength(1);
+    expect(
+      (toPhoto[0]?.body as { template: { components: unknown[] } }).template.components,
+    ).toEqual(photoComponents);
+    for (const n of [502, 503]) {
+      const [request] = templatesTo(`919811100${n}`);
+      expect(
+        (request?.body as { template: { components: unknown[] } }).template.components[0],
+      ).toEqual({
+        type: 'header',
+        parameters: [{ type: 'document', document: { link: pdf(n) } }],
+      });
+    }
+    const status = await apiGetMessage(deps(), ctx, queued.id);
+    expect(status).toMatchObject({ status: 'accepted', templateId: photo.id });
+    expect(JSON.stringify(status)).not.toContain('cdn.example.com');
   });
 
   it('send one template to many numbers in one call, each refusal answered in its place (ADR-163)', async () => {
@@ -1337,7 +1554,7 @@ describe('template sends', () => {
     await optIn('+919811100411');
     await optIn('+919811100412');
     const owner = await fx.ctx(c, c.owner);
-    const campaigns = createCampaignsService(deps());
+    const campaigns = createCampaignsService({ ...deps(), notices: fx.notices() });
     await campaigns.updateSettings(
       owner,
       { approvalRequired: false, cap: { count: 1, days: 7 }, costCurrency: null },
@@ -1651,6 +1868,321 @@ describe('text replies (ADR-070)', () => {
       [c.tenant.id],
     );
     expect(count).toBe(2);
+  });
+
+  it('send a sticker from an https link the same way, without a caption (ADR-198)', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['messages.reply', 'conversations.read'], 'Stickers');
+    const waId = '919811101981';
+    await wrote(c, waId);
+    const conv = await conversationWith(c, `+${waId}`);
+    const link = 'https://cdn.example.com/thanks.webp';
+    const sent = await apiSendMessage(
+      deps(),
+      ctx,
+      { type: 'sticker', to: `+${waId}`, link },
+      idem('sticker-1', 'sticker-1'),
+    );
+    expect(sent.status).toBe(201);
+    expect(sent.body.data).toMatchObject({ type: 'sticker', status: 'queued' });
+    const [stored] = await fx.query(
+      `SELECT m.type, m.content, si.request
+         FROM app.messages m
+         JOIN app.send_intents si ON si.tenant_id = m.tenant_id AND si.message_id = m.id
+        WHERE m.id = $1`,
+      [idOf(sent)],
+    );
+    expect(stored).toEqual({
+      type: 'sticker',
+      content: { link },
+      request: {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: waId,
+        type: 'sticker',
+        sticker: { link },
+      },
+    });
+    expect((await conversationWith(c, `+${waId}`)).last_message_preview).toBe('Sticker');
+    // WhatsApp's sticker object through the send pipeline (the stand-in checks its shape).
+    expect(await sendAll(c)).toEqual(['accepted']);
+    expect(await apiGetMessage(deps(), ctx, idOf(sent))).toMatchObject({
+      type: 'sticker',
+      status: 'accepted',
+    });
+    const atStandIn = fx.standIn.state.requests.filter(
+      (r) => r.path.endsWith('/messages') && (r.body as { to?: string } | undefined)?.to === waId,
+    );
+    expect(atStandIn.map((r) => (r.body as { sticker?: unknown }).sticker)).toEqual([{ link }]);
+    const { data } = await apiListConversationMessages(deps(), ctx, conv.id, {});
+    expect(data.find((m) => m.direction === 'outbound')).toMatchObject({
+      type: 'sticker',
+      text: null,
+      mimeType: null,
+      sentBy: 'api',
+    });
+    // A caption is refused before anything is queued.
+    const captioned = await apiSendMessage(
+      deps(),
+      ctx,
+      { type: 'sticker', to: `+${waId}`, link, caption: 'Thanks!' },
+      idem('sticker-2', 'sticker-2'),
+    ).catch((error: unknown) => error);
+    expect(isAppError(captioned) && captioned.code).toBe('validation_failed');
+    const [{ count } = { count: -1 }] = await fx.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM app.messages WHERE tenant_id = $1 AND direction = 'outbound'`,
+      [c.tenant.id],
+    );
+    expect(count).toBe(1);
+  });
+
+  it('send a location the same way, keeping its coordinates and giving WhatsApp decimal text (ADR-195)', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['messages.reply', 'conversations.read'], 'Front desk');
+    const waId = '919811101951';
+    await wrote(c, waId);
+    const conv = await conversationWith(c, `+${waId}`);
+    const clinic = await apiSendMessage(
+      deps(),
+      ctx,
+      {
+        type: 'location',
+        to: `+${waId}`,
+        latitude: 18.5204,
+        longitude: 73.8567,
+        name: ' Harbour Dental ',
+        address: '12 Harbour Road, Pune',
+      },
+      idem('location-1', 'location-1'),
+    );
+    expect(clinic.status).toBe(201);
+    expect(clinic.body.data).toMatchObject({ type: 'location', status: 'queued' });
+    // A place without a name, just south of the equator: its latitude written out in decimals.
+    const pier = await apiSendMessage(
+      deps(),
+      ctx,
+      {
+        type: 'location',
+        to: `+${waId}`,
+        latitude: -0.0000005,
+        longitude: 9.45,
+        address: 'Pier 3',
+      },
+      idem('location-2', 'location-2'),
+    );
+    const stored = await fx.query(
+      `SELECT m.type, m.content, m.sender_type, si.request
+         FROM app.messages m
+         JOIN app.send_intents si ON si.tenant_id = m.tenant_id AND si.message_id = m.id
+        WHERE m.id = ANY($1::uuid[]) ORDER BY m.created_at`,
+      [[idOf(clinic), idOf(pier)]],
+    );
+    const frame = { messaging_product: 'whatsapp', recipient_type: 'individual', to: waId };
+    const clinicPlace = { name: 'Harbour Dental', address: '12 Harbour Road, Pune' };
+    expect(stored).toEqual([
+      {
+        type: 'location',
+        content: { latitude: 18.5204, longitude: 73.8567, ...clinicPlace },
+        sender_type: 'api',
+        request: {
+          ...frame,
+          type: 'location',
+          location: { latitude: '18.5204', longitude: '73.8567', ...clinicPlace },
+        },
+      },
+      {
+        type: 'location',
+        content: { latitude: -0.0000005, longitude: 9.45, address: 'Pier 3' },
+        sender_type: 'api',
+        request: {
+          ...frame,
+          type: 'location',
+          location: { latitude: '-0.0000005', longitude: '9.45', address: 'Pier 3' },
+        },
+      },
+    ]);
+    expect((await conversationWith(c, `+${waId}`)).last_message_preview).toBe('Pier 3');
+    // WhatsApp's location objects through the send pipeline (the stand-in checks their shape).
+    expect(await sendAll(c)).toEqual(['accepted', 'accepted']);
+    for (const message of [clinic, pier]) {
+      expect(await apiGetMessage(deps(), ctx, idOf(message))).toMatchObject({
+        type: 'location',
+        status: 'accepted',
+      });
+    }
+    const sent = fx.standIn.state.requests.filter(
+      (r) => r.path.endsWith('/messages') && (r.body as { to?: string } | undefined)?.to === waId,
+    );
+    expect(sent.map((r) => (r.body as { location?: unknown }).location)).toEqual([
+      { latitude: '18.5204', longitude: '73.8567', ...clinicPlace },
+      { latitude: '-0.0000005', longitude: '9.45', address: 'Pier 3' },
+    ]);
+    // Read back with the place's name, or its address, as the text.
+    const { data } = await apiListConversationMessages(deps(), ctx, conv.id, {});
+    expect(
+      data.filter((m) => m.direction === 'outbound').map((m) => [m.type, m.text, m.sentBy]),
+    ).toEqual(
+      expect.arrayContaining([
+        ['location', 'Harbour Dental', 'api'],
+        ['location', 'Pier 3', 'api'],
+      ]),
+    );
+    // Refused before anything is queued: a latitude past the pole, a property Meta's spec does not
+    // send, and a number whose window has closed.
+    const pole = await apiSendMessage(
+      deps(),
+      ctx,
+      { type: 'location', to: `+${waId}`, latitude: 90.5, longitude: 0 },
+      idem('location-3', 'location-3'),
+    ).catch((error: unknown) => error);
+    expect(isAppError(pole) && pole.issues?.[0]?.path).toBe('latitude');
+    const withUrl = await apiSendMessage(
+      deps(),
+      ctx,
+      { type: 'location', to: `+${waId}`, latitude: 1, longitude: 2, url: 'https://x.example' },
+      idem('location-4', 'location-4'),
+    ).catch((error: unknown) => error);
+    expect(isAppError(withUrl) && withUrl.code).toBe('validation_failed');
+    const lateWaId = '919811101952';
+    await wrote(c, lateWaId, 25 * 3600);
+    const late = await apiSendMessage(
+      deps(),
+      ctx,
+      { type: 'location', to: `+${lateWaId}`, latitude: 1, longitude: 2 },
+      idem('location-5', 'location-5'),
+    ).catch((error: unknown) => error);
+    expect(reason(late)).toBe('window_closed');
+    const [{ count } = { count: -1 }] = await fx.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM app.messages WHERE tenant_id = $1 AND direction = 'outbound'`,
+      [c.tenant.id],
+    );
+    expect(count).toBe(2);
+  });
+
+  it('send contact cards the same way, kept in WhatsApp’s words and read back as shared cards are (ADR-197)', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['messages.reply', 'conversations.read'], 'Front desk');
+    const waId = '919811101971';
+    await wrote(c, waId);
+    const conv = await conversationWith(c, `+${waId}`);
+    const sent = await apiSendMessage(
+      deps(),
+      ctx,
+      {
+        type: 'contacts',
+        to: `+${waId}`,
+        contacts: [
+          {
+            name: { formattedName: ' Harbour Dental Front Desk ', firstName: 'Front desk' },
+            phones: [{ phone: '+91 20 4000 1234', type: 'WORK' }],
+            emails: [{ email: 'desk@harbour.example', type: 'WORK' }],
+          },
+          {
+            name: { formattedName: 'Dr Rao', lastName: 'Rao', prefix: 'Dr' },
+            phones: [{ phone: '+91 98200 12345', type: 'WORK', waId: '919820012345' }],
+          },
+        ],
+      },
+      idem('cards-1', 'cards-1'),
+    );
+    expect(sent.status).toBe(201);
+    expect(sent.body.data).toMatchObject({ type: 'contacts', status: 'queued' });
+    const desk = {
+      name: { formatted_name: 'Harbour Dental Front Desk', first_name: 'Front desk' },
+      phones: [{ phone: '+91 20 4000 1234', type: 'WORK' }],
+      emails: [{ email: 'desk@harbour.example', type: 'WORK' }],
+    };
+    const rao = {
+      name: { formatted_name: 'Dr Rao', last_name: 'Rao', prefix: 'Dr' },
+      phones: [{ phone: '+91 98200 12345', type: 'WORK', wa_id: '919820012345' }],
+    };
+    const [stored] = await fx.query(
+      `SELECT m.type, m.content, m.sender_type, si.request
+         FROM app.messages m
+         JOIN app.send_intents si ON si.tenant_id = m.tenant_id AND si.message_id = m.id
+        WHERE m.id = $1`,
+      [idOf(sent)],
+    );
+    expect(stored).toEqual({
+      type: 'contacts',
+      content: { contacts: [desk, rao] },
+      sender_type: 'api',
+      request: {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: waId,
+        type: 'contacts',
+        contacts: [desk, rao],
+      },
+    });
+    expect((await conversationWith(c, `+${waId}`)).last_message_preview).toBe(
+      'Contact card: Harbour Dental Front Desk, Dr Rao',
+    );
+    // WhatsApp's contact objects through the send pipeline (the stand-in checks their shape).
+    expect(await sendAll(c)).toEqual(['accepted']);
+    expect(await apiGetMessage(deps(), ctx, idOf(sent))).toMatchObject({
+      type: 'contacts',
+      status: 'accepted',
+    });
+    const atStandIn = fx.standIn.state.requests.filter(
+      (r) => r.path.endsWith('/messages') && (r.body as { to?: string } | undefined)?.to === waId,
+    );
+    expect(atStandIn.map((r) => (r.body as { contacts?: unknown }).contacts)).toEqual([
+      [desk, rao],
+    ]);
+    // Read back as the cards customers share are read (ADR-196).
+    const { data } = await apiListConversationMessages(deps(), ctx, conv.id, {});
+    const card = data.find((m) => m.direction === 'outbound');
+    expect(card).toMatchObject({ type: 'contacts', text: null, sentBy: 'api' });
+    expect(card?.contacts?.map((x) => [x.name.formattedName, x.phones.map((p) => p.waId)])).toEqual(
+      [
+        ['Harbour Dental Front Desk', [null]],
+        ['Dr Rao', ['919820012345']],
+      ],
+    );
+    // Refused before anything is queued: a name without another part, a kind the spec does not
+    // name, and a number whose window has closed.
+    const nameless = await apiSendMessage(
+      deps(),
+      ctx,
+      { type: 'contacts', to: `+${waId}`, contacts: [{ name: { formattedName: 'Desk' } }] },
+      idem('cards-2', 'cards-2'),
+    ).catch((error: unknown) => error);
+    expect(isAppError(nameless) && nameless.issues?.[0]?.path).toBe('contacts.0.name.firstName');
+    const mobile = await apiSendMessage(
+      deps(),
+      ctx,
+      {
+        type: 'contacts',
+        to: `+${waId}`,
+        contacts: [
+          {
+            name: { formattedName: 'Dr Rao', lastName: 'Rao' },
+            phones: [{ phone: '+91 98200 12345', type: 'MOBILE' }],
+          },
+        ],
+      },
+      idem('cards-3', 'cards-3'),
+    ).catch((error: unknown) => error);
+    expect(isAppError(mobile) && mobile.code).toBe('validation_failed');
+    const lateWaId = '919811101972';
+    await wrote(c, lateWaId, 25 * 3600);
+    const late = await apiSendMessage(
+      deps(),
+      ctx,
+      {
+        type: 'contacts',
+        to: `+${lateWaId}`,
+        contacts: [{ name: { formattedName: 'Dr Rao', lastName: 'Rao' } }],
+      },
+      idem('cards-4', 'cards-4'),
+    ).catch((error: unknown) => error);
+    expect(reason(late)).toBe('window_closed');
+    const [{ count } = { count: -1 }] = await fx.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM app.messages WHERE tenant_id = $1 AND direction = 'outbound'`,
+      [c.tenant.id],
+    );
+    expect(count).toBe(1);
   });
 
   it('send reply buttons and lists the same way, and give a tap back with its kind (ADR-080)', async () => {
@@ -3570,6 +4102,7 @@ describe('conversation reads (ADR-072)', () => {
       mimeType: null,
       contentTooLarge: false,
       contactsLeftOut: 0,
+      contacts: null,
       templateId: null,
       templateName: null,
       sentBy: null,
@@ -3719,6 +4252,66 @@ describe('conversation reads (ADR-072)', () => {
         ['system', true, 0],
         ['text', false, 0],
       ].sort(),
+    );
+  });
+
+  it('give the contacts a card shares as WhatsApp gave them, wherever messages are read (ADR-196)', async () => {
+    const c = await fx.company();
+    const reader = await apiKey(c, ['conversations.read']);
+    const waId = '919811101961';
+    // Meta's example of a received card (research M-193), and a contact with only a name and an
+    // email address.
+    const lucia = {
+      name: { first_name: 'Lucía', last_name: 'Gómez', formatted_name: 'Lucía Gómez' },
+      org: { company: 'Google' },
+      phones: [{ phone: '+1 (983) 555-2319', wa_id: '19835552319', type: 'MOBILE' }],
+    };
+    const ravi = { name: { formatted_name: 'Ravi' }, emails: [{ email: 'ravi@example.com' }] };
+    await inbound(c, waId, [
+      { type: 'contacts', extra: { contacts: [lucia, ravi] } },
+      { text: 'My colleagues' },
+    ]);
+    const conv = await conversationOf(c, waId);
+    const none = { middleName: null, prefix: null, suffix: null };
+    const card = [
+      {
+        name: { formattedName: 'Lucía Gómez', firstName: 'Lucía', lastName: 'Gómez', ...none },
+        phones: [{ phone: '+1 (983) 555-2319', waId: '19835552319', type: 'MOBILE' }],
+        emails: [],
+        urls: [],
+        addresses: [],
+        org: { company: 'Google', department: null, title: null },
+        birthday: null,
+      },
+      {
+        name: { formattedName: 'Ravi', firstName: null, lastName: null, ...none },
+        phones: [],
+        emails: [{ email: 'ravi@example.com', type: null }],
+        urls: [],
+        addresses: [],
+        org: null,
+        birthday: null,
+      },
+    ];
+    // The conversation, the feed across conversations and the change feed give the same contacts;
+    // other messages give none.
+    const { data } = await apiListConversationMessages(deps(), reader.ctx, conv.id, {});
+    expect(data.map((m) => [m.type, m.text, m.contactsLeftOut, m.contacts])).toEqual(
+      expect.arrayContaining([
+        ['contacts', null, 0, card],
+        ['text', 'My colleagues', 0, null],
+      ]),
+    );
+    expect(data).toHaveLength(2);
+    const feed = await apiListMessages(deps(), reader.ctx, {});
+    expect(feed.data.find((m) => m.type === 'contacts')?.contacts).toEqual(card);
+    const changes = await apiMessageChanges(
+      { db: fx.dbs.app, keyring: fx.keyring },
+      reader.ctx,
+      {},
+    );
+    expect(changes.data.map((change) => change.message?.contacts ?? null)).toEqual(
+      expect.arrayContaining([card, null]),
     );
   });
 

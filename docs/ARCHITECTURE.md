@@ -162,6 +162,11 @@ is waiting for on a page (confirming an address, resetting a password) are queue
 priority than notices, also when the outbox sweep signals a lost one again, so they do not wait
 behind a burst of notices (ADR-069).
 
+Members choose which notice emails they get, per company (ADR-215): `app.memberships.email_opt_outs`
+lists the kinds turned off (`EMAIL_NOTICE_KINDS` in `tenancy/email-preferences.ts`), each notice
+skips a member with `wantsEmail` before queueing, and the member's own list changes only through
+`app.set_own_email_opt_outs`. Security, sign-in and billing emails are not kinds.
+
 ## 6. Messaging pipeline **[built — verified against a local Graph stand-in; no live Meta traffic yet]**
 
 - **Ingestion:** `POST /api/webhooks/meta` reads the raw body with a hard 4 MB cap (Meta payloads can
@@ -226,6 +231,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   transaction, batched by 500); export streams CSV from keyset batches, each in its own read-only
   transaction. Erasure is `app.erase_contact` (SECURITY DEFINER), leaving an empty tombstone row so
   conversations and delivery history keep their foreign keys.
+  Bulk tag edits (`bulkTagContacts`, ADR-213) lock the contacts the page's filters match
+  (`filterConditions`, at most 10,000, ordered by id) in one transaction, refuse a count other than
+  the one the member saw, then insert the tag for those without it and below the tag cap, or delete
+  it, recording one audit entry.
 - **Consent** (`packages/domain/src/consent`): append-only `consent_events`; a definer trigger
   maintains `contact_consents` (later wins, opt-out wins ties). Sources: keyword messages (matched
   in ingestion on newly stored text, button and interactive replies), member notes, import
@@ -257,7 +266,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   → completed, with paused and canceled. Submitting runs the readiness checks, freezes the audience
   (`campaign_recipients`, one row per contact, pending or skipped with a reason, no personal data)
   and records the submitter. With approval required, a different member with `campaigns.approve`
-  approves. Sends run under the submitter's (or the resuming member's) authority.
+  approves. Sends run under the submitter's (or the resuming member's) authority. A waiting
+  campaign can be approved until `campaignApprovalDeadline` (its set start plus
+  `stop_after_hours`, ADR-209), which `approveCampaign`, the approval email and the page share.
 - **Scheduling** (`campaigns/schedule.ts`): a wall-clock time in an IANA zone resolved with Node's
   ICU data; a time inside a daylight-saving gap moves forward by the jump, a repeated time means its
   first occurrence, and the adjustment is stored and shown. An optional daily sending window (which
@@ -272,6 +283,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   re-checks each with fresh data and queues ordinary messages + send intents + `message.send` jobs
   (batch insert). Campaign threads are created resolved; a reply reopens them. The per-minute
   messaging sweep re-signals ticks through `ops.campaigns_due` (active companies only).
+  When it pauses a campaign by itself it calls `emailCampaignPaused` (`campaigns/service.ts`) in the
+  same transaction, as `pauseCampaignForRemovedLauncher` does (ADR-210): one `tenant.notice` written
+  by `campaignPauseNotice` to the member whose authority the sends use while they may still send
+  campaigns, otherwise to each active member who may approve and send campaigns, with the dedupe key
+  `campaign-paused:<campaign>:<version>:<member>`. `CampaignRunnerDeps.notices` carries the outbox
+  and the app's base URL.
+  Completing a campaign calls `emailCampaignCompleted` in the same transaction (ADR-214): one
+  `tenant.notice` written by `campaignCompletionNotice` to the member it sent under while they are
+  active, with the dedupe key `campaign-completed:<campaign>:<version>:<member>`.
 - **Guardrails:** marketing frequency cap per contact (company setting; counts marketing templates
   from campaigns and the inbox), message cap, estimated spending cap (rate cards, ADR-023), pacing,
   approval, sending window, deadline. Meta's own limits (per-user marketing limit 131049, messaging
@@ -374,6 +394,17 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Mentions** (`app.note_mentions`): a note can name members who can see the conversation at that
   moment; Inbox → Mentions lists a member's mentions in conversations they can still see, with an
   unread count cleared when they open the conversation.
+  **Mention emails** (`inbox/mention-emails.ts`, queue `note.mention`, ADR-211): `addNote` schedules
+  one signed job per member it mentions other than its author, due `MENTION_EMAIL_DELAY_MS` (10
+  minutes) later. `sendMentionEmail` locks the mention row and queues a `tenant.notice` (dedupe key
+  `note-mention:<mention>`) only for an unread mention less than a day old, of an active member who
+  can still see the conversation, with no newer unread mention of the member there; the email names
+  the author and the unread count, never the note or the customer.
+- **Transcripts** (`messaging/transcript.ts`, `exportTranscript` in `messaging/inbox.ts`, ADR-212):
+  an async generator checks `inbox.export` and that the member can see the conversation and writes
+  the audit entry in one transaction, then yields the header and pages of 500 messages (keyset on
+  the exact `created_at` and the id, read-only transactions) formatted as plain text; the route
+  `/c/<company>/inbox/<conversation>/transcript` streams it as an attachment.
 - **Collision warning** (`queueTextMessage` `afterMessageId`): under the conversation row lock, a
   reply is refused once when another member's reply is newer than the newest message the sender had
   seen; the composer refreshes the thread and keeps the draft (ADR-033).
@@ -954,10 +985,67 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the company's status), reads the draft and the company's time zone in one read-only snapshot and
   calls `reviewCampaignDraft`, as members' review does; `toApiCampaignReview` answers it with the
   skip reasons commonest first and amounts in major units. Other statuses get 409.
+- **Submitting drafts (ADR-202):** `apiSubmitCampaign` locks the draft, checks the version and calls
+  `submitLockedDraft` (`campaigns/service.ts`), which members' `submitCampaign` calls too: the
+  readiness, the audience's size, the snapshot and the event, naming the key or the member. A key's
+  submission then always goes to `awaitCampaignApproval`; members' launches when the company needs
+  no approval. `approveCampaign` launches a key's submission under the approving member, who must
+  hold `campaigns.send`.
+- **Withdrawing submissions (ADR-203):** `apiWithdrawCampaign` locks the campaign and, for a
+  submission waiting for approval that the key made, calls `returnLockedCampaignToDraft`
+  (`campaigns/service.ts`), which members' withdrawal and rejection call too.
+- **Approval emails (ADR-204):** `emailCampaignApprovers` (`campaigns/service.ts`) runs in the
+  submission's transaction after `awaitCampaignApproval`, from members' `submitCampaign` and from
+  `apiSubmitCampaign`. It reads the campaign once it waits for approval, picks the active members
+  whose roles grant `campaigns.approve` (and `campaigns.send` for a key's submission) other than the
+  submitter, and queues one `tenant.notice` each through `enqueueEmail`, written by
+  `campaignApprovalNotice`, with the dedupe key `campaign-approval:<campaign>:<version>:<member>`.
+  `CampaignDeps.notices`, and `campaignNotices` for the API route, carry the outbox and the app's
+  base URL.
+- **Review emails (ADR-205):** `emailCampaignSubmitter` (`campaigns/service.ts`) runs in the
+  transaction of `approveCampaign`, `rejectCampaign` and members' `withdrawCampaign`, given the
+  submitter read before the change (sending back clears it). For a member's submission acted on by
+  someone else, while that member is active, it queues one `tenant.notice` written by
+  `campaignReviewNotice`, with the dedupe key `campaign-review:<campaign>:<version>:<member>`.
+- **Segments (ADR-206):** `apiListSegments` and `apiGetSegment` (`api/segments.ts`) read
+  `app.segments` in a read-only transaction, check each definition with `segmentDefinitionSchema`
+  and `checkSegmentDefinition` (`campaigns/segments.ts`), as members' segment page does, and count
+  one with `segmentWhere` in the company's time zone.
+- **Writing segments (ADR-207):** `apiCreateSegment`, `apiUpdateSegment` and `apiArchiveSegment`
+  (`api/segments.ts`) convert conditions with `apiSegmentConditions` (`api/contact-search.ts`), the
+  search's own checks, write `app.segments` and record a system audit with the key; a unique
+  violation of `segments_name_uq` becomes a 409 through `segmentNameRefusal`
+  (`campaigns/segments.ts`), which members' `createSegment` and `updateSegment` use too.
+- **A segment's contacts (ADR-208):** `apiListSegmentContacts` (`api/segments.ts`) reads the
+  segment, checks it as `GET /segments/{id}` does, and passes `segmentConditionsSql` as the filter
+  of `apiContactPage` (`api/contacts.ts`), the page `POST /contacts/search` reads, in a
+  repeatable-read, read-only transaction.
 - **Media from links (ADR-194):** `apiSendMedia` (`api/resources.ts`) parses `type` `image`,
   `video`, `audio` or `document`, an https `link` (`isMediaLink`) and a caption except for audio,
   and sends through `sendReply` as text replies do: the content keeps the link and the caption, the
   send intent the Graph request. `outboundText` reads the caption, and the inbox shows the link.
+- **Locations (ADR-195):** `apiSendLocation` (`api/resources.ts`) parses `type` `location`, the
+  coordinates as numbers within their ranges and an optional name and address, and sends through
+  `sendReply`: the content keeps the coordinates as numbers, as received locations do, and the send
+  intent's Graph request gives them as decimal text (`decimalDegrees`). `outboundText` reads the
+  name, else the address, and the inbox shows the coordinates.
+- **Contact cards' contacts (ADR-196):** `contactCards` (`webhooks/payloads.ts`) reads the contact
+  objects a stored contact card kept into `ContactCard`s, every part optional, for `toApiMessage`
+  (conversation messages, the feed and the change feed) and the `message.received` payload alike;
+  other messages, removed content and content too large to keep give null. The inbox reads the same
+  content for names, numbers and email addresses.
+- **Contact cards sent (ADR-197):** `apiSendContacts` (`api/resources.ts`) parses `type` `contacts`
+  with `apiContactCardInputSchema`, turns each contact into WhatsApp's words (`whatsappContact`),
+  refuses contacts larger than received content may be (`jsonbSize`), and sends through `sendReply`:
+  the content and the Graph request hold the same contacts, which `contactCards` reads back.
+- **Stickers from links (ADR-198):** `API_MEDIA_TYPES` adds `sticker`, parsed by
+  `apiSendStickerSchema` (a link and no caption) and sent by `apiSendMedia` as other media from
+  links are.
+- **Templates with media headers (ADR-201):** `sendSpecFor` (`templates/definition.ts`) takes a
+  photo, video or document header (`TEMPLATE_HEADER_MEDIA`) only when its caller passes
+  `mediaHeaders`, as the API's template list and `loadSendableTemplate` do; every other caller gets
+  the reason. `buildTemplateSend` puts the link in the header's parameter and returns it, and
+  `queueTemplateFor` keeps it as the content's `headerMedia`, which the inbox's bubble shows.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions (`last_message` with `conversations.read` and `campaign` with
   `campaigns.read` since ADR-126, a named campaign checked to be the company's, `name` since
@@ -1762,6 +1850,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   platform audit entry in one transaction and read by the platform role. The Integrations tab's read
   (`receiptsNeedingAttention`) joins it and the administrator's name through `acknowledgers`; the
   CSV writes the time only.
+- **Acknowledging quarantine entries** (ADR-199, migration 0139): `ops.quarantine_acknowledgements`,
+  one note per entry (who, when, the note), deleted with the entry through a cascading foreign key,
+  written only by `ops.platform_acknowledge_quarantine_entry` (definer, platform role only, open
+  entries only) with the platform audit entry in one transaction and read by the platform role. The
+  Integrations tab's read (`openQuarantine`) joins it and the administrator's name through
+  `acknowledgers`; the CSV writes the time only.
+- **Exports beyond a tab's rows (ADR-200):** each list read in `platform/ops.ts` takes a limit, the
+  tab's by default; `exportFile` passes the larger one from `OPS_LIST_ROWS`, and the reads order
+  ties by id so the file starts with the tab's rows.
 - **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
   90 days) and a health card on each company's platform page. Every page re-checks the platform
   actor. The functions read every company on each view, which suits the test envelope; paging and

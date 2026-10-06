@@ -45,7 +45,12 @@ import {
   recordCampaignEvent,
   resumeLockedCampaign,
   reviewCampaignDraft,
+  awaitCampaignApproval,
+  emailCampaignApprovers,
+  returnLockedCampaignToDraft,
+  submitLockedDraft,
   writeLockedCampaignDraft,
+  type CampaignNoticeDeps,
   type CampaignDraftInput,
   type CampaignDraftReview,
 } from '../campaigns/service';
@@ -65,8 +70,9 @@ import { idempotent } from './resources';
  * also reads contacts lists a campaign's recipients, each with what happened to it (ADR-127).
  * Never members or costs. A key with `campaigns.stop` pauses and cancels campaigns as members do
  * (ADR-128), one with `campaigns.resume` resumes what keys paused (ADR-176), and one with
- * `campaigns.write` creates, edits and reviews drafts (ADR-186, ADR-193); submitting, approving and
- * starting stay with members.
+ * `campaigns.write` creates, edits, reviews and submits drafts (ADR-186, ADR-193, ADR-202) and
+ * withdraws its own submissions (ADR-203): a key's submission always waits for a member's approval,
+ * so approving and starting stay with members.
  */
 
 export const apiCampaignListQuerySchema = z
@@ -996,7 +1002,7 @@ export const apiCampaignReviewSchema = z.object({
     .int()
     .min(0)
     .describe(
-      'The version of the draft reviewed: give it as expectedVersion to PATCH /campaigns/{id} to change the draft only as it was reviewed.',
+      'The version of the draft reviewed: give it as expectedVersion to PATCH /campaigns/{id} or POST /campaigns/{id}/submit to change or submit the draft only as it was reviewed.',
     ),
   problems: z
     .array(z.string())
@@ -1064,7 +1070,7 @@ export const apiCampaignReviewSchema = z.object({
   approvalRequired: z
     .boolean()
     .describe(
-      "Whether the company's settings make a submitted campaign wait for a member's approval.",
+      "Whether the company's settings make a member's submission wait for another member's approval. A key's submission (POST /campaigns/{id}/submit) always waits for a member's approval.",
     ),
   frequencyCap: z
     .object({ count: z.number().int().min(1), days: z.number().int().min(1) })
@@ -1163,4 +1169,135 @@ export async function apiReviewCampaign(
     },
     { isolationLevel: 'repeatable read', accessMode: 'read only' },
   );
+}
+
+/** What submitting a draft through the API takes (ADR-202). */
+export const apiSubmitCampaignSchema = z
+  .object({
+    expectedVersion: z
+      .number()
+      .int()
+      .min(0)
+      .describe(
+        "The draft's version as you read or reviewed it (GET /campaigns/{id}, GET /campaigns/{id}/review): a draft changed since is refused with 409.",
+      ),
+  })
+  .strict();
+
+/** Keys' refusal to submit a campaign that is no longer a draft (ADR-202). */
+export const SUBMIT_DRAFTS_ONLY = 'Only draft campaigns are submitted.';
+
+/**
+ * Submits one of the company's drafts (ADR-202) as members submit it, with the campaign row
+ * locked: the draft must be at the version given, pass the checks members' review reads, and its
+ * audience is taken then (`submitLockedDraft`). The submission always waits for a member's
+ * approval, whatever the company's settings, so a key never starts a campaign: the member who
+ * approves it must be able to send campaigns, and it sends under their authority; those members are
+ * emailed in the same transaction (ADR-204). A campaign this key submitted is answered as it is, so a
+ * retry changes nothing; any other campaign that is not a draft is refused with 409, naming its
+ * status.
+ */
+export async function apiSubmitCampaign(
+  deps: Pick<OutboundDeps, 'db' | 'clock'> & { campaignNotices: CampaignNoticeDeps },
+  ctx: ApiContext,
+  campaignId: string,
+  input: unknown,
+): Promise<ApiCampaign> {
+  assertScope(ctx, 'campaigns.write');
+  if (!z.uuid().safeParse(campaignId).success) throw notFound('Campaign');
+  const { expectedVersion } = parseInput(apiSubmitCampaignSchema, input);
+  const now = deps.clock.now();
+  return deps.db.run(ctx.scope, async (tx) => {
+    const c = await lockCampaign(tx, ctx.tenant.id, campaignId);
+    if (c.status !== 'draft') {
+      if (c.submittedByApiKeyId === ctx.key.id) return readApiCampaign(tx, ctx.tenant.id, c.id);
+      throw statusRefusal(SUBMIT_DRAFTS_ONLY, c.status);
+    }
+    if (c.version !== expectedVersion) {
+      throw new AppError(
+        'conflict',
+        `This draft has changed since you read it: its version is ${c.version}. Read it again and give the version it has.`,
+      );
+    }
+    // Conditions on dates read in the company's time zone, as members' submissions read them.
+    const [company] = await tx
+      .select({ timezone: tenants.timezone })
+      .from(tenants)
+      .where(eq(tenants.id, ctx.tenant.id));
+    if (!company) throw notFound('Company');
+    const submission = await submitLockedDraft(
+      tx,
+      { id: ctx.tenant.id, timezone: company.timezone },
+      c,
+      { apiKeyId: ctx.key.id },
+      now,
+    );
+    await awaitCampaignApproval(tx, ctx.tenant.id, c.id, submission);
+    await emailCampaignApprovers(deps.campaignNotices, tx, ctx.tenant.id, c.id);
+    await recordSystemAudit(
+      tx,
+      ctx.tenant.id,
+      {
+        action: 'campaign.submitted',
+        subjectType: 'campaign',
+        subjectId: c.id,
+        metadata: {
+          audience: submission.snapshot.total,
+          pending: submission.snapshot.pending,
+          approvalRequired: true,
+          category: submission.category,
+          source: 'api',
+        },
+        correlationId: ctx.requestId,
+      },
+      apiActor(ctx),
+    );
+    return readApiCampaign(tx, ctx.tenant.id, c.id);
+  });
+}
+
+/**
+ * Takes a submission this key made back to a draft (ADR-203), as members withdraw theirs, with the
+ * campaign row locked: the campaign waiting for approval becomes a draft at a new version, its
+ * audience dropped (nothing was sent). A draft is answered as it is, so a retry changes nothing; a
+ * submission a member or another key made is refused with 403 (members withdraw it in the app), and
+ * a campaign in any other status with 409, naming it.
+ */
+export async function apiWithdrawCampaign(
+  deps: Pick<OutboundDeps, 'db'>,
+  ctx: ApiContext,
+  campaignId: string,
+): Promise<ApiCampaign> {
+  assertScope(ctx, 'campaigns.write');
+  if (!z.uuid().safeParse(campaignId).success) throw notFound('Campaign');
+  return deps.db.run(ctx.scope, async (tx) => {
+    const c = await lockCampaign(tx, ctx.tenant.id, campaignId);
+    if (c.status === 'draft') return readApiCampaign(tx, ctx.tenant.id, c.id);
+    if (c.status !== 'pending_approval') {
+      throw statusRefusal('Only a campaign waiting for approval is withdrawn.', c.status);
+    }
+    if (c.submittedByApiKeyId !== ctx.key.id) {
+      throw new AppError(
+        'forbidden',
+        'Only the key that submitted this campaign withdraws it through the API: members withdraw it in the app.',
+      );
+    }
+    await returnLockedCampaignToDraft(tx, ctx.tenant.id, c.id, {});
+    await recordCampaignEvent(tx, ctx.tenant.id, c.id, 'withdrawn', null, {
+      apiKeyId: ctx.key.id,
+    });
+    await recordSystemAudit(
+      tx,
+      ctx.tenant.id,
+      {
+        action: 'campaign.withdrawn',
+        subjectType: 'campaign',
+        subjectId: c.id,
+        metadata: { source: 'api' },
+        correlationId: ctx.requestId,
+      },
+      apiActor(ctx),
+    );
+    return readApiCampaign(tx, ctx.tenant.id, c.id);
+  });
 }

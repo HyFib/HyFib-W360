@@ -37,6 +37,7 @@ import {
   likePattern,
   parseInput,
 } from '../validation';
+import { BULK_TAG_LIMIT, type BulkTagResult } from './bulk-tags';
 import { CsvError, CSV_BOM, csvLine, parseCsv, restoreCell, type CsvLimits } from './csv';
 import { createContactField, deleteContactField, renameContactField } from './field-definitions';
 import {
@@ -82,6 +83,14 @@ export const contactFilterSchema = z.object({
   consent: z
     .enum(['any', 'marketing_opted_in', 'marketing_opted_out', 'marketing_unknown'])
     .default('any'),
+});
+
+/** A bulk tag edit (ADR-213): the filters, the tag, and how many contacts the member was shown. */
+export const bulkTagSchema = z.object({
+  filter: contactFilterSchema,
+  tag: z.string().max(100),
+  action: z.enum(['add', 'remove']),
+  expectedCount: z.number().int().min(1).max(BULK_TAG_LIMIT),
 });
 
 export const listContactsSchema = contactFilterSchema.extend({
@@ -407,6 +416,131 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
         nextCursor:
           rows.length > q.limit && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
       };
+    },
+
+    /** How many contacts the filters match, counted up to one more than BULK_TAG_LIMIT. */
+    async countContacts(ctx: TenantContext, input: unknown): Promise<number> {
+      assertCan(ctx, 'contacts.read');
+      const filter = parseInput(contactFilterSchema, input ?? {});
+      const rows = await db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({ id: contacts.id })
+            .from(contacts)
+            .where(and(...filterConditions(ctx, filter)))
+            .limit(BULK_TAG_LIMIT + 1),
+        { accessMode: 'read only' },
+      );
+      return rows.length;
+    },
+
+    /**
+     * Adds a tag to, or removes it from, every contact the filters match (ADR-213), under those
+     * contacts' locks: refused beyond BULK_TAG_LIMIT contacts, or when the filters no longer match
+     * the number the member was shown. A contact that has the most tags a contact can have keeps
+     * its tags. Each changed contact is a change in the contact feed and a webhook event, as one
+     * member's edit is; the audit entry counts them, without the search text.
+     */
+    async bulkTagContacts(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta = {},
+    ): Promise<BulkTagResult> {
+      assertCan(ctx, 'contacts.write');
+      const data = parseInput(bulkTagSchema, input);
+      const tag = normalizeTag(data.tag);
+      if (!tag.ok) {
+        throw new AppError('validation_failed', tag.message, {
+          issues: [{ path: 'tag', message: tag.message }],
+        });
+      }
+      return db.run(ctx.scope, async (tx) => {
+        const locked = await tx
+          .select({ id: contacts.id })
+          .from(contacts)
+          .where(and(...filterConditions(ctx, data.filter)))
+          .orderBy(asc(contacts.id))
+          .limit(BULK_TAG_LIMIT + 1)
+          .for('update');
+        if (locked.length > BULK_TAG_LIMIT) {
+          throw new AppError(
+            'validation_failed',
+            `At most ${BULK_TAG_LIMIT.toLocaleString('en-IN')} contacts can be tagged at once. Narrow the filters first.`,
+          );
+        }
+        if (locked.length !== data.expectedCount) {
+          throw new AppError(
+            'conflict',
+            `These filters now match ${locked.length.toLocaleString('en-IN')} contacts, not ${data.expectedCount.toLocaleString('en-IN')}. Review them and try again.`,
+          );
+        }
+        const ids = locked.map((c) => c.id);
+        const current = await tx.execute<{ id: string; tagged: boolean; tags: number }>(sql`
+          select c.id,
+                 exists (select 1 from app.contact_tags t where t.tenant_id = ${ctx.tenant.id}::uuid
+                           and t.contact_id = c.id and t.tag = ${tag.tag}) as tagged,
+                 (select count(*)::int from app.contact_tags t where t.tenant_id = ${ctx.tenant.id}::uuid
+                    and t.contact_id = c.id) as tags
+            from unnest(${sql.param(ids)}::uuid[]) as c(id)`);
+        let changed: number;
+        let unchanged = 0;
+        let atLimit = 0;
+        if (data.action === 'add') {
+          const add: string[] = [];
+          for (const row of current.rows) {
+            if (row.tagged) unchanged += 1;
+            else if (row.tags >= MAX_TAGS_PER_CONTACT) atLimit += 1;
+            else add.push(row.id);
+          }
+          await insertTags(
+            tx,
+            ctx.tenant.id,
+            add.map((contactId) => ({ contactId, tag: tag.tag })),
+          );
+          changed = add.length;
+        } else {
+          const removed = await tx
+            .delete(contactTags)
+            .where(
+              and(
+                eq(contactTags.tenantId, ctx.tenant.id),
+                eq(contactTags.tag, tag.tag),
+                sql`${contactTags.contactId} = any(${sql.param(ids)}::uuid[])`,
+              ),
+            )
+            .returning({ id: contactTags.id });
+          changed = removed.length;
+          unchanged = ids.length - removed.length;
+        }
+        const result: BulkTagResult = {
+          action: data.action,
+          tag: tag.tag,
+          matched: ids.length,
+          changed,
+          unchanged,
+          atLimit,
+        };
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'contacts.bulk_tagged',
+            subjectType: 'tenant',
+            subjectId: ctx.tenant.id,
+            metadata: {
+              ...result,
+              filter: {
+                q: Boolean(data.filter.q),
+                tag: data.filter.tag ?? null,
+                consent: data.filter.consent,
+              },
+            },
+          },
+          meta,
+        );
+        return result;
+      });
     },
 
     async getContact(ctx: TenantContext, contactId: string) {

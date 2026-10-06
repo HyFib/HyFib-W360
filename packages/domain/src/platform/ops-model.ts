@@ -28,6 +28,21 @@ export const OPS_SIGNAL_RULES = {
   complaints: 5,
 } as const;
 
+/**
+ * How many rows each of the console's action lists shows on its tab, and how many its CSV gives
+ * (ADR-200): the lists the platform role reads itself export up to 5,000 rows in the tab's order;
+ * failures and signups, read through definer functions, as many as those return.
+ */
+export const OPS_LIST_ROWS = {
+  signups: { shown: 200, exported: 500 },
+  numberSetups: { shown: 200, exported: 5000 },
+  newCompanies: { shown: 500, exported: 5000 },
+  failures: { shown: 500, exported: 1000 },
+  receipts: { shown: 100, exported: 5000 },
+  quarantine: { shown: 100, exported: 5000 },
+  deadLetters: { shown: 100, exported: 5000 },
+} as const;
+
 export const OPS_WINDOWS = {
   /** Embedded Signup sessions and new companies shown on the onboarding page. */
   onboardingDays: 30,
@@ -684,6 +699,8 @@ export interface QuarantineEntry {
   alertedAt: Date | null;
   /** Whether its receipt can be processed again: quarantined, with its body still kept. */
   retryable: boolean;
+  /** Who noted that they looked at it, when, and what they noted (ADR-199). */
+  acknowledgement: { at: Date; byName: string | null; note: string } | null;
 }
 
 /** One kind of email's failed and waiting counts over `emailDays` (counts only). */
@@ -909,9 +926,13 @@ export const QUARANTINE_CSV_COLUMNS = [
   'Provider ids',
   'Staff emailed (UTC)',
   'Receipt can be retried',
+  'Acknowledged (UTC)',
 ] as const;
 
-/** Open quarantine entries with the provider ids staff may see. */
+/**
+ * Open quarantine entries with the provider ids staff may see, and when one was acknowledged (never
+ * who or the note, ADR-199).
+ */
 export function quarantineCsv(rows: readonly QuarantineEntry[]): string {
   return csvFile(
     QUARANTINE_CSV_COLUMNS,
@@ -923,6 +944,7 @@ export function quarantineCsv(rows: readonly QuarantineEntry[]): string {
       q.externalIds.map((e) => `${e.key}: ${e.value}`).join('; '),
       csvMinute(q.alertedAt),
       yesNo(q.retryable),
+      csvMinute(q.acknowledgement?.at ?? null),
     ]),
   );
 }

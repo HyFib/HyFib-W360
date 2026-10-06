@@ -1,5 +1,953 @@
 # Progress
 
+## 2026-10-06 — Phase 3 follow-up: members choose their notice emails (P3-06, ADR-215)
+
+Status: **Implemented; its database and browser tests run in CI only.** Notice emails about mentions
+and campaigns could not be turned off. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so migration 0142 and the new integration and e2e tests below were written but not run
+here.
+
+### Completed
+
+- **Design (ADR-215):** a list of turned-off kinds on each membership; a definer function that
+  changes only the signed-in member's own; every notice skips a member who turned its kind off;
+  security, sign-in and billing emails always sent.
+- **Migration 0142:** `app.memberships.email_opt_outs` (empty by default, checked kinds) and
+  `app.set_own_email_opt_outs`.
+- **Domain:** `tenancy/email-preferences.ts` (`EMAIL_NOTICE_KINDS`, `wantsEmail`, the service); the
+  approval, review, pause, completion and mention emails honour it; the company export lists the
+  column.
+- **Web:** Settings → Notifications, with a `ClientForm` of the kinds the member's role can receive.
+- **Tests:**
+  - Unit (5 new in `tenancy/email-preferences.test.ts`): the kinds match the migration, opt-outs,
+    the kinds each role sees, labels, the request.
+  - Integration (2 new in `email-preferences.test.ts`, 1 new in `campaigns.test.ts`, 1 new in
+    `inbox-advanced.test.ts`): own choices only, hidden kinds kept, the audit entry, the definer
+    function's refusals, the check and grants; approval, review, pause, completion and mention
+    emails skipping members who turned them off. Written for CI; not run here.
+  - E2E (1 new in `notifications.spec.ts`): an owner turns mention emails off and the choice stays.
+    Written for CI; not run here.
+- **Docs:** ADR-215; ARCHITECTURE; SECURITY; DEPLOYMENT and RUNBOOKS; BACKLOG P3-06; feature matrix
+  H-008.
+- **Mutation checks:** 8 deliberate regressions tried, all caught on the unit-tested parts. The
+  function, the column and the notices need the database, so their regressions are left to the
+  integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 932 passed (91 files)                                               |
+| `pnpm test:integration`, e2e, migration 0142       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 8 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- A digest, in-app notifications, preferences for CRM task reminders, and a company-wide default.
+
+## 2026-10-06 — Phase 3 follow-up: emailing members when a campaign finishes (P3-04, ADR-214)
+
+Status: **Implemented; its database and browser tests run in CI only.** A finished campaign, or one
+whose sending period ended with contacts unreached, said so only on its page. The local PostgreSQL
+is unavailable (its Docker daemon stopped), so the new integration and e2e checks below were written
+but not run here.
+
+### Completed
+
+- **Design (ADR-214):** the member it sent under, while active; in the completing transaction;
+  counts only; nobody for a cancellation; no migration.
+- **Domain:** `campaignCompletionNotice` and `emailCampaignCompleted` (`campaigns/service.ts`),
+  called by the runner's `complete`.
+- **Tests:**
+  - Unit (4 new in `campaigns/completion-notice.test.ts`): finished, ended with contacts unreached
+    or none, and the email's limits.
+  - Integration (2 new in `campaigns.test.ts`): a finished campaign emailed once, a cancelled one
+    not; one ended by its sending period with its count; a suspended member not emailed. Written for
+    CI; not run here.
+  - E2E (1 changed in `campaigns.spec.ts`): the owner receives the email when the campaign
+    completes. Written for CI; not run here.
+- **Docs:** ADR-214; ARCHITECTURE; DEPLOYMENT and RUNBOOKS; BACKLOG P3-04; feature matrix H-022.
+- **Mutation checks:** 8 deliberate regressions tried, all caught on the unit-tested parts. Who is
+  emailed and when needs the database, so those regressions are left to the integration tests, which
+  run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 927 passed (90 files)                                               |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 8 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- A summary of deliveries some time after it finishes, email preferences, and emails to other
+  members.
+
+## 2026-10-06 — Phase 3 follow-up: bulk tag edits (P3-01, ADR-213)
+
+Status: **Implemented; its database and browser tests run in CI only.** Tags changed one contact at
+a time. The local PostgreSQL is unavailable (its Docker daemon stopped), so the new integration and
+e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-213):** one tag on every contact the page's filters match, at most 10,000, under
+  their locks, refused if the count changed; the tag cap kept; audited without the search text; no
+  migration.
+- **Domain:** `countContacts` and `bulkTagContacts` in the contacts service; `bulkTagSchema`;
+  `contacts/bulk-tags.ts` (`BULK_TAG_LIMIT`, `bulkTagSummary`).
+- **Web:** `bulkTagContactsAction` and the bulk tag form on the contacts page (a `ClientForm` with a
+  `ClientButton` for removing).
+- **Tests:**
+  - Unit (3 new in `contacts/bulk-tags.test.ts`): the result's words, the request and its bounds.
+  - Integration (2 new in `contacts.test.ts`): adding and removing under tag and search filters, the
+    tag cap, a changed count, a bad tag, the audit entries, an analyst refused, another company
+    matching none, and the 10,000 limit. Written for CI; not run here.
+  - E2E (1 changed in `contacts.spec.ts`): a tag added to the contact a search finds. Written for
+    CI; not run here.
+- **Docs:** ADR-213; ARCHITECTURE; SECURITY; DEPLOYMENT and RUNBOOKS; BACKLOG P3-01; feature matrix
+  W-049.
+- **Mutation checks:** 10 deliberate regressions tried, all caught on the unit-tested parts. The
+  edit itself needs the database, so its regressions are left to the integration tests, which run in
+  CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 923 passed (89 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 10 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Bulk edits of other fields, from a segment or through the API, choosing contacts one by one, and
+  undo.
+
+## 2026-10-06 — Phase 3 follow-up: downloading a conversation's transcript (P3-06, ADR-212)
+
+Status: **Implemented; its database and browser tests run in CI only.** W-042 was planned: a
+conversation could only be copied from the screen. The local PostgreSQL is unavailable (its Docker
+daemon stopped), so the new integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-212):** a new `inbox.export` permission (owners, administrators, supervisors; kept
+  while suspended); plain text, oldest first, the company's time zone, notes left out; audited
+  before the first byte; no migration.
+- **Domain:** `messaging/transcript.ts` (the format) and `exportTranscript` in the inbox service;
+  `MESSAGE_TYPE_NAMES` exported from `messaging/message-text.ts`.
+- **Web:** the route `/c/<company>/inbox/<conversation>/transcript` and a "Download transcript" link
+  on the conversation page for members with the permission.
+- **Tests:**
+  - Unit (5 new in `messaging/transcript.test.ts`, 1 new in `authz/permissions.test.ts`): times, the
+    header, senders, every kind of message, entries and outcomes; who holds the permission.
+  - Integration (1 new in `inbox-advanced.test.ts`): the transcript of 1,002 messages in order
+    across pages, the audit entry, notes left out, a supervisor allowed, an agent refused, another
+    company's owner not finding it. Written for CI; not run here.
+  - E2E (1 changed in `inbox.spec.ts`): the owner downloads the transcript of the conversation just
+    answered. Written for CI; not run here.
+- **Docs:** ADR-212; ARCHITECTURE; SECURITY (rule and permission matrix); DEPLOYMENT and RUNBOOKS;
+  BACKLOG P3-06; feature matrix W-042 (implemented).
+- **Mutation checks:** 19 deliberate regressions tried, all caught on the unit-tested parts. The
+  route and the service's checks need a browser and the database, so their regressions are left to
+  the e2e and integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 920 passed (88 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 19 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Notes in the transcript, a PDF, a date range, transcripts through the API, and emailing a
+  transcript to the customer.
+
+## 2026-10-06 — Phase 3 follow-up: emailing members about unread mentions (P3-06, ADR-211)
+
+Status: **Implemented; its database tests run in CI only.** Members mentioned in a note saw it only
+in the app. The local PostgreSQL is unavailable (its Docker daemon stopped), so the new and changed
+integration tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-211):** a signed job per mentioned member (not the author), due 10 minutes later;
+  the mention row decides under its lock; the newest unread mention of a burst emails; the author's
+  name, the unread count and a link only; no SQL migration, a new `note.mention` queue.
+- **Domain:** `inbox/mention-emails.ts` (`scheduleMentionEmail`, `mentionEmailNotice`,
+  `sendMentionEmail`); `addNote` schedules the jobs, and needs the job queue when it mentions
+  someone else.
+- **Worker:** `noteMentionHandler` on the `note.mention` queue.
+- **Tests:**
+  - Unit (4 new in `inbox/mention-emails.test.ts`): the email, the unread count, the delay and the
+    late limit, the email's limits and escaping.
+  - Integration (2 new in `inbox-advanced.test.ts`; its inbox service now has the job queue): the
+    signed jobs and their time, the email once and without the note, and no email once read, gone, a
+    day late, out of sight or after leaving, nor for an older mention of a burst. Written for CI;
+    not run here.
+- **Docs:** ADR-211; ARCHITECTURE; SECURITY; DEPLOYMENT and RUNBOOKS; BACKLOG P3-06; feature matrix
+  H-025.
+- **Mutation checks:** 9 deliberate regressions tried, all caught on the unit-tested parts. Which
+  mentions are emailed needs the database, so those regressions are left to the integration tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 914 passed (87 files)                                               |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it       |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 9 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Email preferences, a daily digest, and the note's text in the email.
+
+## 2026-10-06 — Phase 3 follow-up: emailing members when HyFib pauses a campaign (P3-04, ADR-210)
+
+Status: **Implemented; its database tests run in CI only.** A campaign HyFib paused by itself (a cap
+reached, its template or number no longer usable, its sending member gone or no longer permitted, no
+rate card) showed the pause only on its page and in its webhook event. The local PostgreSQL is
+unavailable (its Docker daemon stopped), so the new and changed integration tests below were written
+but not run here.
+
+### Completed
+
+- **Design (ADR-210):** the member it sends under while they may send campaigns, otherwise the
+  owners and administrators; in the pause's transaction; one email per member for each pause; no
+  counts; no migration.
+- **Domain:** `campaignPauseNotice` and `emailCampaignPaused` (`campaigns/service.ts`), called by
+  the runner's pause and by `pauseCampaignForRemovedLauncher`; `CampaignRunnerDeps.notices`.
+- **Worker:** the campaign handler passes the runtime's notice dependencies.
+- **Tests:**
+  - Unit (4 new in `campaigns/pause-notice.test.ts`): every pause's subject and line, the line for a
+    campaign that had not started, the email's limits and escaping.
+  - Integration (2 new and 1 changed in `campaigns.test.ts`): the sending member for a template
+    pause, once per pause, and nobody for a member's pause; owners and administrators when that
+    member lost the permission or left; the cap pauses. Written for CI; not run here.
+- **Docs:** ADR-210; ARCHITECTURE; DEPLOYMENT and RUNBOOKS; BACKLOG P3-04; feature matrix H-022.
+- **Mutation checks:** 13 deliberate regressions tried, all caught on the unit-tested parts. Who is
+  emailed and when needs the database, so those regressions are left to the integration tests, which
+  run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 910 passed (86 files)                                                |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it        |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 13 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- An email when a campaign completes or its sending period ends, a digest of pauses, email
+  preferences and in-app notifications.
+
+## 2026-10-06 — Fix: stickers, locations and contact cards keep their type in message answers
+
+Status: **Fixed; the changed integration tests run in CI only.** Review on #34 found that
+`GET /messages/{id}` gave media as templates and that the `QueuedMessage` and `Message` schemas
+listed too few types; #34 fixed it for media. Stickers (ADR-198), locations (ADR-195) and contact
+cards (ADR-197) had the same gap: `API_MESSAGE_TYPES` now lists them, so both schemas and
+`GET /messages/{id}` give `sticker`, `location` and `contacts`. Unit: the type test covers them.
+Integration: the sticker, location and contact card tests read each message's status back (written
+for CI; not run here).
+
+## 2026-10-06 — Phase 5: saying until when a waiting campaign can be approved (P5-08, ADR-209)
+
+Status: **Implemented; its database and browser tests run in CI only.** A waiting campaign could no
+longer be approved once its sending period ended (a day after submission, for one that starts at
+once), but approvers learned it only from the refusal. The local PostgreSQL is unavailable (its
+Docker daemon stopped), so the changed integration and e2e tests below were written but not run
+here.
+
+### Completed
+
+- **Design (ADR-209):** one deadline (`campaignApprovalDeadline`) for the refusal, the approval
+  email and the page; no Approve button after it; no migration.
+- **Domain:** `campaignApprovalDeadline`, used by `approveCampaign` and the approval email.
+- **Web:** the campaign page's waiting card gives the time, or says the period ended and offers no
+  Approve button; sending back stays, as the approval actions now take a flag for each.
+- **Tests:**
+  - Unit (1 new and 3 changed in `campaigns/approval-notice.test.ts`): the deadline, the email's
+    line.
+  - Integration (2 changed in `api-campaigns.test.ts`): the approval emails give the deadline.
+    Written for CI; not run here.
+  - E2E (1 changed in `campaigns.spec.ts`): the email and the page give it. Written for CI; not run
+    here.
+- **Docs:** ADR-209; ARCHITECTURE; DEPLOYMENT and RUNBOOKS; BACKLOG P5-08; feature matrix H-021.
+- **Mutation checks:** 5 deliberate regressions tried, all caught on the unit-tested parts. The page
+  and the refusal need a browser and the database, so their regressions are left to the e2e and
+  integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 904 passed (84 files)                                               |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 5 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- A reminder before the time passes, extending the sending period on approval, and email
+  preferences.
+
+## 2026-10-06 — Phase 5: listing a segment's contacts through the API (P5-08, ADR-208)
+
+Status: **Implemented; its database and browser tests run in CI only.** Keys read and wrote
+segments, but finding a segment's contacts meant copying its conditions into a search. The local
+PostgreSQL is unavailable (its Docker daemon stopped), so the integration test and the changed e2e
+test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-208):** `GET /segments/{id}/contacts` with `campaigns.read` and `contacts.read` (and
+  `conversations.read` for a recent-messages condition), on the pages of `POST /contacts/search`; a
+  segment with a problem refused with 412; no migration.
+- **Domain:** `apiListSegmentContacts` on `segmentConditionsSql` and `apiContactPage`; the scope's
+  description and the OpenAPI entry.
+- **Web:** the route.
+- **Tests:**
+  - Unit (2 new in `api.test.ts`): the refusals before anything is read, the OpenAPI entry.
+  - Integration (1 new in `api-campaigns.test.ts`): pages, the search's contacts, erasure, the
+    recent-messages scope, problems and segments not found. Written for CI; not run here.
+  - E2E (1 changed in `api-contact-search.spec.ts`): the key lists the contacts of the segment a
+    member saved. Written for CI; not run here.
+- **Docs:** ADR-208; SECURITY; ARCHITECTURE; THREAT-MODEL T202; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-08; feature matrix W-134, W-054 and H-033.
+- **Mutation checks:** 11 deliberate regressions tried, all caught on the unit-tested parts. The
+  listing itself needs the database, so its regressions are left to the integration and e2e tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 903 passed (84 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 11 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Restoring archived segments, a segment's contacts as a file, reminders while a campaign keeps
+  waiting, and email preferences.
+
+## 2026-10-06 — Phase 5: creating, changing and archiving saved segments through the API (P5-08, ADR-207)
+
+Status: **Implemented; its database and browser tests run in CI only.** Keys read segments but only
+members wrote them, and members saving a name another segment had got a generic message. The local
+PostgreSQL is unavailable (its Docker daemon stopped), so the integration test and the changed e2e
+test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-207):** `POST /segments`, `PATCH /segments/{id}` and `DELETE /segments/{id}`
+  (archiving) with `campaigns.write`; conditions checked by the search's code; names refused with
+  words that say so, for members too; no migration.
+- **Domain:** `apiCreateSegment`, `apiUpdateSegment`, `apiArchiveSegment`; `apiSegmentConditions`
+  shared with searches; `segmentNameRefusal` in members' create and update; the scope's description
+  and the OpenAPI entries.
+- **Web:** the routes.
+- **Tests:**
+  - Unit (3 new in `api.test.ts`): the refusals before anything is read, the name refusal, the
+    OpenAPI entries.
+  - Integration (1 new in `api-campaigns.test.ts`): creation, refusals, changes, archiving and the
+    audit. Written for CI; not run here.
+  - E2E (1 changed in `api-contact-search.spec.ts`): a key creates a segment members see on the
+    Segments page, a taken name is refused, and the key archives it. Written for CI; not run here.
+- **Docs:** ADR-207; SECURITY; ARCHITECTURE; THREAT-MODEL T201; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-08; feature matrix W-134, W-054 and H-033.
+- **Mutation checks:** 20 deliberate regressions tried, all caught on the unit-tested parts. The
+  writes themselves need the database, so their regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 901 passed (84 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 20 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Segments' members as pages, restoring archived segments, reminders while a campaign keeps waiting,
+  and email preferences.
+
+## 2026-10-06 — Phase 5: reading saved segments through the API (P5-08, ADR-206)
+
+Status: **Implemented; its database and browser tests run in CI only.** A draft's audience could be
+a saved segment, but keys could not find segments. The local PostgreSQL is unavailable (its Docker
+daemon stopped), so the integration test and the changed e2e test below were written but not run
+here.
+
+### Completed
+
+- **Design (ADR-206):** `GET /segments` and `GET /segments/{id}` with `campaigns.read`; conditions
+  in the API's words, `problem`, and a count for one; no migration.
+- **Domain:** `apiListSegments` and `apiGetSegment` (`api/segments.ts`) on segments' own checks and
+  SQL; the scope's description and the OpenAPI entries.
+- **Web:** the two routes.
+- **Tests:**
+  - Unit (2 new in `api.test.ts`): the refusals before anything is read (a suspended company still
+    reads), the OpenAPI entries.
+  - Integration (1 new in `api-campaigns.test.ts`): pages, problems, counts and a draft taking a
+    listed segment. Written for CI; not run here.
+  - E2E (1 changed in `api-contact-search.spec.ts`): the key reads the segment a member saves, and
+    its count. Written for CI; not run here.
+- **Docs:** ADR-206; SECURITY; ARCHITECTURE; THREAT-MODEL T200; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-08; feature matrix W-134, W-054 and H-033.
+- **Mutation checks:** 11 deliberate regressions tried, all caught on the unit-tested parts. The
+  reads themselves need the database, so their regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 898 passed (84 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 11 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Creating, changing or archiving segments through the API, reminders while a campaign keeps
+  waiting, and email preferences.
+
+## 2026-10-06 — Phase 5: telling the member who submitted a campaign what its approver did (P5-08, ADR-205)
+
+Status: **Implemented; its database tests run in CI only.** Approvers were emailed when a campaign
+waited for them, but the member who submitted it learned the outcome only on its page. The local
+PostgreSQL is unavailable (its Docker daemon stopped), so the integration tests below were written
+but not run here.
+
+### Completed
+
+- **Design (ADR-205):** the submitting member, while active and when someone else acted, emailed in
+  the same transaction that their campaign was approved (when it starts, under their authority),
+  sent back with the note, or taken back; nothing for a key's submission; no migration.
+- **Domain:** `campaignReviewNotice` and `emailCampaignSubmitter`, called by `approveCampaign`,
+  `rejectCampaign` and members' `withdrawCampaign`.
+- **Tests:**
+  - Unit (3 new in `campaigns/approval-notice.test.ts`): each email's text, its limits with the
+    longest names and note, and its escaping.
+  - Integration (2 new in `api-campaigns.test.ts`): the three emails to the submitter, and when
+    nobody is emailed. Written for CI; not run here.
+  - E2E: none. The campaigns e2e company has one member, who cannot approve their own submission, so
+    it has no member's submission to approve.
+- **Docs:** ADR-205; SECURITY; ARCHITECTURE; THREAT-MODEL T199; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-08; feature matrix H-021.
+- **Mutation checks:** 11 deliberate regressions tried, all caught on the unit-tested parts.
+  Choosing whom to email needs the database, so its regressions are left to the integration tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 896 passed (84 files)                                                |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it        |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 11 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Reminders while a campaign keeps waiting, email preferences, emails when a running campaign pauses
+  or completes, and a key withdrawing what a member submitted.
+
+## 2026-10-06 — Phase 5: emailing approvers when a campaign waits for approval (P5-08, ADR-204)
+
+Status: **Implemented; its database and browser tests run in CI only.** A campaign waiting for
+approval, a key's submission included, waited until an approver opened Campaigns. The local
+PostgreSQL is unavailable (its Docker daemon stopped), so the integration tests and the changed e2e
+test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-204):** the active owners and administrators other than the submitter (for a key's
+  submission, those who may also send), emailed in the submission's transaction, once per
+  submission; counts and a link only; no migration.
+- **Domain:** `campaignApprovalNotice` and `emailCampaignApprovers`, called by members'
+  `submitCampaign` and by `apiSubmitCampaign`; `CampaignDeps.notices`.
+- **Web:** the runtime passes the outbox and the app's base URL to the campaigns service and to the
+  submit route.
+- **Tests:**
+  - Unit (3 new in `campaigns/approval-notice.test.ts`): the email's text for a member's and a key's
+    submission, its limits with the longest names and its escaping.
+  - Integration (2 new in `api-campaigns.test.ts`): who is emailed for a key's and a member's
+    submission, and when nobody is. The integration fixture gives services' notices
+    (`fx.notices()`). Written for CI; not run here.
+  - E2E (1 changed in `campaigns.spec.ts`): the owner receives the email for a key's submission and
+    its link opens the campaign. Written for CI; not run here.
+- **Docs:** ADR-204; SECURITY; ARCHITECTURE; THREAT-MODEL T198; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-08; feature matrix H-021 (whose authority line now names the approver of a key's submission).
+- **Mutation checks:** 10 deliberate regressions tried, all caught on the unit-tested parts.
+  Choosing the recipients needs the database, so its regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 893 passed (84 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 10 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Telling the submitter that their campaign was approved or sent back, reminders while a campaign
+  keeps waiting, email preferences, and a key withdrawing what a member submitted.
+
+## 2026-10-06 — Phase 5: withdrawing a key's campaign submission through the API (P5-08, ADR-203)
+
+Status: **Implemented; its database and browser tests run in CI only.** A key submitted drafts but
+only members could take a submission back. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so the integration test and the changed e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-203):** `POST /campaigns/{id}/withdraw` with `campaigns.write`, for the key's own
+  submission while it waits for approval; drafts answered as they are; no migration.
+- **Domain:** `returnLockedCampaignToDraft` shared with members' withdrawal and rejection;
+  `apiWithdrawCampaign`; the scope's description and the OpenAPI entries.
+- **Web:** the route.
+- **Tests:**
+  - Unit (2 new in `api.test.ts`): the refusals before anything is read, the OpenAPI entries.
+  - Integration (1 new in `api-campaigns.test.ts`): the key's withdrawal and its refusals. Written
+    for CI; not run here.
+  - E2E (1 changed in `campaigns.spec.ts`): a key withdraws its submission and submits it again.
+    Written for CI; not run here.
+- **Docs:** ADR-203; SECURITY; ARCHITECTURE; THREAT-MODEL T197; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-08; feature matrix W-134 and H-033.
+- **Mutation checks:** 6 deliberate regressions tried, all caught on the unit-tested parts. The
+  withdrawal itself needs the database, so its regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 890 passed (83 files)                                               |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 6 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Notifying approvers of a waiting campaign, and a key withdrawing what a member submitted.
+
+## 2026-10-06 — Phase 5: submitting campaign drafts through the API, for a member's approval (P5-08, ADR-202)
+
+Status: **Implemented; its database and browser tests run in CI only.** Keys created and reviewed
+drafts, but only members submitted them. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so the migrations, the integration tests and the changed e2e test below were written but
+not run here.
+
+### Completed
+
+- **Design (ADR-202):** `POST /campaigns/{id}/submit` with `campaigns.write` and the draft's
+  version; members' checks and snapshot; always waiting for a member's approval, the approver
+  needing `campaigns.send` and lending their authority; retries answered as they are; migrations
+  0140 and 0141.
+- **Domain:** `submitLockedDraft` and `awaitCampaignApproval` shared with members' submission;
+  `apiSubmitCampaign`; approval of a key's submission; the key in the campaign's detail; the scope's
+  label and description; the OpenAPI entries; the export of the new column.
+- **Web:** the route; the campaign page names the key and offers Approve only to members who can
+  send campaigns.
+- **Tests:**
+  - Unit (3 new and 3 changed in `api.test.ts`): the body, the refusals before anything is read, the
+    scope's text, the OpenAPI entries.
+  - Integration (2 new in `api-campaigns.test.ts`): a submission's refusals, its audience and
+    approval, retries, the approver's permission and authority, rejection and withdrawal, the
+    database's check, foreign key and grant. Written for CI; not run here.
+  - E2E (1 changed in `campaigns.spec.ts`): a key submits a draft, the page names it and the owner
+    approves it under their authority; the scope's new label. Written for CI; not run here.
+- **Docs:** ADR-202; SECURITY; ARCHITECTURE; THREAT-MODEL T196; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-08; feature matrix W-134 and H-033.
+- **Mutation checks:** 15 deliberate regressions tried, all caught on the unit-tested parts. The
+  submission itself needs the database, so its regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 888 passed (83 files)                                                |
+| `pnpm test:integration`, e2e, migrations           | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 15 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Keys approving or starting campaigns (by design), withdrawing a key's submission through the API,
+  and notifying approvers of a waiting campaign.
+
+## 2026-10-06 — Phase 5: sending templates with a photo, video or document header through the API (P5-08, ADR-201)
+
+Status: **Implemented; its database and browser tests run in CI only (test stand-in only).**
+Templates with a photo, video or document header were synced but could not be sent. The local
+PostgreSQL is unavailable (its Docker daemon stopped), so the integration tests and the changed e2e
+test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-201):** `headerMedia: {link}` in the API's template sends (in each message of a send
+  to many), required by a photo, video or document header and refused without one; `GET /templates`
+  names the file a send gives; only the API opts in, and other paths say why; no migration.
+- **Research:** M-195 from Meta's published OpenAPI spec (the header's media parameter, no caption,
+  PDF documents only, IMAGE and DOCUMENT examples).
+- **Domain:** `TEMPLATE_HEADER_MEDIA`, `sendSpecFor`'s `mediaHeaders` option and reason,
+  `buildTemplateSend`'s header parameter, the API's checks, list and stored `headerMedia`, the
+  OpenAPI entries.
+- **Web:** the inbox shows a template's header file as an https link above its text.
+- **Tests:**
+  - Unit (3 new in `definition.test.ts` and `api.test.ts`): the spec by kind and caller, the send
+    object, the API's rules, the OpenAPI entries.
+  - Integration (1 new and 1 changed in `api.test.ts`, 1 changed in `templates.test.ts`): a photo
+    and a document template listed, sent with their links, stored and received as Meta's header
+    parameter, refusals by place, members told why. Written for CI; not run here.
+  - E2E (1 changed in `api.spec.ts`): a photo template made in WhatsApp Manager is listed, refused
+    without its photo, sent with it, received by the stand-in and shown in the inbox. Written for
+    CI; not run here.
+- **Docs:** ADR-201; research M-195; SECURITY; ARCHITECTURE; THREAT-MODEL T195; DEPLOYMENT and
+  RUNBOOKS; DATA-RETENTION; BACKLOG P3-03 and P5-08; feature matrix W-059, W-134 and H-033.
+- **Mutation checks:** 19 deliberate regressions tried, all caught on the unit-tested parts. The
+  send itself needs the database and the stand-in, so its regressions are left to the integration
+  and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 885 passed (83 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 19 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- These templates from the inbox, campaigns, automations or store messages; files uploaded to Meta;
+  creating templates with media headers; location headers.
+
+## 2026-10-06 — Phase 5: exporting the console's lists beyond the rows a tab shows (P5-10, ADR-200)
+
+Status: **Implemented; its database tests run in CI only.** The console's CSV exports gave only the
+rows each tab shows. The local PostgreSQL is unavailable (its Docker daemon stopped), so the
+integration tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-200):** exports of up to 5,000 rows (1,000 failures, 500 signups, the definer
+  functions' limits), the tabs unchanged, the tab's rows first; no migration.
+- **Domain:** `OPS_LIST_ROWS`, a limit on each list read, ties ordered by id, and the exports'
+  larger limits.
+- **Web:** each list's title says how many rows its CSV gives.
+- **Tests:**
+  - Unit (1 new in `ops-model.test.ts`): the numbers of rows.
+  - Integration (1 new in `platform-ops.test.ts`, 7 assertions changed): 101 failed receipts and
+    quarantine entries exported beyond the tab's 100, the tab's rows first, the audit counts; the
+    earlier export tests held to the tab's rows. Written for CI; not run here.
+- **Docs:** ADR-200; SECURITY; ARCHITECTURE; THREAT-MODEL T194; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-10; feature matrix H-034.
+- **Mutation checks:** 4 deliberate regressions tried, all caught on the unit-tested parts (the
+  numbers of rows). The reads need the database, so their regressions are left to the integration
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 882 passed (83 files)                                               |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 4 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Paged or streamed exports beyond these numbers, filters on an export, and raising the definer
+  functions' limits.
+
+## 2026-10-06 — Phase 5: acknowledging quarantine entries on the operations console (P5-10, ADR-199)
+
+Status: **Implemented; its database and browser tests run in CI only.** Quarantine entries could be
+retried or resolved, but nobody could note that they were on one. The local PostgreSQL is
+unavailable (its Docker daemon stopped), so migration 0139, the integration tests and the changed
+e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-199):** a note of 10 to 500 characters on an open quarantine entry, shown with who
+  and when, replaced by a later note, audited, deleted with the entry; a resolved entry takes none;
+  the CSV gives when only.
+- **Database (migration 0139):** `ops.quarantine_acknowledgements` and
+  `ops.platform_acknowledge_quarantine_entry` (definer, platform role only).
+- **Domain:** `acknowledgeQuarantine`, the listing's acknowledgement and the CSV column.
+- **Web:** the Integrations tab's Acknowledged column and form.
+- **Tests:**
+  - Unit (3 new in `quarantine-acknowledgements.test.ts`, 1 changed in `ops-model.test.ts`): the
+    input, the definer call and the CSV column.
+  - Integration (3 new in `platform-ops.test.ts`, 2 changed): who and the note, replacement and
+    audit, a resolved entry refused, refusals, retention, grants and the definer function. Written
+    for CI; not run here.
+  - E2E (1 changed in `platform-ops.spec.ts`): the quarantined event acknowledged before it is
+    resolved, and the CSV header. Written for CI; not run here.
+- **Docs:** ADR-199; SECURITY; ARCHITECTURE; THREAT-MODEL T193; DEPLOYMENT and RUNBOOKS;
+  DATA-RETENTION; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 9 deliberate regressions tried, all caught on the unit-tested parts. The
+  definer function and the listing need the database, so their regressions are left to the
+  integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 881 passed (83 files)                                               |
+| `pnpm test:integration`, e2e, migration 0139       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 9 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Assigning entries or failures to someone, editing or deleting a note, and leaving acknowledged
+  entries out of the alert email.
+
+## 2026-10-06 — Phase 5: sending stickers from links through the public API (P5-08, ADR-198)
+
+Status: **Implemented; its database and browser tests run in CI only (test stand-in only).** Keys
+sent media from links but not stickers. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so the integration test and the changed e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-198):** `type` `sticker` in `POST /messages`, an https link WhatsApp fetches and no
+  caption, under ADR-194's rules; WhatsApp decides whether the file can be a sticker; no migration.
+- **Research:** M-194 from Meta's published OpenAPI spec (a sticker by id or link, no caption, a
+  WebP upload, no stated limits).
+- **Domain:** `sticker` in `API_MEDIA_TYPES`, `apiSendStickerSchema`, its preview, the scope's
+  description and the OpenAPI entries (`SendSticker`).
+- **Tests:**
+  - Unit (3 new and 5 changed in `api.test.ts`): the rules, the dispatch and the scope, the snippet,
+    the OpenAPI entries.
+  - Integration (1 new in `api.test.ts`): a sticker stored, sent and read back; a caption refused.
+    Written for CI; not run here.
+  - E2E (1 changed in `api.spec.ts`): a key sends a sticker and the inbox shows its link. Written
+    for CI; not run here.
+- **Docs:** ADR-198; research M-194; SECURITY; ARCHITECTURE; THREAT-MODEL T192; DEPLOYMENT and
+  RUNBOOKS; DATA-RETENTION; BACKLOG P5-08; feature matrix H-033 and W-134.
+- **Mutation checks:** 7 deliberate regressions tried, all caught on the unit-tested parts. The send
+  itself needs the database and the stand-in, so its regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 878 passed (82 files)                                               |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 7 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Stickers uploaded to Meta or sent by id, and checking that a file can be a sticker.
+
+## 2026-10-06 — Phase 5: sending contact cards through the public API (P5-08, ADR-197)
+
+Status: **Implemented; its database and browser tests run in CI only (test stand-in only).** Keys
+could read the cards customers share but not send one. The local PostgreSQL is unavailable (its
+Docker daemon stopped), so the integration test and the changed e2e test below were written but not
+run here.
+
+### Completed
+
+- **Design (ADR-197):** `type` `contacts` in `POST /messages`, 1 to 5 contacts as Meta's spec
+  describes them, each part checked, a second part of the name besides the formatted one, sent as a
+  reply within the 24-hour window and kept in WhatsApp's words so reads give them back; the scope's
+  label no longer lists every type; no migration.
+- **Domain:** `apiContactCardInputSchema`, `apiSendContactsSchema`, `isCardLink`, `whatsappContact`
+  and `apiSendContacts`, the size check, the dispatch and its refusal, the API limits, the scope's
+  label and description, and the OpenAPI entries (`SendContacts`).
+- **Test stand-in:** the Graph stand-in checks a contacts message (1 to 5 contacts, only the spec's
+  parts, text values, HOME or WORK, a phone, email or link with its value, a birthday written
+  YYYY-MM-DD).
+- **Tests:**
+  - Unit (4 new and 4 changed in `api.test.ts`): the rules, the mapping and its reading back, the
+    dispatch, the scope and the size, the OpenAPI entries, and the scope's new label.
+  - Integration (1 new in `api.test.ts`): two cards stored, sent and read back; the refusals.
+    Written for CI; not run here.
+  - E2E (1 changed in `api.spec.ts`, the scope's new label in it and in `commerce.spec.ts`): a key
+    shares the dentist's card and the inbox shows it. Written for CI; not run here.
+- **Docs:** ADR-197; research M-193 (what is not assumed); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T191; DEPLOYMENT and RUNBOOKS; DATA-RETENTION; BACKLOG P5-08; feature matrix H-033 and W-134.
+- **Mutation checks:** 25 deliberate regressions tried, all caught (one after a test was added) on
+  the unit-tested parts. The send itself needs the database and the stand-in, so its regressions are
+  left to the integration and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                                                            |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                                             |
+| `pnpm test` (unit)                                 | 875 passed (82 files)                                                                             |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them                                   |
+| `pnpm build`                                       | passed                                                                                            |
+| Mutation checks                                    | 25 deliberate regressions tried, all caught (one after a test was added) on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                                                    |
+
+### Known gaps
+
+- Contact cards in the inbox's reply box, and sending one of the company's contacts as a card.
+
+## 2026-10-06 — Phase 5: contact cards' contacts through the API and webhooks (P5-08, ADR-196)
+
+Status: **Implemented; its database and browser tests run in CI only.** The API and the
+`message.received` webhook said how many contacts a card left out, never which it shared. The local
+PostgreSQL is unavailable (its Docker daemon stopped), so the integration tests and the changed e2e
+test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-196):** `contacts` on every message the API gives and in `message.received`, a
+  contact card's contacts as WhatsApp gave them, every part optional, from one mapping; the inbox
+  shows their names and numbers; no migration.
+- **Research:** M-193 from Meta's published OpenAPI spec (the contact object of received and sent
+  cards, and where its schema and examples disagree).
+- **Domain:** `contactCardSchema`, `messageContactsSchema` and `contactCards`, `contacts` in
+  `toApiMessage` and in the `message.received` payload, and the descriptions (`contactsLeftOut`, and
+  a received message's `text`, which names a location's name).
+- **Web:** a contact card shows each contact's name, numbers and email addresses.
+- **Tests:**
+  - Unit (2 new and 2 changed in `webhooks.test.ts`, `api.test.ts` and `message-changes.test.ts`):
+    the mapping, what is left out, the schemas and the OpenAPI entries.
+  - Integration (1 new in `api.test.ts`, 1 new in `webhooks.test.ts`, 1 changed): a card read
+    through the conversation, the feed and the change feed, and posted in `message.received`, none
+    after its sender's erasure. Written for CI; not run here.
+  - E2E (1 changed in `api.spec.ts`): a key reads a shared card and the inbox shows the person's
+    name and number. Written for CI; not run here.
+- **Docs:** ADR-196; research M-193; SECURITY; ARCHITECTURE; THREAT-MODEL T190; DEPLOYMENT and
+  RUNBOOKS; DATA-RETENTION; BACKLOG P5-08 and P5-09; feature matrix H-033 and W-134.
+- **Mutation checks:** 20 deliberate regressions tried, all caught on the unit-tested parts. The
+  reads and the payload need the database, so their regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 871 passed (82 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 20 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Sending contact cards through the API, and adding a shared person as a contact.
+
+## 2026-10-06 — Phase 5: sending locations through the public API (P5-08, ADR-195)
+
+Status: **Implemented; its database and browser tests run in CI only (test stand-in only).** Keys
+could not send a place. The local PostgreSQL is unavailable (its Docker daemon stopped), so the
+integration test and the changed e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-195):** `type` `location` in `POST /messages`, the coordinates as numbers and the
+  place's name and address if wanted, sent as a reply within the 24-hour window with the coordinates
+  as decimal text, as Meta's spec types them; no migration.
+- **Research:** M-192 from Meta's published OpenAPI spec (the location object's four properties, the
+  coordinates typed as strings but sent as numbers in its examples).
+- **Domain:** the schema, `decimalDegrees` and `apiSendLocation`, the dispatch and its refusal,
+  `outboundText` for locations, the API limit, the scope's label and description, and the OpenAPI
+  entries (`SendLocation`, the operation, and a message's `text`, which now names captions and
+  locations for outbound messages).
+- **Web:** the inbox shows a location's coordinates, received locations' too.
+- **Test stand-in:** the Graph stand-in checks a location message's object (the four properties
+  only, the coordinates as decimal text within their ranges).
+- **Tests:**
+  - Unit (5 new and 3 changed in `api.test.ts`): the rules, the decimal text, the dispatch and the
+    scope, the name or address as text, the OpenAPI entries.
+  - Integration (1 new in `api.test.ts`): two locations stored, sent and read back; the refusals.
+    Written for CI; not run here.
+  - E2E (1 changed in `api.spec.ts`, the scope's new label in it and in `commerce.spec.ts`): a key
+    sends the clinic's location and the inbox shows it with its coordinates. Written for CI; not run
+    here.
+- **Docs:** ADR-195, and ADR-194's record corrected (webhooks give no caption as text); research
+  M-192; SECURITY; ARCHITECTURE; THREAT-MODEL T189; DEPLOYMENT and RUNBOOKS; DATA-RETENTION; BACKLOG
+  P5-08; feature matrix H-033 and W-134.
+- **Mutation checks:** 23 deliberate regressions tried, all caught on the unit-tested parts. The
+  send itself needs the database and the stand-in, so its regressions are left to the integration
+  and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 869 passed (82 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 23 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Locations in the inbox's reply box, asking a customer for their location, a place's link, and
+  maps.
+
 ## 2026-10-06 — Phase 5: sending media from links through the public API (P5-08, ADR-194)
 
 Status: **Implemented; its database and browser tests run in CI only (test stand-in only).** Keys

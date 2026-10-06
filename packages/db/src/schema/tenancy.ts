@@ -71,6 +71,11 @@ export const memberships = appSchema.table('memberships', {
   joinedAt: tz('joined_at').notNull().defaultNow(),
   statusChangedAt: tz('status_changed_at'),
   statusChangedBy: text('status_changed_by'),
+  /** The notice emails the member turned off in this company (migration 0142, ADR-215). */
+  emailOptOuts: text('email_opt_outs')
+    .array()
+    .notNull()
+    .default(sql`'{}'::text[]`),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });

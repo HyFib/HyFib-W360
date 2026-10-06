@@ -34,12 +34,16 @@ import { parseTimeOfDay, sendingWindow } from './schedule';
 import {
   CAMPAIGN_TICK_MS,
   campaignLauncherStanding,
+  emailCampaignCompleted,
+  emailCampaignPaused,
   loadCampaignSettings,
   recordCampaignEvent,
   recountedCounters,
   releaseQueuedSends,
   requeueReleased,
   signalCampaignRunner,
+  type AutomaticPauseReason,
+  type CampaignNoticeDeps,
 } from './service';
 import { readCampaignVariables, resolveVariables } from './variables';
 
@@ -65,6 +69,8 @@ export interface CampaignRunnerDeps {
   clock: Clock;
   /** The per-number send rate (META_SEND_RATE_PER_SECOND). */
   sendRatePerSecond: number;
+  /** Emails members when it pauses (ADR-210) or completes (ADR-214) a campaign. */
+  notices: CampaignNoticeDeps;
 }
 
 export type TickOutcome =
@@ -141,7 +147,7 @@ export async function runCampaignTick(
         .set({ ...values, version: sql`${campaigns.version} + 1` })
         .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
 
-    const pause = async (reason: CampaignPauseReason, detail: Record<string, unknown> = {}) => {
+    const pause = async (reason: AutomaticPauseReason, detail: Record<string, unknown> = {}) => {
       // Sends already queued within a cap stay queued; when the template, the number or the
       // sender's authority is the problem, unclaimed sends go back to pending for the resume.
       if (RELEASE_ON_PAUSE.has(reason)) {
@@ -168,6 +174,7 @@ export async function runCampaignTick(
         subjectId: campaignId,
         metadata: { reason },
       });
+      await emailCampaignPaused(deps.notices, tx, tenantId, campaignId, reason);
       await emitTenantEvent(tx, tenantId, { type: 'campaign.progress', payload: { campaignId } });
       return result('paused', null, { pauseReason: reason });
     };
@@ -180,6 +187,7 @@ export async function runCampaignTick(
         nextRunAt: null,
       });
       await recordCampaignEvent(tx, tenantId, campaignId, 'completed', null, { reason });
+      await emailCampaignCompleted(deps.notices, tx, tenantId, campaignId, reason);
       await emitTenantEvent(tx, tenantId, { type: 'campaign.progress', payload: { campaignId } });
       return result('completed');
     };
@@ -439,7 +447,7 @@ export async function runCampaignTick(
     const skips: { recipientId: string; reason: SkipReason }[] = [];
     const planned: Planned[] = [];
     let spent = c.spentEstimateMicros;
-    let stop: CampaignPauseReason | null = null;
+    let stop: AutomaticPauseReason | null = null;
     for (const b of batch) {
       const person = people.find((p) => p.id === b.contactId);
       const skip = (reason: SkipReason) => skips.push({ recipientId: b.id, reason });
@@ -642,10 +650,11 @@ export async function runCampaignTick(
  * The job's acting member is no longer a member: pause the campaign so another member can resume
  * it, releasing the sends no worker has claimed (their recipients return to pending, like any
  * pause for lost authority). Sends the worker rejects for the same reason return their recipients
- * too (cancelSendIntent), so a resumed campaign reaches everyone it had not reached.
+ * too (cancelSendIntent), so a resumed campaign reaches everyone it had not reached. The
+ * company's owners and administrators are emailed (ADR-210).
  */
 export async function pauseCampaignForRemovedLauncher(
-  deps: Pick<CampaignRunnerDeps, 'db' | 'clock'>,
+  deps: Pick<CampaignRunnerDeps, 'db' | 'clock' | 'notices'>,
   scope: TenantScope,
   campaignId: string,
   actorUserId: string | null,
@@ -694,6 +703,7 @@ export async function pauseCampaignForRemovedLauncher(
       subjectId: campaignId,
       metadata: { reason: 'launcher_removed' },
     });
+    await emailCampaignPaused(deps.notices, tx, scope.tenantId, campaignId, 'launcher_removed');
     return true;
   });
 }

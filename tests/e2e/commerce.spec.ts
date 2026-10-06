@@ -205,7 +205,7 @@ test('a catalog is read from Meta, products are sent in a chat and an order is p
   await page.getByLabel('Name', { exact: true }).fill('Shop');
   await page
     .getByRole('checkbox', {
-      name: /Reply with text, buttons, lists, products, reactions and media/,
+      name: /Reply with text, media and other messages/,
     })
     .check();
   await page.getByRole('checkbox', { name: /Read WhatsApp orders/ }).check();

@@ -363,6 +363,159 @@ function mediaProblem(body: unknown): string | null {
   return null;
 }
 
+const LOCATION_KEYS = ['latitude', 'longitude', 'name', 'address'];
+
+/**
+ * Checks a location message (research M-192): `location` holds only `latitude`, `longitude`,
+ * `name` and `address`, the coordinates as the decimal strings the schema types them as (its
+ * examples send numbers; HyFib follows the schema) within their ranges, a name and an address as
+ * text when given.
+ */
+function locationProblem(body: unknown): string | null {
+  const b = body as { type?: unknown; location?: unknown } | undefined;
+  if (b?.type !== 'location') return b?.location === undefined ? null : 'location';
+  const location = b.location as Record<string, unknown> | undefined;
+  if (typeof location !== 'object' || location === null) return 'location';
+  if (Object.keys(location).some((key) => !LOCATION_KEYS.includes(key))) return 'location';
+  for (const [key, bound] of [
+    ['latitude', 90],
+    ['longitude', 180],
+  ] as const) {
+    const value = location[key];
+    if (
+      typeof value !== 'string' ||
+      !/^-?\d+(\.\d+)?$/.test(value) ||
+      Math.abs(Number(value)) > bound
+    ) {
+      return `location.${key}`;
+    }
+  }
+  for (const key of ['name', 'address']) {
+    const value = location[key];
+    if (value !== undefined && (typeof value !== 'string' || !value)) return `location.${key}`;
+  }
+  return null;
+}
+
+const CARD_TYPES = ['HOME', 'WORK'];
+const CARD_PARTS: Record<string, string[]> = {
+  phones: ['phone', 'type', 'wa_id'],
+  emails: ['email', 'type'],
+  urls: ['url', 'type'],
+  addresses: ['street', 'city', 'state', 'zip', 'country', 'country_code', 'type'],
+};
+const CARD_REQUIRED: Record<string, string> = { phones: 'phone', emails: 'email', urls: 'url' };
+const CARD_NAME_PARTS = [
+  'formatted_name',
+  'first_name',
+  'last_name',
+  'middle_name',
+  'prefix',
+  'suffix',
+];
+
+const isText = (value: unknown): value is string => typeof value === 'string' && value !== '';
+
+/**
+ * Checks a contacts message (research M-193): 1 to 5 contacts, each with only the parts of the
+ * spec's contact object, every value text, a phone, email or link with its value, each `type` HOME
+ * or WORK, and a birthday written YYYY-MM-DD.
+ */
+function contactsProblem(body: unknown): string | null {
+  const b = body as { type?: unknown; contacts?: unknown } | undefined;
+  if (b?.type !== 'contacts') return null;
+  const contacts = b.contacts;
+  if (!Array.isArray(contacts) || contacts.length < 1 || contacts.length > 5) return 'contacts';
+  for (const entry of contacts) {
+    if (typeof entry !== 'object' || entry === null) return 'contacts';
+    const contact = entry as Record<string, unknown>;
+    const allowed = ['name', 'birthday', 'org', ...Object.keys(CARD_PARTS)];
+    if (Object.keys(contact).some((key) => !allowed.includes(key))) return 'contacts';
+    const name = contact.name as Record<string, unknown> | undefined;
+    if (name !== undefined) {
+      if (typeof name !== 'object' || name === null) return 'contacts.name';
+      for (const [key, value] of Object.entries(name)) {
+        if (!CARD_NAME_PARTS.includes(key) || !isText(value)) return 'contacts.name';
+      }
+    }
+    for (const [list, parts] of Object.entries(CARD_PARTS)) {
+      const items = contact[list];
+      if (items === undefined) continue;
+      if (!Array.isArray(items)) return `contacts.${list}`;
+      for (const item of items as unknown[]) {
+        if (typeof item !== 'object' || item === null) return `contacts.${list}`;
+        const record = item as Record<string, unknown>;
+        for (const [key, value] of Object.entries(record)) {
+          if (!parts.includes(key) || !isText(value)) return `contacts.${list}`;
+          if (key === 'type' && !CARD_TYPES.includes(value)) return `contacts.${list}`;
+        }
+        const required = CARD_REQUIRED[list];
+        if (required && !isText(record[required])) return `contacts.${list}`;
+      }
+    }
+    const org = contact.org as Record<string, unknown> | undefined;
+    if (org !== undefined) {
+      if (typeof org !== 'object' || org === null) return 'contacts.org';
+      for (const [key, value] of Object.entries(org)) {
+        if (!['company', 'department', 'title'].includes(key) || !isText(value)) {
+          return 'contacts.org';
+        }
+      }
+    }
+    const birthday = contact.birthday;
+    if (birthday !== undefined && !(isText(birthday) && /^\d{4}-\d{2}-\d{2}$/.test(birthday))) {
+      return 'contacts.birthday';
+    }
+  }
+  return null;
+}
+
+const TEMPLATE_HEADER_FILES = new Set(['image', 'video', 'document']);
+
+/**
+ * Checks a template's header parameters (research M-195): one header, with one parameter: text, or
+ * a photo, video or document as a media object (an `id` or an http(s) `link`, and no caption).
+ */
+function templateHeaderProblem(body: unknown): string | null {
+  const b = body as { type?: unknown; template?: unknown } | undefined;
+  if (b?.type !== 'template') return null;
+  const components = (b.template as { components?: unknown } | null | undefined)?.components;
+  if (components === undefined) return null;
+  if (!Array.isArray(components)) return 'template.components';
+  const headers = components.filter(
+    (c: unknown) => (c as { type?: unknown } | null)?.type === 'header',
+  );
+  if (headers.length > 1) return 'template.components';
+  for (const header of headers) {
+    const parameters = (header as { parameters?: unknown }).parameters;
+    if (!Array.isArray(parameters) || parameters.length !== 1) return 'template.header';
+    const parameter = parameters[0] as Record<string, unknown> | null;
+    if (typeof parameter !== 'object' || parameter === null) return 'template.header';
+    const type = typeof parameter.type === 'string' ? parameter.type : '';
+    if (type === 'text') {
+      if (!isText(parameter.text)) return 'template.header.text';
+      continue;
+    }
+    if (!TEMPLATE_HEADER_FILES.has(type)) return 'template.header';
+    if (Object.keys(parameter).some((key) => key !== 'type' && key !== type)) {
+      return 'template.header';
+    }
+    const media = parameter[type] as Record<string, unknown> | undefined;
+    if (typeof media !== 'object' || media === null) return `template.header.${type}`;
+    if (Object.keys(media).some((key) => key !== 'id' && key !== 'link')) {
+      return `template.header.${type}`;
+    }
+    if ((media.id === undefined) === (media.link === undefined)) return `template.header.${type}`;
+    if (
+      media.link !== undefined &&
+      (typeof media.link !== 'string' || !/^https?:\/\/\S+$/.test(media.link))
+    ) {
+      return `template.header.${type}.link`;
+    }
+  }
+  return null;
+}
+
 /** Checks the `context` of a reply that quotes a message (research M-041, M-183). */
 function contextProblem(body: unknown): string | null {
   const context = (body as { context?: unknown } | undefined)?.context;
@@ -513,6 +666,19 @@ export async function startGraphStandIn(options: {
         if (b.refuse === false) state.subscribeErrors.delete(b.wabaId);
         return json(res, 200, { ok: true });
       }
+      // Test control: list a template made in WhatsApp Manager, such as one with a photo header,
+      // which HyFib's editor cannot create (ADR-201).
+      if (req.method === 'POST' && url.pathname === '/__stand-in/template') {
+        const b = (body ?? {}) as { wabaId?: unknown; template?: Omit<TemplateFixture, 'id'> };
+        if (typeof b.wabaId !== 'string' || !b.wabaId || !b.template) {
+          return json(res, 400, { ok: false });
+        }
+        state.templateCounter += 1;
+        const list = state.templates.get(b.wabaId) ?? [];
+        list.push({ ...b.template, id: String(9_000_000_000 + state.templateCounter) });
+        state.templates.set(b.wabaId, list);
+        return json(res, 200, { ok: true });
+      }
       // Test control: set a template's review status, as Meta's review would.
       if (req.method === 'POST' && url.pathname === '/__stand-in/template-status') {
         const b = (body ?? {}) as { wabaId?: string; name?: string; status?: string };
@@ -630,7 +796,13 @@ export async function startGraphStandIn(options: {
             ? null
             : interactiveProblem(body);
         if (invalid) return graphError(res, 400, 100, `(#100) Invalid parameter: ${invalid}`);
-        const shapeInvalid = contextProblem(body) ?? reactionProblem(body) ?? mediaProblem(body);
+        const shapeInvalid =
+          contextProblem(body) ??
+          reactionProblem(body) ??
+          mediaProblem(body) ??
+          locationProblem(body) ??
+          contactsProblem(body) ??
+          templateHeaderProblem(body);
         if (shapeInvalid) {
           return graphError(res, 400, 100, `(#100) Invalid parameter: ${shapeInvalid}`);
         }

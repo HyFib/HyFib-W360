@@ -32,6 +32,7 @@ import {
   HEALTH_CSV_COLUMNS,
   NEW_COMPANIES_CSV_COLUMNS,
   NUMBER_SETUPS_CSV_COLUMNS,
+  OPS_LIST_ROWS,
   QUARANTINE_CSV_COLUMNS,
   QUEUES_CSV_COLUMNS,
   RECEIPTS_CSV_COLUMNS,
@@ -2439,9 +2440,279 @@ describe('acknowledging webhook receipts (ADR-179)', () => {
   });
 });
 
+describe('acknowledging quarantine entries (ADR-199)', () => {
+  /** An open quarantine entry, its receipt received `age` ago; both already emailed about. */
+  async function entry(age = '1 hour') {
+    const receiptId = uuidv7();
+    await fx.query(
+      `INSERT INTO ops.webhook_receipts (id, provider, received_at, body_sha256, body_ciphertext,
+         body_size, status, attempts, exhausted_alerted_at)
+       VALUES ($1, 'meta_whatsapp', now() - $3::interval, $2, 'sealed-body', 10, 'quarantined', 1,
+         now())`,
+      [receiptId, randomBytes(32).toString('hex'), age],
+    );
+    const id = uuidv7();
+    await fx.query(
+      `INSERT INTO ops.webhook_quarantine (id, receipt_id, provider, reason, external_ids,
+         alerted_at)
+       VALUES ($1, $2, 'meta_whatsapp', 'unknown_asset', $3::jsonb, now())`,
+      [id, receiptId, JSON.stringify({ waba: String(Date.now()) })],
+    );
+    return { id, receiptId };
+  }
+  async function namedStaff(name: string): Promise<PlatformActor> {
+    const user = await createUser(fx.dbs, { twoFactor: true, name });
+    await fx.dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_operator')`,
+      [user.id],
+    );
+    return { userId: user.id, role: 'platform_operator', correlationId: uuidv7() };
+  }
+  const listed = async (id: string) =>
+    (await ops().integrations(staff)).quarantine.find((q) => q.id === id);
+  const acknowledge = (actor: PlatformActor, quarantineId: string, note: string) =>
+    ops().acknowledgeQuarantine(actor, { quarantineId, note });
+  const audits = (id: string) =>
+    fx.query<{
+      actor_user_id: string;
+      reason: string;
+      target_tenant_id: string | null;
+      metadata: unknown;
+      correlation_id: string;
+    }>(
+      `SELECT actor_user_id, reason, target_tenant_id, metadata, correlation_id
+         FROM ops.platform_audit_events
+        WHERE action = 'platform.webhook_quarantine_acknowledged'
+          AND metadata->>'quarantineId' = $1
+        ORDER BY occurred_at, id`,
+      [id],
+    );
+  const notes = async (id: string) =>
+    (
+      await fx.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM ops.quarantine_acknowledgements WHERE quarantine_id = $1`,
+        [id],
+      )
+    )[0]!.n;
+
+  it('records who looked at an entry and their note; another administrator replaces it; each is audited; a resolved entry takes none', async () => {
+    const { id, receiptId } = await entry();
+    expect((await listed(id))?.acknowledgement).toBeNull();
+    const asha = await namedStaff('Asha Ops');
+    await acknowledge(asha, id, '  Waiting on the company to reconnect the number.  ');
+    const first = (await listed(id))!.acknowledgement!;
+    expect([first.byName, first.note]).toEqual([
+      'Asha Ops',
+      'Waiting on the company to reconnect the number.',
+    ]);
+    expect(Date.now() - first.at.getTime()).toBeLessThan(60_000);
+    const ravi = await namedStaff('Ravi Ops');
+    await acknowledge(ravi, id, 'Meta confirmed it is a test account; resolving.');
+    expect((await listed(id))?.acknowledgement).toMatchObject({
+      byName: 'Ravi Ops',
+      note: 'Meta confirmed it is a test account; resolving.',
+    });
+    const audited = await audits(id);
+    expect(audited.map((a) => [a.actor_user_id, a.reason, a.correlation_id])).toEqual([
+      [asha.userId, 'Waiting on the company to reconnect the number.', asha.correlationId],
+      [ravi.userId, 'Meta confirmed it is a test account; resolving.', ravi.correlationId],
+    ]);
+    expect(audited[0]!.target_tenant_id).toBeNull();
+    expect(audited[0]!.metadata).toEqual({
+      quarantineId: id,
+      receiptId,
+      provider: 'meta_whatsapp',
+      reason: 'unknown_asset',
+    });
+    // The tab's CSV gives when, never who or the note.
+    const file = await ops().exportList(staff, 'quarantine', 30);
+    const line = file.body.split('\r\n').find((l) => l.includes(`,${receiptId},`))!;
+    expect(line).toMatch(/,\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+    for (const left of ['Ravi', 'Asha', 'reconnect', 'Meta confirmed']) {
+      expect(file.body).not.toContain(left);
+    }
+    // Resolved, it leaves the list and takes no more notes.
+    await ops().resolveQuarantine(staff, {
+      quarantineId: id,
+      resolution: 'A Meta test account, not a customer.',
+    });
+    expect(await listed(id)).toBeUndefined();
+    await expectCode(acknowledge(ravi, id, 'One more note after it closed.'), 'conflict');
+    expect(await audits(id)).toHaveLength(2);
+  });
+
+  it('refuses unknown entries, bad notes and anyone who is not an administrator, and deletes a note with its entry', async () => {
+    const { id } = await entry();
+    await expectCode(acknowledge(staff, uuidv7(), 'Looking into this entry now.'), 'not_found');
+    await expectCode(acknowledge(staff, id, 'Too short'), 'validation_failed');
+    await expectCode(acknowledge(staff, id, 'x'.repeat(501)), 'validation_failed');
+    await expectCode(
+      acknowledge(staff, 'not-a-uuid', 'Looking into this entry now.'),
+      'validation_failed',
+    );
+    // The function checks the note itself too, whatever calls it, and trims it.
+    const direct = (quarantineId: string, note: string) =>
+      fx.dbs.platform.run(staff.userId, (tx) =>
+        tx.execute(
+          sql`select ops.platform_acknowledge_quarantine_entry(${quarantineId}::uuid, ${note}, 'c')`,
+        ),
+      );
+    await expectCode(direct(id, '   short   '), 'precondition_failed');
+    await expectCode(direct(id, 'x'.repeat(501)), 'precondition_failed');
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    await expectCode(
+      acknowledge(
+        { userId: outsider.id, role: 'platform_operator', correlationId: uuidv7() },
+        id,
+        'Looking into this entry now.',
+      ),
+      'forbidden',
+    );
+    expect(await notes(id)).toBe(0);
+    expect(await audits(id)).toEqual([]);
+    await direct(id, '   Noted straight in SQL.   ');
+    expect((await listed(id))?.acknowledgement?.note).toBe('Noted straight in SQL.');
+
+    // The retention sweep deletes an entry with its receipt after 90 days, and its note with them.
+    const old = await entry('91 days');
+    await direct(old.id, 'An old one, noted before it goes.');
+    expect(await notes(old.id)).toBe(1);
+    await fx.dbs.appPool.query(`SELECT * FROM ops.apply_webhook_retention(5000)`);
+    expect(await notes(old.id)).toBe(0);
+    expect(await notes(id)).toBe(1);
+  });
+
+  it('keeps the writing to the definer function and the reading to platform staff', async () => {
+    const { id } = await entry();
+    const privilege = async (role: string, action: string) =>
+      (
+        await fx.query<{ ok: boolean }>(
+          `SELECT has_table_privilege($1, 'ops.quarantine_acknowledgements', $2) AS ok`,
+          [role, action],
+        )
+      )[0]!.ok;
+    expect(await privilege('w360_platform', 'SELECT')).toBe(true);
+    for (const action of ['INSERT', 'UPDATE', 'DELETE']) {
+      expect(await privilege('w360_platform', action), action).toBe(false);
+    }
+    for (const action of ['SELECT', 'INSERT', 'UPDATE', 'DELETE']) {
+      expect(await privilege('w360_app', action), action).toBe(false);
+      expect(await privilege('w360_auth', action), action).toBe(false);
+    }
+    await expect(
+      fx.dbs.appPool.query(
+        `SELECT ops.platform_acknowledge_quarantine_entry($1::uuid, 'Looking into this entry now.', 'c')`,
+        [id],
+      ),
+    ).rejects.toThrow(/permission denied for function/);
+    const [fn] = await fx.query<{ owner: string; definer: boolean; config: unknown }>(
+      `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer, p.proconfig AS config
+         FROM pg_proc p
+        WHERE p.oid = 'ops.platform_acknowledge_quarantine_entry(uuid,text,text)'::regprocedure`,
+    );
+    expect(fn).toEqual({
+      owner: 'w360_definer',
+      definer: true,
+      config: ['search_path=pg_catalog, pg_temp'],
+    });
+    // A note keeps to its length.
+    await expect(
+      fx.query(
+        `INSERT INTO ops.quarantine_acknowledgements (quarantine_id, acknowledged_by_user_id,
+           acknowledged_at, note) VALUES ($1, $2, now(), 'short')`,
+        [id, staff.userId],
+      ),
+    ).rejects.toThrow(/quarantine_acknowledgements_note_check/);
+  });
+});
+
+describe('exports beyond the rows a tab shows (ADR-200)', () => {
+  const csvLines = (body: string) => body.replace(/^\uFEFF/, '').split('\r\n');
+
+  it('gives every failed receipt and open quarantine entry, where the tab shows the newest 100', async () => {
+    const exporter = await platformStaff();
+    // 101 receipts that failed all their attempts and 101 open quarantine entries, 60 days old (older
+    // than what the other tests add, whose rows stay the tab's newest) and already emailed about.
+    const sealed = `md5(g::text || clock_timestamp()::text) || md5(random()::text)`;
+    const failed = await fx.query<{ id: string; received_at: Date }>(
+      `INSERT INTO ops.webhook_receipts (id, provider, received_at, body_sha256, body_size, status,
+         attempts, last_error, exhausted_alerted_at)
+       SELECT gen_random_uuid(), 'meta_whatsapp', now() - interval '60 days' - g * interval '1 minute',
+              ${sealed}, 10, 'failed', 12, 'boom', now()
+         FROM generate_series(1, 101) g
+       RETURNING id, received_at`,
+    );
+    const quarantined = await fx.query<{ receipt_id: string; created_at: Date }>(
+      `WITH r AS (
+         INSERT INTO ops.webhook_receipts (id, provider, received_at, body_sha256, body_size, status,
+           attempts, exhausted_alerted_at)
+         SELECT gen_random_uuid(), 'meta_whatsapp',
+                now() - interval '60 days' - g * interval '1 minute', ${sealed}, 10, 'quarantined', 1,
+                now()
+           FROM generate_series(1, 101) g
+         RETURNING id, received_at)
+       INSERT INTO ops.webhook_quarantine (receipt_id, provider, reason, external_ids, created_at,
+         alerted_at)
+       SELECT r.id, 'meta_whatsapp', 'unknown_asset', jsonb_build_object('waba', r.id::text),
+              r.received_at, now()
+         FROM r
+       RETURNING receipt_id, created_at`,
+    );
+    const oldest = <T>(rows: T[], at: (row: T) => Date) =>
+      rows.reduce((a, b) => (at(a) <= at(b) ? a : b));
+    const oldestFailed = oldest(failed, (r) => r.received_at).id;
+    const oldestQuarantined = oldest(quarantined, (q) => q.created_at).receipt_id;
+
+    const tab = await ops().integrations(exporter);
+    expect(tab.receipts).toHaveLength(OPS_LIST_ROWS.receipts.shown);
+    expect(tab.quarantine).toHaveLength(OPS_LIST_ROWS.quarantine.shown);
+    expect(tab.receipts.some((r) => r.id === oldestFailed)).toBe(false);
+    expect(tab.quarantine.some((q) => q.receiptId === oldestQuarantined)).toBe(false);
+
+    const receipts = await ops().exportList(exporter, 'receipts', 30);
+    const receiptLines = csvLines(receipts.body).filter(Boolean);
+    expect(receiptLines.length - 1).toBeGreaterThan(OPS_LIST_ROWS.receipts.shown);
+    expect(receiptLines.some((l) => l.includes(`,${oldestFailed},`))).toBe(true);
+    expect(receiptLines.slice(0, OPS_LIST_ROWS.receipts.shown + 1)).toEqual(
+      csvLines(receiptsCsv(tab.receipts)).filter(Boolean),
+    );
+    const quarantine = await ops().exportList(exporter, 'quarantine', 30);
+    const quarantineLines = csvLines(quarantine.body).filter(Boolean);
+    expect(quarantineLines.length - 1).toBeGreaterThan(OPS_LIST_ROWS.quarantine.shown);
+    expect(quarantineLines.some((l) => l.includes(`,${oldestQuarantined},`))).toBe(true);
+
+    // Each export's audit entry counts the rows the file gives.
+    const audited = await fx.query<{ action: string; metadata: Record<string, number> }>(
+      `SELECT action, metadata FROM ops.platform_audit_events
+        WHERE actor_user_id = $1 AND action LIKE 'platform.ops\\_%\\_exported'
+        ORDER BY occurred_at, id`,
+      [exporter.userId],
+    );
+    expect(audited).toEqual([
+      { action: 'platform.ops_receipts_exported', metadata: { rows: receiptLines.length - 1 } },
+      {
+        action: 'platform.ops_quarantine_exported',
+        metadata: { rows: quarantineLines.length - 1 },
+      },
+    ]);
+  });
+});
+
 describe('exports of the onboarding, integrations and queues lists (ADR-158)', () => {
   const MINUTE = '\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}';
   const csvLines = (body: string) => body.replace(/^\uFEFF/, '').split('\r\n');
+  /**
+   * An export gives the rows its tab shows, in the tab's order and words: the same file when the tab
+   * shows the whole list, and the tab's rows first when the export goes beyond them (ADR-200).
+   */
+  const expectTabRows = (body: string, tab: string, shown: number) => {
+    const tabLines = csvLines(tab).filter(Boolean);
+    if (tabLines.length - 1 < shown) {
+      expect(body).toBe(tab);
+      return;
+    }
+    expect(csvLines(body).slice(0, tabLines.length)).toEqual(tabLines);
+  };
   const exports = async (actor: PlatformActor) =>
     fx.query<{ action: string; metadata: Record<string, number> }>(
       `SELECT action, metadata FROM ops.platform_audit_events
@@ -2478,7 +2749,7 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
     const tab = await ops().onboarding(exporter);
     const signups = await ops().exportList(exporter, 'signups', 30);
     expect(signups.filename).toMatch(/^hyfib-signups-30-days-\d{4}-\d{2}-\d{2}\.csv$/);
-    expect(signups.body).toBe(signupsCsv(tab.sessions));
+    expectTabRows(signups.body, signupsCsv(tab.sessions), OPS_LIST_ROWS.signups.shown);
     const signupLines = csvLines(signups.body);
     expect(signupLines[0]).toBe(SIGNUPS_CSV_COLUMNS.join(','));
     expect(signupLines.filter((l) => l.includes(`,${slug},`))).toEqual([
@@ -2491,7 +2762,7 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
 
     const setups = await ops().exportList(exporter, 'number-setups', 30);
     expect(setups.filename).toMatch(/^hyfib-number-setups-\d{4}-\d{2}-\d{2}\.csv$/);
-    expect(setups.body).toBe(numberSetupsCsv(tab.numbers));
+    expectTabRows(setups.body, numberSetupsCsv(tab.numbers), OPS_LIST_ROWS.numberSetups.shown);
     const setupLines = csvLines(setups.body);
     expect(setupLines[0]).toBe(NUMBER_SETUPS_CSV_COLUMNS.join(','));
     expect(setupLines.filter((l) => l.includes(`,${slug},`))).toEqual([
@@ -2505,7 +2776,7 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
 
     const fresh = await ops().exportList(exporter, 'new-companies', 30);
     expect(fresh.filename).toMatch(/^hyfib-new-companies-30-days-\d{4}-\d{2}-\d{2}\.csv$/);
-    expect(fresh.body).toBe(newCompaniesCsv(tab.stalled));
+    expectTabRows(fresh.body, newCompaniesCsv(tab.stalled), OPS_LIST_ROWS.newCompanies.shown);
     const freshLines = csvLines(fresh.body);
     expect(freshLines[0]).toBe(NEW_COMPANIES_CSV_COLUMNS.join(','));
     expect(freshLines.filter((l) => l.includes(`,${bare.slug},`))).toEqual([
@@ -2584,7 +2855,7 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
     const tab = await ops().integrations(exporter);
     const failures = await ops().exportList(exporter, 'failures', 30);
     expect(failures.filename).toMatch(/^hyfib-failures-\d{4}-\d{2}-\d{2}\.csv$/);
-    expect(failures.body).toBe(failuresCsv(tab.failures));
+    expectTabRows(failures.body, failuresCsv(tab.failures), OPS_LIST_ROWS.failures.shown);
     const failureLines = csvLines(failures.body);
     expect(failureLines[0]).toBe(FAILURES_CSV_COLUMNS.join(','));
     expect(failureLines.filter((l) => l.includes(`,${slug},`))).toEqual([
@@ -2599,7 +2870,7 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
 
     const receipts = await ops().exportList(exporter, 'receipts', 30);
     expect(receipts.filename).toMatch(/^hyfib-receipts-\d{4}-\d{2}-\d{2}\.csv$/);
-    expect(receipts.body).toBe(receiptsCsv(tab.receipts));
+    expectTabRows(receipts.body, receiptsCsv(tab.receipts), OPS_LIST_ROWS.receipts.shown);
     const receiptLines = csvLines(receipts.body);
     expect(receiptLines[0]).toBe(RECEIPTS_CSV_COLUMNS.join(','));
     expect(receiptLines.filter((l) => l.includes(`,${receiptId},`))).toEqual([
@@ -2613,14 +2884,15 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
 
     const quarantine = await ops().exportList(exporter, 'quarantine', 30);
     expect(quarantine.filename).toMatch(/^hyfib-quarantine-\d{4}-\d{2}-\d{2}\.csv$/);
-    expect(quarantine.body).toBe(quarantineCsv(tab.quarantine));
+    expectTabRows(quarantine.body, quarantineCsv(tab.quarantine), OPS_LIST_ROWS.quarantine.shown);
     const quarantineLines = csvLines(quarantine.body);
     expect(quarantineLines[0]).toBe(QUARANTINE_CSV_COLUMNS.join(','));
     expect(quarantineLines.filter((l) => l.includes(`,${quarantined},`))).toEqual([
       expect.stringMatching(
         new RegExp(
           `^${MINUTE},${quarantined},Meta \\(WhatsApp\\),Unknown account or number,` +
-            `waba: ${stranger.wabaId}; phoneNumberId: ${stranger.phoneNumberId},,Yes$`,
+            // Not acknowledged (ADR-199): the last column is empty.
+            `waba: ${stranger.wabaId}; phoneNumberId: ${stranger.phoneNumberId},,Yes,$`,
         ),
       ),
     ]);
@@ -2681,7 +2953,7 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
 
     const letters = await ops().exportList(exporter, 'dead-letters', 30);
     expect(letters.filename).toMatch(/^hyfib-dead-letters-\d{4}-\d{2}-\d{2}\.csv$/);
-    expect(letters.body).toBe(deadLettersCsv(tab.deadLetters));
+    expectTabRows(letters.body, deadLettersCsv(tab.deadLetters), OPS_LIST_ROWS.deadLetters.shown);
     const letterLines = csvLines(letters.body);
     expect(letterLines[0]).toBe(DEAD_LETTERS_CSV_COLUMNS.join(','));
     expect(letterLines.filter((l) => l.includes(`,${letterId},`))).toEqual([

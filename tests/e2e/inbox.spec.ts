@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { expect, test } from './fixtures';
 import {
   E2E_CHANNEL_TOKEN,
@@ -69,6 +70,18 @@ test('an inbound WhatsApp message appears live, the agent replies and delivery u
     statusUpdate(wabaId, phoneNumberId, sent!.wamid!, 'delivered', waId),
   );
   await expect(page.getByText('Delivered')).toBeVisible({ timeout: 20_000 });
+
+  // The owner downloads the conversation's transcript (ADR-212): both messages, oldest first.
+  const downloading = page.waitForEvent('download');
+  await page.getByRole('link', { name: 'Download transcript' }).click();
+  const download = await downloading;
+  expect(download.suggestedFilename()).toMatch(/^conversation-[0-9a-f]{8}-\d{4}-\d{2}-\d{2}\.txt$/);
+  const transcript = (await readFile(await download.path())).toString('utf8');
+  expect(transcript).toContain(`Conversation with Priya Customer · +${waId}`);
+  expect(transcript).toContain('Company: Inbox Traders');
+  expect(transcript).toMatch(
+    /\] Priya Customer: Is the blue kurta available\?\n\[[^\]]+\] Ira Inbox: Yes, in all sizes\.\n$/,
+  );
 });
 
 test('a long message cut mid-emoji and a large contact card arrive in one webhook (ADR-131)', async ({

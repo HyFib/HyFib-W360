@@ -24,6 +24,7 @@ import {
 import { CompanyLink, ListTitle, Utc } from '@/components/platform/ops';
 import {
   AcknowledgeFailureForm,
+  AcknowledgeQuarantineForm,
   AcknowledgeReceiptForm,
   ResolveQuarantineForm,
   RetryReceiptForm,
@@ -226,7 +227,10 @@ export default async function OpsIntegrationsPage() {
           <CardDescription>
             Events HyFib could not attribute to a company. Map an account only after verifying
             ownership with the company (it reconnects through Embedded Signup), then retry the
-            receipt; record what was decided either way.
+            receipt; record what was decided either way. Until then, acknowledge an entry with a
+            note to tell the other administrators what you found or are waiting for; a later note
+            replaces it, the platform audit log keeps each, and the note goes with the entry
+            (ADR-199). The CSV gives when, never who or the note.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -241,6 +245,7 @@ export default async function OpsIntegrationsPage() {
                   <TH>Reason</TH>
                   <TH>Provider ids</TH>
                   <TH />
+                  <TH>Acknowledged</TH>
                 </TR>
               </THead>
               <TBody>
@@ -270,6 +275,23 @@ export default async function OpsIntegrationsPage() {
                         {q.retryable ? <RetryReceiptForm receiptId={q.receiptId} /> : null}
                         <ResolveQuarantineForm quarantineId={q.id} />
                       </div>
+                    </TD>
+                    <TD className="max-w-xs text-sm">
+                      {q.acknowledgement ? (
+                        <div className="mb-2">
+                          <div>
+                            By {q.acknowledgement.byName ?? 'an administrator'},{' '}
+                            <Utc at={q.acknowledgement.at} />
+                          </div>
+                          <div className="break-words text-xs text-muted-foreground">
+                            {q.acknowledgement.note}
+                          </div>
+                        </div>
+                      ) : null}
+                      <AcknowledgeQuarantineForm
+                        quarantineId={q.id}
+                        acknowledged={q.acknowledgement !== null}
+                      />
                     </TD>
                   </TR>
                 ))}

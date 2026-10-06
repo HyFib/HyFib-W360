@@ -27,7 +27,7 @@ export function campaignRunHandler(rt: WorkerRuntime) {
     }
     if (auth.outcome === 'rejected' && 'cleanupScope' in auth) {
       const paused = await pauseCampaignForRemovedLauncher(
-        { db: rt.db, clock: rt.clock },
+        { db: rt.db, clock: rt.clock, notices: rt.notices },
         auth.cleanupScope,
         auth.envelope.ref,
         auth.envelope.actorUserId,
@@ -49,6 +49,7 @@ export function campaignRunHandler(rt: WorkerRuntime) {
         signer: rt.signer,
         clock: rt.clock,
         sendRatePerSecond: rt.sendRate.refillPerSecond,
+        notices: rt.notices,
       },
       auth.scope,
       auth.envelope.ref,

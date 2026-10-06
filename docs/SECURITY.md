@@ -25,7 +25,7 @@ security operations. It is not a compliance claim; see `docs/THREAT-MODEL.md` fo
 | Live updates       | SSE and polling endpoints authenticate the session, resolve membership per request, re-validate every 30 s, carry ids only and filter events by conversation visibility; unauthenticated or non-member requests get 404.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | Payments           | Card entry only inside Razorpay Checkout's frame; the Checkout signature is verified against our stored order id and the payment is then fetched from Razorpay; only captured payments credit, exactly once, through SECURITY DEFINER functions; runtime roles cannot write ledger rows or balances; webhooks verified over the raw body (current + previous secret) and stored before 200; only card network, issuer, last four digits and expiry stored (no PAN/CVV); billing actions limited to owner and billing roles (MFA-required roles) and audited; adding a card and turning automatic top-ups on or changing them need a sign-in within the last 15 minutes (ADR-056).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | Contacts & consent | Consent is append-only (runtime role can only insert events; current state is written by a SECURITY DEFINER trigger); every template send re-checks consent and the suppression list under the send intent's row lock; erasure is one audited definer function; the status-history guard allows clearing recipient ids only inside it; CSV import caps size, rows, columns and field length and never echoes row contents; CSV export is formula-safe and audited.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| Campaigns          | Audience snapshots without personal data; recipients re-checked (erasure, suppression, consent, variables, frequency cap, spending cap) when queued and again by the send worker before dispatch; pause/cancel cancel unclaimed sends atomically; one runner tick per campaign and per company; sends under a named member's authority; four-eyes approval option; formula-safe audited export; rate cards immutable once published.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Campaigns          | Audience snapshots without personal data; recipients re-checked (erasure, suppression, consent, variables, frequency cap, spending cap) when queued and again by the send worker before dispatch; pause/cancel cancel unclaimed sends atomically; one runner tick per campaign and per company; sends under a named member's authority; four-eyes approval option, approvers emailed when a campaign waits (ADR-204) and submitters told the outcome (ADR-205); formula-safe audited export; rate cards immutable once published.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | Reports            | Aggregates and member names only (no message content or contact details), computed in one read-only snapshot under the company's RLS scope; reply turns written only by database triggers (runtime role cannot rewrite or delete them); metric definitions global and read-only; per-section exports need `reports.export`, are formula-safe and audited before data is returned.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | Automations        | Published versions are immutable (database trigger) and runs stay pinned to theirs; runs are durable rows advanced one step per transaction under the conversation and run row locks; a partial unique index allows one active run per conversation, and a member reply, template send, assignment, take-over or resolve ends it and cancels unclaimed bot sends; reply-button ids name the run, step and visit, and stale or forged ids select nothing; budgets cap steps, loops, messages, run time and runs per conversation per hour; step logs hold outcome codes and labels written by the company, never customer text; captured answers are shown only to members who can see the conversation and are cleared 30 days after the run ends or on erasure.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | Web requests       | Automation HTTP steps reach only company-allowed domains, over https, through one egress guard (public addresses only, DNS pinned to the checked address, no redirects, size and time limits); calls are written ahead, made once and marked unknown (never retried) when they may have been received without a result; secrets are encrypted, write-only, audited by name and sent only to the domain each was saved for; customer text in headers is never read as a placeholder.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
@@ -86,6 +86,7 @@ company is suspended, restricted (its plan expired or was canceled) or pending d
 | `inbox.reply`            |   ✓   |   ✓   |     ✓      |   ✓   |          |         |         |                         |
 | `inbox.assign`           |   ✓   |   ✓   |     ✓      |       |          |         |         |                         |
 | `inbox.supervise`        |   ✓   |   ✓   |     ✓      |       |          |         |         |                         |
+| `inbox.export`           |   ✓   |   ✓   |     ✓      |       |          |         |         |            ✓            |
 | `contacts.read`          |   ✓   |   ✓   |     ✓      |   ✓   |    ✓     |         |         |            ✓            |
 | `contacts.write`         |   ✓   |   ✓   |     ✓      |   ✓   |    ✓     |         |         |                         |
 | `contacts.import`        |   ✓   |   ✓   |     ✓      |       |    ✓     |         |         |                         |
@@ -131,6 +132,14 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   removing one needs `tenant.settings.manage` (it re-enables messaging).
 - Deleting a template Meta already has needs `templates.submit` as well as `templates.write`.
 - Erasing a contact needs `contacts.delete` (also while the company is suspended).
+- Notice email choices (ADR-215): a member changes only their own, through
+  `app.set_own_email_opt_outs` (SECURITY DEFINER, executable by the runtime role only), which takes
+  the membership from the scope, never an argument; the runtime role has no update on memberships.
+  Only the five listed kinds can be turned off (a check constraint); security, sign-in and billing
+  emails cannot be. Each change is audited.
+- Bulk tag edits need `contacts.write`, match only the company's contacts that are not erased,
+  change at most 10,000 at once and only the number the member was shown, and are audited
+  (`contacts.bulk_tagged`: the tag, counts and the filters used, never the search text; ADR-213).
 - Campaigns: drafts and segments need `campaigns.write`; submitting needs `campaigns.write` and
   `campaigns.send`; approving (when the company requires it) needs `campaigns.approve` and a member
   other than the submitter; pausing, resuming, cancelling a started campaign, changing its caps and
@@ -152,6 +161,13 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   closed days and CSAT settings need `tenant.settings.manage` (audited). Teams never widen
   visibility. Mentions: only active members who can see the conversation at that moment can be
   mentioned, and a member's mentions are listed only for conversations they can still see.
+  A member who has not opened the conversation 10 minutes later is emailed once, after the same
+  checks run again (active, can still see it, mention unread); the email names only who mentioned
+  them, how many mentions are unread there and the conversation's link, never the note or the
+  customer (ADR-211).
+  Transcripts need `inbox.export` (owners, administrators, supervisors) and sight of the
+  conversation, are audited (`conversation.transcript_exported`, no content), are plain text so no
+  spreadsheet runs a formula from them, and leave internal notes out (ADR-212).
   Automatic assignment only reaches active members whose role can read and answer conversations.
 - CSAT taps: a tap is recorded only when its button id names a survey of the same conversation and
   its `context.id` is that survey's message; nothing in the tap is trusted beyond selecting one of
@@ -764,12 +780,74 @@ Phase 5 rules (Public API, P5-08):
   and an estimate of Meta's charges, never contacts or members, and keys that only read campaigns
   get 403. It reads one draft of the key's company in a read-only transaction and changes nothing,
   so a company that is not active still reads it.
+- Submitting drafts (ADR-202): a key with `campaigns.write` submits one of its company's drafts with
+  members' checks, but it can never start a campaign: the submission always waits for a member with
+  `campaigns.approve` who also holds `campaigns.send`, and the campaign runs under that member's
+  authority, which the runner checks before each batch. The campaign records the key (a composite
+  foreign key to the company's keys, and never with a submitting member, both enforced by the
+  database), and the event and the audit name it. A suspended company's keys cannot submit.
+- Withdrawing submissions (ADR-203): a key takes back only a submission it made, while it waits for
+  approval (403 for a member's or another key's, 409 once approved); the withdrawal drops the
+  audience, raises the version and is recorded in the event and the audit with the key.
+- Approval emails (ADR-204): when a campaign starts waiting for approval, the company's active
+  owners and administrators other than the member who submitted it are emailed, read in the
+  company's scope and queued through the encrypted outbox in the submission's transaction (a refused
+  submission emails nobody); for a key's submission only members who may also send campaigns. The
+  email names the submitter and the campaign, counts its audience and links to its page, which
+  authorizes the member as usual: no contact data, no token, and the link grants nothing by itself.
+- Review emails (ADR-205): the member who submitted a campaign is emailed what an approver did with
+  it, in the same transaction through the encrypted outbox, only while they are an active member of
+  the company and never for their own action. The email names the approver and the campaign, carries
+  the approver's note (written for that member) and links to the campaign's page, which authorizes
+  as usual; it carries no contact data. A key's submission emails nobody.
+- Segments (ADR-206): a key with `campaigns.read` reads its company's segments that are not
+  archived, in a read-only transaction in the company's scope: names, conditions (tags, field keys
+  and values, consent, dates, campaign ids), versions and how many contacts one matches now. No
+  contact is given (finding them needs `POST /contacts/search` and `contacts.read`); archived
+  segments and other companies' are not found.
+- Writing segments (ADR-207): a key with `campaigns.write` creates, changes and archives its
+  company's segments in the company's scope (RLS); conditions are checked against the company's own
+  fields and campaigns, as searches are, a write is refused while the company is suspended or
+  restricted, and the audit names the key. Saving a segment reads no contact; counting one needs
+  `campaigns.read`, and finding its contacts `contacts.read`. Another company's segment is not
+  found.
+- A segment's contacts (ADR-208): `GET /segments/{id}/contacts` needs `campaigns.read` and
+  `contacts.read`, and `conversations.read` for a segment with a `last_message` condition, as a
+  search with the same conditions does, so a segment never gives what a search could not; it reads
+  in the key's company scope, erased contacts left out.
 - Media from links (ADR-194): a key with `messages.reply` sends a photo, a video, audio or a
   document by a link WhatsApp fetches, within the 24-hour window. HyFib never fetches the link, so
   it cannot be used to reach HyFib's network; it takes only https links with a host and no user name
   or password, so no credentials are stored with the message or shown in the inbox, and the inbox
   opens the link only as an https anchor in a new tab without the referrer. The link is the
   company's own data: it is redacted with the contact's messages and exported with them.
+- Locations (ADR-195): a key with `messages.reply` sends a place's coordinates, name and address
+  within the 24-hour window, with a reply's checks. HyFib fetches and looks up nothing: it sends
+  what the key gives, bounded (coordinates within their ranges, a name and an address of at most
+  1,000 characters each, no other property), and the inbox shows them as text only. The location is
+  the company's own data: it is redacted with the contact's messages and exported with them.
+- Contact cards' contacts (ADR-196): the people a customer shares are third parties' personal data,
+  kept as the message's content since ADR-131. The API gives them only with `conversations.read`
+  (granted only by members who read every conversation), and `message.received` only to the
+  company's endpoints taking it, as both already give messages' text; nothing new is stored. Erasing
+  the customer redacts the card, so reads and deliveries after the erasure give no contacts. The
+  inbox shows them as text only, never as links.
+- Contact cards sent through the API (ADR-197): a key with `messages.reply` shares up to 5 contacts
+  within the 24-hour window, with a reply's checks. HyFib sends what the key gives, bounded (5
+  contacts, 5 of each kind, 256 characters a text, links http or https without credentials, emails
+  and dates checked, no other part) and within the size a message may hold; it fetches nothing, and
+  the inbox shows the card as text only. The people on a card are the company's data like any
+  message's: redacted with the contact's messages and exported with them.
+- Stickers from links (ADR-198): the rules of media from links (ADR-194): a key with
+  `messages.reply`, within the 24-hour window, an https link with a host and no credentials that
+  HyFib never fetches, shown in the inbox as an https anchor in a new tab without the referrer; no
+  caption is taken.
+- Templates with media headers (ADR-201): the header's file follows the rules of media from links
+  (ADR-194): an https link with a host and no credentials, at most 2,000 characters, that HyFib
+  never fetches, shown in the inbox as an https anchor in a new tab without the referrer. The
+  template's checks are unchanged (the scope of its category, consent, the suppression list, the
+  marketing cap); only the API sends these templates, and the link is kept with the message and
+  redacted with it.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so
@@ -1527,6 +1605,18 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   only the platform role reads (the runtime role, which writes receipts, has no grant on it); they
   are deleted with their receipt; the CSV gives the time only (unit tests; integration tests, run in
   CI only).
+- Acknowledging quarantine entries (ADR-199): through `ops.platform_acknowledge_quarantine_entry`
+  (SECURITY DEFINER, executable only by the platform role), which checks the platform administrator,
+  the note (10 to 500 characters, trimmed) and that the entry is open, and writes the platform audit
+  entry (`platform.webhook_quarantine_acknowledged`, the note as its reason, no company) in the same
+  transaction. Notes live in `ops.quarantine_acknowledgements`, which only the definer role writes
+  and only the platform role reads (the runtime role, which writes quarantine entries, has no grant
+  on it); they are deleted with their entry; the CSV gives the time only (unit tests; integration
+  tests, run in CI only).
+- Exports beyond a tab's rows (ADR-200): a list's CSV may give more rows than its tab (up to 5,000),
+  with the same checks: platform administrators only, refused before the list is read, audited with
+  the row count in the same transaction, and the same allow-listed contents without people or notes
+  (ADR-158).
 
 Company export and deletion (Settings → Company data, ADR-055):
 

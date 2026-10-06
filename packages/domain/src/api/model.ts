@@ -85,9 +85,9 @@ export const API_SCOPE_INFO: Record<
     writes: true,
   },
   'messages.reply': {
-    label: 'Reply with text, buttons, lists, products, reactions and media',
+    label: 'Reply with text, media and other messages',
     description:
-      'Send text, reply buttons, list messages, products from the company’s WhatsApp catalogs, reactions, and photos, videos, audio or documents from links, to contacts who wrote to the number in the last 24 hours, quoting their messages if wanted, and read the status of messages the API sent.',
+      'Send text, reply buttons, list messages, products from the company’s WhatsApp catalogs, reactions, photos, videos, audio, documents or stickers from links, locations and contact cards, to contacts who wrote to the number in the last 24 hours, quoting their messages if wanted, and read the status of messages the API sent.',
     permission: 'inbox.reply',
     writes: true,
   },
@@ -108,14 +108,14 @@ export const API_SCOPE_INFO: Record<
   'campaigns.read': {
     label: 'Read campaigns',
     description:
-      "List the company's campaigns and read each one's progress and results: messages sent, delivered, read and failed, replies and opt-outs, and why recipients were skipped. A key that also reads contacts lists each campaign's recipients and what happened to each. Never members or costs.",
+      "List the company's campaigns and read each one's progress and results: messages sent, delivered, read and failed, replies and opt-outs, and why recipients were skipped. Also read the company's saved segments, their conditions and how many contacts each matches. With contacts read as well, list the contacts each segment holds. A key that also reads contacts lists each campaign's recipients and what happened to each. Never members or costs.",
     permission: 'campaigns.read',
     writes: false,
   },
   'campaigns.write': {
-    label: 'Create and edit campaign drafts',
+    label: 'Create, edit and submit campaign drafts',
     description:
-      'Create campaign drafts and edit them as members do: the name, the number and template, the variables, the audience (a segment or conditions), the schedule, the sending window and the caps; review drafts as members do before they submit them (who they would reach and what they would cost); and cancel drafts. A draft sends nothing: members submit and start it in the app, under the authority of a member allowed to send campaigns.',
+      "Create campaign drafts and edit them as members do: the name, the number and template, the variables, the audience (a segment or conditions), the schedule, the sending window and the caps; review drafts as members do before they submit them (who they would reach and what they would cost); submit drafts, which then always wait for a member's approval, and take back what it submitted; and cancel drafts. A key never starts a campaign: a member approves a key's submission, or submits a draft, in the app, and the campaign sends under the authority of a member allowed to send campaigns. Also create, change and archive the company's saved segments.",
     permission: 'campaigns.write',
     writes: true,
   },
@@ -196,6 +196,14 @@ export const API_LIMITS = {
   mediaLinkLength: 2000,
   /** A media message's caption (research M-191). */
   captionLength: 1024,
+  /** A location's name and address (ADR-195): HyFib's own bound; Meta's spec gives none (M-192). */
+  locationTextLength: 1000,
+  /** Contacts one contact card shares (research M-193). */
+  contactsPerCard: 5,
+  /** A contact card's phones, emails, links or addresses, each (ADR-197): HyFib's own bound. */
+  contactCardEntries: 5,
+  /** Any text of a contact card but a link (ADR-197): HyFib's own bound; Meta's spec gives none. */
+  contactCardTextLength: 256,
   idempotencyKeyLength: 255,
   idempotencyHours: 24,
   /** Conversations one call to POST /conversations/update-many changes (ADR-120). */

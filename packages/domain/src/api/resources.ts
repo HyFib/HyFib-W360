@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AppError, clipText, isAppError, jsonbText, notFound, uuidv7 } from '@w360/core';
+import { AppError, clipText, isAppError, jsonbSize, jsonbText, notFound, uuidv7 } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -31,7 +31,12 @@ import {
   type ResolvedProductMessage,
 } from '../commerce/model';
 import { checkTemplateEligibility, recordConsentEvents } from '../consent/service';
-import { MAX_TAGS_PER_CONTACT, normalizeEmail, type AttributeValue } from '../contacts/fields';
+import {
+  MAX_TAGS_PER_CONTACT,
+  normalizeEmail,
+  validDate,
+  type AttributeValue,
+} from '../contacts/fields';
 import { normalizePhone, phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { contactForPhone } from '../contacts/service';
 import { emitTenantEvent } from '../messaging/events';
@@ -44,6 +49,7 @@ import {
   replyButtonsContent,
   replyButtonsInteractive,
 } from '../messaging/interactive';
+import { INBOUND_CONTENT_BUDGET } from '../messaging/meta-webhook';
 import { SERVICE_WINDOW_MS, type OutboundDeps } from '../messaging/outbound';
 import {
   answeredJoin,
@@ -55,10 +61,11 @@ import { STATUS_RANK } from '../messaging/status';
 import { loadEntitlements } from '../plans/entitlements';
 import {
   buildTemplateSend,
-  fromMetaComponents,
+  HEADER_MEDIA_NAMES,
   sendSpecFor,
   TEMPLATE_LIMITS,
   type SendSpec,
+  type TemplateHeaderMedia,
   type TemplateParams,
 } from '../templates/definition';
 import { decodeKeysetCursor, likePattern, parseInput } from '../validation';
@@ -133,6 +140,31 @@ export const apiConsentSchema = z
   })
   .strict();
 
+/** The media a message can carry from a link (ADR-194), as WhatsApp's message `type` names it. */
+export const API_MEDIA_TYPES = ['image', 'video', 'audio', 'document', 'sticker'] as const;
+export type ApiMediaType = (typeof API_MEDIA_TYPES)[number];
+
+/** A link WhatsApp may fetch media from (ADR-194): https, with a host, and no user name or password. */
+export function isMediaLink(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return url.protocol === 'https:' && url.hostname !== '' && !url.username && !url.password;
+}
+
+const mediaLinkField = z
+  .string({ error: 'Give the link to the media' })
+  .trim()
+  .min(1, 'Give the link to the media')
+  .max(API_LIMITS.mediaLinkLength, `Links are limited to ${API_LIMITS.mediaLinkLength} characters`)
+  .refine(isMediaLink, 'Give an https:// link to the media, without a user name or password')
+  .describe(
+    'An https:// link WhatsApp fetches the media from when it sends the message: it must be reachable from the internet without signing in. HyFib neither fetches nor keeps the media.',
+  );
+
 const variableValue = z.string().trim().min(1).max(TEMPLATE_LIMITS.parameterValue);
 
 /** The values of a template's variables, as a send gives them. */
@@ -144,6 +176,15 @@ const templateVariablesField = z
   .strict()
   .default({ header: [], body: [] })
   .describe('Values for the template’s {{1}}, {{2}}… in order.');
+
+/** The file of a template's photo, video or document header (ADR-201), from a link (ADR-194). */
+const headerMediaField = z
+  .object({ link: mediaLinkField })
+  .strict()
+  .optional()
+  .describe(
+    'The file of the template’s photo, video or document header (its `headerMedia` in GET /templates), for templates with one: WhatsApp fetches it from the link when it sends the message, and shows it without a caption. Documents must be PDF files. Leave it out for other templates.',
+  );
 
 /** The number a template is sent from. */
 const templateFromField = z
@@ -160,6 +201,7 @@ export const apiSendMessageSchema = z
     templateId: z.uuid().describe('A template id from GET /api/v1/templates.'),
     from: templateFromField,
     variables: templateVariablesField,
+    headerMedia: headerMediaField,
   })
   .strict();
 
@@ -169,14 +211,22 @@ export const apiSendManyTemplatesSchema = z
     templateId: z.uuid().describe('A template id from GET /api/v1/templates.'),
     from: templateFromField,
     messages: z
-      .array(z.object({ to: phoneField, variables: templateVariablesField }).strict())
+      .array(
+        z
+          .object({
+            to: phoneField,
+            variables: templateVariablesField,
+            headerMedia: headerMediaField,
+          })
+          .strict(),
+      )
       .min(1, 'Give at least one number to send to')
       .max(
         API_LIMITS.messagesPerSend,
         `At most ${API_LIMITS.messagesPerSend} messages are sent in one call`,
       )
       .describe(
-        `The numbers to send the template to, each with the values of its variables, at most ${API_LIMITS.messagesPerSend}; each number once.`,
+        `The numbers to send the template to, each with the values of its variables and, for a template with a photo, video or document header, its file, at most ${API_LIMITS.messagesPerSend}; each number once.`,
       ),
   })
   .strict();
@@ -220,31 +270,6 @@ export const apiSendTextSchema = z
   })
   .strict();
 
-/** The media a message can carry from a link (ADR-194), as WhatsApp's message `type` names it. */
-export const API_MEDIA_TYPES = ['image', 'video', 'audio', 'document'] as const;
-export type ApiMediaType = (typeof API_MEDIA_TYPES)[number];
-
-/** A link WhatsApp may fetch media from (ADR-194): https, with a host, and no user name or password. */
-export function isMediaLink(value: string): boolean {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return false;
-  }
-  return url.protocol === 'https:' && url.hostname !== '' && !url.username && !url.password;
-}
-
-const mediaLinkField = z
-  .string({ error: 'Give the link to the media' })
-  .trim()
-  .min(1, 'Give the link to the media')
-  .max(API_LIMITS.mediaLinkLength, `Links are limited to ${API_LIMITS.mediaLinkLength} characters`)
-  .refine(isMediaLink, 'Give an https:// link to the media, without a user name or password')
-  .describe(
-    'An https:// link WhatsApp fetches the media from when it sends the message: it must be reachable from the internet without signing in. HyFib neither fetches nor keeps the media.',
-  );
-
 const captionField = z
   .string({ error: 'Give the caption as text' })
   .trim()
@@ -274,16 +299,21 @@ export const apiSendAudioSchema = z.object({ type: z.literal('audio'), ...mediaF
 export const apiSendDocumentSchema = z
   .object({ type: z.literal('document'), ...mediaFrame, caption: captionField })
   .strict();
+/** A sticker WhatsApp fetches from a link (ADR-198), without a caption. */
+export const apiSendStickerSchema = z
+  .object({ type: z.literal('sticker'), ...mediaFrame })
+  .strict();
 
 /**
- * A photo, video, audio or document WhatsApp fetches from a link, to a contact who wrote in the
- * last 24 hours (ADR-194); audio takes no caption.
+ * A photo, video, audio, document or sticker WhatsApp fetches from a link, to a contact who wrote
+ * in the last 24 hours (ADR-194, ADR-198); audio and stickers take no caption.
  */
 export const apiSendMediaSchema = z.discriminatedUnion('type', [
   apiSendImageSchema,
   apiSendVideoSchema,
   apiSendAudioSchema,
   apiSendDocumentSchema,
+  apiSendStickerSchema,
 ]);
 
 /** What the conversation shows for media without a caption (ADR-194). */
@@ -292,7 +322,266 @@ const MEDIA_PREVIEWS: Record<ApiMediaType, string> = {
   video: 'Video',
   audio: 'Audio',
   document: 'Document',
+  sticker: 'Sticker',
 };
+
+/**
+ * A coordinate as the decimal degrees Meta's spec types as a string (research M-192), never in
+ * exponent notation, which JavaScript uses for numbers under a millionth (`1e-7`).
+ */
+export function decimalDegrees(value: number): string {
+  const plain = String(value);
+  return /e/i.test(plain) ? value.toFixed(20).replace(/\.?0+$/, '') : plain;
+}
+
+const coordinateField = (
+  name: 'latitude' | 'longitude',
+  bound: number,
+  ends: readonly [string, string],
+) =>
+  z
+    .number({ error: `Give the ${name} as a number of degrees` })
+    .min(-bound, `A ${name} runs from -${bound} to ${bound} degrees`)
+    .max(bound, `A ${name} runs from -${bound} to ${bound} degrees`)
+    .describe(
+      `The ${name} in decimal degrees, from -${bound} (${ends[0]}) to ${bound} (${ends[1]}).`,
+    );
+
+const placeTextField = (what: 'name' | 'address') =>
+  z
+    .string({ error: `Give the ${what} as text` })
+    .trim()
+    .min(1, `Give the ${what}, or leave it out`)
+    .max(
+      API_LIMITS.locationTextLength,
+      `A location’s ${what} is limited to ${API_LIMITS.locationTextLength} characters`,
+    )
+    .optional();
+
+/**
+ * A location, to a contact who wrote in the last 24 hours (ADR-195): its coordinates, and the
+ * place's name and address if given, as Meta's spec sends one (research M-192).
+ */
+export const apiSendLocationSchema = z
+  .object({
+    type: z.literal('location'),
+    to: phoneField,
+    from: replyFromField,
+    replyTo: quoteField,
+    latitude: coordinateField('latitude', 90, ['south', 'north']),
+    longitude: coordinateField('longitude', 180, ['west', 'east']),
+    name: placeTextField('name').describe('The name of the place, such as a shop’s.'),
+    address: placeTextField('address').describe('The address of the place.'),
+  })
+  .strict();
+
+/** The kinds of a contact card's phone, email, link or address, as Meta's spec names them (M-193). */
+export const CONTACT_CARD_TYPES = ['HOME', 'WORK'] as const;
+
+const cardTypeField = z
+  .enum(CONTACT_CARD_TYPES, { error: 'Use HOME or WORK' })
+  .optional()
+  .describe('HOME or WORK.');
+
+const cardTextField = (what: string, max: number = API_LIMITS.contactCardTextLength) =>
+  z
+    .string({ error: `Give the ${what} as text` })
+    .trim()
+    .min(1, `Give the ${what}, or leave it out`)
+    .max(max, `A contact card’s ${what} is limited to ${max} characters`);
+
+const cardListField = <T extends z.ZodType>(item: T, what: string) =>
+  z
+    .array(item)
+    .min(1, `Give at least one ${what}, or leave them out`)
+    .max(
+      API_LIMITS.contactCardEntries,
+      `A contact gives at most ${API_LIMITS.contactCardEntries} ${what}s`,
+    )
+    .optional();
+
+/** A link a contact card gives (ADR-197): http or https, with a host, without credentials. */
+export function isCardLink(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return (
+    (url.protocol === 'https:' || url.protocol === 'http:') &&
+    url.hostname !== '' &&
+    !url.username &&
+    !url.password
+  );
+}
+
+const CARD_NAME_PARTS = ['firstName', 'lastName', 'middleName', 'prefix', 'suffix'] as const;
+const CARD_ADDRESS_PARTS = ['street', 'city', 'state', 'zip', 'country', 'countryCode'] as const;
+
+/**
+ * A contact a contact card shares (ADR-197), in the API's words, as Meta's spec sends one (research
+ * M-193): a name with at least one part besides the formatted name, and if wanted phones, emails,
+ * links and addresses (up to 5 of each), the organisation and the birthday.
+ */
+export const apiContactCardInputSchema = z
+  .object({
+    name: z
+      .object({
+        formattedName: cardTextField('formatted name').describe('The name as the card shows it.'),
+        firstName: cardTextField('first name').optional(),
+        lastName: cardTextField('last name').optional(),
+        middleName: cardTextField('middle name').optional(),
+        prefix: cardTextField('prefix').optional(),
+        suffix: cardTextField('suffix').optional(),
+      })
+      .strict()
+      .refine((name) => CARD_NAME_PARTS.some((part) => name[part] !== undefined), {
+        message: 'Give a first name, a last name or another part of the name too',
+        path: ['firstName'],
+      })
+      .describe('The formatted name and at least one other part of the name.'),
+    phones: cardListField(
+      z
+        .object({
+          phone: cardTextField('phone number', 64)
+            .regex(/\d/, 'Give a phone number with digits')
+            .describe('The number as the card should show it, such as +91 98765 43210.'),
+          type: cardTypeField,
+          waId: z
+            .string({ error: 'Give the WhatsApp id as digits' })
+            .regex(/^\d{6,20}$/, 'A WhatsApp id is 6 to 20 digits')
+            .optional()
+            .describe('The WhatsApp id of the number, if it has one.'),
+        })
+        .strict(),
+      'phone number',
+    ),
+    emails: cardListField(
+      z
+        .object({
+          email: cardTextField('email address', 254).refine(
+            (email) => normalizeEmail(email).ok,
+            'Give a valid email address',
+          ),
+          type: cardTypeField,
+        })
+        .strict(),
+      'email address',
+    ),
+    urls: cardListField(
+      z
+        .object({
+          url: cardTextField('link', API_LIMITS.mediaLinkLength).refine(
+            isCardLink,
+            'Give an http:// or https:// link, without a user name or password',
+          ),
+          type: cardTypeField,
+        })
+        .strict(),
+      'link',
+    ),
+    addresses: cardListField(
+      z
+        .object({
+          street: cardTextField('street').optional(),
+          city: cardTextField('city').optional(),
+          state: cardTextField('state').optional(),
+          zip: cardTextField('postal code').optional(),
+          country: cardTextField('country').optional(),
+          countryCode: z
+            .string({ error: 'Give the country code as two letters' })
+            .regex(/^[A-Za-z]{2}$/, 'Give the country code as two letters, such as IN')
+            .optional(),
+          type: cardTypeField,
+        })
+        .strict()
+        .refine((address) => CARD_ADDRESS_PARTS.some((part) => address[part] !== undefined), {
+          message: 'Give at least one part of the address',
+        }),
+      'address',
+    ),
+    org: z
+      .object({
+        company: cardTextField('company').optional(),
+        department: cardTextField('department').optional(),
+        title: cardTextField('job title').optional(),
+      })
+      .strict()
+      .refine((org) => [org.company, org.department, org.title].some((v) => v !== undefined), {
+        message: 'Give the company, the department or the job title, or leave it out',
+      })
+      .optional(),
+    birthday: z
+      .string({ error: 'Give the birthday as YYYY-MM-DD' })
+      .refine(validDate, 'Give the birthday as a date that exists, written YYYY-MM-DD')
+      .optional()
+      .describe('YYYY-MM-DD.'),
+  })
+  .strict();
+
+export type ApiContactCardInput = z.infer<typeof apiContactCardInputSchema>;
+
+/** Contact cards, to a contact who wrote in the last 24 hours (ADR-197). */
+export const apiSendContactsSchema = z
+  .object({
+    type: z.literal('contacts'),
+    to: phoneField,
+    from: replyFromField,
+    replyTo: quoteField,
+    contacts: z
+      .array(apiContactCardInputSchema)
+      .min(1, 'Give at least one contact')
+      .max(
+        API_LIMITS.contactsPerCard,
+        `A message shares at most ${API_LIMITS.contactsPerCard} contacts`,
+      )
+      .describe(`The contacts to share, 1 to ${API_LIMITS.contactsPerCard}.`),
+  })
+  .strict();
+
+const defined = (entries: Record<string, unknown>): Record<string, unknown> =>
+  Object.fromEntries(Object.entries(entries).filter(([, value]) => value !== undefined));
+
+/**
+ * A contact as Meta's spec sends it (research M-193), and as HyFib keeps received ones: the same
+ * parts in WhatsApp's words, those not given left out (ADR-197).
+ */
+export function whatsappContact(card: ApiContactCardInput): Record<string, unknown> {
+  const { name } = card;
+  return defined({
+    name: defined({
+      formatted_name: name.formattedName,
+      first_name: name.firstName,
+      last_name: name.lastName,
+      middle_name: name.middleName,
+      prefix: name.prefix,
+      suffix: name.suffix,
+    }),
+    phones: card.phones?.map((p) => defined({ phone: p.phone, type: p.type, wa_id: p.waId })),
+    emails: card.emails?.map((e) => defined({ email: e.email, type: e.type })),
+    urls: card.urls?.map((u) => defined({ url: u.url, type: u.type })),
+    addresses: card.addresses?.map((a) =>
+      defined({
+        street: a.street,
+        city: a.city,
+        state: a.state,
+        zip: a.zip,
+        country: a.country,
+        country_code: a.countryCode,
+        type: a.type,
+      }),
+    ),
+    org: card.org
+      ? defined({
+          company: card.org.company,
+          department: card.org.department,
+          title: card.org.title,
+        })
+      : undefined,
+    birthday: card.birthday,
+  });
+}
 
 const LIMITS = INTERACTIVE_LIMITS;
 
@@ -592,13 +881,16 @@ export interface ApiTemplate {
   language: string;
   category: 'utility' | 'marketing';
   variables: { header: number; body: number };
+  /** The file a send gives for the template's header (ADR-201), or null for other headers. */
+  headerMedia: TemplateHeaderMedia | null;
   text: { header: string | null; body: string; footer: string | null };
   channels: { id: string; phone: string | null }[];
 }
 
 /**
  * The types of the messages the API sends, as a queued send and `GET /messages/{id}` give them:
- * templates, text, reply buttons and lists, reactions, and media from links (ADR-194).
+ * templates, text, reply buttons and lists, reactions, media and stickers from links (ADR-194,
+ * ADR-198), locations (ADR-195) and contact cards (ADR-197).
  */
 export const API_MESSAGE_TYPES = [
   'template',
@@ -609,6 +901,9 @@ export const API_MESSAGE_TYPES = [
   'video',
   'audio',
   'document',
+  'sticker',
+  'location',
+  'contacts',
 ] as const;
 export type ApiMessageType = (typeof API_MESSAGE_TYPES)[number];
 
@@ -737,15 +1032,18 @@ export async function apiListTemplates(
         );
       const data: ApiTemplate[] = [];
       for (const t of rows) {
-        const spec = sendSpecFor(t.category, t.components);
-        const definition = fromMetaComponents(t.category, t.components);
-        if (!spec.supported || !definition) continue;
+        // Templates with a photo, video or document header are listed: a send gives the file
+        // (ADR-201).
+        const spec = sendSpecFor(t.category, t.components, { mediaHeaders: true });
+        if (!spec.supported) continue;
+        const definition = spec.definition;
         data.push({
           id: t.id,
           name: t.name,
           language: t.language,
           category: t.category === 'MARKETING' ? 'marketing' : 'utility',
           variables: { header: spec.headerParams, body: spec.bodyParams },
+          headerMedia: spec.headerMedia,
           text: {
             header: definition.header.type === 'text' ? definition.header.text : null,
             body: definition.body.text,
@@ -1054,19 +1352,11 @@ export async function apiSendTemplate(
   return deps.db.run(ctx.scope, (tx) =>
     idempotent(tx, ctx, idempotency, now, async () => {
       const sendable = await loadSendableTemplate(tx, ctx, data.templateId);
-      assertTemplateVariables(sendable.spec, data.variables);
+      const send = { phone, variables: data.variables, headerMedia: data.headerMedia };
+      assertTemplateValues(sendable.spec, send);
       const channel = await templateSendingNumber(tx, ctx, sendable.template, data.from);
       await lockMarketingSends(tx, ctx, sendable.template);
-      const message = await queueTemplateFor(
-        deps,
-        tx,
-        ctx,
-        sendable,
-        channel,
-        phone,
-        data.variables,
-        now,
-      );
+      const message = await queueTemplateFor(deps, tx, ctx, sendable, channel, send, now);
       return { status: 201, body: { data: message } };
     }),
   );
@@ -1074,7 +1364,8 @@ export async function apiSendTemplate(
 
 /**
  * Sends an approved template to up to 50 numbers in one call (ADR-163), each with its own
- * variables. The template, every send's variables and the number sent from are checked once, then
+ * variables and header file (ADR-201). The template, every send's values and the number sent from
+ * are checked once, then
  * each number is sent to as a send to one number is, in a savepoint: a refusal for its contact rolls
  * back to it and is answered in its place while the others are sent. Once per idempotency key.
  */
@@ -1090,22 +1381,22 @@ export async function apiSendManyTemplates(
     place: `messages.${i}`,
     phone: phoneAt(message.to, `messages.${i}.to`),
     variables: message.variables,
+    headerMedia: message.headerMedia,
   }));
   assertEachNumberOnce(sends);
   const now = deps.clock.now();
   return deps.db.run(ctx.scope, (tx) =>
     idempotent(tx, ctx, idempotency, now, async () => {
       const sendable = await loadSendableTemplate(tx, ctx, data.templateId);
-      for (const send of sends) {
-        assertTemplateVariables(sendable.spec, send.variables, `${send.place}.variables`);
-      }
+      for (const send of sends) assertTemplateValues(sendable.spec, send, send.place);
       const channel = await templateSendingNumber(tx, ctx, sendable.template, data.from);
       await lockMarketingSends(tx, ctx, sendable.template);
       const answers: ApiTemplateSend[] = [];
-      for (const { phone, variables } of sends) {
+      for (const send of sends) {
+        const { phone } = send;
         try {
           const message = await tx.transaction((sp) =>
-            queueTemplateFor(deps, sp, ctx, sendable, channel, phone, variables, now),
+            queueTemplateFor(deps, sp, ctx, sendable, channel, send, now),
           );
           answers.push({ to: phone, message, error: null });
         } catch (error) {
@@ -1130,9 +1421,17 @@ interface SendableTemplate {
   spec: Extract<SendSpec, { supported: true }>;
 }
 
+/** What one send of a template gives: the number, its variables' values and its header's file. */
+interface TemplateSendValues {
+  phone: string;
+  variables: TemplateParams;
+  headerMedia?: { link: string } | undefined;
+}
+
 /**
  * The template, when it is the company's, approved and one HyFib can send; its category decides the
- * scope the key needs.
+ * scope the key needs. A template with a photo, video or document header is sendable here, as each
+ * send gives its file by link (ADR-201).
  */
 async function loadSendableTemplate(
   tx: Tx,
@@ -1148,22 +1447,37 @@ async function loadSendableTemplate(
   if (template.status !== 'approved') {
     throw new AppError('precondition_failed', 'Only templates approved by Meta can be sent.');
   }
-  const spec = sendSpecFor(template.category, template.components);
+  const spec = sendSpecFor(template.category, template.components, { mediaHeaders: true });
   if (!spec.supported) throw new AppError('unsupported', spec.reason);
   return { template, spec };
 }
 
-/** Refuses values that do not fill the template's variables, naming `path` in a list of sends. */
-function assertTemplateVariables(
+/**
+ * Refuses values that do not fill the template: its variables, and the file of a photo, video or
+ * document header, which only a template with one takes (ADR-201). In a list of sends `place`
+ * names the send (`messages.3`).
+ */
+function assertTemplateValues(
   spec: SendableTemplate['spec'],
-  variables: TemplateParams,
-  path?: string,
+  { variables, headerMedia }: TemplateSendValues,
+  place?: string,
 ): void {
-  if (variables.header.length === spec.headerParams && variables.body.length === spec.bodyParams) {
-    return;
+  const at = (field: string) => (place ? `${place}.${field}` : field);
+  if (variables.header.length !== spec.headerParams || variables.body.length !== spec.bodyParams) {
+    const message = `This template needs ${spec.headerParams} header and ${spec.bodyParams} body variables.`;
+    throw new AppError(
+      'validation_failed',
+      message,
+      place ? { issues: [{ path: at('variables'), message }] } : {},
+    );
   }
-  const message = `This template needs ${spec.headerParams} header and ${spec.bodyParams} body variables.`;
-  throw new AppError('validation_failed', message, path ? { issues: [{ path, message }] } : {});
+  if ((spec.headerMedia === null) === (headerMedia === undefined)) return;
+  const message = spec.headerMedia
+    ? `This template has a ${HEADER_MEDIA_NAMES[spec.headerMedia]} header: give the link to its file.`
+    : 'This template has no photo, video or document header, so it takes no file.';
+  throw new AppError('validation_failed', message, {
+    issues: [{ path: at('headerMedia'), message }],
+  });
 }
 
 /** The number the template is sent from: of the template's WhatsApp account, and active. */
@@ -1204,6 +1518,7 @@ async function lockMarketingSends(
  * consent, the marketing frequency cap, then the message, its send intent and its job. A refusal
  * throws; the caller's transaction or savepoint rolls back what it wrote, a contact created for the
  * number included. For a marketing template the caller holds the campaign runner's company lock.
+ * The message keeps the header's file link beside the rendered text (ADR-201).
  */
 async function queueTemplateFor(
   deps: OutboundDeps,
@@ -1211,8 +1526,7 @@ async function queueTemplateFor(
   ctx: ApiContext,
   { template, spec }: SendableTemplate,
   channel: { id: string; whatsappAccountId: string },
-  phone: string,
-  variables: TemplateParams,
+  { phone, variables, headerMedia }: TemplateSendValues,
   now: Date,
 ): Promise<ApiQueuedTemplate> {
   const contactId = await contactForPhone(tx, ctx.tenant.id, {
@@ -1249,7 +1563,12 @@ async function queueTemplateFor(
     )
     .limit(1);
   const recipient = phoneFromWaId(identity?.waId) ?? phone;
-  const built = buildTemplateSend(template, spec, variables);
+  const built = buildTemplateSend(
+    template,
+    spec,
+    variables,
+    headerMedia ? { headerMediaLink: headerMedia.link } : {},
+  );
 
   // A conversation this message starts is resolved, like a campaign's; the reply opens it.
   await tx
@@ -1292,6 +1611,7 @@ async function queueTemplateFor(
         category: template.category,
       },
       rendered: built.rendered,
+      ...(built.headerMedia ? { headerMedia: built.headerMedia } : {}),
     },
     status: 'queued',
     statusRank: STATUS_RANK.queued,
@@ -1408,7 +1728,7 @@ interface BuiltReply {
 }
 
 interface ApiReply {
-  type: 'text' | 'interactive' | 'reaction' | ApiMediaType;
+  type: 'text' | 'interactive' | 'reaction' | ApiMediaType | 'location' | 'contacts';
   /** The message the reply quotes, or the reaction is for, as the request names it. */
   replyTo: string | undefined;
   /** Checks that do not depend on the number, made first (the plan's modules). */
@@ -1615,8 +1935,8 @@ export async function apiSendText(
 }
 
 /**
- * A photo, video, audio or document WhatsApp fetches from an https link (ADR-194); see
- * `sendReply`. HyFib stores the link and the caption, never the media.
+ * A photo, video, audio, document or sticker WhatsApp fetches from an https link (ADR-194,
+ * ADR-198); see `sendReply`. HyFib stores the link and the caption, never the media.
  */
 export async function apiSendMedia(
   deps: OutboundDeps,
@@ -1626,7 +1946,7 @@ export async function apiSendMedia(
 ): Promise<ApiResponse> {
   assertScope(ctx, 'messages.reply');
   const data = parseInput(apiSendMediaSchema, input);
-  const caption = data.type === 'audio' ? undefined : data.caption;
+  const caption = data.type === 'audio' || data.type === 'sticker' ? undefined : data.caption;
   const media = { link: data.link, ...(caption ? { caption } : {}) };
   return sendReply(deps, ctx, data, idempotency, {
     type: data.type,
@@ -1635,6 +1955,71 @@ export async function apiSendMedia(
       content: media,
       preview: caption ?? MEDIA_PREVIEWS[data.type],
       request: { type: data.type, [data.type]: media },
+    }),
+  });
+}
+
+/**
+ * A location (ADR-195); see `sendReply`. The message keeps the coordinates as numbers, as received
+ * locations keep theirs; the Graph request gives them as decimal strings, as Meta's spec types them
+ * (research M-192).
+ */
+export async function apiSendLocation(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'messages.reply');
+  const data = parseInput(apiSendLocationSchema, input);
+  const place = {
+    ...(data.name ? { name: data.name } : {}),
+    ...(data.address ? { address: data.address } : {}),
+  };
+  return sendReply(deps, ctx, data, idempotency, {
+    type: 'location',
+    replyTo: data.replyTo,
+    build: () => ({
+      content: { latitude: data.latitude, longitude: data.longitude, ...place },
+      preview: data.name ?? data.address ?? 'Location',
+      request: {
+        type: 'location',
+        location: {
+          latitude: decimalDegrees(data.latitude),
+          longitude: decimalDegrees(data.longitude),
+          ...place,
+        },
+      },
+    }),
+  });
+}
+
+/**
+ * Contact cards (ADR-197); see `sendReply`. The message keeps the contacts as the Graph request
+ * gives them, in WhatsApp's words, as received cards are kept, so reads give both alike (ADR-196).
+ */
+export async function apiSendContacts(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'messages.reply');
+  const data = parseInput(apiSendContactsSchema, input);
+  const cards = data.contacts.map(whatsappContact);
+  // Within the budget received content keeps to, below what the database takes for a message.
+  if (jsonbSize({ contacts: cards }) > INBOUND_CONTENT_BUDGET) {
+    throw new AppError('validation_failed', 'These contacts are more than a message may hold.', {
+      issues: [{ path: 'contacts', message: 'Share fewer contacts, or less about them' }],
+    });
+  }
+  return sendReply(deps, ctx, data, idempotency, {
+    type: 'contacts',
+    replyTo: data.replyTo,
+    build: () => ({
+      content: { contacts: cards },
+      preview: `Contact card: ${data.contacts.map((c) => c.name.formattedName).join(', ')}`,
+      request: { type: 'contacts', contacts: cards },
     }),
   });
 }
@@ -1873,7 +2258,8 @@ export async function apiSendProducts(
 
 /**
  * POST /api/v1/messages: a template (the default), or a reply inside the service window as text,
- * reply buttons, a list, products (ADR-086) or a reaction, by the body's `type`.
+ * reply buttons, a list, products (ADR-086), a reaction, media from a link (ADR-194), a location
+ * (ADR-195) or contact cards (ADR-197), by the body's `type`.
  */
 export async function apiSendMessage(
   deps: OutboundDeps,
@@ -1892,6 +2278,8 @@ export async function apiSendMessage(
   if ((API_MEDIA_TYPES as readonly unknown[]).includes(type)) {
     return apiSendMedia(deps, ctx, input, idempotency);
   }
+  if (type === 'location') return apiSendLocation(deps, ctx, input, idempotency);
+  if (type === 'contacts') return apiSendContacts(deps, ctx, input, idempotency);
   if (type === 'product' || type === 'product_list' || type === 'catalog') {
     return apiSendProducts(deps, ctx, input, idempotency);
   }
@@ -1900,13 +2288,13 @@ export async function apiSendMessage(
   }
   throw new AppError(
     'validation_failed',
-    'Send a template, a text, buttons, a list, products, a reaction or media.',
+    'Send a template, a text, buttons, a list, products, a reaction, media, a location or contacts.',
     {
       issues: [
         {
           path: 'type',
           message:
-            'Use template, text, buttons, list, product, product_list, catalog, reaction, image, video, audio or document.',
+            'Use template, text, buttons, list, product, product_list, catalog, reaction, image, video, audio, document, location or contacts.',
         },
       ],
     },

@@ -329,6 +329,13 @@ opt-out is a defect: collect the message id and the consent event ids (no messag
 security/privacy incident. If the opt-out was never recorded (for example the customer wrote a
 sentence rather than a keyword), record it manually with a note.
 
+**A bulk tag edit was refused or changed fewer contacts than expected (ADR-213).** "These filters
+now match N contacts" means contacts were added, changed or erased since the page loaded: reload it
+and check the matches again. More than 10,000 matches must be narrowed first. A contact that already
+has 50 tags keeps them, and the result counts it; remove a tag from it first. Each edit is in the
+audit log as `contacts.bulk_tagged` with its counts; each changed contact also appears in the
+contact feed and as a `contact.updated` webhook event.
+
 **Erasure request.** A member with `contacts.delete` erases the contact from its page (keep the
 number suppressed unless the requester asks otherwise). The action is audited
 (`contact.erased`). Data already delivered to Meta is outside our database (see
@@ -372,6 +379,27 @@ template, then resume), number inactive (reconnect, then resume), spending or me
 `campaigns.send` resumes it under their name; sends not yet handed to Meta went back to the
 campaign and are sent then), or no rate card for the cap's currency (platform staff publish one,
 or remove the cap).
+
+**Nobody was emailed when HyFib paused a campaign (ADR-210).** The email goes to the member whose
+authority the campaign sends under, while they are active and may send campaigns; otherwise to the
+company's active owners and administrators. Pauses by members or keys email nobody. It is queued in
+the pause's transaction (`ops.email_outbox`, dedupe key
+`campaign-paused:<campaign id>:<version>:<user id>`) and sent by the email worker: check its dead
+letters and the email provider as for other notices. Campaigns paused before this release, or by an
+old worker during a rollout, emailed nobody; the campaign's page gives the reason in any case.
+
+**Nobody was emailed when a campaign finished (ADR-214).** The email goes to the member whose
+authority the campaign sent under, only while they are an active member, when every contact was
+handed to WhatsApp or skipped or when its sending period ended. A cancelled campaign emails nobody.
+It is queued in the transaction that completes the campaign (`ops.email_outbox`, dedupe key
+`campaign-completed:<campaign id>:<version>:<user id>`) and sent by the email worker.
+
+**A member gets an email they turned off, or not one they expect (ADR-215).** Settings →
+Notifications shows the member's own choices for that company; `app.memberships.email_opt_outs`
+lists the kinds turned off. Choices are per company: a member of two companies sets each. Security,
+sign-in and billing emails cannot be turned off. During a rollout an old server may still send an
+email that was turned off. The audit log records each change as
+`membership.email_preferences_updated`.
 
 **Many failures with 131049.** Meta's per-user marketing limit: those customers received too many
 marketing messages from businesses. Do not resend; wait at least 24 hours (M-062) and consider the
@@ -424,6 +452,23 @@ shown as paused resumes at the next opening. Reports apply the current calendar 
 number is suppressed, the contact was erased or has no phone number, the WhatsApp number is inactive,
 or the customer was asked in the last 24 hours. A survey that was queued but failed shows Meta's
 error on the message in the thread (for example a consent change before dispatch: `opted_out`).
+
+**A member was not emailed about a mention (ADR-211).** The email goes 10 minutes after the note,
+only if the member has not opened the conversation since (opening it marks their mentions read), is
+still active and can still see it (an agent loses sight of a conversation assigned to someone else),
+and the mention is less than a day old; of several unread mentions in one conversation only the
+newest one emails. Mentions while the company was suspended are not emailed. The worker logs
+`mention email` with the mention id and the outcome (`sent`, `read`, `cannot_see`, `newer`, `gone`,
+`too_late`, `already_sent`); a sent one is in `ops.email_outbox` with the dedupe key
+`note-mention:<mention id>`, and is then the email worker's (dead letters, the email provider). A
+note added while the `note.mention` queue did not exist fails: run the migration job.
+
+**A member cannot download a conversation's transcript (ADR-212).** It needs `inbox.export` (owners,
+administrators and supervisors; agents do not have it) and a conversation the member can see;
+otherwise the conversation page shows no "Download transcript" link and its address answers with a
+403 or a 404. Each download is in the audit log as `conversation.transcript_exported` with the
+conversation's id. A transcript leaves internal notes out by design; a download cut short mid-file
+is logged by the web server as `transcript export failed mid-stream`, so download it again.
 
 **Migration 0010 failed.** It builds `app.conversations_team_idx` concurrently. If it failed, an
 INVALID index can remain: run `DROP INDEX CONCURRENTLY app.conversations_team_idx;` and run the
@@ -1779,6 +1824,41 @@ they were created with: create a key with both); `not_in_plan` means the plan le
 `outcome` the results do not count, a `cursor` that is not the previous page's `nextCursor`, or an
 unknown parameter.
 
+**A template with a photo, video or document header sent through the API failed (ADR-201).**
+WhatsApp fetches the header's file from the link when it sends the message, as for media from links
+(ADR-194), and `GET /messages/{id}` (and the `message.status` webhook) gives its error. Check that
+the link is reachable from the internet without signing in, that the file is of the header's kind,
+and that a document is a PDF (Meta's spec, research M-195), then send again with a new
+Idempotency-Key. Members cannot send these templates from the inbox, campaigns or automations; the
+template's page says so.
+
+**A sticker sent through the API failed (ADR-198).** As for media from links (ADR-194), WhatsApp
+fetches the sticker and decides whether the file can be one, and `GET /messages/{id}` (and the
+`message.status` webhook) gives its error. Meta's spec uploads stickers as WebP files (research
+M-194) but states no format, dimensions or size, so check the file against Meta's current sticker
+requirements before sending again with a new Idempotency-Key.
+
+**A contact card sent through the API failed (ADR-197).** `GET /messages/{id}` (and the
+`message.status` webhook) gives WhatsApp's error. HyFib sends only the parts Meta's spec describes
+(research M-193), in WhatsApp's words, and requires a second part of the name besides
+`formattedName`; if WhatsApp refuses a card anyway, record its error code and title and review
+M-193. A refusal before sending (422) names the part, such as `contacts.0.phones.1.type`, and the
+inbox shows a card sent with its names and numbers.
+
+**A contact card's contacts are missing or partial through the API or a webhook (ADR-196).**
+`contacts` gives what WhatsApp sent and HyFib kept: parts the person did not or could not share are
+null or empty, a card larger than a message may hold keeps its first contacts (up to 20;
+`contactsLeftOut` counts the others), and an erased customer's cards give null. Values that are not
+text are left out rather than passed on, and numbers are as the card gives them, not E.164. The
+inbox shows the same contacts' names, numbers and email addresses.
+
+**A location sent through the API failed (ADR-195).** HyFib sends the coordinates as decimal text,
+as Meta's spec types them, with the name and address given; `GET /messages/{id}` (and the
+`message.status` webhook) gives WhatsApp's error when it refuses one. The spec's examples send the
+coordinates as numbers (research M-192): if WhatsApp's error names the latitude or the longitude,
+record its code and title and review M-192 before changing what HyFib sends. The location is stored
+with the message and shown in the inbox with its coordinates.
+
 **A photo, video, audio or document sent through the API failed (ADR-194).** WhatsApp fetches the
 media from the message's link when it sends it, and HyFib records what WhatsApp answers:
 `GET /messages/{id}` (and the `message.status` webhook) gives the error. The usual causes are a link
@@ -1786,6 +1866,55 @@ that needs signing in or has expired, one not reachable from the internet, or me
 not accept (its type or size). HyFib never fetches the link, so its logs say nothing of the media;
 fix the link and send the message again with a new Idempotency-Key. The link is stored with the
 message and shown in the inbox.
+
+**A campaign a key submitted waits for approval (ADR-202).** A key's submission always waits for a
+member's approval, even where members' own campaigns start at once. Its page names the key; a member
+who may approve and send campaigns (owners and administrators) approves it there, and it sends under
+their authority, or sends it back with a note. A member who cannot send campaigns sees no Approve
+button for it. The key that submitted it can take it back (`POST /campaigns/{id}/withdraw`,
+ADR-203), and a member can in the app; either makes it a draft at a new version.
+
+**An approver was not emailed about a waiting campaign (ADR-204).** The email goes, when the
+campaign starts waiting, to the company's active owners and administrators other than the member who
+submitted it (who cannot approve their own); for a key's submission, only to those who may also send
+campaigns. Where the only approver submitted it, nobody is emailed: another owner or administrator
+approves it. The email is queued in the submission's transaction (`ops.email_outbox`, dedupe key
+`campaign-approval:<campaign id>:<version>:<user id>`) and sent by the email worker: check its dead
+letters and the email provider as for other notices. Campaigns submitted before this release, or by
+an old web server during a rollout, emailed nobody.
+
+**A member was not told their campaign was approved, sent back or taken back (ADR-205).** The email
+goes to the member who submitted it, when someone else approves it, sends it back or takes it back,
+and only while they are an active member; a key's submission emails nobody (its integration reads
+`campaign.status_changed`). It is queued in the same transaction (`ops.email_outbox`, dedupe key
+`campaign-review:<campaign id>:<version>:<user id>`) and sent by the email worker. The campaign's
+history on its page shows what happened and the note in any case.
+
+**A segment read through the API has a problem, or another count than expected (ADR-206).**
+`problem` says what members' segment page says: usually a condition on a custom field deleted or
+changed since, which a member fixes on the segment's page; until then a draft with it cannot be
+submitted, and `count` is null. `count` is read when asked, from the contacts as they are then
+(erased contacts left out), with dates in the company's time zone, so it changes as contacts do; an
+archived segment is not found.
+
+**A segment a key wrote is refused or not where expected (ADR-207).** A 422 names the condition at
+fault, as `POST /contacts/search` would (a custom field key the company lacks, a comparison its type
+does not take, a campaign of another company); a 409 is a name another segment of the company has,
+whatever its case, or a stale `expectedVersion`. The audit log shows which key created, changed or
+archived a segment. An archived segment leaves members' Segments page and the API's reads; drafts
+with it need another audience before they are submitted.
+
+**A segment's contacts through the API come in short or empty pages, or are refused (ADR-208).**
+Each page reads at most 2,000 of the company's contacts, newest first, so a segment that leaves out
+most contacts gives short or empty pages with a `nextCursor`: follow it until it is `null`. A 412 is
+a segment with a problem, which a member fixes on its page; a 403 naming `conversations.read` is a
+segment with a recent-messages condition.
+
+**An approver cannot approve a waiting campaign: its sending period ended (ADR-209).** A campaign
+can be approved only until its sending period ends, counted from when it was set to start (its
+submission, for one that starts at once); the approval email and its page give the time, and after
+it the page offers no Approve button. Send it back with a note; the member who submitted it
+schedules it again and submits it, or raises its sending period first.
 
 **A draft's review through the API shows no estimate, or other counts than expected (ADR-193).**
 `GET /campaigns/{id}/review` reads the saved draft as members' review does, now: save the draft
@@ -2631,6 +2760,22 @@ it, and the next time it falls behind it starts unacknowledged and is emailed ag
 changes neither the lateness nor the alert. "This queue is no longer late since then." means the
 queue recovered, or fell behind again, since the page loaded: reload it.
 
+**A list's CSV has more rows than its tab (ADR-200).** The console's exports give up to 5,000 rows
+of number setups, new companies, receipts needing attention, quarantine entries and dead letters, up
+to 1,000 current failures and up to 500 signups, newest first, while the tabs show fewer. The file's
+first rows are the tab's; the platform audit entry of the export counts the rows it gave. A list
+longer than its CSV's limit needs a query on the database.
+
+**Acknowledging a quarantine entry (ADR-199).** The administrator who takes up an open quarantine
+entry opens Acknowledge on its row and writes a note of 10 to 500 characters: what was found or is
+awaited ("Asked the company to reconnect through Embedded Signup", "A Meta test account; waiting for
+Meta to confirm"). The row then shows who, when and the note; a later note replaces it, and the
+platform audit log keeps each (`platform.webhook_quarantine_acknowledged`). Acknowledging neither
+retries the receipt nor resolves the entry, and it does not stop the alert email; resolve the entry
+once it is decided. "This quarantine entry is already resolved." means another administrator
+resolved it since the page loaded; "Quarantine entry not found." that it was deleted with its
+receipt.
+
 **Acknowledging a webhook receipt (ADR-179).** The administrator who looks at a receipt that needs
 attention opens Acknowledge on its row and writes a note of 10 to 500 characters: what was found or
 done ("Malformed body from a Meta test account; not retrying", "Parser fixed in 1.4.3; retried").
@@ -2958,6 +3103,12 @@ with it.
 roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
 release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
 endpoints name the column); workers of either release and web servers of the previous release work
+with it.
+
+**Migration 0139 failed.** It creates `ops.quarantine_acknowledgements` and
+`ops.platform_acknowledge_quarantine_entry`, in one transaction; a failure rolls it all back
+(usually the bootstrap roles: fix them and run the migrations again). Web servers of this release
+need it before they show the Integrations tab; workers and web servers of the previous release work
 with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of

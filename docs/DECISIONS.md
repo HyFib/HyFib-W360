@@ -7872,9 +7872,9 @@ Decision:
 - **Stored as sent:** the message's content is the link and the caption (`type` the media's), and
   its send intent the Graph request (`{type}: {link, caption}`), sent through the same pipeline and
   send job as every reply; the conversation's preview is the caption, or the kind of media. The API
-  reads the caption as the message's `text` (`mimeType` stays null: HyFib does not know it), and so
-  do webhooks. The inbox shows the kind, the caption and the link, which opens in a new tab (only an
-  https link is shown as one). Erasing the contact redacts the content as for any message.
+  reads the caption as the message's `text` (`mimeType` stays null: HyFib does not know it). The
+  inbox shows the kind, the caption and the link, which opens in a new tab (only an https link is
+  shown as one). Erasing the contact redacts the content as for any message.
 - **Not uploads, not stickers:** no `id` of uploaded media (HyFib has no media storage), no
   `filename` for documents and no stickers: Meta's spec shows a filename only for a document sent by
   id, and a caption on an audio or sticker message nowhere (M-191). The scope's label and
@@ -7883,3 +7883,620 @@ Decision:
 
 Not built: sending uploaded media (needs media storage and Meta's upload), media in the inbox's own
 reply box, stickers, a document's file name, checking a link before sending it, and media downloads.
+
+## ADR-195 Sending locations through the public API (P5-08) (2026-10-06)
+
+Context: keys reply with text, buttons, lists, products, reactions and media from links (ADR-070,
+ADR-080, ADR-082, ADR-086, ADR-194), but not with a place: a clinic asked where it is could only
+type its address. Meta's published spec describes a location message (research M-192), and the inbox
+already shows the locations customers send.
+
+Decision:
+
+- **A location:** `POST /messages` takes `type` `location` with `to`, an optional `from` and
+  `replyTo` as other replies take them, a `latitude` (-90 to 90) and a `longitude` (-180 to 180) in
+  decimal degrees as JSON numbers, and the place's `name` and `address` if wanted, each trimmed and
+  1 to 1,000 characters long (HyFib's own bound: Meta's spec gives none). Nothing else: the spec's
+  send schema has only these four properties, so a received location's `url` is not sent. It is a
+  reply (ADR-070): `messages.reply`, only to a number that wrote to the WhatsApp number in the last
+  24 hours (`window_closed` otherwise), stopping an automation answering the conversation. It may
+  quote a message, as the spec's examples do.
+- **Coordinates as the spec types them:** the send intent's Graph request gives the coordinates as
+  decimal text (`"18.5204"`), as the spec's `LocationMessage` schema types them; its examples send
+  numbers, a conflict M-192 records, and HyFib follows the schema. `decimalDegrees` writes them in
+  plain decimals, never in the exponent notation JavaScript uses below a millionth. A location
+  WhatsApp refuses makes the message fail, which `GET /messages/{id}` and `message.status` report
+  with WhatsApp's error, as for any send.
+- **Stored as received locations are:** the message's content holds the coordinates as numbers with
+  the name and the address, the shape of a received location, so the inbox and the API read both
+  alike. The conversation's preview, the API's `text` and the inbox's one-line quote give
+  the name, else the address (as for received locations); the preview says "Location" without
+  either. The inbox now shows a location's coordinates under its name and address, received
+  locations' too. Erasing the contact redacts the content as for any message.
+- **Descriptions:** the scope's label and description name locations. The API's description of a
+  message's `text` now names captions and locations for outbound messages too. ADR-194 left captions
+  out of it, and its record said webhooks give a caption as text, which they do not
+  (`message.status` carries no words): both corrected. The feature matrix no longer says media
+  messages are not built.
+- **No migration:** `location` is already a message type.
+
+Not built: locations in the inbox's own reply box, asking a customer for their location
+(`location_request_message` is not among the spec's interactive types, M-043), a place's `url`, and
+maps.
+
+## ADR-196 Reading the contacts of contact cards through the API and webhooks (P5-08, P5-09) (2026-10-06)
+
+Context: when a customer shares a contact card, HyFib keeps the contacts WhatsApp sends (its first
+ones, at most 20, while they fit, ADR-131), but the API and the `message.received` webhook gave only
+how many were left out (`contactsLeftOut`, ADR-132), and the inbox only "Shared a contact card": a
+CRM could not file a referral, and members had to open WhatsApp to read the number. The backlog
+waited on Meta's contact object, which Meta's published spec describes for received cards (research
+M-193).
+
+Decision:
+
+- **`contacts` on every message:** `GET /conversations/{id}/messages`, `GET /messages`,
+  `GET /message-changes` and `message.received` give each message `contacts`: for a contact card,
+  the contacts kept, in the API's words (`name` with `formattedName`, `firstName`, `lastName`,
+  `middleName`, `prefix` and `suffix`; `phones` with `phone`, `waId` and `type`; `emails`; `urls`;
+  `addresses` with `street`, `city`, `state`, `zip`, `country`, `countryCode` and `type`; `org` with
+  `company`, `department` and `title`; `birthday`). It is null for other messages and for content
+  removed or too large to keep; `contactsLeftOut` still counts the contacts left out.
+- **As WhatsApp gave them, every part optional:** the spec says parts may be missing when the person
+  does not or cannot share them, and its schema and examples disagree on the values of `type` (HOME
+  and WORK in the schema, MOBILE in an example), so HyFib passes text on as given. A value that is
+  not text is left out, as are a phone, an email or a link without its value, an address without any
+  part and an organisation without any. Nothing is checked or normalised: a number is the card's,
+  not E.164, and a link is not made a link.
+- **One mapping:** `contactCards` (`webhooks/payloads.ts`) reads the stored content for the API and
+  the webhook alike, so they never differ. An erased customer's messages are redacted, so their
+  cards give null, in a webhook delivered after the erasure too.
+- **Inbox:** a contact card shows each contact's name (its formatted name, else its first and last
+  names) with its numbers and email addresses, as text.
+- **No migration, no new scope:** the content is already stored, and `conversations.read` reads it
+  as it reads messages' text. `message.received`'s description of `text` now names a location's
+  name, which it has always given.
+
+Not built: sending contact cards through the API (the spec describes the object a sent card uses,
+M-193), and adding a shared person as a contact.
+
+## ADR-197 Sending contact cards through the public API (P5-08) (2026-10-06)
+
+Context: keys read the contact cards customers share (ADR-196) but could not send one: a clinic
+could not give a patient the dentist's number as a card WhatsApp can save. Meta's published spec
+describes the contact object a sent card uses (research M-193).
+
+Decision:
+
+- **Contact cards:** `POST /messages` takes `type` `contacts` with `to`, an optional `from` and
+  `replyTo` as other replies take them, and `contacts`: 1 to 5 contacts in the words reads use
+  (ADR-196). Each has a `name` with `formattedName` and at least one other part, and if wanted
+  `phones` (a `phone` with a digit, a `waId` of 6 to 20 digits), `emails` (valid addresses), `urls`
+  (http or https, with a host and no user name or password) and `addresses` (at least one part,
+  `countryCode` two letters), up to 5 of each, each with a `type` of HOME or WORK; an `org` with at
+  least one part; and a `birthday` that exists (YYYY-MM-DD). Each text is trimmed and at most 256
+  characters long (a link 2,000), and nothing else is taken. It is a reply (ADR-070):
+  `messages.reply`, only within the 24-hour window, stopping an automation answering the
+  conversation.
+- **HyFib's own rules:** the spec's `NameObject` requires nothing, but the received card's schema
+  requires `formatted_name` and none of its examples has a formatted name alone, so HyFib asks for
+  one more part, which costs an integration little and avoids a card WhatsApp might refuse. The 256
+  characters and 5 entries of each kind are HyFib's bounds (the spec gives none), and contacts that
+  would make the message larger than received content may be (60 KB) are refused, so a message
+  always fits.
+- **Stored as received cards are:** the message's content and the Graph request hold the contacts in
+  WhatsApp's words (`formatted_name`, `wa_id`, `country_code`), parts not given left out, so reads
+  give sent and received cards alike through `contactCards`, and the inbox shows each one's name,
+  numbers and email addresses. The conversation's preview is "Contact card:" with the names. A card
+  WhatsApp refuses makes the message fail, which `GET /messages/{id}` and `message.status` report
+  with WhatsApp's error, as for any send.
+- **The scope's label** becomes "Reply with text, media and other messages", which stays true as
+  types are added; its description lists them.
+- **No migration:** `contacts` is already a message type.
+
+Not built: contact cards in the inbox's own reply box, and sending one of the company's contacts as
+a card.
+
+## ADR-198 Sending stickers from links through the public API (P5-08) (2026-10-06)
+
+Context: keys send photos, videos, audio and documents from links (ADR-194), and ADR-194 left
+stickers out, though Meta's published spec sends a sticker by link the same way, without a caption
+(research M-191, M-194).
+
+Decision:
+
+- **A fifth kind of media:** `POST /messages` takes `type` `sticker` with `to`, an optional `from`
+  and `replyTo`, and a `link` under ADR-194's rules (https, a host, no user name or password, at
+  most 2,000 characters), and nothing else: no caption, as for audio. It is a reply (ADR-070) under
+  `messages.reply`, sent through the same path as every medium.
+- **WhatsApp decides:** the spec states no format, dimensions or size for a sticker (its upload
+  example is a WebP file), so HyFib checks none; a file WhatsApp does not take as a sticker makes
+  the message fail, which `GET /messages/{id}` and `message.status` report with WhatsApp's error.
+- **Stored as other media sent from a link:** the content keeps the link, the conversation's preview
+  says "Sticker", the API's `text` is null, and the inbox shows the link as other media's.
+- **No migration:** `sticker` is already a message type.
+
+Not built: stickers uploaded to Meta or sent by id, and checking that a file can be a sticker.
+
+## ADR-199 Acknowledging quarantine entries on the operations console (P5-10) (2026-10-06)
+
+Context: the console's other lists take an administrator's note: current failures (ADR-141), dead
+letters (ADR-169), late queues (ADR-177) and webhook receipts (ADR-179). Quarantine entries, events
+HyFib could not attribute to a company, could only be retried or resolved: while one waited on the
+company to reconnect, or on Meta, nothing told the other administrators that someone was on it, and
+every administrator is emailed about each (ADR-091).
+
+Decision:
+
+- **A note on an open entry:** on the Integrations tab, a platform administrator acknowledges an
+  open quarantine entry with a note of 10 to 500 characters (what was found or is awaited). The row
+  shows who acknowledged it, when, and the note; another administrator may acknowledge it again,
+  replacing the note; the platform audit log keeps each (`platform.webhook_quarantine_acknowledged`,
+  the note as its reason, with the entry, its receipt, the provider and the reason it was
+  quarantined, and no company). Resolving the entry still closes it; a resolved entry takes no note
+  (409), as the console no longer lists it.
+- **Where it is enforced:** `ops.platform_acknowledge_quarantine_entry` (SECURITY DEFINER,
+  executable by the platform role only) checks the platform administrator, the note (trimmed) and
+  that the entry exists and is open, then records the note and the audit entry in one transaction.
+  The notes live in `ops.quarantine_acknowledgements` (migration 0139), which only the definer role
+  writes and only the platform role reads: the runtime role, which writes quarantine entries, has no
+  grant on it.
+- **How long:** a note goes with its entry. The retention sweep deletes entries with their receipts
+  after 90 days, and the notes with them through a cascading foreign key.
+- **Exports:** the quarantine CSV gains an "Acknowledged (UTC)" column with the time only, never who
+  or the note, as the other lists' exports do.
+
+Not built: assigning an entry or a failure to someone, editing or deleting a note (a new
+acknowledgement replaces it), and leaving acknowledged entries out of the alert email (each is
+emailed once anyway).
+
+## ADR-200 Exporting the console's lists beyond the rows a tab shows (P5-10) (2026-10-06)
+
+Context: each of the console's action lists downloads as CSV (ADR-158), but only the rows its tab
+shows: the latest 100 dead letters, receipts needing attention and quarantine entries, 200 signups
+and number setups, 500 current failures and new companies. After a bad day, or for a provider asking
+about every quarantined event, staff could not get the rest.
+
+Decision:
+
+- **Exports go further than the tab:** the CSV of number setups, new companies without a number,
+  receipts needing attention, quarantine entries and dead letters gives up to 5,000 rows; of current
+  failures, up to 1,000, and of signups, up to 500, the most their definer functions return, so no
+  function changes. Tabs keep their rows. `OPS_LIST_ROWS` names both numbers for each list, and each
+  list's title says how many rows its CSV gives.
+- **The same list, the same order:** the export reads the list with the tab's own read, only with
+  the larger number, and each read now breaks ties by id, so the tab's rows are the file's first
+  rows. The audit entry (`platform.ops_<list>_exported`) counts the rows the file gives, as before;
+  the files hold what the tabs hold, people and notes left out (ADR-158).
+- **No migration:** the platform role reads the larger lists through its own grants, and the definer
+  functions already accept those numbers.
+
+Not built: exports beyond these numbers (paged or streamed files), filters on an export, and raising
+the definer functions' limits.
+
+## ADR-201 Sending templates with a photo, video or document header through the public API (P5-08) (2026-10-06)
+
+Context: templates made in WhatsApp Manager with a photo, video or document header are synced and
+shown, but HyFib could not send them: a send's spec refused any header but text. A send needs only
+the file, given by link: Meta's published spec gives a header parameter of type `image`, `video` or
+`document` holding a media object (an `id` or a `link`) without a caption, and its "Send Message
+Template Media" example sends `{type: image, image: {link}}` (research M-195). Creating such
+templates needs the Resumable Upload API (M-050), which HyFib does not use yet.
+
+Decision:
+
+- **The API sends them:** `POST /messages` (`type` `template`) and `POST /messages/send-many` (in
+  each message, as each has its own variables) take `headerMedia: {link}`, an https link under
+  ADR-194's rules (a host, no user name or password, at most 2,000 characters) that WhatsApp fetches
+  when it sends the message. A template with such a header needs it and one without refuses it (422,
+  naming `headerMedia` or `messages.<n>.headerMedia`), checked with the variables before anything is
+  written. HyFib never fetches the link and keeps no media.
+- **The list says what a send gives:** `GET /templates` lists these templates with `headerMedia`
+  (`image`, `video` or `document`; null for other templates), their header asking for no text value.
+- **Only the API opts in:** `sendSpecFor` takes a header's file only when its caller passes
+  `mediaHeaders`, as the API does. The inbox, campaigns, automations and store messages still cannot
+  send these templates and now say why ("This template has a photo header: HyFib sends such
+  templates only through the API, which gives a link to the file."), as members' template pages do.
+- **Sent as the spec gives it:** the header's one parameter, `{type, <type>: {link}}`, before the
+  body's; no caption and no file name, which the spec's template media parameters do not take. The
+  spec supports only PDF documents in media templates; HyFib cannot check a file it does not fetch,
+  so the API's description says so, and a file WhatsApp refuses makes the message fail, as
+  `GET /messages/{id}` and `message.status` report.
+- **Kept with the message:** the content keeps `headerMedia` (the kind and the link) beside the
+  rendered text; the inbox shows the kind and the link above the template's text, as an https anchor
+  opened in a new tab without the referrer; API reads and webhooks give the template's text as
+  before, never the file (ADR-194). Erasure replaces the content and the request, as for every
+  message.
+- **VIDEO on the spec's word:** the spec's template examples show IMAGE and DOCUMENT headers, and
+  its header parameters include `video` (M-195), so a VIDEO header is sent as the others. GIF
+  (third-party lists only, M-090), LOCATION and PRODUCT headers stay unsendable.
+- **No migration:** templates and messages keep their columns; the link is in the message's content
+  and its send request.
+
+Not built: these templates from the inbox, campaigns, automations or store messages; files uploaded
+to Meta (ids); creating templates with media headers (the Resumable Upload API); location headers;
+showing a template's example file.
+
+## ADR-202 Submitting campaign drafts through the public API, for a member's approval (P5-08) (2026-10-06)
+
+Context: keys create, edit, review and cancel campaign drafts (ADR-186, ADR-187, ADR-193), but only
+members submit them, so an integration that prepares a campaign has to ask someone to open the app
+and press submit. Members' submission checks the draft, takes its audience and either waits for
+approval or launches the campaign under the submitting member's authority, which the runner checks
+before each batch; a key is no member, so it has no such authority to give.
+
+Decision:
+
+- **A key submits, a member approves:** `POST /campaigns/{id}/submit` with the draft's
+  `expectedVersion` submits it with members' code (`submitLockedDraft`): the checks its review
+  lists, the audience's size and the snapshot of who it goes to, each refused as members are told
+  (409 for a stale version, 412 for a check). The submission then always waits for a member's
+  approval (`pending_approval`), whatever the company's settings: a key never starts a campaign.
+- **The approver lends the authority:** a member with `campaigns.approve` approves a key's
+  submission in the app, as they approve another member's, and must also hold `campaigns.send`, as
+  the campaign is launched under their authority (`launched_by_user_id`), which the runner checks as
+  for every campaign. Rejecting it with a note, or taking it back, makes it a draft again without
+  the key.
+- **`campaigns.write` is the scope:** it already edits what a campaign would send, and a submission
+  sends nothing until a member approves it. Its label becomes "Create, edit and submit campaign
+  drafts", and its description says a key never starts a campaign.
+- **Recorded:** the campaign keeps the key (`submitted_by_api_key_id`, never with a submitting
+  member, a check the database enforces, and a key of the company, a composite foreign key); the
+  event and the audit name it, and the campaign page says the key submitted it and who may approve
+  it.
+- **Retries:** a campaign the key submitted is answered as it is, whatever happened to it since; any
+  other campaign that is not a draft is refused with 409, naming its status. A rejected or withdrawn
+  submission is a draft at a new version, so a retry with the old one is refused.
+- **Migrations 0140 and 0141:** the column, the check and the foreign key added NOT VALID and
+  validated in the next migration, so `app.campaigns` stays writable; the runtime role updates the
+  column through a column grant.
+
+Not built: keys approving or starting campaigns (by design), withdrawing a key's submission through
+the API, and notifying approvers of a waiting campaign.
+
+## ADR-203 Withdrawing a key's campaign submission through the API (P5-08) (2026-10-06)
+
+Context: a key submits drafts, which wait for a member's approval (ADR-202), but only a member could
+take a submission back, so an integration that found a mistake after submitting had to ask someone
+to open the app. Members take back their own submissions and approvers anyone's.
+
+Decision:
+
+- **The submitting key withdraws its own:** `POST /campaigns/{id}/withdraw` with `campaigns.write`
+  takes a campaign waiting for approval that the key submitted back to a draft, as a member's
+  withdrawal does (`returnLockedCampaignToDraft`, shared with members' withdrawal and rejection):
+  the audience snapshot is dropped (nothing was sent), the submission is cleared and the version
+  goes up, so the key reads the draft again before it submits it again.
+- **Nobody else's:** a submission a member or another key made is refused with 403, as a member may
+  take back only their own (approvers withdraw any in the app); a campaign that no longer waits for
+  approval is refused with 409, naming its status.
+- **Retries:** a draft is answered as it is, so a retry after the withdrawal changes nothing; the
+  event and the audit name the key.
+- **No migration.**
+
+Not built: notifying approvers of a waiting campaign, and a key withdrawing what a member submitted.
+
+## ADR-204 Emailing approvers when a campaign waits for approval (P5-08) (2026-10-06)
+
+Context: a campaign that waits for approval (a member's submission where the company requires
+approval, and every key's submission, ADR-202) waited until an approver happened to open Campaigns:
+nobody was told. A key's submission made this worse, as nobody in the company had pressed a button.
+
+Decision:
+
+- **Who:** the company's active members whose roles grant `campaigns.approve` (owners and
+  administrators), except the member who submitted it, who cannot approve their own (four-eyes); for
+  a key's submission only those who may also send campaigns, as approving it needs (ADR-202). Today
+  every role that approves also sends; the check keeps the rule if roles change.
+- **When:** in the submission's transaction, through the encrypted email outbox
+  (`emailCampaignApprovers`, called by members' `submitCampaign` and by `apiSubmitCampaign`), so a
+  refused submission emails nobody. The outbox's dedupe key is the campaign, its version after the
+  submission and the approver: a retry answered as it is adds nothing, and a new submission after a
+  withdrawal or a rejection is a new version and emails again. A submission that starts at once (no
+  approval needed) emails nobody.
+- **What:** a company notice naming who submitted it (the member, or the key by name), how many of
+  its audience it would reach, when it starts once approved (in the campaign's time zone, as its
+  page shows it) and a link to its page, where the member signs in and is authorized as usual.
+  Counts only, never contacts. For a key's submission it adds that approving needs permission to
+  send campaigns, as the campaign then sends under the approver's authority.
+- **No migration and no setting:** the email kind exists (`tenant.notice`), and the services'
+  dependencies now carry the outbox and the app's base URL (`CampaignDeps.notices`).
+
+Not built: telling the submitter that their campaign was approved or sent back, reminders while a
+campaign keeps waiting, and email preferences.
+
+## ADR-205 Telling the member who submitted a campaign what its approver did (P5-08) (2026-10-06)
+
+Context: approvers are emailed when a campaign waits for them (ADR-204), but the member who
+submitted it learned that it was approved, sent back with a note, or taken back to a draft only by
+opening its page. An approved campaign also sends under that member's authority, which they should
+know.
+
+Decision:
+
+- **Who:** the member who submitted it, in the transaction of the approver's action, so a refused
+  approval emails nobody: only while they are an active member, and never for their own action
+  (taking back their own submission). A key's submission has no member to tell: its integration
+  reads `campaign.status_changed` (ADR-087), as before.
+- **What:** approved (by whom, when it starts in the campaign's time zone or that it starts now, the
+  approver's note if any, and that it sends under their authority, so it pauses if they leave or can
+  no longer send campaigns); sent back as a draft with the approver's note; or taken back to a draft
+  by an approver while it waited. Each says nothing was sent where nothing was, and links to the
+  campaign's page. A note is the approver's own words (at most 500 characters), split into lines as
+  long notes are.
+- **Once:** the outbox's dedupe key is the campaign, its version after the action and the member,
+  and each action raises the version.
+- **No migration.** `emailCampaignSubmitter` is called by `approveCampaign`, `rejectCampaign` and
+  members' `withdrawCampaign`; the submitter is passed in, as sending back clears it.
+
+Not built: reminders while a campaign keeps waiting, email preferences, and emails when a running
+campaign pauses or completes (its page and `campaign.status_changed` say so).
+
+## ADR-206 Reading saved segments through the API (P5-08) (2026-10-06)
+
+Context: a draft's audience can be one of the company's saved segments (ADR-186), but a key had no
+way to find a segment's id: segments were only on members' Segments page.
+
+Decision:
+
+- **Reads with `campaigns.read`:** `GET /segments` lists the company's segments that are not
+  archived, newest first on keyset pages, and `GET /segments/{id}` reads one; members read segments
+  with the permission of the same name. Reads continue while the company is suspended, as other
+  reads do.
+- **In the API's words:** each segment gives its conditions as `POST /contacts/search` and drafts'
+  audiences take them (segments store them so, ADR-117), its version, and `problem`: why it cannot
+  be used now, as members' segment page says (a custom field deleted since, a comparison its field
+  no longer takes, a tag or date that is not valid, a campaign that does not exist), checked by
+  segments' rules; conditions HyFib can no longer read give a null definition with a problem.
+- **Counts only:** one segment adds `count`, how many contacts match it now (erased contacts left
+  out), counted by segments' own SQL with dates in the company's time zone, as members' page counts
+  it; null when it has a problem. Contacts themselves are found with `POST /contacts/search` and
+  `contacts.read`, so this read gives no contact.
+- **Not found:** an archived segment and another company's, as members' page.
+- **No migration.**
+
+Not built: creating, changing or archiving segments through the API, and segments' members as pages
+(`POST /contacts/search` with the same conditions finds them).
+
+## ADR-207 Creating, changing and archiving saved segments through the API (P5-08) (2026-10-06)
+
+Context: keys read segments (ADR-206) and give one as a draft's audience (ADR-186), but an
+integration that keeps its audiences elsewhere had to ask a member to build each segment on the
+Segments page. Separately, a member who saved a segment under a name another segment has got only
+the database's generic conflict, "A record with the same unique value already exists".
+
+Decision:
+
+- **Writes with `campaigns.write`,** the permission members create and change segments with:
+  `POST /segments` (the name and conditions; once per `Idempotency-Key`), `PATCH /segments/{id}`
+  (the name or the conditions given, the rest kept, with an optional `expectedVersion`) and
+  `DELETE /segments/{id}`, which archives it as members do. Each answers with the segment as
+  `GET /segments/{id}` reads it, counted now; archiving answers its id.
+- **Checked as a search is:** the conditions go through the code that checks `POST /contacts/search`
+  (`apiSegmentConditions`): a custom field of the company and a comparison its type takes, a valid
+  tag (stored normalized) or date, a campaign of the company; a problem is refused with 422 naming
+  the condition, like `definition.conditions.1.key`. Segments hold no groups. Saving needs no other
+  scope (a condition on messages or campaigns reads nothing when saved; counting it is
+  `GET /segments/{id}`, with `campaigns.read`).
+- **Names:** a name another segment of the company has that is not archived, whatever its case
+  (`segments_name_uq`), is refused with 409 "Another segment already has this name." naming `name`,
+  for keys and for members alike (`segmentNameRefusal`). Archiving frees the name.
+- **Archiving** leaves submitted campaigns' audiences as they were; a draft with the segment cannot
+  be submitted until it takes another audience, as when a member archives it. A segment already
+  archived is answered as it is, so a retry is harmless; another company's is not found.
+- **The audit names the key** (`segment.created`, `segment.updated`, `segment.archived` with source
+  `api`); the segment records no member as its author or last editor.
+- **No migration.**
+
+Not built: segments' members as pages, and restoring an archived segment (members cannot either).
+
+## ADR-208 Listing a segment's contacts through the API (P5-08) (2026-10-06)
+
+Context: keys read, write and count segments (ADR-206, ADR-207), but to get a segment's contacts an
+integration had to copy its conditions into `POST /contacts/search`, and keep the copy in step with
+members' changes.
+
+Decision:
+
+- **`GET /segments/{id}/contacts`** gives the contacts a segment holds now, read from its stored
+  conditions by segments' own SQL (`segmentConditionsSql`), with dates in the company's time zone,
+  as a campaign takes its audience. Pages are those of `POST /contacts/search` (`apiContactPage`):
+  newest first, erased contacts left out, each page reading at most 2,000 contacts in one
+  repeatable-read snapshot, so a page can be short and still give a cursor.
+- **Scopes as a search's:** `campaigns.read` (segments) and `contacts.read` (contacts), and
+  `conversations.read` for a segment with a `last_message` condition, as a search with one needs it
+  (ADR-126); a `campaign` condition needs `campaigns.read`, which the route needs anyway. That last
+  check reads the segment first, as a search reads its conditions.
+- **A segment with a problem** (ADR-206) is refused with 412 saying it, rather than answered from
+  conditions that no longer hold; an archived segment and another company's are not found.
+- **No migration.**
+
+Not built: restoring an archived segment (members cannot either), and a segment's contacts as a
+file.
+
+## ADR-209 Saying until when a waiting campaign can be approved (P5-08) (2026-10-06)
+
+Context: a campaign waiting for approval can be approved only until its sending period ends, counted
+from when it was set to start; a campaign that starts at once is set to start at its submission, so
+with the default 24-hour period it can no longer be approved a day after it was submitted. Approvers
+learned this only from the refusal ("The scheduled sending period has already ended"), neither the
+approval email (ADR-204) nor the campaign's page said it.
+
+Decision:
+
+- **One rule:** `campaignApprovalDeadline` (the set start plus `stop_after_hours`) is what
+  `approveCampaign` refuses after and what the email and the page show, so they cannot disagree.
+- **The approval email** says until when the campaign can be approved, in the campaign's time zone,
+  and that it has to be sent back and scheduled again after that.
+- **The campaign's page** says the same while it waits; once the time has passed it says the sending
+  period ended and that it can no longer be approved, and offers no Approve button (sending it back
+  stays).
+- **No migration and no new setting;** the API is unchanged (a key cannot approve).
+
+Not built: a reminder before the time passes, and letting an approver extend the sending period on
+approval.
+
+## ADR-210 Emailing members when HyFib pauses a campaign by itself (P3-04) (2026-10-06)
+
+Context: the runner pauses a campaign by itself when its spending or message cap is reached, its
+template is no longer approved by Meta (or no longer takes the campaign's variables), its number is
+not active, the member whose authority it sends under left or lost `campaigns.send`, or no rate card
+is published for its cap's currency. The pause showed only on the campaign's page and in its
+outgoing webhook event, so a member who was not looking could learn of it after its sending period
+had ended, when the contacts still waiting are skipped.
+
+Decision:
+
+- **Who:** the member whose authority it sends under, while they are an active member who may send
+  campaigns, as they can fix and resume it; otherwise (they left or lost the permission) the
+  company's active members who may approve and send campaigns, its owners and administrators, as one
+  of them must resume it. Members' and keys' own pauses email nobody.
+- **When:** in the pause's transaction, from the runner's pause and from the job that pauses a
+  campaign whose member left, so a pause that rolls back emails nobody; one email per member for
+  each pause (the dedupe key holds the campaign's version, which every pause raises).
+- **What:** the cause and what a member does about it (raise or remove the cap; resume once Meta
+  approves the template again, or cancel; reconnect the number in Settings → Channels; resume under
+  another member's authority; wait for a rate card or remove the cap), and that messages not sent
+  yet wait for the resume until its sending period ends, given in the campaign's time zone, after
+  which the contacts still waiting are skipped; for a campaign that had not started, that nothing
+  was sent. No counts: messages still queued when a cap pauses it are held back by the send worker
+  afterwards, so a count would be out of date.
+- **No migration and no setting;** the worker sends it.
+
+Not built: an email when a campaign completes or its sending period ends, a digest of pauses, email
+preferences, and in-app notifications.
+
+## ADR-211 Emailing members mentioned in a note who have not opened it (P3-06) (2026-10-06)
+
+Context: a member mentioned in a note sees it only in the app (the unread count, Inbox → Mentions
+and the live update). One who is not in the app learns of it when they next open it, however urgent
+the note.
+
+Decision:
+
+- **After a delay, only if still unread:** adding a note schedules a signed `note.mention` job for
+  each member it mentions other than its author, due 10 minutes later. Opening the conversation in
+  that time (which marks the mention read) means no email.
+- **The mention row decides,** under its row lock, when the job runs: no email for a mention already
+  read, gone with its note (erased contact, deleted company), more than a day old (the company was
+  suspended or the worker down), or of a member who is no longer active or can no longer see the
+  conversation (the inbox's own rule, checked again). Of a member's unread mentions in one
+  conversation, only the newest one's job emails, saying how many are unread, so a burst of notes
+  sends one email. A job run again after its transaction committed finds its email queued (the
+  outbox's dedupe key holds the mention id).
+- **What it says:** who mentioned them, how many of their mentions in the conversation are unread,
+  and a link to the conversation, where access is checked again. Never the note, the customer's name
+  or number, or the message: an email stays readable after its reader loses access to the
+  conversation, and leaves HyFib's controls.
+- **A suspended company's** jobs are dropped (logged): its members get no email for those mentions,
+  which the inbox still shows as unread.
+- **No SQL migration and no setting;** the migration job creates the new queue. Keys' notes mention
+  no one (ADR-072), so nothing changes in the API.
+
+Not built: email preferences (a member cannot turn these emails off), a daily digest, and the note's
+text in the email.
+
+## ADR-212 Downloading a conversation's transcript (P3-06, W-042) (2026-10-06)
+
+Context: a team settling a dispute, handing a case to another system or keeping a record had to copy
+a conversation from the screen; the company export holds every conversation at once and is for
+owners only.
+
+Decision:
+
+- **Who:** a new permission, `inbox.export`, held by owners, administrators and supervisors (and
+  kept while the company is suspended, like the other exports), and only for a conversation the
+  member can see. Agents read their conversations on screen but do not take copies; marketers and
+  analysts do not read conversations.
+- **What:** every message, oldest first, with its time in the company's time zone (WhatsApp's time
+  for a customer's message), who sent it (the contact's name or "Customer", the member, the
+  automation, the campaign by name, the API key by name, or "Sent automatically"), its words in full
+  after its kind when it is not plain text, a contact card's names only, and what happened to a
+  message of the company that did not reach the customer (not delivered with Meta's reason,
+  cancelled, or delivery unknown). A header names the contact, the number, the company, the time
+  zone and who downloaded it when. Internal notes are left out: they are the team's, not the
+  conversation's.
+- **How:** a plain-text file streamed from `/c/<company>/inbox/<conversation>/transcript`, 500
+  messages per read-only transaction, from a "Download transcript" link on the conversation page.
+  The permission, the conversation and the audit entry (`conversation.transcript_exported`, no
+  content) come first, so a refused download is a 403 or 404, never a partial file. Plain text, not
+  CSV: no spreadsheet reads any of it as a formula.
+- **No migration;** the API is unchanged.
+
+Not built: notes in the transcript, a PDF, a date range, transcripts through the API, and emailing a
+transcript to the customer.
+
+## ADR-213 Adding or removing a tag on every contact a filter matches (P3-01) (2026-10-06)
+
+Context: tags were changed one contact at a time, or by importing a CSV of the contacts again.
+Tagging a group found on the contacts page (everyone from Pune who opted in, say) meant opening each
+contact.
+
+Decision:
+
+- **From the contacts page:** below its filters (search, tag, consent), a member with
+  `contacts.write` adds or removes one tag on every contact the filters match, the number shown in
+  the form. More than 10,000 matches are refused: the filters must be narrowed first.
+- **The number shown is the number changed:** the edit carries the count the member saw. In one
+  transaction the matching contacts are locked (as one contact's tag edit locks it) and counted
+  again; a different count refuses the edit, so no contact the member did not review is tagged.
+- **The tag rules stay:** the tag is normalised as everywhere (lower case, no commas). A contact
+  that has the 50 tags a contact may have keeps them; the result says how many were changed, already
+  had the tag (or did not, for a removal) and were full. Erased contacts never match.
+- **Each changed contact is a change,** in the contact feed and as a `contact.updated` webhook
+  event, as when one member edits it. The audit entry (`contacts.bulk_tagged`) holds the tag, the
+  counts and which filters were used, never the search text.
+- **No migration;** the API is unchanged.
+
+Not built: bulk edits of other fields, bulk edits from a segment or through the API, choosing
+contacts one by one, and undo.
+
+## ADR-214 Emailing the member a campaign sent under when it finishes (P3-04) (2026-10-06)
+
+Context: a campaign finishes when every contact in its audience was handed to WhatsApp or skipped,
+or when its sending period ends with contacts still waiting, which are then skipped. Only its page
+said so; a campaign that ran out of time could leave thousands unreached without anyone noticing
+until its results were read.
+
+Decision:
+
+- **Who:** the member whose authority it sent under (who started it, approved it, or last resumed
+  it), while they are an active member. Nobody else: finishing needs no one's action. A cancelled
+  campaign emails nobody, as a member or key cancelled it.
+- **When:** in the transaction that completes it, from the runner, once (completion is final).
+- **What:** that it finished, or that its sending period ended (with its time in the campaign's time
+  zone) and how many contacts it had not reached; how many messages it handed to WhatsApp and how
+  many of its audience it skipped; and that deliveries, reads and replies keep arriving on its page.
+  Counts only, never contacts.
+- **No migration and no setting;** the worker sends it.
+
+Not built: a summary of deliveries some time after it finishes, email preferences, and emails to
+other members.
+
+## ADR-215 Letting members choose which notice emails they get (P3-06) (2026-10-06)
+
+Context: members are emailed when a campaign waits for their approval (ADR-204), when their campaign
+is reviewed (ADR-205), paused by HyFib (ADR-210) or finished (ADR-214), and when they are mentioned
+in a note they have not opened (ADR-211). Each ADR listed email preferences as not built: a member
+who follows campaigns in the app all day could not stop them.
+
+Decision:
+
+- **Per member, per company:** migration 0142 adds `app.memberships.email_opt_outs`, the kinds the
+  member turned off in that company, checked against the five kinds above. It starts empty, so every
+  email stays on until a member turns it off, and it is the company's data: exported with the
+  membership and deleted with the company.
+- **Only one's own:** Settings → Notifications shows each member the kinds their role can receive
+  and saves their choice through `app.set_own_email_opt_outs`, a definer function that finds the
+  membership from the scope (the company and the signed-in user), never from an argument; the
+  runtime role still cannot update memberships. Kinds the role does not show keep their setting. The
+  change is audited (`membership.email_preferences_updated`, with the kinds off).
+- **Every notice honours it,** in the transaction that would send it: approval requests, review
+  outcomes, pause and completion emails, and mention emails (whose job ends as `opted_out`). A pause
+  that needs another member to resume it (ADR-210) still goes to the owners and administrators who
+  did not turn pauses off; if all did, nobody is emailed, and the campaign's page and webhook event
+  still say why it paused.
+- **Never these:** security, sign-in and billing emails are not listed and cannot be turned off.
+
+Not built: a digest instead of single emails, in-app notifications, preferences for CRM task
+reminders, and a company-wide default set by an administrator.

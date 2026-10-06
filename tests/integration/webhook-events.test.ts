@@ -2878,7 +2878,13 @@ describe('campaign events (ADR-087)', () => {
   async function campaignCompany(contactCount: number) {
     const c = await fx.company();
     const clock = new TestClock();
-    const deps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock };
+    const deps = {
+      db: fx.dbs.app,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      clock,
+      notices: fx.notices(),
+    };
     const owner = await fx.ctx(c, c.owner);
     const templateName = `festive_${randomBytes(4).toString('hex')}`;
     const templates = createTemplatesService({ ...deps, clock: systemClock });
@@ -2947,7 +2953,14 @@ describe('campaign events (ADR-087)', () => {
       },
       tick(campaignId: string) {
         return runCampaignTick(
-          { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock, sendRatePerSecond: 100 },
+          {
+            db: fx.dbs.app,
+            jobs: fx.jobs(),
+            signer: fx.signer,
+            clock,
+            sendRatePerSecond: 100,
+            notices: fx.notices(),
+          },
           scope,
           campaignId,
         );

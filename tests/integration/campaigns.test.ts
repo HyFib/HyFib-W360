@@ -3,13 +3,17 @@ import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
 import { authorizedTenantScope, sql, type TenantScope } from '@w360/db';
 import {
   attributeCampaignOptOut,
+  campaignCompletionNotice,
+  campaignPauseNotice,
   cancelSendIntent,
   createCampaignsService,
   createConsentService,
   createContactsService,
+  createEmailPreferencesService,
   createSegmentsService,
   createTemplatesService,
   findDueCampaigns,
+  outboxAad,
   pauseCampaignForRemovedLauncher,
   processSendIntent,
   processTemplateSubmit,
@@ -19,6 +23,7 @@ import {
   type SegmentsService,
   type TemplateDefinition,
 } from '@w360/domain';
+import { acceptInvitation, createUser, invite } from './helpers';
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
 
 /**
@@ -98,7 +103,7 @@ interface Setup {
 async function setup(): Promise<Setup> {
   const c = await fx.company();
   const clock = new TestClock();
-  const deps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock };
+  const deps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock, notices: fx.notices() };
   const templates = createTemplatesService(deps);
   const owner = await fx.ctx(c, c.owner);
   const { id: templateId } = await templates.createDraft(owner, {
@@ -150,7 +155,14 @@ async function setup(): Promise<Setup> {
     },
     tick(campaignId, rate = 100) {
       return runCampaignTick(
-        { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock, sendRatePerSecond: rate },
+        {
+          db: fx.dbs.app,
+          jobs: fx.jobs(),
+          signer: fx.signer,
+          clock,
+          sendRatePerSecond: rate,
+          notices: fx.notices(),
+        },
         scopeOf(c),
         campaignId,
       );
@@ -236,6 +248,36 @@ async function campaignRow(id: string) {
     [id],
   );
   return row!;
+}
+
+/** The emails queued about a campaign's automatic pauses (ADR-210), oldest first. */
+const pauseEmails = (tenantId: string, campaignId: string) =>
+  campaignEmails(tenantId, `campaign-paused:${campaignId}:`);
+
+/** The company's emails whose dedupe key starts with `prefix`, oldest first. */
+async function campaignEmails(tenantId: string, prefix: string) {
+  const rows = await fx.query<{
+    id: string;
+    to_address: string;
+    dedupe_key: string;
+    payload_ciphertext: string;
+  }>(
+    `SELECT id, to_address, dedupe_key, payload_ciphertext FROM ops.email_outbox
+      WHERE tenant_id = $1 AND dedupe_key LIKE $2 ORDER BY id`,
+    [tenantId, `${prefix}%`],
+  );
+  return rows.map((r) => ({
+    to: r.to_address,
+    dedupeKey: r.dedupe_key,
+    ...(JSON.parse(fx.keyring.decryptString(r.payload_ciphertext, outboxAad(r.id))) as {
+      kind: string;
+      companyName: string;
+      subject: string;
+      lines: string[];
+      url: string;
+      actionLabel: string;
+    }),
+  }));
 }
 
 describe('segments', () => {
@@ -931,7 +973,7 @@ describe('approval, pause and resume', () => {
       // ...and the runner's job pauses the campaign, releasing the sends not rejected yet.
       expect(
         await pauseCampaignForRemovedLauncher(
-          { db: fx.dbs.app, clock: systemClock },
+          { db: fx.dbs.app, clock: systemClock, notices: fx.notices() },
           cleanup,
           id,
           s.c.marketer.id,
@@ -969,6 +1011,333 @@ describe('approval, pause and resume', () => {
         [s.c.tenant.id, s.c.marketer.id],
       );
     }
+  });
+});
+
+describe('emailing members when a campaign pauses by itself (ADR-210)', () => {
+  async function member(c: Company, role: 'admin' | 'supervisor', status = 'active') {
+    const user = await createUser(fx.dbs, { name: `Campaign ${role}` });
+    const { token } = await invite(fx.dbs, c.tenant, c.owner, user.email, [role]);
+    await acceptInvitation(fx.dbs, user, token);
+    await fx.query(`UPDATE app.memberships SET status = $3 WHERE tenant_id = $1 AND user_id = $2`, [
+      c.tenant.id,
+      user.id,
+      status,
+    ]);
+    return user;
+  }
+  async function pausedRow(id: string) {
+    const [row] = await fx.query<{ version: number; deadline_at: Date | null }>(
+      `SELECT version, deadline_at FROM app.campaigns WHERE id = $1`,
+      [id],
+    );
+    return row!;
+  }
+  const companyName = async (c: Company) =>
+    (
+      await fx.query<{ name: string }>('SELECT name FROM app.tenants WHERE id = $1', [c.tenant.id])
+    )[0]!.name;
+
+  it('emails the member it sends under when its template can no longer be sent, once per pause, and nobody for a member’s own pause', async () => {
+    const s = await setup();
+    const marketer = await fx.ctx(s.c, s.c.marketer);
+    await member(s.c, 'admin');
+    await s.contact('+919840002001', { name: 'Asha' });
+    await s.contact('+919840002002', { name: 'Ravi' });
+    const { id } = await s.draft('Festive sale');
+    await s.campaigns.submitCampaign(marketer, id, { expectedVersion: 1 }, {});
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 2 });
+    // A member's own pause and resume email nobody.
+    await s.campaigns.pauseCampaign(marketer, id, {});
+    await s.campaigns.resumeCampaign(marketer, id, {});
+    expect(await pauseEmails(s.c.tenant.id, id)).toEqual([]);
+
+    await fx.query(`UPDATE app.message_templates SET status = 'paused' WHERE id = $1`, [
+      s.templateId,
+    ]);
+    expect(await s.tick(id)).toMatchObject({
+      outcome: 'paused',
+      pauseReason: 'template_not_approved',
+    });
+    const first = await pausedRow(id);
+    const expected = campaignPauseNotice({
+      campaignName: 'Festive sale',
+      reason: 'template_not_approved',
+      sendUntil: first.deadline_at,
+      timeZone: 'Asia/Kolkata',
+    });
+    expect(expected.lines[2]).toMatch(
+      /^Messages that had not gone out yet wait until it is resumed\. Its sending period ends at \d+ \w+ \d{4} at \d{2}:\d{2} GMT\+5:30, /,
+    );
+    const email = {
+      to: s.c.marketer.email,
+      dedupeKey: `campaign-paused:${id}:${first.version}:${s.c.marketer.id}`,
+      kind: 'tenant.notice',
+      companyName: await companyName(s.c),
+      subject: 'Campaign “Festive sale” paused: its template can no longer be sent',
+      lines: expected.lines,
+      url: `http://localhost:3000/c/${s.c.tenant.slug}/campaigns/${id}`,
+      actionLabel: 'Open campaign',
+    };
+    // Only the marketer, who may still send campaigns, not the owner or the administrator.
+    expect(await pauseEmails(s.c.tenant.id, id)).toEqual([email]);
+    // A paused campaign's tick changes nothing and emails nobody again.
+    expect(await s.tick(id)).toMatchObject({ outcome: 'inactive' });
+    expect(await pauseEmails(s.c.tenant.id, id)).toHaveLength(1);
+
+    // Approved again and resumed, then paused again: one more email, for the new pause.
+    await fx.query(`UPDATE app.message_templates SET status = 'approved' WHERE id = $1`, [
+      s.templateId,
+    ]);
+    await s.campaigns.resumeCampaign(marketer, id, {});
+    await fx.query(`UPDATE app.message_templates SET status = 'paused' WHERE id = $1`, [
+      s.templateId,
+    ]);
+    expect(await s.tick(id)).toMatchObject({ pauseReason: 'template_not_approved' });
+    const second = await pausedRow(id);
+    expect(second.version).toBeGreaterThan(first.version);
+    expect(await pauseEmails(s.c.tenant.id, id)).toEqual([
+      email,
+      { ...email, dedupeKey: `campaign-paused:${id}:${second.version}:${s.c.marketer.id}` },
+    ]);
+  });
+
+  it('emails the owners and administrators when the member it sends under can no longer send campaigns or leaves', async () => {
+    const s = await setup();
+    const marketer = await fx.ctx(s.c, s.c.marketer);
+    const admin = await member(s.c, 'admin');
+    await member(s.c, 'admin', 'suspended');
+    await member(s.c, 'supervisor');
+    await s.contact('+919840003001', { name: 'Asha' });
+    const { id } = await s.draft('Winter launch');
+    await s.campaigns.submitCampaign(marketer, id, { expectedVersion: 1 }, {});
+    await fx.query(
+      `UPDATE app.memberships SET roles = '{analyst}' WHERE tenant_id = $1 AND user_id = $2`,
+      [s.c.tenant.id, s.c.marketer.id],
+    );
+    expect(await s.tick(id)).toMatchObject({
+      outcome: 'paused',
+      pauseReason: 'launcher_not_permitted',
+    });
+    const row = await pausedRow(id);
+    const notPermitted = await pauseEmails(s.c.tenant.id, id);
+    // The owner and the active administrator approve and send campaigns; the marketer, the
+    // suspended administrator, the supervisor and the agent are not emailed.
+    expect(notPermitted.map((e) => e.to).sort()).toEqual([admin.email, s.c.owner.email].sort());
+    expect(notPermitted.find((e) => e.to === admin.email)).toEqual({
+      to: admin.email,
+      dedupeKey: `campaign-paused:${id}:${row.version}:${admin.id}`,
+      kind: 'tenant.notice',
+      companyName: await companyName(s.c),
+      subject: 'Campaign “Winter launch” paused: another member must resume it',
+      lines: campaignPauseNotice({
+        campaignName: 'Winter launch',
+        reason: 'launcher_not_permitted',
+        sendUntil: row.deadline_at,
+        timeZone: 'Asia/Kolkata',
+      }).lines,
+      url: `http://localhost:3000/c/${s.c.tenant.slug}/campaigns/${id}`,
+      actionLabel: 'Open campaign',
+    });
+
+    // A campaign set for tomorrow whose member left: the runner's job pauses it before it starts.
+    await fx.query(
+      `UPDATE app.memberships SET roles = '{marketer}' WHERE tenant_id = $1 AND user_id = $2`,
+      [s.c.tenant.id, s.c.marketer.id],
+    );
+    const tomorrow = new Date(Date.now() + 86_400_000);
+    const { id: later } = await s.draft('Tomorrow launch', {
+      schedule: {
+        kind: 'later',
+        local: `${tomorrow.toISOString().slice(0, 10)}T09:00`,
+        timezone: 'Asia/Kolkata',
+      },
+    });
+    await s.campaigns.submitCampaign(marketer, later, { expectedVersion: 1 }, {});
+    await fx.query(
+      `UPDATE app.memberships SET status = 'removed' WHERE tenant_id = $1 AND user_id = $2`,
+      [s.c.tenant.id, s.c.marketer.id],
+    );
+    const cleanup = authorizedTenantScope(s.c.tenant.id, null);
+    const pauseDeps = { db: fx.dbs.app, clock: systemClock, notices: fx.notices() };
+    expect(await pauseCampaignForRemovedLauncher(pauseDeps, cleanup, later, s.c.marketer.id)).toBe(
+      true,
+    );
+    expect(await pauseCampaignForRemovedLauncher(pauseDeps, cleanup, later, s.c.marketer.id)).toBe(
+      false,
+    );
+    const removed = await pauseEmails(s.c.tenant.id, later);
+    expect(removed.map((e) => e.to).sort()).toEqual([admin.email, s.c.owner.email].sort());
+    expect(removed.find((e) => e.to === s.c.owner.email)).toEqual({
+      to: s.c.owner.email,
+      dedupeKey: `campaign-paused:${later}:${(await pausedRow(later)).version}:${s.c.owner.id}`,
+      kind: 'tenant.notice',
+      companyName: await companyName(s.c),
+      subject: 'Campaign “Tomorrow launch” paused: another member must resume it',
+      lines: [
+        'HyFib paused the campaign “Tomorrow launch”, and it sends nothing more until it is resumed.',
+        'The member whose authority it sent under is no longer an active member of the company. A member who can send campaigns can resume it, and it then sends under their authority.',
+        'It had not started, so nothing was sent. Once resumed, it starts at its scheduled time, or at once if that time has passed.',
+      ],
+      url: `http://localhost:3000/c/${s.c.tenant.slug}/campaigns/${later}`,
+      actionLabel: 'Open campaign',
+    });
+  });
+});
+
+describe('emailing the member a campaign sent under when it finishes (ADR-214)', () => {
+  const completionEmails = (tenantId: string, campaignId: string) =>
+    campaignEmails(tenantId, `campaign-completed:${campaignId}:`);
+  async function finished(id: string) {
+    const [row] = await fx.query<{
+      version: number;
+      deadline_at: Date | null;
+      completion_reason: string | null;
+    }>(`SELECT version, deadline_at, completion_reason FROM app.campaigns WHERE id = $1`, [id]);
+    return row!;
+  }
+
+  it('emails the member once when every contact was handed over or skipped, and nobody for a cancelled campaign', async () => {
+    const s = await setup();
+    const marketer = await fx.ctx(s.c, s.c.marketer);
+    await s.contact('+919840004001', { name: 'Asha' });
+    await s.contact('+919840004002', { name: 'Ravi' });
+    await s.contact('+919840004003', { name: 'Meena', optIn: false });
+    const { id } = await s.draft('Spring sale');
+    await s.campaigns.submitCampaign(marketer, id, { expectedVersion: 1 }, {});
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 2 });
+    expect(await completionEmails(s.c.tenant.id, id)).toEqual([]);
+    s.clock.advance(11_000);
+    expect(await s.tick(id)).toMatchObject({ outcome: 'completed' });
+    const row = await finished(id);
+    expect(row.completion_reason).toBe('all_processed');
+    const [{ name: company }] = (await fx.query<{ name: string }>(
+      'SELECT name FROM app.tenants WHERE id = $1',
+      [s.c.tenant.id],
+    )) as [{ name: string }];
+    expect(await completionEmails(s.c.tenant.id, id)).toEqual([
+      {
+        to: s.c.marketer.email,
+        dedupeKey: `campaign-completed:${id}:${row.version}:${s.c.marketer.id}`,
+        kind: 'tenant.notice',
+        companyName: company,
+        subject: 'Campaign “Spring sale” finished sending',
+        lines: campaignCompletionNotice({
+          campaignName: 'Spring sale',
+          reason: 'all_processed',
+          audience: 3,
+          queued: 2,
+          skipped: 1,
+          expired: 0,
+          sendUntil: row.deadline_at,
+          timeZone: 'Asia/Kolkata',
+        }).lines,
+        url: `http://localhost:3000/c/${s.c.tenant.slug}/campaigns/${id}`,
+        actionLabel: 'Open campaign',
+      },
+    ]);
+    // A finished campaign's tick changes nothing and emails nobody again.
+    expect(await s.tick(id)).toMatchObject({ outcome: 'inactive' });
+    expect(await completionEmails(s.c.tenant.id, id)).toHaveLength(1);
+
+    // A member's cancellation emails nobody.
+    const { id: canceled } = await s.draft('Cancelled sale');
+    await s.campaigns.submitCampaign(marketer, canceled, { expectedVersion: 1 }, {});
+    await s.campaigns.cancelCampaign(marketer, canceled, {});
+    expect(await completionEmails(s.c.tenant.id, canceled)).toEqual([]);
+  });
+
+  it('says how many contacts its sending period left unreached, and emails nobody once the member is no longer active', async () => {
+    const s = await setup();
+    const marketer = await fx.ctx(s.c, s.c.marketer);
+    await s.contact('+919840005001', { name: 'Asha' });
+    await s.contact('+919840005002', { name: 'Ravi' });
+    await s.contact('+919840005003', { name: 'Meena' });
+    // One message a minute: the first tick queues one, then the sending period ends.
+    const { id } = await s.draft('Slow sale', { ratePerMinute: 1 });
+    await s.campaigns.submitCampaign(marketer, id, { expectedVersion: 1 }, {});
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 1 });
+    s.clock.advance(25 * 3_600_000);
+    expect(await s.tick(id)).toMatchObject({ outcome: 'completed' });
+    const row = await finished(id);
+    expect(row.completion_reason).toBe('deadline_passed');
+    const [email] = await completionEmails(s.c.tenant.id, id);
+    expect(email).toMatchObject({
+      to: s.c.marketer.email,
+      subject: 'Campaign “Slow sale” ended: its sending period is over',
+      lines: campaignCompletionNotice({
+        campaignName: 'Slow sale',
+        reason: 'deadline_passed',
+        audience: 3,
+        queued: 1,
+        skipped: 2,
+        expired: 2,
+        sendUntil: row.deadline_at,
+        timeZone: 'Asia/Kolkata',
+      }).lines,
+    });
+    expect(email!.lines[0]).toMatch(
+      /^The sending period of the campaign “Slow sale” ended at \d+ \w+ \d{4} at \d{2}:\d{2} GMT\+5:30, so the 2 contacts it had not reached were skipped\.$/,
+    );
+
+    // The member was suspended before the period ended: the campaign ends, emailing nobody.
+    const { id: other } = await s.draft('Paused sale', { ratePerMinute: 1 });
+    await s.campaigns.submitCampaign(marketer, other, { expectedVersion: 1 }, {});
+    expect(await s.tick(other)).toMatchObject({ queued: 1 });
+    await fx.query(
+      `UPDATE app.memberships SET status = 'suspended' WHERE tenant_id = $1 AND user_id = $2`,
+      [s.c.tenant.id, s.c.marketer.id],
+    );
+    s.clock.advance(25 * 3_600_000);
+    expect(await s.tick(other)).toMatchObject({ outcome: 'completed' });
+    expect(await completionEmails(s.c.tenant.id, other)).toEqual([]);
+  });
+});
+
+describe('notice emails skip members who turned them off (ADR-215)', () => {
+  it('emails no approver, submitter or sender who turned the kind off', async () => {
+    const s = await setup();
+    const owner = await fx.ctx(s.c, s.c.owner);
+    const marketer = await fx.ctx(s.c, s.c.marketer);
+    const prefs = createEmailPreferencesService({ db: fx.dbs.app });
+    // An administrator approves; the owner turned approval emails off.
+    const user = await createUser(fx.dbs, { name: 'Campaign admin' });
+    const { token } = await invite(fx.dbs, s.c.tenant, s.c.owner, user.email, ['admin']);
+    await acceptInvitation(fx.dbs, user, token);
+    const admin = await fx.ctx(s.c, user);
+    await prefs.updateEmailPreferences(owner, { off: ['campaign_approvals'] });
+    await prefs.updateEmailPreferences(marketer, {
+      off: ['campaign_reviews', 'campaign_pauses', 'campaign_completions'],
+    });
+    await s.campaigns.updateSettings(
+      owner,
+      { approvalRequired: true, cap: null, costCurrency: null },
+      {},
+    );
+    await s.contact('+919840006001', { name: 'Asha' });
+    const { id } = await s.draft('Quiet sale');
+    await s.campaigns.submitCampaign(marketer, id, { expectedVersion: 1 }, {});
+    expect(
+      (await campaignEmails(s.c.tenant.id, `campaign-approval:${id}:`)).map((e) => e.to),
+    ).toEqual([user.email]);
+    await s.campaigns.approveCampaign(admin, id, {}, {});
+    expect(await campaignEmails(s.c.tenant.id, `campaign-review:${id}:`)).toEqual([]);
+    expect(await s.tick(id)).toMatchObject({ queued: 1 });
+    await fx.query(`UPDATE app.message_templates SET status = 'paused' WHERE id = $1`, [
+      s.templateId,
+    ]);
+    // The next tick is due a tick after the batch.
+    s.clock.advance(11_000);
+    expect(await s.tick(id)).toMatchObject({ pauseReason: 'template_not_approved' });
+    expect(await campaignEmails(s.c.tenant.id, `campaign-paused:${id}:`)).toEqual([]);
+    await fx.query(`UPDATE app.message_templates SET status = 'approved' WHERE id = $1`, [
+      s.templateId,
+    ]);
+    await s.campaigns.resumeCampaign(marketer, id, {});
+    expect(await s.tick(id)).toMatchObject({ queued: 1 });
+    s.clock.advance(11_000);
+    expect(await s.tick(id)).toMatchObject({ outcome: 'completed' });
+    expect(await campaignEmails(s.c.tenant.id, `campaign-completed:${id}:`)).toEqual([]);
   });
 });
 
@@ -1110,6 +1479,11 @@ describe('scheduling, windows, frequency caps and spending caps', () => {
         .filter((r) => r.state === 'queued')
         .map((r) => r.estimated_cost_micros),
     ).toEqual(['1000000', '1000000', '1000000', '1000000']);
+    // Each pause emailed the owner, whose authority it sends under (ADR-210).
+    expect((await pauseEmails(s.c.tenant.id, id)).map((e) => [e.to, e.subject])).toEqual([
+      [s.c.owner.email, 'Campaign “Budgeted” paused: its spending cap was reached'],
+      [s.c.owner.email, 'Campaign “Budgeted” paused: its message cap was reached'],
+    ]);
   });
 });
 

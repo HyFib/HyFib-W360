@@ -8,6 +8,7 @@ import {
   NUMBER_SETUPS_CSV_COLUMNS,
   OPS_EXPORT_LISTS,
   OPS_SIGNAL_RULES,
+  OPS_LIST_ROWS,
   QUARANTINE_CSV_COLUMNS,
   QUEUES_CSV_COLUMNS,
   RECEIPTS_CSV_COLUMNS,
@@ -623,6 +624,11 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
             createdAt: at('2026-10-05T02:00:00Z'),
             alertedAt: at('2026-10-05T02:15:00Z'),
             retryable: true,
+            acknowledgement: {
+              at: at('2026-10-05T03:20:30Z'),
+              byName: 'Asha Ops',
+              note: 'Waiting on the company to reconnect the number.',
+            },
           },
           {
             id: 'q2',
@@ -633,15 +639,18 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
             createdAt: at('2026-09-01T00:00:00Z'),
             alertedAt: null,
             retryable: false,
+            acknowledgement: null,
           },
         ]),
       ),
     ).toEqual([
       QUARANTINE_CSV_COLUMNS.join(','),
-      '2026-10-05 02:00,r9,Meta (WhatsApp),Unknown account or number,waba: 8123; phoneNumberId: 8456,2026-10-05 02:15,Yes',
-      '2026-09-01 00:00,r10,Razorpay,mystery,,,No',
+      '2026-10-05 02:00,r9,Meta (WhatsApp),Unknown account or number,waba: 8123; phoneNumberId: 8456,2026-10-05 02:15,Yes,2026-10-05 03:20',
+      '2026-09-01 00:00,r10,Razorpay,mystery,,,No,',
       '',
     ]);
+    // When a quarantine entry was acknowledged, never who or the note (ADR-199).
+    expect(QUARANTINE_CSV_COLUMNS.at(-1)).toBe('Acknowledged (UTC)');
     expect(
       lines(
         emailsCsv([
@@ -838,7 +847,7 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
       'Company,Address,Status,Created (UTC),Number being set up',
       'Company,Address,What,Label,State,Error,Since (UTC),Acknowledged (UTC)',
       'Received (UTC),Receipt,From,Problem,Attempts,Last error,Staff emailed (UTC),Retry,Acknowledged (UTC)',
-      'Quarantined (UTC),Receipt,From,Reason,Provider ids,Staff emailed (UTC),Receipt can be retried',
+      'Quarantined (UTC),Receipt,From,Reason,Provider ids,Staff emailed (UTC),Receipt can be retried,Acknowledged (UTC)',
       'Kind,Failed,Waiting',
       'Queue,Declared by this release,Retries,Dead-lettered after its retries,Wait limit (minutes),' +
         'In the database,Ready,Deferred,Active,Failed,Oldest wait (minutes),Late since (UTC),' +
@@ -876,5 +885,22 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
     expect(opsCsvFilename('signups', at('2026-10-05T00:00:00Z'), 30)).toBe(
       'hyfib-signups-30-days-2026-10-05.csv',
     );
+  });
+});
+
+describe('how many rows the console’s lists export (ADR-200)', () => {
+  it('exports at least the rows each tab shows, up to 5,000, or what the definer functions return', () => {
+    for (const [list, rows] of Object.entries(OPS_LIST_ROWS)) {
+      expect(rows.exported, list).toBeGreaterThanOrEqual(rows.shown);
+    }
+    expect(OPS_LIST_ROWS).toEqual({
+      signups: { shown: 200, exported: 500 },
+      numberSetups: { shown: 200, exported: 5000 },
+      newCompanies: { shown: 500, exported: 5000 },
+      failures: { shown: 500, exported: 1000 },
+      receipts: { shown: 100, exported: 5000 },
+      quarantine: { shown: 100, exported: 5000 },
+      deadLetters: { shown: 100, exported: 5000 },
+    });
   });
 });

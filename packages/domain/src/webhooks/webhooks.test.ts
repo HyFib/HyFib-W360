@@ -97,6 +97,8 @@ import {
   conversationAssignmentPayloadSchema,
   conversationStatusPayloadSchema,
   conversationTeamPayloadSchema,
+  contactCards,
+  contactCardSchema,
   inboundOmissions,
   inboundSummary,
   messageReceivedPayloadSchema,
@@ -293,6 +295,154 @@ describe('inbound message summaries', () => {
     expect(inboundOmissions('text', { tooLarge: 'true' }).contentTooLarge).toBe(false);
   });
 
+  it('gives a contact card’s contacts in the API’s words, every part optional (ADR-196)', () => {
+    // Meta's example of a received card (research M-193), and a fuller one.
+    const lucia = {
+      name: { first_name: 'Lucía', last_name: 'Gómez', formatted_name: 'Lucía Gómez' },
+      org: { company: 'Google' },
+      phones: [{ phone: '+1 (983) 555-2319', wa_id: '19835552319', type: 'MOBILE' }],
+    };
+    const john = {
+      name: {
+        formatted_name: 'Dr John D. Smith Jr',
+        first_name: 'John',
+        last_name: 'Smith',
+        middle_name: 'D.',
+        prefix: 'Dr',
+        suffix: 'Jr',
+      },
+      addresses: [
+        {
+          street: '1 Hacker Way',
+          city: 'Menlo Park',
+          state: 'CA',
+          zip: '94025',
+          country: 'United States',
+          country_code: 'us',
+          type: 'HOME',
+        },
+      ],
+      birthday: '2012-08-18',
+      emails: [{ email: 'test@fb.com', type: 'WORK' }],
+      org: { company: 'WhatsApp', department: 'Design', title: 'Manager' },
+      urls: [{ url: 'https://www.facebook.com', type: 'WORK' }],
+    };
+    const cards = contactCards('contacts', { contacts: [lucia, john], omittedContacts: 2 });
+    expect(cards).toEqual([
+      {
+        name: {
+          formattedName: 'Lucía Gómez',
+          firstName: 'Lucía',
+          lastName: 'Gómez',
+          middleName: null,
+          prefix: null,
+          suffix: null,
+        },
+        phones: [{ phone: '+1 (983) 555-2319', waId: '19835552319', type: 'MOBILE' }],
+        emails: [],
+        urls: [],
+        addresses: [],
+        org: { company: 'Google', department: null, title: null },
+        birthday: null,
+      },
+      {
+        name: {
+          formattedName: 'Dr John D. Smith Jr',
+          firstName: 'John',
+          lastName: 'Smith',
+          middleName: 'D.',
+          prefix: 'Dr',
+          suffix: 'Jr',
+        },
+        phones: [],
+        emails: [{ email: 'test@fb.com', type: 'WORK' }],
+        urls: [{ url: 'https://www.facebook.com', type: 'WORK' }],
+        addresses: [
+          {
+            street: '1 Hacker Way',
+            city: 'Menlo Park',
+            state: 'CA',
+            zip: '94025',
+            country: 'United States',
+            countryCode: 'us',
+            type: 'HOME',
+          },
+        ],
+        org: { company: 'WhatsApp', department: 'Design', title: 'Manager' },
+        birthday: '2012-08-18',
+      },
+    ]);
+    for (const card of cards ?? []) expect(contactCardSchema.parse(card)).toEqual(card);
+    // What a card leaves out, or gives in the wrong shape, is left out.
+    expect(
+      contactCards('contacts', {
+        contacts: [
+          'not a contact',
+          null,
+          {
+            name: { formatted_name: 42, first_name: 'Asha' },
+            phones: [{ type: 'HOME' }, { phone: '' }, 'x', { phone: '+91 98200 00000', wa_id: 7 }],
+            emails: [{ email: 'asha@example.com', type: 3 }, { type: 'WORK' }],
+            urls: [{ url: 9 }, { url: 'asha.example' }],
+            addresses: [{ type: 'HOME' }, { city: 'Pune' }],
+            org: { company: '', title: null },
+            birthday: 20120818,
+          },
+          {},
+        ],
+      }),
+    ).toEqual([
+      {
+        name: {
+          formattedName: null,
+          firstName: 'Asha',
+          lastName: null,
+          middleName: null,
+          prefix: null,
+          suffix: null,
+        },
+        phones: [{ phone: '+91 98200 00000', waId: null, type: null }],
+        emails: [{ email: 'asha@example.com', type: null }],
+        urls: [{ url: 'asha.example', type: null }],
+        addresses: [
+          {
+            street: null,
+            city: 'Pune',
+            state: null,
+            zip: null,
+            country: null,
+            countryCode: null,
+            type: null,
+          },
+        ],
+        org: null,
+        birthday: null,
+      },
+      {
+        name: {
+          formattedName: null,
+          firstName: null,
+          lastName: null,
+          middleName: null,
+          prefix: null,
+          suffix: null,
+        },
+        phones: [],
+        emails: [],
+        urls: [],
+        addresses: [],
+        org: null,
+        birthday: null,
+      },
+    ]);
+    // Only a contact card's kept contacts: none for other messages, removed or too large content.
+    expect(contactCards('text', { text: 'Hi', contacts: [lucia] })).toBeNull();
+    expect(contactCards('contacts', { redacted: true })).toBeNull();
+    expect(contactCards('contacts', { tooLarge: true, contacts: [lucia] })).toBeNull();
+    expect(contactCards('contacts', { contacts: { 0: lucia } })).toBeNull();
+    expect(contactCards('contacts', { contacts: [] })).toEqual([]);
+  });
+
   it('says whether a tap was a reply button or a list row, with the row’s description (ADR-080)', () => {
     const tap = (interactiveType: string, reply: Record<string, unknown>) =>
       inboundSummary('interactive', { interactiveType, reply }).reply;
@@ -344,6 +494,7 @@ describe('webhook payload schemas', () => {
             mimeType: null,
             contentTooLarge: false,
             contactsLeftOut: 0,
+            contacts: null,
             receivedAt: base.createdAt,
           },
           conversation,

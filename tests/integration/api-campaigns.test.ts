@@ -3,18 +3,29 @@ import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/co
 import { authorizedTenantScope, type TenantScope } from '@w360/db';
 import {
   RECIPIENT_OUTCOMES,
+  apiArchiveSegment,
   apiCancelCampaign,
   apiCreateCampaign,
+  apiCreateSegment,
   apiGetCampaign,
+  apiGetSegment,
   apiListCampaignRecipients,
   apiListCampaigns,
   apiListMessages,
+  apiListSegmentContacts,
+  apiListSegments,
   apiPauseCampaign,
   apiResumeCampaign,
   apiReviewCampaign,
   apiSearchContacts,
+  apiSubmitCampaign,
   apiUpdateCampaign,
+  apiUpdateSegment,
+  apiWithdrawCampaign,
   authenticateApiToken,
+  campaignApprovalDeadline,
+  campaignApprovalNotice,
+  campaignReviewNotice,
   createApiKeysService,
   createCampaignsService,
   createConsentService,
@@ -23,6 +34,7 @@ import {
   createTemplatesService,
   createWebhooksService,
   processSendIntent,
+  outboxAad,
   processTemplateSubmit,
   runCampaignTick,
   syncTemplates,
@@ -33,6 +45,7 @@ import {
   type RecipientOutcome,
   type TemplateDefinition,
 } from '@w360/domain';
+import { acceptInvitation, createUser, invite } from './helpers';
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
 
 /**
@@ -76,6 +89,7 @@ beforeEach(() => {
 const scopeOf = (c: Company): TenantScope => authorizedTenantScope(c.tenant.id, null);
 const deps = () => ({ db: fx.dbs.app });
 const writeDeps = () => ({ db: fx.dbs.app, clock: systemClock });
+const submitDeps = () => ({ ...writeDeps(), campaignNotices: fx.notices() });
 
 const promo: TemplateDefinition = {
   category: 'MARKETING',
@@ -117,7 +131,13 @@ async function refusal(promise: Promise<unknown>) {
 async function setup() {
   const c = await fx.company();
   const clock = new TestClock();
-  const serviceDeps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock };
+  const serviceDeps = {
+    db: fx.dbs.app,
+    jobs: fx.jobs(),
+    signer: fx.signer,
+    clock,
+    notices: fx.notices(),
+  };
   const owner = await fx.ctx(c, c.owner);
   const templates = createTemplatesService(serviceDeps);
   const { id: templateId } = await templates.createDraft(owner, {
@@ -191,7 +211,14 @@ async function setup() {
     },
     tick(id: string) {
       return runCampaignTick(
-        { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock, sendRatePerSecond: 100 },
+        {
+          db: fx.dbs.app,
+          jobs: fx.jobs(),
+          signer: fx.signer,
+          clock,
+          sendRatePerSecond: 100,
+          notices: fx.notices(),
+        },
         scopeOf(c),
         id,
       );
@@ -1873,9 +1900,1084 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
       jobs: fx.jobs(),
       signer: fx.signer,
       clock: systemClock,
+      notices: fx.notices(),
     }).createDraft(otherOwner, { name: 'Theirs' }, {});
     expect(await refusal(apiReviewCampaign(writeDeps(), writer, theirs))).toMatchObject({
       code: 'not_found',
     });
+  });
+});
+
+describe('submitting campaign drafts through the API (ADR-202)', () => {
+  const versionOf = async (id: string) =>
+    (
+      await fx.query<{ version: number }>(`SELECT version FROM app.campaigns WHERE id = $1`, [id])
+    )[0]!.version;
+  const stateOf = (id: string) =>
+    fx.query<{
+      status: string;
+      submitted_by_user_id: string | null;
+      submitted_by_api_key_id: string | null;
+      launched_by_user_id: string | null;
+      approved_by_user_id: string | null;
+    }>(
+      `SELECT status, submitted_by_user_id, submitted_by_api_key_id, launched_by_user_id,
+              approved_by_user_id
+         FROM app.campaigns WHERE id = $1`,
+      [id],
+    );
+  const recipientsOf = (id: string) =>
+    fx.query<{ state: string; n: number }>(
+      `SELECT state, count(*)::int AS n FROM app.campaign_recipients WHERE campaign_id = $1
+        GROUP BY state ORDER BY state`,
+      [id],
+    );
+  async function refused(promise: Promise<unknown>) {
+    try {
+      await promise;
+    } catch (error) {
+      if (!isAppError(error)) throw error;
+      return { code: error.code, message: error.publicMessage };
+    }
+    throw new Error('expected a refusal');
+  }
+
+  it("submits a draft with members' checks for a member's approval, never starting it, and the approver launches it", async () => {
+    const s = await setup();
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Drafts');
+    await s.contact('+919820008001', 'Asha');
+    await s.contact('+919820008002', 'Ravi');
+    await s.contact('+919820008003', 'Meena', false);
+    // Members' submissions start at once in this company; a key's waits all the same.
+    expect((await s.campaigns.getSettings(s.owner)).approvalRequired).toBe(false);
+    const id = await s.draft('Festive sale');
+    const version = await versionOf(id);
+
+    // A stale version and a draft the checks refuse are refused, and stay drafts.
+    expect(
+      await refused(apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: version + 1 })),
+    ).toEqual({
+      code: 'conflict',
+      message: `This draft has changed since you read it: its version is ${version}. Read it again and give the version it has.`,
+    });
+    const started = await apiCreateCampaign(writeDeps(), writer, { name: 'Weekend offer' }, null);
+    const emptyId = (started.body as { data: { id: string } }).data.id;
+    expect(
+      await refused(
+        apiSubmitCampaign(submitDeps(), writer, emptyId, {
+          expectedVersion: await versionOf(emptyId),
+        }),
+      ),
+    ).toEqual({ code: 'precondition_failed', message: 'Choose the WhatsApp number to send from.' });
+    for (const draft of [id, emptyId]) {
+      expect(await stateOf(draft)).toEqual([
+        {
+          status: 'draft',
+          submitted_by_user_id: null,
+          submitted_by_api_key_id: null,
+          launched_by_user_id: null,
+          approved_by_user_id: null,
+        },
+      ]);
+      expect(await recipientsOf(draft)).toEqual([]);
+    }
+
+    // Submitted: its audience taken, waiting for a member's approval, the key named.
+    const submitted = await apiSubmitCampaign(submitDeps(), writer, id, {
+      expectedVersion: version,
+    });
+    expect(submitted).toMatchObject({
+      id,
+      status: 'pending_approval',
+      audienceCount: 3,
+      skippedCount: 1,
+      queuedCount: 0,
+      startedAt: null,
+    });
+    expect(await stateOf(id)).toEqual([
+      {
+        status: 'pending_approval',
+        submitted_by_user_id: null,
+        submitted_by_api_key_id: writer.key.id,
+        launched_by_user_id: null,
+        approved_by_user_id: null,
+      },
+    ]);
+    expect(await versionOf(id)).toBe(version + 1);
+    expect(await recipientsOf(id)).toEqual([
+      { state: 'pending', n: 2 },
+      { state: 'skipped', n: 1 },
+    ]);
+    expect(
+      await fx.query(
+        `SELECT actor_user_id, detail->>'apiKeyId' AS api_key_id, (detail->>'pending')::int AS pending
+           FROM app.campaign_events WHERE campaign_id = $1 AND type = 'submitted'`,
+        [id],
+      ),
+    ).toEqual([{ actor_user_id: null, api_key_id: writer.key.id, pending: 2 }]);
+    expect(
+      await fx.query(
+        `SELECT actor_type, actor_id, metadata FROM app.audit_events
+          WHERE subject_id = $1 AND action = 'campaign.submitted'`,
+        [id],
+      ),
+    ).toEqual([
+      {
+        actor_type: 'api_key',
+        actor_id: writer.key.id,
+        metadata: expect.objectContaining({ source: 'api', approvalRequired: true, pending: 2 }),
+      },
+    ]);
+    // A retry is answered as it is; another key cannot submit what is no longer a draft.
+    expect(await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: version })).toEqual(
+      submitted,
+    );
+    const other = await apiKey(s.c, ['campaigns.write'], 'Other drafts');
+    expect(
+      await refused(apiSubmitCampaign(submitDeps(), other, id, { expectedVersion: version + 1 })),
+    ).toEqual({
+      code: 'conflict',
+      message: "Only draft campaigns are submitted. This campaign's status is pending_approval.",
+    });
+    expect((await s.campaigns.getCampaign(s.owner, id)).people.submittedByKey).toBe('Drafts');
+
+    // The approver becomes its launcher, so approving needs permission to send campaigns.
+    const cannotSend = {
+      ...s.owner,
+      permissions: new Set([...s.owner.permissions].filter((p) => p !== 'campaigns.send')),
+    } as typeof s.owner;
+    expect(await refused(s.campaigns.approveCampaign(cannotSend, id, {}, {}))).toEqual({
+      code: 'forbidden',
+      message:
+        'An API key submitted this campaign, so it sends under the authority of the member who approves it: approving it needs permission to send campaigns.',
+    });
+    expect((await stateOf(id))[0]?.status).toBe('pending_approval');
+    await s.campaigns.approveCampaign(s.owner, id, {}, {});
+    expect(await stateOf(id)).toEqual([
+      {
+        status: 'scheduled',
+        submitted_by_user_id: null,
+        submitted_by_api_key_id: writer.key.id,
+        launched_by_user_id: s.c.owner.id,
+        approved_by_user_id: s.c.owner.id,
+      },
+    ]);
+    expect(
+      await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: version }),
+    ).toMatchObject({
+      id,
+      status: 'scheduled',
+    });
+  });
+
+  it('takes a rejected or withdrawn submission back to a draft without the key, and keeps one submitter', async () => {
+    const s = await setup();
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Drafts');
+    await s.contact('+919820008011', 'Asha');
+    const id = await s.draft('Diwali offer');
+    const first = await versionOf(id);
+    await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: first });
+    await s.campaigns.rejectCampaign(s.owner, id, { note: 'Not this week' }, {});
+    expect(await stateOf(id)).toEqual([
+      {
+        status: 'draft',
+        submitted_by_user_id: null,
+        submitted_by_api_key_id: null,
+        launched_by_user_id: null,
+        approved_by_user_id: null,
+      },
+    ]);
+    expect(await recipientsOf(id)).toEqual([]);
+    // The version it was submitted at no longer submits it; the current one does.
+    expect(
+      (await refused(apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: first }))).code,
+    ).toBe('conflict');
+    await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: await versionOf(id) });
+    // A member who approves campaigns takes a key's submission back.
+    await s.campaigns.withdrawCampaign(s.owner, id, {});
+    expect((await stateOf(id))[0]).toMatchObject({
+      status: 'draft',
+      submitted_by_api_key_id: null,
+    });
+
+    // The database keeps at most one submitter, and only a key of the company.
+    await expect(
+      fx.query(
+        `UPDATE app.campaigns SET submitted_by_user_id = $2, submitted_by_api_key_id = $3 WHERE id = $1`,
+        [id, s.c.owner.id, writer.key.id],
+      ),
+    ).rejects.toThrow(/campaigns_one_submitter/);
+    const elsewhere = await fx.company();
+    const theirs = await apiKey(elsewhere, ['campaigns.write'], 'Theirs');
+    await expect(
+      fx.query(`UPDATE app.campaigns SET submitted_by_api_key_id = $2 WHERE id = $1`, [
+        id,
+        theirs.key.id,
+      ]),
+    ).rejects.toThrow(/campaigns_submitted_by_api_key_fk/);
+    expect(
+      await fx.query(
+        `SELECT has_column_privilege('w360_app', 'app.campaigns', 'submitted_by_api_key_id', 'UPDATE') AS can`,
+      ),
+    ).toEqual([{ can: true }]);
+  });
+});
+
+describe('withdrawing campaign submissions through the API (ADR-203)', () => {
+  const versionOf = async (id: string) =>
+    (
+      await fx.query<{ version: number }>(`SELECT version FROM app.campaigns WHERE id = $1`, [id])
+    )[0]!.version;
+  async function refused(promise: Promise<unknown>) {
+    try {
+      await promise;
+    } catch (error) {
+      if (!isAppError(error)) throw error;
+      return { code: error.code, message: error.publicMessage };
+    }
+    throw new Error('expected a refusal');
+  }
+
+  it("takes a key's own submission back to a draft at a new version, and nobody else's", async () => {
+    const s = await setup();
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Drafts');
+    const other = await apiKey(s.c, ['campaigns.write'], 'Other drafts');
+    await s.contact('+919820008021', 'Asha');
+    const id = await s.draft('Festive sale');
+    // A draft is answered as it is, changing nothing.
+    const version = await versionOf(id);
+    expect(await apiWithdrawCampaign(writeDeps(), writer, id)).toMatchObject({
+      id,
+      status: 'draft',
+    });
+    expect(await versionOf(id)).toBe(version);
+    await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: version });
+
+    // Another key cannot take it back, and it keeps waiting with its audience.
+    expect(await refused(apiWithdrawCampaign(writeDeps(), other, id))).toEqual({
+      code: 'forbidden',
+      message:
+        'Only the key that submitted this campaign withdraws it through the API: members withdraw it in the app.',
+    });
+    expect(
+      (
+        await fx.query<{ status: string }>(`SELECT status FROM app.campaigns WHERE id = $1`, [id])
+      )[0]?.status,
+    ).toBe('pending_approval');
+
+    // The key that submitted it does: a draft at a new version without its audience; a retry
+    // answers the draft as it is.
+    for (let i = 0; i < 2; i += 1) {
+      expect(await apiWithdrawCampaign(writeDeps(), writer, id)).toMatchObject({
+        id,
+        status: 'draft',
+        audienceCount: 0,
+        skippedCount: 0,
+      });
+    }
+    expect(await versionOf(id)).toBe(version + 2);
+    expect(
+      await fx.query(`SELECT 1 FROM app.campaign_recipients WHERE campaign_id = $1`, [id]),
+    ).toEqual([]);
+    expect(
+      await fx.query(
+        `SELECT submitted_by_api_key_id, submitted_at FROM app.campaigns WHERE id = $1`,
+        [id],
+      ),
+    ).toEqual([{ submitted_by_api_key_id: null, submitted_at: null }]);
+    expect(
+      await fx.query(
+        `SELECT type, actor_user_id, detail->>'apiKeyId' AS api_key_id FROM app.campaign_events
+          WHERE campaign_id = $1 AND type IN ('submitted', 'withdrawn') ORDER BY occurred_at, id`,
+        [id],
+      ),
+    ).toEqual([
+      { type: 'submitted', actor_user_id: null, api_key_id: writer.key.id },
+      { type: 'withdrawn', actor_user_id: null, api_key_id: writer.key.id },
+    ]);
+    expect(
+      await fx.query(
+        `SELECT actor_type, actor_id, metadata FROM app.audit_events
+          WHERE subject_id = $1 AND action = 'campaign.withdrawn'`,
+        [id],
+      ),
+    ).toEqual([{ actor_type: 'api_key', actor_id: writer.key.id, metadata: { source: 'api' } }]);
+
+    // It is submitted again from its new version; once approved it is no longer withdrawn.
+    await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: version + 2 });
+    await s.campaigns.approveCampaign(s.owner, id, {}, {});
+    expect(await refused(apiWithdrawCampaign(writeDeps(), writer, id))).toEqual({
+      code: 'conflict',
+      message:
+        "Only a campaign waiting for approval is withdrawn. This campaign's status is scheduled.",
+    });
+
+    // A member's submission is withdrawn in the app only.
+    await s.campaigns.updateSettings(
+      s.owner,
+      { approvalRequired: true, cap: null, costCurrency: null },
+      {},
+    );
+    const membersId = await s.draft('Members sale');
+    await s.campaigns.submitCampaign(
+      s.owner,
+      membersId,
+      { expectedVersion: await versionOf(membersId) },
+      {},
+    );
+    expect((await refused(apiWithdrawCampaign(writeDeps(), writer, membersId))).code).toBe(
+      'forbidden',
+    );
+  });
+});
+
+describe('emailing about campaigns waiting for approval (ADR-204, ADR-205)', () => {
+  const versionOf = async (id: string) =>
+    (
+      await fx.query<{ version: number }>(`SELECT version FROM app.campaigns WHERE id = $1`, [id])
+    )[0]!.version;
+  /** The company's campaign emails of one kind queued in the outbox, oldest first. */
+  async function campaignEmails(tenantId: string, kind: 'campaign-approval' | 'campaign-review') {
+    const rows = await fx.query<{
+      id: string;
+      to_address: string;
+      dedupe_key: string;
+      payload_ciphertext: string;
+    }>(
+      `SELECT id, to_address, dedupe_key, payload_ciphertext FROM ops.email_outbox
+        WHERE tenant_id = $1 AND dedupe_key LIKE $2 ORDER BY id`,
+      [tenantId, `${kind}:%`],
+    );
+    return rows.map((r) => ({
+      to: r.to_address,
+      dedupeKey: r.dedupe_key,
+      ...(JSON.parse(fx.keyring.decryptString(r.payload_ciphertext, outboxAad(r.id))) as {
+        kind: string;
+        companyName: string;
+        subject: string;
+        lines: string[];
+        url: string;
+        actionLabel: string;
+      }),
+    }));
+  }
+  const approvalEmails = (tenantId: string) => campaignEmails(tenantId, 'campaign-approval');
+  async function member(c: Company, role: 'admin' | 'supervisor', status = 'active') {
+    const user = await createUser(fx.dbs, { name: `Campaign ${role}` });
+    const { token } = await invite(fx.dbs, c.tenant, c.owner, user.email, [role]);
+    await acceptInvitation(fx.dbs, user, token);
+    await fx.query(`UPDATE app.memberships SET status = $3 WHERE tenant_id = $1 AND user_id = $2`, [
+      c.tenant.id,
+      user.id,
+      status,
+    ]);
+    return user;
+  }
+  const companyName = async (c: Company) =>
+    (
+      await fx.query<{ name: string }>('SELECT name FROM app.tenants WHERE id = $1', [c.tenant.id])
+    )[0]!.name;
+
+  it("emails a key's submission once to the active members who approve and send campaigns, in its transaction, with its counts and a link", async () => {
+    const s = await setup();
+    const admin = await member(s.c, 'admin');
+    await member(s.c, 'admin', 'suspended');
+    await member(s.c, 'supervisor');
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Campaign drafts');
+    await s.contact('+919820008101', 'Asha');
+    await s.contact('+919820008102', 'Ravi');
+    await s.contact('+919820008103', 'Meena', false);
+    const id = await s.draft('Festive sale');
+    const version = await versionOf(id);
+    // A refused submission emails nobody.
+    await expect(
+      apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: version + 1 }),
+    ).rejects.toThrow('This draft has changed since you read it');
+    expect(await approvalEmails(s.c.tenant.id)).toEqual([]);
+
+    await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: version });
+    // It starts once approved, and can be approved until its 24-hour sending period from the
+    // submission ends (ADR-209).
+    const [waiting] = await fx.query<{ scheduled_at: Date }>(
+      `SELECT scheduled_at FROM app.campaigns WHERE id = $1`,
+      [id],
+    );
+    const expected = campaignApprovalNotice({
+      campaignName: 'Festive sale',
+      submitter: { kind: 'key', name: 'Campaign drafts' },
+      pending: 2,
+      total: 3,
+      startsAt: null,
+      approveBy: campaignApprovalDeadline(waiting!.scheduled_at, 24),
+      timeZone: 'Asia/Kolkata',
+    });
+    expect(expected.lines[3]).toMatch(
+      /^It can be approved until \d+ \w+ \d{4} at \d{2}:\d{2} GMT\+5:30, when its sending period ends; /,
+    );
+    expect(expected.lines.slice(0, 3)).toEqual([
+      "The API key “Campaign drafts” submitted the campaign “Festive sale”, and it waits for a member's approval.",
+      'It would be sent to 2 of the 3 contacts in its audience.',
+      'Once approved, it starts at once.',
+    ]);
+    const sent = await approvalEmails(s.c.tenant.id);
+    // The owner and the active administrator approve and send campaigns; the suspended
+    // administrator, the supervisor, the marketer and the agent do not.
+    expect(sent.map((e) => e.to).sort()).toEqual([admin.email, s.c.owner.email].sort());
+    for (const [email, userId] of [
+      [admin.email, admin.id],
+      [s.c.owner.email, s.c.owner.id],
+    ] as const) {
+      expect(sent.find((e) => e.to === email)).toEqual({
+        to: email,
+        dedupeKey: `campaign-approval:${id}:${version + 1}:${userId}`,
+        kind: 'tenant.notice',
+        companyName: await companyName(s.c),
+        subject: 'Campaign “Festive sale” waits for your approval',
+        lines: expected.lines,
+        url: `http://localhost:3000/c/${s.c.tenant.slug}/campaigns/${id}`,
+        actionLabel: 'Review campaign',
+      });
+    }
+
+    // A retry is answered as it is and emails nobody again, nor does a withdrawal.
+    await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: version });
+    await apiWithdrawCampaign(writeDeps(), writer, id);
+    expect(await approvalEmails(s.c.tenant.id)).toHaveLength(2);
+    // Submitted again, it is a new submission at a new version: each approver hears of it.
+    const again = await versionOf(id);
+    await apiSubmitCampaign(submitDeps(), writer, id, { expectedVersion: again });
+    const all = await approvalEmails(s.c.tenant.id);
+    expect(
+      all
+        .map((e) => e.dedupeKey)
+        .slice(2)
+        .sort(),
+    ).toEqual(
+      [admin.id, s.c.owner.id].map((u) => `campaign-approval:${id}:${again + 1}:${u}`).sort(),
+    );
+  });
+
+  it("emails a member's submission to the other approvers when the company requires approval, and nobody when it starts at once", async () => {
+    const s = await setup();
+    const admin = await member(s.c, 'admin');
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Campaign drafts');
+    await s.contact('+919820008111', 'Asha');
+    // Without approval a member's submission starts: nobody is asked to approve it.
+    expect((await s.campaigns.getSettings(s.owner)).approvalRequired).toBe(false);
+    const flash = await s.draft('Flash sale');
+    await s.campaigns.submitCampaign(s.owner, flash, { expectedVersion: 1 }, {});
+    expect(
+      (
+        await fx.query<{ status: string }>(`SELECT status FROM app.campaigns WHERE id = $1`, [
+          flash,
+        ])
+      )[0]?.status,
+    ).toBe('scheduled');
+    expect(await approvalEmails(s.c.tenant.id)).toEqual([]);
+
+    await s.campaigns.updateSettings(
+      s.owner,
+      { approvalRequired: true, cap: null, costCurrency: null },
+      {},
+    );
+    // The marketer's submission goes to the owner and the administrator, naming the marketer.
+    const byMarketer = await s.draft('Diwali offer');
+    await s.campaigns.submitCampaign(
+      await fx.ctx(s.c, s.c.marketer),
+      byMarketer,
+      { expectedVersion: 1 },
+      {},
+    );
+    const first = await approvalEmails(s.c.tenant.id);
+    expect(first.map((e) => e.to).sort()).toEqual([admin.email, s.c.owner.email].sort());
+    expect(first[0]?.lines).toEqual(
+      campaignApprovalNotice({
+        campaignName: 'Diwali offer',
+        submitter: { kind: 'member', name: 'Marketer' },
+        pending: 1,
+        total: 1,
+        startsAt: null,
+        approveBy: campaignApprovalDeadline(
+          (
+            await fx.query<{ scheduled_at: Date }>(
+              `SELECT scheduled_at FROM app.campaigns WHERE id = $1`,
+              [byMarketer],
+            )
+          )[0]!.scheduled_at,
+          24,
+        ),
+        timeZone: 'Asia/Kolkata',
+      }).lines,
+    );
+
+    // The owner's own submission, set to start later in London, goes to the administrator only,
+    // with the start in the campaign's time zone.
+    const byOwner = await s.draft('Winter launch');
+    const local = `${new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10)}T09:30`;
+    await apiUpdateCampaign(deps(), writer, byOwner, {
+      expectedVersion: 1,
+      schedule: { kind: 'later', local, timezone: 'Europe/London' },
+    });
+    const edited = await versionOf(byOwner);
+    await s.campaigns.submitCampaign(s.owner, byOwner, { expectedVersion: edited }, {});
+    const [scheduled] = await fx.query<{ scheduled_at: Date }>(
+      `SELECT scheduled_at FROM app.campaigns WHERE id = $1`,
+      [byOwner],
+    );
+    const second = (await approvalEmails(s.c.tenant.id)).slice(2);
+    expect(second).toEqual([
+      expect.objectContaining({
+        to: admin.email,
+        dedupeKey: `campaign-approval:${byOwner}:${edited + 1}:${admin.id}`,
+        subject: 'Campaign “Winter launch” waits for your approval',
+        lines: campaignApprovalNotice({
+          campaignName: 'Winter launch',
+          submitter: { kind: 'member', name: 'Owner' },
+          pending: 1,
+          total: 1,
+          startsAt: scheduled!.scheduled_at,
+          approveBy: campaignApprovalDeadline(scheduled!.scheduled_at, 24),
+          timeZone: 'Europe/London',
+        }).lines,
+        url: `http://localhost:3000/c/${s.c.tenant.slug}/campaigns/${byOwner}`,
+      }),
+    ]);
+    expect(second[0]?.lines[2]).toMatch(
+      /^Once approved, it starts at \d+ \w+ \d{4} at 09:30 (GMT|BST), or at once/,
+    );
+  });
+
+  it('emails the member who submitted a campaign when an approver approves it, sends it back or takes it back, and nobody for their own withdrawal (ADR-205)', async () => {
+    const s = await setup();
+    await s.contact('+919820008121', 'Asha');
+    await s.campaigns.updateSettings(
+      s.owner,
+      { approvalRequired: true, cap: null, costCurrency: null },
+      {},
+    );
+    const marketer = await fx.ctx(s.c, s.c.marketer);
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Campaign drafts');
+    const submit = async (
+      name: string,
+      schedule?: { kind: 'later'; local: string; timezone: string },
+    ) => {
+      const id = await s.draft(name);
+      if (schedule) await apiUpdateCampaign(deps(), writer, id, { expectedVersion: 1, schedule });
+      await s.campaigns.submitCampaign(marketer, id, { expectedVersion: await versionOf(id) }, {});
+      return id;
+    };
+    // Approved with a note, set to start later in London: the start in the campaign's time zone.
+    const local = `${new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10)}T09:30`;
+    const approved = await submit('Diwali offer', {
+      kind: 'later',
+      local,
+      timezone: 'Europe/London',
+    });
+    await s.campaigns.approveCampaign(s.owner, approved, { note: 'Looks good' }, {});
+    const [launched] = await fx.query<{ scheduled_at: Date; version: number }>(
+      `SELECT scheduled_at, version FROM app.campaigns WHERE id = $1`,
+      [approved],
+    );
+    // Sent back with a note; taken back by the owner; taken back by the marketer, who is told
+    // nothing about their own withdrawal.
+    const rejected = await submit('Weekend sale');
+    await s.campaigns.rejectCampaign(s.owner, rejected, { note: 'Use the new offer' }, {});
+    const withdrawn = await submit('Flash sale');
+    await s.campaigns.withdrawCampaign(s.owner, withdrawn, {});
+    const own = await submit('Clearance');
+    await s.campaigns.withdrawCampaign(marketer, own, {});
+
+    const email = async (id: string, notice: { subject: string; lines: string[] }) => ({
+      to: s.c.marketer.email,
+      dedupeKey: `campaign-review:${id}:${await versionOf(id)}:${s.c.marketer.id}`,
+      kind: 'tenant.notice',
+      companyName: await companyName(s.c),
+      ...notice,
+      url: `http://localhost:3000/c/${s.c.tenant.slug}/campaigns/${id}`,
+      actionLabel: 'Open campaign',
+    });
+    const review = { reviewer: 'Owner', startsAt: null, timeZone: 'Asia/Kolkata' };
+    expect(await versionOf(approved)).toBe(launched!.version);
+    expect(await campaignEmails(s.c.tenant.id, 'campaign-review')).toEqual([
+      await email(
+        approved,
+        campaignReviewNotice({
+          ...review,
+          campaignName: 'Diwali offer',
+          outcome: 'approved',
+          note: 'Looks good',
+          startsAt: launched!.scheduled_at,
+          timeZone: 'Europe/London',
+        }),
+      ),
+      await email(
+        rejected,
+        campaignReviewNotice({
+          ...review,
+          campaignName: 'Weekend sale',
+          outcome: 'rejected',
+          note: 'Use the new offer',
+        }),
+      ),
+      await email(
+        withdrawn,
+        campaignReviewNotice({
+          ...review,
+          campaignName: 'Flash sale',
+          outcome: 'withdrawn',
+          note: null,
+        }),
+      ),
+    ]);
+  });
+
+  it("emails nobody about a key's submission, or a submitter who is no longer an active member (ADR-205)", async () => {
+    const s = await setup();
+    await s.contact('+919820008131', 'Asha');
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Campaign drafts');
+    // No member submitted a key's submission: its integration reads campaign.status_changed.
+    const byKey = await s.draft('Festive sale');
+    await apiSubmitCampaign(submitDeps(), writer, byKey, {
+      expectedVersion: await versionOf(byKey),
+    });
+    await s.campaigns.approveCampaign(s.owner, byKey, {}, {});
+    // The marketer is suspended after submitting: their campaign is sent back without an email.
+    await s.campaigns.updateSettings(
+      s.owner,
+      { approvalRequired: true, cap: null, costCurrency: null },
+      {},
+    );
+    const byMarketer = await s.draft('Diwali offer');
+    await s.campaigns.submitCampaign(
+      await fx.ctx(s.c, s.c.marketer),
+      byMarketer,
+      { expectedVersion: 1 },
+      {},
+    );
+    await fx.query(
+      `UPDATE app.memberships SET status = 'suspended' WHERE tenant_id = $1 AND user_id = $2`,
+      [s.c.tenant.id, s.c.marketer.id],
+    );
+    await s.campaigns.rejectCampaign(s.owner, byMarketer, { note: 'Not this week' }, {});
+    expect(await campaignEmails(s.c.tenant.id, 'campaign-review')).toEqual([]);
+    // Both submissions were still emailed to the approver (ADR-204).
+    expect((await approvalEmails(s.c.tenant.id)).map((e) => e.to)).toEqual([
+      s.c.owner.email,
+      s.c.owner.email,
+    ]);
+  });
+});
+
+describe('reading saved segments through the API (ADR-206)', () => {
+  it("lists the company's segments newest first with their conditions and problems, counts one as members' segment page does, and a draft takes one", async () => {
+    const s = await setup();
+    const segmentsService = createSegmentsService({ db: fx.dbs.app, clock: systemClock });
+    await s.contact('+919820008201', 'Asha');
+    await s.contact('+919820008202', 'Ravi');
+    await s.contact('+919820008203', 'Meena', false);
+    const create = (name: string, definition: unknown) =>
+      segmentsService.createSegment(s.owner, { name, definition }, {});
+    const vip = await create('VIP buyers', {
+      match: 'all',
+      conditions: [{ type: 'tag', op: 'has', tag: 'vip' }],
+    });
+    const optedIn = await create('Opted in', {
+      match: 'any',
+      conditions: [{ type: 'consent', purpose: 'marketing', status: 'opted_in' }],
+    });
+    const broken = await create('Gold tier', {
+      match: 'all',
+      conditions: [{ type: 'tag', op: 'has', tag: 'gold' }],
+    });
+    const unreadable = await create('Lost', {
+      match: 'all',
+      conditions: [{ type: 'tag', op: 'has', tag: 'lost' }],
+    });
+    const archived = await create('Old buyers', {
+      match: 'all',
+      conditions: [{ type: 'tag', op: 'has', tag: 'old' }],
+    });
+    await segmentsService.archiveSegment(s.owner, archived.id, {});
+    // Conditions that no longer hold: on a custom field deleted since, and ones HyFib cannot read.
+    await fx.query(`UPDATE app.segments SET definition = $2 WHERE id = $1`, [
+      broken.id,
+      JSON.stringify({
+        match: 'all',
+        conditions: [{ type: 'field', key: 'tier', op: 'equals', value: 'gold' }],
+      }),
+    ]);
+    await fx.query(
+      `UPDATE app.segments SET definition = '{"match": "all", "conditions": []}' WHERE id = $1`,
+      [unreadable.id],
+    );
+    const other = await setup();
+    const theirs = await segmentsService.createSegment(
+      other.owner,
+      { name: 'Theirs', definition: { conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] } },
+      {},
+    );
+    const reader = await apiKey(s.c, ['campaigns.read'], 'Segments');
+
+    // Newest first on exact pages; the archived segment and the other company's are left out.
+    const first = await apiListSegments(deps(), reader, { limit: '2' });
+    expect(first.data.map((x) => x.name)).toEqual(['Lost', 'Gold tier']);
+    expect(first.nextCursor).not.toBeNull();
+    const second = await apiListSegments(deps(), reader, {
+      limit: '2',
+      cursor: first.nextCursor!,
+    });
+    expect(second).toEqual({
+      data: [
+        {
+          id: optedIn.id,
+          name: 'Opted in',
+          definition: {
+            match: 'any',
+            conditions: [{ type: 'consent', purpose: 'marketing', status: 'opted_in' }],
+          },
+          problem: null,
+          version: 0,
+          createdAt: expect.any(String),
+          updatedAt: expect.any(String),
+        },
+        expect.objectContaining({
+          id: vip.id,
+          definition: { match: 'all', conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
+          problem: null,
+        }),
+      ],
+      nextCursor: null,
+    });
+    expect(first.data).toEqual([
+      expect.objectContaining({
+        id: unreadable.id,
+        definition: null,
+        problem: 'This segment’s conditions can no longer be read.',
+      }),
+      expect.objectContaining({
+        id: broken.id,
+        definition: {
+          match: 'all',
+          conditions: [{ type: 'field', key: 'tier', op: 'equals', value: 'gold' }],
+        },
+        problem: 'A condition uses a custom field that does not exist.',
+      }),
+    ]);
+
+    // One segment, counted now as members' segment page counts it; none with a problem.
+    for (const [segment, count] of [
+      [vip, 3],
+      [optedIn, 2],
+    ] as const) {
+      expect(await apiGetSegment(deps(), reader, segment.id)).toMatchObject({
+        id: segment.id,
+        problem: null,
+        count,
+      });
+      expect((await segmentsService.getSegment(s.owner, segment.id)).preview?.count).toBe(count);
+    }
+    for (const segment of [broken, unreadable]) {
+      expect(await apiGetSegment(deps(), reader, segment.id)).toMatchObject({
+        id: segment.id,
+        problem: expect.any(String),
+        count: null,
+      });
+    }
+    for (const id of [archived.id, theirs.id]) {
+      expect(await refusal(apiGetSegment(deps(), reader, id))).toEqual({
+        code: 'not_found',
+        paths: [],
+      });
+    }
+
+    // A draft's audience takes a listed segment by its id.
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Drafts');
+    const draft = await apiCreateCampaign(
+      writeDeps(),
+      writer,
+      { name: 'VIP offer', audience: { segmentId: vip.id } },
+      null,
+    );
+    expect(draft.status).toBe(201);
+    expect((draft.body as { data: { settings: { audience: unknown } } }).data.settings).toEqual(
+      expect.objectContaining({ audience: { segmentId: vip.id } }),
+    );
+  });
+});
+
+describe('writing saved segments through the API (ADR-207)', () => {
+  const idem = (key: string, request: string) => ({ key, requestHash: sha256Hex(request) });
+  /** The code, message and paths of a refusal. */
+  async function refused(promise: Promise<unknown>) {
+    try {
+      await promise;
+    } catch (error) {
+      if (!isAppError(error)) throw error;
+      return {
+        code: error.code,
+        message: error.publicMessage,
+        paths: (error.issues ?? []).map((i) => i.path),
+      };
+    }
+    throw new Error('expected a refusal');
+  }
+  const dataOf = (response: { body: unknown }) =>
+    (response.body as { data: { id: string } & Record<string, unknown> }).data;
+
+  it('creates, changes and archives segments as members do, checked as searches are, the key named in the audit', async () => {
+    const s = await setup();
+    await s.contact('+919820008211', 'Asha');
+    await s.contact('+919820008212', 'Ravi', false);
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Segments');
+    const reader = await apiKey(s.c, ['campaigns.read'], 'Segment reader');
+    const segmentsService = createSegmentsService({ db: fx.dbs.app, clock: systemClock });
+
+    // Created with its conditions checked and normalized as a search's are, once per key.
+    const body = {
+      name: 'VIP buyers',
+      definition: { conditions: [{ type: 'tag', op: 'has', tag: ' VIP ' }] },
+    };
+    const key = idem('vip-1', JSON.stringify(body));
+    const created = await apiCreateSegment(writeDeps(), writer, body, key);
+    expect(created.status).toBe(201);
+    const segment = dataOf(created);
+    expect(segment).toMatchObject({
+      name: 'VIP buyers',
+      definition: { match: 'all', conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
+      problem: null,
+      version: 0,
+      count: 2,
+    });
+    expect((await apiCreateSegment(writeDeps(), writer, body, key)).body).toEqual(created.body);
+    expect(
+      await fx.query(`SELECT count(*)::int AS n FROM app.segments WHERE tenant_id = $1`, [
+        s.c.tenant.id,
+      ]),
+    ).toEqual([{ n: 1 }]);
+    // Members find it among their segments, counted alike.
+    expect((await segmentsService.getSegment(s.owner, segment.id)).preview?.count).toBe(2);
+
+    // Refused naming the condition, as a search is; a name another segment has, whatever its case.
+    const other = await setup();
+    const theirCampaign = await other.draft('Theirs');
+    for (const [given, expected] of [
+      [
+        {
+          name: 'Tiers',
+          definition: {
+            conditions: [{ type: 'field', key: 'tier', op: 'equals', value: 'gold' }],
+          },
+        },
+        { code: 'validation_failed', paths: ['definition.conditions.0.key'] },
+      ],
+      [
+        {
+          name: 'Theirs',
+          definition: {
+            conditions: [
+              { type: 'tag', op: 'has', tag: 'vip' },
+              { type: 'campaign', campaignId: theirCampaign, outcome: 'replied' },
+            ],
+          },
+        },
+        { code: 'validation_failed', paths: ['definition.conditions.1.campaignId'] },
+      ],
+      [
+        { name: 'vip BUYERS', definition: body.definition },
+        { code: 'conflict', message: 'Another segment already has this name.', paths: ['name'] },
+      ],
+    ] as const) {
+      expect(
+        await refused(apiCreateSegment(writeDeps(), writer, given, null)),
+        JSON.stringify(given),
+      ).toMatchObject(expected);
+    }
+    // Members get the same words for a name another segment has.
+    expect(
+      await refused(
+        segmentsService.createSegment(
+          s.owner,
+          {
+            name: 'VIP Buyers',
+            definition: { conditions: [{ type: 'tag', op: 'has', tag: 'x' }] },
+          },
+          {},
+        ),
+      ),
+    ).toMatchObject({ code: 'conflict', message: 'Another segment already has this name.' });
+
+    // Changed: the name alone, then the conditions at the version read; a stale version refused.
+    expect(
+      await apiUpdateSegment(deps(), writer, segment.id, { name: 'Top buyers' }),
+    ).toMatchObject({ name: 'Top buyers', version: 1, definition: segment.definition, count: 2 });
+    const consented = {
+      match: 'any',
+      conditions: [{ type: 'consent', purpose: 'marketing', status: 'opted_in' }],
+    };
+    expect(
+      await apiUpdateSegment(deps(), writer, segment.id, {
+        expectedVersion: 1,
+        definition: consented,
+      }),
+    ).toMatchObject({ name: 'Top buyers', version: 2, definition: consented, count: 1 });
+    expect(
+      await refused(
+        apiUpdateSegment(deps(), writer, segment.id, { expectedVersion: 1, name: 'x' }),
+      ),
+    ).toEqual({
+      code: 'conflict',
+      message:
+        'This segment has changed since you read it: its version is 2. Read it again and give the version it has.',
+      paths: [],
+    });
+    const second = dataOf(
+      await apiCreateSegment(writeDeps(), writer, { name: 'Second', definition: consented }, null),
+    );
+    expect(
+      await refused(apiUpdateSegment(deps(), writer, second.id, { name: 'TOP buyers' })),
+    ).toMatchObject({ code: 'conflict', paths: ['name'] });
+
+    // Archived, a retry answered as it is; it leaves the reads and its name is free again.
+    for (let i = 0; i < 2; i += 1) {
+      expect(await apiArchiveSegment(writeDeps(), writer, segment.id)).toEqual({
+        id: segment.id,
+        archived: true,
+      });
+    }
+    expect((await refused(apiGetSegment(deps(), reader, segment.id))).code).toBe('not_found');
+    expect(
+      (await refused(apiUpdateSegment(deps(), writer, segment.id, { name: 'Back' }))).code,
+    ).toBe('not_found');
+    expect(
+      (
+        await apiCreateSegment(
+          writeDeps(),
+          writer,
+          { name: 'Top buyers', definition: consented },
+          null,
+        )
+      ).status,
+    ).toBe(201);
+    // Another company's segment is not found.
+    const theirs = await segmentsService.createSegment(
+      other.owner,
+      { name: 'Theirs', definition: { conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] } },
+      {},
+    );
+    expect(
+      (await refused(apiUpdateSegment(deps(), writer, theirs.id, { name: 'Mine' }))).code,
+    ).toBe('not_found');
+    expect((await refused(apiArchiveSegment(writeDeps(), writer, theirs.id))).code).toBe(
+      'not_found',
+    );
+
+    // The audit names the key: created, changed twice, archived once.
+    expect(
+      await fx.query(
+        `SELECT action, actor_type, actor_id, metadata->>'source' AS source FROM app.audit_events
+          WHERE subject_id = $1 ORDER BY occurred_at, id`,
+        [segment.id],
+      ),
+    ).toEqual(
+      ['segment.created', 'segment.updated', 'segment.updated', 'segment.archived'].map(
+        (action) => ({ action, actor_type: 'api_key', actor_id: writer.key.id, source: 'api' }),
+      ),
+    );
+  });
+});
+
+describe("listing a segment's contacts through the API (ADR-208)", () => {
+  async function refused(promise: Promise<unknown>) {
+    try {
+      await promise;
+    } catch (error) {
+      if (!isAppError(error)) throw error;
+      return { code: error.code, message: error.publicMessage };
+    }
+    throw new Error('expected a refusal');
+  }
+
+  it('lists the contacts a segment holds now, newest first on pages, as a search with its conditions finds them', async () => {
+    const s = await setup();
+    const asha = await s.contact('+919820008221', 'Asha');
+    const ravi = await s.contact('+919820008222', 'Ravi');
+    await s.contact('+919820008223', 'Meena', false);
+    const segmentsService = createSegmentsService({ db: fx.dbs.app, clock: systemClock });
+    const consent = { type: 'consent', purpose: 'marketing', status: 'opted_in' } as const;
+    const optedIn = await segmentsService.createSegment(
+      s.owner,
+      { name: 'Opted in', definition: { conditions: [consent] } },
+      {},
+    );
+    const key = await apiKey(s.c, ['campaigns.read', 'contacts.read'], 'Segment contacts');
+
+    // Newest first on pages; Meena, without an opt-in, is not in it.
+    const first = await apiListSegmentContacts(deps(), key, optedIn.id, { limit: '1' });
+    expect(first.data.map((c) => c.id)).toEqual([ravi]);
+    const second = await apiListSegmentContacts(deps(), key, optedIn.id, {
+      limit: '1',
+      cursor: first.nextCursor!,
+    });
+    expect(second).toEqual({ data: [expect.objectContaining({ id: asha })], nextCursor: null });
+    // The same contacts as a search with the segment's conditions, each as the API gives it.
+    const searched = await apiSearchContacts(deps(), key, { conditions: [consent] });
+    expect([...first.data, ...second.data]).toEqual(searched.data);
+    // An erased contact leaves it.
+    await s.erase(ravi);
+    expect(
+      (await apiListSegmentContacts(deps(), key, optedIn.id, {})).data.map((c) => c.id),
+    ).toEqual([asha]);
+
+    // A segment on recent messages also needs conversations.read, as a search does.
+    const recent = await segmentsService.createSegment(
+      s.owner,
+      {
+        name: 'Wrote this week',
+        definition: { conditions: [{ type: 'last_message', op: 'within_days', days: 7 }] },
+      },
+      {},
+    );
+    expect(await refused(apiListSegmentContacts(deps(), key, recent.id, {}))).toEqual({
+      code: 'forbidden',
+      message: 'This API key does not have the conversations.read scope.',
+    });
+    const reader = await apiKey(
+      s.c,
+      ['campaigns.read', 'contacts.read', 'conversations.read'],
+      'Inbox reader',
+    );
+    expect(await apiListSegmentContacts(deps(), reader, recent.id, {})).toEqual({
+      data: [],
+      nextCursor: null,
+    });
+
+    // A segment with a problem is refused saying it; archived and other companies' are not found.
+    const broken = await segmentsService.createSegment(
+      s.owner,
+      { name: 'Gold tier', definition: { conditions: [{ type: 'tag', op: 'has', tag: 'gold' }] } },
+      {},
+    );
+    await fx.query(`UPDATE app.segments SET definition = $2 WHERE id = $1`, [
+      broken.id,
+      JSON.stringify({
+        match: 'all',
+        conditions: [{ type: 'field', key: 'tier', op: 'equals', value: 'gold' }],
+      }),
+    ]);
+    expect(await refused(apiListSegmentContacts(deps(), key, broken.id, {}))).toEqual({
+      code: 'precondition_failed',
+      message:
+        'A condition uses a custom field that does not exist. A member fixes the segment on the Segments page.',
+    });
+    await segmentsService.archiveSegment(s.owner, recent.id, {});
+    const other = await setup();
+    const theirs = await segmentsService.createSegment(
+      other.owner,
+      { name: 'Theirs', definition: { conditions: [consent] } },
+      {},
+    );
+    for (const id of [recent.id, theirs.id]) {
+      expect((await refused(apiListSegmentContacts(deps(), key, id, {}))).code).toBe('not_found');
+    }
   });
 });

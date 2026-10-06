@@ -2,6 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isAppError, systemClock, uuidv7 } from '@w360/core';
 import { authorizedTenantScope, sql } from '@w360/db';
 import {
+  BULK_TAG_LIMIT,
+  MAX_TAGS_PER_CONTACT,
   createConsentService,
   createContactsService,
   parseCsv,
@@ -10,6 +12,7 @@ import {
   type ContactsService,
   type ConsentService,
 } from '@w360/domain';
+import { acceptInvitation, createUser, invite } from './helpers';
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
 
 /**
@@ -213,6 +216,205 @@ describe('contacts', () => {
       cursor = page.nextCursor;
     } while (cursor);
     expect(seen.sort()).toEqual(batch.map((r) => r.id).sort());
+  });
+});
+
+describe('bulk tag edits (ADR-213)', () => {
+  async function tagsOf(contactId: string) {
+    const rows = await fx.query<{ tag: string }>(
+      'SELECT tag FROM app.contact_tags WHERE contact_id = $1 ORDER BY tag',
+      [contactId],
+    );
+    return rows.map((r) => r.tag);
+  }
+
+  it('adds a tag to every contact the filters match, but those that have it or are full, removes it, and audits both', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const a = await contactsSvc.createContact(owner, {
+      displayName: 'Asha Rao',
+      phone: '+919811000001',
+      tags: ['pune'],
+    });
+    const b = await contactsSvc.createContact(owner, {
+      displayName: 'Bina Shah',
+      phone: '+919811000002',
+      tags: ['pune', 'vip'],
+    });
+    const full = await contactsSvc.createContact(owner, {
+      displayName: 'Chitra Das',
+      phone: '+919811000003',
+      tags: ['pune'],
+    });
+    await fx.query(
+      `INSERT INTO app.contact_tags (id, tenant_id, contact_id, tag)
+       SELECT gen_random_uuid(), $1, $2, 'tag ' || n FROM generate_series(1, $3::int - 1) n`,
+      [c.tenant.id, full.id, MAX_TAGS_PER_CONTACT],
+    );
+    const other = await contactsSvc.createContact(owner, {
+      displayName: 'Dev Mehta',
+      phone: '+919811000004',
+      tags: ['mumbai'],
+    });
+    const erased = await contactsSvc.createContact(owner, {
+      displayName: 'Esha Paul',
+      phone: '+919811000005',
+      tags: ['pune'],
+    });
+    await contactsSvc.eraseContact(owner, { contactId: erased.id, suppress: false });
+
+    // The erased contact no longer matches.
+    const pune = { tag: 'pune' };
+    expect(await contactsSvc.countContacts(owner, pune)).toBe(3);
+    // The number shown must still be the number matching.
+    await expectAppError(
+      contactsSvc.bulkTagContacts(owner, {
+        filter: pune,
+        tag: 'vip',
+        action: 'add',
+        expectedCount: 2,
+      }),
+      'conflict',
+      /These filters now match 3 contacts, not 2\./,
+    );
+    await expectAppError(
+      contactsSvc.bulkTagContacts(owner, {
+        filter: pune,
+        tag: 'a,b',
+        action: 'add',
+        expectedCount: 3,
+      }),
+      'validation_failed',
+      /commas/,
+    );
+    expect(
+      await contactsSvc.bulkTagContacts(
+        owner,
+        { filter: pune, tag: ' VIP ', action: 'add', expectedCount: 3 },
+        { ipAddress: '203.0.113.7' },
+      ),
+    ).toEqual({ action: 'add', tag: 'vip', matched: 3, changed: 1, unchanged: 1, atLimit: 1 });
+    expect(await tagsOf(a.id)).toEqual(['pune', 'vip']);
+    expect(await tagsOf(b.id)).toEqual(['pune', 'vip']);
+    expect(await tagsOf(full.id)).not.toContain('vip');
+    expect(await tagsOf(other.id)).toEqual(['mumbai']);
+
+    // Removing it, by an agent, from the contacts a search finds.
+    const agent = await fx.ctx(c, c.agent);
+    const search = { q: 'Rao' };
+    expect(await contactsSvc.countContacts(agent, search)).toBe(1);
+    expect(
+      await contactsSvc.bulkTagContacts(agent, {
+        filter: search,
+        tag: 'vip',
+        action: 'remove',
+        expectedCount: 1,
+      }),
+    ).toEqual({ action: 'remove', tag: 'vip', matched: 1, changed: 1, unchanged: 0, atLimit: 0 });
+    expect(await tagsOf(a.id)).toEqual(['pune']);
+    expect(
+      await contactsSvc.bulkTagContacts(owner, {
+        filter: pune,
+        tag: 'vip',
+        action: 'remove',
+        expectedCount: 3,
+      }),
+    ).toEqual({ action: 'remove', tag: 'vip', matched: 3, changed: 1, unchanged: 2, atLimit: 0 });
+    expect(await tagsOf(b.id)).toEqual(['pune']);
+
+    // Audited with the counts and which filters were used, never the search text.
+    const audit = await fx.query<{ actor_id: string; metadata: Record<string, unknown> }>(
+      `SELECT actor_id, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'contacts.bulk_tagged' ORDER BY id`,
+      [c.tenant.id],
+    );
+    expect(audit).toEqual([
+      {
+        actor_id: c.owner.id,
+        metadata: {
+          action: 'add',
+          tag: 'vip',
+          matched: 3,
+          changed: 1,
+          unchanged: 1,
+          atLimit: 1,
+          filter: { q: false, tag: 'pune', consent: 'any' },
+        },
+      },
+      {
+        actor_id: c.agent.id,
+        metadata: {
+          action: 'remove',
+          tag: 'vip',
+          matched: 1,
+          changed: 1,
+          unchanged: 0,
+          atLimit: 0,
+          filter: { q: true, tag: null, consent: 'any' },
+        },
+      },
+      expect.objectContaining({ actor_id: c.owner.id }),
+    ]);
+    expect(JSON.stringify(audit)).not.toContain('Rao');
+
+    // Members who cannot change contacts cannot use it; another company finds none of these.
+    const user = await createUser(fx.dbs, { name: 'Analyst A' });
+    const { token } = await invite(fx.dbs, c.tenant, c.owner, user.email, ['analyst']);
+    await acceptInvitation(fx.dbs, user, token);
+    const analyst = await fx.ctx(c, user);
+    await expectAppError(contactsSvc.countContacts(analyst, pune), 'forbidden');
+    await expectAppError(
+      contactsSvc.bulkTagContacts(analyst, {
+        filter: pune,
+        tag: 'vip',
+        action: 'add',
+        expectedCount: 3,
+      }),
+      'forbidden',
+    );
+    const d = await fx.company();
+    const elsewhere = await fx.ctx(d, d.owner);
+    expect(await contactsSvc.countContacts(elsewhere, pune)).toBe(0);
+    await expectAppError(
+      contactsSvc.bulkTagContacts(elsewhere, {
+        filter: pune,
+        tag: 'vip',
+        action: 'add',
+        expectedCount: 3,
+      }),
+      'conflict',
+      /These filters now match 0 contacts, not 3\./,
+    );
+  });
+
+  it('refuses more contacts than one edit may change', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await fx.query(
+      `WITH added AS (
+         INSERT INTO app.contacts (id, tenant_id, display_name, source)
+         SELECT gen_random_uuid(), $1, 'Bulk ' || n, 'import' FROM generate_series(1, $2::int) n
+         RETURNING id)
+       INSERT INTO app.contact_tags (id, tenant_id, contact_id, tag)
+       SELECT gen_random_uuid(), $1, id, 'lead' FROM added`,
+      [c.tenant.id, BULK_TAG_LIMIT + 1],
+    );
+    expect(await contactsSvc.countContacts(owner, { tag: 'lead' })).toBe(BULK_TAG_LIMIT + 1);
+    await expectAppError(
+      contactsSvc.bulkTagContacts(owner, {
+        filter: { tag: 'lead' },
+        tag: 'lead',
+        action: 'remove',
+        expectedCount: BULK_TAG_LIMIT,
+      }),
+      'validation_failed',
+      /At most 10,000 contacts can be tagged at once\. Narrow the filters first\./,
+    );
+    const [left] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM app.contact_tags WHERE tenant_id = $1 AND tag = 'lead'`,
+      [c.tenant.id],
+    );
+    expect(left!.n).toBe(BULK_TAG_LIMIT + 1);
   });
 });
 
