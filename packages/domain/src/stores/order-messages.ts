@@ -39,7 +39,7 @@ import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { emitTenantEvent } from '../messaging/events';
 import { STATUS_RANK } from '../messaging/status';
-import { buildTemplateSend, sendSpecFor } from '../templates/definition';
+import { buildTemplateSend, linkButtons, sendSpecFor } from '../templates/definition';
 import {
   STORE_MESSAGE_EVENT_INFO,
   STORE_MESSAGE_LIMITS,
@@ -574,7 +574,9 @@ export async function processStoreMessage(
       payloads.set(rule.confirmButton, codPayload(row.id, 'confirm'));
       payloads.set(rule.cancelButton, codPayload(row.id, 'cancel'));
     }
-    const resolved = resolveStoreVariables(readStoreVariables(rule.variables), values);
+    const variables = readStoreVariables(rule.variables);
+    if (variables.buttons.length !== spec.buttonParams) return skip('template_changed');
+    const resolved = resolveStoreVariables(variables, values, linkButtons(spec.definition));
     if (!resolved.ok) return skip('missing_variable');
     if (
       resolved.params.header.length !== spec.headerParams ||

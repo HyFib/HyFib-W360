@@ -104,6 +104,8 @@ export type RunEffect =
       templateId: string;
       header: string[];
       body: string[];
+      /** The ends of the template's links that take a value, as rendered (ADR-229). */
+      links: string[];
       ask: boolean;
       buttons: { index: number; title: string; payload: string }[];
     }
@@ -495,14 +497,20 @@ export function advance(input: AdvanceInput): StepResult {
         const vals = values(base.variables);
         const header = current.header.map((t) => templateParam(renderText(t, vals)));
         const body = current.body.map((t) => templateParam(renderText(t, vals)));
+        // The end of a link is kept as rendered (no white space collapsed): whether it can end
+        // the template's link is checked when the template is queued.
+        const links = current.links.map((t) => renderText(t, vals).trim());
         // Nothing is sent with a blank variable.
-        if ([...header, ...body].some((v) => !v)) return fail('error', 'missing_variable', base);
+        if ([...header, ...body, ...links].some((v) => !v)) {
+          return fail('error', 'missing_variable', base);
+        }
         const ask = current.type === 'ask_template';
         const effect: RunEffect = {
           kind: 'send_template',
           templateId: current.templateId,
           header,
           body,
+          links,
           ask,
           buttons: ask
             ? current.buttons.map((b) => ({

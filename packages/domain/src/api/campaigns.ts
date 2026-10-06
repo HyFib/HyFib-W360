@@ -170,7 +170,7 @@ const apiAudienceSchema = z
 
 /** How a draft fills its template's variables (ADR-186), as members choose it. */
 const apiVariablesSchema = campaignVariablesSchema.describe(
-  "How each of the template's variables is filled for a recipient, in order (header, then body): fixed text (static), the contact's name with a fallback (name), or a custom field with an optional fallback (field). A recipient whose variable has no value and no fallback is skipped.",
+  "How each of the template's variables is filled for a recipient, in order (header, body, then `buttons`: the end of each of the template's `links` in GET /templates): fixed text (static), the contact's name with a fallback (name), or a custom field with an optional fallback (field). A recipient whose variable has no value and no fallback is skipped; for the end of a link, a value with spaces or one that would change the website counts as none.",
 );
 
 const apiWindowSchema = z

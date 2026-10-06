@@ -59,7 +59,7 @@ describe('campaign variables', () => {
     });
     expect(
       resolveVariables(
-        { header: [{ source: 'field', key: 'city' }], body: [] },
+        { header: [{ source: 'field', key: 'city' }], body: [], buttons: [] },
         { displayName: null, attributes: { city } },
       ),
     ).toEqual({
@@ -83,6 +83,88 @@ describe('campaign variables', () => {
       checkVariables(variables, { headerParams: 0, bodyParams: 3 }, new Set(['city', 'points'])),
     ).toMatch(/every template variable/);
     expect(checkVariables(variables, spec, new Set(['city']))).toMatch(/no longer exists/);
+  });
+
+  it('fills the ends of links, using the fallback for a value a link cannot end with (ADR-229)', () => {
+    const links = [
+      { index: 1, text: 'Track', url: 'https://shop.example/track/{{1}}' },
+      { index: 2, text: 'Rate', url: 'https://shop.example/rate?o={{1}}' },
+    ];
+    const linked = campaignVariablesSchema.parse({
+      body: [{ source: 'name', fallback: 'there' }],
+      buttons: [
+        { source: 'field', key: 'order_no', fallback: 'latest' },
+        { source: 'static', value: 'wa-campaign' },
+      ],
+    });
+    const contact = (orderNo: unknown) => ({
+      displayName: 'Asha Rao',
+      attributes: orderNo === undefined ? {} : { order_no: orderNo },
+    });
+    expect(resolveVariables(linked, contact('A-1001'), links)).toEqual({
+      ok: true,
+      params: { header: [], body: ['Asha Rao'], buttons: ['A-1001', 'wa-campaign'] },
+    });
+    expect(resolveVariables(linked, contact(4217), links)).toMatchObject({
+      params: { buttons: ['4217', 'wa-campaign'] },
+    });
+    // A value with spaces, too long, or none: the fallback.
+    for (const value of ['A 1001', 'x'.repeat(TEMPLATE_LIMITS.parameterValue + 1), undefined, '']) {
+      expect(
+        resolveVariables(linked, contact(value), links),
+        String(value).slice(0, 20),
+      ).toMatchObject({
+        params: { buttons: ['latest', 'wa-campaign'] },
+      });
+    }
+    // Without a usable fallback the recipient is missing the variable; so without the links.
+    const strict = campaignVariablesSchema.parse({
+      buttons: [{ source: 'name', fallback: 'no name' }],
+    });
+    expect(resolveVariables(strict, contact('x'), links.slice(0, 1))).toEqual({
+      ok: false,
+      missing: 'buttons.1',
+    });
+    expect(resolveVariables(linked, contact('A-1001'))).toEqual({
+      ok: false,
+      missing: 'buttons.1',
+    });
+    expect(
+      fieldsWithoutFallback(
+        campaignVariablesSchema.parse({ buttons: [{ source: 'field', key: 'order_no' }] }),
+      ),
+    ).toEqual(['order_no']);
+  });
+
+  it('checks the ends of links: one source each, fixed values and fallbacks a link can end with', () => {
+    const links = [{ index: 0, text: 'Track', url: 'https://shop.example/track/{{1}}' }];
+    const spec = { headerParams: 0, bodyParams: 0, links };
+    const check = (buttons: unknown[]) =>
+      checkVariables(campaignVariablesSchema.parse({ buttons }), spec, new Set(['order_no']));
+    expect(check([{ source: 'field', key: 'order_no' }])).toBeNull();
+    expect(check([{ source: 'field', key: 'order_no', fallback: 'latest' }])).toBeNull();
+    expect(check([{ source: 'static', value: 'A-1' }])).toBeNull();
+    expect(check([])).toMatch(/every template variable/);
+    expect(check([{ source: 'field', key: 'gone' }])).toMatch(/no longer exists/);
+    expect(check([{ source: 'static', value: 'A 1' }])).toBe(
+      'Track: The end of a link cannot contain spaces.',
+    );
+    expect(check([{ source: 'field', key: 'order_no', fallback: 'a b' }])).toBe(
+      'Track (fallback): The end of a link cannot contain spaces.',
+    );
+    expect(check([{ source: 'name', fallback: 'friend of ours' }])).toMatch(/^Track \(fallback\)/);
+    expect(
+      checkVariables(
+        campaignVariablesSchema.parse({ buttons: [{ source: 'static', value: 'A-1' }] }),
+        { headerParams: 0, bodyParams: 0 },
+        new Set(),
+      ),
+    ).toMatch(/every template variable/);
+    expect(
+      campaignVariablesSchema.safeParse({
+        buttons: [1, 2, 3].map((n) => ({ source: 'static', value: String(n) })),
+      }).success,
+    ).toBe(false);
   });
 
   it('rejects malformed mappings', () => {

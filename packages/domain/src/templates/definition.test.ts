@@ -369,15 +369,9 @@ describe('website buttons whose link ends with a value (ADR-228)', () => {
     ]);
   });
 
-  it('is sendable only by callers that give the values, and sends each as its button’s text', () => {
+  it('asks every send for the ends of links, and sends each as its button’s text (ADR-229)', () => {
     const components = toMetaComponents(tracked);
-    expect(sendSpecFor('UTILITY', components)).toEqual({
-      supported: false,
-      reason:
-        'This template has a website button whose link ends with a value given when sending: HyFib sends such templates from a contact or a conversation and through the API, not yet from campaigns, automations or store messages.',
-    });
-    expect(sendSpecFor('UTILITY', components, { mediaHeaders: true }).supported).toBe(false);
-    const spec = sendSpecFor('UTILITY', components, { linkValues: true });
+    const spec = sendSpecFor('UTILITY', components);
     expect(spec).toMatchObject({
       supported: true,
       headerParams: 0,
@@ -385,8 +379,12 @@ describe('website buttons whose link ends with a value (ADR-228)', () => {
       buttonParams: 1,
     });
     if (!spec.supported) throw new Error('unsupported');
+    expect(sendSpecFor('UTILITY', components, { mediaHeaders: true })).toMatchObject({
+      supported: true,
+      buttonParams: 1,
+    });
     // Other templates need no link values.
-    expect(sendSpecFor('UTILITY', toMetaComponents(def), { linkValues: true })).toMatchObject({
+    expect(sendSpecFor('UTILITY', toMetaComponents(def))).toMatchObject({
       supported: true,
       buttonParams: 0,
     });
@@ -424,7 +422,6 @@ describe('website buttons whose link ends with a value (ADR-228)', () => {
         ...tracked,
         buttons: [tracked.buttons[1]!, { type: 'QUICK_REPLY', text: 'Stop updates' }],
       }),
-      { linkValues: true },
     );
     if (!linkFirst.supported) throw new Error('unsupported');
     expect(

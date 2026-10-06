@@ -1215,6 +1215,7 @@ const update = (third: StoreVariables['body'][number]): StoreVariables => ({
     { source: 'order', field: 'order_name' },
     third,
   ],
+  buttons: [],
 });
 
 async function saveRule(
@@ -1336,6 +1337,91 @@ const orderSignal = (shop: string, id: string, topic = 'orders/updated') =>
   });
 
 describe('Order messages', () => {
+  it('fills the end of a tracking link from the shipment (ADR-229)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    await optIn(owner, storeId);
+    const template = await approvedTemplate(c, owner, {
+      category: 'UTILITY',
+      header: { type: 'none' },
+      body: { text: 'Hi {{1}}, order {{2}} has shipped.', examples: ['Asha', '#1001'] },
+      footer: null,
+      buttons: [
+        {
+          type: 'URL',
+          text: 'Track parcel',
+          url: 'https://tara.example/track/{{1}}',
+          example: 'AWB1',
+        },
+      ],
+    });
+    const vars: StoreVariables = {
+      header: [],
+      body: [
+        { source: 'order', field: 'customer_name', fallback: 'there' },
+        { source: 'order', field: 'order_name' },
+      ],
+      buttons: [{ source: 'order', field: 'tracking_number' }],
+    };
+    // Without the link's end, or with fixed text a link cannot end with, the rule is refused.
+    await expectAppError(
+      saveRule(owner, c, storeId, 'order_shipped', {
+        templateId: template.id,
+        variables: { ...vars, buttons: [] },
+      }),
+      'validation_failed',
+      /every template variable/,
+    );
+    await expectAppError(
+      saveRule(owner, c, storeId, 'order_shipped', {
+        templateId: template.id,
+        variables: { ...vars, buttons: [{ source: 'static', value: 'two words' }] },
+      }),
+      'validation_failed',
+      /Track parcel: The end of a link cannot contain spaces/,
+    );
+    await saveRule(owner, c, storeId, 'order_shipped', {
+      templateId: template.id,
+      variables: vars,
+    });
+
+    shopify.upsertOrder(shop, {
+      id: '7101',
+      name: '#2001',
+      phone: '+919812370001',
+      shippingAddress: { name: 'Asha K', phone: null },
+    });
+    await orderSignal(shop, '7101', 'orders/create');
+    await drain(c, storeId);
+    shopify.upsertOrder(shop, {
+      id: '7101',
+      displayFulfillmentStatus: 'FULFILLED',
+      fulfillments: [
+        {
+          status: 'SUCCESS',
+          displayStatus: 'IN_TRANSIT',
+          createdAt: iso(),
+          updatedAt: iso(),
+          deliveredAt: null,
+          trackingInfo: [
+            { company: 'Delhivery', number: 'AWB777', url: 'https://track.example/AWB777' },
+          ],
+        },
+      ],
+    });
+    await orderSignal(shop, '7101');
+    await drain(c, storeId);
+    expect(await runMessages(c, storeId)).toMatchObject([{ outcome: 'queued' }]);
+    expect(await sendAll(c)).toEqual(['accepted']);
+    expect(templatesTo('919812370001')[0]?.components).toContainEqual({
+      type: 'button',
+      sub_type: 'url',
+      index: '0',
+      parameters: [{ type: 'text', text: 'AWB777' }],
+    });
+  });
+
   it('sends the chosen templates when Shopify orders are placed, shipped, delivered and cancelled', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
@@ -1557,6 +1643,7 @@ describe('Order messages', () => {
         { source: 'order', field: 'order_name' },
         { source: 'order', field: 'order_total' },
       ],
+      buttons: [],
     };
     // The same button for both answers, or a template without two quick replies, is refused.
     await expectAppError(
@@ -2087,6 +2174,7 @@ describe('Order messages', () => {
           { source: 'order', field: 'order_name' },
           { source: 'order', field: 'order_total' },
         ],
+        buttons: [],
       },
       confirmButton: 0,
       cancelButton: 1,
@@ -2170,7 +2258,7 @@ describe('Order messages', () => {
     await expectAppError(
       saveRule(owner, c, storeId, 'order_placed', {
         templateId: template.id,
-        variables: { header: [], body: [{ source: 'order', field: 'order_name' }] },
+        variables: { header: [], body: [{ source: 'order', field: 'order_name' }], buttons: [] },
       }),
       'validation_failed',
       /every template variable/,
@@ -2248,6 +2336,7 @@ const cartVars: StoreVariables = {
     { source: 'checkout', field: 'customer_name', fallback: 'there' },
     { source: 'checkout', field: 'checkout_url' },
   ],
+  buttons: [],
 };
 const MINUTE_MS = 60_000;
 

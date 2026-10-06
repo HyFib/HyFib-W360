@@ -74,7 +74,7 @@ export default async function ConversationPage({
     can(ctx, 'inbox.assign') && can(ctx, 'members.read')
       ? inbox.assignableMembers(ctx)
       : Promise.resolve([]),
-    sendableTemplates(ctx, { linkValues: true }),
+    sendableTemplates(ctx),
     canReply ? inbox.mentionableMembers(ctx, conversationId) : Promise.resolve([]),
     canReply ? savedReplies.savedRepliesFor(ctx, conversationId) : Promise.resolve([]),
     showCrm ? crm.contactCrm(ctx, thread.conversation.contactId) : null,

@@ -1487,6 +1487,105 @@ describe('scheduling, windows, frequency caps and spending caps', () => {
   });
 });
 
+describe('the ends of links (ADR-229)', () => {
+  it('fills each recipient’s link from a field, with the fallback for a value the link cannot take', async () => {
+    const s = await setup();
+    const owner = await fx.ctx(s.c, s.c.owner);
+    const contactsService = createContactsService({ db: fx.dbs.app, clock: systemClock });
+    const { key } = await contactsService.createField(owner, { label: 'Order code', type: 'text' });
+    // A template whose website button's link ends with a value (ADR-228).
+    const templates = createTemplatesService({
+      db: fx.dbs.app,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      clock: systemClock,
+    });
+    const { id: templateId } = await templates.createDraft(owner, {
+      whatsappAccountId: s.c.whatsappAccountId,
+      name: 'order_link',
+      language: 'en',
+      definition: {
+        category: 'MARKETING',
+        header: { type: 'none' },
+        body: { text: 'Hello {{1}}, your offer is ready.', examples: ['Asha'] },
+        footer: null,
+        buttons: [
+          {
+            type: 'URL',
+            text: 'Open offer',
+            url: 'https://shop.example/offer/{{1}}',
+            example: 'A-1',
+          },
+        ],
+      },
+    });
+    await templates.submitTemplate(owner, templateId);
+    const workerDeps = {
+      db: fx.dbs.app,
+      keyring: fx.keyring,
+      graph: fx.graph,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    };
+    expect(await processTemplateSubmit(workerDeps, scopeOf(s.c), templateId)).toBe('done');
+    fx.standIn.state.templates.get(s.c.wabaId)!.find((x) => x.name === 'order_link')!.status =
+      'APPROVED';
+    await syncTemplates(workerDeps, scopeOf(s.c), s.c.whatsappAccountId);
+
+    const asha = await s.contact('+919830000001', { name: 'Asha' });
+    const bina = await s.contact('+919830000002', { name: 'Bina' });
+    await contactsService.updateContact(owner, asha, { attributes: { [key]: 'A-17' } });
+    await contactsService.updateContact(owner, bina, { attributes: { [key]: 'B 18' } });
+
+    // A fixed end the link cannot take is a problem before submitting.
+    const fixed = await s.draft('Fixed link', {
+      templateId,
+      variables: {
+        header: [],
+        body: [{ source: 'name', fallback: 'there' }],
+        buttons: [{ source: 'static', value: 'two words' }],
+      },
+    });
+    expect((await s.campaigns.reviewDraft(owner, fixed.id)).problems).toContain(
+      'Open offer: The end of a link cannot contain spaces.',
+    );
+
+    const { id } = await s.draft('Offer links', {
+      templateId,
+      variables: {
+        header: [],
+        body: [{ source: 'name', fallback: 'there' }],
+        buttons: [{ source: 'field', key, fallback: 'latest' }],
+      },
+    });
+    expect((await s.campaigns.reviewDraft(owner, id)).problems).toEqual([]);
+    await s.campaigns.submitCampaign(owner, id, { expectedVersion: 1 }, {});
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 2 });
+    expect(await s.dispatchAll(id)).toEqual(['accepted', 'accepted']);
+    const sent = fx.standIn.state.requests
+      .filter((r) => r.path.endsWith('/messages'))
+      .slice(-2)
+      .map((r) => r.body as { to: string; template: { components: unknown[] } });
+    const buttonOf = (to: string) =>
+      sent
+        .find((b) => b.to === to)!
+        .template.components.filter((c) => (c as { type: string }).type === 'button');
+    // Asha's own code; Bina's has a space, so the fallback.
+    expect(buttonOf('919830000001')).toEqual([
+      { type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: 'A-17' }] },
+    ]);
+    expect(buttonOf('919830000002')).toEqual([
+      {
+        type: 'button',
+        sub_type: 'url',
+        index: '0',
+        parameters: [{ type: 'text', text: 'latest' }],
+      },
+    ]);
+  });
+});
+
 describe('isolation', () => {
   it('another company cannot read, change or target a campaign or segment by id', async () => {
     const a = await setup();

@@ -4307,7 +4307,7 @@ describe('campaign drafts through the API (ADR-186)', () => {
     name: 'Diwali offer',
     channelAccountId: number,
     templateId: null,
-    variables: { header: [], body: [{ source: 'name', fallback: 'there' }] },
+    variables: { header: [], body: [{ source: 'name', fallback: 'there' }], buttons: [] },
     audience: { kind: 'segment', segmentId: segment },
     schedule: { kind: 'later', local: '2026-11-01T09:00', timezone: 'Asia/Kolkata' },
     window: { start: '09:00', end: '20:00' },
@@ -4382,7 +4382,7 @@ describe('campaign drafts through the API (ADR-186)', () => {
     };
     expect(apiCreateCampaignSchema.parse(full)).toEqual({
       ...full,
-      variables: { header: [], body: [{ source: 'static', value: 'Asha' }] },
+      variables: { header: [], body: [{ source: 'static', value: 'Asha' }], buttons: [] },
       audience: { match: 'all', conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
     });
     expect(apiCreateCampaignSchema.parse({ name: 'A', audience: { segmentId: segment } })).toEqual({

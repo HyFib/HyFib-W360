@@ -1106,10 +1106,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `linkValueProblem` (`templates/definition.ts`) read a `URL` button whose link ends with `{{1}}`.
   `validateDefinition` requires the value after the website's address in full (`prefixFixesWebsite`
   appends values that would change the link's origin) and an example, which `toMetaComponents` sends
-  as `example: [value]`. `sendSpecFor` gives `buttonParams` only to callers passing `linkValues`:
-  the contact and conversation sender (`sendableTemplates(ctx, { linkValues: true })`,
-  `queueTemplateMessage`), the template list and detail, and the API (`apiListTemplates`,
-  `loadSendableTemplate`); campaigns, automations and store messages get the reason.
+  as `example: [value]`. `sendSpecFor` asks every caller for `buttonParams`: the contact and
+  conversation sender (`queueTemplateMessage`), the API (`apiListTemplates`, `loadSendableTemplate`)
+  and, since ADR-229, campaigns (`variables.buttons`, resolved per recipient by `resolveVariables`
+  against the template's links, with `checkVariables` refusing fixed ends a link cannot take),
+  automations (a step's `links`, rendered by the interpreter and checked by `queueBotTemplate`,
+  which answers `invalid_link`) and store messages (`resolveStoreVariables` with the links,
+  `storeLinkProblem` when saved).
   `linkValuesProblem` names the first value a link cannot end with; `buildTemplateSend` checks the
   values again, adds one `button` component with `sub_type` `url` per value, ordered with the
   quick-reply payloads by button, and keeps each link as sent in the rendered buttons (`url`), which

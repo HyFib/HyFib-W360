@@ -444,9 +444,7 @@ export async function queueTemplateMessage(deps: OutboundDeps, ctx: TenantContex
     if (template.status !== 'approved') {
       throw new AppError('precondition_failed', 'Only templates approved by Meta can be sent.');
     }
-    // The member types the ends of links, so templates whose links end with a value are sendable
-    // here (ADR-228).
-    const spec = sendSpecFor(template.category, template.components, { linkValues: true });
+    const spec = sendSpecFor(template.category, template.components);
     if (!spec.supported) throw new AppError('unsupported', spec.reason);
     if (
       data.params.header.length !== spec.headerParams ||

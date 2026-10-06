@@ -528,14 +528,13 @@ export type SendSpec =
 /**
  * What a send of the template needs. A photo, video or document header is sendable only when the
  * caller gives its file by link: the API (ADR-201) passes `mediaHeaders`; the inbox, campaigns,
- * automations and store messages do not, and are told why. A website button whose link ends with
- * a value is sendable only by callers that give the value (`linkValues`, ADR-228): a contact's or
- * conversation's sender and the API; campaigns, automations and store messages are told why.
+ * automations and store messages do not, and are told why. Every caller gives the ends of links
+ * that take a value (`buttonParams`; ADR-228, ADR-229).
  */
 export function sendSpecFor(
   category: string,
   components: unknown[],
-  options: { mediaHeaders?: boolean; linkValues?: boolean } = {},
+  options: { mediaHeaders?: boolean } = {},
 ): SendSpec {
   if (category === 'AUTHENTICATION') {
     return { supported: false, reason: 'Authentication templates are not supported yet.' };
@@ -562,19 +561,11 @@ export function sendSpecFor(
       reason: `This template has a ${HEADER_MEDIA_NAMES[header.media]} header: HyFib sends such templates only through the API, which gives a link to the file.`,
     };
   }
-  const links = linkButtons(def);
-  if (links.length > 0 && !options.linkValues) {
-    return {
-      supported: false,
-      reason:
-        'This template has a website button whose link ends with a value given when sending: HyFib sends such templates from a contact or a conversation and through the API, not yet from campaigns, automations or store messages.',
-    };
-  }
   return {
     supported: true,
     headerParams: new Set(headerVariables.numbers).size > 0 ? 1 : 0,
     bodyParams: new Set(body.numbers).size,
-    buttonParams: links.length,
+    buttonParams: linkButtons(def).length,
     definition: def,
     headerMedia: header?.media ?? null,
   };

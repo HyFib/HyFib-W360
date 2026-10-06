@@ -35,6 +35,8 @@ export interface EditorTemplate {
   unsupported: string | null;
   headerParams: number;
   bodyParams: number;
+  /** Website buttons whose link ends with a value, in the order a step fills them (ADR-229). */
+  links: readonly { index: number; text: string; url: string }[];
   /** Quick-reply buttons by their position among the template's buttons. */
   quickReplies: readonly { index: number; title: string }[];
   preview: { header: string | null; body: string; footer: string | null } | null;
@@ -940,6 +942,7 @@ function TemplateFields({
     if (!next) return;
     const header = resized(node.header, next.headerParams);
     const body = resized(node.body, next.bodyParams);
+    const links = resized(node.links, next.links.length);
     if (node.type === 'ask_template') {
       // One branch per quick-reply button, keeping where a button that stayed the same went.
       const buttons = next.quickReplies.map((q) => ({
@@ -947,12 +950,12 @@ function TemplateFields({
         title: q.title,
         next: node.buttons.find((b) => b.index === q.index && b.title === q.title)?.next ?? null,
       }));
-      onChange({ ...node, templateId: next.id, header, body, buttons });
+      onChange({ ...node, templateId: next.id, header, body, links, buttons });
     } else {
-      onChange({ ...node, templateId: next.id, header, body });
+      onChange({ ...node, templateId: next.id, header, body, links });
     }
   };
-  const setParam = (part: 'header' | 'body', index: number, value: string) =>
+  const setParam = (part: 'header' | 'body' | 'links', index: number, value: string) =>
     onChange({ ...node, [part]: node[part].map((v, j) => (j === index ? value : v)) });
   return (
     <div className="grid gap-4">
@@ -1019,6 +1022,23 @@ function TemplateFields({
               value={value}
               maxLength={1000}
               onChange={(e) => setParam('body', i, e.target.value)}
+            />
+          )}
+        </Field>
+      ))}
+      {node.links.map((value, i) => (
+        <Field
+          key={`link-${i}`}
+          id={`${p}-link-${i}`}
+          label={`End of the “${template?.links[i]?.text ?? ''}” link`}
+          description={`Replaces {{1}} in ${template?.links[i]?.url ?? 'the link'}. Placeholders work; the result cannot hold spaces or change the website, or the run fails.`}
+        >
+          {(aria) => (
+            <Input
+              {...aria}
+              value={value}
+              maxLength={1000}
+              onChange={(e) => setParam('links', i, e.target.value)}
             />
           )}
         </Field>

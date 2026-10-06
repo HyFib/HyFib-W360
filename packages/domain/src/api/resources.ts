@@ -1076,10 +1076,7 @@ export async function apiListTemplates(
       for (const t of rows) {
         // Templates with a photo, video or document header are listed: a send gives the file
         // (ADR-201), as it gives the ends of links (ADR-228).
-        const spec = sendSpecFor(t.category, t.components, {
-          mediaHeaders: true,
-          linkValues: true,
-        });
+        const spec = sendSpecFor(t.category, t.components, { mediaHeaders: true });
         if (!spec.supported) continue;
         const definition = spec.definition;
         data.push({
@@ -1504,10 +1501,7 @@ async function loadSendableTemplate(
   if (template.status !== 'approved') {
     throw new AppError('precondition_failed', 'Only templates approved by Meta can be sent.');
   }
-  const spec = sendSpecFor(template.category, template.components, {
-    mediaHeaders: true,
-    linkValues: true,
-  });
+  const spec = sendSpecFor(template.category, template.components, { mediaHeaders: true });
   if (!spec.supported) throw new AppError('unsupported', spec.reason);
   return { template, spec };
 }

@@ -54,6 +54,7 @@ const templateRef: TemplateReference = {
   unsupported: null,
   headerParams: 0,
   bodyParams: 2,
+  links: [],
   quickReplies: [{ index: 0, title: 'Confirm' }],
 };
 

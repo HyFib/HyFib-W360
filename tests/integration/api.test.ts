@@ -6718,6 +6718,81 @@ describe('automations started through the API (ADR-077)', () => {
     });
   }
 
+  it('fill the ends of a template’s links from the inputs, and fail a run whose end the link cannot take (ADR-229)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const template = await approvedTemplate(c, {
+      category: 'UTILITY',
+      header: { type: 'none' },
+      body: { text: 'Hi {{1}}, manage your booking below.', examples: ['Asha'] },
+      footer: null,
+      buttons: [
+        {
+          type: 'URL',
+          text: 'Manage booking',
+          url: 'https://clinic.example/booking/{{1}}',
+          example: 'B-1',
+        },
+      ],
+    });
+    const trigger: AutomationTrigger = { type: 'api', inputs: ['patient', 'booking'] };
+    const graph = (links: string[]) => ({
+      version: 1,
+      start: 'send',
+      nodes: [
+        {
+          id: 'send',
+          type: 'send_template',
+          templateId: template.id,
+          header: [],
+          body: ['{{input.patient}}'],
+          links,
+          next: null,
+        },
+      ],
+    });
+    // A step that leaves the link's end out does not pass the checks.
+    const unfinished = await save(owner, 'No link', trigger, graph([]), c.channelAccountId);
+    expect(unfinished.issues.map((i) => i.message)).toContain(
+      `The template “${template.name}” has 2 variables: fill in each one.`,
+    );
+    const flow = await publish(
+      owner,
+      'Booking link',
+      trigger,
+      graph(['{{input.booking}}']),
+      c.channelAccountId,
+    );
+    const { ctx } = await apiKey(c, ['automations.start'], 'Clinic system');
+    const start = async (to: string, booking: string, key: string) =>
+      (
+        await apiStartAutomationRun(
+          deps(),
+          ctx,
+          flow.id,
+          { to, inputs: { patient: 'Asha', booking } },
+          idem(key, key),
+        )
+      ).body.data as ApiAutomationRun;
+
+    const good = await start('+91 98111 70001', 'B-42', 'link-run-1');
+    expect(await driveRun(c, good.id)).toBe('completed');
+    expect(templateSends('919811170001')[0]?.components).toContainEqual({
+      type: 'button',
+      sub_type: 'url',
+      index: '0',
+      parameters: [{ type: 'text', text: 'B-42' }],
+    });
+    // An end with a space: nothing is sent and the run says why.
+    const bad = await start('+91 98111 70002', 'B 43', 'link-run-2');
+    expect(await driveRun(c, bad.id)).toBe('failed');
+    expect(await runRow(bad.id)).toMatchObject({
+      end_reason: 'send_blocked',
+      end_detail: 'invalid_link',
+    });
+    expect(templateSends('919811170002')).toEqual([]);
+  });
+
   it('start a published automation for a contact once per Idempotency-Key, with its inputs, and follow the contact’s tap', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);

@@ -907,6 +907,13 @@ Phase 5 rules (Public API, P5-08):
   value is checked again when sent, by the sender, the API and `buildTemplateSend` (no spaces or
   control characters, the template's origin kept). The link as sent is kept with the message and
   redacted with it, and the inbox shows it as an https anchor in a new tab without the referrer.
+- Ends of links from customer data (ADR-229): campaigns, automations and store messages fill the end
+  of a link from contact fields, run inputs or order values, which customers or integrations may
+  have written. Each is checked when queued exactly as a member's value is (no spaces or control
+  characters, at most 1,000 characters, the template's website kept): an unusable value falls back
+  to the member's fallback, or skips the recipient or message, or fails the run; fixed ends and
+  fallbacks are checked when saved. A value can choose the path on the template's website, never
+  another website.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so

@@ -139,6 +139,7 @@ function defaultNode(
         templateId: template?.id ?? '',
         header: Array.from({ length: template?.headerParams ?? 0 }, () => ''),
         body: Array.from({ length: template?.bodyParams ?? 0 }, () => ''),
+        links: Array.from({ length: template?.links.length ?? 0 }, () => ''),
       };
       if (type === 'send_template') return { id, type, label: '', ...fields, next: null };
       return {

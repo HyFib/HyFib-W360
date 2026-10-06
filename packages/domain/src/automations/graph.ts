@@ -368,7 +368,10 @@ const templateParamSchema = z
     `Template variables are limited to ${TEMPLATE_LIMITS.parameterValue} characters.`,
   );
 
-/** The template a step sends and the texts (with placeholders) for its variables, in order. */
+/**
+ * The template a step sends and the texts (with placeholders) for its variables, in order, and for
+ * the ends of its links that take a value (ADR-229; versions saved before have none).
+ */
 const templateFields = {
   templateId: z.uuid('Choose a template.'),
   header: z.array(templateParamSchema).max(1, 'A template header has at most one variable.'),
@@ -378,6 +381,13 @@ const templateFields = {
       TEMPLATE_LIMITS.bodyVariables,
       `A template has at most ${TEMPLATE_LIMITS.bodyVariables} variables.`,
     ),
+  links: z
+    .array(templateParamSchema)
+    .max(
+      TEMPLATE_LIMITS.urlButtons,
+      `A template has at most ${TEMPLATE_LIMITS.urlButtons} links that take a value.`,
+    )
+    .default([]),
 };
 
 const sendTemplateNode = z.object({
@@ -1082,6 +1092,8 @@ export interface TemplateReference {
   unsupported: string | null;
   headerParams: number;
   bodyParams: number;
+  /** Its website buttons whose link ends with a value, in the order a step fills them (ADR-229). */
+  links: readonly { index: number; text: string; url: string }[];
   /** Its quick-reply buttons, by their position among the template's buttons. */
   quickReplies: readonly { index: number; title: string }[];
 }
@@ -1469,9 +1481,10 @@ function templateStepIssues(
     out.push(template.unsupported);
   } else if (
     node.header.length !== template.headerParams ||
-    node.body.length !== template.bodyParams
+    node.body.length !== template.bodyParams ||
+    node.links.length !== template.links.length
   ) {
-    const count = template.headerParams + template.bodyParams;
+    const count = template.headerParams + template.bodyParams + template.links.length;
     out.push(
       `The template “${template.name}” has ${count} variable${count === 1 ? '' : 's'}: fill in each one.`,
     );

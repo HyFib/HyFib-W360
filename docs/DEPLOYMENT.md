@@ -517,9 +517,17 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    website button's link ends with `{{1}}`, shows such templates as not sendable, leaves them out of
    GET /api/v1/templates, and answers a send giving `variables.buttons` with 422 (a field it does
    not know) and a send of such a template with 501; rolling web servers back to an image from
-   before it does the same and cannot open such a draft in the editor. Workers are not affected:
-   they send the request the web server stored, and their own template sends do not take these
-   templates.
+   before it does the same and cannot open such a draft in the editor. Workers send the request
+   the web server stored; their own sends of these templates came with ADR-229, below.
+
+   ADR-229 has no migration. Campaigns, automations and store messages now send templates whose
+   links end with a value from workers, which roll out before web servers, so no member chooses such
+   a template for them before every worker can send it. Rolling workers back to an image from before
+   it pauses such campaigns (`template_not_approved`), skips such store messages
+   (`template_unavailable`) and fails such automation runs (`template_unavailable`) until they roll
+   forward. Web servers from before ADR-228 offer no such template to campaigns, automations or
+   store messages, and drop `variables.buttons` from a campaign draft given through the API (a field
+   of the variables they do not know), whose template they then report as one HyFib cannot send.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

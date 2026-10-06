@@ -36,7 +36,12 @@ import { MAX_TAGS_PER_CONVERSATION } from '../inbox/conversation-tags';
 import { emitTenantEvent } from '../messaging/events';
 import { STATUS_RANK } from '../messaging/status';
 import { orderPlaceholderValues } from '../stores/order-values';
-import { buildTemplateSend, sendSpecFor } from '../templates/definition';
+import {
+  TEMPLATE_LIMITS,
+  buildTemplateSend,
+  linkValuesProblem,
+  sendSpecFor,
+} from '../templates/definition';
 import { RUN_BUDGETS, graphSchema, type AutomationGraph, type AutomationNode } from './graph';
 import {
   FINISHED_HTTP_STATES,
@@ -402,8 +407,19 @@ export async function queueBotTemplate(
   }
   const spec = sendSpecFor(template.category, template.components);
   if (!spec.supported) return { ok: false, code: 'template_unavailable' };
-  if (effect.header.length !== spec.headerParams || effect.body.length !== spec.bodyParams) {
+  if (
+    effect.header.length !== spec.headerParams ||
+    effect.body.length !== spec.bodyParams ||
+    effect.links.length !== spec.buttonParams
+  ) {
     return { ok: false, code: 'template_changed' };
+  }
+  // A rendered end of a link that the link cannot take (spaces, too long, another website).
+  if (
+    effect.links.some((v) => v.length > TEMPLATE_LIMITS.parameterValue) ||
+    linkValuesProblem(spec.definition, effect.links)
+  ) {
+    return { ok: false, code: 'invalid_link' };
   }
   if (effect.ask) {
     // The quick-reply buttons the step branches on, exactly as the template has them now.
@@ -474,7 +490,7 @@ export async function queueBotTemplate(
   const built = buildTemplateSend(
     template,
     spec,
-    { header: effect.header, body: effect.body },
+    { header: effect.header, body: effect.body, buttons: effect.links },
     { quickReplyPayloads: new Map(effect.buttons.map((b) => [b.index, b.payload])) },
   );
   const messageId = uuidv7();

@@ -42,7 +42,7 @@ import type { JobQueue } from '../jobs/queue';
 import { emitTenantEvent } from '../messaging/events';
 import { canSeeConversation, SERVICE_WINDOW_MS } from '../messaging/outbound';
 import { STORE_MESSAGE_EVENT_INFO } from '../stores/messages-model';
-import { renderPlaceholders, sendSpecFor } from '../templates/definition';
+import { linkButtons, renderPlaceholders, sendSpecFor } from '../templates/definition';
 import { parseInput } from '../validation';
 import {
   apiInputValues,
@@ -305,6 +305,7 @@ function templateOption(t: TemplateRow): AutomationTemplateOption {
     unsupported: spec.supported ? null : spec.reason,
     headerParams: spec.supported ? spec.headerParams : 0,
     bodyParams: spec.supported ? spec.bodyParams : 0,
+    links: spec.supported ? linkButtons(spec.definition) : [],
     quickReplies: spec.supported
       ? spec.definition.buttons.flatMap((b, index) =>
           b.type === 'QUICK_REPLY' ? [{ index, title: b.text }] : [],

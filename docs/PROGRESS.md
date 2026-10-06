@@ -1,5 +1,47 @@
 # Progress
 
+## 2026-10-06 — Phase 3/4 follow-up: links filled by campaigns, automations and store messages (P3-03, P3-04, P4-01, P4-06c, ADR-229)
+
+Status: **Implemented; its database tests run in CI only.** Campaigns, automations and store
+messages could not send templates whose links end with a value. The local PostgreSQL is unavailable,
+so the integration tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-229):** sources for each link's end in campaigns and store messages, a step's
+  `links` in automations; unusable values fall back, skip or fail the run; every send asks for them.
+- **Domain:** `campaignVariablesSchema.buttons`, `resolveVariables` and `checkVariables` with the
+  links; the automation graph's `links`, the interpreter and `queueBotTemplate` (`invalid_link`);
+  `storeVariablesSchema.buttons`, `resolveStoreVariables`, `storeLinkProblem`; `sendSpecFor`'s
+  `linkValues` option removed; no migration.
+- **Web:** link rows in the campaign editor, the automation builder's template step and store
+  messages; the run log's `invalid_link`.
+- **Tests:**
+  - Unit (5 new: 2 in `variables.test.ts`, 2 in `automations/templates.test.ts`, 1 in
+    `messages-model.test.ts`; expectations updated where variables, steps and effects gained the
+    links).
+  - Integration (3 new: `campaigns.test.ts`, `api.test.ts` for an API-started automation,
+    `stores.test.ts` for a shipped order; store literals updated). Written for CI; not run here.
+- **Docs:** ADR-229; ARCHITECTURE; SECURITY; THREAT-MODEL T216; DEPLOYMENT; BACKLOG P3-03 and P5-08;
+  feature matrix W-059.
+- **Mutation checks:** 21/21 deliberate regressions caught on the unit-tested parts.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 991 passed (99 files)                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| Mutation checks                                    | 21/21 deliberate regressions caught on the unit-tested parts  |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+### Known gaps
+
+- No browser test of the three editors' link fields; an unusable value shares `missing_variable`
+  with a missing one; never exercised against Meta.
+
 ## 2026-10-06 — Phase 3 follow-up: website buttons whose link ends with a value (P3-03, P5-08, ADR-228)
 
 Status: **Implemented; its database and browser tests run in CI only.** Templates could not carry a

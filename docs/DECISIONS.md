@@ -8963,3 +8963,33 @@ Decision:
 Not built: values from campaigns, automations and store messages, a value elsewhere than at the end
 of a link, more than one variable in a link, and encoding values for a link (a value must already be
 fit for one).
+
+## ADR-229 Filling the ends of links from campaigns, automations and store messages (2026-10-06)
+
+Context: since ADR-228 a template's website button can end its link with a value given when sending,
+but only a member's send and the API gave one: campaigns, automations and store messages left such
+templates out, although a personal link (an offer, a booking, a parcel to track) is what they most
+often send.
+
+Decision:
+
+- **Campaigns** fill the end of each link from a source, as they fill variables: fixed text, the
+  contact's name or a custom field, with a fallback (`variables.buttons`, also through the API's
+  campaign drafts). A contact's value that cannot end the link (spaces or control characters, over
+  1,000 characters, or one that would change the website) counts as no value: the fallback is used
+  when it can, else the recipient is skipped with `missing_variable`, as for a variable without a
+  value. A fixed text or fallback that cannot end the link is a review problem before submitting.
+- **Automations:** a template step gives each link's end as text with placeholders (`links`;
+  versions saved before have none), counted with the variables in the checks. The end is kept as
+  rendered (white space is not collapsed); an empty one fails the run with `missing_variable`, and
+  one the link cannot take ends it as `send_blocked` with the detail `invalid_link` when the
+  template is queued.
+- **Store messages** fill each link's end from the order or the checkout, or fixed text, with a
+  fallback, as their variables (an order's tracking number to start with). An unusable value falls
+  back or skips the message with `missing_variable`; fixed text or a fallback a link cannot end with
+  is refused when the message is saved.
+- **Every send takes them:** `sendSpecFor` no longer has a caller that cannot give the ends of
+  links, so its option for them is removed and every caller is asked for `buttonParams`.
+
+Not built: a browser test of the three editors' link fields (their database tests cover the sends),
+encoding a value for a link, and a skip reason of its own for an unusable value.

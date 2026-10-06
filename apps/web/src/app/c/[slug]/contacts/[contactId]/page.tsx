@@ -132,7 +132,7 @@ export default async function ContactPage({
     consent.consentForContact(ctx, contact.id),
     consent.suppressionsForContact(ctx, contact.id),
     templates.sendChannels(ctx),
-    sendableTemplates(ctx, { linkValues: true }),
+    sendableTemplates(ctx),
     showCrm ? crm.contactCrm(ctx, contact.id) : null,
     showCrm ? crmLookups(ctx) : null,
   ]);

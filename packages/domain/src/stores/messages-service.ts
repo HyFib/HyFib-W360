@@ -30,7 +30,7 @@ import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, can, type TenantContext } from '../authz/context';
 import { parseGraph, parseTrigger } from '../automations/graph';
 import { formatTimeOfDay, parseTimeOfDay } from '../campaigns/schedule';
-import { renderPlaceholders, sendSpecFor } from '../templates/definition';
+import { linkButtons, renderPlaceholders, sendSpecFor } from '../templates/definition';
 import { parseInput } from '../validation';
 import {
   CART_EVENTS,
@@ -43,6 +43,7 @@ import {
   eventAvailable,
   isCartEvent,
   readStoreVariables,
+  storeLinkProblem,
   storeVariablesSchema,
   variablesFit,
   type StoreMessageEvent,
@@ -119,6 +120,8 @@ export interface StoreMessageTemplateOption {
   whatsappAccountId: string;
   headerParams: number;
   bodyParams: number;
+  /** Website buttons whose link ends with a value, in the order a message fills them (ADR-229). */
+  links: { index: number; text: string; url: string }[];
   /** Quick-reply buttons by their position among the template's buttons. */
   quickReplies: { index: number; text: string }[];
   preview: string;
@@ -253,6 +256,7 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
         whatsappAccountId: t.whatsappAccountId,
         headerParams: spec.headerParams,
         bodyParams: spec.bodyParams,
+        links: linkButtons(spec.definition),
         quickReplies: spec.definition.buttons.flatMap((b, index) =>
           b.type === 'QUICK_REPLY' ? [{ index, text: b.text }] : [],
         ),
@@ -458,10 +462,13 @@ export function createStoreMessagesService(deps: StoreMessagesServiceDeps) {
     if (!spec.supported) throw invalid('templateId', spec.reason);
     if (
       data.variables.header.length !== spec.headerParams ||
-      data.variables.body.length !== spec.bodyParams
+      data.variables.body.length !== spec.bodyParams ||
+      data.variables.buttons.length !== spec.buttonParams
     ) {
       throw invalid('variables', 'Choose a value for every template variable.');
     }
+    const linkProblem = storeLinkProblem(data.variables, linkButtons(spec.definition));
+    if (linkProblem) throw invalid('variables', linkProblem);
     if (data.event === 'cod_confirmation') {
       const buttons = spec.definition.buttons;
       if (

@@ -78,6 +78,8 @@ export const STEP_DETAILS: Record<string, string> = {
     'the template’s variables or quick-reply buttons changed after the step was set up',
   channel_unavailable: 'the WhatsApp number is not active or does not match the template',
   missing_variable: 'a template variable was empty after filling in placeholders',
+  invalid_link:
+    'the end of a website button’s link held spaces, was too long or would change the website',
   suppressed: 'the number is on the company’s suppression list',
   opted_out: 'the contact opted out of these messages',
   no_marketing_opt_in: 'the template is a marketing template and the contact has not opted in',

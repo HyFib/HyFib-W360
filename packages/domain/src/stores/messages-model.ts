@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { clipText } from '@w360/core/text';
 import { sendingWindow } from '../campaigns/schedule';
 import { formatMinor, isCurrency } from '../crm/money';
-import { TEMPLATE_LIMITS } from '../templates/definition';
+import { TEMPLATE_LIMITS, linkValueProblem, type LinkButton } from '../templates/definition';
 
 /**
  * Order messages (P4-06c): the WhatsApp template a store sends when one of its orders is placed,
@@ -156,7 +156,8 @@ export const STORE_MESSAGE_SKIP_REASONS = {
   no_marketing_opt_in: 'The template is a marketing template and the contact has not opted in.',
   template_unavailable: 'The template is not approved, or HyFib cannot send it.',
   channel_unavailable: 'The WhatsApp number is not active or does not match the template.',
-  missing_variable: 'A template variable had no value and no fallback.',
+  missing_variable:
+    'A template variable had no usable value and no fallback (for the end of a link: none, spaces, or one that would change the website).',
   template_changed:
     'The template’s variables or buttons changed after this message was set up. Set it up again.',
   checkout_completed: 'The customer completed the checkout.',
@@ -419,10 +420,12 @@ export type StoreVariableSource = z.infer<typeof storeVariableSourceSchema>;
 export const storeVariablesSchema = z.object({
   header: z.array(storeVariableSourceSchema).max(1).default([]),
   body: z.array(storeVariableSourceSchema).max(TEMPLATE_LIMITS.bodyVariables).default([]),
+  /** The ends of the template's links that take a value, in button order (ADR-229). */
+  buttons: z.array(storeVariableSourceSchema).max(TEMPLATE_LIMITS.urlButtons).default([]),
 });
 export type StoreVariables = z.infer<typeof storeVariablesSchema>;
 
-export const EMPTY_STORE_VARIABLES: StoreVariables = { header: [], body: [] };
+export const EMPTY_STORE_VARIABLES: StoreVariables = { header: [], body: [], buttons: [] };
 
 /** Reads stored variables, treating anything unparseable as empty (the editor then asks again). */
 export function readStoreVariables(raw: unknown): StoreVariables {
@@ -433,9 +436,28 @@ export function readStoreVariables(raw: unknown): StoreVariables {
 /** The variable sources a rule for `event` may use: its subject's fields, or fixed text. */
 export function variablesFit(event: StoreMessageEvent, variables: StoreVariables): boolean {
   const kind = isCartEvent(event) ? 'checkout' : 'order';
-  return [...variables.header, ...variables.body].every(
+  return [...variables.header, ...variables.body, ...variables.buttons].every(
     (v) => v.source === 'static' || v.source === kind,
   );
+}
+
+/**
+ * The first fixed text or fallback among the ends of links that its link cannot end with, naming
+ * the button (ADR-229), or null.
+ */
+export function storeLinkProblem(
+  variables: StoreVariables,
+  links: readonly LinkButton[],
+): string | null {
+  for (const [i, source] of variables.buttons.entries()) {
+    const link = links[i];
+    const fixed = source.source === 'static' ? source.value : source.fallback;
+    if (!link || !fixed) continue;
+    const problem = linkValueProblem(link.url, fixed);
+    if (problem)
+      return `${link.text}${source.source === 'static' ? '' : ' (fallback)'}: ${problem}`;
+  }
+  return null;
 }
 
 /** The values an order offers to template variables (null where it has none). */
@@ -509,18 +531,32 @@ export function checkoutValues(input: {
 
 /**
  * Template parameters for one order or checkout, or the first variable that could not be filled
- * (`header.1`, `body.2`, …). Nothing is ever sent with an empty or placeholder value, and a source
- * for the other kind of subject counts as unfilled.
+ * (`header.1`, `body.2`, `buttons.1`, …). Nothing is ever sent with an empty or placeholder value,
+ * and a source for the other kind of subject counts as unfilled. The end of a link (ADR-229) is the
+ * subject's value when its link (`links`, in button order) can end with it, else the fallback when
+ * it can.
  */
 export function resolveStoreVariables(
   variables: StoreVariables,
   subject: StoreValues,
-): { ok: true; params: { header: string[]; body: string[] } } | { ok: false; missing: string } {
+  links: readonly Pick<LinkButton, 'url'>[] = [],
+):
+  | { ok: true; params: { header: string[]; body: string[]; buttons: string[] } }
+  | { ok: false; missing: string } {
+  const valueOf = (source: StoreVariableSource): string | null => {
+    if (source.source === 'static' || source.source !== subject.subject) return null;
+    const values: Partial<Record<string, string | null>> = subject.values;
+    return values[source.field] ?? null;
+  };
   const one = (source: StoreVariableSource): string | null => {
     if (source.source === 'static') return collapse(source.value);
     if (source.source !== subject.subject) return null;
-    const values: Partial<Record<string, string | null>> = subject.values;
-    return values[source.field] ?? collapse(source.fallback);
+    return valueOf(source) ?? collapse(source.fallback);
+  };
+  const linkValue = (url: string, text: string | null | undefined): string | null => {
+    const value = text?.trim();
+    if (!value || value.length > TEMPLATE_LIMITS.parameterValue) return null;
+    return linkValueProblem(url, value) === null ? value : null;
   };
   const header: string[] = [];
   for (const [i, source] of variables.header.entries()) {
@@ -534,7 +570,20 @@ export function resolveStoreVariables(
     if (!text) return { ok: false, missing: `body.${i + 1}` };
     body.push(clipText(text, TEMPLATE_LIMITS.parameterValue));
   }
-  return { ok: true, params: { header, body } };
+  const buttons: string[] = [];
+  for (const [i, source] of variables.buttons.entries()) {
+    const link = links[i];
+    const text = !link
+      ? null
+      : source.source === 'static'
+        ? linkValue(link.url, source.value)
+        : source.source === subject.subject
+          ? (linkValue(link.url, valueOf(source)) ?? linkValue(link.url, source.fallback))
+          : null;
+    if (!text) return { ok: false, missing: `buttons.${i + 1}` };
+    buttons.push(text);
+  }
+  return { ok: true, params: { header, body, buttons } };
 }
 
 // Cash on delivery answers ---------------------------------------------------------------------------------
