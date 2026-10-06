@@ -192,7 +192,9 @@ export const mergeSummarySchema = z.object({
   storeMessages: z.number().int(),
   campaignSends: z.number().int(),
   automationRuns: z.number().int(),
+  flowSends: z.number().int(),
   flowAnswers: z.number().int(),
+  conversationSources: z.number().int(),
   optOutsCarried: z.array(z.enum(['marketing', 'utility'])),
 });
 export type MergeSummary = z.infer<typeof mergeSummarySchema>;

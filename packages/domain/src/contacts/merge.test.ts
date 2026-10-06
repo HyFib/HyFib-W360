@@ -229,10 +229,15 @@ describe('merging contacts (ADR-224)', () => {
       storeMessages: 0,
       campaignSends: 4,
       automationRuns: 0,
+      flowSends: 0,
       flowAnswers: 0,
+      conversationSources: 0,
       optOutsCarried: ['marketing'],
     };
     expect(mergeSummarySchema.parse(summary)).toEqual(summary);
+    // Every count app.merge_contacts returns is kept, for the audit record.
+    const { flowSends: _omitted, ...missing } = summary;
+    expect(mergeSummarySchema.safeParse(missing).success).toBe(false);
     expect(mergeSummarySchema.safeParse({ ...summary, optOutsCarried: ['email'] }).success).toBe(
       false,
     );
