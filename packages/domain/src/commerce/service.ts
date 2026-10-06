@@ -28,6 +28,7 @@ import {
   sql,
   whatsappAccounts,
   OPEN_PAYMENT_LINK_STATUSES,
+  ORDER_STATUSES,
   type Database,
   type OrderStatus,
   type SQL,
@@ -59,6 +60,15 @@ import {
   type ResolvedProductMessage,
 } from './model';
 import { assertModule } from '../plans/entitlements';
+import { CSV_BOM, csvLine } from '../contacts/csv';
+import { shownNumber } from '../contacts/number-masking';
+import { ORDER_CSV_COLUMNS, orderCsvLine, type OrderCsvRow } from './orders-csv';
+
+/** Orders one batch of an export reads (ADR-235). */
+const ORDER_EXPORT_BATCH = 500;
+
+/** An orders export's filter, as the list's (ADR-235). */
+const orderExportSchema = z.object({ status: z.enum(ORDER_STATUSES).optional() });
 
 /**
  * Commerce (P4-06). Reading catalogs, products and orders needs `commerce.read`; members see an
@@ -781,6 +791,104 @@ export function createCommerceService(deps: CommerceDeps) {
         })),
         older: rows.length > 50 && last ? `${last.receivedAt.toISOString()}~${last.id}` : null,
       };
+    },
+
+    /**
+     * The orders of conversations the member can see as CSV (ADR-235), newest first, streamed in
+     * batches, as the list filters them by status. They carry customers' names, numbers and notes,
+     * so they need `contacts.export` too; numbers are shown as the member may see them (ADR-226).
+     * Audited before the first line.
+     */
+    async *exportOrders(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta = {},
+    ): AsyncGenerator<string> {
+      assertCan(ctx, 'commerce.read');
+      assertCan(ctx, 'contacts.export');
+      const { status } = parseInput(orderExportSchema, input ?? {});
+      await db.run(ctx.scope, (tx) =>
+        recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'commerce.orders_exported',
+            subjectType: 'tenant',
+            subjectId: ctx.tenant.id,
+            metadata: { status: status ?? null },
+          },
+          meta,
+        ),
+      );
+      yield CSV_BOM + csvLine(ORDER_CSV_COLUMNS);
+      let before: { at: Date; id: string } | null = null;
+      for (;;) {
+        const cursor: { at: Date; id: string } | null = before;
+        const rows: OrderCsvRow[] = await db.run(
+          ctx.scope,
+          (tx) =>
+            tx
+              .select({
+                id: commerceOrders.id,
+                reference: commerceOrders.reference,
+                receivedAt: commerceOrders.receivedAt,
+                status: commerceOrders.status,
+                statusChangedAt: commerceOrders.statusChangedAt,
+                paidAt: commerceOrders.paidAt,
+                contactName: contacts.displayName,
+                contactPhone: contacts.phoneE164,
+                contactErased: sql<boolean>`${contacts.erasedAt} is not null`,
+                items: sql<string | null>`(select string_agg(i.quantity || ' × ' ||
+                    coalesce(i.name, i.retailer_id), '; ' order by i.position)
+                  from app.commerce_order_items i
+                  where i.tenant_id = ${commerceOrders.tenantId} and i.order_id = ${commerceOrders.id})`,
+                itemCount: commerceOrders.itemCount,
+                droppedItems: commerceOrders.droppedItems,
+                currency: commerceOrders.currency,
+                subtotalMinor: commerceOrders.subtotalMinor,
+                customerNote: commerceOrders.customerNote,
+              })
+              .from(commerceOrders)
+              .innerJoin(
+                conversations,
+                and(
+                  eq(conversations.tenantId, commerceOrders.tenantId),
+                  eq(conversations.id, commerceOrders.conversationId),
+                ),
+              )
+              .innerJoin(
+                contacts,
+                and(
+                  eq(contacts.tenantId, commerceOrders.tenantId),
+                  eq(contacts.id, commerceOrders.contactId),
+                ),
+              )
+              .where(
+                and(
+                  eq(commerceOrders.tenantId, ctx.tenant.id),
+                  orderVisibility(ctx),
+                  status ? eq(commerceOrders.status, status) : undefined,
+                  cursor
+                    ? or(
+                        lt(commerceOrders.receivedAt, cursor.at),
+                        and(
+                          eq(commerceOrders.receivedAt, cursor.at),
+                          lt(commerceOrders.id, cursor.id),
+                        ),
+                      )
+                    : undefined,
+                ),
+              )
+              .orderBy(desc(commerceOrders.receivedAt), desc(commerceOrders.id))
+              .limit(ORDER_EXPORT_BATCH),
+          { accessMode: 'read only' },
+        );
+        if (rows.length === 0) break;
+        yield rows.map((r) => orderCsvLine(r, (phone) => shownNumber(ctx, phone))).join('');
+        const last = rows.at(-1);
+        if (!last || rows.length < ORDER_EXPORT_BATCH) break;
+        before = { at: last.receivedAt, id: last.id };
+      }
     },
 
     /** One order with its items, its Payment Links and what the member may do. */

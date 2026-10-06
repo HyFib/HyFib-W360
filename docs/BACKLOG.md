@@ -261,10 +261,13 @@ verification, app review, Embedded Signup configuration).
   lease, not-sent reason, erasure, isolation; 15 deliberate regressions caught), unit tests (prices,
   order parsing, message shapes, limits, references, the Payment Link client), e2e
   `commerce.spec.ts` (catalog read, products sent, order, keys, payment request, forged and signed
-  notifications, paid and fulfilled). **Remaining:** checks on an approved sandbox number and with a
-  company's Razorpay test keys (release checklist), product enquiries (`referred_product`), payments
-  inside WhatsApp (`order_details`, needs Meta payment configuration), writing to catalogs and stock,
-  refunds from HyFib, order reports and exports, sending products from automations.
+  notifications, paid and fulfilled). **[Order exports built; their database test runs only in CI]**
+  (ADR-235: the orders a member can see as CSV, filtered by status, with `commerce.read` and
+  `contacts.export`, numbers masked as for the member, erased contacts blanked, audited; no
+  migration). **Remaining:** checks on an approved sandbox number and with a company's Razorpay test
+  keys (release checklist), product enquiries (`referred_product`), payments inside WhatsApp
+  (`order_details`, needs Meta payment configuration), writing to catalogs and stock, refunds from
+  HyFib, order reports, sending products from automations.
 - **P4-06b Store connectors** — _implemented and locally verified (2026-09-27) against the Shopify
   and WooCommerce stand-ins; no live store traffic yet_: companies connect Shopify stores through
   HyFib's Shopify app (a signed callback bound to the member who started it, `read_orders` and

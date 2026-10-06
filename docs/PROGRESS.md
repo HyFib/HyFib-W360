@@ -1,5 +1,39 @@
 # Progress
 
+## 2026-10-06 — Exporting WhatsApp orders as CSV (P4-06a, ADR-235)
+
+Status: **Implemented; its database test runs in CI only.** Orders could be read fifty at a time on
+screen but not taken out of HyFib. The local PostgreSQL is unavailable, so the integration test
+below was written but not run here.
+
+### Completed
+
+- **Domain:** `commerce/orders-csv.ts` (`ORDER_CSV_COLUMNS`, `orderCsvLine`) and `exportOrders` in
+  the commerce service (permissions, the list's visibility and filter, batches of 500, the audit).
+- **Web:** `GET /c/{slug}/commerce/orders/export` (authorized before the first byte) and "Export
+  CSV" on Commerce → Orders for members who export contacts, keeping the status filter.
+- **Tests:**
+  - Unit (3 new in `orders-csv.test.ts`).
+  - Integration (1 new in `commerce.test.ts`: the lines, the filter, an unknown status, an agent
+    refused, the audit, an erased contact, another company). Written for CI; not run here.
+- **Docs:** ADR-235; SECURITY; THREAT-MODEL T219; BACKLOG P4-06a; feature matrix W-113.
+- **Mutation checks:** 9/9 deliberate regressions caught on the CSV lines.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 103 files, 1016 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| Mutation checks                                    | 9/9 deliberate regressions caught on the CSV lines            |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+### Known gaps
+
+- No browser test of the download; no order reports or API export.
+
 ## 2026-10-06 — Moving deals between pipelines in the app (P4-04, ADR-234)
 
 Status: **Implemented; its database and browser tests run in CI only.** The service moved deals

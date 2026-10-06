@@ -5,6 +5,7 @@ import { can } from '@w360/domain';
 import { formatMinor } from '@w360/domain/crm-money';
 import {
   Badge,
+  Button,
   Card,
   CardContent,
   CardDescription,
@@ -59,6 +60,16 @@ export default async function OrdersPage({
             Carts customers send from your catalog in WhatsApp. You see the orders of conversations
             you can see. Amounts are the prices WhatsApp sent with the order.
           </CardDescription>
+          {can(ctx, 'contacts.export') ? (
+            <div>
+              <Button asChild variant="outline" size="sm">
+                {/* The orders this list shows, as CSV (ADR-235). */}
+                <a href={`${base}/orders/export${current ? `?status=${current}` : ''}`} download>
+                  Export CSV
+                </a>
+              </Button>
+            </div>
+          ) : null}
           <nav aria-label="Order status" className="flex flex-wrap gap-2 pt-2 text-sm">
             {FILTERS.map((s) => (
               <Link

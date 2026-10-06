@@ -9151,3 +9151,28 @@ Decision:
   the CRM e2e test moves its deal to a second rupee pipeline. No migration.
 
 Not built: moving deals in bulk, from the board, or through the API.
+
+## ADR-235 Exporting WhatsApp orders as CSV (P4-06a) (2026-10-06)
+
+Context: Commerce → Orders lists the carts customers send from the company's WhatsApp catalog, fifty
+at a time, but a company reconciling orders with its accounts or its warehouse had no way to take
+them out of HyFib. Campaign recipients and contacts already export as CSV.
+
+Decision:
+
+- **What:** one line per order the member can see (the inbox's visibility, as the list), newest
+  first, filtered by status as the list is: the order id and reference, when it was received, its
+  status and when that changed, when it was paid, the customer's name and number, the items ("2 ×
+  Blue kurta; 1 × sku-9", product names where the catalog gave them), how many items and how many
+  could not be read, the currency and the subtotal in its major unit (exact, from minor units), and
+  the customer's note. Times are UTC, ISO 8601.
+- **Who:** `commerce.read` and `contacts.export`, since the file carries customers' names, numbers
+  and notes (owners and administrators; marketers export contacts but see no conversations, so their
+  file is empty). Numbers are shown as the member may see them (ADR-226). An erased contact's orders
+  stay in the file as "Erased contact", with neither number nor note.
+- **How:** `exportOrders` streams batches of 500 by received time and id, formula-safe (`csvLine`),
+  through `GET /c/{slug}/commerce/orders/export`, which authorizes before the first byte; each
+  export is audited (`commerce.orders_exported`, with the status filter). No migration.
+
+Not built: order reports (totals by day or product), exports through the public API, and a choice of
+columns or time zone.

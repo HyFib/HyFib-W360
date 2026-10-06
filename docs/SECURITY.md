@@ -363,6 +363,10 @@ Phase 4 rules (Commerce, P4-06a):
   (`commerce.catalog_sync_requested`, `commerce.order_status_changed`, `commerce.payment_requested`,
   `commerce.payment_link_cancel_requested`, `commerce.payment_account_saved`,
   `commerce.payment_account_removed`, with the order reference or key id, never secrets).
+- Exporting orders (ADR-235) needs `commerce.read` and `contacts.export`: the file holds the orders
+  of conversations the member can see, with customers' names, numbers (masked as for the member,
+  ADR-226) and notes, formula-neutralised; an erased contact's orders carry neither number nor note.
+  Each export is audited (`commerce.orders_exported`, with the status filter).
 - The company's key secret and webhook secret are sent once, stored as keyring ciphertexts bound to
   the company and account (`commerce-payments:<company>:<account>:<key|webhook>`), never returned
   to the browser or logged, and used only by the worker (keys) and the merchant webhook route

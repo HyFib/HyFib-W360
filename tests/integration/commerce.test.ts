@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { isAppError, systemClock, type Clock } from '@w360/core';
 import { authorizedTenantScope, sql } from '@w360/db';
 import {
+  ORDER_CSV_COLUMNS,
   createCommerceService,
   createContactsService,
   findDueCommerceWork,
@@ -674,6 +675,73 @@ describe('orders', () => {
     expect(new Set(ids).size).toBe(53);
     // A cursor that is not one of ours is ignored rather than trusted.
     expect((await svc.orders(owner, { before: 'not-a-cursor' })).orders).toHaveLength(50);
+  });
+
+  it('exports the orders a member can see as CSV, audited, erased contacts blanked (ADR-235)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    await syncedCatalog(c, owner, '5550007', 3);
+    const svc = service();
+    const asha = waId();
+    await fx.deliver(
+      orderMessage(
+        c,
+        asha,
+        '5550007',
+        [
+          { retailerId: 'sku-1', quantity: 2, price: 19.99 },
+          { retailerId: 'unknown-sku', quantity: 1, price: 0.1 },
+        ],
+        'Ring the bell',
+      ),
+    );
+    const conv = await conversationOf(c, asha);
+    const order = await orderOf(conv.id);
+    const read = async (ctx: TenantContext, input: unknown = {}) => {
+      let out = '';
+      for await (const chunk of svc.exportOrders(ctx, input, { ipAddress: '203.0.113.9' })) {
+        out += chunk;
+      }
+      return out
+        .replace(/^\uFEFF/, '')
+        .trimEnd()
+        .split('\r\n');
+    };
+
+    const lines = await read(owner);
+    expect(lines[0]).toBe(ORDER_CSV_COLUMNS.join(','));
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain(`${order.id},${order.reference},`);
+    expect(lines[1]).toContain(',received,');
+    expect(lines[1]).toContain(
+      `,+${asha},2 × Product 001; 1 × unknown-sku,3,0,INR,40.08,Ring the bell`,
+    );
+    // The list's status filter applies; an unknown status is refused.
+    expect(await read(owner, { status: 'confirmed' })).toEqual([ORDER_CSV_COLUMNS.join(',')]);
+    await expectAppError(read(owner, { status: 'shipped' }), 'validation_failed');
+    // Agents see orders but do not export contacts.
+    await expectAppError(read(agent), 'forbidden');
+    const audits = await fx.query<{ metadata: { status: string | null } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'commerce.orders_exported' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(audits.map((a) => a.metadata.status)).toEqual([null, 'confirmed']);
+
+    // An erased contact's orders stay, without the customer's name, number or note.
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(owner, {
+      contactId: conv.contact_id,
+      suppress: false,
+    });
+    const after = await read(owner);
+    expect(after[1]).toContain(',Erased contact,,2 × Product 001; 1 × unknown-sku,3,0,INR,40.08,');
+    expect(after[1]).not.toContain('Ring the bell');
+    expect(after[1]).not.toContain(asha);
+
+    // Another company's export holds none of these orders.
+    const other = await fx.company();
+    expect(await read(await fx.ctx(other, other.owner))).toEqual([ORDER_CSV_COLUMNS.join(',')]);
   });
 });
 
