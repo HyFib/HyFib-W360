@@ -629,6 +629,9 @@ verification, app review, Embedded Signup configuration).
   **[Sending media from links built; its database tests run only in CI]** (ADR-194: a key replies
   with a photo, a video, audio or a document WhatsApp fetches from an https link, with a caption
   except for audio, within the 24-hour window; HyFib keeps the link, never the media; no migration).
+  **[Sending locations built; its database tests run only in CI]** (ADR-195: a key replies with a
+  place's coordinates, and its name and address if wanted, within the 24-hour window, sent as Meta's
+  spec types them; no migration).
   Remaining: uploaded media and stickers, call-to-action messages through the API, taking
   reactions back,
   media downloads, a contact card's contacts (Meta's

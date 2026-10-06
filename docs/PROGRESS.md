@@ -1,5 +1,56 @@
 # Progress
 
+## 2026-10-06 — Phase 5: sending locations through the public API (P5-08, ADR-195)
+
+Status: **Implemented; its database and browser tests run in CI only (test stand-in only).** Keys
+could not send a place. The local PostgreSQL is unavailable (its Docker daemon stopped), so the
+integration test and the changed e2e test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-195):** `type` `location` in `POST /messages`, the coordinates as numbers and the
+  place's name and address if wanted, sent as a reply within the 24-hour window with the coordinates
+  as decimal text, as Meta's spec types them; no migration.
+- **Research:** M-192 from Meta's published OpenAPI spec (the location object's four properties, the
+  coordinates typed as strings but sent as numbers in its examples).
+- **Domain:** the schema, `decimalDegrees` and `apiSendLocation`, the dispatch and its refusal,
+  `outboundText` for locations, the API limit, the scope's label and description, and the OpenAPI
+  entries (`SendLocation`, the operation, and a message's `text`, which now names captions and
+  locations for outbound messages).
+- **Web:** the inbox shows a location's coordinates, received locations' too.
+- **Test stand-in:** the Graph stand-in checks a location message's object (the four properties
+  only, the coordinates as decimal text within their ranges).
+- **Tests:**
+  - Unit (5 new and 3 changed in `api.test.ts`): the rules, the decimal text, the dispatch and the
+    scope, the name or address as text, the OpenAPI entries.
+  - Integration (1 new in `api.test.ts`): two locations stored, sent and read back; the refusals.
+    Written for CI; not run here.
+  - E2E (1 changed in `api.spec.ts`, the scope's new label in it and in `commerce.spec.ts`): a key
+    sends the clinic's location and the inbox shows it with its coordinates. Written for CI; not run
+    here.
+- **Docs:** ADR-195, and ADR-194's record corrected (webhooks give no caption as text); research
+  M-192; SECURITY; ARCHITECTURE; THREAT-MODEL T189; DEPLOYMENT and RUNBOOKS; DATA-RETENTION; BACKLOG
+  P5-08; feature matrix H-033 and W-134.
+- **Mutation checks:** 23 deliberate regressions tried, all caught on the unit-tested parts. The
+  send itself needs the database and the stand-in, so its regressions are left to the integration
+  and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 869 passed (82 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 23 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Locations in the inbox's reply box, asking a customer for their location, a place's link, and
+  maps.
+
 ## 2026-10-06 — Phase 5: sending media from links through the public API (P5-08, ADR-194)
 
 Status: **Implemented; its database and browser tests run in CI only (test stand-in only).** Keys

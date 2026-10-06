@@ -116,6 +116,8 @@ import {
   isMediaLink,
   API_MESSAGE_TYPES,
   apiMessageType,
+  apiSendLocationSchema,
+  decimalDegrees,
 } from './resources';
 import {
   apiCreateWebhookEndpointSchema,
@@ -755,10 +757,12 @@ describe('text replies (ADR-070)', () => {
       planScopes: null,
     } as unknown as ApiContext;
     const idem = { key: 'k-1', requestHash: 'h' };
-    // Stickers and locations are not sent through the API (ADR-194 sends media from links).
+    // Stickers and contact cards are not sent through the API (ADR-194 sends media from links,
+    // ADR-195 locations).
     for (const body of [
       { type: 'sticker' },
-      { type: 'location' },
+      { type: 'contacts' },
+      { type: 'LOCATION' },
       { type: 'IMAGE' },
       { type: 'TEXT' },
       { type: null },
@@ -2980,6 +2984,7 @@ describe('OpenAPI document', () => {
         { $ref: '#/components/schemas/SendVideo' },
         { $ref: '#/components/schemas/SendAudio' },
         { $ref: '#/components/schemas/SendDocument' },
+        { $ref: '#/components/schemas/SendLocation' },
       ],
     });
     for (const scope of API_SEND_SCOPES) expect(send.description).toContain(`\`${scope}\``);
@@ -5210,7 +5215,7 @@ describe('media from links through the API (ADR-194)', () => {
 
   it('are described in the send operation, each type with its own schema, and by the scope', () => {
     expect(API_SCOPE_INFO['messages.reply'].label).toBe(
-      'Reply with text, buttons, lists, products, reactions and media',
+      'Reply with text, buttons, lists, products, reactions, media and locations',
     );
     expect(API_SCOPE_INFO['messages.reply'].description).toContain(
       'photos, videos, audio or documents from links',
@@ -5222,7 +5227,7 @@ describe('media from links through the API (ADR-194)', () => {
         Record<string, { summary: string; description: string }>
       >
     )['/messages']?.post;
-    expect(send?.summary).toContain('a reaction or media');
+    expect(send?.summary).toContain('a reaction, media or a location');
     for (const words of [
       '`image`, `video`, `audio` or `document`',
       'https:// `link` that WhatsApp fetches when it sends the message',
@@ -5265,6 +5270,166 @@ describe('the types of the messages the API sends, in its answers (ADR-194)', ()
     }
     expect(API_MESSAGE_TYPES).toEqual(
       expect.arrayContaining(['image', 'video', 'audio', 'document']),
+    );
+  });
+});
+
+describe('locations through the API (ADR-195)', () => {
+  const base = { type: 'location', to: '+919876543210', latitude: 18.5204, longitude: 73.8567 };
+
+  it('take coordinates within their ranges, and a trimmed name and address if given', () => {
+    expect(
+      apiSendLocationSchema.parse({
+        ...base,
+        name: '  Harbour Dental ',
+        address: ' 12 Harbour Road, Pune ',
+      }),
+    ).toEqual({ ...base, name: 'Harbour Dental', address: '12 Harbour Road, Pune' });
+    expect(apiSendLocationSchema.parse(base)).toEqual(base);
+    for (const [latitude, longitude] of [
+      [90, 180],
+      [-90, -180],
+      [0, 0],
+    ]) {
+      expect(
+        apiSendLocationSchema.safeParse({ ...base, latitude, longitude }).success,
+        `${latitude}, ${longitude}`,
+      ).toBe(true);
+    }
+    expect(API_LIMITS.locationTextLength).toBe(1000);
+    const longest = 'n'.repeat(API_LIMITS.locationTextLength);
+    expect(apiSendLocationSchema.parse({ ...base, name: longest, address: longest })).toMatchObject(
+      { name: longest, address: longest },
+    );
+    for (const bad of [
+      { ...base, latitude: 90.0001 },
+      { ...base, latitude: -91 },
+      { ...base, longitude: 180.5 },
+      { ...base, longitude: -181 },
+      { ...base, latitude: '18.5204' },
+      { ...base, latitude: undefined },
+      { ...base, longitude: null },
+      { ...base, name: '   ' },
+      { ...base, address: '' },
+      { ...base, name: 'n'.repeat(1001) },
+      { ...base, address: 'a'.repeat(1001) },
+      { ...base, url: 'https://harbour.example' },
+      { ...base, type: 'image' },
+    ]) {
+      expect(apiSendLocationSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+    expect(
+      apiSendLocationSchema.safeParse({ ...base, latitude: 91 }).error?.issues[0],
+    ).toMatchObject({ path: ['latitude'], message: 'A latitude runs from -90 to 90 degrees' });
+    expect(
+      apiSendLocationSchema.safeParse({ ...base, longitude: '73.8567' }).error?.issues[0]?.message,
+    ).toBe('Give the longitude as a number of degrees');
+    expect(
+      apiSendLocationSchema.safeParse({ ...base, address: 'a'.repeat(1001) }).error?.issues[0]
+        ?.message,
+    ).toBe('A location’s address is limited to 1000 characters');
+  });
+
+  it('give WhatsApp the coordinates as decimal text, never in exponent notation', () => {
+    expect(decimalDegrees(37.758056)).toBe('37.758056');
+    expect(decimalDegrees(-122.425332)).toBe('-122.425332');
+    expect(decimalDegrees(90)).toBe('90');
+    expect(decimalDegrees(0)).toBe('0');
+    expect(decimalDegrees(0.000001)).toBe('0.000001');
+    expect(decimalDegrees(1e-7)).toBe('0.0000001');
+    expect(decimalDegrees(-5e-7)).toBe('-0.0000005');
+    expect(decimalDegrees(1.5e-10)).toBe('0.00000000015');
+  });
+
+  it('are chosen by their type and need a key that replies', async () => {
+    const idem = { key: 'k-1', requestHash: 'h' };
+    const sending = {
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(['messages.send']) },
+      planScopes: null,
+    } as unknown as ApiContext;
+    await expect(apiSendMessage({} as never, sending, base, idem)).rejects.toThrow(
+      'This API key does not have the messages.reply scope.',
+    );
+    // A key that replies reaches the location's own checks before anything is read.
+    const replying = {
+      ...sending,
+      key: { id: 'k', scopes: new Set(['messages.reply']) },
+    } as unknown as ApiContext;
+    const refused: unknown = await apiSendMessage(
+      {} as never,
+      replying,
+      { ...base, longitude: 181 },
+      idem,
+    ).catch((caught: unknown) => caught);
+    expect(isAppError(refused) && refused.issues?.[0]?.path).toBe('longitude');
+  });
+
+  it('name the place, or its address without a name', () => {
+    const at = { latitude: 18.5204, longitude: 73.8567 };
+    expect(
+      outboundText('location', { ...at, name: 'Harbour Dental', address: '12 Harbour Road' }),
+    ).toBe('Harbour Dental');
+    expect(outboundText('location', { ...at, address: '12 Harbour Road' })).toBe('12 Harbour Road');
+    expect(outboundText('location', at)).toBeNull();
+    expect(messageSnippet('outbound', 'location', at)).toBe('Location');
+    expect(messageSnippet('outbound', 'location', { ...at, name: 'Harbour\n Dental' })).toBe(
+      'Harbour Dental',
+    );
+  });
+
+  it('are described in the send operation, with their own schema, and by the scope', () => {
+    expect(API_SCOPE_INFO['messages.reply'].label).toBe(
+      'Reply with text, buttons, lists, products, reactions, media and locations',
+    );
+    expect(API_SCOPE_INFO['messages.reply'].description).toContain(
+      'from links, and locations, to contacts who wrote',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const send = (
+      doc.paths as unknown as Record<
+        string,
+        Record<string, { summary: string; description: string }>
+      >
+    )['/messages']?.post;
+    expect(send?.summary).toContain('media or a location');
+    for (const words of [
+      '`document` or `location`) needs `messages.reply`',
+      'A text, buttons, a list, products, media or a location can quote',
+      'A location (`location`) is a place given by its `latitude` and `longitude` in decimal degrees',
+      `up to ${API_LIMITS.locationTextLength.toLocaleString('en')} characters each`,
+    ]) {
+      expect(send?.description).toContain(words);
+    }
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const location = schemas.SendLocation as {
+      properties: Record<string, Record<string, unknown>>;
+      required: string[];
+      additionalProperties: unknown;
+    };
+    expect(Object.keys(location.properties).sort()).toEqual(
+      ['address', 'from', 'latitude', 'longitude', 'name', 'replyTo', 'to', 'type'].sort(),
+    );
+    expect([...location.required].sort()).toEqual(['latitude', 'longitude', 'to', 'type']);
+    expect(location.additionalProperties).toBe(false);
+    expect(location.properties.latitude).toMatchObject({
+      type: 'number',
+      minimum: -90,
+      maximum: 90,
+    });
+    expect(location.properties.longitude).toMatchObject({
+      type: 'number',
+      minimum: -180,
+      maximum: 180,
+    });
+    expect(location.properties.address).toMatchObject({ type: 'string', maxLength: 1000 });
+    // A message's words: a location's name, or its address, whichever way it went.
+    const message = schemas.ConversationMessage as {
+      properties: { text: { description: string } };
+    };
+    expect(message.properties.text.description).toContain(
+      'a location’s name (its address if it has no name); for inbound messages also the title of a tapped reply, for outbound ones',
     );
   });
 });

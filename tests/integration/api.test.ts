@@ -1653,6 +1653,123 @@ describe('text replies (ADR-070)', () => {
     expect(count).toBe(2);
   });
 
+  it('send a location the same way, keeping its coordinates and giving WhatsApp decimal text (ADR-195)', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['messages.reply', 'conversations.read'], 'Front desk');
+    const waId = '919811101951';
+    await wrote(c, waId);
+    const conv = await conversationWith(c, `+${waId}`);
+    const clinic = await apiSendMessage(
+      deps(),
+      ctx,
+      {
+        type: 'location',
+        to: `+${waId}`,
+        latitude: 18.5204,
+        longitude: 73.8567,
+        name: ' Harbour Dental ',
+        address: '12 Harbour Road, Pune',
+      },
+      idem('location-1', 'location-1'),
+    );
+    expect(clinic.status).toBe(201);
+    expect(clinic.body.data).toMatchObject({ type: 'location', status: 'queued' });
+    // A place without a name, just south of the equator: its latitude written out in decimals.
+    const pier = await apiSendMessage(
+      deps(),
+      ctx,
+      {
+        type: 'location',
+        to: `+${waId}`,
+        latitude: -0.0000005,
+        longitude: 9.45,
+        address: 'Pier 3',
+      },
+      idem('location-2', 'location-2'),
+    );
+    const stored = await fx.query(
+      `SELECT m.type, m.content, m.sender_type, si.request
+         FROM app.messages m
+         JOIN app.send_intents si ON si.tenant_id = m.tenant_id AND si.message_id = m.id
+        WHERE m.id = ANY($1::uuid[]) ORDER BY m.created_at`,
+      [[idOf(clinic), idOf(pier)]],
+    );
+    const frame = { messaging_product: 'whatsapp', recipient_type: 'individual', to: waId };
+    const clinicPlace = { name: 'Harbour Dental', address: '12 Harbour Road, Pune' };
+    expect(stored).toEqual([
+      {
+        type: 'location',
+        content: { latitude: 18.5204, longitude: 73.8567, ...clinicPlace },
+        sender_type: 'api',
+        request: {
+          ...frame,
+          type: 'location',
+          location: { latitude: '18.5204', longitude: '73.8567', ...clinicPlace },
+        },
+      },
+      {
+        type: 'location',
+        content: { latitude: -0.0000005, longitude: 9.45, address: 'Pier 3' },
+        sender_type: 'api',
+        request: {
+          ...frame,
+          type: 'location',
+          location: { latitude: '-0.0000005', longitude: '9.45', address: 'Pier 3' },
+        },
+      },
+    ]);
+    expect((await conversationWith(c, `+${waId}`)).last_message_preview).toBe('Pier 3');
+    // WhatsApp's location objects through the send pipeline (the stand-in checks their shape).
+    expect(await sendAll(c)).toEqual(['accepted', 'accepted']);
+    const sent = fx.standIn.state.requests.filter(
+      (r) => r.path.endsWith('/messages') && (r.body as { to?: string } | undefined)?.to === waId,
+    );
+    expect(sent.map((r) => (r.body as { location?: unknown }).location)).toEqual([
+      { latitude: '18.5204', longitude: '73.8567', ...clinicPlace },
+      { latitude: '-0.0000005', longitude: '9.45', address: 'Pier 3' },
+    ]);
+    // Read back with the place's name, or its address, as the text.
+    const { data } = await apiListConversationMessages(deps(), ctx, conv.id, {});
+    expect(
+      data.filter((m) => m.direction === 'outbound').map((m) => [m.type, m.text, m.sentBy]),
+    ).toEqual(
+      expect.arrayContaining([
+        ['location', 'Harbour Dental', 'api'],
+        ['location', 'Pier 3', 'api'],
+      ]),
+    );
+    // Refused before anything is queued: a latitude past the pole, a property Meta's spec does not
+    // send, and a number whose window has closed.
+    const pole = await apiSendMessage(
+      deps(),
+      ctx,
+      { type: 'location', to: `+${waId}`, latitude: 90.5, longitude: 0 },
+      idem('location-3', 'location-3'),
+    ).catch((error: unknown) => error);
+    expect(isAppError(pole) && pole.issues?.[0]?.path).toBe('latitude');
+    const withUrl = await apiSendMessage(
+      deps(),
+      ctx,
+      { type: 'location', to: `+${waId}`, latitude: 1, longitude: 2, url: 'https://x.example' },
+      idem('location-4', 'location-4'),
+    ).catch((error: unknown) => error);
+    expect(isAppError(withUrl) && withUrl.code).toBe('validation_failed');
+    const lateWaId = '919811101952';
+    await wrote(c, lateWaId, 25 * 3600);
+    const late = await apiSendMessage(
+      deps(),
+      ctx,
+      { type: 'location', to: `+${lateWaId}`, latitude: 1, longitude: 2 },
+      idem('location-5', 'location-5'),
+    ).catch((error: unknown) => error);
+    expect(reason(late)).toBe('window_closed');
+    const [{ count } = { count: -1 }] = await fx.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM app.messages WHERE tenant_id = $1 AND direction = 'outbound'`,
+      [c.tenant.id],
+    );
+    expect(count).toBe(2);
+  });
+
   it('send reply buttons and lists the same way, and give a tap back with its kind (ADR-080)', async () => {
     const c = await fx.company();
     const { ctx, id: keyId } = await apiKey(c, ['messages.reply', 'conversations.read'], 'Booking');

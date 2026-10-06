@@ -1779,6 +1779,13 @@ they were created with: create a key with both); `not_in_plan` means the plan le
 `outcome` the results do not count, a `cursor` that is not the previous page's `nextCursor`, or an
 unknown parameter.
 
+**A location sent through the API failed (ADR-195).** HyFib sends the coordinates as decimal text,
+as Meta's spec types them, with the name and address given; `GET /messages/{id}` (and the
+`message.status` webhook) gives WhatsApp's error when it refuses one. The spec's examples send the
+coordinates as numbers (research M-192): if WhatsApp's error names the latitude or the longitude,
+record its code and title and review M-192 before changing what HyFib sends. The location is stored
+with the message and shown in the inbox with its coordinates.
+
 **A photo, video, audio or document sent through the API failed (ADR-194).** WhatsApp fetches the
 media from the message's link when it sends it, and HyFib records what WhatsApp answers:
 `GET /messages/{id}` (and the `message.status` webhook) gives the error. The usual causes are a link

@@ -294,6 +294,56 @@ const MEDIA_PREVIEWS: Record<ApiMediaType, string> = {
   document: 'Document',
 };
 
+/**
+ * A coordinate as the decimal degrees Meta's spec types as a string (research M-192), never in
+ * exponent notation, which JavaScript uses for numbers under a millionth (`1e-7`).
+ */
+export function decimalDegrees(value: number): string {
+  const plain = String(value);
+  return /e/i.test(plain) ? value.toFixed(20).replace(/\.?0+$/, '') : plain;
+}
+
+const coordinateField = (
+  name: 'latitude' | 'longitude',
+  bound: number,
+  ends: readonly [string, string],
+) =>
+  z
+    .number({ error: `Give the ${name} as a number of degrees` })
+    .min(-bound, `A ${name} runs from -${bound} to ${bound} degrees`)
+    .max(bound, `A ${name} runs from -${bound} to ${bound} degrees`)
+    .describe(
+      `The ${name} in decimal degrees, from -${bound} (${ends[0]}) to ${bound} (${ends[1]}).`,
+    );
+
+const placeTextField = (what: 'name' | 'address') =>
+  z
+    .string({ error: `Give the ${what} as text` })
+    .trim()
+    .min(1, `Give the ${what}, or leave it out`)
+    .max(
+      API_LIMITS.locationTextLength,
+      `A location’s ${what} is limited to ${API_LIMITS.locationTextLength} characters`,
+    )
+    .optional();
+
+/**
+ * A location, to a contact who wrote in the last 24 hours (ADR-195): its coordinates, and the
+ * place's name and address if given, as Meta's spec sends one (research M-192).
+ */
+export const apiSendLocationSchema = z
+  .object({
+    type: z.literal('location'),
+    to: phoneField,
+    from: replyFromField,
+    replyTo: quoteField,
+    latitude: coordinateField('latitude', 90, ['south', 'north']),
+    longitude: coordinateField('longitude', 180, ['west', 'east']),
+    name: placeTextField('name').describe('The name of the place, such as a shop’s.'),
+    address: placeTextField('address').describe('The address of the place.'),
+  })
+  .strict();
+
 const LIMITS = INTERACTIVE_LIMITS;
 
 /** Text in a reply buttons or list message, trimmed, within Meta's limit (M-157, M-159, M-179). */
@@ -1408,7 +1458,7 @@ interface BuiltReply {
 }
 
 interface ApiReply {
-  type: 'text' | 'interactive' | 'reaction' | ApiMediaType;
+  type: 'text' | 'interactive' | 'reaction' | ApiMediaType | 'location';
   /** The message the reply quotes, or the reaction is for, as the request names it. */
   replyTo: string | undefined;
   /** Checks that do not depend on the number, made first (the plan's modules). */
@@ -1635,6 +1685,41 @@ export async function apiSendMedia(
       content: media,
       preview: caption ?? MEDIA_PREVIEWS[data.type],
       request: { type: data.type, [data.type]: media },
+    }),
+  });
+}
+
+/**
+ * A location (ADR-195); see `sendReply`. The message keeps the coordinates as numbers, as received
+ * locations keep theirs; the Graph request gives them as decimal strings, as Meta's spec types them
+ * (research M-192).
+ */
+export async function apiSendLocation(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'messages.reply');
+  const data = parseInput(apiSendLocationSchema, input);
+  const place = {
+    ...(data.name ? { name: data.name } : {}),
+    ...(data.address ? { address: data.address } : {}),
+  };
+  return sendReply(deps, ctx, data, idempotency, {
+    type: 'location',
+    replyTo: data.replyTo,
+    build: () => ({
+      content: { latitude: data.latitude, longitude: data.longitude, ...place },
+      preview: data.name ?? data.address ?? 'Location',
+      request: {
+        type: 'location',
+        location: {
+          latitude: decimalDegrees(data.latitude),
+          longitude: decimalDegrees(data.longitude),
+          ...place,
+        },
+      },
     }),
   });
 }
@@ -1873,7 +1958,8 @@ export async function apiSendProducts(
 
 /**
  * POST /api/v1/messages: a template (the default), or a reply inside the service window as text,
- * reply buttons, a list, products (ADR-086) or a reaction, by the body's `type`.
+ * reply buttons, a list, products (ADR-086), a reaction, media from a link (ADR-194) or a location
+ * (ADR-195), by the body's `type`.
  */
 export async function apiSendMessage(
   deps: OutboundDeps,
@@ -1892,6 +1978,7 @@ export async function apiSendMessage(
   if ((API_MEDIA_TYPES as readonly unknown[]).includes(type)) {
     return apiSendMedia(deps, ctx, input, idempotency);
   }
+  if (type === 'location') return apiSendLocation(deps, ctx, input, idempotency);
   if (type === 'product' || type === 'product_list' || type === 'catalog') {
     return apiSendProducts(deps, ctx, input, idempotency);
   }
@@ -1900,13 +1987,13 @@ export async function apiSendMessage(
   }
   throw new AppError(
     'validation_failed',
-    'Send a template, a text, buttons, a list, products, a reaction or media.',
+    'Send a template, a text, buttons, a list, products, a reaction, media or a location.',
     {
       issues: [
         {
           path: 'type',
           message:
-            'Use template, text, buttons, list, product, product_list, catalog, reaction, image, video, audio or document.',
+            'Use template, text, buttons, list, product, product_list, catalog, reaction, image, video, audio, document or location.',
         },
       ],
     },

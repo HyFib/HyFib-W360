@@ -730,7 +730,7 @@ test('a key sends reply buttons and a list to a customer who wrote: the inbox sh
   await page.getByLabel('Name', { exact: true }).fill('Booking');
   await page
     .getByRole('checkbox', {
-      name: /Reply with text, buttons, lists, products, reactions and media/,
+      name: /Reply with text, buttons, lists, products, reactions, media and locations/,
     })
     .check();
   await page.getByRole('checkbox', { name: /Read conversations/ }).check();
@@ -879,7 +879,7 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
   await page.getByLabel('Name', { exact: true }).fill('Front desk');
   await page
     .getByRole('checkbox', {
-      name: /Reply with text, buttons, lists, products, reactions and media/,
+      name: /Reply with text, buttons, lists, products, reactions, media and locations/,
     })
     .check();
   await page.getByRole('checkbox', { name: /Read conversations/ }).check();
@@ -951,19 +951,40 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
     link: 'http://cdn.example.com/harbour-dental/map.png',
   });
   expect(insecure.status()).toBe(422);
+  // And where the clinic is (ADR-195); a latitude past the pole is refused.
+  const where = await post({
+    type: 'location',
+    to: `+${waId}`,
+    latitude: 18.5204,
+    longitude: 73.8567,
+    name: 'Harbour Dental Clinic',
+    address: '12 Harbour Road, Pune',
+  });
+  expect(where.status()).toBe(201);
+  expect((await where.json()).data).toMatchObject({ type: 'location', status: 'queued' });
+  const pole = await post({ type: 'location', to: `+${waId}`, latitude: 91, longitude: 0 });
+  expect(pole.status()).toBe(422);
 
-  // The worker sends all three, in any order, as Meta's spec describes them.
+  // The worker sends all four, in any order, as Meta's spec describes them.
   let sent: Awaited<ReturnType<typeof standInRequests>> = [];
   await expect(async () => {
     sent = (await standInRequests(request)).filter(
       (r) =>
         r.path === `/v26.0/${phoneNumberId}/messages` && (r.body as { to?: string }).to === waId,
     );
-    expect(sent).toHaveLength(3);
+    expect(sent).toHaveLength(4);
   }).toPass({ timeout: 30_000 });
   const ofType = (type: string) => sent.find((r) => (r.body as { type: string }).type === type);
   expect(ofType('document')?.body).toMatchObject({
     document: { link: leafletLink, caption: 'Before your visit' },
+  });
+  expect(ofType('location')?.body).toMatchObject({
+    location: {
+      latitude: '18.5204',
+      longitude: '73.8567',
+      name: 'Harbour Dental Clinic',
+      address: '12 Harbour Road, Pune',
+    },
   });
   expect(ofType('text')?.body).toMatchObject({
     context: { message_id: questionWamid },
@@ -973,8 +994,7 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
     reaction: { message_id: questionWamid, emoji: '👍' },
   });
 
-  // Members see the quote above the reply, and what the reaction is for (the conversation list
-  // shows the reaction as the last message too).
+  // Members see the quote above the reply, and what the reaction is for.
   await page.goto(`/c/${slug}/inbox`);
   await page.getByRole('link', { name: /Priya Customer/ }).click();
   const thread = page.getByRole('list', { name: /Messages with/ }).getByRole('listitem');
@@ -990,6 +1010,10 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
     leafletLink,
   );
   await expect(sentLeaflet).not.toContainText('Media download is not available yet.');
+  // The location shows the place, its address and its coordinates.
+  const sentPlace = thread.filter({ hasText: '12 Harbour Road, Pune' });
+  await expect(sentPlace).toContainText('Location · Harbour Dental Clinic');
+  await expect(sentPlace).toContainText('18.5204, 73.8567');
   await expectNoHorizontalOverflow(page);
 
   // The customer reacts to the reply: the key reads which message the reaction is for.

@@ -770,6 +770,11 @@ Phase 5 rules (Public API, P5-08):
   or password, so no credentials are stored with the message or shown in the inbox, and the inbox
   opens the link only as an https anchor in a new tab without the referrer. The link is the
   company's own data: it is redacted with the contact's messages and exported with them.
+- Locations (ADR-195): a key with `messages.reply` sends a place's coordinates, name and address
+  within the 24-hour window, with a reply's checks. HyFib fetches and looks up nothing: it sends
+  what the key gives, bounded (coordinates within their ranges, a name and an address of at most
+  1,000 characters each, no other property), and the inbox shows them as text only. The location is
+  the company's own data: it is redacted with the contact's messages and exported with them.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so

@@ -85,9 +85,9 @@ export const API_SCOPE_INFO: Record<
     writes: true,
   },
   'messages.reply': {
-    label: 'Reply with text, buttons, lists, products, reactions and media',
+    label: 'Reply with text, buttons, lists, products, reactions, media and locations',
     description:
-      'Send text, reply buttons, list messages, products from the company’s WhatsApp catalogs, reactions, and photos, videos, audio or documents from links, to contacts who wrote to the number in the last 24 hours, quoting their messages if wanted, and read the status of messages the API sent.',
+      'Send text, reply buttons, list messages, products from the company’s WhatsApp catalogs, reactions, photos, videos, audio or documents from links, and locations, to contacts who wrote to the number in the last 24 hours, quoting their messages if wanted, and read the status of messages the API sent.',
     permission: 'inbox.reply',
     writes: true,
   },
@@ -196,6 +196,8 @@ export const API_LIMITS = {
   mediaLinkLength: 2000,
   /** A media message's caption (research M-191). */
   captionLength: 1024,
+  /** A location's name and address (ADR-195): HyFib's own bound; Meta's spec gives none (M-192). */
+  locationTextLength: 1000,
   idempotencyKeyLength: 255,
   idempotencyHours: 24,
   /** Conversations one call to POST /conversations/update-many changes (ADR-120). */

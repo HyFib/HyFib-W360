@@ -958,6 +958,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `video`, `audio` or `document`, an https `link` (`isMediaLink`) and a caption except for audio,
   and sends through `sendReply` as text replies do: the content keeps the link and the caption, the
   send intent the Graph request. `outboundText` reads the caption, and the inbox shows the link.
+- **Locations (ADR-195):** `apiSendLocation` (`api/resources.ts`) parses `type` `location`, the
+  coordinates as numbers within their ranges and an optional name and address, and sends through
+  `sendReply`: the content keeps the coordinates as numbers, as received locations do, and the send
+  intent's Graph request gives them as decimal text (`decimalDegrees`). `outboundText` reads the
+  name, else the address, and the inbox shows the coordinates.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions (`last_message` with `conversations.read` and `campaign` with
   `campaigns.read` since ADR-126, a named campaign checked to be the company's, `name` since

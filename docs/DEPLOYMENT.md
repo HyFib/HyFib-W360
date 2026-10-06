@@ -370,6 +370,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-194 has no migration: until the web rollout ends, an old web server refuses media in
    `POST /messages` with 422, as before.
 
+   ADR-195 has no migration: until the web rollout ends, an old web server refuses locations in
+   `POST /messages` with 422, as before.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

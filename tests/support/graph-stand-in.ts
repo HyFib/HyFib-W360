@@ -363,6 +363,40 @@ function mediaProblem(body: unknown): string | null {
   return null;
 }
 
+const LOCATION_KEYS = ['latitude', 'longitude', 'name', 'address'];
+
+/**
+ * Checks a location message (research M-192): `location` holds only `latitude`, `longitude`,
+ * `name` and `address`, the coordinates as the decimal strings the schema types them as (its
+ * examples send numbers; HyFib follows the schema) within their ranges, a name and an address as
+ * text when given.
+ */
+function locationProblem(body: unknown): string | null {
+  const b = body as { type?: unknown; location?: unknown } | undefined;
+  if (b?.type !== 'location') return b?.location === undefined ? null : 'location';
+  const location = b.location as Record<string, unknown> | undefined;
+  if (typeof location !== 'object' || location === null) return 'location';
+  if (Object.keys(location).some((key) => !LOCATION_KEYS.includes(key))) return 'location';
+  for (const [key, bound] of [
+    ['latitude', 90],
+    ['longitude', 180],
+  ] as const) {
+    const value = location[key];
+    if (
+      typeof value !== 'string' ||
+      !/^-?\d+(\.\d+)?$/.test(value) ||
+      Math.abs(Number(value)) > bound
+    ) {
+      return `location.${key}`;
+    }
+  }
+  for (const key of ['name', 'address']) {
+    const value = location[key];
+    if (value !== undefined && (typeof value !== 'string' || !value)) return `location.${key}`;
+  }
+  return null;
+}
+
 /** Checks the `context` of a reply that quotes a message (research M-041, M-183). */
 function contextProblem(body: unknown): string | null {
   const context = (body as { context?: unknown } | undefined)?.context;
@@ -630,7 +664,11 @@ export async function startGraphStandIn(options: {
             ? null
             : interactiveProblem(body);
         if (invalid) return graphError(res, 400, 100, `(#100) Invalid parameter: ${invalid}`);
-        const shapeInvalid = contextProblem(body) ?? reactionProblem(body) ?? mediaProblem(body);
+        const shapeInvalid =
+          contextProblem(body) ??
+          reactionProblem(body) ??
+          mediaProblem(body) ??
+          locationProblem(body);
         if (shapeInvalid) {
           return graphError(res, 400, 100, `(#100) Invalid parameter: ${shapeInvalid}`);
         }

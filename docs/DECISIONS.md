@@ -7872,9 +7872,9 @@ Decision:
 - **Stored as sent:** the message's content is the link and the caption (`type` the media's), and
   its send intent the Graph request (`{type}: {link, caption}`), sent through the same pipeline and
   send job as every reply; the conversation's preview is the caption, or the kind of media. The API
-  reads the caption as the message's `text` (`mimeType` stays null: HyFib does not know it), and so
-  do webhooks. The inbox shows the kind, the caption and the link, which opens in a new tab (only an
-  https link is shown as one). Erasing the contact redacts the content as for any message.
+  reads the caption as the message's `text` (`mimeType` stays null: HyFib does not know it). The
+  inbox shows the kind, the caption and the link, which opens in a new tab (only an https link is
+  shown as one). Erasing the contact redacts the content as for any message.
 - **Not uploads, not stickers:** no `id` of uploaded media (HyFib has no media storage), no
   `filename` for documents and no stickers: Meta's spec shows a filename only for a document sent by
   id, and a caption on an audio or sticker message nowhere (M-191). The scope's label and
@@ -7883,3 +7883,43 @@ Decision:
 
 Not built: sending uploaded media (needs media storage and Meta's upload), media in the inbox's own
 reply box, stickers, a document's file name, checking a link before sending it, and media downloads.
+
+## ADR-195 Sending locations through the public API (P5-08) (2026-10-06)
+
+Context: keys reply with text, buttons, lists, products, reactions and media from links (ADR-070,
+ADR-080, ADR-082, ADR-086, ADR-194), but not with a place: a clinic asked where it is could only
+type its address. Meta's published spec describes a location message (research M-192), and the inbox
+already shows the locations customers send.
+
+Decision:
+
+- **A location:** `POST /messages` takes `type` `location` with `to`, an optional `from` and
+  `replyTo` as other replies take them, a `latitude` (-90 to 90) and a `longitude` (-180 to 180) in
+  decimal degrees as JSON numbers, and the place's `name` and `address` if wanted, each trimmed and
+  1 to 1,000 characters long (HyFib's own bound: Meta's spec gives none). Nothing else: the spec's
+  send schema has only these four properties, so a received location's `url` is not sent. It is a
+  reply (ADR-070): `messages.reply`, only to a number that wrote to the WhatsApp number in the last
+  24 hours (`window_closed` otherwise), stopping an automation answering the conversation. It may
+  quote a message, as the spec's examples do.
+- **Coordinates as the spec types them:** the send intent's Graph request gives the coordinates as
+  decimal text (`"18.5204"`), as the spec's `LocationMessage` schema types them; its examples send
+  numbers, a conflict M-192 records, and HyFib follows the schema. `decimalDegrees` writes them in
+  plain decimals, never in the exponent notation JavaScript uses below a millionth. A location
+  WhatsApp refuses makes the message fail, which `GET /messages/{id}` and `message.status` report
+  with WhatsApp's error, as for any send.
+- **Stored as received locations are:** the message's content holds the coordinates as numbers with
+  the name and the address, the shape of a received location, so the inbox and the API read both
+  alike. The conversation's preview, the API's `text` and the inbox's one-line quote give
+  the name, else the address (as for received locations); the preview says "Location" without
+  either. The inbox now shows a location's coordinates under its name and address, received
+  locations' too. Erasing the contact redacts the content as for any message.
+- **Descriptions:** the scope's label and description name locations. The API's description of a
+  message's `text` now names captions and locations for outbound messages too. ADR-194 left captions
+  out of it, and its record said webhooks give a caption as text, which they do not
+  (`message.status` carries no words): both corrected. The feature matrix no longer says media
+  messages are not built.
+- **No migration:** `location` is already a message type.
+
+Not built: locations in the inbox's own reply box, asking a customer for their location
+(`location_request_message` is not among the spec's interactive types, M-043), a place's `url`, and
+maps.

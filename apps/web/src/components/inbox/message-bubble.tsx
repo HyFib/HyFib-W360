@@ -51,6 +51,17 @@ function text(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
+/** A location's coordinates in decimal degrees ("18.5204, 73.8567"), when it has both. */
+function coordinates(content: Record<string, unknown>): string | null {
+  const { latitude, longitude } = content;
+  return typeof latitude === 'number' &&
+    Number.isFinite(latitude) &&
+    typeof longitude === 'number' &&
+    Number.isFinite(longitude)
+    ? `${latitude}, ${longitude}`
+    : null;
+}
+
 /** One answer of a completed form as text (lists joined, other values as JSON, bounded). */
 /** Renders message content as plain text only (never HTML), by type. */
 function Body({
@@ -118,6 +129,9 @@ function Body({
           <span className="font-medium">Location</span>
           {text(c.name) ? ` · ${text(c.name)}` : ''}
           {text(c.address) ? <span className="block">{text(c.address)}</span> : null}
+          {coordinates(c) ? (
+            <span className="block text-xs opacity-80">{coordinates(c)}</span>
+          ) : null}
         </p>
       );
     case 'reaction':
