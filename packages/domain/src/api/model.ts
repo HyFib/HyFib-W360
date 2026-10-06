@@ -13,6 +13,7 @@ export const API_SCOPE_KEYS = [
   'templates.read',
   'contacts.read',
   'contacts.write',
+  'contacts.merge',
   'contact_fields.manage',
   'messages.send',
   'messages.send_marketing',
@@ -62,6 +63,14 @@ export const API_SCOPE_INFO: Record<
     description:
       'Create contacts, change their name, email, custom fields and tags, and record opt-ins and opt-outs with their evidence.',
     permission: 'contacts.write',
+    writes: true,
+  },
+  'contacts.merge': {
+    label: 'Merge contacts',
+    description:
+      'Merge two contacts of the same person: everything of one moves to the other, which keeps its details, and the merged contact is deleted. A merge cannot be undone.',
+    // Merging deletes a contact, so only members who may delete contacts grant it (ADR-227).
+    permission: 'contacts.delete',
     writes: true,
   },
   'contact_fields.manage': {

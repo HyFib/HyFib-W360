@@ -88,7 +88,9 @@ import {
   API_CONTACT_SEARCH_WINDOW,
   MAX_FIELD_FILTERS,
   apiContactFieldSchema,
+  apiContactMergeResultSchema,
   apiContactUpdateSchema,
+  apiMergeContactsSchema,
   apiUpdateManyContactsSchema,
 } from './contacts';
 import {
@@ -1176,6 +1178,25 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('Contact'))),
             },
             ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/contacts/{id}/merge': {
+        post: {
+          operationId: 'mergeContacts',
+          summary: 'Merge another contact of the same person into this one',
+          description: `${scopeNote('contacts.merge')} Everything of \`mergeContactId\` moves to the contact the path names: its WhatsApp identities, conversations, consent history, tags, deals, tasks and notes, orders, campaign sends, automation runs and Flow answers. The kept contact keeps its name, number, email and custom field values and takes the other's where it has none; an opt-out of either stands, and no opt-in is added. The merged contact is then deleted, which cannot be undone: its id answers 404 with reason \`contact_merged\` and \`mergedInto\`. Refused with 409 for the same contact twice, an erased contact, or a message to the merged contact being sent (try again in a minute), and with 412 when both have a phone number (a contact keeps one), both have a conversation on the same WhatsApp number, they have more than 50 tags between them, or both were sent the same campaign. Endpoints taking \`contact.merged\` are sent the merge. With an \`Idempotency-Key\`, a retry answers the first response. ${MERGED_CONTACT_NOTE}`,
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKeyOptional' },
+          ],
+          requestBody: { required: true, content: json(ref('ContactMerge')) },
+          responses: {
+            '200': {
+              description: 'The contact kept, the contact merged, and what moved.',
+              content: json(dataOf(ref('ContactMergeResult'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -2531,6 +2552,8 @@ export function buildOpenApiDocument(serverUrl: string) {
           required: ['id', 'erased', 'contact', 'mergedContactIds'],
         },
         Consent: jsonSchema(apiConsentSchema, 'input'),
+        ContactMerge: jsonSchema(apiMergeContactsSchema, 'input'),
+        ContactMergeResult: jsonSchema(apiContactMergeResultSchema),
         Template: jsonSchema(apiTemplateSchema),
         SendTemplate: jsonSchema(apiSendMessageSchema, 'input'),
         SendManyTemplates: jsonSchema(apiSendManyTemplatesSchema, 'input'),
@@ -2639,6 +2662,7 @@ export const API_ROUTES = [
   ['get', '/contacts/{id}'],
   ['patch', '/contacts/{id}'],
   ['post', '/contacts/{id}/consent'],
+  ['post', '/contacts/{id}/merge'],
   ['get', '/contact-fields'],
   ['post', '/contact-fields'],
   ['patch', '/contact-fields/{key}'],

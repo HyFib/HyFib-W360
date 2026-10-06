@@ -5,6 +5,7 @@ import {
   apiContactChanges,
   apiErrorResponse,
   apiGetContact,
+  apiMergeContacts,
   apiRecordConsent,
   apiUpdateContact,
   authenticateApiToken,
@@ -16,6 +17,7 @@ import {
   createCrmService,
   queueTextMessage,
   type ApiContext,
+  type ApiScope,
   type AutomationTrigger,
   type TenantContext,
 } from '@w360/domain';
@@ -57,16 +59,18 @@ const outbound = () => ({ db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, cl
 
 const phone = () => `+91${randomInt(7_000_000_000, 9_999_999_999)}`;
 
-/** A key of the company with the contact scopes, and the context a request with it gets. */
-async function contactsKey(c: Company): Promise<ApiContext> {
+/** A key of the company created by its owner, and the context a request with it gets. */
+async function keyWith(c: Company, scopes: ApiScope[]): Promise<ApiContext> {
   const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
     await fx.ctx(c, c.owner),
-    { name: 'Contact sync', scopes: ['contacts.read', 'contacts.write'], expiresInDays: 0 },
+    { name: 'Contact sync', scopes, expiresInDays: 0 },
   );
   const ctx = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
   if (!ctx) throw new Error('a new key does not authenticate');
   return ctx;
 }
+
+const contactsKey = (c: Company) => keyWith(c, ['contacts.read', 'contacts.write']);
 
 /** The API error a call answers with, as the client receives it. */
 async function apiRefusal(promise: Promise<unknown>) {
@@ -606,6 +610,91 @@ describe('merging contacts (ADR-224)', () => {
       [messageId],
     );
     expect(intent!.request.to).toBe(wa);
+  });
+
+  it('merges through the API with a key that has contacts.merge (ADR-227)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const contacts = contactsSvc();
+    const kept = (await contacts.createContact(owner, { displayName: 'Kept', phone: phone() })).id;
+    const user = userId();
+    await writesByUserId(c, { user });
+    const byUser = await contactOf(c, { bsuid: user });
+
+    // A key without the scope is refused.
+    const writer = await contactsKey(c);
+    expect(
+      await apiRefusal(
+        apiMergeContacts(outbound(), writer, kept, { mergeContactId: byUser }, null),
+      ),
+    ).toMatchObject({ status: 403, code: 'forbidden' });
+
+    const key = await keyWith(c, ['contacts.read', 'contacts.merge']);
+    const retry = { key: `merge-${randomInt(1e9)}`, requestHash: 'same-request' };
+    const first = await apiMergeContacts(outbound(), key, kept, { mergeContactId: byUser }, retry);
+    expect(first).toMatchObject({
+      status: 200,
+      replayed: false,
+      body: {
+        data: {
+          contact: { id: kept, name: 'Kept' },
+          mergedContactId: byUser,
+          moved: { identities: 1, conversations: 1, optOutsCarried: [] },
+        },
+      },
+    });
+    expect(await fx.query('SELECT 1 FROM app.contacts WHERE id = $1', [byUser])).toEqual([]);
+    expect(await contactOf(c, { bsuid: user })).toBe(kept);
+    // A retry with the same Idempotency-Key answers the first response; without one, the merged
+    // id says where it went.
+    expect(
+      await apiMergeContacts(outbound(), key, kept, { mergeContactId: byUser }, retry),
+    ).toEqual({ ...first, replayed: true });
+    expect(
+      await apiRefusal(apiMergeContacts(outbound(), key, kept, { mergeContactId: byUser }, null)),
+    ).toEqual({
+      status: 404,
+      code: 'not_found',
+      message: 'This contact was merged into another contact.',
+      reason: 'contact_merged',
+      mergedInto: kept,
+    });
+    // Recorded as the key's: the audit names it, and the merge record names no member.
+    const audits = await fx.query<{ actor_type: string; actor_id: string; subject_id: string }>(
+      `SELECT actor_type, actor_id, subject_id FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'contact.merged'`,
+      [c.tenant.id],
+    );
+    expect(audits).toEqual([{ actor_type: 'api_key', actor_id: key.key.id, subject_id: kept }]);
+    const [record] = await fx.query<{ merged_by_user_id: string | null }>(
+      'SELECT merged_by_user_id FROM app.contact_merges WHERE merged_contact_id = $1',
+      [byUser],
+    );
+    expect(record).toEqual({ merged_by_user_id: null });
+
+    // The function's refusals answer with their status, and change nothing.
+    const a = (await contacts.createContact(owner, { displayName: 'A', phone: phone() })).id;
+    const b = (await contacts.createContact(owner, { displayName: 'B', phone: phone() })).id;
+    expect(
+      await apiRefusal(apiMergeContacts(outbound(), key, a, { mergeContactId: b }, null)),
+    ).toMatchObject({ status: 412, code: 'precondition_failed' });
+    expect(
+      await apiRefusal(apiMergeContacts(outbound(), key, a, { mergeContactId: a }, null)),
+    ).toMatchObject({ status: 409, code: 'conflict' });
+    // Another company's contact is not found.
+    const d = await fx.company();
+    const theirs = (
+      await contactsSvc().createContact(await fx.ctx(d, d.owner), {
+        displayName: 'D',
+        phone: phone(),
+      })
+    ).id;
+    expect(
+      await apiRefusal(apiMergeContacts(outbound(), key, a, { mergeContactId: theirs }, null)),
+    ).toMatchObject({ status: 404, code: 'not_found' });
+    for (const id of [a, b]) {
+      expect(await fx.query('SELECT 1 FROM app.contacts WHERE id = $1', [id]), id).toHaveLength(1);
+    }
   });
 
   it('follows earlier merges into the contact kept last', async () => {

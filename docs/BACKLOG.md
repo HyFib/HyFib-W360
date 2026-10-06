@@ -76,7 +76,9 @@ verification, app review, Embedded Signup configuration).
   duplicate is deleted with a record of the merge). **[Number masking built; its database and
   browser tests run only in CI]** (ADR-226, W-044, migration 0152: owners and administrators choose
   the roles whose members see customers' numbers masked, enforced in the services, with searches by
-  whole numbers only). **Remaining:** bulk edits of other fields, merges through the API, joining
+  whole numbers only). **[Merges through the API built; their database tests run only in CI]**
+  (ADR-227, migration 0153: a `contacts.merge` scope, granted by members who may delete contacts,
+  for `POST /contacts/{id}/merge`). **Remaining:** bulk edits of other fields, joining
   conversations.
 - **P3-02 Consent & suppression** — _implemented (2026-09-26)_: consent events with provenance,
   opt-out/opt-in keywords, Meta 131050 opt-outs, suppression list, send-time enforcement (race test
@@ -714,6 +716,9 @@ verification, app review, Embedded Signup configuration).
   **[Conversation tags through the API built; their database and browser tests run only in CI]**
   (ADR-221: conversations carry `tags`, `GET /conversations` filters by `tag`, and the three calls
   that change conversations take `addTags` and `removeTags`; no migration).
+  **[Merging contacts through the API built; its database tests run only in CI]** (ADR-227,
+  migration 0153: `POST /contacts/{id}/merge` with the `contacts.merge` scope merges a contact into
+  another as owners and administrators do, answering the kept contact and what moved).
   Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,

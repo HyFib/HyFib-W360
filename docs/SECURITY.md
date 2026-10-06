@@ -910,6 +910,11 @@ Phase 5 rules (Public API, P5-08):
   (column grants: the runtime and definer roles insert only `tenant_id` and `contact_id`); only the
   compaction function, owned by the definer role and run by the worker, deletes rows across
   companies, and only rows a later change of the same contact replaced.
+- Merging contacts through the API (ADR-227): `contacts.merge` is granted only by members holding
+  `contacts.delete` (owners and administrators, who merge in the app), is a writing scope (refused
+  while the company is suspended or restricted) and can be left out by the plan. The merge runs
+  `app.merge_contacts` in the key's company scope, so another company's contact is not found; the
+  audit log names the key.
 - Defining contact fields (ADR-115): adding, renaming and deleting the company's custom fields needs
   `contact_fields.manage`, which only members holding `tenant.settings.manage` (owners and
   administrators, who define fields in Settings) grant, and an active company. Fields are named by

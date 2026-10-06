@@ -1136,7 +1136,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   kept contact, and the feed lists for each contact it reads the contacts merged into it
   (`mergedContactIds`, from `app.contact_merges` in the page's snapshot); the contact endpoints
   answer a merged contact's id with 404, reason `contact_merged` and `mergedInto`
-  (`apiContactNotFound`, `api/contact-view.ts`).
+  (`apiContactNotFound`, `api/contact-view.ts`). Since ADR-227 `POST /contacts/{id}/merge`
+  (`apiMergeContacts`, scope `contacts.merge`) checks that both contacts exist in the key's company,
+  calls `app.merge_contacts` in the key's scope, audits as the key and answers the kept contact with
+  the counts moved; with an `Idempotency-Key` the claim and the stored response share the merge's
+  transaction.
 - **Defining contact fields (0092, ADR-115):** `contacts/field-definitions.ts` adds, renames and
   deletes a company's custom fields for both Settings (`contacts/service.ts`, by id) and the API
   (`api/contact-fields.ts`, by key, scope `contact_fields.manage`); callers check who may and audit

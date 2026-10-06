@@ -8900,3 +8900,29 @@ Decision:
 
 Not built: masking per member rather than per role, masking emails, masking customers' numbers in
 message content, and masking for API keys.
+
+## ADR-227 Merging contacts through the API (2026-10-06)
+
+Context: owners and administrators merge two contacts of the same person in the app (ADR-224), and
+integrations hear of merges (ADR-225), but an integration that finds duplicates itself (a CRM that
+knows a customer by phone and by WhatsApp user id) could not merge them.
+
+Decision:
+
+- **A `contacts.merge` scope** for `POST /contacts/{id}/merge` with `mergeContactId`: the contact
+  the body names is merged into the one the path names, through `app.merge_contacts`, as in the app
+  (the same moves, refusals, stricter consent and deletion). Merging deletes a contact, so only
+  members who may delete contacts grant the scope (`contacts.delete`: owners and administrators); it
+  is a writing scope, refused while the company is suspended or its plan has ended. A plan version
+  that chose its scopes (ADR-092) leaves it out until a new version includes it (migration 0153).
+- **Answers** the kept contact as it is now, the merged contact's id and the counts moved (200).
+  Refusals: 404 for a contact of no one or another company, and `contact_merged` with `mergedInto`
+  for one merged already; 409 for the same contact twice, an erased contact, or a message to the
+  merged contact being sent; 412 for two numbers, conversations on the same number, more than 50
+  tags between them or a campaign sent to both. With an `Idempotency-Key`, a retry answers the first
+  response; a retry without one learns where the first merge went from the 404.
+- **Recorded as the key's:** the audit log names the key; the merge record names no member, and an
+  opt-out the merge carries is recorded with actor `system` (the function reads no key).
+
+Not built: naming the key on the merge record and on the carried opt-out, merging many pairs in one
+call, and suggesting duplicates through the API.

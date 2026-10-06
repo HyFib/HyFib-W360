@@ -77,6 +77,8 @@ import {
   apiContactListFilters,
   apiContactUpdateSchema,
   apiListContactFields,
+  apiMergeContacts,
+  apiMergeContactsSchema,
   apiTags,
   apiUpdateContact,
   apiUpdateManyContacts,
@@ -236,6 +238,7 @@ describe('API scopes', () => {
     const writes = API_SCOPE_KEYS.filter((s) => API_SCOPE_INFO[s].writes);
     expect(writes).toEqual([
       'contacts.write',
+      'contacts.merge',
       'contact_fields.manage',
       'messages.send',
       'messages.send_marketing',
@@ -258,6 +261,8 @@ describe('API scopes', () => {
     expect(API_SCOPE_INFO['messages.send_marketing'].permission).toBe('campaigns.send');
     expect(API_SCOPE_INFO['messages.reply'].permission).toBe('inbox.reply');
     expect(API_SCOPE_INFO['contacts.write'].permission).toBe('contacts.write');
+    // Merging deletes a contact: members merge with contacts.write and contacts.delete (ADR-227).
+    expect(API_SCOPE_INFO['contacts.merge'].permission).toBe('contacts.delete');
     // Members define fields in Settings with tenant.settings.manage (ADR-115).
     expect(API_SCOPE_INFO['contact_fields.manage'].permission).toBe('tenant.settings.manage');
     // Members pause and cancel campaigns with campaigns.send (ADR-128).
@@ -6567,5 +6572,89 @@ describe("listing a segment's contacts through the API (ADR-208)", () => {
       'With contacts read as well, list the contacts each segment holds.',
     );
     expect(API_ROUTES).toContainEqual(['get', '/segments/{id}/contacts']);
+  });
+});
+
+describe('merging contacts through the API (ADR-227)', () => {
+  const KEEP = '0192f3a4-5b6c-7d8e-9f00-112233445566';
+  const MERGE = '0192f3a4-5b6c-7d8e-9f00-112233445577';
+  const ctx = (scopes: string[], status = 'active') =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: null,
+    }) as unknown as ApiContext;
+  const unreachable = {
+    db: {
+      run: () => {
+        throw new Error('the database was reached');
+      },
+    },
+    clock: { now: () => new Date('2026-10-06T00:00:00Z') },
+  } as unknown as Parameters<typeof apiMergeContacts>[0];
+  const merge = (c: ApiContext, id: string, body: unknown) =>
+    apiMergeContacts(unreachable, c, id, body, null);
+
+  it('needs the contacts.merge scope, an active company and two contact ids, before the database', async () => {
+    await expect(
+      merge(ctx(['contacts.read', 'contacts.write']), KEEP, { mergeContactId: MERGE }),
+    ).rejects.toMatchObject({
+      code: 'forbidden',
+      publicMessage: 'This API key does not have the contacts.merge scope.',
+    });
+    await expect(
+      merge(ctx(['contacts.merge'], 'suspended'), KEEP, { mergeContactId: MERGE }),
+    ).rejects.toMatchObject({ code: 'tenant_suspended' });
+    await expect(
+      merge(ctx(['contacts.merge']), 'nope', { mergeContactId: MERGE }),
+    ).rejects.toMatchObject({ code: 'not_found' });
+    for (const body of [{}, { mergeContactId: 'nope' }, { mergeContactId: MERGE, keep: KEEP }]) {
+      await expect(
+        merge(ctx(['contacts.merge']), KEEP, body),
+        JSON.stringify(body),
+      ).rejects.toMatchObject({ code: 'validation_failed' });
+    }
+    await expect(merge(ctx(['contacts.merge']), KEEP, { mergeContactId: MERGE })).rejects.toThrow(
+      'the database was reached',
+    );
+    expect(apiMergeContactsSchema.parse({ mergeContactId: MERGE })).toEqual({
+      mergeContactId: MERGE,
+    });
+  });
+
+  it('is described with its scope, an optional Idempotency-Key, what it answers and its refusals', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const op = (
+      doc.paths as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            description: string;
+            parameters: { $ref: string }[];
+            responses: Record<string, unknown>;
+          }
+        >
+      >
+    )['/contacts/{id}/merge']?.post;
+    expect(op?.operationId).toBe('mergeContacts');
+    expect(op?.description).toContain('`contacts.merge`');
+    expect(op?.description).toContain('which cannot be undone');
+    expect(op?.parameters.map((p) => p.$ref)).toEqual([
+      '#/components/parameters/Id',
+      '#/components/parameters/IdempotencyKeyOptional',
+    ]);
+    expect(Object.keys(op?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '404', '409', '412', '422', '423']),
+    );
+    const schemas = doc.components.schemas as Record<
+      string,
+      { required?: string[]; additionalProperties?: unknown }
+    >;
+    expect(schemas.ContactMerge?.required).toEqual(['mergeContactId']);
+    expect(schemas.ContactMerge?.additionalProperties).toBe(false);
+    expect(schemas.ContactMergeResult?.required).toEqual(['contact', 'mergedContactId', 'moved']);
+    expect(API_ROUTES).toEqual(expect.arrayContaining([['post', '/contacts/{id}/merge']]));
   });
 });

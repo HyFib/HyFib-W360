@@ -1,5 +1,42 @@
 # Progress
 
+## 2026-10-06 — Phase 5 follow-up: merging contacts through the API (P5-08, P3-01, ADR-227)
+
+Status: **Implemented; its database tests run in CI only.** Integrations could not merge the
+duplicates they find. The local PostgreSQL is unavailable, so migration 0153 and the integration
+test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-227):** a `contacts.merge` scope granted with `contacts.delete`;
+  `POST /contacts/{id}/merge`; answers, refusals and retries; recorded as the key's.
+- **Migration:** 0153 (the keys' and plans' scope checks with `contacts.merge`).
+- **Domain and web:** `apiMergeContacts` and its schemas; the route; the OpenAPI path and schemas.
+- **Tests:**
+  - Unit (2 new in `api.test.ts`; scope tests updated): the scope and its permission, the checks
+    before the database, the documentation.
+  - Integration (1 new in `contact-merges.test.ts`): a merge through the API, the scope refusal, the
+    replay, the 404 for a merged id, the audit, the function's refusals. Written for CI; not run
+    here.
+- **Docs:** ADR-227; ARCHITECTURE; SECURITY; THREAT-MODEL T214; DEPLOYMENT; BACKLOG P3-01 and P5-08;
+  feature matrix H-019.
+- **Mutation checks:** 8/8 deliberate regressions caught on the unit-tested parts.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 980 passed (99 files)                                           |
+| `pnpm test:integration`, migration 0153            | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 8/8 deliberate regressions caught on the unit-tested parts      |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- The merge record and a carried opt-out do not name the key (the audit log does); no bulk merges.
+
 ## 2026-10-06 — Phase 3 follow-up: hiding customers' numbers (P3-01, W-044, ADR-226)
 
 Status: **Implemented; its database and browser tests run in CI only.** Every member who read

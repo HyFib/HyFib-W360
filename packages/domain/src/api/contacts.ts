@@ -19,6 +19,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
+import { mergeSummarySchema } from '../contacts/merge';
 import {
   MAX_CONTACT_FIELDS,
   MAX_TAGS_PER_CONTACT,
@@ -35,10 +36,17 @@ import {
   apiContactById,
   apiContactColumns,
   apiContactNotFound,
+  apiContactSchema,
   toApiContact,
   type ApiContact,
 } from './contact-view';
 import { apiActor, assertAnyScope, assertScope, type ApiContext } from './context';
+import {
+  claimIdempotencyKey,
+  storeIdempotentResponse,
+  type ApiResponse,
+  type IdempotencyInput,
+} from './idempotency';
 import { API_LIMITS } from './model';
 
 /**
@@ -814,5 +822,100 @@ export async function apiUpdateManyContacts(
       if (!row) throw unknownContact(index);
       return toApiContact(row);
     });
+  });
+}
+
+/** The contact to merge into the one the path names (ADR-227). */
+export const apiMergeContactsSchema = z
+  .object({
+    mergeContactId: z
+      .uuid()
+      .describe(
+        'The contact to merge into the one the path names: everything of it moves there, and it is deleted.',
+      ),
+  })
+  .strict();
+
+/** What a merge through the API answers (ADR-227). */
+export const apiContactMergeResultSchema = z.object({
+  contact: apiContactSchema.describe('The contact kept, as it is now.'),
+  mergedContactId: z
+    .uuid()
+    .describe(
+      'The contact merged and deleted. Its id is no longer found: GET /contacts/{id} answers 404 with reason `contact_merged`.',
+    ),
+  moved: mergeSummarySchema.describe(
+    'How many of each kind of record moved to the kept contact, and the purposes whose opt-out the merged contact had and the kept one now has.',
+  ),
+});
+
+/**
+ * Merges a contact into another as owners and administrators do (ADR-224), through
+ * `app.merge_contacts`, which takes the locks and refuses what it cannot merge (409, 412). The kept
+ * contact keeps its details and fills its gaps; the merged one is deleted. Recorded in the audit
+ * log as the key's; the merge record names no member. With an `Idempotency-Key`, a retry answers
+ * the first response.
+ */
+export async function apiMergeContacts(
+  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+  ctx: ApiContext,
+  contactId: string,
+  input: unknown,
+  idempotency: IdempotencyInput | null,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'contacts.merge');
+  if (!z.uuid().safeParse(contactId).success) throw notFound('Contact');
+  const data = parseInput(apiMergeContactsSchema, input);
+  const now = deps.clock.now();
+  return deps.db.run(ctx.scope, async (tx) => {
+    // Claimed in the merge's transaction, so a refused merge leaves the key unused (ADR-052).
+    let claimed: string | null = null;
+    if (idempotency) {
+      const claim = await claimIdempotencyKey(tx, ctx, idempotency, now);
+      if ('replay' in claim) return claim.replay;
+      claimed = claim.claimed;
+    }
+    // Both must exist now (the function checks again under its locks): a merged one says which
+    // contact it belongs to, so a retry without a key learns where the first went.
+    const found = await tx
+      .select({ id: contacts.id })
+      .from(contacts)
+      .where(
+        and(
+          eq(contacts.tenantId, ctx.tenant.id),
+          inArray(contacts.id, [contactId, data.mergeContactId]),
+        ),
+      );
+    const exists = new Set(found.map((r) => r.id));
+    if (!exists.has(contactId)) throw await apiContactNotFound(tx, ctx.tenant.id, contactId);
+    if (!exists.has(data.mergeContactId)) {
+      throw await apiContactNotFound(tx, ctx.tenant.id, data.mergeContactId);
+    }
+    const res = await tx.execute<{ summary: unknown }>(
+      sql`select app.merge_contacts(${contactId}::uuid, ${data.mergeContactId}::uuid) as summary`,
+    );
+    const moved = mergeSummarySchema.parse(res.rows[0]?.summary);
+    await recordSystemAudit(
+      tx,
+      ctx.tenant.id,
+      {
+        action: 'contact.merged',
+        subjectType: 'contact',
+        subjectId: contactId,
+        correlationId: ctx.requestId,
+        metadata: { mergedContactId: data.mergeContactId, ...moved },
+      },
+      apiActor(ctx),
+    );
+    const row = await apiContactById(tx, ctx.tenant.id, contactId);
+    if (!row) throw notFound('Contact');
+    const response = {
+      status: 200,
+      body: {
+        data: { contact: toApiContact(row), mergedContactId: data.mergeContactId, moved },
+      },
+    };
+    if (claimed) await storeIdempotentResponse(tx, ctx, claimed, response);
+    return { ...response, replayed: false };
   });
 }

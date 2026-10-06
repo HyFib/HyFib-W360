@@ -507,6 +507,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    server shows no setting and masks nothing, so a company should choose roles once the rollout is
    done.
 
+   Migration 0153 (ADR-227) widens the same scope checks again, with the same brief locks. Web
+   servers from before it do not know `contacts.merge`: until the web rollout ends, an old server
+   answers Settings → API keys with an error for a company with a key holding it (and the platform
+   plan pages for a plan version including it), and `POST /api/v1/contacts/{id}/merge` with 404;
+   rolling web servers back to an image from before it does the same. Workers are not affected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back
