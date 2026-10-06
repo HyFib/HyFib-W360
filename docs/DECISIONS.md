@@ -7848,3 +7848,38 @@ Not built: reviewing a draft's settings before saving them (the review reads the
 submitting, approving, scheduling or starting campaigns through the API (a key is not a member), and
 the frequency cap's effect on the audience (applied when the campaign sends, as members' review
 says).
+
+## ADR-194 Sending media from links through the public API (P5-08) (2026-10-06)
+
+Context: keys reply with text, buttons, lists, products and reactions (ADR-070, ADR-080, ADR-082,
+ADR-086), but not with a photo, a video, a voice note or a document: a clinic could not send its
+leaflet, nor a shop a product photo, to a customer who had just written. HyFib keeps no media
+(inbound media is metadata only, and uploads need storage it does not have), but Meta's published
+spec lets a message name its media by an http(s) `link` that WhatsApp fetches (research M-191).
+
+Decision:
+
+- **Media from a link:** `POST /messages` takes `type` `image`, `video`, `audio` or `document` with
+  `to`, an optional `from` and `replyTo` as other replies take them, a `link`, and for a photo, a
+  video or a document an optional `caption` (trimmed, 1 to 1,024 characters); audio takes none. It
+  is a reply (ADR-070): `messages.reply`, only to a number that wrote to the WhatsApp number in the
+  last 24 hours (`window_closed` otherwise), stopping an automation answering the conversation.
+- **Links:** https only, with a host and without a user name or password, at most 2,000 characters,
+  trimmed; HyFib never fetches it. WhatsApp fetches it when it sends the message, so it must be
+  reachable from the internet without signing in; a link it cannot fetch, or media it does not
+  accept, makes the message fail, which `GET /messages/{id}` and `message.status` report with
+  WhatsApp's error, as for any send.
+- **Stored as sent:** the message's content is the link and the caption (`type` the media's), and
+  its send intent the Graph request (`{type}: {link, caption}`), sent through the same pipeline and
+  send job as every reply; the conversation's preview is the caption, or the kind of media. The API
+  reads the caption as the message's `text` (`mimeType` stays null: HyFib does not know it), and so
+  do webhooks. The inbox shows the kind, the caption and the link, which opens in a new tab (only an
+  https link is shown as one). Erasing the contact redacts the content as for any message.
+- **Not uploads, not stickers:** no `id` of uploaded media (HyFib has no media storage), no
+  `filename` for documents and no stickers: Meta's spec shows a filename only for a document sent by
+  id, and a caption on an audio or sticker message nowhere (M-191). The scope's label and
+  description name media.
+- **No migration:** the media types are already message types.
+
+Not built: sending uploaded media (needs media storage and Meta's upload), media in the inbox's own
+reply box, stickers, a document's file name, checking a link before sending it, and media downloads.

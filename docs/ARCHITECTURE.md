@@ -954,6 +954,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the company's status), reads the draft and the company's time zone in one read-only snapshot and
   calls `reviewCampaignDraft`, as members' review does; `toApiCampaignReview` answers it with the
   skip reasons commonest first and amounts in major units. Other statuses get 409.
+- **Media from links (ADR-194):** `apiSendMedia` (`api/resources.ts`) parses `type` `image`,
+  `video`, `audio` or `document`, an https `link` (`isMediaLink`) and a caption except for audio,
+  and sends through `sendReply` as text replies do: the content keeps the link and the caption, the
+  send intent the Graph request. `outboundText` reads the caption, and the inbox shows the link.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions (`last_message` with `conversations.read` and `campaign` with
   `campaigns.read` since ADR-126, a named campaign checked to be the company's, `name` since

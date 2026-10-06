@@ -1779,6 +1779,14 @@ they were created with: create a key with both); `not_in_plan` means the plan le
 `outcome` the results do not count, a `cursor` that is not the previous page's `nextCursor`, or an
 unknown parameter.
 
+**A photo, video, audio or document sent through the API failed (ADR-194).** WhatsApp fetches the
+media from the message's link when it sends it, and HyFib records what WhatsApp answers:
+`GET /messages/{id}` (and the `message.status` webhook) gives the error. The usual causes are a link
+that needs signing in or has expired, one not reachable from the internet, or media WhatsApp does
+not accept (its type or size). HyFib never fetches the link, so its logs say nothing of the media;
+fix the link and send the message again with a new Idempotency-Key. The link is stored with the
+message and shown in the inbox.
+
 **A draft's review through the API shows no estimate, or other counts than expected (ADR-193).**
 `GET /campaigns/{id}/review` reads the saved draft as members' review does, now: save the draft
 first. `estimate` is null without a currency (the spending cap's, or else Settings → Messaging),

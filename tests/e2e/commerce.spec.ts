@@ -204,7 +204,9 @@ test('a catalog is read from Meta, products are sent in a chat and an order is p
   await expect(page).toHaveURL(new RegExp(`/c/${slug}/settings/api-keys$`));
   await page.getByLabel('Name', { exact: true }).fill('Shop');
   await page
-    .getByRole('checkbox', { name: /Reply with text, buttons, lists, products and reactions/ })
+    .getByRole('checkbox', {
+      name: /Reply with text, buttons, lists, products, reactions and media/,
+    })
     .check();
   await page.getByRole('checkbox', { name: /Read WhatsApp orders/ }).check();
   await page.getByRole('checkbox', { name: /Confirm, fulfil and cancel WhatsApp orders/ }).check();

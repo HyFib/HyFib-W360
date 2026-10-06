@@ -729,7 +729,9 @@ test('a key sends reply buttons and a list to a customer who wrote: the inbox sh
   ).toBeVisible();
   await page.getByLabel('Name', { exact: true }).fill('Booking');
   await page
-    .getByRole('checkbox', { name: /Reply with text, buttons, lists, products and reactions/ })
+    .getByRole('checkbox', {
+      name: /Reply with text, buttons, lists, products, reactions and media/,
+    })
     .check();
   await page.getByRole('checkbox', { name: /Read conversations/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
@@ -876,7 +878,9 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
   await page.goto(`/c/${slug}/settings/api-keys`);
   await page.getByLabel('Name', { exact: true }).fill('Front desk');
   await page
-    .getByRole('checkbox', { name: /Reply with text, buttons, lists, products and reactions/ })
+    .getByRole('checkbox', {
+      name: /Reply with text, buttons, lists, products, reactions and media/,
+    })
     .check();
   await page.getByRole('checkbox', { name: /Read conversations/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
@@ -930,17 +934,37 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
   expect((await reacted.json()).data).toMatchObject({ type: 'reaction', status: 'queued' });
   const word = await post({ type: 'reaction', to: `+${waId}`, replyTo: asked, emoji: 'ok' });
   expect(word.status()).toBe(422);
+  // And it sends the clinic's leaflet from a link, with a caption (ADR-194); a plain http link is
+  // refused.
+  const leafletLink = 'https://cdn.example.com/harbour-dental/leaflet.pdf';
+  const leaflet = await post({
+    type: 'document',
+    to: `+${waId}`,
+    link: leafletLink,
+    caption: 'Before your visit',
+  });
+  expect(leaflet.status()).toBe(201);
+  expect((await leaflet.json()).data).toMatchObject({ type: 'document', status: 'queued' });
+  const insecure = await post({
+    type: 'image',
+    to: `+${waId}`,
+    link: 'http://cdn.example.com/harbour-dental/map.png',
+  });
+  expect(insecure.status()).toBe(422);
 
-  // The worker sends both, in either order, as Meta's spec describes them.
+  // The worker sends all three, in any order, as Meta's spec describes them.
   let sent: Awaited<ReturnType<typeof standInRequests>> = [];
   await expect(async () => {
     sent = (await standInRequests(request)).filter(
       (r) =>
         r.path === `/v26.0/${phoneNumberId}/messages` && (r.body as { to?: string }).to === waId,
     );
-    expect(sent).toHaveLength(2);
+    expect(sent).toHaveLength(3);
   }).toPass({ timeout: 30_000 });
   const ofType = (type: string) => sent.find((r) => (r.body as { type: string }).type === type);
+  expect(ofType('document')?.body).toMatchObject({
+    document: { link: leafletLink, caption: 'Before your visit' },
+  });
   expect(ofType('text')?.body).toMatchObject({
     context: { message_id: questionWamid },
     text: { body: 'Thursday at 11:00 works.' },
@@ -959,6 +983,13 @@ test('a key quotes a customer’s message and reacts to it: the inbox shows both
   await expect(thread.filter({ hasText: 'Reacted 👍' })).toContainText(
     'to “Can I come on Thursday instead?”',
   );
+  // The leaflet shows its caption and the link it was sent from.
+  const sentLeaflet = thread.filter({ hasText: 'Before your visit' });
+  await expect(sentLeaflet.getByRole('link', { name: leafletLink })).toHaveAttribute(
+    'href',
+    leafletLink,
+  );
+  await expect(sentLeaflet).not.toContainText('Media download is not available yet.');
   await expectNoHorizontalOverflow(page);
 
   // The customer reacts to the reply: the key reads which message the reaction is for.

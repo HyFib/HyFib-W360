@@ -94,7 +94,19 @@ function Body({
           <span className="font-medium capitalize">{type}</span>
           {text(c.filename) ? ` · ${text(c.filename)}` : ''}
           {text(c.caption) ? <span className="block">{text(c.caption)}</span> : null}
-          <span className="block text-xs opacity-80">Media download is not available yet.</span>
+          {/* Sent through the API from a link (ADR-194), which the API only takes as https. */}
+          {text(c.link)?.startsWith('https://') ? (
+            <a
+              href={text(c.link) ?? undefined}
+              target="_blank"
+              rel="noopener noreferrer nofollow"
+              className="block break-all text-xs underline opacity-80"
+            >
+              {text(c.link)}
+            </a>
+          ) : (
+            <span className="block text-xs opacity-80">Media download is not available yet.</span>
+          )}
         </p>
       );
     case 'location':

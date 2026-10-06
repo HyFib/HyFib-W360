@@ -220,6 +220,80 @@ export const apiSendTextSchema = z
   })
   .strict();
 
+/** The media a message can carry from a link (ADR-194), as WhatsApp's message `type` names it. */
+export const API_MEDIA_TYPES = ['image', 'video', 'audio', 'document'] as const;
+export type ApiMediaType = (typeof API_MEDIA_TYPES)[number];
+
+/** A link WhatsApp may fetch media from (ADR-194): https, with a host, and no user name or password. */
+export function isMediaLink(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return url.protocol === 'https:' && url.hostname !== '' && !url.username && !url.password;
+}
+
+const mediaLinkField = z
+  .string({ error: 'Give the link to the media' })
+  .trim()
+  .min(1, 'Give the link to the media')
+  .max(API_LIMITS.mediaLinkLength, `Links are limited to ${API_LIMITS.mediaLinkLength} characters`)
+  .refine(isMediaLink, 'Give an https:// link to the media, without a user name or password')
+  .describe(
+    'An https:// link WhatsApp fetches the media from when it sends the message: it must be reachable from the internet without signing in. HyFib neither fetches nor keeps the media.',
+  );
+
+const captionField = z
+  .string({ error: 'Give the caption as text' })
+  .trim()
+  .min(1, 'Give the caption, or leave it out')
+  .max(API_LIMITS.captionLength, `Captions are limited to ${API_LIMITS.captionLength} characters`)
+  .optional()
+  .describe('Text shown with the media.');
+
+const mediaFrame = {
+  to: phoneField,
+  from: replyFromField,
+  replyTo: quoteField,
+  link: mediaLinkField,
+};
+
+/** A photo WhatsApp fetches from a link (ADR-194). */
+export const apiSendImageSchema = z
+  .object({ type: z.literal('image'), ...mediaFrame, caption: captionField })
+  .strict();
+/** A video WhatsApp fetches from a link (ADR-194). */
+export const apiSendVideoSchema = z
+  .object({ type: z.literal('video'), ...mediaFrame, caption: captionField })
+  .strict();
+/** Audio WhatsApp fetches from a link (ADR-194), without a caption. */
+export const apiSendAudioSchema = z.object({ type: z.literal('audio'), ...mediaFrame }).strict();
+/** A document WhatsApp fetches from a link (ADR-194). */
+export const apiSendDocumentSchema = z
+  .object({ type: z.literal('document'), ...mediaFrame, caption: captionField })
+  .strict();
+
+/**
+ * A photo, video, audio or document WhatsApp fetches from a link, to a contact who wrote in the
+ * last 24 hours (ADR-194); audio takes no caption.
+ */
+export const apiSendMediaSchema = z.discriminatedUnion('type', [
+  apiSendImageSchema,
+  apiSendVideoSchema,
+  apiSendAudioSchema,
+  apiSendDocumentSchema,
+]);
+
+/** What the conversation shows for media without a caption (ADR-194). */
+const MEDIA_PREVIEWS: Record<ApiMediaType, string> = {
+  image: 'Photo',
+  video: 'Video',
+  audio: 'Audio',
+  document: 'Document',
+};
+
 const LIMITS = INTERACTIVE_LIMITS;
 
 /** Text in a reply buttons or list message, trimmed, within Meta's limit (M-157, M-159, M-179). */
@@ -1311,7 +1385,7 @@ interface BuiltReply {
 }
 
 interface ApiReply {
-  type: 'text' | 'interactive' | 'reaction';
+  type: 'text' | 'interactive' | 'reaction' | ApiMediaType;
   /** The message the reply quotes, or the reaction is for, as the request names it. */
   replyTo: string | undefined;
   /** Checks that do not depend on the number, made first (the plan's modules). */
@@ -1513,6 +1587,31 @@ export async function apiSendText(
       content: { text: data.text },
       preview: data.text,
       request: { type: 'text', text: { body: data.text, preview_url: data.previewUrl } },
+    }),
+  });
+}
+
+/**
+ * A photo, video, audio or document WhatsApp fetches from an https link (ADR-194); see
+ * `sendReply`. HyFib stores the link and the caption, never the media.
+ */
+export async function apiSendMedia(
+  deps: OutboundDeps,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'messages.reply');
+  const data = parseInput(apiSendMediaSchema, input);
+  const caption = data.type === 'audio' ? undefined : data.caption;
+  const media = { link: data.link, ...(caption ? { caption } : {}) };
+  return sendReply(deps, ctx, data, idempotency, {
+    type: data.type,
+    replyTo: data.replyTo,
+    build: () => ({
+      content: media,
+      preview: caption ?? MEDIA_PREVIEWS[data.type],
+      request: { type: data.type, [data.type]: media },
     }),
   });
 }
@@ -1767,6 +1866,9 @@ export async function apiSendMessage(
   if (type === 'buttons') return apiSendButtons(deps, ctx, input, idempotency);
   if (type === 'list') return apiSendList(deps, ctx, input, idempotency);
   if (type === 'reaction') return apiSendReaction(deps, ctx, input, idempotency);
+  if ((API_MEDIA_TYPES as readonly unknown[]).includes(type)) {
+    return apiSendMedia(deps, ctx, input, idempotency);
+  }
   if (type === 'product' || type === 'product_list' || type === 'catalog') {
     return apiSendProducts(deps, ctx, input, idempotency);
   }
@@ -1775,12 +1877,13 @@ export async function apiSendMessage(
   }
   throw new AppError(
     'validation_failed',
-    'Send a template, a text, buttons, a list, products or a reaction.',
+    'Send a template, a text, buttons, a list, products, a reaction or media.',
     {
       issues: [
         {
           path: 'type',
-          message: 'Use template, text, buttons, list, product, product_list, catalog or reaction.',
+          message:
+            'Use template, text, buttons, list, product, product_list, catalog, reaction, image, video, audio or document.',
         },
       ],
     },

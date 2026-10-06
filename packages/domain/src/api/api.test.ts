@@ -89,7 +89,7 @@ import {
   replyButtonsContent,
   replyButtonsInteractive,
 } from '../messaging/interactive';
-import { messageSnippet, SNIPPET_LENGTH } from '../messaging/message-text';
+import { messageSnippet, outboundText, SNIPPET_LENGTH } from '../messaging/message-text';
 import { NOTE_MAX_LENGTH } from '../messaging/notes';
 import {
   answerProblem,
@@ -111,6 +111,9 @@ import {
   apiSendProductSchema,
   apiSendReactionSchema,
   apiSendTextSchema,
+  API_MEDIA_TYPES,
+  apiSendMediaSchema,
+  isMediaLink,
 } from './resources';
 import {
   apiCreateWebhookEndpointSchema,
@@ -750,7 +753,14 @@ describe('text replies (ADR-070)', () => {
       planScopes: null,
     } as unknown as ApiContext;
     const idem = { key: 'k-1', requestHash: 'h' };
-    for (const body of [{ type: 'image' }, { type: 'TEXT' }, { type: null }]) {
+    // Stickers and locations are not sent through the API (ADR-194 sends media from links).
+    for (const body of [
+      { type: 'sticker' },
+      { type: 'location' },
+      { type: 'IMAGE' },
+      { type: 'TEXT' },
+      { type: null },
+    ]) {
       const error: unknown = await apiSendMessage(
         {} as never,
         ctx,
@@ -2964,6 +2974,10 @@ describe('OpenAPI document', () => {
         { $ref: '#/components/schemas/SendProductList' },
         { $ref: '#/components/schemas/SendCatalog' },
         { $ref: '#/components/schemas/SendReaction' },
+        { $ref: '#/components/schemas/SendImage' },
+        { $ref: '#/components/schemas/SendVideo' },
+        { $ref: '#/components/schemas/SendAudio' },
+        { $ref: '#/components/schemas/SendDocument' },
       ],
     });
     for (const scope of API_SEND_SCOPES) expect(send.description).toContain(`\`${scope}\``);
@@ -5113,5 +5127,119 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
     expect(Object.keys(reviewSchema.properties).sort()).toEqual(fields);
     expect([...(reviewSchema.required ?? [])].sort()).toEqual(fields);
     expect(API_ROUTES).toEqual(expect.arrayContaining([['get', '/campaigns/{id}/review']]));
+  });
+});
+
+describe('media from links through the API (ADR-194)', () => {
+  const base = { to: '+919876543210', link: 'https://cdn.example.com/menu.pdf' };
+
+  it('take an https link without a user name or password, and a trimmed caption except for audio', () => {
+    expect([...API_MEDIA_TYPES]).toEqual(['image', 'video', 'audio', 'document']);
+    expect(
+      apiSendMediaSchema.parse({ ...base, type: 'document', caption: '  Our menu  ' }),
+    ).toEqual({ ...base, type: 'document', caption: 'Our menu' });
+    expect(
+      apiSendMediaSchema.parse({ ...base, type: 'image', link: ' https://x.example/a.jpg ' }),
+    ).toMatchObject({ link: 'https://x.example/a.jpg' });
+    expect(apiSendMediaSchema.parse({ ...base, type: 'audio' })).toEqual({
+      ...base,
+      type: 'audio',
+    });
+    expect(
+      apiSendMediaSchema.parse({ ...base, type: 'video', caption: 'c'.repeat(1024) }),
+    ).toMatchObject({ caption: 'c'.repeat(1024) });
+    for (const link of [
+      'http://cdn.example.com/menu.pdf',
+      'https://user:secret@cdn.example.com/menu.pdf',
+      'https://user@cdn.example.com/menu.pdf',
+      'https://:secret@cdn.example.com/menu.pdf',
+      'ftp://cdn.example.com/menu.pdf',
+      'javascript:alert(1)',
+      'cdn.example.com/menu.pdf',
+      '',
+      `https://cdn.example.com/${'a'.repeat(2000)}`,
+    ]) {
+      expect(isMediaLink(link) && link.length <= 2000, link).toBe(false);
+      expect(apiSendMediaSchema.safeParse({ ...base, type: 'image', link }).success, link).toBe(
+        false,
+      );
+    }
+    for (const bad of [
+      { ...base, type: 'audio', caption: 'A voice note' },
+      { ...base, type: 'image', caption: '   ' },
+      { ...base, type: 'image', caption: 'c'.repeat(1025) },
+      { ...base, type: 'document', filename: 'menu.pdf' },
+      { ...base, type: 'image', id: '1003383421387256' },
+      { to: base.to, type: 'image' },
+      { ...base, type: 'sticker' },
+    ]) {
+      expect(apiSendMediaSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+    expect(
+      apiSendMediaSchema.safeParse({ ...base, type: 'image', link: 'http://x.example/a.jpg' }).error
+        ?.issues[0]?.message,
+    ).toBe('Give an https:// link to the media, without a user name or password');
+  });
+
+  it('are chosen by their type and need a key that replies', async () => {
+    const ctx = {
+      tenant: { id: 't', status: 'active' },
+      key: { id: 'k', scopes: new Set(['messages.send']) },
+      planScopes: null,
+    } as unknown as ApiContext;
+    for (const type of API_MEDIA_TYPES) {
+      await expect(
+        apiSendMessage({} as never, ctx, { ...base, type }, { key: 'k-1', requestHash: 'h' }),
+      ).rejects.toThrow('This API key does not have the messages.reply scope.');
+    }
+  });
+
+  it('name the media by its caption, or by what it is', () => {
+    expect(outboundText('image', { link: base.link, caption: 'Today’s menu' })).toBe(
+      'Today’s menu',
+    );
+    expect(outboundText('document', { link: base.link, caption: 'Menu' })).toBe('Menu');
+    expect(outboundText('audio', { link: base.link })).toBeNull();
+    expect(messageSnippet('outbound', 'video', { link: base.link })).toBe('Video');
+    expect(messageSnippet('outbound', 'image', { link: base.link, caption: 'New\n stock' })).toBe(
+      'New stock',
+    );
+  });
+
+  it('are described in the send operation, each type with its own schema, and by the scope', () => {
+    expect(API_SCOPE_INFO['messages.reply'].label).toBe(
+      'Reply with text, buttons, lists, products, reactions and media',
+    );
+    expect(API_SCOPE_INFO['messages.reply'].description).toContain(
+      'photos, videos, audio or documents from links',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const send = (
+      doc.paths as unknown as Record<
+        string,
+        Record<string, { summary: string; description: string }>
+      >
+    )['/messages']?.post;
+    expect(send?.summary).toContain('a reaction or media');
+    for (const words of [
+      '`image`, `video`, `audio` or `document`',
+      'https:// `link` that WhatsApp fetches when it sends the message',
+      'HyFib neither fetches nor keeps the media',
+      'a `caption` of up to 1,024 characters; audio takes none',
+    ]) {
+      expect(send?.description).toContain(words);
+    }
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    for (const name of ['SendImage', 'SendVideo', 'SendDocument']) {
+      const schema = schemas[name] as { properties: object; required: string[] };
+      expect(Object.keys(schema.properties).sort(), name).toEqual(
+        ['caption', 'from', 'link', 'replyTo', 'to', 'type'].sort(),
+      );
+      expect([...schema.required].sort(), name).toEqual(['link', 'to', 'type']);
+    }
+    const audio = schemas.SendAudio as { properties: object; additionalProperties: unknown };
+    expect(Object.keys(audio.properties)).not.toContain('caption');
+    expect(audio.additionalProperties).toBe(false);
   });
 });

@@ -764,6 +764,12 @@ Phase 5 rules (Public API, P5-08):
   and an estimate of Meta's charges, never contacts or members, and keys that only read campaigns
   get 403. It reads one draft of the key's company in a read-only transaction and changes nothing,
   so a company that is not active still reads it.
+- Media from links (ADR-194): a key with `messages.reply` sends a photo, a video, audio or a
+  document by a link WhatsApp fetches, within the 24-hour window. HyFib never fetches the link, so
+  it cannot be used to reach HyFib's network; it takes only https links with a host and no user name
+  or password, so no credentials are stored with the message or shown in the inbox, and the inbox
+  opens the link only as an https anchor in a new tab without the referrer. The link is the
+  company's own data: it is redacted with the contact's messages and exported with them.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so

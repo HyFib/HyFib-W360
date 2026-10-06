@@ -8,8 +8,9 @@ const obj = (value: unknown): Record<string, unknown> | null =>
 
 /**
  * The words of an outbound message: a text's body, a template's rendered body, the body of an
- * interactive message (automation buttons, satisfaction survey, products, a WhatsApp Flow), or a
- * reaction's emoji (ADR-082), as inbound reactions give theirs.
+ * interactive message (automation buttons, satisfaction survey, products, a WhatsApp Flow), a
+ * reaction's emoji (ADR-082), as inbound reactions give theirs, or the caption of media sent from
+ * a link (ADR-194).
  */
 export function outboundText(type: string, content: Record<string, unknown>): string | null {
   switch (type) {
@@ -21,6 +22,10 @@ export function outboundText(type: string, content: Record<string, unknown>): st
       return str(obj(content.rendered)?.body);
     case 'interactive':
       return str(content.body) ?? str(obj(content.products)?.body) ?? str(obj(content.flow)?.body);
+    case 'image':
+    case 'video':
+    case 'document':
+      return str(content.caption);
     default:
       return null;
   }

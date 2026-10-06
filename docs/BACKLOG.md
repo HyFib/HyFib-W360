@@ -626,7 +626,11 @@ verification, app review, Embedded Signup configuration).
   `GET /campaigns/{id}/review` answers a draft's review as members see it, for a key holding
   `campaigns.write`: what blocks it, who it would reach and an upper bound of its cost; no
   migration).
-  Remaining: media messages, call-to-action messages through the API, taking reactions back,
+  **[Sending media from links built; its database tests run only in CI]** (ADR-194: a key replies
+  with a photo, a video, audio or a document WhatsApp fetches from an https link, with a caption
+  except for audio, within the 24-hour window; HyFib keeps the link, never the media; no migration).
+  Remaining: uploaded media and stickers, call-to-action messages through the API, taking
+  reactions back,
   media downloads, a contact card's contacts (Meta's
   contact object is not confirmed), changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),

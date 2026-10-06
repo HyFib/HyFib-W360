@@ -1538,6 +1538,109 @@ describe('text replies (ADR-070)', () => {
     expect((await apiGetMessage(deps(), ctx, idOf(withLink))).type).toBe('text');
   });
 
+  it('send media from an https link the same way, keeping the link and the caption, never the media (ADR-194)', async () => {
+    const c = await fx.company();
+    const { ctx } = await apiKey(c, ['messages.reply', 'conversations.read'], 'Catalogue');
+    const waId = '919811100194';
+    await wrote(c, waId);
+    const conv = await conversationWith(c, `+${waId}`);
+    const menu = 'https://cdn.example.com/menu.pdf';
+    const greeting = 'https://cdn.example.com/hello.ogg';
+    const document = await apiSendMessage(
+      deps(),
+      ctx,
+      { type: 'document', to: `+${waId}`, link: menu, caption: '  Our menu ' },
+      idem('media-1', 'media-1'),
+    );
+    expect(document.status).toBe(201);
+    expect(document.body.data).toMatchObject({ type: 'document', status: 'queued' });
+    const audio = await apiSendMessage(
+      deps(),
+      ctx,
+      { type: 'audio', to: `+${waId}`, link: greeting },
+      idem('media-2', 'media-2'),
+    );
+    const stored = await fx.query(
+      `SELECT m.type, m.content, m.sender_type, si.request
+         FROM app.messages m
+         JOIN app.send_intents si ON si.tenant_id = m.tenant_id AND si.message_id = m.id
+        WHERE m.id = ANY($1::uuid[]) ORDER BY m.created_at`,
+      [[idOf(document), idOf(audio)]],
+    );
+    const frame = { messaging_product: 'whatsapp', recipient_type: 'individual', to: waId };
+    expect(stored).toEqual([
+      {
+        type: 'document',
+        content: { link: menu, caption: 'Our menu' },
+        sender_type: 'api',
+        request: { ...frame, type: 'document', document: { link: menu, caption: 'Our menu' } },
+      },
+      {
+        type: 'audio',
+        content: { link: greeting },
+        sender_type: 'api',
+        request: { ...frame, type: 'audio', audio: { link: greeting } },
+      },
+    ]);
+    expect((await conversationWith(c, `+${waId}`)).last_message_preview).toBe('Audio');
+    // WhatsApp's media objects through the send pipeline (the stand-in checks their shape).
+    expect(await sendAll(c)).toEqual(['accepted', 'accepted']);
+    const sent = fx.standIn.state.requests.filter(
+      (r) => r.path.endsWith('/messages') && (r.body as { to?: string } | undefined)?.to === waId,
+    );
+    expect(
+      sent.map((r) => {
+        const body = r.body as Record<string, unknown> & { type: string };
+        return [body.type, body[body.type]];
+      }),
+    ).toEqual([
+      ['document', { link: menu, caption: 'Our menu' }],
+      ['audio', { link: greeting }],
+    ]);
+    // Read back with the caption as the text; the media is never attached.
+    const { data } = await apiListConversationMessages(deps(), ctx, conv.id, {});
+    expect(
+      data
+        .filter((m) => m.direction === 'outbound')
+        .map((m) => [m.type, m.text, m.mimeType, m.sentBy]),
+    ).toEqual(
+      expect.arrayContaining([
+        ['document', 'Our menu', null, 'api'],
+        ['audio', null, null, 'api'],
+      ]),
+    );
+    // Refused before anything is queued: a link that is not https, a caption on audio, and a
+    // number whose window has closed.
+    const refusedLink = await apiSendMessage(
+      deps(),
+      ctx,
+      { type: 'image', to: `+${waId}`, link: 'http://cdn.example.com/a.jpg' },
+      idem('media-3', 'media-3'),
+    ).catch((error: unknown) => error);
+    expect(isAppError(refusedLink) && refusedLink.issues?.[0]?.path).toBe('link');
+    const refusedCaption = await apiSendMessage(
+      deps(),
+      ctx,
+      { type: 'audio', to: `+${waId}`, link: greeting, caption: 'Hello' },
+      idem('media-4', 'media-4'),
+    ).catch((error: unknown) => error);
+    expect(isAppError(refusedCaption) && refusedCaption.code).toBe('validation_failed');
+    const lateWaId = '919811100195';
+    await wrote(c, lateWaId, 25 * 3600);
+    const late = await apiSendMessage(
+      deps(),
+      ctx,
+      { type: 'image', to: `+${lateWaId}`, link: 'https://cdn.example.com/a.jpg' },
+      idem('media-5', 'media-5'),
+    ).catch((error: unknown) => error);
+    expect(reason(late)).toBe('window_closed');
+    const [{ count } = { count: -1 }] = await fx.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM app.messages WHERE tenant_id = $1 AND direction = 'outbound'`,
+      [c.tenant.id],
+    );
+    expect(count).toBe(2);
+  });
+
   it('send reply buttons and lists the same way, and give a tap back with its kind (ADR-080)', async () => {
     const c = await fx.company();
     const { ctx, id: keyId } = await apiKey(c, ['messages.reply', 'conversations.read'], 'Booking');

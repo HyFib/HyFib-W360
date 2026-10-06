@@ -1,5 +1,54 @@
 # Progress
 
+## 2026-10-06 — Phase 5: sending media from links through the public API (P5-08, ADR-194)
+
+Status: **Implemented; its database and browser tests run in CI only (test stand-in only).** Keys
+could not send a photo, a video, audio or a document. The local PostgreSQL is unavailable (its
+Docker daemon stopped), so the integration test and the changed e2e test below were written but not
+run here.
+
+### Completed
+
+- **Design (ADR-194):** `type` `image`, `video`, `audio` or `document` in `POST /messages`, an https
+  `link` WhatsApp fetches and a caption except for audio, sent as a reply within the 24-hour window;
+  HyFib keeps the link, never the media; no migration.
+- **Research:** M-191 from Meta's published OpenAPI spec (the media object's `link`, the captions
+  its examples show, what is left unconfirmed).
+- **Domain:** the schemas, `isMediaLink` and `apiSendMedia`, the dispatch and its refusal,
+  `outboundText` for captions, the API limits, the scope's label and description, and the OpenAPI
+  entries (`SendImage`, `SendVideo`, `SendAudio`, `SendDocument`).
+- **Web:** the inbox shows the link of media sent from one.
+- **Test stand-in:** the Graph stand-in checks a media message's object (an id or an http(s) link, a
+  caption only for a photo, a video or a document).
+- **Tests:**
+  - Unit (4 new and 2 changed in `api.test.ts`): the rules, the dispatch and the scope, the captions
+    as text, the OpenAPI entries.
+  - Integration (1 new in `api.test.ts`): a document and audio stored, sent and read back; the
+    refusals. Written for CI; not run here.
+  - E2E (1 changed in `api.spec.ts`, the scope's new label in it and in `commerce.spec.ts`): a key
+    sends a leaflet and the inbox shows its link. Written for CI; not run here.
+- **Docs:** ADR-194; research M-191; SECURITY; ARCHITECTURE; THREAT-MODEL T188; DEPLOYMENT and
+  RUNBOOKS; DATA-RETENTION; BACKLOG P5-08; feature matrix H-033 and W-134.
+- **Mutation checks:** 13 deliberate regressions tried, all caught on the unit-tested parts. The
+  send itself needs the database and the stand-in, so its regressions are left to the integration
+  and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 864 passed (82 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 13 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Uploaded media, stickers, a document's file name, media in the inbox's reply box, and media
+  downloads.
+
 ## 2026-10-05 — Phase 5: a waiting template sync takes the priority asked for (ADR-178 amended)
 
 Status: **Fixed; its database test runs in CI only.** A review of PR #33 found that a member's
