@@ -13,5 +13,8 @@ patchedDependencies:
 # The Next ESLint plugin's one use of fast-glob is patched to Node's fs.globSync (patches/,
 # docs/DECISIONS.md ADR-142): fast-glob's micromatch pulls in braces, GHSA-vfj7-8cjw-p6xm, which
 # has no patched release.
+# sharp before 0.35.5 carries a vulnerable librsvg (GHSA-wq5f-xc86-pv6w); Next asks for ^0.35.4, so
+# the patched release fits its range.
 overrides:
   '@next/eslint-plugin-next>fast-glob': '-'
+  'sharp@<0.35.5': '^0.35.5'
