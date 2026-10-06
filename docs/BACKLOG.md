@@ -143,10 +143,13 @@ verification, app review, Embedded Signup configuration).
   receipts and typing indicators built; their database and browser tests run only in CI]** (ADR-223,
   migration 0146: a company setting, off by default, marks the customer's message read when a member
   opens the conversation and shows the customer a typing indicator while a member writes).
-  **Remaining:** per-team SLA targets and calendars, SLA breach notifications (email or in-app),
-  presence of members (who is viewing a conversation), private team queues (would change visibility,
-  ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA
-  (phone-number masking: P3-01, ADR-226).
+  **[Emails when a reply is overdue built; their database tests run only in CI]** (ADR-230,
+  migrations 0154 and 0155: the member it is assigned to, else its team, else the members who assign
+  conversations, once per wait, one email per member per sweep, never the customer's details;
+  members can turn them off). **Remaining:** per-team SLA targets and calendars, in-app notices of
+  overdue replies, presence of members (who is viewing a conversation), private team queues (would
+  change visibility, ADR-029), CSAT by template outside the window (needs a consent decision), CSAT
+  with a real WABA (phone-number masking: P3-01, ADR-226).
 
 ## Phase 4 — automation, Flows, CRM, commerce
 

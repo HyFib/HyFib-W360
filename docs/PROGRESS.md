@@ -1,5 +1,49 @@
 # Progress
 
+## 2026-10-06 — Phase 3 follow-up: emails when a reply is overdue (P3-06, H-011, ADR-230)
+
+Status: **Implemented; its database tests run in CI only.** Nobody was told when a waiting
+customer's reply went past the company's first-response target unless they watched the inbox. The
+local PostgreSQL is unavailable, so the integration tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-230):** the minute sweep emails the member responsible once per wait (assignee, else
+  team, else those who assign), one email per member per sweep, waiting for business hours, skipping
+  waits due more than a day ago; a new email kind members can turn off.
+- **Database:** migration 0154 (`app.overdue_reply_notices` with its guard, deletion step and
+  export, `ops.overdue_reply_turns`, the definer's reads, `reply_overdue` in the email choices) and
+  0155 (the open-turn index, built concurrently).
+- **Domain:** `noticeOverdueReplies`, `responsibleMembers`, `overdueReplyEmail`, `targetText`;
+  `EMAIL_NOTICES.reply_overdue`; the worker's messaging sweep calls it after routing.
+- **Web:** Settings → Notifications lists the kind (from the domain); Settings → Inbox explains the
+  emails beside the target.
+- **Tests:**
+  - Unit (6 new in `overdue-replies.test.ts`; the email preference tests read the latest migration's
+    kinds and expect the new one).
+  - Integration (6 new in `overdue-replies.test.ts`; `email-preferences.test.ts` updated). Written
+    for CI; not run here.
+  - E2E: the notifications test expects six kinds. Runs in CI.
+- **Docs:** ADR-230; ARCHITECTURE; SECURITY; THREAT-MODEL T217; DATA-RETENTION; DEPLOYMENT;
+  RUNBOOKS; BACKLOG P3-06; feature matrix H-011.
+- **Mutation checks:** 17/17 deliberate regressions caught on the unit-tested parts.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 997 passed (100 files)                                        |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| Mutation checks                                    | 17/17 deliberate regressions caught on the unit-tested parts  |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+### Known gaps
+
+- No browser test of an overdue email (it would wait a real minute or more); no in-app notice; one
+  email per wait, never a reminder.
+
 ## 2026-10-06 — Phase 3/4 follow-up: links filled by campaigns, automations and store messages (P3-03, P3-04, P4-01, P4-06c, ADR-229)
 
 Status: **Implemented; its database tests run in CI only.** Campaigns, automations and store

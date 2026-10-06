@@ -548,6 +548,19 @@ Numbers customers wrote in messages, and those the public API and webhooks carry
 `DROP INDEX CONCURRENTLY app.campaign_recipients_contact_idx;` (or
 `app.automation_runs_contact_idx`) and run the migrations again.
 
+**Migration 0155 failed.** It builds `app.conversation_turns_open_started_idx` concurrently. If it
+failed, an INVALID index can remain: run
+`DROP INDEX CONCURRENTLY app.conversation_turns_open_started_idx;` and run the migrations again.
+
+**Members were not emailed about an overdue reply.** Emails go only to companies with a
+first-response target (Settings → Inbox), once per wait, after its due time (in business hours when
+they are on). `app.overdue_reply_notices` for the turn says what happened: no row (not due yet, or
+the worker's sweep has not run), `waiting` (due at `due_at`, business hours), `skipped` with
+`too_late` (due more than a day before the sweep saw it), `no_one` (no active member could answer
+it) or `opted_out` (every member responsible turned these emails off), or `sent` with the members
+emailed. The worker logs `overdue replies` with counts, and
+`overdue reply emails failed; will retry` with the company when a pass failed.
+
 **Migration 0010 failed.** It builds `app.conversations_team_idx` concurrently. If it failed, an
 INVALID index can remain: run `DROP INDEX CONCURRENTLY app.conversations_team_idx;` and run the
 migrations again.

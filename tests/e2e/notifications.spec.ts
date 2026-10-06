@@ -22,7 +22,7 @@ test('a member turns a notice email off for their company, and it stays off (ADR
   ).toBeVisible();
   // An owner can receive every kind; all start on.
   const boxes = page.getByRole('checkbox');
-  await expect(boxes).toHaveCount(5);
+  await expect(boxes).toHaveCount(6);
   const mentions = page.getByRole('checkbox', { name: /Mentions in notes/ });
   await expect(mentions).toBeChecked();
   await mentions.uncheck();

@@ -188,6 +188,11 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   checks run again (active, can still see it, mention unread); the email names only who mentioned
   them, how many mentions are unread there and the conversation's link, never the note or the
   customer (ADR-211).
+  Overdue reply emails (ADR-230) go only to members who can see the conversation by the inbox's rule
+  (the assignee, the team's members, or those who assign conversations), checked when sent, and skip
+  members who turned them off. They carry the target, the reason, the time the customer started
+  waiting and a link where access is checked again; never the customer's name, number or messages.
+  The sweep's definer function returns ids only; the decisions run in each company's own scope.
   Transcripts need `inbox.export` (owners, administrators, supervisors) and sight of the
   conversation, are audited (`conversation.transcript_exported`, no content), are plain text so no
   spreadsheet runs a formula from them, and leave internal notes out (ADR-212).

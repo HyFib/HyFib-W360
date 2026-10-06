@@ -52,3 +52,31 @@ export const conversationTurns = appSchema.table('conversation_turns', {
   replyMessageId: uuid('reply_message_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
 });
+
+/**
+ * Overdue reply emails (migration 0154, ADR-230): at most one per reply turn. `waiting` while
+ * business hours put the due time off (the sweep looks again at `dueAt`); `sent` or `skipped` for
+ * good.
+ */
+export const OVERDUE_NOTICE_STATES = ['waiting', 'sent', 'skipped'] as const;
+export type OverdueNoticeState = (typeof OVERDUE_NOTICE_STATES)[number];
+
+/**
+ * `too_late`: due more than a day before the sweep saw it (the worker was down, the company was
+ * suspended); `no_one`: no active member could answer it; `opted_out`: every member responsible
+ * turned these emails off.
+ */
+export const OVERDUE_NOTICE_SKIP_REASONS = ['too_late', 'no_one', 'opted_out'] as const;
+export type OverdueNoticeSkipReason = (typeof OVERDUE_NOTICE_SKIP_REASONS)[number];
+
+export const overdueReplyNotices = appSchema.table('overdue_reply_notices', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  turnId: uuid('turn_id').notNull(),
+  state: text('state', { enum: OVERDUE_NOTICE_STATES }).notNull(),
+  dueAt: tz('due_at').notNull(),
+  emailed: integer('emailed').notNull().default(0),
+  skipReason: text('skip_reason', { enum: OVERDUE_NOTICE_SKIP_REASONS }),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});

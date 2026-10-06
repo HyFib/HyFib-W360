@@ -16,6 +16,7 @@ import {
   newResealState,
   newResignState,
   noticeApiKeyUsageDue,
+  noticeOverdueReplies,
   processChannelOnboarding,
   processMetaWebhookReceipt,
   processSendIntent,
@@ -227,6 +228,23 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     if (reminders > 0) rt.logger.info({ reminders }, 'task reminders signalled');
     const routed = await routeDueConversations(rt.db);
     if (routed > 0) rt.logger.info({ routed }, 'waiting conversations assigned');
+    // Emails when a waiting customer's reply is overdue (ADR-230), after routing assigned them.
+    const overdue = await noticeOverdueReplies({
+      db: rt.db,
+      clock: rt.clock,
+      outbox: rt.notices.outbox,
+      appBaseUrl: rt.notices.appBaseUrl,
+    });
+    for (const failure of overdue.failed) {
+      rt.logger.warn(
+        { tenantId: failure.tenantId, err: toError(failure.error).message },
+        'overdue reply emails failed; will retry',
+      );
+    }
+    if (overdue.noticed + overdue.waiting + overdue.skipped > 0) {
+      const { noticed, emails, waiting, skipped } = overdue;
+      rt.logger.info({ noticed, emails, waiting, skipped }, 'overdue replies');
+    }
     const retention = await applyMessagingRetention(rt.db);
     if (retention.bodiesErased + retention.receiptsDeleted + retention.eventsPruned > 0) {
       rt.logger.info(retention, 'messaging retention applied');

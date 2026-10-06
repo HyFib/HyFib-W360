@@ -47,7 +47,9 @@ export function ResponseTargetForm({
             <span className="block text-muted-foreground">
               The inbox shows when each reply is due and reports show how many waiting customers got
               a first reply within it. Counted in business hours when business hours are on (below),
-              otherwise in absolute time.
+              otherwise in absolute time. When a reply is overdue, the member it is assigned to is
+              emailed, else its team, else the members who assign conversations; each member can
+              turn these emails off in Settings → Notifications.
             </span>
           </span>
         </label>

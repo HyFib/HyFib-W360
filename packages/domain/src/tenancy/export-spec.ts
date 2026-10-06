@@ -1285,6 +1285,19 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
     columns: ['id', 'note_id', 'membership_id', 'read_at', 'created_at'],
   },
   {
+    table: 'app.overdue_reply_notices',
+    columns: [
+      'id',
+      'turn_id',
+      'state',
+      'due_at',
+      'emailed',
+      'skip_reason',
+      'created_at',
+      'updated_at',
+    ],
+  },
+  {
     table: 'app.payment_mandates',
     columns: [
       'id',

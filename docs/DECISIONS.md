@@ -8993,3 +8993,43 @@ Decision:
 
 Not built: a browser test of the three editors' link fields (their database tests cover the sends),
 encoding a value for a link, and a skip reason of its own for an unusable value.
+
+## ADR-230 Emailing members when a customer's reply is overdue (P3-06) (2026-10-06)
+
+Context: the inbox shows when each waiting customer's reply is due (the company's first-response
+target, counted in business hours when they are on) and turns it red once it is overdue, but only
+for members looking at the inbox. A customer waiting past the target while the member responsible is
+away from the screen waits on, unseen.
+
+Decision:
+
+- **When:** the worker's minute sweep finds open reply turns that may be overdue
+  (`ops.overdue_reply_turns`, a definer function giving ids only, for active companies with a
+  target) and works through each company's in the company's own scope. The due time is the inbox's
+  own (`replyDueAt`); a turn only ever waits for a member (an automation answering closes it, a
+  resolve closes it, a member's reply closes it), and it is locked while the sweep decides, so a
+  reply either waits for the sweep or is seen by it.
+- **Once per wait:** `app.overdue_reply_notices` (migration 0154) records each turn's notice:
+  `waiting` while business hours put its due time later than the target in absolute time (the sweep
+  looks again at that time), then `sent` or `skipped` for good (a guard trigger keeps them as they
+  are). A customer who writes again after a member's reply starts a new wait, noticed anew. A reply
+  due more than a day before the sweep saw it (the worker was down, the company suspended) is
+  skipped (`too_late`); turns are looked at only within 30 days of their start.
+- **Who:** the member the conversation is assigned to while they can see and answer it; else the
+  members of its team who can see and answer it; else the members who assign conversations (owners,
+  administrators, supervisors). A member who turned these emails off (a new kind, `reply_overdue`,
+  in Settings → Notifications, ADR-215) is not emailed, and nobody else is emailed in their place:
+  such a wait is skipped (`opted_out`), as one nobody can answer is (`no_one`).
+- **What:** one email per member per company in a sweep. For one conversation: the target, why it is
+  theirs (assigned, their team's, nobody's), since when the customer waits, and the conversation's
+  link; for several (business hours opening on a night's messages): how many, for what reasons, the
+  longest wait, and the inbox's list by longest wait. Never the customer's name, number or messages:
+  an email stays readable after its reader loses access.
+- **No setting of its own:** a company without a first-response target gets no emails; one with a
+  target gets them, and each member chooses theirs. Settings → Inbox says so beside the target.
+- **Migrations:** 0154 adds the notices (deleted with the company before its turns, exported with
+  the company, gone with their turn), the sweep function and the definer's reads, and the new kind
+  in the members' email choices; 0155 builds the index of open turns by start concurrently.
+
+Not built: in-app notices, a second email when a wait drags on, per-team targets and calendars,
+escalation to supervisors when the assignee does not answer, and a digest across sweeps.

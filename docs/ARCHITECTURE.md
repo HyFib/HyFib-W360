@@ -411,6 +411,16 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `note-mention:<mention>`) only for an unread mention less than a day old, of an active member who
   can still see the conversation, with no newer unread mention of the member there; the email names
   the author and the unread count, never the note or the customer.
+  **Overdue reply emails** (`inbox/overdue-replies.ts`, ADR-230): the messaging sweep calls
+  `noticeOverdueReplies` after routing. `ops.overdue_reply_turns(now, limit)` (definer, ids only)
+  lists open turns of active companies with a target that started at least the target ago (within 30
+  days) without a notice, or whose `waiting` notice is due. Per company, in its scope, the turns are
+  locked (`FOR UPDATE`), each gets its due time from `replyDueAt`, and `app.overdue_reply_notices`
+  records `waiting` (with the due time), `skipped` (`too_late`, `no_one`, `opted_out`) or `sent`;
+  `responsibleMembers` picks the assignee, the team or the members with `inbox.assign`, and each
+  member gets one `tenant.notice` (`overdueReplyEmail`, dedupe key
+  `reply-overdue:<first turn>:<member>`). A company's failure is logged and retried by the next
+  sweep.
 - **Transcripts** (`messaging/transcript.ts`, `exportTranscript` in `messaging/inbox.ts`, ADR-212):
   an async generator checks `inbox.export` and that the member can see the conversation and writes
   the audit entry in one transaction, then yields the header and pages of 500 messages (keyset on

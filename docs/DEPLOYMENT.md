@@ -529,6 +529,16 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    store messages, and drop `variables.buttons` from a campaign draft given through the API (a field
    of the variables they do not know), whose template they then report as one HyFib cannot send.
 
+   Migration 0154 (ADR-230) adds `app.overdue_reply_notices`, the sweep function and the definer's
+   reads, and replaces the members' email choice check with one allowing `reply_overdue` (validated
+   under a brief lock on `app.memberships`, one row per membership). Migration 0155 builds the index
+   of open reply turns concurrently, outside a transaction; if it fails, see `docs/RUNBOOKS.md`.
+   Workers roll out first and start emailing about overdue replies once both are applied. Until the
+   web rollout ends, an old web server does not list the new kind in Settings → Notifications, and a
+   member saving their choices there keeps whatever they chose for it (kinds a server does not show
+   keep their setting). Rolling workers back stops the emails; the notices stay and are honoured
+   again when workers roll forward.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back
