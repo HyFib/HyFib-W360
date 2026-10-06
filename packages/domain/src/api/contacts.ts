@@ -31,7 +31,13 @@ import {
 import { normalizePhone } from '../contacts/phone';
 import type { OutboundDeps } from '../messaging/outbound';
 import { encodeKeysetCursor, parseInput } from '../validation';
-import { apiContactById, apiContactColumns, toApiContact, type ApiContact } from './contact-view';
+import {
+  apiContactById,
+  apiContactColumns,
+  apiContactNotFound,
+  toApiContact,
+  type ApiContact,
+} from './contact-view';
 import { apiActor, assertAnyScope, assertScope, type ApiContext } from './context';
 import { API_LIMITS } from './model';
 
@@ -725,7 +731,7 @@ export async function apiUpdateContact(
       .from(contacts)
       .where(and(eq(contacts.tenantId, ctx.tenant.id), eq(contacts.id, contactId)))
       .for('update');
-    if (!current || current.erasedAt) throw notFound('Contact');
+    if (!current || current.erasedAt) throw await apiContactNotFound(tx, ctx.tenant.id, contactId);
     await changeLockedContact(tx, ctx, current, change, fieldChanges, '');
     const row = await apiContactById(tx, ctx.tenant.id, contactId);
     if (!row) throw notFound('Contact');
@@ -736,7 +742,7 @@ export async function apiUpdateContact(
 const unknownContact = (index: number) =>
   invalidField(
     `contacts.${index}.id`,
-    'The company has no contact with this id, or it was erased (GET /contacts).',
+    'The company has no contact with this id: it was erased, merged into another (GET /contacts/{id} names which) or never existed.',
   );
 
 /**

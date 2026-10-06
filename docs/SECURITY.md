@@ -140,6 +140,12 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   of `contact_id` alone, only inside the function (`w360.contact_merge`) and only for the definer
   role, which alone holds UPDATE on those columns. The opt-out of either contact stands; no opt-in
   is added. `app.contact_merges` holds ids, the member and counts, never personal data.
+- Integrations hear of a merge (ADR-225) through ids only: `contact.merged` names the merged
+  contact's id and gives the kept contact as the API describes it to the company's own endpoints,
+  the change feed lists merged contacts' ids, and a 404 for a merged contact names the kept
+  contact's id. The trigger runs as the merge (the definer role) and captures for the merging
+  company alone; the API reads `app.contact_merges` in the key's company scope, so another company's
+  merged contact is plainly not found.
 - Notice email choices (ADR-215): a member changes only their own, through
   `app.set_own_email_opt_outs` (SECURITY DEFINER, executable by the runtime role only), which takes
   the membership from the scope, never an argument; the runtime role has no update on memberships.

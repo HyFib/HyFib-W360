@@ -8824,3 +8824,39 @@ Decision:
 Not built: merging through the API and a `contact.merged` webhook event (the merged contact's id
 stops resolving: the API answers 404), joining two conversations on one number, merging contacts
 that each have a number, undoing a merge, and suggestions of likely duplicates.
+
+## ADR-225 Telling integrations about a merge (2026-10-06)
+
+Context: a merge (ADR-224) deletes the merged contact. Integrations that keep copies of contacts,
+from webhooks or the API's change feed, had no way to learn that its id was gone: events of it not
+yet delivered stopped, the API answered a plain 404, and the feed never read it again, so their copy
+stayed.
+
+Decision:
+
+- **A `contact.merged` webhook event**, one per merge, for the endpoints that choose it in Settings
+  → Webhooks or through the API (no filter narrows it): `mergedContactId`, and `contact`, the
+  contact it belongs to now as the API describes it when the event is delivered. After a later merge
+  of that contact, that is the contact kept then: the merge points every earlier merge into it at
+  the new kept contact (`app.contact_merges`). A trigger on `app.contact_merges` captures it when
+  the merge records itself, after the merged contact is deleted, through
+  `app.capture_webhook_event`. It has no `captured_xact`, so what the merge changed of the kept
+  contact stays its own `contact.updated`. A `contact.created` or `contact.updated` of the merged
+  contact not yet delivered ends as `event_gone`, as an event of anything gone does; a
+  `consent.changed` of it is still sent, naming its id, as before.
+- **The API answers a merged contact's id** on `GET` and `PATCH /contacts/{id}` and
+  `POST /contacts/{id}/consent` with 404, reason `contact_merged`, and `mergedInto`, the contact it
+  belongs to now; nothing is changed. Another company's contact, or an id that never was one, is
+  plainly not found. `POST /contacts/update-many` says in its refusal that a contact may have been
+  merged.
+- **The change feed** records a change of the kept contact at every merge (the same trigger), and
+  each contact it reads lists `mergedContactIds`: the contacts merged into it, oldest merge first,
+  those merged into a contact merged into it later included. The kept contact's latest change is at
+  or after the merge, so a reader learns of it however the feed was compacted; the merged contact's
+  own changes go with it (ADR-224), so it is never read again.
+- **Also:** a worker that meets an event type it does not describe (one a newer release added, read
+  by a worker rolled back) fails the delivery without an attempt, to be replayed once fixed, instead
+  of sending a body without data.
+
+Not built: merging through the API, filters on merge events, and naming the kept contact in a
+`consent.changed` of the merged contact delivered after the merge.

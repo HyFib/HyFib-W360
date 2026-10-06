@@ -2244,6 +2244,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'contact.created',
       'contact.updated',
       'contact.erased',
+      'contact.merged',
     ]);
     const refused = apiCreateWebhookEndpointSchema.safeParse({
       ...base,
@@ -2865,6 +2866,8 @@ describe('Idempotency-Key header', () => {
 });
 
 describe('API errors', () => {
+  const KEPT_CONTACT = '0192f3a4-5b6c-7d8e-9f00-1122334455aa';
+
   it('expose only the public message, issues and curated reason of application errors', () => {
     const mapped = apiErrorResponse(
       new AppError('validation_failed', 'Bad key', {
@@ -2888,6 +2891,18 @@ describe('API errors', () => {
     });
     expect(apiErrorResponse(new AppError('tenant_suspended', 'Suspended'), 'r').status).toBe(423);
     expect(apiErrorResponse(new AppError('forbidden', 'No'), 'r').status).toBe(403);
+    // A merged contact names the contact it belongs to now (ADR-225); nothing else of the details.
+    const merged = (details: Record<string, unknown>) =>
+      apiErrorResponse(new AppError('not_found', 'Merged.', { details }), 'r').body.error;
+    expect(
+      merged({ apiReason: 'contact_merged', mergedInto: KEPT_CONTACT, tenantId: 'x' }),
+    ).toEqual({
+      code: 'not_found',
+      message: 'Merged.',
+      reason: 'contact_merged',
+      mergedInto: KEPT_CONTACT,
+    });
+    expect(merged({ mergedInto: 42 })).toEqual({ code: 'not_found', message: 'Merged.' });
   });
 
   it('turn anything else into a generic internal error without its message', () => {
@@ -3574,6 +3589,16 @@ describe('contact custom fields and changes (ADR-112)', () => {
       paths['/contacts/{id}']?.patch as unknown as { responses: Record<string, unknown> }
     ).responses;
     expect(Object.keys(patchResponses)).toEqual(expect.arrayContaining(['409', '412', '422']));
+    // A merged contact's id answers 404 naming the contact it belongs to now (ADR-225).
+    for (const op of [
+      paths['/contacts/{id}']?.get,
+      paths['/contacts/{id}']?.patch,
+      paths['/contacts/{id}/consent']?.post,
+    ]) {
+      expect(op?.description).toContain(
+        'A contact merged into another is not found: 404 with reason `contact_merged`, and `mergedInto` naming the contact it belongs to now.',
+      );
+    }
     expect(paths['/contact-fields']?.get?.operationId).toBe('listContactFields');
     expect(paths['/contact-fields']?.get?.description).toContain('`contacts.read`');
     const schemas = doc.components.schemas as Record<

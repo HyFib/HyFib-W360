@@ -201,6 +201,7 @@ describe('API reference (ADR-152)', () => {
       ['code', 1, true],
       ['message', 1, true],
       ['reason', 1, false],
+      ['mergedInto', 1, false],
       ['issues', 1, false],
       ['path', 2, true],
       ['message', 2, true],

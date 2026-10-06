@@ -112,6 +112,7 @@ describe('following contact changes through the public API (ADR-114)', () => {
       id: asha,
       erased: false,
       contact: await apiGetContact(deps(), ctx, asha),
+      mergedContactIds: [],
     });
 
     await apiUpdateContact(deps(), ctx, asha, { name: 'Asha K' });
@@ -205,7 +206,7 @@ describe('following contact changes through the public API (ADR-114)', () => {
     const phone = (await apiGetContact(deps(), ctx, withCity)).phone!;
     await service.eraseContact(owner, { contactId: withCity, suppress: false });
     const erased = await next();
-    expect(erased).toEqual([{ id: withCity, erased: true, contact: null }]);
+    expect(erased).toEqual([{ id: withCity, erased: true, contact: null, mergedContactIds: [] }]);
     expect(JSON.stringify(erased)).not.toContain(phone.slice(1));
     // From the start: each contact once, the erased one as erased.
     expect(

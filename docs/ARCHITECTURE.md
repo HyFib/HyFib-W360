@@ -1127,7 +1127,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   at its latest such row, joined to the contact for its current state; the cursor is sealed with the
   keyring and the company as associated data. `ops.compact_contact_changes` (minute sweep) walks the
   rows in the same order from `ops.contact_change_compaction` and deletes the rows each change
-  replaced.
+  replaced. Since 0150 (ADR-225) the trigger on `app.contact_merges` also records a change of the
+  kept contact, and the feed lists for each contact it reads the contacts merged into it
+  (`mergedContactIds`, from `app.contact_merges` in the page's snapshot); the contact endpoints
+  answer a merged contact's id with 404, reason `contact_merged` and `mergedInto`
+  (`apiContactNotFound`, `api/contact-view.ts`).
 - **Defining contact fields (0092, ADR-115):** `contacts/field-definitions.ts` adds, renames and
   deletes a company's custom fields for both Settings (`contacts/service.ts`, by id) and the API
   (`api/contact-fields.ts`, by key, scope `contact_fields.manage`); callers check who may and audit
@@ -1514,7 +1518,11 @@ true`); the same key with another request (method, path and body hashed) answers
   contact (`api/contact-view.ts`, shared with the public API) and `erased`, an erased contact
   keeping its id, source and creation time only, and `contact.updated` with `changes` (null for
   events captured before 0096) and `tagsAdded` and `tagsRemoved` (null before 0129 and for an erased
-  contact).
+  contact). Since 0150 (ADR-225) a trigger on `app.contact_merges` captures `contact.merged` through
+  `app.capture_webhook_event` when a merge records itself: the kept contact, the merged one in the
+  detail, and no `captured_xact`, so the kept contact's `contact.updated` from the merge stays its
+  own event; its payload gives the contact `app.contact_merges` names for the merged one when it is
+  delivered. A type the builder does not describe fails its delivery without an attempt.
 - **Automation run events** (migrations 0055–0056, ADR-078): triggers on `app.automation_runs`
   capture `automation.run_started` when a live run is inserted and `automation.run_ended` when one
   moves from running or waiting to an ended status, through `app.capture_webhook_event` (the run and

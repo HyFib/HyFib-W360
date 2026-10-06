@@ -38,6 +38,7 @@ import {
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
+  contactMergedPayloadSchema,
   contactsLeftOutSchema,
   messageContactsSchema,
   contactUpdatedPayloadSchema,
@@ -722,7 +723,13 @@ export const apiErrorSchema = z.object({
       .string()
       .optional()
       .describe(
-        'A finer reason: automation_busy, automation_limit, automation_paused, automation_quota, automation_unavailable, channel_unavailable, conversation_assigned, idempotency_key_reused, ip_not_allowed, key_quota_exceeded, not_in_plan, quota_exceeded or window_closed.',
+        'A finer reason: automation_busy, automation_limit, automation_paused, automation_quota, automation_unavailable, channel_unavailable, contact_merged, conversation_assigned, idempotency_key_reused, ip_not_allowed, key_quota_exceeded, not_in_plan, quota_exceeded or window_closed.',
+      ),
+    mergedInto: z
+      .uuid()
+      .optional()
+      .describe(
+        'With reason contact_merged: the contact the requested one was merged into, as it is now (GET /contacts/{id}).',
       ),
     issues: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
   }),
@@ -791,6 +798,10 @@ const pageOf = (schema: string) =>
   });
 
 const scopeNote = (...scopes: string[]) => `Scope: ${scopes.map((s) => `\`${s}\``).join(' or ')}.`;
+
+/** How a contact merged into another answers (ADR-225). */
+const MERGED_CONTACT_NOTE =
+  'A contact merged into another is not found: 404 with reason `contact_merged`, and `mergedInto` naming the contact it belongs to now.';
 
 const retrySchedule = WEBHOOK_RETRY_SECONDS.map((seconds) =>
   seconds < 3_600 ? `${seconds / 60} min` : `${seconds / 3_600} h`,
@@ -989,7 +1000,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'getContact',
           summary: 'A contact',
-          description: scopeNote('contacts.read'),
+          description: `${scopeNote('contacts.read')} ${MERGED_CONTACT_NOTE}`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           responses: {
             '200': { description: 'The contact.', content: json(dataOf(ref('Contact'))) },
@@ -999,7 +1010,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         patch: {
           operationId: 'updateContact',
           summary: 'Change a contact’s name, email, number, custom fields or tags',
-          description: `${scopeNote('contacts.write')} A field's value must have its type (GET /contact-fields); a refusal names \`fields.<key>\` and saves nothing. Tags are lower-cased, 50 at most per contact. A number changes only when it was typed for the contact, as members change it: one WhatsApp gave (the contact wrote to one of the company's numbers) is the contact's identity and is refused with 412, as is a number on the company's suppression list; a number another contact has is refused with 409, without naming that contact. POST /contacts/update-many changes numbers too; the same change for many contacts does not. What the contact already has changes nothing, so a retry is safe without an \`Idempotency-Key\`. Erased contacts are not found.`,
+          description: `${scopeNote('contacts.write')} A field's value must have its type (GET /contact-fields); a refusal names \`fields.<key>\` and saves nothing. Tags are lower-cased, 50 at most per contact. A number changes only when it was typed for the contact, as members change it: one WhatsApp gave (the contact wrote to one of the company's numbers) is the contact's identity and is refused with 412, as is a number on the company's suppression list; a number another contact has is refused with 409, without naming that contact. POST /contacts/update-many changes numbers too; the same change for many contacts does not. What the contact already has changes nothing, so a retry is safe without an \`Idempotency-Key\`. Erased contacts are not found. ${MERGED_CONTACT_NOTE}`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           requestBody: { required: true, content: json(ref('ContactUpdate')) },
           responses: {
@@ -1114,7 +1125,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listContactChanges',
           summary: 'Contacts in the order they changed',
-          description: `${scopeNote('contacts.read')} Every contact whose name, number, email, custom field values, tags or consent changed, or that was added or erased, once, as it is now, in the order the changes were saved. Start without a cursor to read every contact the company has; keep \`nextCursor\` and ask again with it to read what changed since. No change is skipped: a change appears once every change saved before it has finished, and a contact changed again appears again. Read pages until \`hasMore\` is false, then ask again later with the last \`nextCursor\`. A cursor works only for the company that read it.`,
+          description: `${scopeNote('contacts.read')} Every contact whose name, number, email, custom field values, tags or consent changed, that was added or erased, or that another contact was merged into, once, as it is now, in the order the changes were saved. A merged contact is not read again: the contact it was merged into is, naming it in \`mergedContactIds\`. Start without a cursor to read every contact the company has; keep \`nextCursor\` and ask again with it to read what changed since. No change is skipped: a change appears once every change saved before it has finished, and a contact changed again appears again. Read pages until \`hasMore\` is false, then ask again later with the last \`nextCursor\`. A cursor works only for the company that read it.`,
           parameters: [
             {
               name: 'limit',
@@ -1156,7 +1167,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'recordConsent',
           summary: 'Record an opt-in or opt-out',
-          description: `${scopeNote('contacts.write')} Recorded with its evidence as consent from the API; marketing templates need the contact's marketing opt-in.`,
+          description: `${scopeNote('contacts.write')} Recorded with its evidence as consent from the API; marketing templates need the contact's marketing opt-in. ${MERGED_CONTACT_NOTE}`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           requestBody: { required: true, content: json(ref('Consent')) },
           responses: {
@@ -2347,6 +2358,12 @@ export function buildOpenApiDocument(serverUrl: string) {
         WEBHOOK_EVENT_INFO['contact.erased'].description,
         'WebhookContactErased',
       ),
+      'contact.merged': webhook(
+        'webhookContactMerged',
+        WEBHOOK_EVENT_INFO['contact.merged'].label,
+        `${WEBHOOK_EVENT_INFO['contact.merged'].description} One event per merge. The merged contact's id is no longer found: GET /contacts/{id} answers 404 with reason \`contact_merged\` and \`mergedInto\`, the contact it belongs to now. What the merge changed of the kept contact is sent as contact.updated; a contact.created or contact.updated of the merged contact not yet delivered is not sent.`,
+        'WebhookContactMerged',
+      ),
       'automation.run_started': webhook(
         'webhookAutomationRunStarted',
         WEBHOOK_EVENT_INFO['automation.run_started'].label,
@@ -2504,8 +2521,14 @@ export function buildOpenApiDocument(serverUrl: string) {
               oneOf: [ref('Contact'), { type: 'null' }],
               description: 'The contact as it is now; null once it was erased.',
             },
+            mergedContactIds: {
+              type: 'array',
+              items: { type: 'string', format: 'uuid' },
+              description:
+                'The contacts merged into this one, oldest merge first, including those merged into a contact that was merged into this one later: they no longer exist, and their records are this contact’s. Delete your copies.',
+            },
           },
-          required: ['id', 'erased', 'contact'],
+          required: ['id', 'erased', 'contact', 'mergedContactIds'],
         },
         Consent: jsonSchema(apiConsentSchema, 'input'),
         Template: jsonSchema(apiTemplateSchema),
@@ -2592,6 +2615,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookContactCreated: jsonSchema(contactCreatedPayloadSchema),
         WebhookContactUpdated: jsonSchema(contactUpdatedPayloadSchema),
         WebhookContactErased: jsonSchema(contactErasedPayloadSchema),
+        WebhookContactMerged: jsonSchema(contactMergedPayloadSchema),
         WebhookAutomationRunStarted: jsonSchema(automationRunStartedPayloadSchema),
         WebhookAutomationRunEnded: jsonSchema(automationRunEndedPayloadSchema),
         WebhookOrderReceived: jsonSchema(orderReceivedPayloadSchema),

@@ -528,6 +528,14 @@ leads to the contact it was merged into (`app.contact_merges`), and the audit lo
 `contact.merged` with the counts moved. A merge cannot be undone; a mistaken one is corrected by
 hand (a number moved back by a member, consent recorded again with evidence).
 
+**An integration still has a merged contact (ADR-225).** Endpoints that take `contact.merged` are
+sent one event per merge, with `mergedContactId` and the contact it belongs to now; the contact
+endpoints of the API answer the merged id with 404, reason `contact_merged`, and `mergedInto`;
+`GET /contact-changes` lists `mergedContactIds` on the kept contact. Events of the merged contact
+not yet delivered at the merge end as `event_gone` (Settings → Webhooks shows them as failed). A
+receiver that still holds the merged contact deletes its copy or moves what it keeps to the kept
+contact.
+
 **Migration 0148 or 0149 failed.** They build `app.campaign_recipients_contact_idx` and
 `app.automation_runs_contact_idx` concurrently. If one failed, an INVALID index can remain: run
 `DROP INDEX CONCURRENTLY app.campaign_recipients_contact_idx;` (or

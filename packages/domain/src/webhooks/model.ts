@@ -50,6 +50,7 @@ export const WEBHOOK_EVENT_KEYS = [
   'contact.created',
   'contact.updated',
   'contact.erased',
+  'contact.merged',
   'automation.run_started',
   'automation.run_ended',
   'order.received',
@@ -105,6 +106,11 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       label: 'Contact erased',
       description:
         'A contact was erased. Take it to delete your copy: the event carries no personal data.',
+    },
+    'contact.merged': {
+      label: 'Contacts merged',
+      description:
+        'A member merged two contacts of the same person: the event names the contact merged and deleted, and gives the contact it was merged into.',
     },
     'automation.run_started': {
       label: 'Automation started',

@@ -3,13 +3,21 @@ import { sql, systemScope, type Database } from '@w360/db';
 
 /** The JSON error body of the public API (ADR-052). */
 export interface ApiErrorBody {
-  error: { code: string; message: string; reason?: string; issues?: FieldIssue[] };
+  error: {
+    code: string;
+    message: string;
+    reason?: string;
+    /** With reason `contact_merged`: the contact the requested one was merged into (ADR-225). */
+    mergedInto?: string;
+    issues?: FieldIssue[];
+  };
   requestId: string;
 }
 
 /**
- * An application error as an API response. Only the public message, field issues and a curated
- * reason leave the server; anything else is a generic 500 that the caller logs with the request id.
+ * An application error as an API response. Only the public message, field issues, a curated reason
+ * and the contact a merged one belongs to leave the server; anything else is a generic 500 that the
+ * caller logs with the request id.
  */
 export function apiErrorResponse(
   error: unknown,
@@ -17,6 +25,7 @@ export function apiErrorResponse(
 ): { status: number; body: ApiErrorBody; internal: boolean } {
   if (isAppError(error)) {
     const reason = error.details?.apiReason;
+    const mergedInto = error.details?.mergedInto;
     return {
       status: error.httpStatus,
       internal: false,
@@ -25,6 +34,7 @@ export function apiErrorResponse(
           code: error.code,
           message: error.publicMessage,
           ...(typeof reason === 'string' ? { reason } : {}),
+          ...(typeof mergedInto === 'string' ? { mergedInto } : {}),
           ...(error.issues ? { issues: error.issues } : {}),
         },
         requestId,

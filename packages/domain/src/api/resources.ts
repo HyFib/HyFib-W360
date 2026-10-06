@@ -71,7 +71,7 @@ import {
   type TemplateParams,
 } from '../templates/definition';
 import { decodeKeysetCursor, likePattern, parseInput } from '../validation';
-import { apiContactById, toApiContact, type ApiContact } from './contact-view';
+import { apiContactById, apiContactNotFound, toApiContact, type ApiContact } from './contact-view';
 import {
   apiContactFieldFiltersSchema,
   apiContactPage,
@@ -1139,11 +1139,15 @@ export async function apiGetContact(
 ): Promise<ApiContact> {
   assertScope(ctx, 'contacts.read');
   if (!z.uuid().safeParse(contactId).success) throw notFound('Contact');
-  const row = await deps.db.run(ctx.scope, (tx) => apiContactById(tx, ctx.tenant.id, contactId), {
-    accessMode: 'read only',
-  });
-  if (!row) throw notFound('Contact');
-  return toApiContact(row);
+  return deps.db.run(
+    ctx.scope,
+    async (tx) => {
+      const row = await apiContactById(tx, ctx.tenant.id, contactId);
+      if (!row) throw await apiContactNotFound(tx, ctx.tenant.id, contactId);
+      return toApiContact(row);
+    },
+    { accessMode: 'read only' },
+  );
 }
 
 /**
@@ -1282,7 +1286,7 @@ export async function apiRecordConsent(
       .from(contacts)
       .where(and(eq(contacts.tenantId, ctx.tenant.id), eq(contacts.id, contactId)))
       .for('update');
-    if (!contact || contact.erasedAt) throw notFound('Contact');
+    if (!contact || contact.erasedAt) throw await apiContactNotFound(tx, ctx.tenant.id, contactId);
     await recordConsentEvents(tx, [
       {
         tenantId: ctx.tenant.id,

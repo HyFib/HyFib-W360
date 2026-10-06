@@ -25,6 +25,7 @@ import {
   campaignStatusChangedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
+  contactMergedPayloadSchema,
   contactUpdatedPayloadSchema,
   conversationAssignmentPayloadSchema,
   conversationStatusPayloadSchema,
@@ -34,6 +35,7 @@ import {
   createCampaignsService,
   createCommerceService,
   createConsentService,
+  createContactMergeService,
   createContactsService,
   createInboxService,
   createTeamsService,
@@ -911,6 +913,112 @@ describe('contact events', () => {
     expect((await eventsOf(c, 'contact.')).map((e) => [e.type, e.deliveries])).toEqual([
       ['contact.created', 0],
     ]);
+  });
+
+  it('sends contact.merged with the contact kept as it is when delivered, and nothing more of a merged contact (ADR-225)', async () => {
+    const c = await fx.company();
+    const all = await addEndpoint(c, ['contact.created', 'contact.updated', 'contact.merged']);
+    const mergesOnly = await addEndpoint(c, ['contact.merged']);
+    const updatesOnly = await addEndpoint(c, ['contact.updated']);
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const merges = createContactMergeService({ db: fx.dbs.app, clock: systemClock });
+    const { id: kept } = await service.createContact(owner, {
+      displayName: 'Gita',
+      phone: '+919811100051',
+    });
+    const { id: first } = await service.createContact(owner, {
+      displayName: 'Gita R',
+      email: 'gita@example.test',
+      tags: ['store'],
+    });
+    const { id: last } = await service.createContact(owner, { displayName: 'G. Rao' });
+    await deliverDue(c);
+    expect(bodiesAt(all.path).map((b) => b.type)).toEqual([
+      'contact.created',
+      'contact.created',
+      'contact.created',
+    ]);
+    // A change of the first contact, not yet delivered when it is merged.
+    await service.updateContact(owner, first, { displayName: 'Gita Rao' });
+
+    // The first into the last, then the last into the kept contact, before any delivery.
+    await merges.mergeContacts(owner, { keepContactId: last, mergeContactId: first });
+    await merges.mergeContacts(owner, { keepContactId: kept, mergeContactId: last });
+    // One event per merge, naming the contact kept then and the merged one; each merge changed the
+    // contact it kept, which is still captured as contact.updated.
+    const events = await eventsOf(c, 'contact.');
+    expect(
+      events
+        .filter((e) => e.type !== 'contact.created')
+        .map((e) => [e.type, e.contact_id, e.detail.mergedContactId ?? null, e.deliveries])
+        .sort(),
+    ).toEqual(
+      [
+        ['contact.merged', kept, last, 2],
+        ['contact.merged', last, first, 2],
+        ['contact.updated', first, null, 2],
+        ['contact.updated', kept, null, 2],
+        ['contact.updated', last, null, 2],
+      ].sort(),
+    );
+
+    await deliverDue(c);
+    // Each merge is delivered with the contact the merged one belongs to now: the kept contact,
+    // through the later merge too. The changes of the contacts that are gone are not sent.
+    const sent = bodiesAt(all.path).slice(3);
+    expect(
+      sent
+        .map((b) => [b.type, (b.data.contact as { id: string }).id, b.data.mergedContactId ?? null])
+        .sort(),
+    ).toEqual(
+      [
+        ['contact.merged', kept, first],
+        ['contact.merged', kept, last],
+        ['contact.updated', kept, null],
+      ].sort(),
+    );
+    for (const body of sent.filter((b) => b.type === 'contact.merged')) {
+      expect(contactMergedPayloadSchema.safeParse(body).success).toBe(true);
+      expect(body.data.contact).toMatchObject({
+        id: kept,
+        name: 'Gita',
+        email: 'gita@example.test',
+        tags: ['store'],
+        erased: false,
+      });
+    }
+    expect(sent.find((b) => b.type === 'contact.updated')!.data).toMatchObject({
+      changes: ['email', 'tags'],
+      tagsAdded: ['store'],
+      tagsRemoved: [],
+    });
+    expect(
+      bodiesAt(mergesOnly.path)
+        .map((b) => [b.type, b.data.mergedContactId])
+        .sort(),
+    ).toEqual(
+      [
+        ['contact.merged', first],
+        ['contact.merged', last],
+      ].sort(),
+    );
+    expect(bodiesAt(updatesOnly.path).map((b) => (b.data.contact as { id: string }).id)).toEqual([
+      kept,
+    ]);
+    expect(
+      await fx.query<{ contact_id: string; last_error: string }>(
+        `SELECT e.contact_id, d.last_error FROM app.webhook_deliveries d
+           JOIN app.webhook_events e ON e.tenant_id = d.tenant_id AND e.id = d.event_id
+          WHERE d.endpoint_id = $1 AND d.state = 'failed' ORDER BY e.contact_id`,
+        [all.id],
+      ),
+    ).toEqual(
+      [
+        { contact_id: first, last_error: 'event_gone' },
+        { contact_id: last, last_error: 'event_gone' },
+      ].sort((a, b) => (a.contact_id < b.contact_id ? -1 : 1)),
+    );
   });
 
   it('keeps one event per contact and transaction across savepoints; a rolled-back savepoint leaves none behind', async () => {

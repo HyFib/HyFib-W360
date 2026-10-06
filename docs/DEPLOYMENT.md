@@ -493,6 +493,14 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    keep being written. Old servers never call the function; until the web rollout ends, an old web
    server shows no merge.
 
+   Migration 0150 (ADR-225) replaces the endpoints' event check (validated at once: at most 10
+   endpoints per company) and the events' type check (NOT VALID; 0151 validates it while captures go
+   on), and adds a trigger on `app.contact_merges`. Workers roll out before web servers, so no
+   endpoint takes `contact.merged` before every worker can describe it. A worker from before it
+   cannot describe the event and fails its company's delivery run each time it claims one, so before
+   rolling workers back to such an image, turn the event off on the endpoints that take it; newer
+   workers fail only that delivery (`payload_failed`, replayable).
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

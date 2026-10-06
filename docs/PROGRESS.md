@@ -1,5 +1,53 @@
 # Progress
 
+## 2026-10-06 — Phase 5 follow-up: integrations hear of merges (P5-09, P5-08, ADR-225)
+
+Status: **Implemented; its database tests run in CI only.** A merge (ADR-224) deleted the merged
+contact without telling integrations. The local PostgreSQL is unavailable, so migrations 0150 and
+0151 and the integration tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-225):** a `contact.merged` webhook event giving the contact a merged one belongs to
+  when delivered; a `contact_merged` 404 with `mergedInto` on the contact endpoints; the change feed
+  recording the kept contact and listing `mergedContactIds`; unknown event types failing their
+  delivery without an attempt.
+- **Migrations:** 0150 (the event type in both checks, the capture trigger on `app.contact_merges`),
+  0151 (validates the events' type check).
+- **Domain:** the event in the webhook model, payloads and builder; `apiContactNotFound` for
+  `GET`/`PATCH /contacts/{id}` and `POST /contacts/{id}/consent`; `mergedInto` in API errors;
+  `mergedContactIds` in `apiContactChanges`; the OpenAPI document (the webhook, the error field and
+  reason, the endpoints, the feed).
+- **Tests:**
+  - Unit: the payload schema, the error body, the documentation of the webhook, the endpoints and
+    the feed, distinct event labels, an unknown event type built as no body.
+  - Integration: `webhook-events.test.ts` (capture and delivery across two merges, the kept
+    contact's own change, events of the merged contacts ending as gone); `contact-merges.test.ts`
+    (the 404s on each endpoint, other companies' and unknown ids, the feed's merged ids); the change
+    feed tests and the isolation suite updated. Written for CI; not run here.
+  - E2E: the change feed spec expects `mergedContactIds`. Written for CI; not run here.
+- **Docs:** ADR-225; ARCHITECTURE; SECURITY; THREAT-MODEL T212; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-09; feature matrix H-014 and H-019.
+- **Mutation checks:** 15/15 deliberate regressions caught on the unit-tested parts. The capture,
+  the payload's lookup, the 404s and the feed need the database, so their regressions are left to
+  the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                                | Result                                                          |
+| ------------------------------------------------------ | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`     | clean                                                           |
+| `pnpm test` (unit)                                     | 972 passed (98 files)                                           |
+| `pnpm test:integration`, e2e, migrations 0150 and 0151 | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                           | passed                                                          |
+| Mutation checks                                        | 15/15 deliberate regressions caught on the unit-tested parts    |
+| gitleaks 8.30.1 on the staged changes                  | no leaks found                                                  |
+
+### Known gaps
+
+- Merging through the API; filters on merge events; a `consent.changed` of the merged contact
+  delivered after the merge still names its id.
+
 ## 2026-10-06 — Phase 3 follow-up: merging contacts (P3-01, H-019, ADR-224)
 
 Status: **Implemented; its database and browser tests run in CI only.** One person could be two

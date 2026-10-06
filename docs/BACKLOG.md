@@ -846,12 +846,15 @@ verification, app review, Embedded Signup configuration).
   (ADR-192: an endpoint takes the ends of the runs that ended for the reasons it chooses, each
   narrowing the end it belongs to, such as only the failures to send among failed runs, or every end
   as before). **[Contact cards' contacts built; their database tests run only in CI]** (ADR-196:
-  `message.received` gives a contact card's contacts, as the API does). Remaining:
-  filters for other event types and on a message's or contact's values (such as by tag or a field's
-  value, or the key that started a run), other authentication (headers computed
-  per delivery, other OAuth grants),
-  mutual TLS, fixed egress addresses, events for store orders, Payment Links and each step of a run,
-  `createdAt` finer than the millisecond, load tests.
+  `message.received` gives a contact card's contacts, as the API does). **[Merge events built; their
+  database tests run only in CI]** (ADR-225: `contact.merged` names the merged contact and gives the
+  contact it belongs to now; the API answers a merged contact's id with 404, reason
+  `contact_merged`, naming that contact, and `GET /contact-changes` lists the contacts merged into
+  each contact it reads). Remaining: filters for other event types and on a message's or contact's
+  values (such as by tag or a field's value, or the key that started a run), other authentication
+  (headers computed per delivery, other OAuth grants), mutual TLS, fixed egress addresses, events
+  for store orders, Payment Links and each step of a run, `createdAt` finer than the millisecond,
+  load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,
