@@ -1,5 +1,46 @@
 # Progress
 
+## 2026-10-06 — Automation steps that send a WhatsApp form (P4-01, P4-03, W-085, ADR-248)
+
+Status: **Implemented; its database and browser tests run in CI only.** Forms could be sent only by
+members. No migration. The local PostgreSQL is unavailable, so the integration and e2e tests below
+were written but not run here.
+
+### Completed
+
+- **Domain:** the `send_flow` step (graph, checks against the company's forms, the interpreter's
+  effect), `queueBotFlow` in the runner (the plan and the form checked again, the message, its send
+  intent and a `flow_sends` row with a new token), the WhatsApp Flows plan check for publishing and
+  testing, the company's forms among the editor's options.
+- **Web:** the step in the automation editor (form, message, header, footer, button), its line in
+  the simulator, and the run page's reasons.
+- **Tests:**
+  - Unit (5 new in `flow-step.test.ts`).
+  - Integration (4 new in `automations.test.ts`: the send with its token and request, a form no
+    longer published, publishing only a published form, a plan without WhatsApp Flows). Written for
+    CI; not run here.
+  - E2e (`flows.spec.ts`: after the form is published, an automation is built, simulated and
+    published, sends the form on WhatsApp and the answers are saved). Written for CI; not run here.
+- **Docs:** ADR-248; ARCHITECTURE; SECURITY; DEPLOYMENT; BACKLOG P4-01 and P4-03; feature matrix
+  W-085.
+- **Mutation checks:** 14/14 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 1062 passed (113 files)                                         |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 14/14 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- No forms from campaigns or templates, no draft forms from test runs, and no waiting for or
+  branching on a form's answers.
+
 ## 2026-10-06 — An expected close date from deal steps (P4-01, P4-04, ADR-247)
 
 Status: **Implemented; its database and browser tests run in CI only.** No migration. The local

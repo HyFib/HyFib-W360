@@ -100,7 +100,7 @@ test('a form is checked by Meta, published, sent in a chat and its answers saved
   page,
   request,
 }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(240_000);
   const { wabaId, phoneNumberId } = await newCompany(page, 'flows', 'Farah Flows');
 
   // Flows → New flow: the starter form is checked while it is edited.
@@ -194,6 +194,53 @@ test('a form is checked by Meta, published, sent in a chat and its answers saved
   await expect(completed).toContainText('the contact’s email: saved');
   await expect(page.getByText('1 · 1 · 1')).toBeVisible();
   await expectNoHorizontalOverflow(page);
+
+  // An automation sends the published form too, to a customer who asks for a callback (ADR-248).
+  await openFromNav(page, 'Automations');
+  await page.getByLabel('Name', { exact: true }).fill('Callback form');
+  await page.getByRole('button', { name: 'Create draft' }).click();
+  await expect(page.getByRole('heading', { name: 'Callback form' })).toBeVisible();
+  await page.getByLabel('Start when').selectOption('keyword');
+  await page.getByLabel('Keywords').fill('callback');
+  await page.getByLabel('Add a step').selectOption('send_flow');
+  await page.getByRole('button', { name: 'Add step' }).click();
+  await page.locator('#step-send-flow-1-flow').selectOption({ label: 'Lead form' });
+  await page.locator('#step-send-flow-1-body').fill('Hi {{name}}, tell us when to call.');
+  await page.locator('#step-send-flow-1-cta').fill('Book a call');
+  await page.locator('#step-welcome-next').selectOption('send-flow-1');
+  await expect(page.getByText(/to fix before publishing/)).toBeHidden();
+  await page.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(page.getByText('[Book a call] opens the form “Lead form”')).toBeVisible();
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByText('Draft saved.')).toBeVisible();
+  await page.getByRole('button', { name: 'Publish' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Publish' }).click();
+  await expect(page.getByText('Published.')).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
+  // A customer writes "callback": the run sends the form with a token of its own, and the answers
+  // are saved as for a form a member sent.
+  const caller = randomWaId();
+  await sendSignedWebhook(
+    request,
+    inboundMessage(wabaId, phoneNumberId, caller, 'callback please'),
+  );
+  const automated = await flowMessageTo(request, caller);
+  expect(automated.token).not.toBe(sent.token);
+  expect(automated.parameters).toMatchObject({ mode: 'published', flow_cta: 'Book a call' });
+  await sendSignedWebhook(
+    request,
+    flowCompletion(
+      wabaId,
+      phoneNumberId,
+      caller,
+      { flow_token: automated.token, full_name: 'Ravi Kumar', email: 'ravi@example.com' },
+      automated.wamid,
+    ),
+  );
+  await openFromNav(page, 'Flows');
+  await page.getByRole('link', { name: 'Lead form' }).click();
+  await reloadUntil(page, 'full_name: Ravi Kumar');
 });
 
 test.describe('the encrypted data endpoint', () => {

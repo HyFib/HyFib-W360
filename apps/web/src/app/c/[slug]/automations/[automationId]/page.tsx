@@ -79,6 +79,7 @@ export default async function AutomationPage({
           teams={detail.options.teams}
           crmMembers={detail.options.crmMembers}
           crmPipelines={detail.options.crmPipelines}
+          flows={detail.options.flows}
           fields={detail.options.fields}
           web={{
             allowedDomains: detail.options.allowedDomains,

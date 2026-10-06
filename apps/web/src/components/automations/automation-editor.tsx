@@ -142,6 +142,7 @@ function defaultNode(
   template: EditorTemplate | undefined,
   crmMember: string | undefined,
   pipeline: EditorPipeline | undefined,
+  flow: { id: string } | undefined,
 ): AutomationNode {
   const id = newNodeId(graph, type);
   switch (type) {
@@ -242,6 +243,18 @@ function defaultNode(
         dueInHours: 24,
         next: null,
       };
+    case 'send_flow':
+      return {
+        id,
+        type,
+        label: '',
+        flowId: flow?.id ?? '',
+        header: null,
+        body: 'Please fill in this form.',
+        footer: null,
+        cta: 'Open the form',
+        next: null,
+      };
     case 'create_deal':
       return {
         id,
@@ -267,6 +280,7 @@ function retarget(node: AutomationNode, target: string, value: string | null): A
   switch (node.type) {
     case 'send_text':
     case 'send_template':
+    case 'send_flow':
     case 'update_contact':
     case 'update_conversation':
     case 'create_task':
@@ -323,6 +337,7 @@ export function AutomationEditor({
   teams,
   crmMembers,
   crmPipelines,
+  flows,
   fields,
   web,
 }: {
@@ -338,6 +353,8 @@ export function AutomationEditor({
   crmMembers: { id: string; name: string }[];
   /** Active pipelines with their currency and active stages, for deal steps. */
   crmPipelines: EditorPipeline[];
+  /** The company's forms that are not archived, for form steps. */
+  flows: { id: string; name: string; whatsappAccountId: string; sendable: boolean }[];
   fields: { key: string; label: string; type: string }[];
   /** What web request steps may use: allowed domains and secrets (names and domains only). */
   web: {
@@ -385,6 +402,16 @@ export function AutomationEditor({
       ),
     [templates, channelWhatsappAccountId],
   );
+  // Forms a step can send: published, of the number's WhatsApp account when it is limited to one.
+  const usableFlows = useMemo(
+    () =>
+      flows.filter(
+        (f) =>
+          f.sendable &&
+          (!channelWhatsappAccountId || f.whatsappAccountId === channelWhatsappAccountId),
+      ),
+    [flows, channelWhatsappAccountId],
+  );
   const parsedTrigger = useMemo(() => parseTrigger(triggerInput(trigger)), [trigger]);
   const apiInputs = useMemo(
     () =>
@@ -397,6 +424,9 @@ export function AutomationEditor({
     () => ({
       teamIds: new Set(teams.map((t) => t.id)),
       crmMemberIds: new Set(crmMembers.map((m) => m.id)),
+      flows: new Map(
+        flows.map((f) => [f.id, { whatsappAccountId: f.whatsappAccountId, sendable: f.sendable }]),
+      ),
       crmPipelines: new Map(
         crmPipelines.map((pl) => [
           pl.id,
@@ -416,6 +446,7 @@ export function AutomationEditor({
       teams,
       crmMembers,
       crmPipelines,
+      flows,
       fields,
       web,
       templates,
@@ -475,6 +506,7 @@ export function AutomationEditor({
     teams,
     crmMembers,
     crmPipelines,
+    flows: usableFlows,
     fields,
     answers,
     allowedDomains: web.allowedDomains,
@@ -932,6 +964,7 @@ export function AutomationEditor({
                             usableTemplates[0],
                             crmMembers[0]?.id,
                             crmPipelines[0],
+                            usableFlows[0],
                           ),
                         ],
                       })),
@@ -981,6 +1014,7 @@ export function AutomationEditor({
             teams={teams}
             crmMembers={crmMembers}
             crmPipelines={crmPipelines}
+            flows={flows}
             templates={templates}
             storeEvent={storeEvent}
             apiInputs={apiInputs}

@@ -14,6 +14,7 @@ import {
   type HttpMethod,
   type NodeOf,
 } from '@w360/domain/automation-model';
+import { FLOW_LIMITS } from '@w360/domain/flow-json';
 
 /**
  * Field editors for each step type. Every control is labelled; "next step" choices list the
@@ -58,6 +59,8 @@ export interface NodeFieldOptions {
   crmMembers: { id: string; name: string }[];
   /** Active pipelines with their currency and active stages, for deal steps. */
   crmPipelines: EditorPipeline[];
+  /** The company's forms that can be sent, of the automation's number's account when it has one. */
+  flows: { id: string; name: string }[];
   fields: { key: string; label: string; type: string }[];
   /** Answer names saved by questions and web requests in this automation. */
   answers: string[];
@@ -412,6 +415,84 @@ export function NodeFields({
               />
             )}
           </Field>
+          <NextSelect
+            id={`${p}-next`}
+            label="Then"
+            value={node.next}
+            self={node.id}
+            options={options}
+            onChange={(next) => patch(node, { next })}
+          />
+        </div>
+      );
+    case 'send_flow':
+      return (
+        <div className="grid gap-4">
+          <Field
+            id={`${p}-flow`}
+            label="Form"
+            description="A published form of the number's WhatsApp account. The customer's answers go to the contact as the form maps them."
+          >
+            {(aria) => (
+              <Select
+                {...aria}
+                value={node.flowId}
+                onChange={(e) => patch(node, { flowId: e.target.value })}
+              >
+                {options.flows.some((f) => f.id === node.flowId) ? null : (
+                  <option value={node.flowId}>Choose a form</option>
+                )}
+                {options.flows.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.name}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+          <Field id={`${p}-body`} label="Message" description={hintFor(options)}>
+            {(aria) => (
+              <Textarea
+                {...aria}
+                rows={3}
+                value={node.body}
+                maxLength={FLOW_LIMITS.bodyLength}
+                onChange={(e) => patch(node, { body: e.target.value })}
+              />
+            )}
+          </Field>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Field id={`${p}-header`} label="Header (optional)">
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={node.header ?? ''}
+                  maxLength={FLOW_LIMITS.headerLength}
+                  onChange={(e) => patch(node, { header: e.target.value || null })}
+                />
+              )}
+            </Field>
+            <Field id={`${p}-footer`} label="Footer (optional)">
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={node.footer ?? ''}
+                  maxLength={FLOW_LIMITS.footerLength}
+                  onChange={(e) => patch(node, { footer: e.target.value || null })}
+                />
+              )}
+            </Field>
+            <Field id={`${p}-cta`} label="Button">
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={node.cta}
+                  maxLength={FLOW_LIMITS.ctaLength}
+                  onChange={(e) => patch(node, { cta: e.target.value })}
+                />
+              )}
+            </Field>
+          </div>
           <NextSelect
             id={`${p}-next`}
             label="Then"

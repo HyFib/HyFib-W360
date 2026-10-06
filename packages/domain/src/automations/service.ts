@@ -16,6 +16,7 @@ import {
   commerceStores,
   contactFields,
   conversations,
+  flows,
   desc,
   eq,
   gte,
@@ -47,6 +48,7 @@ import { parseInput } from '../validation';
 import { CSV_BOM, csvLine } from '../contacts/csv';
 import { crmMembers } from '../crm/common';
 import { loadPipelines } from '../crm/pipelines';
+import { SENDABLE_STATUSES } from '../flows/service';
 import { RUN_CSV_COLUMNS, runCsvLine, type RunCsvRow } from './runs-csv';
 import {
   apiInputValues,
@@ -66,7 +68,7 @@ import {
   type TemplateReference,
 } from './graph';
 import { appendRunStep, endRun, endRunForHuman, lockActiveRun, signalAutomationRun } from './runs';
-import { assertLiveAutomationAvailable } from '../plans/entitlements';
+import { assertLiveAutomationAvailable, assertModule } from '../plans/entitlements';
 
 /**
  * Automations for the web tier. Drafts are edited freely (`automations.write`); publishing
@@ -184,12 +186,22 @@ export interface AutomationDetail {
     crmMembers: { id: string; name: string }[];
     /** Active pipelines with their currency and active stages, for deal steps (ADR-245). */
     crmPipelines: AutomationPipelineOption[];
+    /** The company's forms that are not archived, for form steps (ADR-248). */
+    flows: AutomationFlowOption[];
     fields: { key: string; label: string; type: string }[];
     /** Domains HTTP steps may call, and the secrets they may use (never their values). */
     allowedDomains: string[];
     secrets: { name: string; domain: string }[];
     allowInsecureHttp: boolean;
   };
+}
+
+/** A form a form step may send (ADR-248): only one published at Meta can be sent. */
+export interface AutomationFlowOption {
+  id: string;
+  name: string;
+  whatsappAccountId: string;
+  sendable: boolean;
 }
 
 /** An active pipeline a deal step may create deals in, with its active stages (ADR-245). */
@@ -446,6 +458,27 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         id: m.membershipId,
         name: m.name,
       })),
+      flows: (
+        await tx
+          .select({
+            id: flows.id,
+            name: flows.name,
+            whatsappAccountId: flows.whatsappAccountId,
+            metaFlowId: flows.metaFlowId,
+            metaStatus: flows.metaStatus,
+          })
+          .from(flows)
+          .where(and(eq(flows.tenantId, tenantId), isNull(flows.archivedAt)))
+          .orderBy(asc(sql`lower(${flows.name})`))
+      ).map((f): AutomationFlowOption => ({
+        id: f.id,
+        name: f.name,
+        whatsappAccountId: f.whatsappAccountId,
+        sendable:
+          f.metaFlowId !== null &&
+          f.metaStatus !== null &&
+          SENDABLE_STATUSES.includes(f.metaStatus),
+      })),
       crmPipelines: (await loadPipelines(tx, tenantId, { includeArchived: false })).map(
         (p): AutomationPipelineOption => ({
           id: p.id,
@@ -473,6 +506,12 @@ export function createAutomationService(deps: AutomationServiceDeps) {
     return {
       teamIds: new Set(refs.teamRows.map((t) => t.id)),
       crmMemberIds: new Set(refs.crmMembers.map((m) => m.id)),
+      flows: new Map(
+        refs.flows.map((f) => [
+          f.id,
+          { whatsappAccountId: f.whatsappAccountId, sendable: f.sendable },
+        ]),
+      ),
       crmPipelines: new Map(
         refs.crmPipelines.map((p) => [
           p.id,
@@ -547,6 +586,14 @@ export function createAutomationService(deps: AutomationServiceDeps) {
     throw forbidden(
       `${action === 'publish' ? 'Publishing' : 'Testing'} an automation that creates CRM tasks or deals needs the permission to edit the CRM.`,
     );
+  }
+
+  /**
+   * Publishing or testing a graph that sends forms needs WhatsApp Flows in the company's plan, as
+   * sending a form in the inbox does (ADR-248).
+   */
+  function assertMaySendForms(ctx: TenantContext, graph: AutomationGraph) {
+    if (graph.nodes.some((n) => n.type === 'send_flow')) assertModule(ctx.plan, 'flows');
   }
 
   /** Parses and checks a draft; throws when it cannot be run. */
@@ -870,6 +917,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               teams: teamRows,
               crmMembers: refs.crmMembers,
               crmPipelines: refs.crmPipelines,
+              flows: refs.flows,
               fields: fieldRows,
               allowedDomains: refs.domains,
               secrets: refs.secrets,
@@ -1047,6 +1095,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         const { trigger, graph } = await runnableDraft(tx, row);
         await assertMayUseTemplates(tx, ctx, graph, 'publish');
         assertMayChangeCrm(ctx, graph, 'publish');
+        assertMaySendForms(ctx, graph);
         const sha = definitionSha({ trigger, graph, channelAccountId: row.draftChannelAccountId });
         if (row.activeVersionId) {
           const [current] = await tx
@@ -1249,6 +1298,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         const { trigger, graph } = await runnableDraft(tx, row);
         await assertMayUseTemplates(tx, ctx, graph, 'test');
         assertMayChangeCrm(ctx, graph, 'test');
+        assertMaySendForms(ctx, graph);
         let storeOrderId: string | null = null;
         if (trigger.type === 'store_event') {
           // The steps send the order's customer details: seeing store orders needs both.

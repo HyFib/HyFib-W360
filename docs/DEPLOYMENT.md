@@ -586,6 +586,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-247 has no migration either: an old worker reads a deal step's expected close date as absent
    and creates the deal without it.
 
+   ADR-248 has no migration. A worker of the previous release cannot read a published version with a
+   form step and would fail its runs as unreadable, so roll the workers out first. An old web server
+   cannot read a draft with a form step either: its editor opens it with the starter steps, and
+   saving there would replace the draft, so do not edit automations with form steps until the web
+   rollout ends.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

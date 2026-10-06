@@ -74,6 +74,10 @@ export const STEP_DETAILS: Record<string, string> = {
   'store_event:order_shipped': 'an order shipped by a store',
   'store_event:order_delivered': 'an order delivered',
   'store_event:order_cancelled': 'an order cancelled in a store',
+  // Form steps (ADR-248, checked again when the step runs).
+  flow_unavailable:
+    'the form is archived, no longer published, or of another WhatsApp account than the number',
+  flows_not_in_plan: 'the company’s plan does not include WhatsApp Flows',
   // Template steps (checked again when the step runs).
   template_unavailable: 'the template is no longer approved, or HyFib cannot send it',
   template_changed:

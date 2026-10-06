@@ -21,7 +21,11 @@ import {
   type NodeOf,
   type OrderPlaceholderValues,
 } from './graph';
+import { FLOW_LIMITS } from '../flows/flow-json';
 import { normalizeRoutingText } from '../inbox/keywords';
+
+/** A form's message as WhatsApp takes it (ADR-248). */
+const FLOW_BODY_LENGTH = FLOW_LIMITS.bodyLength;
 
 /**
  * The automation interpreter: a pure function from (graph, run state, event, facts) to the next
@@ -110,6 +114,18 @@ export type RunEffect =
       links: string[];
       ask: boolean;
       buttons: { index: number; title: string; payload: string }[];
+    }
+  /**
+   * One of the company's forms (ADR-248), with the message as rendered; the header, footer and
+   * button text as written.
+   */
+  | {
+      kind: 'send_flow';
+      flowId: string;
+      header: string | null;
+      body: string;
+      footer: string | null;
+      cta: string;
     }
   | { kind: 'add_tag'; tag: string }
   | { kind: 'remove_tag'; tag: string }
@@ -506,6 +522,23 @@ export function advance(input: AdvanceInput): StepResult {
     switch (current.type) {
       case 'send_text': {
         const built = message(base, () => textEffect(current.text, base.variables));
+        if (isResult(built)) return built;
+        return moveTo(current.next, built.state, [built.effect], 'sent', null);
+      }
+      case 'send_flow': {
+        const built = message(base, () => {
+          const body = truncate(renderText(current.body, values(base.variables)), FLOW_BODY_LENGTH);
+          return body
+            ? {
+                kind: 'send_flow',
+                flowId: current.flowId,
+                header: current.header,
+                body,
+                footer: current.footer,
+                cta: current.cta,
+              }
+            : null;
+        });
         if (isResult(built)) return built;
         return moveTo(current.next, built.state, [built.effect], 'sent', null);
       }

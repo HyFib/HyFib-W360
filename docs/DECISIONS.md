@@ -9472,3 +9472,32 @@ Decision:
   expected date. No migration.
 
 Not built: a date from an answer or an order, and moving the date when the deal changes stage.
+
+## ADR-248 Automation steps that send a WhatsApp form (P4-01, P4-03) (2026-10-06)
+
+Context: a form (WhatsApp Flows, ADR-045) could be sent only by a member from a conversation, so an
+automation answering a customer could not hand them a form to fill in.
+
+Decision:
+
+- **The step:** "Send a form" (`send_flow`) sends one of the company's published forms in the
+  conversation the run answers, with a message (up to 1,024 characters, with the placeholders of a
+  message), an optional header and footer (60 characters each) and a button text (30), the limits of
+  a member's form. It is a session message like a text: it needs the 24-hour window, follows a
+  customer's reply in automations started by a store or the API, and counts against the run's
+  message budget.
+- **Sent like a member's form:** after a text's checks (an active number, an open window, a
+  WhatsApp number for the contact), the runner queues it through the send pipeline with a new flow
+  token recorded for the conversation and contact (`flow_sends`, with no member), so the customer's
+  answers are applied to the contact as the form maps them. The message is the bot's and names the
+  run.
+- **When the form or the plan changed:** publishing needs a form published at Meta (or throttled),
+  of the WhatsApp account of the automation's number when it has one; the run checks again when it
+  sends, and a form archived, no longer published or of another account than the number ends the run
+  with `send_blocked` (`flow_unavailable`), passing the conversation to people, as for a text that
+  cannot be sent. As in the inbox, the company's plan must include WhatsApp Flows: publishing or
+  testing such an automation is refused without it, and a run ends with `flows_not_in_plan` when the
+  plan no longer includes it. No migration.
+
+Not built: forms from campaigns and templates, a draft form sent by a test run, waiting for the
+form's answers before the run goes on, and branching on them.

@@ -9,6 +9,7 @@ import {
   typoAllowance,
 } from '../inbox/keywords';
 import { parseAmountToMinor } from '../crm/money';
+import { FLOW_LIMITS } from '../flows/flow-json';
 import { TEMPLATE_LIMITS } from '../templates/definition';
 
 /**
@@ -386,6 +387,23 @@ const handoffNode = z.object({
 const endNode = z.object({ id: nodeIdSchema, type: z.literal('end'), label: labelSchema });
 
 /**
+ * One of the company's WhatsApp forms (Flows) sent in the conversation (ADR-248), a session message
+ * like a text: the customer's answers are applied to the contact as the form maps them. The message
+ * may hold placeholders; the header, footer and button text are sent as written.
+ */
+const sendFlowNode = z.object({
+  id: nodeIdSchema,
+  type: z.literal('send_flow'),
+  label: labelSchema,
+  flowId: z.uuid('Choose a form.'),
+  header: optionalShortText(FLOW_LIMITS.headerLength, 'header'),
+  body: textSchema(FLOW_LIMITS.bodyLength, 'message'),
+  footer: optionalShortText(FLOW_LIMITS.footerLength, 'footer'),
+  cta: textSchema(FLOW_LIMITS.ctaLength, 'button text'),
+  next: nextSchema,
+});
+
+/**
  * A CRM task about the run's contact for a member of the company (ADR-244), created by the
  * automation. The title may hold placeholders, filled in when the step runs.
  */
@@ -537,6 +555,7 @@ export const nodeSchema = z.discriminatedUnion('type', [
   askTextNode,
   sendTemplateNode,
   askTemplateNode,
+  sendFlowNode,
   conditionNode,
   updateContactNode,
   updateConversationNode,
@@ -557,6 +576,7 @@ export const NODE_TYPES: readonly NodeType[] = [
   'ask_text',
   'send_template',
   'ask_template',
+  'send_flow',
   'condition',
   'update_contact',
   'update_conversation',
@@ -574,6 +594,7 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   ask_text: 'Ask a question',
   send_template: 'Send a template',
   ask_template: 'Ask with a template',
+  send_flow: 'Send a form',
   condition: 'Condition',
   update_contact: 'Update contact',
   update_conversation: 'Tag the conversation',
@@ -601,6 +622,7 @@ export const SESSION_MESSAGE_NODE_TYPES: ReadonlySet<NodeType> = new Set([
   'send_text',
   'ask_buttons',
   'ask_text',
+  'send_flow',
 ]);
 
 export const graphSchema = z.object({
@@ -1134,6 +1156,7 @@ export function edgesOf(node: AutomationNode): { label: string; target: string |
   switch (node.type) {
     case 'send_text':
     case 'send_template':
+    case 'send_flow':
     case 'update_contact':
     case 'update_conversation':
     case 'create_task':
@@ -1195,6 +1218,8 @@ function textsOf(node: AutomationNode): string[] {
   switch (node.type) {
     case 'send_text':
       return [node.text];
+    case 'send_flow':
+      return [node.body];
     case 'send_template':
     case 'ask_template':
       return [...node.header, ...node.body];
@@ -1215,6 +1240,11 @@ function textsOf(node: AutomationNode): string[] {
 export interface GraphReferences {
   /** Teams of the company; when given, hand-off teams must be among them. */
   teamIds?: ReadonlySet<string>;
+  /**
+   * The company's forms by id, with their WhatsApp account and whether they can be sent (published
+   * at Meta); when given, form steps must use one that can, of the automation's account (ADR-248).
+   */
+  flows?: ReadonlyMap<string, { whatsappAccountId: string; sendable: boolean }>;
   /**
    * Active members who can use the CRM; when given, the members task steps create tasks for must
    * be among them (ADR-244).
@@ -1529,6 +1559,18 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
         nodeId: node.id,
         message: 'Choose an active member who can use the CRM for the task.',
       });
+    }
+    if (node.type === 'send_flow' && refs.flows) {
+      const flow = refs.flows.get(node.flowId);
+      const message = !flow
+        ? 'The form no longer exists.'
+        : !flow.sendable
+          ? 'Publish the form before an automation sends it.'
+          : refs.channelWhatsappAccountId &&
+              flow.whatsappAccountId !== refs.channelWhatsappAccountId
+            ? 'Choose a form of the WhatsApp account of the automation’s number.'
+            : null;
+      if (message) issues.push({ level: 'error', nodeId: node.id, message });
     }
     if (node.type === 'create_deal') {
       for (const message of dealStepIssues(node, refs)) {

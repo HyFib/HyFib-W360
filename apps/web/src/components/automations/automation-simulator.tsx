@@ -130,6 +130,7 @@ export function AutomationSimulator({
   teams,
   crmMembers,
   crmPipelines,
+  flows,
   templates,
   storeEvent,
   apiInputs,
@@ -142,6 +143,8 @@ export function AutomationSimulator({
   crmMembers: { id: string; name: string }[];
   /** Pipelines deal steps may use, to name them and their stages. */
   crmPipelines: EditorPipeline[];
+  /** Forms form steps may send, to name them. */
+  flows: { id: string; name: string }[];
   templates: EditorTemplate[];
   /** Started by order messages: the run reads a sample order. */
   storeEvent: boolean;
@@ -244,6 +247,14 @@ export function AutomationSimulator({
             body: effect.body,
           });
           break;
+        case 'send_flow': {
+          const flow = flows.find((f) => f.id === effect.flowId);
+          out.push({
+            who: 'bot',
+            text: `${effect.header ? `${effect.header}\n` : ''}${effect.body}${effect.footer ? `\n${effect.footer}` : ''}\n[${effect.cta}] opens the form “${flow?.name ?? 'Form'}”`,
+          });
+          break;
+        }
         case 'create_task': {
           const member = crmMembers.find((m) => m.id === effect.assigneeMembershipId);
           const due =

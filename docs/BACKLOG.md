@@ -188,11 +188,13 @@ verification, app review, Embedded Signup configuration).
   runs only in CI]** (ADR-237: the runs the list shows as CSV, with its filters, without customer
   data, with `automations.read`, audited; no migration). **[Keyword typos built; their database test
   runs only in CI]** (ADR-240: keyword triggers may also start on small typos, by word length, never
-  in short words or numbers, ranked below every match without typos; no migration). **Remaining:**
-  Flow and catalog steps (sending a WhatsApp Flow or products from a run), starting runs from the
-  public API or campaigns, enrolling contacts or segments in a sequence without a customer message
-  or order event, a drag-and-drop canvas (ADR-034), usage billing for automation steps, a real
-  sandbox run (release checklist).
+  in short words or numbers, ranked below every match without typos; no migration). **[Form steps
+  built; their database and browser tests run only in CI]** (ADR-248: a published form sent in the
+  conversation with a token of its own, as a member sends it, while the plan includes WhatsApp
+  Flows; no migration). **Remaining:** catalog steps (sending products from a run), starting runs
+  from the public API or campaigns, enrolling contacts or segments in a sequence without a customer
+  message or order event, a drag-and-drop canvas (ADR-034), usage billing for automation steps, a
+  real sandbox run (release checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
   local target server only_: "Call a web address" steps (method, address with URL-encoded
   placeholders, headers, JSON body, values saved from the response, success and failure branches);
@@ -223,9 +225,10 @@ verification, app review, Embedded Signup configuration).
   and completion, a completion by another contact, erasure, the endpoint with every refusal and a
   secret moved to another domain, isolation), unit tests (Flow JSON checks, decryption with
   rotation and tampering, the message, health status), e2e `flows.spec.ts` (create, publish, send,
-  complete; encrypted requests through the route). **Remaining:** checks on an approved sandbox
-  number and a real account's keys (release checklist), a visual form builder, sending flows from
-  automations, campaigns and templates, flows that open with `data_exchange`, Meta's flow metrics.
+  complete; encrypted requests through the route). **[Sending forms from automations built; its
+  database and browser tests run only in CI]** (ADR-248). **Remaining:** checks on an approved
+  sandbox number and a real account's keys (release checklist), a visual form builder, sending flows
+  from campaigns and templates, flows that open with `data_exchange`, Meta's flow metrics.
 - **P4-04 CRM** — _implemented and locally verified (2026-09-27); reminder emails verified through
   Mailpit only_: pipelines (company settings, audited) with ordered stages and one currency each,
   archived instead of deleted; deals linked to a contact for life and optionally to a conversation,

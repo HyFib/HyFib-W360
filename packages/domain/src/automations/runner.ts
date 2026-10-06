@@ -15,6 +15,8 @@ import {
   crmPipelines,
   crmStages,
   crmTasks,
+  flowSends,
+  flows,
   conversationTags,
   eq,
   gte,
@@ -37,6 +39,9 @@ import { MAX_TAGS_PER_CONTACT, coerceFieldValue } from '../contacts/fields';
 import { addActivity, memberRefs } from '../crm/common';
 import { localDateAfter } from '../crm/time';
 import { scheduleTaskReminder } from '../crm/reminders';
+import { FLOW_TOKEN_DAYS, buildFlowMessageRequest, newFlowToken } from '../flows/model';
+import { SENDABLE_STATUSES } from '../flows/service';
+import { loadEntitlements } from '../plans/entitlements';
 import { phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { businessStatusAt, loadBusinessCalendar } from '../inbox/business-hours';
 import { MAX_TAGS_PER_CONVERSATION } from '../inbox/conversation-tags';
@@ -253,7 +258,7 @@ async function loadFacts(
   };
 }
 
-type SendEffect = Extract<RunEffect, { kind: 'send_text' | 'send_buttons' }>;
+type SendEffect = Extract<RunEffect, { kind: 'send_text' | 'send_buttons' | 'send_flow' }>;
 
 /**
  * Queues a bot message through the send pipeline, after the checks a member's reply gets: the
@@ -307,6 +312,16 @@ export async function queueBotMessage(
     )
     .limit(1);
   if (!identity?.waId) return { ok: false, code: 'no_phone' };
+  if (effect.kind === 'send_flow') {
+    return queueBotFlow(tx, deps, {
+      run,
+      conversation,
+      effect,
+      now,
+      waId: identity.waId,
+      whatsappAccountId: channel.whatsappAccountId,
+    });
+  }
 
   const base = { messaging_product: 'whatsapp', recipient_type: 'individual', to: identity.waId };
   const request =
@@ -365,6 +380,122 @@ export async function queueBotMessage(
   await tx
     .update(conversations)
     .set({ lastMessageAt: now, lastMessagePreview: clipText(preview, 200) })
+    .where(and(eq(conversations.tenantId, run.tenantId), eq(conversations.id, conversation.id)));
+  await emitTenantEvent(tx, run.tenantId, {
+    type: 'message.created',
+    conversationId: conversation.id,
+    payload: { messageId },
+  });
+  await deps.jobs.enqueue(
+    tx,
+    QUEUES.messageSend.name,
+    deps.signer.sign({
+      kind: 'message.send',
+      tenantId: run.tenantId,
+      actorUserId: run.startedByUserId,
+      ref: intentId,
+    }),
+    { singletonKey: intentId, group: { id: conversation.channelAccountId } },
+  );
+  return { ok: true, messageId };
+}
+
+/**
+ * Queues a form step's form (ADR-248) once the channel, window and number checks passed: as in the
+ * inbox, the company's plan must include WhatsApp Flows (otherwise `flows_not_in_plan`), and the form
+ * must still be published at Meta, of the number's WhatsApp account and not archived (otherwise
+ * `flow_unavailable`). It is sent like a member's form, with a new flow token recorded for the
+ * conversation and contact, so the customer's answers are applied as the form maps them.
+ */
+async function queueBotFlow(
+  tx: Tx,
+  deps: RunSignalDeps,
+  input: {
+    run: AutomationRun;
+    conversation: { id: string; channelAccountId: string; contactId: string };
+    effect: Extract<RunEffect, { kind: 'send_flow' }>;
+    now: Date;
+    waId: string;
+    whatsappAccountId: string;
+  },
+): Promise<{ ok: true; messageId: string } | { ok: false; code: string }> {
+  const { run, conversation, effect, now } = input;
+  if (!(await loadEntitlements(tx, run.tenantId)).modules.has('flows')) {
+    return { ok: false, code: 'flows_not_in_plan' };
+  }
+  const [flow] = await tx
+    .select({
+      id: flows.id,
+      name: flows.name,
+      whatsappAccountId: flows.whatsappAccountId,
+      metaFlowId: flows.metaFlowId,
+      metaStatus: flows.metaStatus,
+      archivedAt: flows.archivedAt,
+    })
+    .from(flows)
+    .where(and(eq(flows.tenantId, run.tenantId), eq(flows.id, effect.flowId)));
+  if (
+    !flow ||
+    flow.archivedAt ||
+    !flow.metaFlowId ||
+    flow.whatsappAccountId !== input.whatsappAccountId ||
+    !flow.metaStatus ||
+    !SENDABLE_STATUSES.includes(flow.metaStatus)
+  ) {
+    return { ok: false, code: 'flow_unavailable' };
+  }
+  const message = {
+    header: effect.header,
+    body: effect.body,
+    footer: effect.footer,
+    cta: effect.cta,
+  };
+  const token = newFlowToken();
+  const messageId = uuidv7();
+  const intentId = uuidv7();
+  await tx.insert(messages).values({
+    id: messageId,
+    tenantId: run.tenantId,
+    conversationId: conversation.id,
+    channelAccountId: conversation.channelAccountId,
+    direction: 'outbound',
+    type: 'interactive',
+    content: {
+      flow: { id: flow.id, name: flow.name, mode: 'published', ...message },
+      automationRunId: run.id,
+    },
+    status: 'queued',
+    statusRank: STATUS_RANK.queued,
+    senderType: 'bot',
+    senderMembershipId: null,
+  });
+  await tx.insert(sendIntents).values({
+    id: intentId,
+    tenantId: run.tenantId,
+    messageId,
+    channelAccountId: conversation.channelAccountId,
+    request: buildFlowMessageRequest(input.waId, message, {
+      metaFlowId: flow.metaFlowId,
+      token,
+      mode: 'published',
+    }),
+    actorUserId: run.startedByUserId,
+  });
+  await tx.insert(flowSends).values({
+    id: uuidv7(),
+    tenantId: run.tenantId,
+    flowId: flow.id,
+    conversationId: conversation.id,
+    contactId: conversation.contactId,
+    messageId,
+    token,
+    mode: 'published',
+    sentByMembershipId: null,
+    expiresAt: new Date(now.getTime() + FLOW_TOKEN_DAYS * 86_400_000),
+  });
+  await tx
+    .update(conversations)
+    .set({ lastMessageAt: now, lastMessagePreview: clipText(`[Form] ${flow.name}`, 200) })
     .where(and(eq(conversations.tenantId, run.tenantId), eq(conversations.id, conversation.id)));
   await emitTenantEvent(tx, run.tenantId, {
     type: 'message.created',
@@ -1074,7 +1205,11 @@ async function runStep(
     let skipped = false;
     let handoff: { teamId: string | null } | null = null;
     for (const effect of result.effects) {
-      if (effect.kind === 'send_text' || effect.kind === 'send_buttons') {
+      if (
+        effect.kind === 'send_text' ||
+        effect.kind === 'send_buttons' ||
+        effect.kind === 'send_flow'
+      ) {
         const sent = await queueBotMessage(tx, deps, { run, conversation: conv, effect, now });
         if (!sent.ok) {
           blocked = sent.code;

@@ -20,8 +20,10 @@ import {
   createContactsService,
   createCrmService,
   createInboxService,
+  createPlanAdminService,
   createReportsService,
   createTeamsService,
+  dayOf,
   findDueAutomationRuns,
   MAX_STEP_FAILURES,
   PgBossJobQueue,
@@ -32,10 +34,16 @@ import {
   signalAutomationRun,
   type AutomationTrigger,
   type JobQueue,
+  type PlatformActor,
   type TenantContext,
 } from '@w360/domain';
-import { connectTestDatabases } from './helpers';
-import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
+import { connectTestDatabases, createUser } from './helpers';
+import {
+  nextExternalId,
+  startWhatsAppFixture,
+  type Company,
+  type WhatsAppFixture,
+} from './whatsapp-fixture';
 
 /**
  * Automations against real PostgreSQL, pg-boss and the test-only Graph stand-in: immutable
@@ -2426,6 +2434,222 @@ describe('automations that create CRM deals (ADR-245)', () => {
       publish(owner, 'Archived leads', keyword('price'), graph({})),
       'precondition_failed',
       /active stage of an active pipeline/,
+    );
+  });
+});
+
+describe('automations that send a form (ADR-248)', () => {
+  /** A form of the company's WhatsApp account, at Meta with `status`. */
+  async function form(c: Company, status = 'PUBLISHED') {
+    const id = uuidv7();
+    const metaFlowId = nextExternalId();
+    const publicId = Array.from(
+      { length: 16 },
+      () => 'abcdefghijklmnopqrstuvwxyz234567'[randomInt(32)],
+    ).join('');
+    await fx.query(
+      `INSERT INTO app.flows (id, tenant_id, whatsapp_account_id, public_id, name, categories,
+         flow_json, json_version, first_screen, meta_flow_id, meta_status, created_by_membership_id)
+       VALUES ($1, $2, $3, $4, 'Booking', ARRAY['APPOINTMENT_BOOKING'], '{}', '7.2', 'START', $5, $6, $7)`,
+      [
+        id,
+        c.tenant.id,
+        c.whatsappAccountId,
+        publicId,
+        metaFlowId,
+        status,
+        c.tenant.ownerMembershipId,
+      ],
+    );
+    return { id, metaFlowId };
+  }
+
+  const booking = (flowId: string) => ({
+    version: 1,
+    start: 'form',
+    nodes: [
+      {
+        id: 'form',
+        type: 'send_flow',
+        flowId,
+        header: null,
+        body: 'Hi {{name}}, pick a time.',
+        footer: null,
+        cta: 'Book now',
+        next: null,
+      },
+    ],
+  });
+
+  it('sends the form with a new token for the conversation, as the automation', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const flow = await form(c);
+    await publish(owner, 'Bookings', keyword('book'), booking(flow.id));
+    const conversationId = await inbound(c, waId(), 'book a visit');
+    const run = await onlyRun(conversationId);
+    const before = Date.now();
+    expect((await drive(c, conversationId, run.id)).outcome).toBe('ended');
+    const [sent] = await fx.query<{
+      id: string;
+      type: string;
+      content: { flow: Record<string, unknown>; automationRunId: string };
+      sender_type: string;
+    }>(
+      `SELECT id, type, content, sender_type FROM app.messages
+        WHERE conversation_id = $1 AND direction = 'outbound'`,
+      [conversationId],
+    );
+    expect(sent).toMatchObject({
+      type: 'interactive',
+      sender_type: 'bot',
+      content: {
+        flow: {
+          id: flow.id,
+          name: 'Booking',
+          mode: 'published',
+          body: 'Hi Priya Customer, pick a time.',
+          cta: 'Book now',
+        },
+        automationRunId: run.id,
+      },
+    });
+    const [record] = await fx.query<{
+      flow_id: string;
+      contact_id: string;
+      token: string;
+      mode: string;
+      sent_by_membership_id: string | null;
+      expires_at: Date;
+    }>(
+      `SELECT flow_id, contact_id, token, mode, sent_by_membership_id, expires_at
+         FROM app.flow_sends WHERE message_id = $1`,
+      [sent!.id],
+    );
+    expect(record).toMatchObject({
+      flow_id: flow.id,
+      mode: 'published',
+      sent_by_membership_id: null,
+    });
+    expect(record!.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(record!.expires_at.getTime()).toBeGreaterThanOrEqual(before + 30 * 86_400_000);
+    // Sent to WhatsApp as Meta's form message, with the token and the published mode.
+    const [intent] = await fx.query<{ request: Record<string, unknown> }>(
+      'SELECT request FROM app.send_intents WHERE message_id = $1',
+      [sent!.id],
+    );
+    expect(intent!.request).toMatchObject({
+      interactive: {
+        type: 'flow',
+        body: { text: 'Hi Priya Customer, pick a time.' },
+        action: {
+          name: 'flow',
+          parameters: {
+            flow_id: flow.metaFlowId,
+            flow_cta: 'Book now',
+            flow_token: record!.token,
+            mode: 'published',
+          },
+        },
+      },
+    });
+    expect((await stepLog(run.id)).map((st) => [st.node_id, st.outcome])).toEqual(
+      expect.arrayContaining([['form', 'sent']]),
+    );
+  });
+
+  it('does not send a form that is no longer published: the run passes the conversation to people', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const flow = await form(c);
+    await publish(owner, 'Bookings', keyword('book'), booking(flow.id));
+    await fx.query(`UPDATE app.flows SET meta_status = 'DEPRECATED' WHERE id = $1`, [flow.id]);
+    const conversationId = await inbound(c, waId(), 'book please');
+    const run = await onlyRun(conversationId);
+    expect((await drive(c, conversationId, run.id)).outcome).toBe('ended');
+    expect(await onlyRun(conversationId)).toMatchObject({
+      status: 'failed',
+      end_reason: 'send_blocked',
+    });
+    expect((await stepLog(run.id)).find((st) => st.node_id === 'form')).toMatchObject({
+      outcome: 'failed',
+      detail: 'flow_unavailable',
+    });
+    expect(
+      await fx.query('SELECT id FROM app.flow_sends WHERE conversation_id = $1', [conversationId]),
+    ).toEqual([]);
+  });
+
+  it('is published only with a published form', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const draft = await form(c, 'DRAFT');
+    await expectAppError(
+      publish(owner, 'Bookings', keyword('book'), booking(draft.id)),
+      'precondition_failed',
+      /Publish the form/,
+    );
+  });
+
+  it('sends no form, and publishes no form step, when the plan leaves out WhatsApp Flows', async () => {
+    const c = await fx.company();
+    const flow = await form(c);
+    await publish(await fx.ctx(c, c.owner), 'Bookings', keyword('book'), booking(flow.id));
+    // Platform staff move the company to a plan with automations but without forms.
+    const staff = await createUser(fx.dbs, { twoFactor: true });
+    await fx.dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_owner')`,
+      [staff.id],
+    );
+    const actor: PlatformActor = {
+      userId: staff.id,
+      role: 'platform_owner',
+      correlationId: uuidv7(),
+    };
+    const plans = createPlanAdminService({ platformDb: fx.dbs.platform, clock: systemClock });
+    const { id: planId } = await plans.createPlan(actor, {
+      code: `au-${Date.now().toString(36)}-${randomInt(1_000_000)}`,
+      name: 'Automations plan',
+      price: '999',
+      intervalMonths: '1',
+      trialDays: '0',
+      graceDays: '7',
+      seatsIncluded: '10',
+      numbersIncluded: '5',
+      modules: ['automations'],
+    });
+    await plans.publishPlan(actor, planId);
+    const view = await plans.tenantPlan(actor, c.tenant.id);
+    await plans.setTenantPlan(actor, {
+      tenantId: c.tenant.id,
+      version: view.state.version,
+      status: 'active',
+      planId,
+      periodStart: dayOf(new Date(), 'Asia/Kolkata'),
+      periodEnd: dayOf(new Date(Date.now() + 30 * 86_400_000), 'Asia/Kolkata'),
+      reason: 'Plan for the automation form tests',
+    });
+
+    // The automation still runs, but its form is not sent: the run passes the conversation on.
+    const conversationId = await inbound(c, waId(), 'book a table');
+    const run = await onlyRun(conversationId);
+    expect((await drive(c, conversationId, run.id)).outcome).toBe('ended');
+    expect(await onlyRun(conversationId)).toMatchObject({
+      status: 'failed',
+      end_reason: 'send_blocked',
+    });
+    expect((await stepLog(run.id)).find((st) => st.node_id === 'form')).toMatchObject({
+      outcome: 'failed',
+      detail: 'flows_not_in_plan',
+    });
+    expect(
+      await fx.query('SELECT id FROM app.flow_sends WHERE conversation_id = $1', [conversationId]),
+    ).toEqual([]);
+    // Nor can a form step be published, as a form cannot be sent in the inbox.
+    await expectAppError(
+      publish(await fx.ctx(c, c.owner), 'More bookings', keyword('visit'), booking(flow.id)),
+      'forbidden',
+      /does not include WhatsApp Flows/,
     );
   });
 });

@@ -476,6 +476,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   pipeline's currency); `applyDealEffect` in the runner holds the contact for no key update,
   re-checks the stage, skips a contact with an open deal in the pipeline, and inserts the deal with
   `created_by_automation_id` and a `deal_created` activity without an actor.
+- **Automations that send a form** (ADR-248): `send_flow` steps (checked against the company's
+  forms, `flows`, by whether they can be sent and their WhatsApp account); the interpreter gives a
+  `send_flow` effect counted as a message; `queueBotMessage` runs a text's checks and `queueBotFlow`
+  checks the plan and the form again, then inserts the message, its send intent
+  (`buildFlowMessageRequest`) and a `flow_sends` row with a new token, as a member's send does.
 - **Read receipts and typing indicators** (`inbox/read-receipts.ts`, ADR-223): `markRead` in
   `messaging/inbox.ts` calls `queueReadReceipt` in its transaction; the composer calls
   `showTypingAction` at most every 20 seconds, which `showTyping` checks and queues; both sign a job
