@@ -34,6 +34,7 @@ import { parseTimeOfDay, sendingWindow } from './schedule';
 import {
   CAMPAIGN_TICK_MS,
   campaignLauncherStanding,
+  emailCampaignCompleted,
   emailCampaignPaused,
   loadCampaignSettings,
   recordCampaignEvent,
@@ -68,7 +69,7 @@ export interface CampaignRunnerDeps {
   clock: Clock;
   /** The per-number send rate (META_SEND_RATE_PER_SECOND). */
   sendRatePerSecond: number;
-  /** Emails members when it pauses a campaign (ADR-210). */
+  /** Emails members when it pauses (ADR-210) or completes (ADR-214) a campaign. */
   notices: CampaignNoticeDeps;
 }
 
@@ -186,6 +187,7 @@ export async function runCampaignTick(
         nextRunAt: null,
       });
       await recordCampaignEvent(tx, tenantId, campaignId, 'completed', null, { reason });
+      await emailCampaignCompleted(deps.notices, tx, tenantId, campaignId, reason);
       await emitTenantEvent(tx, tenantId, { type: 'campaign.progress', payload: { campaignId } });
       return result('completed');
     };

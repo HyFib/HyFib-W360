@@ -8450,3 +8450,25 @@ Decision:
 
 Not built: bulk edits of other fields, bulk edits from a segment or through the API, choosing
 contacts one by one, and undo.
+
+## ADR-214 Emailing the member a campaign sent under when it finishes (P3-04) (2026-10-06)
+
+Context: a campaign finishes when every contact in its audience was handed to WhatsApp or skipped,
+or when its sending period ends with contacts still waiting, which are then skipped. Only its page
+said so; a campaign that ran out of time could leave thousands unreached without anyone noticing
+until its results were read.
+
+Decision:
+
+- **Who:** the member whose authority it sent under (who started it, approved it, or last resumed
+  it), while they are an active member. Nobody else: finishing needs no one's action. A cancelled
+  campaign emails nobody, as a member or key cancelled it.
+- **When:** in the transaction that completes it, from the runner, once (completion is final).
+- **What:** that it finished, or that its sending period ended (with its time in the campaign's time
+  zone) and how many contacts it had not reached; how many messages it handed to WhatsApp and how
+  many of its audience it skipped; and that deliveries, reads and replies keep arriving on its page.
+  Counts only, never contacts.
+- **No migration and no setting;** the worker sends it.
+
+Not built: a summary of deliveries some time after it finishes, email preferences, and emails to
+other members.

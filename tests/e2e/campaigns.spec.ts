@@ -144,6 +144,13 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
       timeout: 1_000,
     });
   }).toPass({ timeout: 30_000 });
+  // The owner, whose authority it sent under, is emailed that it finished (ADR-214).
+  const finishedMail = await waitForEmailContaining(
+    email,
+    'finished sending',
+    'It handed 1 message to WhatsApp and skipped 1 of the 2 contacts in its audience',
+  );
+  expect(finishedMail).toContain(`/c/${slug}/campaigns/`);
 
   // Per-recipient outcomes and a formula-safe export.
   await page.getByRole('link', { name: 'Recipients' }).click();

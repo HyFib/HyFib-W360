@@ -1,5 +1,47 @@
 # Progress
 
+## 2026-10-06 — Phase 3 follow-up: emailing members when a campaign finishes (P3-04, ADR-214)
+
+Status: **Implemented; its database and browser tests run in CI only.** A finished campaign, or one
+whose sending period ended with contacts unreached, said so only on its page. The local PostgreSQL
+is unavailable (its Docker daemon stopped), so the new integration and e2e checks below were written
+but not run here.
+
+### Completed
+
+- **Design (ADR-214):** the member it sent under, while active; in the completing transaction;
+  counts only; nobody for a cancellation; no migration.
+- **Domain:** `campaignCompletionNotice` and `emailCampaignCompleted` (`campaigns/service.ts`),
+  called by the runner's `complete`.
+- **Tests:**
+  - Unit (4 new in `campaigns/completion-notice.test.ts`): finished, ended with contacts unreached
+    or none, and the email's limits.
+  - Integration (2 new in `campaigns.test.ts`): a finished campaign emailed once, a cancelled one
+    not; one ended by its sending period with its count; a suspended member not emailed. Written for
+    CI; not run here.
+  - E2E (1 changed in `campaigns.spec.ts`): the owner receives the email when the campaign
+    completes. Written for CI; not run here.
+- **Docs:** ADR-214; ARCHITECTURE; DEPLOYMENT and RUNBOOKS; BACKLOG P3-04; feature matrix H-022.
+- **Mutation checks:** 8 deliberate regressions tried, all caught on the unit-tested parts. Who is
+  emailed and when needs the database, so those regressions are left to the integration tests, which
+  run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 927 passed (90 files)                                               |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 8 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- A summary of deliveries some time after it finishes, email preferences, and emails to other
+  members.
+
 ## 2026-10-06 — Phase 3 follow-up: bulk tag edits (P3-01, ADR-213)
 
 Status: **Implemented; its database and browser tests run in CI only.** Tags changed one contact at

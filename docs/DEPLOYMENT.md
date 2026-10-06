@@ -436,6 +436,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-213 has no migration: until the web rollout ends, an old web server shows the contacts page
    without the bulk tag form.
 
+   ADR-214 has no migration: until the worker rollout ends, an old worker completes campaigns
+   without emailing anyone.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

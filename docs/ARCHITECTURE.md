@@ -284,6 +284,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   campaigns, otherwise to each active member who may approve and send campaigns, with the dedupe key
   `campaign-paused:<campaign>:<version>:<member>`. `CampaignRunnerDeps.notices` carries the outbox
   and the app's base URL.
+  Completing a campaign calls `emailCampaignCompleted` in the same transaction (ADR-214): one
+  `tenant.notice` written by `campaignCompletionNotice` to the member it sent under while they are
+  active, with the dedupe key `campaign-completed:<campaign>:<version>:<member>`.
 - **Guardrails:** marketing frequency cap per contact (company setting; counts marketing templates
   from campaigns and the inbox), message cap, estimated spending cap (rate cards, ADR-023), pacing,
   approval, sending window, deadline. Meta's own limits (per-user marketing limit 131049, messaging

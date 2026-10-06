@@ -388,6 +388,12 @@ the pause's transaction (`ops.email_outbox`, dedupe key
 letters and the email provider as for other notices. Campaigns paused before this release, or by an
 old worker during a rollout, emailed nobody; the campaign's page gives the reason in any case.
 
+**Nobody was emailed when a campaign finished (ADR-214).** The email goes to the member whose
+authority the campaign sent under, only while they are an active member, when every contact was
+handed to WhatsApp or skipped or when its sending period ended. A cancelled campaign emails nobody.
+It is queued in the transaction that completes the campaign (`ops.email_outbox`, dedupe key
+`campaign-completed:<campaign id>:<version>:<user id>`) and sent by the email worker.
+
 **Many failures with 131049.** Meta's per-user marketing limit: those customers received too many
 marketing messages from businesses. Do not resend; wait at least 24 hours (M-062) and consider the
 company's frequency cap.

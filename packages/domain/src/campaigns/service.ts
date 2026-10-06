@@ -1489,6 +1489,114 @@ export async function emailCampaignPaused(
   return recipients.length;
 }
 
+/**
+ * The email that a campaign finished (ADR-214): every contact in its audience was handed to
+ * WhatsApp or skipped, or its sending period ended and those it had not reached were skipped.
+ * Counts only, never contacts; deliveries keep arriving after it.
+ */
+export function campaignCompletionNotice(input: {
+  campaignName: string;
+  reason: 'all_processed' | 'deadline_passed';
+  audience: number;
+  queued: number;
+  skipped: number;
+  /** Contacts skipped because its sending period ended before it reached them. */
+  expired: number;
+  /** When its sending period ended, for a campaign stopped by it. */
+  sendUntil: Date | null;
+  timeZone: string;
+}): { subject: string; lines: string[] } {
+  const count = (n: number) => n.toLocaleString('en-IN');
+  const contacts = (n: number) => `${count(n)} ${n === 1 ? 'contact' : 'contacts'}`;
+  const name = input.campaignName;
+  const ended = input.reason === 'deadline_passed';
+  const until = input.sendUntil ? ` at ${formatCompanyTime(input.sendUntil, input.timeZone)}` : '';
+  return {
+    subject: ended
+      ? `Campaign “${name}” ended: its sending period is over`
+      : `Campaign “${name}” finished sending`,
+    lines: [
+      !ended
+        ? `The campaign “${name}” finished: every contact in its audience was handed to WhatsApp or skipped.`
+        : input.expired === 0
+          ? `The sending period of the campaign “${name}” ended${until}, after every contact in its audience was handed to WhatsApp or skipped.`
+          : `The sending period of the campaign “${name}” ended${until}, so the ${contacts(input.expired)} it had not reached ${input.expired === 1 ? 'was' : 'were'} skipped.`,
+      `It handed ${count(input.queued)} ${input.queued === 1 ? 'message' : 'messages'} to WhatsApp and skipped ${count(input.skipped)} of the ${contacts(input.audience)} in its audience; its page says why each was skipped.`,
+      'WhatsApp keeps reporting deliveries, reads and replies after this, and its page shows them as they arrive.',
+    ],
+  };
+}
+
+/**
+ * Emails the member a finished campaign sent under (ADR-214), in the transaction that completes
+ * it, while they are an active member. A cancelled campaign emails nobody: a member or key did it.
+ * Returns whether it emailed.
+ */
+export async function emailCampaignCompleted(
+  notices: CampaignNoticeDeps,
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+  reason: 'all_processed' | 'deadline_passed',
+): Promise<boolean> {
+  const [c] = await tx
+    .select({
+      name: campaigns.name,
+      version: campaigns.version,
+      launchedByUserId: campaigns.launchedByUserId,
+      audienceCount: campaigns.audienceCount,
+      queuedCount: campaigns.queuedCount,
+      skippedCount: campaigns.skippedCount,
+      deadlineAt: campaigns.deadlineAt,
+      timezone: campaigns.timezone,
+      company: tenants.name,
+      slug: tenants.slug,
+      expired: sql<number>`(select count(*)::int from app.campaign_recipients r
+        where r.tenant_id = ${campaigns.tenantId} and r.campaign_id = ${campaigns.id}
+          and r.state = 'skipped' and r.skip_reason = 'expired')`,
+    })
+    .from(campaigns)
+    .innerJoin(tenants, eq(tenants.id, campaigns.tenantId))
+    .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
+  if (!c?.launchedByUserId) return false;
+  const [member] = await tx
+    .select({ userId: users.id, email: users.email })
+    .from(memberships)
+    .innerJoin(users, eq(users.id, memberships.userId))
+    .where(
+      and(
+        eq(memberships.tenantId, tenantId),
+        eq(memberships.userId, c.launchedByUserId),
+        eq(memberships.status, 'active'),
+      ),
+    );
+  if (!member) return false;
+  const { subject, lines } = campaignCompletionNotice({
+    campaignName: c.name,
+    reason,
+    audience: c.audienceCount,
+    queued: c.queuedCount,
+    skipped: c.skippedCount,
+    expired: c.expired,
+    sendUntil: c.deadlineAt,
+    timeZone: c.timezone,
+  });
+  await enqueueEmail(notices.outbox, tx, {
+    to: member.email,
+    tenantId,
+    dedupeKey: `campaign-completed:${campaignId}:${c.version}:${member.userId}`,
+    payload: {
+      kind: 'tenant.notice',
+      companyName: c.company,
+      subject,
+      lines,
+      url: new URL(`/c/${c.slug}/campaigns/${campaignId}`, notices.appBaseUrl).toString(),
+      actionLabel: 'Open campaign',
+    },
+  });
+  return true;
+}
+
 // Service ----------------------------------------------------------------------------------------
 
 export function createCampaignsService(deps: CampaignDeps) {

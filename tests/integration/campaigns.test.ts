@@ -3,6 +3,7 @@ import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
 import { authorizedTenantScope, sql, type TenantScope } from '@w360/db';
 import {
   attributeCampaignOptOut,
+  campaignCompletionNotice,
   campaignPauseNotice,
   cancelSendIntent,
   createCampaignsService,
@@ -249,7 +250,11 @@ async function campaignRow(id: string) {
 }
 
 /** The emails queued about a campaign's automatic pauses (ADR-210), oldest first. */
-async function pauseEmails(tenantId: string, campaignId: string) {
+const pauseEmails = (tenantId: string, campaignId: string) =>
+  campaignEmails(tenantId, `campaign-paused:${campaignId}:`);
+
+/** The company's emails whose dedupe key starts with `prefix`, oldest first. */
+async function campaignEmails(tenantId: string, prefix: string) {
   const rows = await fx.query<{
     id: string;
     to_address: string;
@@ -258,7 +263,7 @@ async function pauseEmails(tenantId: string, campaignId: string) {
   }>(
     `SELECT id, to_address, dedupe_key, payload_ciphertext FROM ops.email_outbox
       WHERE tenant_id = $1 AND dedupe_key LIKE $2 ORDER BY id`,
-    [tenantId, `campaign-paused:${campaignId}:%`],
+    [tenantId, `${prefix}%`],
   );
   return rows.map((r) => ({
     to: r.to_address,
@@ -1176,6 +1181,115 @@ describe('emailing members when a campaign pauses by itself (ADR-210)', () => {
       url: `http://localhost:3000/c/${s.c.tenant.slug}/campaigns/${later}`,
       actionLabel: 'Open campaign',
     });
+  });
+});
+
+describe('emailing the member a campaign sent under when it finishes (ADR-214)', () => {
+  const completionEmails = (tenantId: string, campaignId: string) =>
+    campaignEmails(tenantId, `campaign-completed:${campaignId}:`);
+  async function finished(id: string) {
+    const [row] = await fx.query<{
+      version: number;
+      deadline_at: Date | null;
+      completion_reason: string | null;
+    }>(`SELECT version, deadline_at, completion_reason FROM app.campaigns WHERE id = $1`, [id]);
+    return row!;
+  }
+
+  it('emails the member once when every contact was handed over or skipped, and nobody for a cancelled campaign', async () => {
+    const s = await setup();
+    const marketer = await fx.ctx(s.c, s.c.marketer);
+    await s.contact('+919840004001', { name: 'Asha' });
+    await s.contact('+919840004002', { name: 'Ravi' });
+    await s.contact('+919840004003', { name: 'Meena', optIn: false });
+    const { id } = await s.draft('Spring sale');
+    await s.campaigns.submitCampaign(marketer, id, { expectedVersion: 1 }, {});
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 2 });
+    expect(await completionEmails(s.c.tenant.id, id)).toEqual([]);
+    s.clock.advance(11_000);
+    expect(await s.tick(id)).toMatchObject({ outcome: 'completed' });
+    const row = await finished(id);
+    expect(row.completion_reason).toBe('all_processed');
+    const [{ name: company }] = (await fx.query<{ name: string }>(
+      'SELECT name FROM app.tenants WHERE id = $1',
+      [s.c.tenant.id],
+    )) as [{ name: string }];
+    expect(await completionEmails(s.c.tenant.id, id)).toEqual([
+      {
+        to: s.c.marketer.email,
+        dedupeKey: `campaign-completed:${id}:${row.version}:${s.c.marketer.id}`,
+        kind: 'tenant.notice',
+        companyName: company,
+        subject: 'Campaign “Spring sale” finished sending',
+        lines: campaignCompletionNotice({
+          campaignName: 'Spring sale',
+          reason: 'all_processed',
+          audience: 3,
+          queued: 2,
+          skipped: 1,
+          expired: 0,
+          sendUntil: row.deadline_at,
+          timeZone: 'Asia/Kolkata',
+        }).lines,
+        url: `http://localhost:3000/c/${s.c.tenant.slug}/campaigns/${id}`,
+        actionLabel: 'Open campaign',
+      },
+    ]);
+    // A finished campaign's tick changes nothing and emails nobody again.
+    expect(await s.tick(id)).toMatchObject({ outcome: 'inactive' });
+    expect(await completionEmails(s.c.tenant.id, id)).toHaveLength(1);
+
+    // A member's cancellation emails nobody.
+    const { id: canceled } = await s.draft('Cancelled sale');
+    await s.campaigns.submitCampaign(marketer, canceled, { expectedVersion: 1 }, {});
+    await s.campaigns.cancelCampaign(marketer, canceled, {});
+    expect(await completionEmails(s.c.tenant.id, canceled)).toEqual([]);
+  });
+
+  it('says how many contacts its sending period left unreached, and emails nobody once the member is no longer active', async () => {
+    const s = await setup();
+    const marketer = await fx.ctx(s.c, s.c.marketer);
+    await s.contact('+919840005001', { name: 'Asha' });
+    await s.contact('+919840005002', { name: 'Ravi' });
+    await s.contact('+919840005003', { name: 'Meena' });
+    // One message a minute: the first tick queues one, then the sending period ends.
+    const { id } = await s.draft('Slow sale', { ratePerMinute: 1 });
+    await s.campaigns.submitCampaign(marketer, id, { expectedVersion: 1 }, {});
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 1 });
+    s.clock.advance(25 * 3_600_000);
+    expect(await s.tick(id)).toMatchObject({ outcome: 'completed' });
+    const row = await finished(id);
+    expect(row.completion_reason).toBe('deadline_passed');
+    const [email] = await completionEmails(s.c.tenant.id, id);
+    expect(email).toMatchObject({
+      to: s.c.marketer.email,
+      subject: 'Campaign “Slow sale” ended: its sending period is over',
+      lines: campaignCompletionNotice({
+        campaignName: 'Slow sale',
+        reason: 'deadline_passed',
+        audience: 3,
+        queued: 1,
+        skipped: 2,
+        expired: 2,
+        sendUntil: row.deadline_at,
+        timeZone: 'Asia/Kolkata',
+      }).lines,
+    });
+    expect(email!.lines[0]).toMatch(
+      /^The sending period of the campaign “Slow sale” ended at \d+ \w+ \d{4} at \d{2}:\d{2} GMT\+5:30, so the 2 contacts it had not reached were skipped\.$/,
+    );
+
+    // The member was suspended before the period ended: the campaign ends, emailing nobody.
+    const { id: other } = await s.draft('Paused sale', { ratePerMinute: 1 });
+    await s.campaigns.submitCampaign(marketer, other, { expectedVersion: 1 }, {});
+    expect(await s.tick(other)).toMatchObject({ queued: 1 });
+    await fx.query(
+      `UPDATE app.memberships SET status = 'suspended' WHERE tenant_id = $1 AND user_id = $2`,
+      [s.c.tenant.id, s.c.marketer.id],
+    );
+    s.clock.advance(25 * 3_600_000);
+    expect(await s.tick(other)).toMatchObject({ outcome: 'completed' });
+    expect(await completionEmails(s.c.tenant.id, other)).toEqual([]);
   });
 });
 
