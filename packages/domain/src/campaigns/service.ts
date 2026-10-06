@@ -1003,6 +1003,91 @@ export function campaignDraftInputOf(c: CampaignRow): CampaignDraftInput {
   };
 }
 
+/** Who submits a draft: a member, or a key through the API (ADR-202). */
+export type CampaignSubmitter = { userId: string } | { apiKeyId: string };
+
+/** What a submission took, for the caller that launches it or leaves it waiting for approval. */
+export interface CampaignSubmission {
+  snapshot: { total: number; pending: number; skipped: number };
+  schedule: { at: Date; adjustment: ScheduleAdjustment | null };
+  category: 'MARKETING' | 'UTILITY' | 'AUTHENTICATION';
+  /** The columns a submission sets, whatever follows it. */
+  submitted: Partial<typeof campaigns.$inferInsert>;
+}
+
+/**
+ * Submits a locked draft, for a member and for a key (ADR-202) alike: the readiness members' review
+ * reads, the audience's size and the snapshot of who it goes to, each refused as members are told,
+ * and the submission's event. The caller then launches it under a member's authority, or leaves it
+ * waiting for approval (`awaitCampaignApproval`), as a key's submission always is.
+ */
+export async function submitLockedDraft(
+  tx: Tx,
+  company: CampaignCompany,
+  c: CampaignRow,
+  by: CampaignSubmitter,
+  now: Date,
+): Promise<CampaignSubmission> {
+  const r = await evaluateReadiness(tx, company, c, now);
+  const first = r.problems[0];
+  if (first) throw new AppError('precondition_failed', first);
+  if (!r.rules || !r.where || !r.schedule || !r.definition || !r.template)
+    throw new Error('Readiness without an audience');
+  const total = await countAudience(tx, r.where);
+  if (total > MAX_AUDIENCE)
+    throw new AppError(
+      'precondition_failed',
+      `This audience has ${total} contacts; campaigns are limited to ${MAX_AUDIENCE}.`,
+    );
+  const snapshot = await insertSnapshot(tx, c.id, r.rules, r.where);
+  if (snapshot.pending === 0)
+    throw new AppError(
+      'precondition_failed',
+      'No contact in this audience can receive the campaign now.',
+    );
+  const member = 'userId' in by ? by.userId : null;
+  const key = 'apiKeyId' in by ? by.apiKeyId : null;
+  await recordCampaignEvent(tx, company.id, c.id, 'submitted', member, {
+    ...(key ? { apiKeyId: key } : {}),
+    audience: snapshot.total,
+    pending: snapshot.pending,
+    skipped: snapshot.skipped,
+  });
+  return {
+    snapshot,
+    schedule: r.schedule,
+    category: r.template.category,
+    submitted: {
+      audienceUsed: r.definition,
+      audienceCount: snapshot.total,
+      skippedCount: snapshot.skipped,
+      submittedByUserId: member,
+      submittedByApiKeyId: key,
+      submittedAt: now,
+      reviewNote: null,
+    },
+  };
+}
+
+/** Leaves a submitted campaign waiting for a member's approval, set to start when it would. */
+export async function awaitCampaignApproval(
+  tx: Tx,
+  tenantId: string,
+  campaignId: string,
+  submission: CampaignSubmission,
+): Promise<void> {
+  await tx
+    .update(campaigns)
+    .set({
+      ...submission.submitted,
+      status: 'pending_approval',
+      scheduledAt: submission.schedule.at,
+      scheduleAdjustment: submission.schedule.adjustment,
+      version: sql`${campaigns.version} + 1`,
+    })
+    .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
+}
+
 // Service ----------------------------------------------------------------------------------------
 
 export function createCampaignsService(deps: CampaignDeps) {
@@ -1210,6 +1295,15 @@ export function createCampaignsService(deps: CampaignDeps) {
               ),
             );
           const nameOf = (id: string | null) => names.find((n) => n.id === id)?.name ?? null;
+          // The key that submitted it through the API (ADR-202), named as the timeline names keys.
+          const [submittingKey] = c.submittedByApiKeyId
+            ? await tx
+                .select({ name: apiKeys.name })
+                .from(apiKeys)
+                .where(
+                  and(eq(apiKeys.tenantId, ctx.tenant.id), eq(apiKeys.id, c.submittedByApiKeyId)),
+                )
+            : [];
           return {
             campaign: c,
             variables: readCampaignVariables(c.variables),
@@ -1236,6 +1330,7 @@ export function createCampaignsService(deps: CampaignDeps) {
             events,
             people: {
               submittedBy: nameOf(c.submittedByUserId),
+              submittedByKey: submittingKey?.name ?? null,
               approvedBy: nameOf(c.approvedByUserId),
               launchedBy: nameOf(c.launchedByUserId),
               createdBy: nameOf(c.createdByUserId),
@@ -1340,55 +1435,22 @@ export function createCampaignsService(deps: CampaignDeps) {
             'conflict',
             'Someone else changed this campaign. Reload the page to see their version.',
           );
-        const r = await evaluateReadiness(tx, ctx.tenant, c, now);
-        const first = r.problems[0];
-        if (first) throw new AppError('precondition_failed', first);
-        if (!r.rules || !r.where || !r.schedule || !r.definition || !r.template)
-          throw new Error('Readiness without an audience');
-        const total = await countAudience(tx, r.where);
-        if (total > MAX_AUDIENCE)
-          throw new AppError(
-            'precondition_failed',
-            `This audience has ${total} contacts; campaigns are limited to ${MAX_AUDIENCE}.`,
-          );
-        const snapshot = await insertSnapshot(tx, campaignId, r.rules, r.where);
-        if (snapshot.pending === 0)
-          throw new AppError(
-            'precondition_failed',
-            'No contact in this audience can receive the campaign now.',
-          );
+        const submission = await submitLockedDraft(tx, ctx.tenant, c, { userId: ctx.user.id }, now);
+        const { snapshot } = submission;
         const settings = await loadCampaignSettings(tx, ctx.tenant.id);
-        const submitted = {
-          audienceUsed: r.definition,
-          audienceCount: snapshot.total,
-          skippedCount: snapshot.skipped,
-          submittedByUserId: ctx.user.id,
-          submittedAt: now,
-          reviewNote: null,
-        };
-        await recordCampaignEvent(tx, ctx.tenant.id, campaignId, 'submitted', ctx.user.id, {
-          audience: snapshot.total,
-          pending: snapshot.pending,
-          skipped: snapshot.skipped,
-        });
         if (settings.approvalRequired) {
-          await tx
-            .update(campaigns)
-            .set({
-              ...submitted,
-              status: 'pending_approval',
-              scheduledAt: r.schedule.at,
-              scheduleAdjustment: r.schedule.adjustment,
-              version: sql`${campaigns.version} + 1`,
-            })
-            .where(and(eq(campaigns.tenantId, ctx.tenant.id), eq(campaigns.id, campaignId)));
+          await awaitCampaignApproval(tx, ctx.tenant.id, campaignId, submission);
         } else {
           await launch(
             tx,
             ctx,
             c,
-            { launcherUserId: ctx.user.id, at: r.schedule.at, adjustment: r.schedule.adjustment },
-            submitted,
+            {
+              launcherUserId: ctx.user.id,
+              at: submission.schedule.at,
+              adjustment: submission.schedule.adjustment,
+            },
+            submission.submitted,
           );
         }
         await recordAudit(
@@ -1402,7 +1464,7 @@ export function createCampaignsService(deps: CampaignDeps) {
               audience: snapshot.total,
               pending: snapshot.pending,
               approvalRequired: settings.approvalRequired,
-              category: r.template.category,
+              category: submission.category,
             },
           },
           meta,
@@ -1415,7 +1477,11 @@ export function createCampaignsService(deps: CampaignDeps) {
       });
     },
 
-    /** Four-eyes approval: a member other than the submitter, holding `campaigns.approve`. */
+    /**
+     * Four-eyes approval: a member other than the submitter, holding `campaigns.approve`. A key's
+     * submission (ADR-202) is approved by any such member who may also send campaigns, under whose
+     * authority it then sends.
+     */
     async approveCampaign(
       ctx: TenantContext,
       campaignId: string,
@@ -1432,7 +1498,13 @@ export function createCampaignsService(deps: CampaignDeps) {
           throw new AppError('conflict', 'This campaign is not waiting for approval.');
         if (c.submittedByUserId === ctx.user.id)
           throw forbidden('A different member must approve a campaign you submitted.');
-        if (!c.submittedByUserId) throw new Error('Submitted campaign without submitter');
+        // A key's submission sends under the approving member's authority (ADR-202).
+        const launcherUserId = c.submittedByUserId ?? (c.submittedByApiKeyId ? ctx.user.id : null);
+        if (!launcherUserId) throw new Error('Submitted campaign without submitter');
+        if (launcherUserId === ctx.user.id && !can(ctx, 'campaigns.send'))
+          throw forbidden(
+            'An API key submitted this campaign, so it sends under the authority of the member who approves it: approving it needs permission to send campaigns.',
+          );
         const template = await loadTemplate(tx, ctx.tenant.id, c.templateId);
         if (!template || template.status !== 'approved')
           throw new AppError('precondition_failed', 'The template is no longer approved by Meta.');
@@ -1450,7 +1522,7 @@ export function createCampaignsService(deps: CampaignDeps) {
           ctx,
           c,
           {
-            launcherUserId: c.submittedByUserId,
+            launcherUserId,
             at,
             adjustment: c.scheduleAdjustment,
           },
@@ -1924,6 +1996,7 @@ export function createCampaignsService(deps: CampaignDeps) {
         audienceCount: 0,
         skippedCount: 0,
         submittedByUserId: null,
+        submittedByApiKeyId: null,
         submittedAt: null,
         scheduledAt: null,
         scheduleAdjustment: null,

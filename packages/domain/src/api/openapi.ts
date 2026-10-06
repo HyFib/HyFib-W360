@@ -70,6 +70,7 @@ import {
   apiCampaignReviewSchema,
   apiCampaignSchema,
   apiCreateCampaignSchema,
+  apiSubmitCampaignSchema,
   apiUpdateCampaignSchema,
 } from './campaigns';
 import { apiContactFieldCreateSchema, apiContactFieldUpdateSchema } from './contact-fields';
@@ -813,7 +814,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, create, edit and review campaign drafts for members to submit, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, create, edit, review and submit campaign drafts for a member’s approval, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -1476,7 +1477,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'createCampaign',
           summary: 'Create a campaign draft',
-          description: `${scopeNote('campaigns.write')} A draft with the settings given, checked as members' drafts are: the number, template and segment must be the company's (a segment not archived), and conditions are checked by segments' rules (a field's comparisons by its type, a campaign of the company). Settings left out start as a member's new draft does: no number, template or audience, starting at once once submitted, in the company's time zone, sending for 24 hours. A draft sends nothing: members review, submit and start it in the app, under the authority of a member allowed to send campaigns, and a submission checks what a draft needs (an approved template of the number's WhatsApp account, every variable filled, an audience). Its history in the app names the key. One draft per \`Idempotency-Key\`: a retry answers with the draft as first created.`,
+          description: `${scopeNote('campaigns.write')} A draft with the settings given, checked as members' drafts are: the number, template and segment must be the company's (a segment not archived), and conditions are checked by segments' rules (a field's comparisons by its type, a campaign of the company). Settings left out start as a member's new draft does: no number, template or audience, starting at once once submitted, in the company's time zone, sending for 24 hours. A draft sends nothing: a member submits it in the app, or a key submits it for a member's approval (POST /campaigns/{id}/submit), and it sends under the authority of a member allowed to send campaigns; a submission checks what a draft needs (an approved template of the number's WhatsApp account, every variable filled, an audience). Its history in the app names the key. One draft per \`Idempotency-Key\`: a retry answers with the draft as first created.`,
           parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
           requestBody: { required: true, content: json(ref('CreateCampaign')) },
           responses: {
@@ -1523,7 +1524,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           summary: 'What submitting a campaign draft would do now',
           description: [
             `${scopeNote('campaigns.write')} The draft's review as members see it in the app before they submit it, read now: what must change before a member can submit it, how many contacts it would reach and why the others would be skipped, an upper bound of Meta's charges from the rate card HyFib publishes, when it would start, and whether it would wait for a member's approval. It changes nothing, and is answered whatever the company's status. Counts only: never contacts or members.`,
-            'Only a draft is reviewed: any other status is refused with 409, naming it (a submitted campaign keeps the audience it was submitted with, and GET /campaigns/{id} counts its results). A member submits the draft in the app, and the submission checks it again.',
+            'Only a draft is reviewed: any other status is refused with 409, naming it (a submitted campaign keeps the audience it was submitted with, and GET /campaigns/{id} counts its results). A member submits the draft in the app, or a key with POST /campaigns/{id}/submit, and the submission checks it again.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/Id' }],
           responses: {
@@ -1532,6 +1533,25 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('CampaignReview'))),
             },
             ...errors(401, 403, 404, 409, 429, 500),
+          },
+        },
+      },
+      '/campaigns/{id}/submit': {
+        post: {
+          operationId: 'submitCampaign',
+          summary: 'Submit a campaign draft for a member’s approval',
+          description: [
+            `${scopeNote('campaigns.write')} Submits the draft as a member submits it in the app: it must be at \`expectedVersion\` and pass the checks its review lists (GET /campaigns/{id}/review), and its audience is taken now (\`audienceCount\`, \`skippedCount\`). It then waits for a member's approval (\`pending_approval\`), whatever the company's settings: a key never starts a campaign. A member who may approve and send campaigns approves it in the app, and it sends under their authority from the time it was set to start, or at once when that time has passed; or a member rejects it with a note, or takes it back, and it is a draft again. Its history in the app names the key.`,
+            'A draft changed since you read it is refused with 409 and stays a draft; one the checks refuse is refused with 412, naming the first thing to change, and stays a draft. A campaign this key submitted is answered as it is, so a retry changes nothing; any other campaign that is not a draft is refused with 409, naming its status.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('SubmitCampaign')) },
+          responses: {
+            '200': {
+              description: 'The campaign, waiting for a member’s approval.',
+              content: json(dataOf(ref('Campaign'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -2293,6 +2313,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         CampaignReview: jsonSchema(apiCampaignReviewSchema),
         CreateCampaign: jsonSchema(apiCreateCampaignSchema, 'input'),
         UpdateCampaign: jsonSchema(apiUpdateCampaignSchema, 'input'),
+        SubmitCampaign: jsonSchema(apiSubmitCampaignSchema, 'input'),
         CampaignRecipient: jsonSchema(apiCampaignRecipientSchema),
         Automation: jsonSchema(apiAutomationSchema),
         AutomationRun: jsonSchema(apiAutomationRunSchema),
@@ -2367,6 +2388,7 @@ export const API_ROUTES = [
   ['get', '/campaigns/{id}'],
   ['patch', '/campaigns/{id}'],
   ['get', '/campaigns/{id}/review'],
+  ['post', '/campaigns/{id}/submit'],
   ['get', '/campaigns/{id}/recipients'],
   ['post', '/campaigns/{id}/pause'],
   ['post', '/campaigns/{id}/resume'],

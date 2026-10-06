@@ -423,16 +423,32 @@ async function LiveView({
           <CardHeader>
             <CardTitle>Waiting for approval</CardTitle>
             <CardDescription>
-              Submitted by {view.people.submittedBy ?? 'a member'}
-              {c.submittedAt ? ` on ${formatDateTime(c.submittedAt.toISOString(), tz)}` : ''}. A
-              different member with approval rights must approve it.
+              {c.submittedByApiKeyId ? (
+                <>
+                  Submitted through the API by the key “{view.people.submittedByKey ?? 'unknown'}”
+                  {c.submittedAt ? ` on ${formatDateTime(c.submittedAt.toISOString(), tz)}` : ''}. A
+                  member with approval rights who can send campaigns must approve it; it then sends
+                  under their authority.
+                </>
+              ) : (
+                <>
+                  Submitted by {view.people.submittedBy ?? 'a member'}
+                  {c.submittedAt ? ` on ${formatDateTime(c.submittedAt.toISOString(), tz)}` : ''}. A
+                  different member with approval rights must approve it.
+                </>
+              )}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <ApprovalActions
               slug={slug}
               campaignId={c.id}
-              canApprove={can(ctx, 'campaigns.approve') && c.submittedByUserId !== ctx.user.id}
+              canApprove={
+                can(ctx, 'campaigns.approve') &&
+                c.submittedByUserId !== ctx.user.id &&
+                // A key's submission sends under the approver's authority (ADR-202).
+                (c.submittedByApiKeyId === null || can(ctx, 'campaigns.send'))
+              }
               canWithdraw={
                 can(ctx, 'campaigns.write') &&
                 (c.submittedByUserId === ctx.user.id || can(ctx, 'campaigns.approve'))

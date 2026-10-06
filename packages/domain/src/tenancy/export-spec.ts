@@ -288,6 +288,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'budget_currency',
       'stop_after_hours',
       'submitted_by_user_id',
+      'submitted_by_api_key_id',
       'submitted_at',
       'approved_by_user_id',
       'approved_at',

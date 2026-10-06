@@ -88,6 +88,8 @@ export const campaigns = appSchema.table('campaigns', {
   estimateCurrency: text('estimate_currency'),
   stopAfterHours: smallint('stop_after_hours').notNull().default(24),
   submittedByUserId: text('submitted_by_user_id'),
+  /** The key that submitted it through the API (ADR-202), never with a submitting member. */
+  submittedByApiKeyId: uuid('submitted_by_api_key_id'),
   submittedAt: tz('submitted_at'),
   approvedByUserId: text('approved_by_user_id'),
   approvedAt: tz('approved_at'),

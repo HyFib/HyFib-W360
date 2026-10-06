@@ -644,12 +644,14 @@ verification, app review, Embedded Signup configuration).
   **[Sending templates with a photo, video or document header built; its database tests run only in
   CI]** (ADR-201: a key gives the header's file by https link in each send, which WhatsApp fetches;
   the inbox, campaigns and automations still cannot send them, and say why; no migration).
+  **[Submitting campaign drafts built; its database tests run only in CI]** (ADR-202: a key submits
+  a draft with members' checks, and the submission always waits for a member's approval, who must be
+  able to send campaigns and under whose authority it sends; migrations 0140 and 0141).
   Remaining: uploaded media, call-to-action messages through the API, taking
   reactions back,
   media downloads, changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
-  resuming what members or HyFib paused, approving, scheduling and starting campaigns
-  through the API, campaign
+  resuming what members or HyFib paused, withdrawing a key's submission through the API, campaign
   recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose
   per scope since ADR-092). The one-argument key lookup kept for rolling deploys (0051) is dropped
   (0074). Replaying many deliveries in one call is built with P5-09 (ADR-095).

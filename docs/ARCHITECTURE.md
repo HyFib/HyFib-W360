@@ -954,6 +954,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the company's status), reads the draft and the company's time zone in one read-only snapshot and
   calls `reviewCampaignDraft`, as members' review does; `toApiCampaignReview` answers it with the
   skip reasons commonest first and amounts in major units. Other statuses get 409.
+- **Submitting drafts (ADR-202):** `apiSubmitCampaign` locks the draft, checks the version and calls
+  `submitLockedDraft` (`campaigns/service.ts`), which members' `submitCampaign` calls too: the
+  readiness, the audience's size, the snapshot and the event, naming the key or the member. A key's
+  submission then always goes to `awaitCampaignApproval`; members' launches when the company needs
+  no approval. `approveCampaign` launches a key's submission under the approving member, who must
+  hold `campaigns.send`.
 - **Media from links (ADR-194):** `apiSendMedia` (`api/resources.ts`) parses `type` `image`,
   `video`, `audio` or `document`, an https `link` (`isMediaLink`) and a caption except for audio,
   and sends through `sendReply` as text replies do: the content keeps the link and the caption, the

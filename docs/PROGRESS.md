@@ -1,5 +1,53 @@
 # Progress
 
+## 2026-10-06 — Phase 5: submitting campaign drafts through the API, for a member's approval (P5-08, ADR-202)
+
+Status: **Implemented; its database and browser tests run in CI only.** Keys created and reviewed
+drafts, but only members submitted them. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so the migrations, the integration tests and the changed e2e test below were written but
+not run here.
+
+### Completed
+
+- **Design (ADR-202):** `POST /campaigns/{id}/submit` with `campaigns.write` and the draft's
+  version; members' checks and snapshot; always waiting for a member's approval, the approver
+  needing `campaigns.send` and lending their authority; retries answered as they are; migrations
+  0140 and 0141.
+- **Domain:** `submitLockedDraft` and `awaitCampaignApproval` shared with members' submission;
+  `apiSubmitCampaign`; approval of a key's submission; the key in the campaign's detail; the scope's
+  label and description; the OpenAPI entries; the export of the new column.
+- **Web:** the route; the campaign page names the key and offers Approve only to members who can
+  send campaigns.
+- **Tests:**
+  - Unit (3 new and 3 changed in `api.test.ts`): the body, the refusals before anything is read, the
+    scope's text, the OpenAPI entries.
+  - Integration (2 new in `api-campaigns.test.ts`): a submission's refusals, its audience and
+    approval, retries, the approver's permission and authority, rejection and withdrawal, the
+    database's check, foreign key and grant. Written for CI; not run here.
+  - E2E (1 changed in `campaigns.spec.ts`): a key submits a draft, the page names it and the owner
+    approves it under their authority; the scope's new label. Written for CI; not run here.
+- **Docs:** ADR-202; SECURITY; ARCHITECTURE; THREAT-MODEL T196; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-08; feature matrix W-134 and H-033.
+- **Mutation checks:** 15 deliberate regressions tried, all caught on the unit-tested parts. The
+  submission itself needs the database, so its regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 888 passed (83 files)                                                |
+| `pnpm test:integration`, e2e, migrations           | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 15 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Keys approving or starting campaigns (by design), withdrawing a key's submission through the API,
+  and notifying approvers of a waiting campaign.
+
 ## 2026-10-06 — Phase 5: sending templates with a photo, video or document header through the API (P5-08, ADR-201)
 
 Status: **Implemented; its database and browser tests run in CI only (test stand-in only).**

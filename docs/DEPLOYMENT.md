@@ -394,6 +394,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    with a photo, video or document header in `GET /templates` nor sends them, refusing `headerMedia`
    with 422.
 
+   Migrations 0140 and 0141 (ADR-202) add `app.campaigns.submitted_by_api_key_id` with its check and
+   foreign key NOT VALID, then validate them; campaigns stay writable throughout. Web servers of
+   this release need 0140. Until the web rollout ends, an old web server answers
+   `POST /campaigns/{id}/submit` with 404, says a member submitted a key's submission, and fails
+   with an error when a member approves one: approve such campaigns once the rollout ends.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

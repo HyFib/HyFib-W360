@@ -13,6 +13,7 @@ import {
   apiResumeCampaign,
   apiReviewCampaign,
   apiSearchContacts,
+  apiSubmitCampaign,
   apiUpdateCampaign,
   authenticateApiToken,
   createApiKeysService,
@@ -1877,5 +1878,220 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
     expect(await refusal(apiReviewCampaign(writeDeps(), writer, theirs))).toMatchObject({
       code: 'not_found',
     });
+  });
+});
+
+describe('submitting campaign drafts through the API (ADR-202)', () => {
+  const versionOf = async (id: string) =>
+    (
+      await fx.query<{ version: number }>(`SELECT version FROM app.campaigns WHERE id = $1`, [id])
+    )[0]!.version;
+  const stateOf = (id: string) =>
+    fx.query<{
+      status: string;
+      submitted_by_user_id: string | null;
+      submitted_by_api_key_id: string | null;
+      launched_by_user_id: string | null;
+      approved_by_user_id: string | null;
+    }>(
+      `SELECT status, submitted_by_user_id, submitted_by_api_key_id, launched_by_user_id,
+              approved_by_user_id
+         FROM app.campaigns WHERE id = $1`,
+      [id],
+    );
+  const recipientsOf = (id: string) =>
+    fx.query<{ state: string; n: number }>(
+      `SELECT state, count(*)::int AS n FROM app.campaign_recipients WHERE campaign_id = $1
+        GROUP BY state ORDER BY state`,
+      [id],
+    );
+  async function refused(promise: Promise<unknown>) {
+    try {
+      await promise;
+    } catch (error) {
+      if (!isAppError(error)) throw error;
+      return { code: error.code, message: error.publicMessage };
+    }
+    throw new Error('expected a refusal');
+  }
+
+  it("submits a draft with members' checks for a member's approval, never starting it, and the approver launches it", async () => {
+    const s = await setup();
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Drafts');
+    await s.contact('+919820008001', 'Asha');
+    await s.contact('+919820008002', 'Ravi');
+    await s.contact('+919820008003', 'Meena', false);
+    // Members' submissions start at once in this company; a key's waits all the same.
+    expect((await s.campaigns.getSettings(s.owner)).approvalRequired).toBe(false);
+    const id = await s.draft('Festive sale');
+    const version = await versionOf(id);
+
+    // A stale version and a draft the checks refuse are refused, and stay drafts.
+    expect(
+      await refused(apiSubmitCampaign(writeDeps(), writer, id, { expectedVersion: version + 1 })),
+    ).toEqual({
+      code: 'conflict',
+      message: `This draft has changed since you read it: its version is ${version}. Read it again and give the version it has.`,
+    });
+    const started = await apiCreateCampaign(writeDeps(), writer, { name: 'Weekend offer' }, null);
+    const emptyId = (started.body as { data: { id: string } }).data.id;
+    expect(
+      await refused(
+        apiSubmitCampaign(writeDeps(), writer, emptyId, {
+          expectedVersion: await versionOf(emptyId),
+        }),
+      ),
+    ).toEqual({ code: 'precondition_failed', message: 'Choose the WhatsApp number to send from.' });
+    for (const draft of [id, emptyId]) {
+      expect(await stateOf(draft)).toEqual([
+        {
+          status: 'draft',
+          submitted_by_user_id: null,
+          submitted_by_api_key_id: null,
+          launched_by_user_id: null,
+          approved_by_user_id: null,
+        },
+      ]);
+      expect(await recipientsOf(draft)).toEqual([]);
+    }
+
+    // Submitted: its audience taken, waiting for a member's approval, the key named.
+    const submitted = await apiSubmitCampaign(writeDeps(), writer, id, {
+      expectedVersion: version,
+    });
+    expect(submitted).toMatchObject({
+      id,
+      status: 'pending_approval',
+      audienceCount: 3,
+      skippedCount: 1,
+      queuedCount: 0,
+      startedAt: null,
+    });
+    expect(await stateOf(id)).toEqual([
+      {
+        status: 'pending_approval',
+        submitted_by_user_id: null,
+        submitted_by_api_key_id: writer.key.id,
+        launched_by_user_id: null,
+        approved_by_user_id: null,
+      },
+    ]);
+    expect(await versionOf(id)).toBe(version + 1);
+    expect(await recipientsOf(id)).toEqual([
+      { state: 'pending', n: 2 },
+      { state: 'skipped', n: 1 },
+    ]);
+    expect(
+      await fx.query(
+        `SELECT actor_user_id, detail->>'apiKeyId' AS api_key_id, (detail->>'pending')::int AS pending
+           FROM app.campaign_events WHERE campaign_id = $1 AND type = 'submitted'`,
+        [id],
+      ),
+    ).toEqual([{ actor_user_id: null, api_key_id: writer.key.id, pending: 2 }]);
+    expect(
+      await fx.query(
+        `SELECT actor_type, actor_id, metadata FROM app.audit_events
+          WHERE subject_id = $1 AND action = 'campaign.submitted'`,
+        [id],
+      ),
+    ).toEqual([
+      {
+        actor_type: 'api_key',
+        actor_id: writer.key.id,
+        metadata: expect.objectContaining({ source: 'api', approvalRequired: true, pending: 2 }),
+      },
+    ]);
+    // A retry is answered as it is; another key cannot submit what is no longer a draft.
+    expect(await apiSubmitCampaign(writeDeps(), writer, id, { expectedVersion: version })).toEqual(
+      submitted,
+    );
+    const other = await apiKey(s.c, ['campaigns.write'], 'Other drafts');
+    expect(
+      await refused(apiSubmitCampaign(writeDeps(), other, id, { expectedVersion: version + 1 })),
+    ).toEqual({
+      code: 'conflict',
+      message: "Only draft campaigns are submitted. This campaign's status is pending_approval.",
+    });
+    expect((await s.campaigns.getCampaign(s.owner, id)).people.submittedByKey).toBe('Drafts');
+
+    // The approver becomes its launcher, so approving needs permission to send campaigns.
+    const cannotSend = {
+      ...s.owner,
+      permissions: new Set([...s.owner.permissions].filter((p) => p !== 'campaigns.send')),
+    } as typeof s.owner;
+    expect(await refused(s.campaigns.approveCampaign(cannotSend, id, {}, {}))).toEqual({
+      code: 'forbidden',
+      message:
+        'An API key submitted this campaign, so it sends under the authority of the member who approves it: approving it needs permission to send campaigns.',
+    });
+    expect((await stateOf(id))[0]?.status).toBe('pending_approval');
+    await s.campaigns.approveCampaign(s.owner, id, {}, {});
+    expect(await stateOf(id)).toEqual([
+      {
+        status: 'scheduled',
+        submitted_by_user_id: null,
+        submitted_by_api_key_id: writer.key.id,
+        launched_by_user_id: s.c.owner.id,
+        approved_by_user_id: s.c.owner.id,
+      },
+    ]);
+    expect(
+      await apiSubmitCampaign(writeDeps(), writer, id, { expectedVersion: version }),
+    ).toMatchObject({
+      id,
+      status: 'scheduled',
+    });
+  });
+
+  it('takes a rejected or withdrawn submission back to a draft without the key, and keeps one submitter', async () => {
+    const s = await setup();
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Drafts');
+    await s.contact('+919820008011', 'Asha');
+    const id = await s.draft('Diwali offer');
+    const first = await versionOf(id);
+    await apiSubmitCampaign(writeDeps(), writer, id, { expectedVersion: first });
+    await s.campaigns.rejectCampaign(s.owner, id, { note: 'Not this week' }, {});
+    expect(await stateOf(id)).toEqual([
+      {
+        status: 'draft',
+        submitted_by_user_id: null,
+        submitted_by_api_key_id: null,
+        launched_by_user_id: null,
+        approved_by_user_id: null,
+      },
+    ]);
+    expect(await recipientsOf(id)).toEqual([]);
+    // The version it was submitted at no longer submits it; the current one does.
+    expect(
+      (await refused(apiSubmitCampaign(writeDeps(), writer, id, { expectedVersion: first }))).code,
+    ).toBe('conflict');
+    await apiSubmitCampaign(writeDeps(), writer, id, { expectedVersion: await versionOf(id) });
+    // A member who approves campaigns takes a key's submission back.
+    await s.campaigns.withdrawCampaign(s.owner, id, {});
+    expect((await stateOf(id))[0]).toMatchObject({
+      status: 'draft',
+      submitted_by_api_key_id: null,
+    });
+
+    // The database keeps at most one submitter, and only a key of the company.
+    await expect(
+      fx.query(
+        `UPDATE app.campaigns SET submitted_by_user_id = $2, submitted_by_api_key_id = $3 WHERE id = $1`,
+        [id, s.c.owner.id, writer.key.id],
+      ),
+    ).rejects.toThrow(/campaigns_one_submitter/);
+    const elsewhere = await fx.company();
+    const theirs = await apiKey(elsewhere, ['campaigns.write'], 'Theirs');
+    await expect(
+      fx.query(`UPDATE app.campaigns SET submitted_by_api_key_id = $2 WHERE id = $1`, [
+        id,
+        theirs.key.id,
+      ]),
+    ).rejects.toThrow(/campaigns_submitted_by_api_key_fk/);
+    expect(
+      await fx.query(
+        `SELECT has_column_privilege('w360_app', 'app.campaigns', 'submitted_by_api_key_id', 'UPDATE') AS can`,
+      ),
+    ).toEqual([{ can: true }]);
   });
 });

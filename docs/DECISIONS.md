@@ -8116,3 +8116,40 @@ Decision:
 Not built: these templates from the inbox, campaigns, automations or store messages; files uploaded
 to Meta (ids); creating templates with media headers (the Resumable Upload API); location headers;
 showing a template's example file.
+
+## ADR-202 Submitting campaign drafts through the public API, for a member's approval (P5-08) (2026-10-06)
+
+Context: keys create, edit, review and cancel campaign drafts (ADR-186, ADR-187, ADR-193), but only
+members submit them, so an integration that prepares a campaign has to ask someone to open the app
+and press submit. Members' submission checks the draft, takes its audience and either waits for
+approval or launches the campaign under the submitting member's authority, which the runner checks
+before each batch; a key is no member, so it has no such authority to give.
+
+Decision:
+
+- **A key submits, a member approves:** `POST /campaigns/{id}/submit` with the draft's
+  `expectedVersion` submits it with members' code (`submitLockedDraft`): the checks its review
+  lists, the audience's size and the snapshot of who it goes to, each refused as members are told
+  (409 for a stale version, 412 for a check). The submission then always waits for a member's
+  approval (`pending_approval`), whatever the company's settings: a key never starts a campaign.
+- **The approver lends the authority:** a member with `campaigns.approve` approves a key's
+  submission in the app, as they approve another member's, and must also hold `campaigns.send`, as
+  the campaign is launched under their authority (`launched_by_user_id`), which the runner checks as
+  for every campaign. Rejecting it with a note, or taking it back, makes it a draft again without
+  the key.
+- **`campaigns.write` is the scope:** it already edits what a campaign would send, and a submission
+  sends nothing until a member approves it. Its label becomes "Create, edit and submit campaign
+  drafts", and its description says a key never starts a campaign.
+- **Recorded:** the campaign keeps the key (`submitted_by_api_key_id`, never with a submitting
+  member, a check the database enforces, and a key of the company, a composite foreign key); the
+  event and the audit name it, and the campaign page says the key submitted it and who may approve
+  it.
+- **Retries:** a campaign the key submitted is answered as it is, whatever happened to it since; any
+  other campaign that is not a draft is refused with 409, naming its status. A rejected or withdrawn
+  submission is a draft at a new version, so a retry with the old one is refused.
+- **Migrations 0140 and 0141:** the column, the check and the foreign key added NOT VALID and
+  validated in the next migration, so `app.campaigns` stays writable; the runtime role updates the
+  column through a column grant.
+
+Not built: keys approving or starting campaigns (by design), withdrawing a key's submission through
+the API, and notifying approvers of a waiting campaign.

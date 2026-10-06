@@ -764,6 +764,12 @@ Phase 5 rules (Public API, P5-08):
   and an estimate of Meta's charges, never contacts or members, and keys that only read campaigns
   get 403. It reads one draft of the key's company in a read-only transaction and changes nothing,
   so a company that is not active still reads it.
+- Submitting drafts (ADR-202): a key with `campaigns.write` submits one of its company's drafts with
+  members' checks, but it can never start a campaign: the submission always waits for a member with
+  `campaigns.approve` who also holds `campaigns.send`, and the campaign runs under that member's
+  authority, which the runner checks before each batch. The campaign records the key (a composite
+  foreign key to the company's keys, and never with a submitting member, both enforced by the
+  database), and the event and the audit name it. A suspended company's keys cannot submit.
 - Media from links (ADR-194): a key with `messages.reply` sends a photo, a video, audio or a
   document by a link WhatsApp fetches, within the 24-hour window. HyFib never fetches the link, so
   it cannot be used to reach HyFib's network; it takes only https links with a host and no user name

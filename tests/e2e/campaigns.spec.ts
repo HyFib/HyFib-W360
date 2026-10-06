@@ -373,7 +373,7 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
   // reads campaigns gets no settings.
   await page.goto(`/c/${slug}/settings/api-keys`);
   await page.getByLabel('Name', { exact: true }).fill('Campaign drafts');
-  await page.getByRole('checkbox', { name: /Create and edit campaign drafts/ }).check();
+  await page.getByRole('checkbox', { name: /Create, edit and submit campaign drafts/ }).check();
   await page.getByRole('checkbox', { name: /Read campaigns/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const draftField = page.getByLabel('API key', { exact: true });
@@ -489,4 +489,56 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
   await page.reload();
   await expect(page.getByText('Cancelled', { exact: true }).first()).toBeVisible();
   await expect(page.getByRole('listitem').filter({ hasText: byDrafts })).toHaveCount(3);
+
+  // The key submits a draft set to start in a month (ADR-202): it waits for a member's approval,
+  // though members' own campaigns start at once here; a key that only reads campaigns cannot, and a
+  // retry answers it as it is. The page names the key, and once the owner approves it, it is
+  // scheduled under the owner's authority; the stopping key then cancels it.
+  const inAMonth = new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 16);
+  const launchCreated = await request.post('/api/v1/campaigns', {
+    headers: { ...draftAuth, 'Idempotency-Key': randomUUID() },
+    data: {
+      name: 'Winter launch',
+      channelId: spring.channel.id,
+      templateId: spring.templateId,
+      variables: { body: [{ source: 'name', fallback: 'there' }] },
+      audience: { conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
+      schedule: { kind: 'later', local: inAMonth },
+    },
+  });
+  expect(launchCreated.status()).toBe(201);
+  const launch = ((await launchCreated.json()) as { data: { id: string; version: number } }).data;
+  const submitLaunch = (headers: Record<string, string>) =>
+    request.post(`/api/v1/campaigns/${launch.id}/submit`, {
+      headers,
+      data: { expectedVersion: launch.version },
+    });
+  expect((await submitLaunch(auth)).status()).toBe(403);
+  for (let i = 0; i < 2; i += 1) {
+    const submitted = await submitLaunch(draftAuth);
+    expect(submitted.status()).toBe(200);
+    expect(((await submitted.json()) as { data: unknown }).data).toMatchObject({
+      id: launch.id,
+      status: 'pending_approval',
+      // The same audience as the draft reviewed above, taken now.
+      audienceCount: review.audience.total,
+      skippedCount: review.audience.total - review.audience.eligible,
+    });
+  }
+  await page.goto(`/c/${slug}/campaigns/${launch.id}`);
+  await expect(
+    page.getByText('Submitted through the API by the key “Campaign drafts”'),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('listitem').filter({ hasText: 'Submitted' }).filter({ hasText: byDrafts }),
+  ).toHaveCount(1);
+  await page.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByText('Scheduled', { exact: true }).first()).toBeVisible();
+  await expect(
+    page.getByText('Sends under the authority of', { exact: true }).locator('..'),
+  ).toContainText('Cam Campaigns');
+  const launchCanceled = await request.post(`/api/v1/campaigns/${launch.id}/cancel`, {
+    headers: stopAuth,
+  });
+  expect(launchCanceled.status()).toBe(200);
 });

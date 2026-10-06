@@ -25,6 +25,8 @@ import {
   apiUpdateCampaignSchema,
   apiCampaignReviewSchema,
   apiReviewCampaign,
+  apiSubmitCampaign,
+  apiSubmitCampaignSchema,
   toApiCampaignReview,
 } from './campaigns';
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
@@ -4276,14 +4278,15 @@ describe('campaign drafts through the API (ADR-186)', () => {
       API_SCOPE_KEYS.indexOf('campaigns.read') + 1,
     );
     expect(API_SCOPE_INFO['campaigns.write']).toMatchObject({
-      label: 'Create and edit campaign drafts',
+      label: 'Create, edit and submit campaign drafts',
       permission: 'campaigns.write',
       writes: true,
     });
     for (const words of [
       'Create campaign drafts and edit them as members do',
       'the audience (a segment or conditions)',
-      'A draft sends nothing: members submit and start it in the app, under the authority of a member allowed to send campaigns.',
+      "submit drafts, which then always wait for a member's approval",
+      "A key never starts a campaign: a member approves a key's submission, or submits a draft, in the app, and the campaign sends under the authority of a member allowed to send campaigns.",
     ]) {
       expect(API_SCOPE_INFO['campaigns.write'].description).toContain(words);
     }
@@ -4500,7 +4503,7 @@ describe('campaign drafts through the API (ADR-186)', () => {
     for (const words of [
       'Scope: `campaigns.write`.',
       "checked as members' drafts are",
-      'A draft sends nothing: members review, submit and start it in the app',
+      "A draft sends nothing: a member submits it in the app, or a key submits it for a member's approval (POST /campaigns/{id}/submit)",
       'One draft per `Idempotency-Key`',
     ]) {
       expect(create?.description).toContain(words);
@@ -5144,7 +5147,7 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     expect(doc.info.description).toContain(
-      'create, edit and review campaign drafts for members to submit',
+      'create, edit, review and submit campaign drafts for a member’s approval',
     );
     const op = (
       doc.paths as unknown as Record<
@@ -5873,5 +5876,134 @@ describe('templates with a photo, video or document header through the API (ADR-
     ).items;
     expect(Object.keys(items.properties)).toEqual(['to', 'variables', 'headerMedia']);
     expect(items.required).toEqual(['to']);
+  });
+});
+
+describe('submitting campaign drafts through the API (ADR-202)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const id = '0190a000-0000-7000-8000-000000000003';
+
+  it("take the draft's version as read, and nothing else", () => {
+    expect(apiSubmitCampaignSchema.parse({ expectedVersion: 4 })).toEqual({ expectedVersion: 4 });
+    expect(apiSubmitCampaignSchema.parse({ expectedVersion: 0 })).toEqual({ expectedVersion: 0 });
+    for (const body of [
+      {},
+      { expectedVersion: -1 },
+      { expectedVersion: 1.5 },
+      { expectedVersion: '4' },
+      { expectedVersion: 4, approve: true },
+      { expectedVersion: 4, status: 'scheduled' },
+      null,
+    ]) {
+      expect(apiSubmitCampaignSchema.safeParse(body).success, JSON.stringify(body)).toBe(false);
+    }
+  });
+
+  it('are refused before anything is read: without the scope, outside the plan, while the company is not active, a bad id, and no version', async () => {
+    const body = { expectedVersion: 3 };
+    // Stopping, resuming or reading campaigns submits nothing.
+    for (const scopes of [['campaigns.read'], ['campaigns.stop', 'campaigns.resume']]) {
+      expect(await code(apiSubmitCampaign({} as never, ctx(scopes), id, body))).toBe('forbidden');
+    }
+    await expect(apiSubmitCampaign({} as never, ctx(['campaigns.read']), id, body)).rejects.toThrow(
+      'This API key does not have the campaigns.write scope.',
+    );
+    await expect(
+      apiSubmitCampaign(
+        {} as never,
+        ctx(['campaigns.write'], 'active', ['campaigns.read']),
+        id,
+        body,
+      ),
+    ).rejects.toMatchObject({ code: 'forbidden', details: { apiReason: 'not_in_plan' } });
+    for (const status of ['suspended', 'restricted']) {
+      expect(
+        await code(apiSubmitCampaign({} as never, ctx(['campaigns.write'], status), id, body)),
+      ).toBe('tenant_suspended');
+    }
+    expect(
+      await code(apiSubmitCampaign({} as never, ctx(['campaigns.write']), 'not-an-id', body)),
+    ).toBe('not_found');
+    expect(await code(apiSubmitCampaign({} as never, ctx(['campaigns.write']), id, {}))).toBe(
+      'validation_failed',
+    );
+  });
+
+  it("are described: members' checks, a member's approval always, the version and safe retries", () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const op = (
+      doc.paths as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            description: string;
+            requestBody: unknown;
+            responses: Record<string, { content?: unknown }>;
+          }
+        >
+      >
+    )['/campaigns/{id}/submit']?.post;
+    expect(op?.operationId).toBe('submitCampaign');
+    expect(op?.requestBody).toEqual({
+      required: true,
+      content: { 'application/json': { schema: { $ref: '#/components/schemas/SubmitCampaign' } } },
+    });
+    expect(op?.responses['200']?.content).toEqual({
+      'application/json': {
+        schema: {
+          type: 'object',
+          properties: { data: { $ref: '#/components/schemas/Campaign' } },
+          required: ['data'],
+        },
+      },
+    });
+    expect(Object.keys(op?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '403', '404', '409', '412', '422', '423']),
+    );
+    for (const words of [
+      'Scope: `campaigns.write`.',
+      'it must be at `expectedVersion` and pass the checks its review lists (GET /campaigns/{id}/review)',
+      "It then waits for a member's approval (`pending_approval`), whatever the company's settings: a key never starts a campaign.",
+      'A member who may approve and send campaigns approves it in the app, and it sends under their authority',
+      'A draft changed since you read it is refused with 409 and stays a draft',
+      'refused with 412, naming the first thing to change',
+      'A campaign this key submitted is answered as it is, so a retry changes nothing',
+    ]) {
+      expect(op?.description).toContain(words);
+    }
+    const schemas = (
+      doc.components as unknown as {
+        schemas: Record<
+          string,
+          {
+            properties: Record<string, { description?: string }>;
+            required: string[];
+            additionalProperties: unknown;
+          }
+        >;
+      }
+    ).schemas;
+    expect(Object.keys(schemas.SubmitCampaign?.properties ?? {})).toEqual(['expectedVersion']);
+    expect(schemas.SubmitCampaign?.required).toEqual(['expectedVersion']);
+    expect(schemas.SubmitCampaign?.additionalProperties).toBe(false);
+    expect(schemas.CampaignReview?.properties.approvalRequired?.description).toContain(
+      "A key's submission (POST /campaigns/{id}/submit) always waits for a member's approval.",
+    );
+    expect(schemas.CampaignReview?.properties.version?.description).toContain(
+      'POST /campaigns/{id}/submit',
+    );
+    expect(API_ROUTES).toContainEqual(['post', '/campaigns/{id}/submit']);
   });
 });
