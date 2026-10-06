@@ -86,6 +86,103 @@ describe('template definitions', () => {
     expect(spec).toMatchObject({ supported: true, headerParams: 1, bodyParams: 2 });
   });
 
+  it('sends a photo, video or document header only for callers giving its file (ADR-201)', () => {
+    const body = {
+      type: 'BODY',
+      text: 'Parcel {{1}} was delivered.',
+      example: { body_text: [['P-1']] },
+    };
+    const withHeader = (format: string) => [
+      { type: 'HEADER', format, example: { header_handle: ['4::aW1hZ2U='] } },
+      body,
+    ];
+    // The inbox, campaigns, automations and store messages are told why they cannot send it.
+    expect(sendSpecFor('UTILITY', withHeader('IMAGE'))).toEqual({
+      supported: false,
+      reason:
+        'This template has a photo header: HyFib sends such templates only through the API, which gives a link to the file.',
+    });
+    expect(sendSpecFor('MARKETING', withHeader('DOCUMENT'))).toMatchObject({
+      reason: expect.stringContaining('a document header'),
+    });
+    // The API gives the file, so the header asks for no text value.
+    for (const [format, media] of [
+      ['IMAGE', 'image'],
+      ['VIDEO', 'video'],
+      ['DOCUMENT', 'document'],
+    ] as const) {
+      expect(sendSpecFor('UTILITY', withHeader(format), { mediaHeaders: true })).toEqual({
+        supported: true,
+        headerParams: 0,
+        bodyParams: 1,
+        headerMedia: media,
+        definition: {
+          category: 'UTILITY',
+          header: { type: 'none' },
+          body: { text: 'Parcel {{1}} was delivered.', examples: ['P-1'] },
+          footer: null,
+          buttons: [],
+        },
+      });
+    }
+    // Other headers and other content stay out of reach, for the API too.
+    for (const components of [
+      withHeader('LOCATION'),
+      withHeader('GIF'),
+      [
+        ...withHeader('IMAGE'),
+        { type: 'BUTTONS', buttons: [{ type: 'URL', text: 'Go', url: 'https://x.test/{{1}}' }] },
+      ],
+    ]) {
+      expect(sendSpecFor('UTILITY', components, { mediaHeaders: true })).toEqual({
+        supported: false,
+        reason:
+          'This template uses content HyFib cannot send yet (for example a location header or a button with a variable).',
+      });
+    }
+    expect(sendSpecFor('UTILITY', toMetaComponents(def), { mediaHeaders: true })).toMatchObject({
+      supported: true,
+      headerParams: 1,
+      headerMedia: null,
+    });
+
+    // The file goes first, as the header's one parameter; the text has no header.
+    const spec = sendSpecFor('UTILITY', withHeader('VIDEO'), { mediaHeaders: true });
+    if (!spec.supported) throw new Error('unsupported');
+    const link = 'https://cdn.example.com/parcel.mp4';
+    const built = buildTemplateSend(
+      { name: 'parcel_video', language: 'en' },
+      spec,
+      { header: [], body: ['P-7'] },
+      { headerMediaLink: link },
+    );
+    expect(built.template.components).toEqual([
+      { type: 'header', parameters: [{ type: 'video', video: { link } }] },
+      { type: 'body', parameters: [{ type: 'text', text: 'P-7' }] },
+    ]);
+    expect(built.headerMedia).toEqual({ type: 'video', link });
+    expect(built.rendered).toMatchObject({ header: null, body: 'Parcel P-7 was delivered.' });
+    expect(() =>
+      buildTemplateSend({ name: 'x', language: 'en' }, spec, { header: [], body: ['P-7'] }),
+    ).toThrow('The template’s header needs a link');
+    const text = sendSpecFor('UTILITY', toMetaComponents(def), { mediaHeaders: true });
+    if (!text.supported) throw new Error('unsupported');
+    expect(() =>
+      buildTemplateSend(
+        { name: 'x', language: 'en' },
+        text,
+        { header: ['B-2'], body: ['Ravi', 'B-2'] },
+        { headerMediaLink: link },
+      ),
+    ).toThrow('The template has no media header');
+    expect(
+      buildTemplateSend({ name: 'x', language: 'en' }, text, {
+        header: ['B-2'],
+        body: ['Ravi', 'B-2'],
+      }).headerMedia,
+    ).toBeNull();
+  });
+
   it('builds the send object with the deterministic language policy and renders the text', () => {
     const spec = sendSpecFor('UTILITY', toMetaComponents(def));
     if (!spec.supported) throw new Error('unsupported');

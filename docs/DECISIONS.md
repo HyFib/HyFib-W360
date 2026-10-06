@@ -8073,3 +8073,46 @@ Decision:
 
 Not built: exports beyond these numbers (paged or streamed files), filters on an export, and raising
 the definer functions' limits.
+
+## ADR-201 Sending templates with a photo, video or document header through the public API (P5-08) (2026-10-06)
+
+Context: templates made in WhatsApp Manager with a photo, video or document header are synced and
+shown, but HyFib could not send them: a send's spec refused any header but text. A send needs only
+the file, given by link: Meta's published spec gives a header parameter of type `image`, `video` or
+`document` holding a media object (an `id` or a `link`) without a caption, and its "Send Message
+Template Media" example sends `{type: image, image: {link}}` (research M-195). Creating such
+templates needs the Resumable Upload API (M-050), which HyFib does not use yet.
+
+Decision:
+
+- **The API sends them:** `POST /messages` (`type` `template`) and `POST /messages/send-many` (in
+  each message, as each has its own variables) take `headerMedia: {link}`, an https link under
+  ADR-194's rules (a host, no user name or password, at most 2,000 characters) that WhatsApp fetches
+  when it sends the message. A template with such a header needs it and one without refuses it (422,
+  naming `headerMedia` or `messages.<n>.headerMedia`), checked with the variables before anything is
+  written. HyFib never fetches the link and keeps no media.
+- **The list says what a send gives:** `GET /templates` lists these templates with `headerMedia`
+  (`image`, `video` or `document`; null for other templates), their header asking for no text value.
+- **Only the API opts in:** `sendSpecFor` takes a header's file only when its caller passes
+  `mediaHeaders`, as the API does. The inbox, campaigns, automations and store messages still cannot
+  send these templates and now say why ("This template has a photo header: HyFib sends such
+  templates only through the API, which gives a link to the file."), as members' template pages do.
+- **Sent as the spec gives it:** the header's one parameter, `{type, <type>: {link}}`, before the
+  body's; no caption and no file name, which the spec's template media parameters do not take. The
+  spec supports only PDF documents in media templates; HyFib cannot check a file it does not fetch,
+  so the API's description says so, and a file WhatsApp refuses makes the message fail, as
+  `GET /messages/{id}` and `message.status` report.
+- **Kept with the message:** the content keeps `headerMedia` (the kind and the link) beside the
+  rendered text; the inbox shows the kind and the link above the template's text, as an https anchor
+  opened in a new tab without the referrer; API reads and webhooks give the template's text as
+  before, never the file (ADR-194). Erasure replaces the content and the request, as for every
+  message.
+- **VIDEO on the spec's word:** the spec's template examples show IMAGE and DOCUMENT headers, and
+  its header parameters include `video` (M-195), so a VIDEO header is sent as the others. GIF
+  (third-party lists only, M-090), LOCATION and PRODUCT headers stay unsendable.
+- **No migration:** templates and messages keep their columns; the link is in the message's content
+  and its send request.
+
+Not built: these templates from the inbox, campaigns, automations or store messages; files uploaded
+to Meta (ids); creating templates with media headers (the Resumable Upload API); location headers;
+showing a template's example file.

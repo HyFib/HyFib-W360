@@ -96,6 +96,13 @@ function coordinates(content: Record<string, unknown>): string | null {
     : null;
 }
 
+/** What the file of a template's photo, video or document header is called (ADR-201). */
+const HEADER_FILE_NAMES: Record<string, string> = {
+  image: 'Photo',
+  video: 'Video',
+  document: 'Document',
+};
+
 /** One answer of a completed form as text (lists joined, other values as JSON, bounded). */
 /** Renders message content as plain text only (never HTML), by type. */
 function Body({
@@ -398,12 +405,30 @@ function Body({
       const buttons = Array.isArray(rendered.buttons)
         ? (rendered.buttons as { text?: unknown }[]).map((b) => text(b.text)).filter(Boolean)
         : [];
+      // A photo, video or document header sent through the API from an https link (ADR-201).
+      const headerMedia = (c.headerMedia ?? {}) as Record<string, unknown>;
+      const headerLink = text(headerMedia.link);
       return (
         <div className="grid gap-1">
           <p className="text-xs font-medium uppercase tracking-wide opacity-70">
             {text(campaign.name) ? `Campaign “${text(campaign.name)}” · ` : ''}Template ·{' '}
             {text(template.name) ?? 'unknown'}
           </p>
+          {headerLink?.startsWith('https://') ? (
+            <p>
+              <span className="font-medium">
+                {HEADER_FILE_NAMES[text(headerMedia.type) ?? ''] ?? 'File'}
+              </span>
+              <a
+                href={headerLink}
+                target="_blank"
+                rel="noopener noreferrer nofollow"
+                className="block break-all text-xs underline opacity-80"
+              >
+                {headerLink}
+              </a>
+            </p>
+          ) : null}
           {text(rendered.header) ? <p className="font-semibold">{text(rendered.header)}</p> : null}
           <p className="whitespace-pre-wrap break-words">{text(rendered.body) ?? ''}</p>
           {text(rendered.footer) ? (

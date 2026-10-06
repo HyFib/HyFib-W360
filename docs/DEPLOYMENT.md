@@ -390,6 +390,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-200 has no migration: until the web rollout ends, an old web server's export gives only the
    rows its tab shows.
 
+   ADR-201 has no migration: until the web rollout ends, an old web server neither lists templates
+   with a photo, video or document header in `GET /templates` nor sends them, refusing `headerMedia`
+   with 422.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

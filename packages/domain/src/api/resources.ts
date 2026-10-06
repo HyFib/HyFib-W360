@@ -61,10 +61,11 @@ import { STATUS_RANK } from '../messaging/status';
 import { loadEntitlements } from '../plans/entitlements';
 import {
   buildTemplateSend,
-  fromMetaComponents,
+  HEADER_MEDIA_NAMES,
   sendSpecFor,
   TEMPLATE_LIMITS,
   type SendSpec,
+  type TemplateHeaderMedia,
   type TemplateParams,
 } from '../templates/definition';
 import { decodeKeysetCursor, likePattern, parseInput } from '../validation';
@@ -139,6 +140,31 @@ export const apiConsentSchema = z
   })
   .strict();
 
+/** The media a message can carry from a link (ADR-194), as WhatsApp's message `type` names it. */
+export const API_MEDIA_TYPES = ['image', 'video', 'audio', 'document', 'sticker'] as const;
+export type ApiMediaType = (typeof API_MEDIA_TYPES)[number];
+
+/** A link WhatsApp may fetch media from (ADR-194): https, with a host, and no user name or password. */
+export function isMediaLink(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return url.protocol === 'https:' && url.hostname !== '' && !url.username && !url.password;
+}
+
+const mediaLinkField = z
+  .string({ error: 'Give the link to the media' })
+  .trim()
+  .min(1, 'Give the link to the media')
+  .max(API_LIMITS.mediaLinkLength, `Links are limited to ${API_LIMITS.mediaLinkLength} characters`)
+  .refine(isMediaLink, 'Give an https:// link to the media, without a user name or password')
+  .describe(
+    'An https:// link WhatsApp fetches the media from when it sends the message: it must be reachable from the internet without signing in. HyFib neither fetches nor keeps the media.',
+  );
+
 const variableValue = z.string().trim().min(1).max(TEMPLATE_LIMITS.parameterValue);
 
 /** The values of a template's variables, as a send gives them. */
@@ -150,6 +176,15 @@ const templateVariablesField = z
   .strict()
   .default({ header: [], body: [] })
   .describe('Values for the template’s {{1}}, {{2}}… in order.');
+
+/** The file of a template's photo, video or document header (ADR-201), from a link (ADR-194). */
+const headerMediaField = z
+  .object({ link: mediaLinkField })
+  .strict()
+  .optional()
+  .describe(
+    'The file of the template’s photo, video or document header (its `headerMedia` in GET /templates), for templates with one: WhatsApp fetches it from the link when it sends the message, and shows it without a caption. Documents must be PDF files. Leave it out for other templates.',
+  );
 
 /** The number a template is sent from. */
 const templateFromField = z
@@ -166,6 +201,7 @@ export const apiSendMessageSchema = z
     templateId: z.uuid().describe('A template id from GET /api/v1/templates.'),
     from: templateFromField,
     variables: templateVariablesField,
+    headerMedia: headerMediaField,
   })
   .strict();
 
@@ -175,14 +211,22 @@ export const apiSendManyTemplatesSchema = z
     templateId: z.uuid().describe('A template id from GET /api/v1/templates.'),
     from: templateFromField,
     messages: z
-      .array(z.object({ to: phoneField, variables: templateVariablesField }).strict())
+      .array(
+        z
+          .object({
+            to: phoneField,
+            variables: templateVariablesField,
+            headerMedia: headerMediaField,
+          })
+          .strict(),
+      )
       .min(1, 'Give at least one number to send to')
       .max(
         API_LIMITS.messagesPerSend,
         `At most ${API_LIMITS.messagesPerSend} messages are sent in one call`,
       )
       .describe(
-        `The numbers to send the template to, each with the values of its variables, at most ${API_LIMITS.messagesPerSend}; each number once.`,
+        `The numbers to send the template to, each with the values of its variables and, for a template with a photo, video or document header, its file, at most ${API_LIMITS.messagesPerSend}; each number once.`,
       ),
   })
   .strict();
@@ -225,31 +269,6 @@ export const apiSendTextSchema = z
       .describe('Whether WhatsApp may show a preview of the first link in the text.'),
   })
   .strict();
-
-/** The media a message can carry from a link (ADR-194), as WhatsApp's message `type` names it. */
-export const API_MEDIA_TYPES = ['image', 'video', 'audio', 'document', 'sticker'] as const;
-export type ApiMediaType = (typeof API_MEDIA_TYPES)[number];
-
-/** A link WhatsApp may fetch media from (ADR-194): https, with a host, and no user name or password. */
-export function isMediaLink(value: string): boolean {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return false;
-  }
-  return url.protocol === 'https:' && url.hostname !== '' && !url.username && !url.password;
-}
-
-const mediaLinkField = z
-  .string({ error: 'Give the link to the media' })
-  .trim()
-  .min(1, 'Give the link to the media')
-  .max(API_LIMITS.mediaLinkLength, `Links are limited to ${API_LIMITS.mediaLinkLength} characters`)
-  .refine(isMediaLink, 'Give an https:// link to the media, without a user name or password')
-  .describe(
-    'An https:// link WhatsApp fetches the media from when it sends the message: it must be reachable from the internet without signing in. HyFib neither fetches nor keeps the media.',
-  );
 
 const captionField = z
   .string({ error: 'Give the caption as text' })
@@ -862,6 +881,8 @@ export interface ApiTemplate {
   language: string;
   category: 'utility' | 'marketing';
   variables: { header: number; body: number };
+  /** The file a send gives for the template's header (ADR-201), or null for other headers. */
+  headerMedia: TemplateHeaderMedia | null;
   text: { header: string | null; body: string; footer: string | null };
   channels: { id: string; phone: string | null }[];
 }
@@ -1007,15 +1028,18 @@ export async function apiListTemplates(
         );
       const data: ApiTemplate[] = [];
       for (const t of rows) {
-        const spec = sendSpecFor(t.category, t.components);
-        const definition = fromMetaComponents(t.category, t.components);
-        if (!spec.supported || !definition) continue;
+        // Templates with a photo, video or document header are listed: a send gives the file
+        // (ADR-201).
+        const spec = sendSpecFor(t.category, t.components, { mediaHeaders: true });
+        if (!spec.supported) continue;
+        const definition = spec.definition;
         data.push({
           id: t.id,
           name: t.name,
           language: t.language,
           category: t.category === 'MARKETING' ? 'marketing' : 'utility',
           variables: { header: spec.headerParams, body: spec.bodyParams },
+          headerMedia: spec.headerMedia,
           text: {
             header: definition.header.type === 'text' ? definition.header.text : null,
             body: definition.body.text,
@@ -1324,19 +1348,11 @@ export async function apiSendTemplate(
   return deps.db.run(ctx.scope, (tx) =>
     idempotent(tx, ctx, idempotency, now, async () => {
       const sendable = await loadSendableTemplate(tx, ctx, data.templateId);
-      assertTemplateVariables(sendable.spec, data.variables);
+      const send = { phone, variables: data.variables, headerMedia: data.headerMedia };
+      assertTemplateValues(sendable.spec, send);
       const channel = await templateSendingNumber(tx, ctx, sendable.template, data.from);
       await lockMarketingSends(tx, ctx, sendable.template);
-      const message = await queueTemplateFor(
-        deps,
-        tx,
-        ctx,
-        sendable,
-        channel,
-        phone,
-        data.variables,
-        now,
-      );
+      const message = await queueTemplateFor(deps, tx, ctx, sendable, channel, send, now);
       return { status: 201, body: { data: message } };
     }),
   );
@@ -1344,7 +1360,8 @@ export async function apiSendTemplate(
 
 /**
  * Sends an approved template to up to 50 numbers in one call (ADR-163), each with its own
- * variables. The template, every send's variables and the number sent from are checked once, then
+ * variables and header file (ADR-201). The template, every send's values and the number sent from
+ * are checked once, then
  * each number is sent to as a send to one number is, in a savepoint: a refusal for its contact rolls
  * back to it and is answered in its place while the others are sent. Once per idempotency key.
  */
@@ -1360,22 +1377,22 @@ export async function apiSendManyTemplates(
     place: `messages.${i}`,
     phone: phoneAt(message.to, `messages.${i}.to`),
     variables: message.variables,
+    headerMedia: message.headerMedia,
   }));
   assertEachNumberOnce(sends);
   const now = deps.clock.now();
   return deps.db.run(ctx.scope, (tx) =>
     idempotent(tx, ctx, idempotency, now, async () => {
       const sendable = await loadSendableTemplate(tx, ctx, data.templateId);
-      for (const send of sends) {
-        assertTemplateVariables(sendable.spec, send.variables, `${send.place}.variables`);
-      }
+      for (const send of sends) assertTemplateValues(sendable.spec, send, send.place);
       const channel = await templateSendingNumber(tx, ctx, sendable.template, data.from);
       await lockMarketingSends(tx, ctx, sendable.template);
       const answers: ApiTemplateSend[] = [];
-      for (const { phone, variables } of sends) {
+      for (const send of sends) {
+        const { phone } = send;
         try {
           const message = await tx.transaction((sp) =>
-            queueTemplateFor(deps, sp, ctx, sendable, channel, phone, variables, now),
+            queueTemplateFor(deps, sp, ctx, sendable, channel, send, now),
           );
           answers.push({ to: phone, message, error: null });
         } catch (error) {
@@ -1400,9 +1417,17 @@ interface SendableTemplate {
   spec: Extract<SendSpec, { supported: true }>;
 }
 
+/** What one send of a template gives: the number, its variables' values and its header's file. */
+interface TemplateSendValues {
+  phone: string;
+  variables: TemplateParams;
+  headerMedia?: { link: string } | undefined;
+}
+
 /**
  * The template, when it is the company's, approved and one HyFib can send; its category decides the
- * scope the key needs.
+ * scope the key needs. A template with a photo, video or document header is sendable here, as each
+ * send gives its file by link (ADR-201).
  */
 async function loadSendableTemplate(
   tx: Tx,
@@ -1418,22 +1443,37 @@ async function loadSendableTemplate(
   if (template.status !== 'approved') {
     throw new AppError('precondition_failed', 'Only templates approved by Meta can be sent.');
   }
-  const spec = sendSpecFor(template.category, template.components);
+  const spec = sendSpecFor(template.category, template.components, { mediaHeaders: true });
   if (!spec.supported) throw new AppError('unsupported', spec.reason);
   return { template, spec };
 }
 
-/** Refuses values that do not fill the template's variables, naming `path` in a list of sends. */
-function assertTemplateVariables(
+/**
+ * Refuses values that do not fill the template: its variables, and the file of a photo, video or
+ * document header, which only a template with one takes (ADR-201). In a list of sends `place`
+ * names the send (`messages.3`).
+ */
+function assertTemplateValues(
   spec: SendableTemplate['spec'],
-  variables: TemplateParams,
-  path?: string,
+  { variables, headerMedia }: TemplateSendValues,
+  place?: string,
 ): void {
-  if (variables.header.length === spec.headerParams && variables.body.length === spec.bodyParams) {
-    return;
+  const at = (field: string) => (place ? `${place}.${field}` : field);
+  if (variables.header.length !== spec.headerParams || variables.body.length !== spec.bodyParams) {
+    const message = `This template needs ${spec.headerParams} header and ${spec.bodyParams} body variables.`;
+    throw new AppError(
+      'validation_failed',
+      message,
+      place ? { issues: [{ path: at('variables'), message }] } : {},
+    );
   }
-  const message = `This template needs ${spec.headerParams} header and ${spec.bodyParams} body variables.`;
-  throw new AppError('validation_failed', message, path ? { issues: [{ path, message }] } : {});
+  if ((spec.headerMedia === null) === (headerMedia === undefined)) return;
+  const message = spec.headerMedia
+    ? `This template has a ${HEADER_MEDIA_NAMES[spec.headerMedia]} header: give the link to its file.`
+    : 'This template has no photo, video or document header, so it takes no file.';
+  throw new AppError('validation_failed', message, {
+    issues: [{ path: at('headerMedia'), message }],
+  });
 }
 
 /** The number the template is sent from: of the template's WhatsApp account, and active. */
@@ -1474,6 +1514,7 @@ async function lockMarketingSends(
  * consent, the marketing frequency cap, then the message, its send intent and its job. A refusal
  * throws; the caller's transaction or savepoint rolls back what it wrote, a contact created for the
  * number included. For a marketing template the caller holds the campaign runner's company lock.
+ * The message keeps the header's file link beside the rendered text (ADR-201).
  */
 async function queueTemplateFor(
   deps: OutboundDeps,
@@ -1481,8 +1522,7 @@ async function queueTemplateFor(
   ctx: ApiContext,
   { template, spec }: SendableTemplate,
   channel: { id: string; whatsappAccountId: string },
-  phone: string,
-  variables: TemplateParams,
+  { phone, variables, headerMedia }: TemplateSendValues,
   now: Date,
 ): Promise<ApiQueuedTemplate> {
   const contactId = await contactForPhone(tx, ctx.tenant.id, {
@@ -1519,7 +1559,12 @@ async function queueTemplateFor(
     )
     .limit(1);
   const recipient = phoneFromWaId(identity?.waId) ?? phone;
-  const built = buildTemplateSend(template, spec, variables);
+  const built = buildTemplateSend(
+    template,
+    spec,
+    variables,
+    headerMedia ? { headerMediaLink: headerMedia.link } : {},
+  );
 
   // A conversation this message starts is resolved, like a campaign's; the reply opens it.
   await tx
@@ -1562,6 +1607,7 @@ async function queueTemplateFor(
         category: template.category,
       },
       rendered: built.rendered,
+      ...(built.headerMedia ? { headerMedia: built.headerMedia } : {}),
     },
     status: 'queued',
     statusRank: STATUS_RANK.queued,

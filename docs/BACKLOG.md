@@ -71,7 +71,8 @@ verification, app review, Embedded Signup configuration).
 - **P3-03 Templates** — _implemented (2026-09-26), not verified against Meta_: drafts, validation,
   write-ahead submission with lost-response reconciliation, Graph listing sync (webhook-triggered
   and periodic), deletion, status history, template sends from contacts and the inbox.
-  **Remaining:** media headers (Resumable Upload + media storage), URL buttons with variables (the
+  **Remaining:** creating media headers (Resumable Upload + media storage) and sending them outside
+  the API (which sends them with a link since ADR-201), URL buttons with variables (the
   example format must be confirmed), named parameters, authentication/OTP, carousel, LTO, copy-code
   and catalog templates, editing approved templates (`POST /{template-id}`), template library
   (W-070), and a sandbox run with a real WABA.
@@ -640,6 +641,9 @@ verification, app review, Embedded Signup configuration).
   received cards are, so reads give them back; no migration).
   **[Sending stickers from links built; its database tests run only in CI]** (ADR-198: a key replies
   with a sticker WhatsApp fetches from an https link, without a caption; no migration).
+  **[Sending templates with a photo, video or document header built; its database tests run only in
+  CI]** (ADR-201: a key gives the header's file by https link in each send, which WhatsApp fetches;
+  the inbox, campaigns and automations still cannot send them, and say why; no migration).
   Remaining: uploaded media, call-to-action messages through the API, taking
   reactions back,
   media downloads, changing a field's type,

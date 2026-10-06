@@ -1779,6 +1779,14 @@ they were created with: create a key with both); `not_in_plan` means the plan le
 `outcome` the results do not count, a `cursor` that is not the previous page's `nextCursor`, or an
 unknown parameter.
 
+**A template with a photo, video or document header sent through the API failed (ADR-201).**
+WhatsApp fetches the header's file from the link when it sends the message, as for media from links
+(ADR-194), and `GET /messages/{id}` (and the `message.status` webhook) gives its error. Check that
+the link is reachable from the internet without signing in, that the file is of the header's kind,
+and that a document is a PDF (Meta's spec, research M-195), then send again with a new
+Idempotency-Key. Members cannot send these templates from the inbox, campaigns or automations; the
+template's page says so.
+
 **A sticker sent through the API failed (ADR-198).** As for media from links (ADR-194), WhatsApp
 fetches the sticker and decides whether the file can be one, and `GET /messages/{id}` (and the
 `message.status` webhook) gives its error. Meta's spec uploads stickers as WebP files (research

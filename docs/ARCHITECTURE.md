@@ -975,6 +975,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Stickers from links (ADR-198):** `API_MEDIA_TYPES` adds `sticker`, parsed by
   `apiSendStickerSchema` (a link and no caption) and sent by `apiSendMedia` as other media from
   links are.
+- **Templates with media headers (ADR-201):** `sendSpecFor` (`templates/definition.ts`) takes a
+  photo, video or document header (`TEMPLATE_HEADER_MEDIA`) only when its caller passes
+  `mediaHeaders`, as the API's template list and `loadSendableTemplate` do; every other caller gets
+  the reason. `buildTemplateSend` puts the link in the header's parameter and returns it, and
+  `queueTemplateFor` keeps it as the content's `headerMedia`, which the inbox's bubble shows.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions (`last_message` with `conversations.read` and `campaign` with
   `campaigns.read` since ADR-126, a named campaign checked to be the company's, `name` since

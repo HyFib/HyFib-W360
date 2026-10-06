@@ -107,6 +107,7 @@ import {
   apiSendManyTemplates,
   apiSendManyTemplatesSchema,
   apiSendMessage,
+  apiSendMessageSchema,
   apiSendProductListSchema,
   apiSendProductSchema,
   apiSendReactionSchema,
@@ -5765,5 +5766,112 @@ describe('stickers from links through the API (ADR-198)', () => {
     );
     expect([...(sticker?.required ?? [])].sort()).toEqual(['link', 'to', 'type']);
     expect(sticker?.additionalProperties).toBe(false);
+  });
+});
+
+describe('templates with a photo, video or document header through the API (ADR-201)', () => {
+  const templateId = '0192a1b2-0000-7000-8000-000000000001';
+  const link = 'https://cdn.example.com/parcel.jpg';
+
+  it('take the header’s file from an https link, for one number and for each of many', () => {
+    expect(
+      apiSendMessageSchema.parse({
+        to: '+919876543210',
+        templateId,
+        headerMedia: { link: ` ${link} ` },
+      }),
+    ).toEqual({
+      to: '+919876543210',
+      templateId,
+      variables: { header: [], body: [] },
+      headerMedia: { link },
+    });
+    expect(apiSendMessageSchema.parse({ to: '+919876543210', templateId })).not.toHaveProperty(
+      'headerMedia',
+    );
+    for (const headerMedia of [
+      { link: 'http://cdn.example.com/parcel.jpg' },
+      { link: 'https://user:secret@cdn.example.com/parcel.jpg' },
+      { link: `https://cdn.example.com/${'a'.repeat(API_LIMITS.mediaLinkLength)}` },
+      { link, caption: 'Your parcel' },
+      { link, filename: 'parcel.pdf' },
+      { id: '1003383421387256' },
+      {},
+      link,
+    ]) {
+      expect(
+        apiSendMessageSchema.safeParse({ to: '+919876543210', templateId, headerMedia }).success,
+        JSON.stringify(headerMedia).slice(0, 80),
+      ).toBe(false);
+    }
+    const many = apiSendManyTemplatesSchema.parse({
+      templateId,
+      messages: [
+        { to: '+919811100001', headerMedia: { link } },
+        { to: '+919811100002', headerMedia: { link: 'https://cdn.example.com/other.jpg' } },
+      ],
+    });
+    expect(many.messages.map((m) => m.headerMedia?.link)).toEqual([
+      link,
+      'https://cdn.example.com/other.jpg',
+    ]);
+    expect(
+      apiSendManyTemplatesSchema.safeParse({
+        templateId,
+        headerMedia: { link },
+        messages: [{ to: '+919811100001' }],
+      }).success,
+    ).toBe(false);
+    expect(
+      apiSendManyTemplatesSchema.safeParse({
+        templateId,
+        messages: [{ to: '+919811100001', headerMedia: { link: 'ftp://cdn.example.com/a.jpg' } }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('are described: the list names the file, a send gives it, each send of many its own', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const paths = doc.paths as unknown as Record<string, Record<string, { description: string }>>;
+    expect(paths['/templates']?.get?.description).toContain(
+      'for a header that is a photo, a video or a document, which file a send gives (`headerMedia`)',
+    );
+    for (const words of [
+      'A template whose header is a photo, a video or a document (its `headerMedia` in GET /templates) needs the file in `headerMedia`',
+      'Documents must be PDF files.',
+      'HyFib neither fetches nor keeps the file, and stores the link with the message.',
+      'Other templates take no file (422, `headerMedia`).',
+    ]) {
+      expect(paths['/messages']?.post?.description).toContain(words);
+    }
+    expect(paths['/messages/send-many']?.post?.description).toContain(
+      'a header file missing or given when the template takes none (422, naming the place, as `messages.3.variables` or `messages.3.headerMedia`)',
+    );
+    const schemas = (
+      doc.components as unknown as {
+        schemas: Record<
+          string,
+          { properties: Record<string, Record<string, unknown>>; required: string[] }
+        >;
+      }
+    ).schemas;
+    expect(schemas.Template?.properties.headerMedia).toMatchObject({
+      anyOf: [{ type: 'string', enum: ['image', 'video', 'document'] }, { type: 'null' }],
+    });
+    expect(schemas.Template?.required).toContain('headerMedia');
+    expect(schemas.SendTemplate?.properties.headerMedia).toMatchObject({
+      type: 'object',
+      properties: { link: { type: 'string', maxLength: API_LIMITS.mediaLinkLength } },
+      required: ['link'],
+      additionalProperties: false,
+    });
+    expect(schemas.SendTemplate?.required).toEqual(['to', 'templateId']);
+    const items = (
+      schemas.SendManyTemplates?.properties.messages as {
+        items: { properties: Record<string, unknown>; required: string[] };
+      }
+    ).items;
+    expect(Object.keys(items.properties)).toEqual(['to', 'variables', 'headerMedia']);
+    expect(items.required).toEqual(['to']);
   });
 });

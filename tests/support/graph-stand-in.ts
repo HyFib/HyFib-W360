@@ -470,6 +470,52 @@ function contactsProblem(body: unknown): string | null {
   return null;
 }
 
+const TEMPLATE_HEADER_FILES = new Set(['image', 'video', 'document']);
+
+/**
+ * Checks a template's header parameters (research M-195): one header, with one parameter: text, or
+ * a photo, video or document as a media object (an `id` or an http(s) `link`, and no caption).
+ */
+function templateHeaderProblem(body: unknown): string | null {
+  const b = body as { type?: unknown; template?: unknown } | undefined;
+  if (b?.type !== 'template') return null;
+  const components = (b.template as { components?: unknown } | null | undefined)?.components;
+  if (components === undefined) return null;
+  if (!Array.isArray(components)) return 'template.components';
+  const headers = components.filter(
+    (c: unknown) => (c as { type?: unknown } | null)?.type === 'header',
+  );
+  if (headers.length > 1) return 'template.components';
+  for (const header of headers) {
+    const parameters = (header as { parameters?: unknown }).parameters;
+    if (!Array.isArray(parameters) || parameters.length !== 1) return 'template.header';
+    const parameter = parameters[0] as Record<string, unknown> | null;
+    if (typeof parameter !== 'object' || parameter === null) return 'template.header';
+    const type = typeof parameter.type === 'string' ? parameter.type : '';
+    if (type === 'text') {
+      if (!isText(parameter.text)) return 'template.header.text';
+      continue;
+    }
+    if (!TEMPLATE_HEADER_FILES.has(type)) return 'template.header';
+    if (Object.keys(parameter).some((key) => key !== 'type' && key !== type)) {
+      return 'template.header';
+    }
+    const media = parameter[type] as Record<string, unknown> | undefined;
+    if (typeof media !== 'object' || media === null) return `template.header.${type}`;
+    if (Object.keys(media).some((key) => key !== 'id' && key !== 'link')) {
+      return `template.header.${type}`;
+    }
+    if ((media.id === undefined) === (media.link === undefined)) return `template.header.${type}`;
+    if (
+      media.link !== undefined &&
+      (typeof media.link !== 'string' || !/^https?:\/\/\S+$/.test(media.link))
+    ) {
+      return `template.header.${type}.link`;
+    }
+  }
+  return null;
+}
+
 /** Checks the `context` of a reply that quotes a message (research M-041, M-183). */
 function contextProblem(body: unknown): string | null {
   const context = (body as { context?: unknown } | undefined)?.context;
@@ -620,6 +666,19 @@ export async function startGraphStandIn(options: {
         if (b.refuse === false) state.subscribeErrors.delete(b.wabaId);
         return json(res, 200, { ok: true });
       }
+      // Test control: list a template made in WhatsApp Manager, such as one with a photo header,
+      // which HyFib's editor cannot create (ADR-201).
+      if (req.method === 'POST' && url.pathname === '/__stand-in/template') {
+        const b = (body ?? {}) as { wabaId?: unknown; template?: Omit<TemplateFixture, 'id'> };
+        if (typeof b.wabaId !== 'string' || !b.wabaId || !b.template) {
+          return json(res, 400, { ok: false });
+        }
+        state.templateCounter += 1;
+        const list = state.templates.get(b.wabaId) ?? [];
+        list.push({ ...b.template, id: String(9_000_000_000 + state.templateCounter) });
+        state.templates.set(b.wabaId, list);
+        return json(res, 200, { ok: true });
+      }
       // Test control: set a template's review status, as Meta's review would.
       if (req.method === 'POST' && url.pathname === '/__stand-in/template-status') {
         const b = (body ?? {}) as { wabaId?: string; name?: string; status?: string };
@@ -742,7 +801,8 @@ export async function startGraphStandIn(options: {
           reactionProblem(body) ??
           mediaProblem(body) ??
           locationProblem(body) ??
-          contactsProblem(body);
+          contactsProblem(body) ??
+          templateHeaderProblem(body);
         if (shapeInvalid) {
           return graphError(res, 400, 100, `(#100) Invalid parameter: ${shapeInvalid}`);
         }

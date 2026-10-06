@@ -791,6 +791,12 @@ Phase 5 rules (Public API, P5-08):
   `messages.reply`, within the 24-hour window, an https link with a host and no credentials that
   HyFib never fetches, shown in the inbox as an https anchor in a new tab without the referrer; no
   caption is taken.
+- Templates with media headers (ADR-201): the header's file follows the rules of media from links
+  (ADR-194): an https link with a host and no credentials, at most 2,000 characters, that HyFib
+  never fetches, shown in the inbox as an https anchor in a new tab without the referrer. The
+  template's checks are unchanged (the scope of its category, consent, the suppression list, the
+  marketing cap); only the API sends these templates, and the link is kept with the message and
+  redacted with it.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so

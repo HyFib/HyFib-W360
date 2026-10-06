@@ -7,10 +7,12 @@ import { z } from 'zod';
  * QUICK_REPLY / URL / PHONE_NUMBER).
  *
  * Scope: MARKETING and UTILITY templates with an optional text header, positional variables
- * ({{1}}, {{2}} ...), an optional footer and static buttons. Media headers (need the Resumable
- * Upload API and media storage), URL buttons with variables (the example format is not confirmed),
- * named variables, authentication templates, carousels and other component types are not supported
- * yet; synced templates using them are shown but cannot be sent from HyFib.
+ * ({{1}}, {{2}} ...), an optional footer and static buttons. Creating media headers (needs the
+ * Resumable Upload API and media storage), URL buttons with variables (the example format is not
+ * confirmed), named variables, authentication templates, carousels and other component types are
+ * not supported yet; synced templates using them are shown but cannot be sent from HyFib. Synced
+ * templates with a photo, video or document header are sent only through the API, which gives a
+ * link to the file (ADR-201).
  *
  * Length limits below are HyFib guardrails chosen to stay inside Meta's published constraints as
  * far as we know them; they are not a verified statement of Meta's limits (Meta validates on
@@ -355,35 +357,91 @@ export function fromMetaComponents(
   return def;
 }
 
+/**
+ * The files a template's header can hold that a send gives by link (ADR-201), as the send's header
+ * parameter names them (research M-195: `image`, `video` and `document` parameters, each a media
+ * object without a caption).
+ */
+export const TEMPLATE_HEADER_MEDIA = ['image', 'video', 'document'] as const;
+export type TemplateHeaderMedia = (typeof TEMPLATE_HEADER_MEDIA)[number];
+
+/** What a template's header file is called. */
+export const HEADER_MEDIA_NAMES: Record<TemplateHeaderMedia, string> = {
+  image: 'photo',
+  video: 'video',
+  document: 'document',
+};
+
+/**
+ * The template's photo, video or document header (HEADER with `format` IMAGE, VIDEO or DOCUMENT)
+ * and its other components, or null when it has no such header. Its example file (`header_handle`)
+ * is the one shown in review; every send gives its own.
+ */
+function mediaHeader(
+  components: unknown[],
+): { media: TemplateHeaderMedia; rest: unknown[] } | null {
+  for (const [index, c] of components.entries()) {
+    if (!isRec(c) || str(c.type)?.toUpperCase() !== 'HEADER') continue;
+    const format = str(c.format)?.toLowerCase();
+    const media = TEMPLATE_HEADER_MEDIA.find((m) => m === format);
+    if (media) return { media, rest: components.filter((_, i) => i !== index) };
+  }
+  return null;
+}
+
 /** What a send of this template needs: parameter counts, or why HyFib cannot send it yet. */
 export type SendSpec =
-  | { supported: true; headerParams: 0 | 1; bodyParams: number; definition: TemplateDefinition }
+  | {
+      supported: true;
+      headerParams: 0 | 1;
+      bodyParams: number;
+      definition: TemplateDefinition;
+      /** The header's file, which every send gives by link (ADR-201), or null. */
+      headerMedia: TemplateHeaderMedia | null;
+    }
   | { supported: false; reason: string };
 
-export function sendSpecFor(category: string, components: unknown[]): SendSpec {
+/**
+ * What a send of the template needs. A photo, video or document header is sendable only when the
+ * caller gives its file by link: the API (ADR-201) passes `mediaHeaders`; the inbox, campaigns,
+ * automations and store messages do not, and are told why.
+ */
+export function sendSpecFor(
+  category: string,
+  components: unknown[],
+  options: { mediaHeaders?: boolean } = {},
+): SendSpec {
   if (category === 'AUTHENTICATION') {
     return { supported: false, reason: 'Authentication templates are not supported yet.' };
   }
-  const def = fromMetaComponents(category, components);
+  const header = mediaHeader(components);
+  const def = fromMetaComponents(category, header ? header.rest : components);
   if (!def) {
     return {
       supported: false,
       reason:
-        'This template uses content HyFib cannot send yet (for example a media header or a button with a variable).',
+        'This template uses content HyFib cannot send yet (for example a location header or a button with a variable).',
     };
   }
-  const header =
+  const headerVariables =
     def.header.type === 'text'
       ? positionalVariables(def.header.text)
       : { ok: true as const, numbers: [] };
   const body = positionalVariables(def.body.text);
-  if (!header.ok || !body.ok)
+  if (!headerVariables.ok || !body.ok)
     return { supported: false, reason: 'This template uses named variables.' };
+  if (header && !options.mediaHeaders) {
+    return {
+      supported: false,
+      reason: `This template has a ${HEADER_MEDIA_NAMES[header.media]} header: HyFib sends such templates only through the API, which gives a link to the file.`,
+    };
+  }
   return {
     supported: true,
-    headerParams: new Set(header.numbers).size > 0 ? 1 : 0,
+    headerParams: new Set(headerVariables.numbers).size > 0 ? 1 : 0,
     bodyParams: new Set(body.numbers).size,
     definition: def,
+    headerMedia: header?.media ?? null,
   };
 }
 
@@ -405,8 +463,9 @@ function substitute(text: string, values: readonly string[]): string {
 
 /**
  * The `template` object of a Cloud API send (TemplateObject in the official spec: `language`
- * requires `policy: deterministic`; text parameters per component) and the rendered text stored
- * with the message so the conversation shows what was sent.
+ * requires `policy: deterministic`; text parameters per component; a header's file as a media
+ * parameter, research M-195) and the rendered text stored with the message so the conversation
+ * shows what was sent, with the header's file when it has one.
  */
 export function buildTemplateSend(
   template: { name: string; language: string },
@@ -418,13 +477,34 @@ export function buildTemplateSend(
      * (research M-177); a tap returns the payload in the reply (M-178).
      */
     quickReplyPayloads?: ReadonlyMap<number, string>;
+    /** The link to the header's file, for a template with a photo, video or document header. */
+    headerMediaLink?: string;
   } = {},
-): { template: Record<string, unknown>; rendered: RenderedTemplate } {
+): {
+  template: Record<string, unknown>;
+  rendered: RenderedTemplate;
+  headerMedia: { type: TemplateHeaderMedia; link: string } | null;
+} {
   if (params.header.length !== spec.headerParams || params.body.length !== spec.bodyParams) {
     throw new Error('Template parameter count mismatch');
   }
+  if ((spec.headerMedia === null) !== (options.headerMediaLink === undefined)) {
+    throw new Error(
+      spec.headerMedia ? 'The template’s header needs a link' : 'The template has no media header',
+    );
+  }
   const def = spec.definition;
   const components: Record<string, unknown>[] = [];
+  const headerMedia =
+    spec.headerMedia && options.headerMediaLink !== undefined
+      ? { type: spec.headerMedia, link: options.headerMediaLink }
+      : null;
+  if (headerMedia) {
+    components.push({
+      type: 'header',
+      parameters: [{ type: headerMedia.type, [headerMedia.type]: { link: headerMedia.link } }],
+    });
+  }
   if (spec.headerParams === 1) {
     components.push({ type: 'header', parameters: [{ type: 'text', text: params.header[0] }] });
   }
@@ -459,6 +539,7 @@ export function buildTemplateSend(
       footer: def.footer,
       buttons: def.buttons.map((b) => ({ type: b.type, text: b.text })),
     },
+    headerMedia,
   };
 }
 

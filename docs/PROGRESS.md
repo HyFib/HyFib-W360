@@ -1,5 +1,54 @@
 # Progress
 
+## 2026-10-06 — Phase 5: sending templates with a photo, video or document header through the API (P5-08, ADR-201)
+
+Status: **Implemented; its database and browser tests run in CI only (test stand-in only).**
+Templates with a photo, video or document header were synced but could not be sent. The local
+PostgreSQL is unavailable (its Docker daemon stopped), so the integration tests and the changed e2e
+test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-201):** `headerMedia: {link}` in the API's template sends (in each message of a send
+  to many), required by a photo, video or document header and refused without one; `GET /templates`
+  names the file a send gives; only the API opts in, and other paths say why; no migration.
+- **Research:** M-195 from Meta's published OpenAPI spec (the header's media parameter, no caption,
+  PDF documents only, IMAGE and DOCUMENT examples).
+- **Domain:** `TEMPLATE_HEADER_MEDIA`, `sendSpecFor`'s `mediaHeaders` option and reason,
+  `buildTemplateSend`'s header parameter, the API's checks, list and stored `headerMedia`, the
+  OpenAPI entries.
+- **Web:** the inbox shows a template's header file as an https link above its text.
+- **Tests:**
+  - Unit (3 new in `definition.test.ts` and `api.test.ts`): the spec by kind and caller, the send
+    object, the API's rules, the OpenAPI entries.
+  - Integration (1 new and 1 changed in `api.test.ts`, 1 changed in `templates.test.ts`): a photo
+    and a document template listed, sent with their links, stored and received as Meta's header
+    parameter, refusals by place, members told why. Written for CI; not run here.
+  - E2E (1 changed in `api.spec.ts`): a photo template made in WhatsApp Manager is listed, refused
+    without its photo, sent with it, received by the stand-in and shown in the inbox. Written for
+    CI; not run here.
+- **Docs:** ADR-201; research M-195; SECURITY; ARCHITECTURE; THREAT-MODEL T195; DEPLOYMENT and
+  RUNBOOKS; DATA-RETENTION; BACKLOG P3-03 and P5-08; feature matrix W-059, W-134 and H-033.
+- **Mutation checks:** 19 deliberate regressions tried, all caught on the unit-tested parts. The
+  send itself needs the database and the stand-in, so its regressions are left to the integration
+  and e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 885 passed (83 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 19 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- These templates from the inbox, campaigns, automations or store messages; files uploaded to Meta;
+  creating templates with media headers; location headers.
+
 ## 2026-10-06 — Phase 5: exporting the console's lists beyond the rows a tab shows (P5-10, ADR-200)
 
 Status: **Implemented; its database tests run in CI only.** The console's CSV exports gave only the

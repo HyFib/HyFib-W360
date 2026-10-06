@@ -23,8 +23,8 @@ test('an API key created in settings sends an approved template once, and stops 
   page,
   request,
 }) => {
-  // Two sends wait for WhatsApp after the template's review: more than the default minute.
-  test.setTimeout(120_000);
+  // Several sends wait for WhatsApp after the templates' review: more than the default minute.
+  test.setTimeout(180_000);
   const email = uniqueEmail('api');
   const slug = `api-${Date.now().toString(36)}`;
   await signUpAndVerify(page, { name: 'Arun Api', email, password: PASSWORD });
@@ -57,6 +57,32 @@ test('an API key created in settings sends an approved template once, and stops 
     data: { wabaId, name: 'shipping_update', status: 'APPROVED' },
   });
   expect(approved.status()).toBe(200);
+  // A template made in WhatsApp Manager with a photo header, which the editor cannot create: sent
+  // only through the API, which gives the photo's link (ADR-201).
+  const madeElsewhere = await request.post(`${standIn}/__stand-in/template`, {
+    data: {
+      wabaId,
+      template: {
+        name: 'delivery_photo',
+        language: 'en',
+        status: 'APPROVED',
+        category: 'UTILITY',
+        components: [
+          {
+            type: 'HEADER',
+            format: 'IMAGE',
+            example: { header_handle: ['4::aW1hZ2UvanBlZw==:ARZ'] },
+          },
+          {
+            type: 'BODY',
+            text: 'Your parcel {{1}} was delivered.',
+            example: { body_text: [['A-1001']] },
+          },
+        ],
+      },
+    },
+  });
+  expect(madeElsewhere.status()).toBe(200);
   await page.goto(`/c/${slug}/templates`);
   await expectNoHorizontalOverflow(page);
   await page.getByRole('button', { name: 'Refresh from Meta' }).click();
@@ -106,12 +132,21 @@ test('an API key created in settings sends an approved template once, and stops 
   expect(templates.status()).toBe(200);
   expect(templates.headers()['cache-control']).toBe('private, no-store');
   expect(templates.headers()['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
-  const template = (
+  const listed = (
     (await templates.json()) as {
-      data: { id: string; name: string; variables: { header: number; body: number } }[];
+      data: {
+        id: string;
+        name: string;
+        variables: { header: number; body: number };
+        headerMedia: string | null;
+      }[];
     }
-  ).data.find((t) => t.name === 'shipping_update');
+  ).data;
+  const template = listed.find((t) => t.name === 'shipping_update');
   expect(template?.variables).toEqual({ header: 0, body: 2 });
+  expect(template?.headerMedia).toBeNull();
+  const photoTemplate = listed.find((t) => t.name === 'delivery_photo');
+  expect(photoTemplate).toMatchObject({ variables: { header: 0, body: 1 }, headerMedia: 'image' });
 
   // Without contacts.read the key cannot list contacts.
   const forbidden = await request.get('/api/v1/contacts', { headers: auth });
@@ -245,6 +280,67 @@ test('an API key created in settings sends an approved template once, and stops 
     .map((r) => (r.body as { to?: string }).to)
     .filter((to) => to === optedOutWaId || manyWaIds.includes(to ?? ''));
   expect(sentMany.sort()).toEqual([...manyWaIds].sort());
+
+  // The template with a photo header (ADR-201): refused without the photo, by its place; sent with
+  // its link, which WhatsApp receives as the header's parameter and the inbox shows.
+  const photoWaId = randomWaId();
+  const kiran = await request.post('/api/v1/contacts', {
+    headers: auth,
+    data: { phone: `+${photoWaId}`, name: 'Kiran Photo' },
+  });
+  expect(kiran.status()).toBe(201);
+  const photoLink = 'https://cdn.example.com/deliveries/a-1001.jpg';
+  const sendPhoto = (data: Record<string, unknown>) =>
+    request.post('/api/v1/messages', {
+      headers: { ...auth, 'Idempotency-Key': randomUUID() },
+      data: { to: `+${photoWaId}`, templateId: photoTemplate!.id, ...data },
+    });
+  const withoutPhoto = await sendPhoto({ variables: { body: ['A-1001'] } });
+  expect(withoutPhoto.status()).toBe(422);
+  expect((await withoutPhoto.json()).error.issues).toEqual([
+    {
+      path: 'headerMedia',
+      message: 'This template has a photo header: give the link to its file.',
+    },
+  ]);
+  const photoSent = await sendPhoto({
+    variables: { body: ['A-1001'] },
+    headerMedia: { link: photoLink },
+  });
+  expect(photoSent.status()).toBe(201);
+  const photoMessage = (await photoSent.json()).data as { id: string };
+  await expect(async () => {
+    const status = await request.get(`/api/v1/messages/${photoMessage.id}`, { headers: auth });
+    expect((await status.json()).data.status).toBe('accepted');
+  }).toPass({ timeout: 30_000 });
+  const toKiran = (await standInRequests(request)).filter(
+    (r) =>
+      r.path === `/v26.0/${phoneNumberId}/messages` && (r.body as { to?: string }).to === photoWaId,
+  );
+  expect(toKiran.map((r) => r.body)).toEqual([
+    expect.objectContaining({
+      type: 'template',
+      template: expect.objectContaining({
+        name: 'delivery_photo',
+        components: [
+          { type: 'header', parameters: [{ type: 'image', image: { link: photoLink } }] },
+          { type: 'body', parameters: [{ type: 'text', text: 'A-1001' }] },
+        ],
+      }),
+    }),
+  ]);
+  // A template sent through the API leaves its conversation resolved.
+  await page.goto(`/c/${slug}/inbox?status=resolved`);
+  await page.getByRole('link', { name: /Kiran Photo/ }).click();
+  const photoBubble = page
+    .getByRole('list', { name: /^Messages with/ })
+    .getByRole('listitem')
+    .filter({ hasText: 'Your parcel A-1001 was delivered.' });
+  await expect(photoBubble.getByRole('link', { name: photoLink })).toBeVisible({
+    timeout: 20_000,
+  });
+  await expect(photoBubble).toContainText('Photo');
+  await page.goto(`/c/${slug}/settings/api-keys`);
 
   // Revoked in settings: the next request is refused.
   await page.getByRole('button', { name: 'Revoke Order system' }).click();

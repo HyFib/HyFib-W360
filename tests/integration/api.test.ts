@@ -192,6 +192,48 @@ async function approvedTemplate(c: Company, definition: TemplateDefinition) {
   return { id, name };
 }
 
+/**
+ * A template made in WhatsApp Manager with a photo, video or document header, which HyFib's editor
+ * cannot create, approved at the stand-in and synced (ADR-201).
+ */
+async function syncedMediaTemplate(c: Company, format: 'IMAGE' | 'VIDEO' | 'DOCUMENT') {
+  templateCounter += 1;
+  const name = `api_media_${templateCounter}_${Date.now().toString(36)}`;
+  const list = fx.standIn.state.templates.get(c.wabaId) ?? [];
+  fx.standIn.state.templates.set(c.wabaId, list);
+  fx.standIn.state.templateCounter += 1;
+  list.push({
+    id: String(9_000_000_000 + fx.standIn.state.templateCounter),
+    name,
+    language: 'en',
+    status: 'APPROVED',
+    category: 'UTILITY',
+    components: [
+      { type: 'HEADER', format, example: { header_handle: ['4::aW1hZ2UvanBlZw==:ARZ'] } },
+      {
+        type: 'BODY',
+        text: 'Hi {{1}}, parcel {{2}} was delivered.',
+        example: { body_text: [['Asha', 'P-1']] },
+      },
+    ],
+  });
+  const graphDeps = {
+    db: fx.dbs.app,
+    jobs: fx.jobs(),
+    signer: fx.signer,
+    clock: systemClock,
+    keyring: fx.keyring,
+    graph: fx.graph,
+  };
+  await syncTemplates(graphDeps, authorizedTenantScope(c.tenant.id, null), c.whatsappAccountId);
+  const [row] = await fx.query<{ id: string }>(
+    'SELECT id FROM app.message_templates WHERE tenant_id = $1 AND name = $2',
+    [c.tenant.id, name],
+  );
+  if (!row) throw new Error('template not synced');
+  return { id: row.id, name };
+}
+
 /** Hands every queued send of the company to the Graph stand-in. */
 async function sendAll(c: Company) {
   const intents = await fx.query<{ id: string; actor_user_id: string | null }>(
@@ -864,6 +906,7 @@ describe('template sends', () => {
       language: 'en',
       category: 'utility',
       variables: { header: 0, body: 2 },
+      headerMedia: null,
       text: { header: null, body: 'Hi {{1}}, your order {{2}} has shipped.', footer: null },
       channels: [{ id: c.channelAccountId, phone: '+91 90000 00000' }],
     });
@@ -1184,6 +1227,179 @@ describe('template sends', () => {
     const failed = await apiGetMessage(deps(), ctx, (mine.body.data as { id: string }).id);
     expect(failed.status).toBe('failed');
     expect(failed.error).toMatchObject({ code: '131026' });
+  });
+
+  it('send a template with a photo or document header, each send giving its file by link (ADR-201)', async () => {
+    const photo = await syncedMediaTemplate(c, 'IMAGE');
+    const receipt = await syncedMediaTemplate(c, 'DOCUMENT');
+    const { ctx } = await apiKey(c, ['templates.read', 'messages.send']);
+    // Listed with the file a send gives; the header asks for no text value.
+    const { data } = await apiListTemplates(deps(), ctx);
+    expect(data.find((t) => t.id === photo.id)).toEqual({
+      id: photo.id,
+      name: photo.name,
+      language: 'en',
+      category: 'utility',
+      variables: { header: 0, body: 2 },
+      headerMedia: 'image',
+      text: { header: null, body: 'Hi {{1}}, parcel {{2}} was delivered.', footer: null },
+      channels: [{ id: c.channelAccountId, phone: '+91 90000 00000' }],
+    });
+    expect(data.find((t) => t.id === receipt.id)?.headerMedia).toBe('document');
+    // Members cannot send it from HyFib, and are told why.
+    const owner = await fx.ctx(c, c.owner);
+    const memberTemplates = createTemplatesService({
+      db: fx.dbs.app,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      clock: systemClock,
+    });
+    expect(
+      (await memberTemplates.listTemplates(owner)).find((t) => t.name === photo.name),
+    ).toMatchObject({
+      sendable: false,
+      unsupportedReason:
+        'This template has a photo header: HyFib sends such templates only through the API, which gives a link to the file.',
+    });
+
+    const link = 'https://cdn.example.com/parcels/p-501.jpg';
+    const sent = await apiSendTemplate(
+      deps(),
+      ctx,
+      {
+        to: '+919811100501',
+        templateId: photo.id,
+        variables: { body: ['Asha', 'P-501'] },
+        headerMedia: { link },
+      },
+      idem('media-tpl-1', 'media-tpl-1'),
+    );
+    expect(sent.status).toBe(201);
+    const queued = sent.body.data as { id: string };
+    const [stored] = await fx.query<{
+      content: Record<string, unknown>;
+      request: { template: { components: unknown[] } };
+    }>(
+      `SELECT m.content, si.request FROM app.messages m
+         JOIN app.send_intents si ON si.tenant_id = m.tenant_id AND si.message_id = m.id
+        WHERE m.id = $1`,
+      [queued.id],
+    );
+    expect(stored?.content).toMatchObject({
+      headerMedia: { type: 'image', link },
+      rendered: { header: null, body: 'Hi Asha, parcel P-501 was delivered.' },
+    });
+    const photoComponents = [
+      { type: 'header', parameters: [{ type: 'image', image: { link } }] },
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: 'Asha' },
+          { type: 'text', text: 'P-501' },
+        ],
+      },
+    ];
+    expect(stored?.request.template.components).toEqual(photoComponents);
+
+    // To many numbers, each with its own file.
+    const pdf = (n: number) => `https://cdn.example.com/receipts/p-${n}.pdf`;
+    const many = await apiSendManyTemplates(
+      deps(),
+      ctx,
+      {
+        templateId: receipt.id,
+        messages: [502, 503].map((n) => ({
+          to: `+919811100${n}`,
+          variables: { body: ['Ravi', `P-${n}`] },
+          headerMedia: { link: pdf(n) },
+        })),
+      },
+      idem('media-tpl-2', 'media-tpl-2'),
+    );
+    expect(
+      (many.body.data as { message: { status: string } | null }[]).map((a) => a.message?.status),
+    ).toEqual(['queued', 'queued']);
+
+    // Refused before anything is written: a file missing, or given to a template without one, by
+    // its place; a link that is not https.
+    const refuse = async (send: Promise<unknown>, message: string, paths: string[]) => {
+      const refused = await expectAppError(send, 'validation_failed');
+      expect(isAppError(refused) && refused.publicMessage).toBe(message);
+      expect(isAppError(refused) && refused.issues?.map((i) => i.path)).toEqual(paths);
+    };
+    const one = (input: Record<string, unknown>, key: string) =>
+      apiSendTemplate(deps(), ctx, { to: '+919811100504', ...input }, idem(key, key));
+    await refuse(
+      one({ templateId: photo.id, variables: { body: ['a', 'b'] } }, 'media-tpl-3'),
+      'This template has a photo header: give the link to its file.',
+      ['headerMedia'],
+    );
+    await refuse(
+      one(
+        { templateId: utility.id, variables: { body: ['a', 'b'] }, headerMedia: { link } },
+        'media-tpl-4',
+      ),
+      'This template has no photo, video or document header, so it takes no file.',
+      ['headerMedia'],
+    );
+    await refuse(
+      one(
+        {
+          templateId: photo.id,
+          variables: { body: ['a', 'b'] },
+          headerMedia: { link: 'http://cdn.example.com/p.jpg' },
+        },
+        'media-tpl-5',
+      ),
+      'Give an https:// link to the media, without a user name or password',
+      ['headerMedia.link'],
+    );
+    await refuse(
+      apiSendManyTemplates(
+        deps(),
+        ctx,
+        {
+          templateId: receipt.id,
+          messages: [
+            {
+              to: '+919811100505',
+              variables: { body: ['a', 'b'] },
+              headerMedia: { link: pdf(505) },
+            },
+            { to: '+919811100506', variables: { body: ['a', 'b'] } },
+          ],
+        },
+        idem('media-tpl-6', 'media-tpl-6'),
+      ),
+      'This template has a document header: give the link to its file.',
+      ['messages.1.headerMedia'],
+    );
+    expect(
+      await fx.query(
+        'SELECT 1 FROM app.contacts WHERE tenant_id = $1 AND phone_e164 = ANY($2::text[])',
+        [c.tenant.id, ['+919811100504', '+919811100505', '+919811100506']],
+      ),
+    ).toHaveLength(0);
+
+    // WhatsApp gets each file as its header's one parameter; reads never give the file.
+    expect((await sendAll(c)).filter((outcome) => outcome !== 'accepted')).toEqual([]);
+    const toPhoto = templatesTo('919811100501');
+    expect(toPhoto).toHaveLength(1);
+    expect(
+      (toPhoto[0]?.body as { template: { components: unknown[] } }).template.components,
+    ).toEqual(photoComponents);
+    for (const n of [502, 503]) {
+      const [request] = templatesTo(`919811100${n}`);
+      expect(
+        (request?.body as { template: { components: unknown[] } }).template.components[0],
+      ).toEqual({
+        type: 'header',
+        parameters: [{ type: 'document', document: { link: pdf(n) } }],
+      });
+    }
+    const status = await apiGetMessage(deps(), ctx, queued.id);
+    expect(status).toMatchObject({ status: 'accepted', templateId: photo.id });
+    expect(JSON.stringify(status)).not.toContain('cdn.example.com');
   });
 
   it('send one template to many numbers in one call, each refusal answered in its place (ADR-163)', async () => {

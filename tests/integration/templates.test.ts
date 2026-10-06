@@ -350,7 +350,10 @@ describe('template sync', () => {
     const listed = await templates.listTemplates(owner);
     const image = listed.find((t) => t.name === 'image_header')!;
     expect(image.sendable).toBe(false);
-    expect(image.unsupportedReason).toMatch(/cannot send yet/);
+    // A photo header is sent only through the API, which gives the file (ADR-201).
+    expect(image.unsupportedReason).toBe(
+      'This template has a photo header: HyFib sends such templates only through the API, which gives a link to the file.',
+    );
     expect(listed.find((t) => t.name === 'external_000')!.sendable).toBe(true);
 
     fx.standIn.state.templates.set(c.wabaId, list.slice(1));
