@@ -1,5 +1,38 @@
 # Progress
 
+## 2026-10-06 — Moving deals between pipelines in the app (P4-04, ADR-234)
+
+Status: **Implemented; its database and browser tests run in CI only.** The service moved deals
+between pipelines, but the app did not offer it. The local PostgreSQL is unavailable, so the tests
+below were written but not run here.
+
+### Completed
+
+- **Web:** `PipelineMoveForm` on an open deal's page ("Move to another pipeline"): the company's
+  other active pipelines with stages, each with its currency, and a stage of the one chosen; the
+  service's refusal (another currency with a value) is shown.
+- **Tests:**
+  - Integration (1 new in `crm.test.ts`: a move keeping the value, the timeline entry and both
+    boards; a stage of another pipeline, another company's pipeline and an archived pipeline
+    refused). Written for CI; not run here.
+  - E2E: `crm.spec.ts` creates a second rupee pipeline and moves its deal there. Runs in CI.
+- **Docs:** ADR-234; ARCHITECTURE; BACKLOG P4-04; feature matrix H-012.
+- **Mutation checks:** none: no unit-tested code changed (the domain is unchanged).
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                       |
+| -------------------------------------------------- | ---------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                        |
+| `pnpm test` (unit)                                 | 102 files, 1013 tests passed |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here; CI runs them   |
+| `pnpm build`                                       | passed                       |
+| gitleaks 8.30.1 on the staged changes              | no leaks found               |
+
+### Known gaps
+
+- No move in bulk, from the board or through the API.
+
 ## 2026-10-06 — The setup checklist from the company's data (W-026, ADR-233)
 
 Status: **Implemented; its database and browser tests run in CI only.** The overview's "Get started"

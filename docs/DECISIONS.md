@@ -9128,3 +9128,26 @@ Decision:
 
 Not built: dismissing the checklist, steps for automations, campaigns or stores, and counting
 progress across members.
+
+## ADR-234 Moving deals between pipelines in the app (P4-04) (2026-10-06)
+
+Context: since P4-04 the CRM service has moved a deal to a stage of another pipeline (a value in a
+different currency must be cleared first) and recorded the move on the deal's timeline, but the app
+only offered the stages of the deal's own pipeline. A deal opened in the wrong pipeline had to be
+lost and created again, losing its history.
+
+Decision:
+
+- **The deal page offers it:** an open deal's page has "Move to another pipeline" for members with
+  `crm.write`: the company's other active pipelines that have a stage, each with its currency, and a
+  stage of the one chosen. The move is the service's own (`moveDeal` with the pipeline): the version
+  check, the pipeline and stage checks, the currency rule and the timeline entry ("Qualified → New
+  (another pipeline)").
+- **No new rule:** a deal keeps its value between pipelines of one currency; to move a deal with a
+  value to a pipeline in another currency, a member clears the value first, as the service's refusal
+  says. Archived pipelines and stages are not offered and are refused.
+- **Tests:** an integration test of a successful move (value kept, timeline entry, both boards) and
+  of the refusals (a stage of another pipeline, another company's pipeline, an archived pipeline);
+  the CRM e2e test moves its deal to a second rupee pipeline. No migration.
+
+Not built: moving deals in bulk, from the board, or through the API.

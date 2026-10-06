@@ -89,6 +89,23 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   await expect(timeline.getByText(/₹25,000.50 → ₹26,000.00/)).toBeVisible();
   await expect(page.getByText('Deal saved.')).toBeVisible();
 
+  // A second rupee pipeline takes the deal with its value (ADR-234).
+  const dealUrl = page.url();
+  await page.goto(`/c/${slug}/settings/pipelines`);
+  const newPipeline = page
+    .locator('form')
+    .filter({ has: page.getByRole('button', { name: 'Create pipeline' }) });
+  await newPipeline.getByLabel('Name', { exact: true }).fill('Renewals');
+  await newPipeline.getByRole('button', { name: 'Create pipeline' }).click();
+  await expect(page.getByText('Pipeline created.')).toBeVisible();
+  await page.goto(dealUrl);
+  await page.getByText('Move to another pipeline').click();
+  await page.getByLabel('Pipeline', { exact: true }).selectOption({ label: 'Renewals (INR)' });
+  await page.getByLabel('Stage in that pipeline').selectOption({ label: 'New' });
+  await page.getByRole('button', { name: 'Move deal' }).click();
+  await expect(page.getByText('Renewals · ₹26,000.00')).toBeVisible();
+  await expect(timeline.getByText('Qualified → New (another pipeline)')).toBeVisible();
+
   // A task with a reminder at the current minute (up to a minute back is accepted), so the
   // worker emails it straight away rather than after a wait.
   const now = Date.now();

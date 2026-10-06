@@ -222,11 +222,12 @@ verification, app review, Embedded Signup configuration).
   with a reason when stale, closed or the assignee lost access); notes; an append-only timeline per
   contact and deal; CRM panels on the contact page and beside a conversation; deal outcomes, win
   rate, time to win and open pipeline in reports and CSV; erasure of the CRM free text. T: reminders
-  exactly once under repeated signals; erasure; isolation. **Remaining:** custom deal fields,
-  products on deals, deal import and export, forecasting, moving deals between pipelines in the UI
-  (the service supports it), automation steps that create deals or tasks, CRM connectors (HubSpot,
-  Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
-  checklist).
+  exactly once under repeated signals; erasure; isolation. **[Moving deals between pipelines in the
+  app built; its database and browser tests run only in CI]** (ADR-234: the deal page offers the
+  company's other active pipelines and their stages; the service keeps its rules; no migration).
+  **Remaining:** custom deal fields, products on deals, deal import and export, forecasting,
+  automation steps that create deals or tasks, CRM connectors (HubSpot, Salesforce, Zoho:
+  integrations), reminder emails through the production SMTP provider (release checklist).
 - **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad
   traffic yet_: click-to-chat links (a short link that counts clicks per link and company day
   without any visitor data and redirects to wa.me with a pre-filled message and an optional

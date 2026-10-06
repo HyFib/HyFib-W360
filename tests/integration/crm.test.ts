@@ -370,6 +370,109 @@ describe('crm deals', () => {
     ).rejects.toThrow(/append-only/);
   });
 
+  it('moves an open deal to a stage of another pipeline of its currency (ADR-234)', async () => {
+    const { c, owner, agent, pipeline, newStage } = await setup();
+    const svc = crm();
+    const contactId = await newContact(owner, 'Chitra');
+    const { id } = await svc.createDeal(agent, {
+      contactId,
+      pipelineId: pipeline.id,
+      stageId: newStage.id,
+      title: 'Renewal',
+      value: '5,000',
+    });
+    const { id: renewalsId } = await svc.createPipeline(owner, {
+      name: 'Renewals',
+      currency: 'INR',
+      stages: ['Due', 'Renewed'],
+    });
+    const renewals = (await svc.listPipelines(owner)).find((p) => p.id === renewalsId)!;
+    const renewed = renewals.stages[1]!;
+
+    // A stage must belong to the pipeline named.
+    await expectAppError(
+      svc.moveDeal(agent, {
+        id,
+        expectedVersion: 1,
+        pipelineId: renewals.id,
+        stageId: newStage.id,
+      }),
+      'validation_failed',
+      /Choose a stage of the pipeline/,
+    );
+    // Another company's pipeline reads as one that does not exist.
+    const other = await setup();
+    await expectAppError(
+      svc.moveDeal(agent, {
+        id,
+        expectedVersion: 1,
+        pipelineId: other.pipeline.id,
+        stageId: other.newStage.id,
+      }),
+      'validation_failed',
+      /Choose a stage of the pipeline/,
+    );
+
+    expect(
+      await svc.moveDeal(agent, {
+        id,
+        expectedVersion: 1,
+        pipelineId: renewals.id,
+        stageId: renewed.id,
+      }),
+    ).toEqual({ version: 2 });
+    const deal = await svc.getDeal(owner, id);
+    expect(deal).toMatchObject({
+      pipelineId: renewals.id,
+      pipelineName: 'Renewals',
+      stageId: renewed.id,
+      stageName: 'Renewed',
+      valueMinor: 500000,
+      currency: 'INR',
+      version: 2,
+    });
+    expect(deal.timeline[0]).toMatchObject({
+      kind: 'stage_changed',
+      data: {
+        fromStageId: newStage.id,
+        toStageId: renewed.id,
+        fromPipelineId: pipeline.id,
+        toPipelineId: renewals.id,
+      },
+    });
+    // The board of each pipeline shows it where it is now.
+    expect(
+      (await svc.board(owner, { pipelineId: pipeline.id }))!.columns.every(
+        (col) => col.count === 0,
+      ),
+    ).toBe(true);
+    expect(
+      (await svc.board(owner, { pipelineId: renewals.id }))!.columns.find(
+        (col) => col.stage.id === renewed.id,
+      )?.count,
+    ).toBe(1);
+
+    // An archived pipeline takes no deal.
+    const { id: archivedId } = await svc.createPipeline(owner, {
+      name: 'Old',
+      currency: 'INR',
+      stages: ['Lead'],
+    });
+    const archived = (await svc.listPipelines(owner)).find((p) => p.id === archivedId)!;
+    await svc.archivePipeline(owner, { id: archived.id, expectedVersion: archived.version });
+    await expectAppError(
+      svc.moveDeal(agent, {
+        id,
+        expectedVersion: 2,
+        pipelineId: archived.id,
+        stageId: archived.stages[0]!.id,
+      }),
+      'conflict',
+      /archived/,
+    );
+    expect(c.tenant.id).not.toBe(other.c.tenant.id);
+  });
+
   it('links a deal to a conversation only for members who can see it', async () => {
     const { c, owner, agent, pipeline, newStage } = await setup();
     const waId = `91${randomInt(7_000_000_000, 9_999_999_999)}`;
