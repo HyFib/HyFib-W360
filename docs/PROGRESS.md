@@ -1,5 +1,53 @@
 # Progress
 
+## 2026-10-06 — Phase 5: conversation tags through the API (P5-08, W-035, ADR-221)
+
+Status: **Implemented; its database and browser tests run in CI only.** Members tag conversations
+since ADR-220; integrations could not read or set the tags. The local PostgreSQL is unavailable (its
+Docker daemon stopped), so the new integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-221):** `tags` on every conversation the API answers, a `tag` filter, and `addTags`
+  and `removeTags` on the three calls that change conversations; a change of the tags moves
+  `updatedAt`, through the API or the inbox.
+- **Domain:** `api/conversations.ts` (`prepareConversationChange`, tags in
+  `changeLockedConversation`, the filter and the columns); the inbox's tag changes touch the
+  conversation; the scope's description and the API's summary mention tags.
+- **API document:** `tags` on `Conversation`, the `tag` parameter, `addTags` and `removeTags` on the
+  change schemas; two descriptions that named an ADR corrected, and a test that the document names
+  none.
+- **Tests:**
+  - Unit (4 new in `api/conversation-tags.test.ts`, 3 changed in `api/api.test.ts` and
+    `api/conversations.test.ts` for the new fields): the schemas, the refusals before the database,
+    the API document.
+  - Integration (3 new in `api-conversation-tags.test.ts`): reading, filtering, adding and removing,
+    `updatedAt`, the audit entry, the limit for one, many and a filter, other companies, erasure.
+    Written for CI; not run here.
+  - E2E (1 new in `api.spec.ts`): a key tags conversations, lists them by a tag, and the inbox shows
+    the tags. Written for CI; not run here.
+- **Docs:** ADR-221; ARCHITECTURE; SECURITY; THREAT-MODEL T208; DEPLOYMENT and RUNBOOKS;
+  DATA-RETENTION; BACKLOG P5-08; feature matrix W-035 and W-134.
+- **Mutation checks:** 12 deliberate regressions tried, all caught on the unit-tested parts.
+  Applying tags under the lock, the filter and `updatedAt` need the database, so their regressions
+  are left to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 959 passed (96 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 12 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Webhook events and filters on tags, tags in the message feed, a list of tags in use through the
+  API.
+
 ## 2026-10-06 — Phase 3 follow-up: conversation tags (P3-06, W-035, ADR-220)
 
 Status: **Implemented; its database and browser tests run in CI only.** Members filtered the inbox

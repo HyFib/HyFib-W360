@@ -472,6 +472,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    new function. Until the web rollout ends, an old web server shows no tags and ignores the inbox's
    `tag` filter.
 
+   ADR-221 has no migration. Until the web rollout ends, an old web server answers conversations
+   without `tags` and refuses `tag`, `addTags` and `removeTags` as unknown fields (422).
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

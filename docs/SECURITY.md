@@ -173,6 +173,9 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   on conversations the member can see. Erasing a contact deletes the tags of their conversations
   (the definer function's policies reach only the current company's rows), and an erased contact's
   conversation takes no new tags.
+  Keys (ADR-221) read conversations' tags with `conversations.read` and change them with
+  `conversations.write`, in their own company only; conversations of erased contacts are not found.
+  Changes through the API are audited with the counts added and removed, never the tags.
   Files customers send (ADR-216) are given only to members who can see the conversation, fetched for
   each request with the receiving account's token, which goes only to Graph and to the https address
   Graph returned (no user name or password, no redirects; the address is never stored or logged),

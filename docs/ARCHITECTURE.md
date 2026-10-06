@@ -411,6 +411,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `tagsInUse` groups the tags of the conversations the member can see. The inbox list selects each
   conversation's tags (`conversationTagsOf`) and filters with `conversationHasTag`;
   `app.erase_contact` deletes the tags of the contact's conversations.
+- **Conversation tags through the API** (`api/conversations.ts`, ADR-221): the conversation columns
+  select the tags (`conversationTagsOf`), `conversationFilterSql` adds `conversationHasTag` for
+  `tag`, `prepareConversationChange` checks `addTags` and `removeTags` before the transaction, and
+  `changeLockedConversation` applies them after the status under the row lock, touching
+  `updated_at`, emitting `conversation.tags` and auditing the counts.
 - **Files customers send** (`messaging/received-media.ts`, ADR-216): the route
   `/c/<company>/inbox/<conversation>/media/<message>` checks that the member can see the
   conversation and reads the message's media record and the receiving account's token in one

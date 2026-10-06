@@ -101,7 +101,7 @@ export const API_SCOPE_INFO: Record<
   'conversations.write': {
     label: 'Resolve, reopen, assign and add notes to conversations',
     description:
-      'Mark conversations resolved, or open again, assign them to members or move them between teams, as members do in the inbox, and add internal notes the team reads there (WhatsApp never receives them). Resolving a conversation or assigning it to a member stops an automation answering it.',
+      'Mark conversations resolved, or open again, assign them to members, move them between teams and tag them, as members do in the inbox, and add internal notes the team reads there (WhatsApp never receives them). Resolving a conversation or assigning it to a member stops an automation answering it.',
     permission: 'inbox.supervise',
     writes: true,
   },

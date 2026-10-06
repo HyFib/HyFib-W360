@@ -112,6 +112,17 @@ export function createConversationTagsService({ db }: ConversationTagsDeps) {
     return row;
   }
 
+  /**
+   * A change of the tags is a change of the conversation: its `updatedAt` moves, so the API's
+   * `updatedSince` finds it (ADR-221).
+   */
+  async function touch(tx: Tx, tenantId: string, conversationId: string): Promise<void> {
+    await tx
+      .update(conversations)
+      .set({ updatedAt: sql`now()` })
+      .where(and(eq(conversations.tenantId, tenantId), eq(conversations.id, conversationId)));
+  }
+
   async function tagsOf(tx: Tx, tenantId: string, conversationId: string): Promise<string[]> {
     const rows = await tx
       .select({ tag: conversationTags.tag })
@@ -164,6 +175,7 @@ export function createConversationTagsService({ db }: ConversationTagsDeps) {
             tag,
           })),
         );
+        await touch(tx, ctx.tenant.id, conversation.id);
         await emitTenantEvent(tx, ctx.tenant.id, {
           type: 'conversation.tags',
           conversationId: conversation.id,
@@ -195,6 +207,7 @@ export function createConversationTagsService({ db }: ConversationTagsDeps) {
           )
           .returning({ id: conversationTags.id });
         if (removed.length > 0) {
+          await touch(tx, ctx.tenant.id, conversation.id);
           await emitTenantEvent(tx, ctx.tenant.id, {
             type: 'conversation.tags',
             conversationId: conversation.id,

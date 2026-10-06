@@ -3140,6 +3140,8 @@ describe('OpenAPI document', () => {
       'status',
       'assigneeId',
       'teamId',
+      'addTags',
+      'removeTags',
     ]);
     expect(schema?.properties?.conversationIds).toMatchObject({
       minItems: 1,
@@ -3221,6 +3223,8 @@ describe('OpenAPI document', () => {
       'status',
       'assigneeId',
       'teamId',
+      'addTags',
+      'removeTags',
     ]);
     expect(schemas.UpdateConversation?.properties?.status?.enum).toEqual(['open', 'resolved']);
     for (const field of ['assigneeId', 'teamId']) {

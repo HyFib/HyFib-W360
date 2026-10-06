@@ -8686,3 +8686,29 @@ Decision:
 
 Not built: tags through the public API or webhooks, automations that tag, a central list of allowed
 tags, renaming a tag everywhere, and reports by tag.
+
+## ADR-221 Conversation tags through the public API (P5-08, W-035) (2026-10-06)
+
+Context: members tag conversations since ADR-220, but an integration (a helpdesk, a CRM) could
+neither read the tags nor set them, so the two sides could not share the labels.
+
+Decision:
+
+- **Read:** every conversation the API answers carries `tags`, alphabetically, with
+  `conversations.read`. `GET /conversations` takes `tag` (written as tags are, so its case does not
+  matter); a value that cannot be a tag is refused with 422 naming `tag`. Changing the conversations
+  a filter finds (ADR-166) takes it too.
+- **Change:** `PATCH /conversations/{id}`, `POST /conversations/update-many` and `/update-matching`
+  take `addTags` and `removeTags` with `conversations.write`, applied after the status: written as
+  tags are, each once, never both added and removed (422 naming `removeTags`), at most 20 on a
+  conversation, counted under the conversation's row lock (422 naming `addTags`, or
+  `change.addTags`, and nothing changed). What a conversation already has changes nothing.
+- **A change of the tags is a change of the conversation**, through the API or the inbox: its
+  `updatedAt` moves, so `updatedSince` finds it, and open inboxes refresh. Through the API it is
+  audited as `conversation.tags_changed` with the counts added and removed, never the tags, as
+  contacts' tag changes are.
+- **The API document names no ADR:** a unit test now checks the whole document, and two descriptions
+  that did were corrected.
+
+Not built: webhook events or webhook filters on tags, tags in the message feed, and a list of the
+tags in use through the API.

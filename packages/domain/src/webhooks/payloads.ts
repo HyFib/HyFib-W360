@@ -287,7 +287,7 @@ export const conversationAssignmentPayloadSchema = envelope(
         .uuid()
         .nullable()
         .describe(
-          'The member assigned by the change, as GET /members lists them; null for none. Null too for events captured before members were named (ADR-094).',
+          'The member assigned by the change, as GET /members lists them; null for none. Null too for events captured before members were named.',
         ),
       previousAssigneeId: z
         .uuid()

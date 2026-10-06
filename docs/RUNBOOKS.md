@@ -503,6 +503,12 @@ most 20 tags of up to 40 characters, without commas, and the conversation of an 
 none ("This contact was erased."). The inbox's Tag filter offers only the tags on conversations the
 member can see, so two members may be offered different tags.
 
+**An integration's tag change is refused (ADR-221).** 422 naming `addTags` means a tag that cannot
+be one (over 40 characters, or with a comma) or a conversation that would have more than 20 tags
+(the message names it; the call changed nothing); `removeTags` means the same tag both added and
+removed; `tag` means a filter value that cannot be a tag. Conversations of erased contacts are not
+found. Each change is in the audit log as `conversation.tags_changed` with the counts.
+
 **Migration 0010 failed.** It builds `app.conversations_team_idx` concurrently. If it failed, an
 INVALID index can remain: run `DROP INDEX CONCURRENTLY app.conversations_team_idx;` and run the
 migrations again.

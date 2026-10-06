@@ -700,6 +700,9 @@ verification, app review, Embedded Signup configuration).
   **[Uploading files to send by id built; its database and browser tests run only in CI]** (ADR-219,
   migrations 0143 and 0144: `POST /media` uploads a file for a number, which `POST /messages` sends
   as `mediaId` from that number for 30 days).
+  **[Conversation tags through the API built; their database and browser tests run only in CI]**
+  (ADR-221: conversations carry `tags`, `GET /conversations` filters by `tag`, and the three calls
+  that change conversations take `addTags` and `removeTags`; no migration).
   Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,

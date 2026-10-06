@@ -863,6 +863,88 @@ test('a key assigns and resolves several conversations in one call, all of them 
   );
 });
 
+test('a key tags conversations and lists them by tag, and the inbox shows the tags (ADR-221)', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('apitags');
+  const slug = `apitags-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Tanu Tags', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Tag Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Helpdesk tags');
+  await page.getByRole('checkbox', { name: /Read conversations/ }).check();
+  await page.getByRole('checkbox', { name: /Resolve, reopen, assign and add notes/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const token = await page.getByLabel('API key', { exact: true }).inputValue();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const auth = { Authorization: `Bearer ${token}` };
+
+  for (const text of ['My refund is late', 'Do you ship abroad?']) {
+    await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, randomWaId(), text));
+  }
+  await page.goto(`/c/${slug}/inbox`);
+  const items = page.getByRole('link', { name: /Priya Customer/ });
+  await expect(items).toHaveCount(2, { timeout: 20_000 });
+  const listed = (await (await request.get('/api/v1/conversations', { headers: auth })).json())
+    .data as { id: string; tags: string[] }[];
+  expect(listed.map((c) => c.tags)).toEqual([[], []]);
+  const [newest, oldest] = listed.map((c) => c.id) as [string, string];
+
+  // Written as members write tags; never added and removed at once.
+  const patch = (id: string, data: Record<string, unknown>) =>
+    request.patch(`/api/v1/conversations/${id}`, { headers: auth, data });
+  const tagged = await patch(oldest, { addTags: ['Refund', 'VIP', 'refund'] });
+  expect(tagged.status()).toBe(200);
+  expect((await tagged.json()).data.tags).toEqual(['refund', 'vip']);
+  const both = await patch(oldest, { addTags: ['vip'], removeTags: ['VIP'] });
+  expect(both.status()).toBe(422);
+  expect((await both.json()).error.issues).toEqual([
+    { path: 'removeTags', message: 'The tag vip cannot be both added and removed.' },
+  ]);
+
+  // Both tagged in one call, then listed by a tag.
+  const many = await request.post('/api/v1/conversations/update-many', {
+    headers: auth,
+    data: { conversationIds: [newest, oldest], addTags: ['follow up'] },
+  });
+  expect(((await many.json()).data as { tags: string[] }[]).map((c) => c.tags)).toEqual([
+    ['follow up'],
+    ['follow up', 'refund', 'vip'],
+  ]);
+  const vip = (await (await request.get('/api/v1/conversations?tag=VIP', { headers: auth })).json())
+    .data as { id: string }[];
+  expect(vip.map((c) => c.id)).toEqual([oldest]);
+  const badTag = await request.get('/api/v1/conversations?tag=a%2Cb', { headers: auth });
+  expect(badTag.status()).toBe(422);
+
+  // The tag taken off every conversation that has it, by a filter.
+  const matching = await request.post('/api/v1/conversations/update-matching', {
+    headers: auth,
+    data: { filter: { tag: 'follow up' }, change: { removeTags: ['follow up'] } },
+  });
+  expect(matching.status()).toBe(200);
+  expect(((await matching.json()).data as { tags: string[] }[]).map((c) => c.tags)).toEqual([
+    [],
+    ['refund', 'vip'],
+  ]);
+
+  // The inbox shows the tags the key put on, and filters by them.
+  await page.goto(`/c/${slug}/inbox?view=all&status=open&tag=vip`);
+  await expect(items).toHaveCount(1);
+  await expect(items.first()).toContainText('refund');
+  await expect(items.first()).toContainText('vip');
+
+  const doc = await (await request.get('/api/v1/openapi.json')).json();
+  expect(doc.components.schemas.Conversation.required).toContain('tags');
+  expect(JSON.stringify(doc)).not.toMatch(/ADR-\d/);
+});
+
 test('a key sends reply buttons and a list to a customer who wrote: the inbox shows them, and a picked row comes back through the API', async ({
   page,
   request,

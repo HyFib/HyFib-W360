@@ -284,7 +284,7 @@ const mediaIdField = z
   .uuid({ error: 'Give the id POST /media answered for the file' })
   .optional()
   .describe(
-    'The id `POST /media` answered for a file the company uploaded for the number the message is sent from, in the last 30 days (ADR-219). Give it in place of `link`.',
+    'The id `POST /media` answered for a file the company uploaded for the number the message is sent from, in the last 30 days. Give it in place of `link`.',
   );
 
 /** A message's media: a link WhatsApp fetches, or a file uploaded for the number (ADR-219). */

@@ -58,6 +58,7 @@ import { SEGMENT_LIMITS } from '../campaigns/segments';
 import { ORDER_REFERENCE_RE } from '../commerce/model';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
+import { MAX_TAGS_PER_CONVERSATION } from '../inbox/conversation-tags';
 import { TEMPLATE_HEADER_MEDIA } from '../templates/definition';
 import {
   apiStartAutomationSchema,
@@ -233,6 +234,11 @@ export const apiConversationSchema = z.object({
     .uuid()
     .nullable()
     .describe('The team the conversation is in, as GET /teams lists them.'),
+  tags: z
+    .array(z.string())
+    .describe(
+      'The conversation’s tags, alphabetically, as members and keys put them on it (lower-cased, without commas).',
+    ),
   unreadCount: z.number().int(),
   lastMessageAt: z.iso.datetime().nullable(),
   lastInboundAt: z.iso.datetime().nullable().describe('When the contact last wrote.'),
@@ -820,7 +826,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, read and manage saved segments and list their contacts, create, edit, review and submit campaign drafts for a member’s approval, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen, assign and tag conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, read and manage saved segments and list their contacts, create, edit, review and submit campaign drafts for a member’s approval, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -1310,7 +1316,14 @@ export function buildOpenApiDocument(serverUrl: string) {
               in: 'query',
               schema: { type: 'string', format: 'date-time' },
               description:
-                'Only conversations changed at or after this time (a new message, a status or assignee change, a read).',
+                'Only conversations changed at or after this time (a new message, a status, assignee or tag change, a read).',
+            },
+            {
+              name: 'tag',
+              in: 'query',
+              schema: { type: 'string', maxLength: 100 },
+              description:
+                'Only the conversations with this tag, however its letters are cased. A value that cannot be a tag (over 40 characters, or with a comma) is refused (422).',
             },
           ],
           responses: {
@@ -1335,11 +1348,12 @@ export function buildOpenApiDocument(serverUrl: string) {
         },
         patch: {
           operationId: 'updateConversation',
-          summary: 'Resolve, reopen, assign or move a conversation',
+          summary: 'Resolve, reopen, assign, move or tag a conversation',
           description: [
-            `${scopeNote('conversations.write')} As members do in the inbox, with any of \`status\`, \`assigneeId\` and \`teamId\`, applied together: the team, then the member, then the status.`,
+            `${scopeNote('conversations.write')} As members do in the inbox, with any of \`status\`, \`assigneeId\`, \`teamId\`, \`addTags\` and \`removeTags\`, applied together: the team, then the member, then the status, then the tags.`,
             "Resolving stops an automation answering the conversation and ends the wait for a reply; the contact's next message opens the conversation again. No satisfaction survey is sent: surveys follow a member's resolve.",
             'Assigning a member (one from GET /members) stops an automation answering the conversation; `null` unassigns it, and a round-robin team gives it out again within a minute. Moving it to a team (one from GET /teams) gives it to the team’s next available member when the team assigns in turn and the conversation is open with no member. A member who cannot answer conversations, or a team of another company, is refused (422, naming the field). When routing hands the conversation out at the same moment as a move into a team, the request can be refused (409, changing nothing): send it again.',
+            `Tags are written as members write them (lower-cased, spaces collapsed, at most 40 characters, no commas), each once; a tag cannot be both added and removed. A conversation has at most ${MAX_TAGS_PER_CONVERSATION} tags: a change that would give it more is refused (422, naming \`addTags\`). A change of the tags is a change of the conversation (\`updatedAt\`).`,
             'What the conversation already has changes nothing, so a retry is safe without an `Idempotency-Key`. Conversations of erased contacts are not found.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/Id' }],
@@ -1356,9 +1370,9 @@ export function buildOpenApiDocument(serverUrl: string) {
       '/conversations/update-many': {
         post: {
           operationId: 'updateManyConversations',
-          summary: 'Resolve, reopen, assign or move many conversations at once',
+          summary: 'Resolve, reopen, assign, move or tag many conversations at once',
           description: [
-            `${scopeNote('conversations.write')} Up to ${API_LIMITS.conversationsPerChange} conversations, each changed as PATCH /conversations/{id} changes one, with any of \`status\`, \`assigneeId\` and \`teamId\`. All of them or none: an id that names none of the company's conversations (an erased contact's included), a member who cannot answer conversations or a team of another company refuses the call (422, naming the field, as \`conversationIds.3\`), and nothing is changed.`,
+            `${scopeNote('conversations.write')} Up to ${API_LIMITS.conversationsPerChange} conversations, each changed as PATCH /conversations/{id} changes one, with any of \`status\`, \`assigneeId\`, \`teamId\`, \`addTags\` and \`removeTags\`. All of them or none: an id that names none of the company's conversations (an erased contact's included), a member who cannot answer conversations, a team of another company or a conversation that would have more than ${MAX_TAGS_PER_CONVERSATION} tags refuses the call (422, naming the field, as \`conversationIds.3\`), and nothing is changed.`,
             'The conversations are changed in the order given (a team that assigns in turn gives them out in that order) and answered in it. When routing hands one of them out at the same moment as a move into a team, the call can be refused as a whole (409, changing nothing): send it again. A call counts as one request against the rate and monthly limits. What a conversation already has changes nothing, so a retry is safe without an `Idempotency-Key`.',
           ].join('\n\n'),
           requestBody: { required: true, content: json(ref('UpdateManyConversations')) },
@@ -1380,9 +1394,9 @@ export function buildOpenApiDocument(serverUrl: string) {
           operationId: 'updateMatchingConversations',
           summary: 'Change the conversations a filter finds, a page at a time',
           description: [
-            'Scopes: `conversations.read` and `conversations.write`. Takes the filters of GET /conversations (`filter`, at least one) and a change (`change`): any of `status`, `assigneeId` and `teamId`, the same for every conversation, applied as PATCH /conversations/{id} applies them: the team, then the member, then the status.',
+            'Scopes: `conversations.read` and `conversations.write`. Takes the filters of GET /conversations (`filter`, at least one) and a change (`change`): any of `status`, `assigneeId`, `teamId`, `addTags` and `removeTags`, the same for every conversation, applied as PATCH /conversations/{id} applies them: the team, then the member, then the status, then the tags.',
             `Each call reads one page of the conversations GET /conversations lists with the same filters (newest first, at most ${API_LIMITS.conversationsPerChange}), changes each of them as PATCH /conversations/{id} changes one, in that order, and answers them as they now are with \`nextCursor\`: send the same filter and change with it until it is \`null\`. Pages go from newer conversations to older ones, each found by the filters as they are when it is read, so a conversation the change takes out of the filter is not read again. One someone else takes out of the filter between the read and the change is left out, so a page can hold fewer conversations than the limit while more follow. Conversations of erased contacts are left out.`,
-            'A member who cannot answer conversations or a team of another company refuses the call (422, naming the field, as `change.teamId`), even when no conversation matches, and nothing is changed. When the call moves conversations into a team while routing hands out one of them, it can be refused as a whole (409, changing nothing): send it again with the same cursor.',
+            `A member who cannot answer conversations or a team of another company refuses the call (422, naming the field, as \`change.teamId\`), even when no conversation matches, and nothing is changed; so does a conversation of the page that would have more than ${MAX_TAGS_PER_CONVERSATION} tags (\`change.addTags\`). When the call moves conversations into a team while routing hands out one of them, it can be refused as a whole (409, changing nothing): send it again with the same cursor.`,
             'What a conversation already has changes nothing, and one the change took out of the filter is not found again, so a call sent again after a lost answer is safe without an `Idempotency-Key`: the pages still reach every conversation the filter finds, each changed once. A call counts as one request against the rate and monthly limits.',
           ].join('\n\n'),
           requestBody: { required: true, content: json(ref('UpdateMatchingConversations')) },
@@ -2435,7 +2449,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       schemas: {
         UploadedMedia: {
           type: 'object',
-          description: 'A file uploaded for a number to send by id (ADR-219).',
+          description: 'A file uploaded for a number, to send by id.',
           properties: {
             id: { type: 'string', format: 'uuid', description: 'Give it as `mediaId`.' },
             channelId: {
