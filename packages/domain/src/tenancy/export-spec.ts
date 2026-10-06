@@ -776,6 +776,17 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
     ],
   },
   {
+    table: 'app.contact_merges',
+    columns: [
+      'id',
+      'kept_contact_id',
+      'merged_contact_id',
+      'merged_by_user_id',
+      'summary',
+      'merged_at',
+    ],
+  },
+  {
     table: 'app.contact_tags',
     columns: ['id', 'contact_id', 'tag', 'created_at'],
   },

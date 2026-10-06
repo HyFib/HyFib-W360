@@ -485,6 +485,14 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    Old servers ignore the column; until the web rollout ends, an old web server shows no setting and
    queues no receipts.
 
+   Migration 0147 (ADR-224) creates `app.contact_merges` and `app.merge_contacts`, adds the `merge`
+   consent source (its check is replaced, reading `app.consent_events` once under the migration's
+   lock), replaces three guard functions with an exception only that function uses, and grants the
+   definer role what it moves. 0148 and 0149 build `app.campaign_recipients_contact_idx` and
+   `app.automation_runs_contact_idx` concurrently (outside a transaction), so campaigns and runs
+   keep being written. Old servers never call the function; until the web rollout ends, an old web
+   server shows no merge.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

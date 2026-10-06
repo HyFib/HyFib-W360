@@ -132,6 +132,14 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   removing one needs `tenant.settings.manage` (it re-enables messaging).
 - Deleting a template Meta already has needs `templates.submit` as well as `templates.write`.
 - Erasing a contact needs `contacts.delete` (also while the company is suspended).
+- Merging contacts (ADR-224) needs `contacts.write` and `contacts.delete` (owners and
+  administrators, not while the company is suspended) and is audited with the counts.
+  `app.merge_contacts` (SECURITY DEFINER, executable by the runtime role only) works in the
+  company's own scope: a contact of another company is not found, and its new policies reach only
+  the current company's rows. Consent events, the CRM timeline and automation runs accept a change
+  of `contact_id` alone, only inside the function (`w360.contact_merge`) and only for the definer
+  role, which alone holds UPDATE on those columns. The opt-out of either contact stands; no opt-in
+  is added. `app.contact_merges` holds ids, the member and counts, never personal data.
 - Notice email choices (ADR-215): a member changes only their own, through
   `app.set_own_email_opt_outs` (SECURITY DEFINER, executable by the runtime role only), which takes
   the membership from the scope, never an argument; the runtime role has no update on memberships.

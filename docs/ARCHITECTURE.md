@@ -235,6 +235,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`filterConditions`, at most 10,000, ordered by id) in one transaction, refuse a count other than
   the one the member saw, then insert the tag for those without it and below the tag cap, or delete
   it, recording one audit entry.
+  Merging (`contacts/merge.ts`, ADR-224): `previewMerge` reads both contacts with their identities,
+  conversations, consent and counts, and `planContactMerge` gives the result and the refusals;
+  `mergeContacts` calls `app.merge_contacts` (SECURITY DEFINER), which takes the locks, checks
+  again, moves every row naming the merged contact, records the stricter consent, deletes the merged
+  contact and records the merge in `app.contact_merges`; the contact page follows a link to a merged
+  contact through `mergedInto`.
 - **Consent** (`packages/domain/src/consent`): append-only `consent_events`; a definer trigger
   maintains `contact_consents` (later wins, opt-out wins ties). Sources: keyword messages (matched
   in ingestion on newly stored text, button and interactive replies), member notes, import

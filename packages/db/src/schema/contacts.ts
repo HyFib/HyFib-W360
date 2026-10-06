@@ -91,6 +91,8 @@ export const CONSENT_SOURCES = [
   'api',
   'erasure',
   'store',
+  /** An opt-out a merged contact had, carried to the contact it was merged into (ADR-224). */
+  'merge',
 ] as const;
 export type ConsentSource = (typeof CONSENT_SOURCES)[number];
 
@@ -123,6 +125,24 @@ export const contactConsents = appSchema.table('contact_consents', {
   eventId: uuid('event_id').notNull(),
   occurredAt: tz('occurred_at').notNull(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
+/**
+ * A contact merged into another and deleted (migration 0147, ADR-224), written only by
+ * `app.merge_contacts`: who merged it and when, and how many records moved. The merged contact's
+ * details are not kept.
+ */
+export const contactMerges = appSchema.table('contact_merges', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  keptContactId: uuid('kept_contact_id').notNull(),
+  mergedContactId: uuid('merged_contact_id').notNull(),
+  mergedByUserId: text('merged_by_user_id'),
+  summary: jsonb('summary')
+    .notNull()
+    .default(sql`'{}'::jsonb`)
+    .$type<Record<string, unknown>>(),
+  mergedAt: tz('merged_at').notNull().defaultNow(),
 });
 
 export const SUPPRESSION_REASONS = ['manual', 'complaint', 'legal', 'erased'] as const;

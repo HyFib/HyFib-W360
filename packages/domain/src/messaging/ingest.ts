@@ -763,7 +763,24 @@ async function upsertIdentity(
     if (info.bsuid && !existing.bsuid) updates.bsuid = info.bsuid;
     if (info.parentBsuid && existing.parentBsuid !== info.parentBsuid)
       updates.parentBsuid = info.parentBsuid;
-    if (info.waId && !existing.waId) updates.waId = info.waId;
+    // Another identity can hold the number: one recorded by the number before WhatsApp named the
+    // customer by user id, which may belong to another contact or, after a merge (ADR-224), to the
+    // same one. That identity keeps it (taking it would break the unique index and fail the whole
+    // receipt); the message joins the contact of the identity its user id names.
+    if (info.waId && !existing.waId) {
+      const [holder] = await tx
+        .select({ id: contactIdentities.id })
+        .from(contactIdentities)
+        .where(
+          and(
+            eq(contactIdentities.tenantId, tenantId),
+            eq(contactIdentities.whatsappAccountId, whatsappAccountId),
+            eq(contactIdentities.waId, info.waId),
+          ),
+        )
+        .limit(1);
+      if (!holder) updates.waId = info.waId;
+    }
     if (info.profileName && existing.profileName !== info.profileName)
       updates.profileName = clipText(info.profileName, 200);
     if (Object.keys(updates).length > 0) {

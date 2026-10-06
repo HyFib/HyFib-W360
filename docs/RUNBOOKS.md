@@ -521,6 +521,18 @@ outcome (`off`, `contact_erased`, `channel_inactive`, `account_disconnected`, `r
 Meta said). Jobs that kept failing are in the dead letters of the `message.read` queue. Typing
 indicators are queued only inside the 24-hour window, at most every 20 seconds per composer.
 
+**A merge is refused, or a contact is missing after one (ADR-224).** The review page says why a
+merge cannot be done; the function refuses the same cases again in fixed sentences, and a message to
+the merged contact being sent asks for a minute's wait. A merged contact is deleted: its old link
+leads to the contact it was merged into (`app.contact_merges`), and the audit log has
+`contact.merged` with the counts moved. A merge cannot be undone; a mistaken one is corrected by
+hand (a number moved back by a member, consent recorded again with evidence).
+
+**Migration 0148 or 0149 failed.** They build `app.campaign_recipients_contact_idx` and
+`app.automation_runs_contact_idx` concurrently. If one failed, an INVALID index can remain: run
+`DROP INDEX CONCURRENTLY app.campaign_recipients_contact_idx;` (or
+`app.automation_runs_contact_idx`) and run the migrations again.
+
 **Migration 0010 failed.** It builds `app.conversations_team_idx` concurrently. If it failed, an
 INVALID index can remain: run `DROP INDEX CONCURRENTLY app.conversations_team_idx;` and run the
 migrations again.

@@ -70,8 +70,11 @@ verification, app review, Embedded Signup configuration).
   and inbound), formula-safe export, erasure; saved segments (P3-04). **[Bulk tag edits built; their
   database and browser tests run only in CI]** (ADR-213: one tag added to or removed from up to
   10,000 contacts the page's filters match, refused if the matches changed since the member saw
-  them; no migration). **Remaining:** safe merge (H-019), role-based number masking (W-044), bulk
-  edits of other fields.
+  them; no migration). **[Merging contacts built; its database and browser tests run only in CI]**
+  (ADR-224, H-019, migrations 0147 to 0149: owners and administrators merge a duplicate into the
+  contact they keep after reviewing both; everything moves, the stricter consent stands, and the
+  duplicate is deleted with a record of the merge). **Remaining:** role-based number masking
+  (W-044), bulk edits of other fields, merges through the API, joining conversations.
 - **P3-02 Consent & suppression** — _implemented (2026-09-26)_: consent events with provenance,
   opt-out/opt-in keywords, Meta 131050 opt-outs, suppression list, send-time enforcement (race test
   with a queued template, and with campaigns). **Remaining:** review Meta's

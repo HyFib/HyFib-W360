@@ -1,4 +1,10 @@
 import { expect, test } from './fixtures';
+import {
+  connectTestChannel,
+  inboundByUserId,
+  messagingConfigured,
+  sendSignedWebhook,
+} from './messaging-support';
 import { expectNoHorizontalOverflow, signUpAndVerify, uniqueEmail } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
@@ -87,4 +93,72 @@ test('an owner adds a contact, records consent and tags, imports a CSV and expor
   await expect(page.getByText('Consent settings saved.')).toBeVisible();
   await page.reload();
   await expect(page.getByLabel('Stop all messages')).toHaveValue('STOP, BAND KARO');
+});
+
+test('an owner merges a customer known only by WhatsApp user id into the contact with their number', async ({
+  page,
+  request,
+}) => {
+  test.skip(!messagingConfigured, 'Meta test configuration (stand-in, app secret) not provided');
+  const email = uniqueEmail('merge');
+  const slug = `mg-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Mira Merge', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Merge Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  // The contact with the number, added by a member.
+  await page.goto(`/c/${slug}/contacts/new`);
+  await page.getByLabel('Name').fill('Asha Rao');
+  await page.getByLabel('Phone number').fill('+91 98765 43299');
+  await page.getByRole('button', { name: 'Add contact' }).click();
+  await expect(page.getByRole('heading', { name: 'Asha Rao', level: 1 })).toBeVisible();
+  const keptUrl = page.url();
+
+  // The same customer writes with a username: WhatsApp names them by user id only.
+  const userId = `IN.e2e${Date.now().toString(36)}`;
+  await sendSignedWebhook(
+    request,
+    inboundByUserId(wabaId, phoneNumberId, userId, 'Hi, it is Asha', 'Asha'),
+  );
+  await expect
+    .poll(
+      async () => {
+        await page.goto(`/c/${slug}/contacts?q=Asha`);
+        return page.getByRole('link', { name: 'Asha', exact: true }).count();
+      },
+      { timeout: 20_000 },
+    )
+    .toBe(1);
+  await page.getByRole('link', { name: 'Asha', exact: true }).click();
+  const mergedUrl = page.url();
+  await expect(page.getByText('No phone number')).toBeVisible();
+
+  // From the kept contact: find the duplicate, review, merge.
+  await page.goto(keptUrl);
+  await page.getByRole('link', { name: 'Find the duplicate' }).click();
+  await page.getByLabel('Search').fill('Asha');
+  await page.getByRole('button', { name: 'Search' }).click();
+  await expect(page.getByRole('cell', { name: 'Asha Rao' })).toHaveCount(0);
+  await page.getByRole('link', { name: 'Review merge' }).click();
+  await expect(page.getByRole('heading', { name: 'Review merge', level: 1 })).toBeVisible();
+  await expect(page.getByText('user id only')).toBeVisible();
+  await expect(page.getByText('These contacts cannot be merged')).toHaveCount(0);
+  await expectNoHorizontalOverflow(page);
+  await page.getByRole('button', { name: 'Merge contacts' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Merge contacts' }).click();
+
+  // The kept contact has the customer's WhatsApp identity and conversation now.
+  await expect(page.getByText('Contacts merged')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Asha Rao', level: 1 })).toBeVisible();
+  await expect(page.getByText(/user id only/)).toBeVisible();
+  await expect(page.getByRole('link', { name: /Conversation via/ })).toBeVisible();
+
+  // A link to the merged contact leads to the one it was merged into.
+  await page.goto(mergedUrl);
+  await expect(page.getByRole('heading', { name: 'Merged contact', level: 1 })).toBeVisible();
+  await page.getByRole('link', { name: 'Open the contact it was merged into' }).click();
+  await expect(page.getByRole('heading', { name: 'Asha Rao', level: 1 })).toBeVisible();
 });

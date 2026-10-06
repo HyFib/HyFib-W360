@@ -1,5 +1,57 @@
 # Progress
 
+## 2026-10-06 — Phase 3 follow-up: merging contacts (P3-01, H-019, ADR-224)
+
+Status: **Implemented; its database and browser tests run in CI only.** One person could be two
+contacts (a customer writing by WhatsApp user id and known by phone) and nothing joined them. The
+local PostgreSQL is unavailable (its Docker daemon stopped), so migrations 0147 to 0149 and the new
+integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-224):** owners and administrators merge from the kept contact after a review;
+  everything moves; the stricter consent; the merged contact deleted with a record; refusals; the
+  lock order and the append-only exceptions.
+- **Migrations:** 0147 (`app.contact_merges`, `app.merge_contacts`, the `merge` consent source,
+  three guards' exceptions, grants and policies, deletion step 777), 0148 and 0149 (indexes on the
+  contact of campaign rows and automation runs, built concurrently).
+- **Domain:** `contacts/merge.ts` (`planContactMerge`, `mergedConsent`, the service with
+  `previewMerge`, `mergeContacts`, `mergedInto`); ingestion leaves a number another identity holds;
+  replies use the identity with a number WhatsApp updated last; the export spec lists
+  `app.contact_merges`.
+- **Web:** "Merge a duplicate" on the contact page, the search and review pages, the merged notice,
+  and the page a merged contact's link shows.
+- **Tests:**
+  - Unit (6 new in `contacts/merge.test.ts`): the consent rule, the result, the refusals and their
+    sentences, the schemas, the permissions before the database (also while suspended).
+  - Integration (4 new in `contact-merges.test.ts`): every record moved and the stricter consent,
+    the deletion, its record, audit and webhooks; the refusals under the function's checks; a
+    customer known by user id and by number, and the reply to the number; chained merges. Written
+    for CI; not run here.
+  - E2E (1 new in `contacts.spec.ts`): an owner merges a customer known only by user id into the
+    contact with their number. Written for CI; not run here.
+- **Docs:** ADR-224; ARCHITECTURE; SECURITY; THREAT-MODEL T211; DEPLOYMENT and RUNBOOKS;
+  DATA-RETENTION; BACKLOG P3-01; feature matrix H-019 (implemented).
+- **Mutation checks:** 19 deliberate regressions tried, all caught (one only after a test was added)
+  on the unit-tested parts. The function's moves and checks need the database, so their regressions
+  are left to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                               | Result                                                                                                 |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`    | clean                                                                                                  |
+| `pnpm test` (unit)                                    | 971 passed (98 files)                                                                                  |
+| `pnpm test:integration`, e2e, migrations 0147 to 0149 | not run here: the local PostgreSQL is unavailable; CI runs them                                        |
+| `pnpm build`                                          | passed                                                                                                 |
+| Mutation checks                                       | 19 deliberate regressions tried, all caught (one only after a test was added) on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes                 | no leaks found                                                                                         |
+
+### Known gaps
+
+- Merges through the API and a `contact.merged` webhook event; joining two conversations on one
+  number; merging contacts that each have a number; suggestions of duplicates.
+
 ## 2026-10-06 — Phase 3 follow-up: read receipts and typing indicators (P3-06, ADR-223)
 
 Status: **Implemented; its database and browser tests run in CI only.** Customers never saw that the

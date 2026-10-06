@@ -20,6 +20,7 @@ import {
   desc,
   eq,
   inArray,
+  isNotNull,
   isNull,
   mediaObjects,
   messageStatusEvents,
@@ -167,6 +168,8 @@ async function replyRoute(
       'The 24-hour customer service window has closed. Only approved templates can be sent now.',
     );
   }
+  // A contact can have more than one identity on an account (one known by user id only, or two
+  // after a merge, ADR-224): the reply goes to the number of the one WhatsApp updated last.
   const [identity] = await tx
     .select({ waId: contactIdentities.waId })
     .from(contactIdentities)
@@ -175,8 +178,10 @@ async function replyRoute(
         eq(contactIdentities.tenantId, ctx.tenant.id),
         eq(contactIdentities.contactId, conv.contactId),
         eq(contactIdentities.whatsappAccountId, channel.whatsappAccountId),
+        isNotNull(contactIdentities.waId),
       ),
     )
+    .orderBy(desc(contactIdentities.updatedAt), desc(contactIdentities.id))
     .limit(1);
   if (!identity?.waId) {
     throw new AppError(
@@ -485,6 +490,7 @@ export async function queueTemplateMessage(deps: OutboundDeps, ctx: TenantContex
           sql`${contactIdentities.waId} is not null`,
         ),
       )
+      .orderBy(desc(contactIdentities.updatedAt), desc(contactIdentities.id))
       .limit(1);
     const recipientPhone = phoneFromWaId(identity?.waId) ?? contact.phone;
     if (!recipientPhone) {

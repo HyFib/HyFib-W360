@@ -44,6 +44,7 @@ import {
   createFlowsService,
   createReportsService,
   createConsentService,
+  createContactMergeService,
   createContactsService,
   createEmailPreferencesService,
   createInboxService,
@@ -99,6 +100,7 @@ import {
   type GrowthService,
   type ReportsService,
   type ConsentService,
+  type ContactMergeService,
   type ContactsService,
   type EmailPreferencesService,
   type InboxService,
@@ -191,6 +193,8 @@ export interface Runtime {
   /** Emails to the members who can approve a campaign waiting for approval (ADR-204). */
   campaignNotices: CampaignNoticeDeps;
   contacts: ContactsService;
+  /** Merging two contacts into one (ADR-224). */
+  contactMerges: ContactMergeService;
   consent: ConsentService;
   templates: TemplatesService;
   segments: SegmentsService;
@@ -354,6 +358,7 @@ async function init(): Promise<Runtime> {
   const csat = createCsatService({ db, clock: systemClock });
   const outbound: OutboundDeps = { db, jobs, signer, clock: systemClock };
   const contacts = createContactsService({ db, clock: systemClock });
+  const contactMerges = createContactMergeService({ db, clock: systemClock });
   const consent = createConsentService({ db, clock: systemClock });
   const templates = createTemplatesService({ db, jobs, signer, clock: systemClock });
   const segments = createSegmentsService({ db, clock: systemClock });
@@ -569,6 +574,7 @@ async function init(): Promise<Runtime> {
     outbound,
     campaignNotices,
     contacts,
+    contactMerges,
     consent,
     templates,
     segments,

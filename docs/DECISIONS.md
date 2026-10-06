@@ -8768,3 +8768,58 @@ Decision:
 
 Not built: members' presence in the inbox (who else is viewing or writing in a conversation), read
 receipts for automations' or keys' replies, and marking each unread message read.
+
+## ADR-224 Merging two contacts (H-019) (2026-10-06)
+
+Context: one person could be two contacts, and nothing joined them. WhatsApp lets customers write
+with a username: a message naming them only by WhatsApp user id creates a contact without a number,
+while the company already knows them by phone (imported, added by a member, read from a store).
+Contacts from the API or a store can lack a number too. A later message naming both the user id and
+the number failed its whole receipt: the user id's identity took a number another identity held,
+against the unique index.
+
+Decision:
+
+- **Owners and administrators merge** (`contacts.write` and `contacts.delete`, so not while the
+  company is suspended), from the contact they keep: "Merge a duplicate" finds the other by name,
+  email or number, the review shows both side by side with what the result keeps and why a merge is
+  refused, and a confirmation merges. It cannot be undone; the audit log has `contact.merged` with
+  the merged contact's id and counts.
+- **Everything moves to the kept contact** in one transaction (`app.merge_contacts`, SECURITY
+  DEFINER): WhatsApp identities, conversations, the consent history (whole, with its times and
+  sources), tags, CRM deals with their tasks and timeline (one statement, as their composite keys
+  tie them to one contact), orders, store messages, conversation sources, campaign rows, automation
+  runs, Flow sends and answers, and earlier merges into it. The kept contact keeps its name, number,
+  email and field values and takes the other's where it has none. Of a campaign both were in, one
+  row stays: the one a message was sent from, else one still waiting to be sent (so the person is
+  not sent it twice), else the kept contact's.
+- **The stricter consent:** the merged contact's opt-out stands on the kept contact, recorded as a
+  consent event with the new source `merge` (at the later of now and the kept state's own time,
+  where an opt-out wins a tie). A merge never adds an opt-in: one only the merged contact had stays
+  in the history, the review says so, and a member records it again if the customer agreed.
+- **Deleted, not emptied:** the merged contact is deleted once nothing names it, and
+  `app.contact_merges` records who merged it into which contact, when, and the counts (no personal
+  data), so a link to it leads to the kept contact. Anything that read it before the merge's locks
+  committed first and was merged; anything still naming it afterwards meets its foreign key and
+  fails (ingestion and jobs are retried, members' actions refused) instead of landing on a contact
+  nobody sees. What the merge's own transaction captured about it (webhook events, the API's change
+  records) goes with it.
+- **Refused** (the review says why, and the function checks again under its locks): two phone
+  numbers (a contact keeps one), conversations of both on the same company number (one conversation
+  per number and contact; conversations are not joined), more than 50 tags between them, a campaign
+  sent to both, an erased contact, and a message to the merged contact being sent (its answer is
+  recorded for the contact read when it was claimed; queued sends are locked, so none is claimed
+  during the merge).
+- **Locks** in the order other writers take them: both contacts' conversations, then both contacts,
+  then the merged contact's queued and in-flight sends and both contacts' campaign rows, each in id
+  order. Consent events, the CRM timeline and what started an automation run stay append-only,
+  except for an update that changes only `contact_id` while the function sets `w360.contact_merge`,
+  by the definer role alone (it alone holds UPDATE on those columns), as erasure's exception (0005).
+- **Also fixed:** a message naming a customer by user id and by a number another identity holds
+  leaves the number with that identity and joins the user id's contact, instead of failing the
+  receipt; a reply uses the identity WhatsApp updated last among those with a number (with two
+  identities on an account it could take the one known by user id only and refuse).
+
+Not built: merging through the API and a `contact.merged` webhook event (the merged contact's id
+stops resolving: the API answers 404), joining two conversations on one number, merging contacts
+that each have a number, undoing a merge, and suggestions of likely duplicates.

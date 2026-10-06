@@ -139,6 +139,31 @@ export function inboundMessage(
   });
 }
 
+/**
+ * A customer's text naming them by WhatsApp user id only, without their number (customers who use
+ * a username, ADR-224).
+ */
+export function inboundByUserId(
+  wabaId: string,
+  phoneNumberId: string,
+  userId: string,
+  text: string,
+  name = 'Priya Customer',
+) {
+  return envelope(wabaId, phoneNumberId, {
+    contacts: [{ profile: { name }, user_id: userId }],
+    messages: [
+      {
+        from: userId,
+        id: `wamid.e2e.${randomUUID()}`,
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        type: 'text',
+        text: { body: text },
+      },
+    ],
+  });
+}
+
 /** Several messages from one customer in one webhook, each `{ type, [type]: fields }`. */
 export function inboundMessages(
   wabaId: string,
