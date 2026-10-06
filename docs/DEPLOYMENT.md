@@ -445,6 +445,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    Old servers ignore the column: until the rollout ends, an old web server shows no Notifications
    tab and old workers and web servers email members who turned a kind off.
 
+   ADR-216 has no migration. The web tier now makes outbound https requests to Meta on members'
+   requests: to the Graph origin, as onboarding already did, and to the address each file's Graph
+   answer gives, whose host Meta's description does not name. Allow the web tier the same outbound
+   https to Meta as the worker. Until the web rollout ends, an old web server shows "Media download
+   is not available yet." in place of a file.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

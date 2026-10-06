@@ -405,6 +405,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the audit entry in one transaction, then yields the header and pages of 500 messages (keyset on
   the exact `created_at` and the id, read-only transactions) formatted as plain text; the route
   `/c/<company>/inbox/<conversation>/transcript` streams it as an attachment.
+- **Files customers send** (`messaging/received-media.ts`, ADR-216): the route
+  `/c/<company>/inbox/<conversation>/media/<message>` checks that the member can see the
+  conversation and reads the message's media record and the receiving account's token in one
+  read-only transaction, then asks Graph for the file's address (`GraphClient.getMedia`) and
+  downloads it with the token (`downloadMedia`: https or the Graph origin only, no redirects),
+  passing the bytes on through a stream that stops past 100 MB. Nothing is stored;
+  `mediaPresentation` decides the response's type and disposition.
 - **Collision warning** (`queueTextMessage` `afterMessageId`): under the conversation row lock, a
   reply is refused once when another member's reply is newer than the newest message the sender had
   seen; the composer refreshes the thread and keeps the draft (ADR-033).

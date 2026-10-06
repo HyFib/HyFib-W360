@@ -298,6 +298,7 @@ export default async function ConversationPage({
                 <MessageBubble
                   key={m.id}
                   slug={ctx.tenant.slug}
+                  conversationId={conv.id}
                   message={m as ThreadMessage}
                   timeZone={tz}
                   canResolveUnknown={canReply}

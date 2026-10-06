@@ -1,5 +1,52 @@
 # Progress
 
+## 2026-10-06 — Phase 2 follow-up: viewing the files customers send (P2-09, P5-08, ADR-216)
+
+Status: **Implemented; its database and browser tests run in CI only.** The inbox showed only the
+kind and caption of a file a customer sent. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so the new integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-216):** files fetched from WhatsApp for each request with the receiving account's
+  token and passed on without a copy; members who can see the conversation; only photos, stickers,
+  recordings and videos shown in the page, other files downloaded; 100 MB at most.
+- **Domain:** `messaging/received-media.ts` (the service, `mediaPresentation`, `mediaFilename`,
+  `contentDisposition`, `limitedStream`); `GraphClient.getMedia` and `downloadMedia`.
+- **Web:** the route `/c/<company>/inbox/<conversation>/media/<message>`; the conversation page
+  shows photos and stickers, players for recordings and videos, and download links.
+- **Test stand-in:** files kept per media id, `GET /{media-id}` and the download address, which
+  needs a valid token.
+- **Tests:**
+  - Unit (9 new in `messaging/received-media.test.ts`): types, presentation, names, the header, the
+    limit, the refusals, the Graph answers, the address and redirect rules.
+  - Integration (2 new in `received-media.test.ts`): members who can see the conversation, the token
+    at both calls, nothing stored, other conversations and companies, refusals with reasons, none
+    after erasure. Written for CI; not run here.
+  - E2E (1 new in `inbox.spec.ts`): a photo shown and a document downloaded under its name. Written
+    for CI; not run here.
+- **Docs:** ADR-216; research M-196; ARCHITECTURE; SECURITY; THREAT-MODEL T203; DEPLOYMENT and
+  RUNBOOKS; DATA-RETENTION; BACKLOG P2-09 and P5-08; feature matrix W-032.
+- **Mutation checks:** 24 deliberate regressions tried, all caught on the unit-tested parts. The
+  service's access checks need the database, so their regressions are left to the integration tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 941 passed (92 files)                                                |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them      |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 24 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Files through the public API, byte ranges for Safari's players, thumbnails, keeping files past
+  WhatsApp's lifetime, scanning documents.
+
 ## 2026-10-06 — Phase 3 follow-up: members choose their notice emails (P3-06, ADR-215)
 
 Status: **Implemented; its database and browser tests run in CI only.** Notice emails about mentions

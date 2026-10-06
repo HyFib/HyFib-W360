@@ -6,8 +6,10 @@ import {
   inboundMessage,
   inboundMessages,
   messagingConfigured,
+  newMediaId,
   randomWaId,
   sendSignedWebhook,
+  setStandInMedia,
   standInRequests,
   statusUpdate,
 } from './messaging-support';
@@ -137,6 +139,70 @@ test('a long message cut mid-emoji and a large contact card arrive in one webhoo
   await expect(thread.getByText('Shared a contact card')).toBeVisible();
   await expect(thread.getByText(/^\d+ contacts were too large to keep$/)).toBeVisible();
   await expect(thread.getByText('This message was too large to keep.')).toBeVisible();
+});
+
+/** A 1×1 PNG. */
+const PIXEL = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+  'base64',
+);
+
+test('a photo and a document the customer sends open from the conversation (ADR-216)', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('inbox-files');
+  const slug = `files-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Faiz Files', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('File Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  // WhatsApp keeps the files; the webhook names them.
+  const photoId = newMediaId();
+  const pdfId = newMediaId();
+  const pdf = Buffer.from('%PDF-1.4 price list');
+  await setStandInMedia(request, { id: photoId, mimeType: 'image/png', bytes: PIXEL });
+  await setStandInMedia(request, { id: pdfId, mimeType: 'application/pdf', bytes: pdf });
+  await sendSignedWebhook(
+    request,
+    inboundMessages(wabaId, phoneNumberId, randomWaId(), [
+      { type: 'image', image: { id: photoId, mime_type: 'image/png', caption: 'The blue kurta' } },
+      {
+        type: 'document',
+        document: { id: pdfId, mime_type: 'application/pdf', filename: 'Price list.pdf' },
+      },
+    ]),
+  );
+  await page.getByRole('link', { name: 'Inbox' }).click();
+  const conversation = page.getByRole('link', { name: /Priya Customer/ });
+  await expect(conversation).toBeVisible({ timeout: 20_000 });
+  await conversation.click();
+  const thread = page.getByRole('list', { name: /^Messages with/ });
+
+  // The photo is fetched from WhatsApp through HyFib as the page shows it.
+  const photo = thread.getByRole('img', { name: 'The blue kurta' });
+  await expect(photo).toBeVisible();
+  await expect
+    .poll(() => photo.evaluate((img: HTMLImageElement) => (img.complete ? img.naturalWidth : 0)))
+    .toBe(1);
+  // The document downloads under the name it came with.
+  const downloading = page.waitForEvent('download');
+  await thread.getByRole('link', { name: 'Download Price list.pdf' }).click();
+  const download = await downloading;
+  expect(download.suggestedFilename()).toBe('Price list.pdf');
+  expect((await readFile(await download.path())).equals(pdf)).toBe(true);
+
+  // Both came from WhatsApp with the company's token.
+  const fetched = (await standInRequests(request)).filter(
+    (r) => r.path === `/__media/${photoId}` || r.path === `/__media/${pdfId}`,
+  );
+  expect(new Set(fetched.map((r) => r.path))).toEqual(
+    new Set([`/__media/${photoId}`, `/__media/${pdfId}`]),
+  );
+  expect(fetched.every((r) => r.authorization === `Bearer ${E2E_CHANNEL_TOKEN}`)).toBe(true);
 });
 
 test('webhooks with a bad signature are refused and store nothing', async ({ request }) => {

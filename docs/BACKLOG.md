@@ -40,8 +40,10 @@ verification, app review, Embedded Signup configuration).
   delivery in e2e.
 - **P2-09 Inbox UI** — done: views, thread, composer with per-member-and-company drafts and
   idempotency keys, window indicator, assignment, resolve/reopen, notes, unknown-outcome decisions,
-  live updates. Remaining: list virtualisation, collision warnings (phase 3 with presence), template
-  picker (phase 3).
+  live updates. **[Files customers send built; their database and browser tests run only in CI]**
+  (ADR-216: photos, stickers, voice notes, videos and documents fetched from WhatsApp when shown and
+  never stored; no migration). Remaining: list virtualisation, collision warnings (phase 3 with
+  presence), template picker (phase 3), byte ranges so Safari plays recordings and videos.
 - **P2-10 Channel settings UI** — done: connect (Embedded Signup), setup progress and errors, retry,
   disconnect, quality and health time. Remaining: messaging limits and granted permissions display.
 - **P2-11 Platform quarantine view** — done with P5-10 (ADR-054): the operations console's
@@ -688,7 +690,7 @@ verification, app review, Embedded Signup configuration).
   after which approving is refused, and the page then offers no Approve button; no migration).
   Remaining: uploaded media, call-to-action messages through the API, taking
   reactions back,
-  media downloads, changing a field's type,
+  media downloads (members open them in the inbox since ADR-216), changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
   resuming what members or HyFib paused, campaign
   recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose

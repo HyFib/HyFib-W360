@@ -28,6 +28,7 @@ export * from './messaging/ingest';
 export * from './messaging/outbound';
 export * from './messaging/inbox';
 export * from './messaging/transcript';
+export * from './messaging/received-media';
 export * from './messaging/interactive';
 export * from './messaging/onboarding';
 export * from './messaging/access';

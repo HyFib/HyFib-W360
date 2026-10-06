@@ -427,6 +427,23 @@ export async function setStandInSubscription(
   expect(res.ok()).toBe(true);
 }
 
+/** An id for a file a customer sends, as WhatsApp names one in a webhook (ADR-216). */
+export function newMediaId(): string {
+  return digits(16);
+}
+
+/** TEST-ONLY: a file a customer sent, as WhatsApp keeps it for the account (ADR-216). */
+export async function setStandInMedia(
+  request: APIRequestContext,
+  media: { id: string; mimeType: string; bytes: Buffer },
+) {
+  const res = await request.post(
+    `http://127.0.0.1:${process.env.E2E_GRAPH_PORT}/__stand-in/media`,
+    { data: { id: media.id, mimeType: media.mimeType, base64: media.bytes.toString('base64') } },
+  );
+  expect(res.ok()).toBe(true);
+}
+
 export async function standInRequests(request: APIRequestContext) {
   const res = await request.get(
     `http://127.0.0.1:${process.env.E2E_GRAPH_PORT}/__stand-in/requests`,

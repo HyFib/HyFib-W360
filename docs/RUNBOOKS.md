@@ -401,6 +401,13 @@ sign-in and billing emails cannot be turned off. During a rollout an old server 
 email that was turned off. The audit log records each change as
 `membership.email_preferences_updated`.
 
+**A member cannot open a file a customer sent (ADR-216).** The message says why: the account that
+received it is disconnected or Meta refused its token (reconnect it in Settings → Channels; the
+daily access check reports the same), WhatsApp no longer keeps the file (it keeps files for a
+limited time; there is nothing to restore, since HyFib keeps no copy), or WhatsApp did not answer
+(try again, and check the web tier's outbound https to Meta). Safari and iOS do not play recordings
+and videos from HyFib: members download them with the link below the player.
+
 **Many failures with 131049.** Meta's per-user marketing limit: those customers received too many
 marketing messages from businesses. Do not resend; wait at least 24 hours (M-062) and consider the
 company's frequency cap.

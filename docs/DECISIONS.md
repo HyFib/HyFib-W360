@@ -8500,3 +8500,54 @@ Decision:
 
 Not built: a digest instead of single emails, in-app notifications, preferences for CRM task
 reminders, and a company-wide default set by an administrator.
+
+## ADR-216 Viewing and downloading the files customers send (P2-09, P5-08) (2026-10-06)
+
+Context: a photo, voice note, video, document or sticker a customer sent reached the inbox as its
+kind and caption only, with "Media download is not available yet.": members could not see what
+customers sent. WhatsApp keeps the file for the business to fetch (`GET /{media-id}` gives an
+address valid for 5 minutes, downloaded with the account's token; research M-047, M-196), but HyFib
+has no storage for files.
+
+Decision:
+
+- **Fetched when shown, never kept:** the conversation page shows each file the customer sent
+  through `/c/<company>/inbox/<conversation>/media/<message>`. For each request HyFib asks Graph for
+  the file's address with the token of the WhatsApp account that received it, downloads it with the
+  same token and passes it on as it arrives (`messaging/received-media.ts`). Nothing is written: the
+  file is not stored, cached on the server or logged, so a customer's erasure, which deletes the
+  message's media record, leaves nothing behind, and a file WhatsApp no longer keeps cannot be
+  shown.
+- **Who:** members who can see the conversation, as for its messages: `inbox.read_all`, or
+  `inbox.read_assigned` for conversations assigned to them or to nobody. A message of another
+  conversation or company, one the company sent, or one of an erased customer has no file to give
+  (404).
+- **How it reaches the browser:** photos (JPEG, PNG), stickers (WebP), recordings (AAC, MP4, MPEG
+  and OGG audio) and videos (MP4, 3GPP) keep their type and are shown or played in the page;
+  recordings and videos load only when played. Every other file, documents included, is sent as
+  `application/octet-stream` with `Content-Disposition: attachment`, under the name the document
+  came with (without characters a file name or a header cannot hold) or
+  `whatsapp-<type>-<message>.<extension>`, so no customer's file renders as a page of HyFib. Every
+  answer carries `X-Content-Type-Options: nosniff`, a `sandbox` Content-Security-Policy and
+  `Cross-Origin-Resource-Policy: same-origin`, and only the member's browser caches it (`private`,
+  an hour).
+- **The token reaches only Meta:** it goes in the Authorization header to Graph, and to the address
+  Graph returned only when that address is https (or the configured Graph origin, the test stand-in)
+  and has no user name or password; redirects are refused and the address is never stored or logged.
+  The download sends a User-Agent in the form of the pattern in Meta's description.
+- **Limits and refusals:** a file larger than 100 MB, Meta's largest (M-049), is refused by its
+  announced size before the download and by counting while it passes. Other refusals come before the
+  first byte, as plain text: the account disconnected or its token refused by Meta (412, reconnect
+  in Settings → Channels), WhatsApp no longer giving the file (404, as it keeps files for a limited
+  time), WhatsApp not answering (503). An error page in place of the file is refused.
+- **What is not checked:** Meta's description does not say how `sha256` is encoded (its example is
+  `<HASH>`), so HyFib does not compare the file with it; TLS protects the transfer.
+  `phone_number_id` is not sent: the description says it checks that the media belongs to that
+  number, and whether a customer's file belongs to the number it was sent to is not stated.
+- **No migration.** The web tier now calls Meta's media host on members' requests, as DEPLOYMENT
+  notes.
+
+Not built: files through the public API, byte ranges (Safari and iOS play recordings and videos only
+from servers that answer byte-range requests, so members there download them with the link below the
+player), keeping files beyond WhatsApp's lifetime, thumbnails, scanning documents for malware
+(members' devices open them), and sending files from the inbox.

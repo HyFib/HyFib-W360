@@ -168,6 +168,12 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   Transcripts need `inbox.export` (owners, administrators, supervisors) and sight of the
   conversation, are audited (`conversation.transcript_exported`, no content), are plain text so no
   spreadsheet runs a formula from them, and leave internal notes out (ADR-212).
+  Files customers send (ADR-216) are given only to members who can see the conversation, fetched for
+  each request with the receiving account's token, which goes only to Graph and to the https address
+  Graph returned (no user name or password, no redirects; the address is never stored or logged),
+  and passed on without a copy. Only photos, stickers, recordings and videos keep their type; every
+  other file is an `application/octet-stream` attachment. Answers carry `nosniff`, a `sandbox`
+  Content-Security-Policy and a same-origin resource policy, and stop past 100 MB.
   Automatic assignment only reaches active members whose role can read and answer conversations.
 - CSAT taps: a tap is recorded only when its button id names a survey of the same conversation and
   its `context.id` is that survey's message; nothing in the tap is trusted beyond selecting one of

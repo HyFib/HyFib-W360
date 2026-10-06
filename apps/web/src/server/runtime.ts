@@ -47,6 +47,7 @@ import {
   createContactsService,
   createEmailPreferencesService,
   createInboxService,
+  createReceivedMediaService,
   createOnboardingService,
   createPlanAdminService,
   createPlanAddOnsService,
@@ -98,6 +99,7 @@ import {
   type ContactsService,
   type EmailPreferencesService,
   type InboxService,
+  type ReceivedMediaService,
   type JobQueue,
   type OnboardingService,
   type OutboundDeps,
@@ -164,6 +166,8 @@ export interface Runtime {
   /** Billing → Usage and rates: Meta's rates and this month's estimate (ADR-060). */
   billingUsage: BillingUsageService;
   inbox: InboxService;
+  /** Files customers send, fetched from WhatsApp per request (ADR-216); null without Meta. */
+  receivedMedia: ReceivedMediaService | null;
   emailPreferences: EmailPreferencesService;
   teams: TeamsService;
   businessHours: BusinessHoursService;
@@ -460,6 +464,13 @@ async function init(): Promise<Runtime> {
         meta,
       })
     : null;
+  const receivedMedia = meta
+    ? createReceivedMediaService({
+        db,
+        keyring,
+        graph: new GraphClient({ baseUrl: meta.graphBaseUrl, version: meta.graphApiVersion }),
+      })
+    : null;
   const billing = createBillingService({
     db,
     clock: systemClock,
@@ -520,6 +531,7 @@ async function init(): Promise<Runtime> {
     platformReconciliation,
     billingUsage,
     inbox,
+    receivedMedia,
     emailPreferences,
     teams,
     businessHours,
