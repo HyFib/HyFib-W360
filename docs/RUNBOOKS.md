@@ -1838,6 +1838,13 @@ approves it. The email is queued in the submission's transaction (`ops.email_out
 letters and the email provider as for other notices. Campaigns submitted before this release, or by
 an old web server during a rollout, emailed nobody.
 
+**A member was not told their campaign was approved, sent back or taken back (ADR-205).** The email
+goes to the member who submitted it, when someone else approves it, sends it back or takes it back,
+and only while they are an active member; a key's submission emails nobody (its integration reads
+`campaign.status_changed`). It is queued in the same transaction (`ops.email_outbox`, dedupe key
+`campaign-review:<campaign id>:<version>:<user id>`) and sent by the email worker. The campaign's
+history on its page shows what happened and the note in any case.
+
 **A draft's review through the API shows no estimate, or other counts than expected (ADR-193).**
 `GET /campaigns/{id}/review` reads the saved draft as members' review does, now: save the draft
 first. `estimate` is null without a currency (the spending cap's, or else Settings → Messaging),

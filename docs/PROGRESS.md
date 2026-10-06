@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-06 — Phase 5: telling the member who submitted a campaign what its approver did (P5-08, ADR-205)
+
+Status: **Implemented; its database tests run in CI only.** Approvers were emailed when a campaign
+waited for them, but the member who submitted it learned the outcome only on its page. The local
+PostgreSQL is unavailable (its Docker daemon stopped), so the integration tests below were written
+but not run here.
+
+### Completed
+
+- **Design (ADR-205):** the submitting member, while active and when someone else acted, emailed in
+  the same transaction that their campaign was approved (when it starts, under their authority),
+  sent back with the note, or taken back; nothing for a key's submission; no migration.
+- **Domain:** `campaignReviewNotice` and `emailCampaignSubmitter`, called by `approveCampaign`,
+  `rejectCampaign` and members' `withdrawCampaign`.
+- **Tests:**
+  - Unit (3 new in `campaigns/approval-notice.test.ts`): each email's text, its limits with the
+    longest names and note, and its escaping.
+  - Integration (2 new in `api-campaigns.test.ts`): the three emails to the submitter, and when
+    nobody is emailed. Written for CI; not run here.
+  - E2E: none. The campaigns e2e company has one member, who cannot approve their own submission, so
+    it has no member's submission to approve.
+- **Docs:** ADR-205; SECURITY; ARCHITECTURE; THREAT-MODEL T199; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-08; feature matrix H-021.
+- **Mutation checks:** 11 deliberate regressions tried, all caught on the unit-tested parts.
+  Choosing whom to email needs the database, so its regressions are left to the integration tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 896 passed (84 files)                                                |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it        |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 11 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- Reminders while a campaign keeps waiting, email preferences, emails when a running campaign pauses
+  or completes, and a key withdrawing what a member submitted.
+
 ## 2026-10-06 — Phase 5: emailing approvers when a campaign waits for approval (P5-08, ADR-204)
 
 Status: **Implemented; its database and browser tests run in CI only.** A campaign waiting for

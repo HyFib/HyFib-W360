@@ -971,6 +971,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `campaignApprovalNotice`, with the dedupe key `campaign-approval:<campaign>:<version>:<member>`.
   `CampaignDeps.notices`, and `campaignNotices` for the API route, carry the outbox and the app's
   base URL.
+- **Review emails (ADR-205):** `emailCampaignSubmitter` (`campaigns/service.ts`) runs in the
+  transaction of `approveCampaign`, `rejectCampaign` and members' `withdrawCampaign`, given the
+  submitter read before the change (sending back clears it). For a member's submission acted on by
+  someone else, while that member is active, it queues one `tenant.notice` written by
+  `campaignReviewNotice`, with the dedupe key `campaign-review:<campaign>:<version>:<member>`.
 - **Media from links (ADR-194):** `apiSendMedia` (`api/resources.ts`) parses `type` `image`,
   `video`, `audio` or `document`, an https `link` (`isMediaLink`) and a caption except for audio,
   and sends through `sendReply` as text replies do: the content keeps the link and the caption, the

@@ -653,6 +653,9 @@ verification, app review, Embedded Signup configuration).
   **[Emailing approvers of a waiting campaign built; its database tests run only in CI]** (ADR-204:
   the company's owners and administrators other than the submitter are emailed when a member's or a
   key's submission waits for approval, in the submission's transaction; no migration).
+  **[Telling the submitter what the approver did built; its database tests run only in CI]**
+  (ADR-205: the member who submitted a campaign is emailed when an approver approves it, sends it
+  back with a note or takes it back; no migration).
   Remaining: uploaded media, call-to-action messages through the API, taking
   reactions back,
   media downloads, changing a field's type,

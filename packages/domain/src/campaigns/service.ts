@@ -41,6 +41,7 @@ import {
 import { CSV_BOM, csvLine } from '../contacts/csv';
 import { normalizePhone } from '../contacts/phone';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
+import { NOTICE_LINE_MAX, splitEmailText } from '../email/templates';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { STATUS_RANK } from '../messaging/status';
@@ -1220,6 +1221,127 @@ export async function emailCampaignApprovers(
   return approvers.length;
 }
 
+/** What an approver did with a member's submission, for the email to that member (ADR-205). */
+export type CampaignReviewOutcome = 'approved' | 'rejected' | 'withdrawn';
+
+/**
+ * The email to the member who submitted a campaign about what an approver did with it (ADR-205):
+ * approved (when it starts, in the campaign's time zone, and that it sends under their authority),
+ * sent back with the approver's note, or taken back to a draft. A note is the approver's own words,
+ * split into lines as long notes are.
+ */
+export function campaignReviewNotice(input: {
+  campaignName: string;
+  outcome: CampaignReviewOutcome;
+  /** The member who approved it, sent it back or took it back. */
+  reviewer: string;
+  note: string | null;
+  /** When an approved campaign starts, or null when it starts at once. */
+  startsAt: Date | null;
+  /** The campaign's time zone, the one its page shows its schedule in. */
+  timeZone: string;
+}): { subject: string; lines: string[] } {
+  const name = `“${input.campaignName}”`;
+  const note = input.note
+    ? splitEmailText(`Their note: “${input.note}”`, NOTICE_LINE_MAX.tenant)
+    : [];
+  switch (input.outcome) {
+    case 'approved':
+      return {
+        subject: `Campaign ${name} was approved`,
+        lines: [
+          `${input.reviewer} approved your campaign ${name}.`,
+          input.startsAt
+            ? `It starts at ${formatCompanyTime(input.startsAt, input.timeZone)}.`
+            : 'It starts now.',
+          ...note,
+          'It sends under your authority, so it pauses if you leave the company or can no longer send campaigns. You can follow, pause or cancel it on its page.',
+        ],
+      };
+    case 'rejected':
+      return {
+        subject: `Campaign ${name} was sent back`,
+        lines: [
+          `${input.reviewer} sent your campaign ${name} back to you as a draft. Nothing was sent.`,
+          ...note,
+          'Change what is needed, then submit it again for approval.',
+        ],
+      };
+    case 'withdrawn':
+      return {
+        subject: `Campaign ${name} was taken back to a draft`,
+        lines: [
+          `${input.reviewer} took your campaign ${name} back to a draft while it waited for approval. Nothing was sent.`,
+          'Submit it again when it is ready.',
+        ],
+      };
+  }
+}
+
+/**
+ * Emails the member who submitted a campaign what an approver did with it (ADR-205), in the same
+ * transaction, so a refused approval emails nobody. Nobody is emailed for a key's submission (its
+ * integration reads `campaign.status_changed`), when the member acted on their own submission, or
+ * when they are no longer an active member. The submitter is passed in, as sending a campaign back
+ * clears it. Returns whether it emailed.
+ */
+export async function emailCampaignSubmitter(
+  notices: CampaignNoticeDeps,
+  tx: Tx,
+  tenant: { id: string; name: string; slug: string },
+  campaignId: string,
+  review: {
+    submittedByUserId: string | null;
+    reviewer: { id: string; name: string };
+    outcome: CampaignReviewOutcome;
+    note: string | null;
+    startsAt: Date | null;
+  },
+): Promise<boolean> {
+  const submitterId = review.submittedByUserId;
+  if (!submitterId || submitterId === review.reviewer.id) return false;
+  const [submitter] = await tx
+    .select({ email: users.email })
+    .from(memberships)
+    .innerJoin(users, eq(users.id, memberships.userId))
+    .where(
+      and(
+        eq(memberships.tenantId, tenant.id),
+        eq(memberships.userId, submitterId),
+        eq(memberships.status, 'active'),
+      ),
+    );
+  if (!submitter) return false;
+  const [c] = await tx
+    .select({ name: campaigns.name, version: campaigns.version, timezone: campaigns.timezone })
+    .from(campaigns)
+    .where(and(eq(campaigns.tenantId, tenant.id), eq(campaigns.id, campaignId)));
+  if (!c) return false;
+  const { subject, lines } = campaignReviewNotice({
+    campaignName: c.name,
+    outcome: review.outcome,
+    reviewer: review.reviewer.name,
+    note: review.note,
+    startsAt: review.startsAt,
+    timeZone: c.timezone,
+  });
+  await enqueueEmail(notices.outbox, tx, {
+    to: submitter.email,
+    tenantId: tenant.id,
+    // Approving, sending back and taking back each raise the version: one email for each.
+    dedupeKey: `campaign-review:${campaignId}:${c.version}:${submitterId}`,
+    payload: {
+      kind: 'tenant.notice',
+      companyName: tenant.name,
+      subject,
+      lines,
+      url: new URL(`/c/${tenant.slug}/campaigns/${campaignId}`, notices.appBaseUrl).toString(),
+      actionLabel: 'Open campaign',
+    },
+  });
+  return true;
+}
+
 // Service ----------------------------------------------------------------------------------------
 
 export function createCampaignsService(deps: CampaignDeps) {
@@ -1664,6 +1786,13 @@ export function createCampaignsService(deps: CampaignDeps) {
         await recordCampaignEvent(tx, ctx.tenant.id, campaignId, 'approved', ctx.user.id, {
           ...(note ? { note } : {}),
         });
+        await emailCampaignSubmitter(deps.notices, tx, ctx.tenant, campaignId, {
+          submittedByUserId: c.submittedByUserId,
+          reviewer: ctx.user,
+          outcome: 'approved',
+          note: note ?? null,
+          startsAt: at.getTime() === now.getTime() ? null : at,
+        });
         await recordAudit(
           tx,
           ctx,
@@ -1688,6 +1817,13 @@ export function createCampaignsService(deps: CampaignDeps) {
           throw new AppError('conflict', 'This campaign is not waiting for approval.');
         await backToDraft(tx, ctx, c.id, { reviewNote: note });
         await recordCampaignEvent(tx, ctx.tenant.id, campaignId, 'rejected', ctx.user.id, { note });
+        await emailCampaignSubmitter(deps.notices, tx, ctx.tenant, campaignId, {
+          submittedByUserId: c.submittedByUserId,
+          reviewer: ctx.user,
+          outcome: 'rejected',
+          note,
+          startsAt: null,
+        });
         await recordAudit(
           tx,
           ctx,
@@ -1709,6 +1845,13 @@ export function createCampaignsService(deps: CampaignDeps) {
           throw forbidden('Only the member who submitted this campaign can withdraw it.');
         await backToDraft(tx, ctx, c.id, {});
         await recordCampaignEvent(tx, ctx.tenant.id, campaignId, 'withdrawn', ctx.user.id);
+        await emailCampaignSubmitter(deps.notices, tx, ctx.tenant, campaignId, {
+          submittedByUserId: c.submittedByUserId,
+          reviewer: ctx.user,
+          outcome: 'withdrawn',
+          note: null,
+          startsAt: null,
+        });
         await recordAudit(
           tx,
           ctx,

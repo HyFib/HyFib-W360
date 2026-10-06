@@ -8204,3 +8204,30 @@ Decision:
 
 Not built: telling the submitter that their campaign was approved or sent back, reminders while a
 campaign keeps waiting, and email preferences.
+
+## ADR-205 Telling the member who submitted a campaign what its approver did (P5-08) (2026-10-06)
+
+Context: approvers are emailed when a campaign waits for them (ADR-204), but the member who
+submitted it learned that it was approved, sent back with a note, or taken back to a draft only by
+opening its page. An approved campaign also sends under that member's authority, which they should
+know.
+
+Decision:
+
+- **Who:** the member who submitted it, in the transaction of the approver's action, so a refused
+  approval emails nobody: only while they are an active member, and never for their own action
+  (taking back their own submission). A key's submission has no member to tell: its integration
+  reads `campaign.status_changed` (ADR-087), as before.
+- **What:** approved (by whom, when it starts in the campaign's time zone or that it starts now, the
+  approver's note if any, and that it sends under their authority, so it pauses if they leave or can
+  no longer send campaigns); sent back as a draft with the approver's note; or taken back to a draft
+  by an approver while it waited. Each says nothing was sent where nothing was, and links to the
+  campaign's page. A note is the approver's own words (at most 500 characters), split into lines as
+  long notes are.
+- **Once:** the outbox's dedupe key is the campaign, its version after the action and the member,
+  and each action raises the version.
+- **No migration.** `emailCampaignSubmitter` is called by `approveCampaign`, `rejectCampaign` and
+  members' `withdrawCampaign`; the submitter is passed in, as sending back clears it.
+
+Not built: reminders while a campaign keeps waiting, email preferences, and emails when a running
+campaign pauses or completes (its page and `campaign.status_changed` say so).

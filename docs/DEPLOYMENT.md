@@ -406,6 +406,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-204 has no migration: until the web rollout ends, a submission an old web server takes emails
    nobody, and approvers find it on the Campaigns page as before.
 
+   ADR-205 has no migration: until the web rollout ends, an approval, a rejection or a withdrawal an
+   old web server takes emails nobody.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

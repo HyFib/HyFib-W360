@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { emailPayloadSchema, renderEmail } from '../email/templates';
-import { campaignApprovalNotice } from './service';
+import { campaignApprovalNotice, campaignReviewNotice } from './service';
 
 describe('the email that a campaign waits for approval (ADR-204)', () => {
   it('names the member who submitted it, how many it reaches and its start in the campaign’s time zone', () => {
@@ -68,5 +68,84 @@ describe('the email that a campaign waits for approval (ADR-204)', () => {
     expect(email.html).toContain(`&lt;b&gt;${'C'.repeat(113)}&lt;/b&gt;`);
     expect(email.html).not.toContain('<b>C');
     expect(email.html).toContain('>Review campaign</a>');
+  });
+});
+
+describe('the email to the member who submitted a campaign about its review (ADR-205)', () => {
+  const base = {
+    campaignName: 'Diwali offer',
+    reviewer: 'Ravi Kumar',
+    note: null,
+    startsAt: null,
+    timeZone: 'Asia/Kolkata',
+  };
+
+  it('says an approved campaign starts at its time in the campaign’s time zone, or now, under their authority', () => {
+    expect(
+      campaignReviewNotice({
+        ...base,
+        outcome: 'approved',
+        note: 'Looks good',
+        startsAt: new Date('2026-10-20T04:30:00Z'),
+      }),
+    ).toEqual({
+      subject: 'Campaign “Diwali offer” was approved',
+      lines: [
+        'Ravi Kumar approved your campaign “Diwali offer”.',
+        'It starts at 20 October 2026 at 10:00 GMT+5:30.',
+        'Their note: “Looks good”',
+        'It sends under your authority, so it pauses if you leave the company or can no longer send campaigns. You can follow, pause or cancel it on its page.',
+      ],
+    });
+    expect(campaignReviewNotice({ ...base, outcome: 'approved' }).lines.slice(0, 2)).toEqual([
+      'Ravi Kumar approved your campaign “Diwali offer”.',
+      'It starts now.',
+    ]);
+  });
+
+  it('gives a campaign sent back with the note, and one taken back without one', () => {
+    expect(
+      campaignReviewNotice({ ...base, outcome: 'rejected', note: 'Use the\n\nnew   offer' }),
+    ).toEqual({
+      subject: 'Campaign “Diwali offer” was sent back',
+      lines: [
+        'Ravi Kumar sent your campaign “Diwali offer” back to you as a draft. Nothing was sent.',
+        'Their note: “Use the new offer”',
+        'Change what is needed, then submit it again for approval.',
+      ],
+    });
+    expect(campaignReviewNotice({ ...base, outcome: 'withdrawn' })).toEqual({
+      subject: 'Campaign “Diwali offer” was taken back to a draft',
+      lines: [
+        'Ravi Kumar took your campaign “Diwali offer” back to a draft while it waited for approval. Nothing was sent.',
+        'Submit it again when it is ready.',
+      ],
+    });
+  });
+
+  it('fits the email’s limits with the longest names and note, escaped in the HTML', () => {
+    for (const outcome of ['approved', 'rejected', 'withdrawn'] as const) {
+      const notice = campaignReviewNotice({
+        campaignName: `<i>${'C'.repeat(113)}</i>`,
+        outcome,
+        reviewer: 'R'.repeat(200),
+        note: `<b>${'n'.repeat(493)}</b>`,
+        startsAt: new Date('2026-12-31T23:59:00Z'),
+        timeZone: 'America/Argentina/Buenos_Aires',
+      });
+      const payload = {
+        kind: 'tenant.notice' as const,
+        companyName: 'Acme',
+        subject: notice.subject,
+        lines: notice.lines,
+        url: 'https://app.example.test/c/acme/campaigns/0199b6f2-7c3e-7a1b-9f00-123456789abc',
+        actionLabel: 'Open campaign',
+      };
+      expect(emailPayloadSchema.parse(payload)).toEqual(payload);
+      const html = renderEmail(payload).html;
+      expect(html).toContain(`&lt;i&gt;${'C'.repeat(113)}&lt;/i&gt;`);
+      expect(html).not.toContain('<i>C');
+      if (outcome !== 'withdrawn') expect(html).toContain(`&lt;b&gt;${'n'.repeat(493)}&lt;/b&gt;`);
+    }
   });
 });

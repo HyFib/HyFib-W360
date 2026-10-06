@@ -18,6 +18,7 @@ import {
   apiWithdrawCampaign,
   authenticateApiToken,
   campaignApprovalNotice,
+  campaignReviewNotice,
   createApiKeysService,
   createCampaignsService,
   createConsentService,
@@ -2216,13 +2217,13 @@ describe('withdrawing campaign submissions through the API (ADR-203)', () => {
   });
 });
 
-describe('emailing the members who approve a waiting campaign (ADR-204)', () => {
+describe('emailing about campaigns waiting for approval (ADR-204, ADR-205)', () => {
   const versionOf = async (id: string) =>
     (
       await fx.query<{ version: number }>(`SELECT version FROM app.campaigns WHERE id = $1`, [id])
     )[0]!.version;
-  /** The company's approval emails queued in the outbox, oldest first. */
-  async function approvalEmails(tenantId: string) {
+  /** The company's campaign emails of one kind queued in the outbox, oldest first. */
+  async function campaignEmails(tenantId: string, kind: 'campaign-approval' | 'campaign-review') {
     const rows = await fx.query<{
       id: string;
       to_address: string;
@@ -2230,8 +2231,8 @@ describe('emailing the members who approve a waiting campaign (ADR-204)', () => 
       payload_ciphertext: string;
     }>(
       `SELECT id, to_address, dedupe_key, payload_ciphertext FROM ops.email_outbox
-        WHERE tenant_id = $1 AND dedupe_key LIKE 'campaign-approval:%' ORDER BY id`,
-      [tenantId],
+        WHERE tenant_id = $1 AND dedupe_key LIKE $2 ORDER BY id`,
+      [tenantId, `${kind}:%`],
     );
     return rows.map((r) => ({
       to: r.to_address,
@@ -2246,6 +2247,7 @@ describe('emailing the members who approve a waiting campaign (ADR-204)', () => 
       }),
     }));
   }
+  const approvalEmails = (tenantId: string) => campaignEmails(tenantId, 'campaign-approval');
   async function member(c: Company, role: 'admin' | 'supervisor', status = 'active') {
     const user = await createUser(fx.dbs, { name: `Campaign ${role}` });
     const { token } = await invite(fx.dbs, c.tenant, c.owner, user.email, [role]);
@@ -2409,5 +2411,125 @@ describe('emailing the members who approve a waiting campaign (ADR-204)', () => 
     expect(second[0]?.lines[2]).toMatch(
       /^Once approved, it starts at \d+ \w+ \d{4} at 09:30 (GMT|BST), or at once/,
     );
+  });
+
+  it('emails the member who submitted a campaign when an approver approves it, sends it back or takes it back, and nobody for their own withdrawal (ADR-205)', async () => {
+    const s = await setup();
+    await s.contact('+919820008121', 'Asha');
+    await s.campaigns.updateSettings(
+      s.owner,
+      { approvalRequired: true, cap: null, costCurrency: null },
+      {},
+    );
+    const marketer = await fx.ctx(s.c, s.c.marketer);
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Campaign drafts');
+    const submit = async (
+      name: string,
+      schedule?: { kind: 'later'; local: string; timezone: string },
+    ) => {
+      const id = await s.draft(name);
+      if (schedule) await apiUpdateCampaign(deps(), writer, id, { expectedVersion: 1, schedule });
+      await s.campaigns.submitCampaign(marketer, id, { expectedVersion: await versionOf(id) }, {});
+      return id;
+    };
+    // Approved with a note, set to start later in London: the start in the campaign's time zone.
+    const local = `${new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10)}T09:30`;
+    const approved = await submit('Diwali offer', {
+      kind: 'later',
+      local,
+      timezone: 'Europe/London',
+    });
+    await s.campaigns.approveCampaign(s.owner, approved, { note: 'Looks good' }, {});
+    const [launched] = await fx.query<{ scheduled_at: Date; version: number }>(
+      `SELECT scheduled_at, version FROM app.campaigns WHERE id = $1`,
+      [approved],
+    );
+    // Sent back with a note; taken back by the owner; taken back by the marketer, who is told
+    // nothing about their own withdrawal.
+    const rejected = await submit('Weekend sale');
+    await s.campaigns.rejectCampaign(s.owner, rejected, { note: 'Use the new offer' }, {});
+    const withdrawn = await submit('Flash sale');
+    await s.campaigns.withdrawCampaign(s.owner, withdrawn, {});
+    const own = await submit('Clearance');
+    await s.campaigns.withdrawCampaign(marketer, own, {});
+
+    const email = async (id: string, notice: { subject: string; lines: string[] }) => ({
+      to: s.c.marketer.email,
+      dedupeKey: `campaign-review:${id}:${await versionOf(id)}:${s.c.marketer.id}`,
+      kind: 'tenant.notice',
+      companyName: await companyName(s.c),
+      ...notice,
+      url: `http://localhost:3000/c/${s.c.tenant.slug}/campaigns/${id}`,
+      actionLabel: 'Open campaign',
+    });
+    const review = { reviewer: 'Owner', startsAt: null, timeZone: 'Asia/Kolkata' };
+    expect(await versionOf(approved)).toBe(launched!.version);
+    expect(await campaignEmails(s.c.tenant.id, 'campaign-review')).toEqual([
+      await email(
+        approved,
+        campaignReviewNotice({
+          ...review,
+          campaignName: 'Diwali offer',
+          outcome: 'approved',
+          note: 'Looks good',
+          startsAt: launched!.scheduled_at,
+          timeZone: 'Europe/London',
+        }),
+      ),
+      await email(
+        rejected,
+        campaignReviewNotice({
+          ...review,
+          campaignName: 'Weekend sale',
+          outcome: 'rejected',
+          note: 'Use the new offer',
+        }),
+      ),
+      await email(
+        withdrawn,
+        campaignReviewNotice({
+          ...review,
+          campaignName: 'Flash sale',
+          outcome: 'withdrawn',
+          note: null,
+        }),
+      ),
+    ]);
+  });
+
+  it("emails nobody about a key's submission, or a submitter who is no longer an active member (ADR-205)", async () => {
+    const s = await setup();
+    await s.contact('+919820008131', 'Asha');
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Campaign drafts');
+    // No member submitted a key's submission: its integration reads campaign.status_changed.
+    const byKey = await s.draft('Festive sale');
+    await apiSubmitCampaign(submitDeps(), writer, byKey, {
+      expectedVersion: await versionOf(byKey),
+    });
+    await s.campaigns.approveCampaign(s.owner, byKey, {}, {});
+    // The marketer is suspended after submitting: their campaign is sent back without an email.
+    await s.campaigns.updateSettings(
+      s.owner,
+      { approvalRequired: true, cap: null, costCurrency: null },
+      {},
+    );
+    const byMarketer = await s.draft('Diwali offer');
+    await s.campaigns.submitCampaign(
+      await fx.ctx(s.c, s.c.marketer),
+      byMarketer,
+      { expectedVersion: 1 },
+      {},
+    );
+    await fx.query(
+      `UPDATE app.memberships SET status = 'suspended' WHERE tenant_id = $1 AND user_id = $2`,
+      [s.c.tenant.id, s.c.marketer.id],
+    );
+    await s.campaigns.rejectCampaign(s.owner, byMarketer, { note: 'Not this week' }, {});
+    expect(await campaignEmails(s.c.tenant.id, 'campaign-review')).toEqual([]);
+    // Both submissions were still emailed to the approver (ADR-204).
+    expect((await approvalEmails(s.c.tenant.id)).map((e) => e.to)).toEqual([
+      s.c.owner.email,
+      s.c.owner.email,
+    ]);
   });
 });
