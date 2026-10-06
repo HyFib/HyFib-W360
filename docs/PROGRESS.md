@@ -1,5 +1,53 @@
 # Progress
 
+## 2026-10-06 — Phase 3 follow-up: members choose their notice emails (P3-06, ADR-215)
+
+Status: **Implemented; its database and browser tests run in CI only.** Notice emails about mentions
+and campaigns could not be turned off. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so migration 0142 and the new integration and e2e tests below were written but not run
+here.
+
+### Completed
+
+- **Design (ADR-215):** a list of turned-off kinds on each membership; a definer function that
+  changes only the signed-in member's own; every notice skips a member who turned its kind off;
+  security, sign-in and billing emails always sent.
+- **Migration 0142:** `app.memberships.email_opt_outs` (empty by default, checked kinds) and
+  `app.set_own_email_opt_outs`.
+- **Domain:** `tenancy/email-preferences.ts` (`EMAIL_NOTICE_KINDS`, `wantsEmail`, the service); the
+  approval, review, pause, completion and mention emails honour it; the company export lists the
+  column.
+- **Web:** Settings → Notifications, with a `ClientForm` of the kinds the member's role can receive.
+- **Tests:**
+  - Unit (5 new in `tenancy/email-preferences.test.ts`): the kinds match the migration, opt-outs,
+    the kinds each role sees, labels, the request.
+  - Integration (2 new in `email-preferences.test.ts`, 1 new in `campaigns.test.ts`, 1 new in
+    `inbox-advanced.test.ts`): own choices only, hidden kinds kept, the audit entry, the definer
+    function's refusals, the check and grants; approval, review, pause, completion and mention
+    emails skipping members who turned them off. Written for CI; not run here.
+  - E2E (1 new in `notifications.spec.ts`): an owner turns mention emails off and the choice stays.
+    Written for CI; not run here.
+- **Docs:** ADR-215; ARCHITECTURE; SECURITY; DEPLOYMENT and RUNBOOKS; BACKLOG P3-06; feature matrix
+  H-008.
+- **Mutation checks:** 8 deliberate regressions tried, all caught on the unit-tested parts. The
+  function, the column and the notices need the database, so their regressions are left to the
+  integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 932 passed (91 files)                                               |
+| `pnpm test:integration`, e2e, migration 0142       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 8 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- A digest, in-app notifications, preferences for CRM task reminders, and a company-wide default.
+
 ## 2026-10-06 — Phase 3 follow-up: emailing members when a campaign finishes (P3-04, ADR-214)
 
 Status: **Implemented; its database and browser tests run in CI only.** A finished campaign, or one

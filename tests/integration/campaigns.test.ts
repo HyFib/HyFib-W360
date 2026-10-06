@@ -9,6 +9,7 @@ import {
   createCampaignsService,
   createConsentService,
   createContactsService,
+  createEmailPreferencesService,
   createSegmentsService,
   createTemplatesService,
   findDueCampaigns,
@@ -1290,6 +1291,51 @@ describe('emailing the member a campaign sent under when it finishes (ADR-214)',
     s.clock.advance(25 * 3_600_000);
     expect(await s.tick(other)).toMatchObject({ outcome: 'completed' });
     expect(await completionEmails(s.c.tenant.id, other)).toEqual([]);
+  });
+});
+
+describe('notice emails skip members who turned them off (ADR-215)', () => {
+  it('emails no approver, submitter or sender who turned the kind off', async () => {
+    const s = await setup();
+    const owner = await fx.ctx(s.c, s.c.owner);
+    const marketer = await fx.ctx(s.c, s.c.marketer);
+    const prefs = createEmailPreferencesService({ db: fx.dbs.app });
+    // An administrator approves; the owner turned approval emails off.
+    const user = await createUser(fx.dbs, { name: 'Campaign admin' });
+    const { token } = await invite(fx.dbs, s.c.tenant, s.c.owner, user.email, ['admin']);
+    await acceptInvitation(fx.dbs, user, token);
+    const admin = await fx.ctx(s.c, user);
+    await prefs.updateEmailPreferences(owner, { off: ['campaign_approvals'] });
+    await prefs.updateEmailPreferences(marketer, {
+      off: ['campaign_reviews', 'campaign_pauses', 'campaign_completions'],
+    });
+    await s.campaigns.updateSettings(
+      owner,
+      { approvalRequired: true, cap: null, costCurrency: null },
+      {},
+    );
+    await s.contact('+919840006001', { name: 'Asha' });
+    const { id } = await s.draft('Quiet sale');
+    await s.campaigns.submitCampaign(marketer, id, { expectedVersion: 1 }, {});
+    expect(
+      (await campaignEmails(s.c.tenant.id, `campaign-approval:${id}:`)).map((e) => e.to),
+    ).toEqual([user.email]);
+    await s.campaigns.approveCampaign(admin, id, {}, {});
+    expect(await campaignEmails(s.c.tenant.id, `campaign-review:${id}:`)).toEqual([]);
+    expect(await s.tick(id)).toMatchObject({ queued: 1 });
+    await fx.query(`UPDATE app.message_templates SET status = 'paused' WHERE id = $1`, [
+      s.templateId,
+    ]);
+    expect(await s.tick(id)).toMatchObject({ pauseReason: 'template_not_approved' });
+    expect(await campaignEmails(s.c.tenant.id, `campaign-paused:${id}:`)).toEqual([]);
+    await fx.query(`UPDATE app.message_templates SET status = 'approved' WHERE id = $1`, [
+      s.templateId,
+    ]);
+    await s.campaigns.resumeCampaign(marketer, id, {});
+    expect(await s.tick(id)).toMatchObject({ queued: 1 });
+    s.clock.advance(11_000);
+    expect(await s.tick(id)).toMatchObject({ outcome: 'completed' });
+    expect(await campaignEmails(s.c.tenant.id, `campaign-completed:${id}:`)).toEqual([]);
   });
 });
 

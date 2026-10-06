@@ -394,6 +394,13 @@ handed to WhatsApp or skipped or when its sending period ended. A cancelled camp
 It is queued in the transaction that completes the campaign (`ops.email_outbox`, dedupe key
 `campaign-completed:<campaign id>:<version>:<user id>`) and sent by the email worker.
 
+**A member gets an email they turned off, or not one they expect (ADR-215).** Settings →
+Notifications shows the member's own choices for that company; `app.memberships.email_opt_outs`
+lists the kinds turned off. Choices are per company: a member of two companies sets each. Security,
+sign-in and billing emails cannot be turned off. During a rollout an old server may still send an
+email that was turned off. The audit log records each change as
+`membership.email_preferences_updated`.
+
 **Many failures with 131049.** Meta's per-user marketing limit: those customers received too many
 marketing messages from businesses. Do not resend; wait at least 24 hours (M-062) and consider the
 company's frequency cap.

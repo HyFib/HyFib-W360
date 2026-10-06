@@ -18,6 +18,7 @@ import {
 } from '@w360/db';
 import { permissionsForRoles } from '../authz/permissions';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
+import { wantsEmail } from '../tenancy/email-preferences';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 
@@ -79,7 +80,7 @@ export interface MentionEmailDeps {
 }
 
 export type MentionEmailOutcome =
-  'sent' | 'gone' | 'read' | 'too_late' | 'cannot_see' | 'newer' | 'already_sent';
+  'sent' | 'gone' | 'read' | 'too_late' | 'cannot_see' | 'opted_out' | 'newer' | 'already_sent';
 
 /** Emails the member a mention names, unless the mention row says it is not needed (see above). */
 export async function sendMentionEmail(
@@ -128,7 +129,12 @@ export async function sendMentionEmail(
       );
     if (!note) return 'gone';
     const [member] = await tx
-      .select({ status: memberships.status, roles: memberships.roles, email: users.email })
+      .select({
+        status: memberships.status,
+        roles: memberships.roles,
+        email: users.email,
+        optOuts: memberships.emailOptOuts,
+      })
       .from(memberships)
       .innerJoin(users, eq(users.id, memberships.userId))
       .where(and(eq(memberships.tenantId, tenantId), eq(memberships.id, mention.membershipId)));
@@ -142,6 +148,7 @@ export async function sendMentionEmail(
           (note.assignedMembershipId === null ||
             note.assignedMembershipId === mention.membershipId)));
     if (!member || !canSee) return 'cannot_see';
+    if (!wantsEmail(member.optOuts, 'mentions')) return 'opted_out';
     // The member's unread mentions in the conversation: only the newest one's job emails.
     const res = await tx.execute<{ unread: number; newer: boolean }>(sql`
       select count(*)::int as unread,

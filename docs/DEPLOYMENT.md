@@ -439,6 +439,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-214 has no migration: until the worker rollout ends, an old worker completes campaigns
    without emailing anyone.
 
+   Migration 0142 (ADR-215) adds `app.memberships.email_opt_outs` with an empty default and a check
+   (memberships is small, so the check is validated at once) and creates
+   `app.set_own_email_opt_outs`, owned by `w360_definer` and executable by the runtime role only.
+   Old servers ignore the column: until the rollout ends, an old web server shows no Notifications
+   tab and old workers and web servers email members who turned a kind off.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -8472,3 +8472,31 @@ Decision:
 
 Not built: a summary of deliveries some time after it finishes, email preferences, and emails to
 other members.
+
+## ADR-215 Letting members choose which notice emails they get (P3-06) (2026-10-06)
+
+Context: members are emailed when a campaign waits for their approval (ADR-204), when their campaign
+is reviewed (ADR-205), paused by HyFib (ADR-210) or finished (ADR-214), and when they are mentioned
+in a note they have not opened (ADR-211). Each ADR listed email preferences as not built: a member
+who follows campaigns in the app all day could not stop them.
+
+Decision:
+
+- **Per member, per company:** migration 0142 adds `app.memberships.email_opt_outs`, the kinds the
+  member turned off in that company, checked against the five kinds above. It starts empty, so every
+  email stays on until a member turns it off, and it is the company's data: exported with the
+  membership and deleted with the company.
+- **Only one's own:** Settings → Notifications shows each member the kinds their role can receive
+  and saves their choice through `app.set_own_email_opt_outs`, a definer function that finds the
+  membership from the scope (the company and the signed-in user), never from an argument; the
+  runtime role still cannot update memberships. Kinds the role does not show keep their setting. The
+  change is audited (`membership.email_preferences_updated`, with the kinds off).
+- **Every notice honours it,** in the transaction that would send it: approval requests, review
+  outcomes, pause and completion emails, and mention emails (whose job ends as `opted_out`). A pause
+  that needs another member to resume it (ADR-210) still goes to the owners and administrators who
+  did not turn pauses off; if all did, nobody is emailed, and the campaign's page and webhook event
+  still say why it paused.
+- **Never these:** security, sign-in and billing emails are not listed and cannot be turned off.
+
+Not built: a digest instead of single emails, in-app notifications, preferences for CRM task
+reminders, and a company-wide default set by an administrator.

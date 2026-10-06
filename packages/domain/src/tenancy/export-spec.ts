@@ -1167,6 +1167,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'joined_at',
       'status_changed_at',
       'status_changed_by',
+      'email_opt_outs',
       'created_at',
       'updated_at',
     ],

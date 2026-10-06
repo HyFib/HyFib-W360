@@ -162,6 +162,11 @@ is waiting for on a page (confirming an address, resetting a password) are queue
 priority than notices, also when the outbox sweep signals a lost one again, so they do not wait
 behind a burst of notices (ADR-069).
 
+Members choose which notice emails they get, per company (ADR-215): `app.memberships.email_opt_outs`
+lists the kinds turned off (`EMAIL_NOTICE_KINDS` in `tenancy/email-preferences.ts`), each notice
+skips a member with `wantsEmail` before queueing, and the member's own list changes only through
+`app.set_own_email_opt_outs`. Security, sign-in and billing emails are not kinds.
+
 ## 6. Messaging pipeline **[built — verified against a local Graph stand-in; no live Meta traffic yet]**
 
 - **Ingestion:** `POST /api/webhooks/meta` reads the raw body with a hard 4 MB cap (Meta payloads can

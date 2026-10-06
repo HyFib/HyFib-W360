@@ -6,6 +6,7 @@ import { authorizedTenantScope, sql } from '@w360/db';
 import {
   MENTION_EMAIL_DELAY_MS,
   MENTION_EMAIL_LATE_LIMIT_MS,
+  createEmailPreferencesService,
   createInboxService,
   createSavedRepliesService,
   createTeamsService,
@@ -904,6 +905,40 @@ describe('emailing members mentioned in a note who have not opened it (ADR-211)'
     await fx.query(`UPDATE app.memberships SET status = 'removed' WHERE id = $1`, [b.membershipId]);
     expect(await sendMentionEmail(emailDeps(), scopeOf(c), fifth!.id)).toBe('cannot_see');
     expect(await mentionEmails(c)).toHaveLength(1);
+  });
+});
+
+describe('mention emails for members who turned them off (ADR-215)', () => {
+  it('emails nobody who turned mention emails off', async () => {
+    const { c, owner, agents } = await setup(0);
+    const [agent] = agents as [Setup['agents'][0]];
+    const conv = await inbound(c, waId());
+    await createEmailPreferencesService({ db: fx.dbs.app }).updateEmailPreferences(agent.ctx, {
+      off: ['mentions'],
+    });
+    await inboxService().addNote(owner, {
+      conversationId: conv.id,
+      body: 'Quiet: for the agent',
+      mentionIds: [agent.membershipId],
+    });
+    const [mention] = await fx.query<{ id: string }>(
+      `SELECT m.id FROM app.note_mentions m
+         JOIN app.conversation_notes n ON n.tenant_id = m.tenant_id AND n.id = m.note_id
+        WHERE m.tenant_id = $1 AND n.body = 'Quiet: for the agent'`,
+      [c.tenant.id],
+    );
+    expect(
+      await sendMentionEmail(
+        { db: fx.dbs.app, clock: systemClock, ...fx.notices() },
+        authorizedTenantScope(c.tenant.id, null),
+        mention!.id,
+      ),
+    ).toBe('opted_out');
+    const [queued] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM ops.email_outbox WHERE dedupe_key = $1`,
+      [`note-mention:${mention!.id}`],
+    );
+    expect(queued!.n).toBe(0);
   });
 });
 

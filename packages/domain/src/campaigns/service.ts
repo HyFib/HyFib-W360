@@ -48,6 +48,7 @@ import type { JobQueue } from '../jobs/queue';
 import { STATUS_RANK } from '../messaging/status';
 import { queueTemplateMessage } from '../messaging/outbound';
 import { formatCompanyTime } from '../tenancy/deletion';
+import { wantsEmail } from '../tenancy/email-preferences';
 import { sendSpecFor } from '../templates/definition';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import {
@@ -1198,7 +1199,12 @@ export async function emailCampaignApprovers(
     submitter = { kind: 'member', name: member?.name ?? 'A member' };
   }
   const members = await tx
-    .select({ userId: users.id, email: users.email, roles: memberships.roles })
+    .select({
+      userId: users.id,
+      email: users.email,
+      roles: memberships.roles,
+      optOuts: memberships.emailOptOuts,
+    })
     .from(memberships)
     .innerJoin(users, eq(users.id, memberships.userId))
     .where(and(eq(memberships.tenantId, tenantId), eq(memberships.status, 'active')))
@@ -1206,6 +1212,7 @@ export async function emailCampaignApprovers(
   const approvers = members.filter((m) => {
     const granted = permissionsForRoles(m.roles as TenantRole[]);
     return (
+      wantsEmail(m.optOuts, 'campaign_approvals') &&
       granted.has('campaigns.approve') &&
       m.userId !== c.submittedByUserId &&
       (submitter.kind === 'member' || granted.has('campaigns.send'))
@@ -1320,7 +1327,7 @@ export async function emailCampaignSubmitter(
   const submitterId = review.submittedByUserId;
   if (!submitterId || submitterId === review.reviewer.id) return false;
   const [submitter] = await tx
-    .select({ email: users.email })
+    .select({ email: users.email, optOuts: memberships.emailOptOuts })
     .from(memberships)
     .innerJoin(users, eq(users.id, memberships.userId))
     .where(
@@ -1330,7 +1337,7 @@ export async function emailCampaignSubmitter(
         eq(memberships.status, 'active'),
       ),
     );
-  if (!submitter) return false;
+  if (!submitter || !wantsEmail(submitter.optOuts, 'campaign_reviews')) return false;
   const [c] = await tx
     .select({ name: campaigns.name, version: campaigns.version, timezone: campaigns.timezone })
     .from(campaigns)
@@ -1451,7 +1458,12 @@ export async function emailCampaignPaused(
     .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
   if (!c) return 0;
   const members = await tx
-    .select({ userId: users.id, email: users.email, roles: memberships.roles })
+    .select({
+      userId: users.id,
+      email: users.email,
+      roles: memberships.roles,
+      optOuts: memberships.emailOptOuts,
+    })
     .from(memberships)
     .innerJoin(users, eq(users.id, memberships.userId))
     .where(and(eq(memberships.tenantId, tenantId), eq(memberships.status, 'active')))
@@ -1460,9 +1472,12 @@ export async function emailCampaignPaused(
   const launcher = members.find(
     (m) => m.userId === c.launchedByUserId && grants(m).has('campaigns.send'),
   );
-  const recipients = launcher
-    ? [launcher]
-    : members.filter((m) => grants(m).has('campaigns.approve') && grants(m).has('campaigns.send'));
+  // Who must act, then those of them who did not turn these emails off (ADR-215).
+  const recipients = (
+    launcher
+      ? [launcher]
+      : members.filter((m) => grants(m).has('campaigns.approve') && grants(m).has('campaigns.send'))
+  ).filter((m) => wantsEmail(m.optOuts, 'campaign_pauses'));
   const { subject, lines } = campaignPauseNotice({
     campaignName: c.name,
     reason,
@@ -1560,7 +1575,7 @@ export async function emailCampaignCompleted(
     .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, campaignId)));
   if (!c?.launchedByUserId) return false;
   const [member] = await tx
-    .select({ userId: users.id, email: users.email })
+    .select({ userId: users.id, email: users.email, optOuts: memberships.emailOptOuts })
     .from(memberships)
     .innerJoin(users, eq(users.id, memberships.userId))
     .where(
@@ -1570,7 +1585,7 @@ export async function emailCampaignCompleted(
         eq(memberships.status, 'active'),
       ),
     );
-  if (!member) return false;
+  if (!member || !wantsEmail(member.optOuts, 'campaign_completions')) return false;
   const { subject, lines } = campaignCompletionNotice({
     campaignName: c.name,
     reason,

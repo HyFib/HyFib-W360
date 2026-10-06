@@ -45,6 +45,7 @@ import {
   createReportsService,
   createConsentService,
   createContactsService,
+  createEmailPreferencesService,
   createInboxService,
   createOnboardingService,
   createPlanAdminService,
@@ -95,6 +96,7 @@ import {
   type ReportsService,
   type ConsentService,
   type ContactsService,
+  type EmailPreferencesService,
   type InboxService,
   type JobQueue,
   type OnboardingService,
@@ -162,6 +164,7 @@ export interface Runtime {
   /** Billing → Usage and rates: Meta's rates and this month's estimate (ADR-060). */
   billingUsage: BillingUsageService;
   inbox: InboxService;
+  emailPreferences: EmailPreferencesService;
   teams: TeamsService;
   businessHours: BusinessHoursService;
   savedReplies: SavedRepliesService;
@@ -324,6 +327,7 @@ async function init(): Promise<Runtime> {
   const platformReconciliation = createPlatformReconciliationService({ platformDb });
   const billingUsage = createBillingUsageService({ db, clock: systemClock });
   const inbox = createInboxService({ db, clock: systemClock, jobs, signer });
+  const emailPreferences = createEmailPreferencesService({ db });
   const teams = createTeamsService({ db, clock: systemClock });
   const businessHours = createBusinessHoursService({ db, clock: systemClock });
   const savedReplies = createSavedRepliesService({ db, clock: systemClock });
@@ -516,6 +520,7 @@ async function init(): Promise<Runtime> {
     platformReconciliation,
     billingUsage,
     inbox,
+    emailPreferences,
     teams,
     businessHours,
     savedReplies,
