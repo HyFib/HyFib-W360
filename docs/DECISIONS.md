@@ -1150,8 +1150,9 @@ message, contact, conversation or template id, the status reached, an error code
 purpose, action and source). The worker builds the JSON when it delivers, in the company's scope:
 the contact's number and name, the message's text or reply, the template's name. Nothing personal
 is stored twice, a contact erased before delivery is sent without their details, and no erasure
-hook is needed. A retry is built again, so it may carry newer data than the first attempt; the
-event id, type and the status it reports never change.
+hook is needed (except for the tags a contact change lists, ADR-182). A retry is built again, so it
+may carry newer data than the first attempt; the event id, type and the status it reports never
+change.
 
 **Delivery.** A per-company `webhook.deliver` job (pg-boss policy `stately`: one queued and one
 active per company) is enqueued after that lookup, which the worker's LISTEN connection runs when
@@ -4182,8 +4183,9 @@ Found while building: `POST /contacts` added up to 20 tags to an existing contac
 naming `tags`.
 
 Not built: defining fields through the API, filtering the contact list by a field value (since
-ADR-113), changing numbers through the API, changing many contacts in one call, and an event that
-says which fields changed (the payload is the contact as it is when delivered, as before).
+ADR-113), changing numbers through the API (typed numbers: built by ADR-180), changing many contacts
+in one call, and an event that says which fields changed (the payload is the contact as it is when
+delivered, as before).
 
 ## ADR-113 Finding contacts through the public API (2026-10-02)
 
@@ -4605,10 +4607,10 @@ Decision:
 
 Not built: what changed in `GET /contact-changes` (an item there stands for every change since the
 reader's cursor and compaction merges a contact's changes, ADR-114, so it could name only parts a
-reader may already have read; a reader keeping a copy compares), which tags were added or removed,
-the values before a change (personal data stays out of events), consent and source (consent has its
-own event; the source is not part of `contact.updated`), and endpoints taking `contact.updated` only
-for chosen parts.
+reader may already have read; a reader keeping a copy compares), which tags were added or removed
+(built by ADR-182), the values before a change (personal data stays out of events), consent and
+source (consent has its own event; the source is not part of `contact.updated`), and endpoints
+taking `contact.updated` only for chosen parts.
 
 ## ADR-122 Changing many contacts in one call through the public API (2026-10-03)
 
@@ -4678,8 +4680,8 @@ Decision:
   endpoints per company), the runtime role's update of the column, and
   `app.capture_contact_webhook_event` replaced with the same signature.
 
-Not built: field keys chosen one by one, filters for `contact.created` or `contact.erased`, and
-filters on a contact's values (a tag, a field's value).
+Not built: field keys chosen one by one (built by ADR-184), filters for `contact.created` or
+`contact.erased`, and filters on a contact's values (a tag, a field's value).
 
 ## ADR-124 Finding contacts by name through the public API (2026-10-03)
 
@@ -4777,10 +4779,10 @@ Decision:
   at once, as 0092 did (one row per key and per plan version).
 
 Not built: changing campaigns through the API (creating, submitting, approving, pausing, resuming or
-cancelling them; pausing and cancelling since ADR-128), each recipient's outcome (since ADR-127),
-costs, filters by template, number or time, results for a time range or grouped by day, and campaign
-results in `campaign.status_changed` (ADR-087 left them out: they change with every message status;
-built by ADR-150, counted when each event is delivered).
+cancelling them; pausing and cancelling since ADR-128, creating and editing drafts since ADR-186),
+each recipient's outcome (since ADR-127), costs, filters by template, number or time, results for a
+time range or grouped by day, and campaign results in `campaign.status_changed` (ADR-087 left them
+out: they change with every message status; built by ADR-150, counted when each event is delivered).
 
 ## ADR-126 Conversation and campaign conditions in contact searches through the public API (2026-10-03)
 
@@ -4941,8 +4943,9 @@ Decision:
 - **Migration 0100** replaces the key and plan scope checks with the 13 scopes (as 0099 did) and the
   campaigns' pause reason check with `api` added; existing rows already satisfy them.
 
-Not built: resuming, approving, scheduling, creating or editing campaigns through the API,
-cancelling drafts, stopping many campaigns in one call, a reason or note given with the call, and
+Not built: resuming (built by ADR-176 for the campaigns keys paused), approving, scheduling,
+creating or editing campaigns through the API (drafts: built by ADR-186), cancelling drafts (built
+by ADR-187), stopping many campaigns in one call, a reason or note given with the call, and
 `campaign.status_changed` naming who cancelled a campaign.
 
 ## ADR-129 Database errors without the data they quote (SEC-11) (2026-10-03)
@@ -5625,8 +5628,9 @@ page view as their start. The console now parses them (an integration test compa
 stored times).
 
 Not built: assigning a failure to someone, acknowledging the console's other lists (dead letters,
-receipts, quarantine, late queues), editing or deleting a note (a new acknowledgement replaces it),
-and leaving acknowledged failures out of the alert email (each failure is emailed once anyway).
+built by ADR-169; receipts, built by ADR-179; quarantine; late queues, built by ADR-177), editing or
+deleting a note (a new acknowledgement replaces it), and leaving acknowledged failures out of the
+alert email (each failure is emailed once anyway).
 
 ## ADR-142 Clearing the braces advisory from the Next.js ESLint plugin (2026-10-04)
 
@@ -5804,9 +5808,9 @@ Decision:
   signature (0095's, with the automation condition), so its owner and grants stay. Existing
   endpoints keep null; nothing is backfilled.
 
-Not built: filters on other facts of a run (its trigger, how it ended (built by ADR-151), the key
-that started it), choosing automations by tag or folder, and filters for campaigns, templates,
-orders or conversations by team or channel (by number: built by ADR-170).
+Not built: filters on other facts of a run (its trigger (built by ADR-183), how it ended (built by
+ADR-151), the key that started it), choosing automations by tag or folder, and filters for
+campaigns, templates, orders or conversations by team or channel (by number: built by ADR-170).
 
 ## ADR-146 Choosing the campaign statuses a webhook endpoint receives (P5-09) (2026-10-04)
 
@@ -5952,8 +5956,9 @@ Decision:
   endpoints keep null; nothing is backfilled. An integration test holds the domain's list, the
   trigger's and the check's to the same statuses.
 
-Not built: filters by template, category, language or WhatsApp account, by the status before a
-change or by Meta's reason, and filters for conversation statuses (built by ADR-149).
+Not built: filters by template (built by ADR-175), category, language or WhatsApp account, by the
+status before a change or by Meta's reason, and filters for conversation statuses (built by
+ADR-149).
 
 ## ADR-149 Choosing the conversation statuses a webhook endpoint receives (P5-09) (2026-10-04)
 
@@ -6089,8 +6094,8 @@ Decision:
   signature (0113's, with the run end condition), so its owner and grants stay. Existing endpoints
   keep null; nothing is backfilled.
 
-Not built: filters on a run's end reason, its trigger or the key that started it, on how long it
-ran, or by tag or folder.
+Not built: filters on a run's end reason, its trigger (built by ADR-183) or the key that started it,
+on how long it ran, or by tag or folder.
 
 ## ADR-152 An API reference page made from the OpenAPI document (P5-08) (2026-10-05)
 
@@ -6745,8 +6750,9 @@ Decision:
 - **The CSV** of Recent dead letters (ADR-158) gains "Acknowledged (UTC)": when, never who or the
   note, as for failures.
 
-Not built: acknowledging receipts, quarantine entries and late queues; assigning a dead letter to
-someone; filtering the list by acknowledgement; deleting a note (a new acknowledgement replaces it).
+Not built: acknowledging quarantine entries (late queues: built by ADR-177; receipts: built by
+ADR-179); assigning a dead letter to someone; filtering the list by acknowledgement; deleting a note
+(a new acknowledgement replaces it).
 
 ## ADR-170 Choosing the WhatsApp numbers whose events a webhook endpoint receives (P5-09) (2026-10-05)
 
@@ -6807,7 +6813,7 @@ Decision:
   the same names, so their owners, grants and triggers stay. Existing endpoints keep null; nothing
   is backfilled.
 
-Not built: filters by team or by the member assigned, numbers chosen per event type (one list
+Not built: filters by team (built by ADR-174) or by the member assigned, numbers chosen per event type (one list
 applies to every event of a number the endpoint takes), and a `GET /channels` listing a company's
 numbers through the API (built by ADR-171).
 
@@ -6884,9 +6890,9 @@ Decision:
   and the message trigger function with the same name, so owners, grants and triggers stay. Existing
   endpoints keep null; nothing is backfilled.
 
-Not built: statuses of the messages one API key, campaign, automation or template sent (an endpoint
-chooses kinds of senders only), and a sender filter for received messages (a contact sends them
-all).
+Not built: statuses of the messages one API key, campaign (built by ADR-185), automation or template
+(built by ADR-175) sent (an endpoint chooses kinds of senders only), and a sender filter for
+received messages (a contact sends them all).
 
 ## ADR-173 OAuth 2.0 client credentials for webhook endpoints (P5-09) (2026-10-05)
 
@@ -6959,3 +6965,604 @@ Not built: other grants and client authentication (authorization code, JWT asser
 allows it; Basic is the method servers must support for a client with a password), token revocation,
 one token shared by several endpoints, refreshing a token before it is needed, and sending a
 delivery again within its attempt after a 401.
+
+## ADR-174 Choosing the teams whose conversations' events a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint receives the message and conversation events of every conversation its company
+has. Companies route conversations to teams (support, sales, returns), and each team often works in
+a tool of its own: a helpdesk for support, a CRM for sales. Each tool was sent every team's
+conversations and had to look the team up and drop the rest. ADR-170 narrows events by WhatsApp
+number and left filters by team unbuilt.
+
+Decision:
+
+- **A list of teams per endpoint,** for the events of a conversation only: `message.received`,
+  `message.status`, `conversation.status_changed`, `conversation.assignment_changed` and
+  `conversation.team_changed`. Null receives every conversation's events, as before; a list holds 1
+  to 50 of the company's teams, in the order given with repeats merged. It is chosen in Settings →
+  Webhooks ("Teams": every conversation's events, or only those of the conversations of the teams
+  ticked) and shown on the endpoint as "Teams whose conversations’ events are sent: …", and through
+  the API as `teamIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every
+  endpoint the API answers.
+- **Only with those events:** a list given for an endpoint that takes none of them is refused
+  (`teamIds`; 422 through the API). A change that removes them clears it, and a `PATCH` that leaves
+  it out keeps it; Settings always sends it. A check in the database holds the same rule (null, or 1
+  to 50 ids without a null while one of the five events is among the endpoint's).
+- **A conversation's team is the one it is in when the event is captured,** read from the
+  conversation (after the change, for the conversation's own events), so a conversation in no team
+  is on no list, and `conversation.team_changed` reaches the endpoints of the team the conversation
+  left (its stored `previousTeamId`) as well as of the team it joined. Applied in
+  `app.capture_webhook_event` with the endpoints' other filters; the team is read only when an
+  active endpoint of the company that takes the event names teams, and no event is written when none
+  takes it. Stored events and payloads are unchanged; replays and test events too. Consent, contact,
+  template, automation run, order and campaign events are not narrowed: an endpoint that names teams
+  still receives every one of them it takes.
+- **The company's teams:** a list given now may add only teams of the endpoint's company. A team
+  deleted later stays on the lists that held it (its conversations leave it first, so it matches
+  nothing), and a list given again may keep it but not add it back: an endpoint's list never widens
+  by itself. Settings names such a team "A deleted team"; the API answers its id.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `teamIds` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The choices list the company's teams by name to members with
+  `developer.manage`.
+- **Migration 0122:** `team_ids uuid[]` on `app.webhook_endpoints` with the check, validated at once
+  (a company has at most 10 endpoints), an update grant on the column for the runtime role, and
+  `app.capture_webhook_event` replaced with the same signature (0120's, with the team condition), so
+  its owner and grants stay. The triggers are unchanged. Existing endpoints keep null; nothing is
+  backfilled.
+
+Not built: filters by the member a conversation is assigned to (built by ADR-181), teams for
+automation run and order events (which can belong to a conversation too), and teams chosen per event
+type.
+
+## ADR-175 Choosing the templates whose message statuses and changes a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint that takes `message.status` receives the statuses of every message its company
+sends, and one that takes `template.status_changed` the changes of every template. A receiver often
+follows a few notifications only: an order system the delivery and read statuses of its order and
+shipping updates, a login service those of its one-time passwords, a team that looks after some
+templates their reviews. Each was sent every status and had to look the template up and drop the
+rest. ADR-148 left filters by template unbuilt, and ADR-172 narrows statuses by kind of sender only.
+
+Decision:
+
+- **A list of templates per endpoint,** for `message.status` and `template.status_changed` only.
+  Null receives every template's, as before; a list holds 1 to 50 of the company's templates, in the
+  order given with repeats merged. It is chosen in Settings → Webhooks ("Templates": every message's
+  statuses and every template's changes, or only those of the templates ticked, named by name and
+  language) and shown on the endpoint as "Templates whose statuses and changes are sent: …", and
+  through the API as `templateIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}`
+  and in every endpoint the API answers.
+- **Only with those events:** a list given for an endpoint that takes neither is refused
+  (`templateIds`; 422 through the API). A change that removes both clears it, and a `PATCH` that
+  leaves it out keeps it; Settings always sends it. A check in the database holds the same rule
+  (null, or 1 to 50 ids without a null while one of the two events is among the endpoint's).
+- **A message's template is the one it was sent with** (its `template_id`, written with the message
+  and never changed), so the statuses of a message sent without one, such as a member's reply or an
+  automation's text, are on no list; a template's change goes by the template that changed. Applied
+  in `app.capture_webhook_event` with the endpoints' other filters, to the template both triggers
+  already passed; no event is written when no endpoint takes it. Stored events and payloads are
+  unchanged; replays and test events too. Other events are not narrowed: an endpoint that names
+  templates still receives every other event it takes.
+- **The company's templates, in any status:** a list may name only templates of the endpoint's
+  company, a draft or a rejected one included, so their statuses and changes can be chosen before
+  approval. A template is never deleted while its company exists (one deleted at Meta or from HyFib
+  keeps its row, and the messages sent with it keep referring to it), so a list never names one that
+  is gone; a list given again is checked again.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `templateIds` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The choices list the company's templates by name and language
+  to members with `developer.manage` (owners and administrators, who can read templates anyway).
+- **Migration 0123:** `template_ids uuid[]` on `app.webhook_endpoints` with the check, validated at
+  once (a company has at most 10 endpoints), an update grant on the column for the runtime role, and
+  `app.capture_webhook_event` replaced with the same signature (0122's, with the template
+  condition), so its owner and grants stay. The triggers are unchanged. Existing endpoints keep
+  null; nothing is backfilled.
+
+Not built: filters by a template's category or language, by campaign (built by ADR-185) or
+automation (a list names templates, not who sent them), and templates chosen per event type (one
+list serves both events).
+
+## ADR-176 Resuming through the public API the campaigns keys paused (P5-08) (2026-10-05)
+
+Context: since ADR-128 a key pauses a campaign, for example when a product sells out or a price
+changes, but only members resume it: an integration that paused a campaign for stock had someone
+resume it by hand once the stock was back. ADR-128 kept resuming with members because a resumed
+campaign sends under the authority of the member who resumed it (`launched_by_user_id`, which the
+runner checks before each batch), and a key is not a member.
+
+Decision:
+
+- **A new writing scope, `campaigns.resume`** ("Resume campaigns keys paused"), granted only by
+  members holding `campaigns.send`, the permission members resume campaigns with. Existing keys gain
+  nothing, and `campaigns.stop` does not resume. A plan version that chose its scopes (ADR-092)
+  leaves it out until a new version includes it; one with every scope (`NULL`) includes it. As a
+  writing scope it is refused while the company is suspended or restricted (423, ADR-052).
+- **Only what keys paused:** `POST /campaigns/{id}/resume`, without a body, resumes a campaign whose
+  pause reason is `api`. A campaign a member paused (`manual`), or HyFib paused (a cap reached, the
+  template no longer approved, the number inactive, the launcher gone or no longer permitted, no
+  rate card), is refused with 409 naming its `pauseReason`: members decided that pause, or fix its
+  cause, in the app. A scheduled or running campaign is answered as it is, so a retry changes
+  nothing; a draft, one waiting for approval, a completed or a cancelled one is refused with 409
+  naming its status.
+- **Under the launcher's authority:** the key lifts the pause and nothing else. The campaign keeps
+  `launched_by_user_id`, so it sends under the authority of the member who launched it, as before
+  the pause, and the runner keeps checking that member before each batch. The resume is refused
+  (412) while that member has left or can no longer send campaigns, which the runner would answer
+  with a pause of its own; a member who can resumes it in the app, under their own authority.
+- **Members' checks:** the template still approved by Meta, the number active, neither cap reached
+  (counted again first) and a rate card for a spending cap's currency, each refused with 412 as
+  members are refused. A campaign that started runs again at once; one that never started waits for
+  its scheduled time, or starts at once if that has passed. Its recipients waiting since the pause
+  are queued again as it runs.
+- **One implementation:** members' resume and the API's call `resumeLockedCampaign`
+  (`campaigns/service.ts`) once the campaign row is locked; a member's resume puts the campaign
+  under the resuming member's authority as before, and a key's leaves it. The runner's launcher
+  check and the key's share `campaignLauncherStanding`. Members' resume no longer checks
+  `campaigns.send` a second time for marketing templates after asserting it first (that check could
+  not fail).
+- **Who did it:** the `resumed` event names no member and carries the key's id in its detail
+  (`apiKeyId`), and members' history names the key ("Resumed through the API, key “name”"); the
+  audit row `campaign.resumed` is the key's (`api_key`), with the request's id and `source` `api`;
+  `campaign.status_changed` fires from the status trigger as for members.
+- **The answer** is the campaign as `GET /campaigns/{id}` describes it, without `results`. No
+  idempotency key: the call answers the state the campaign is in, so repeating it changes nothing.
+- **Migration 0124** replaces the key and plan scope checks with the 17 scopes (as 0119 did);
+  existing rows already satisfy them.
+
+Not built: resuming through the API what members or HyFib paused, a key as a campaign's launcher,
+raising caps, approving, scheduling, creating or editing campaigns through the API (drafts: built by
+ADR-186), and resuming many campaigns in one call.
+
+## ADR-177 Acknowledging late queues on the operations console (P5-10) (2026-10-05)
+
+Context: since ADR-096 every platform administrator is emailed once each time a queue falls behind,
+and Operations → Queues shows since when. As with failing integrations (ADR-141) and dead letters
+(ADR-169), nothing there said that someone had already looked at a late queue or what they found, so
+every administrator who read the email opened the same tab, and two could restart the same worker or
+each assume that the other had. ADR-169 left acknowledging late queues unbuilt.
+
+Decision:
+
+- **Acknowledged with a note:** on Job queues, a platform administrator acknowledges a queue that is
+  late with a note of 10 to 500 characters (what was found or done). The queue's row shows who
+  acknowledged it, when, and the note; another administrator may acknowledge it again, replacing the
+  note. The platform audit log keeps each (`platform.late_queue_acknowledged`, the note as its
+  reason, the queue, since when it was late and its waiting jobs in the metadata, no company).
+- **While it stays late:** the time, the administrator and the note are columns of `ops.queue_waits`
+  (migration 0125), set together or not at all and only while the queue is late (a check holds
+  both). The worker's check that finds the queue back on time (under half its limit, as ADR-096
+  decides) clears them with the alert's mark, so the next time it falls behind it starts
+  unacknowledged, as it is emailed again. A page names the lateness it shows by when it began (to
+  the millisecond, as the console reads it): a page left open cannot acknowledge a queue that
+  recovered (409, "no longer late since then") or a later spell of the same queue.
+- **Where it is enforced:** `ops.platform_acknowledge_late_queue` (SECURITY DEFINER, executable by
+  the platform role only) checks the administrator, the note (trimmed) and the queue's lateness,
+  then writes the columns and the audit entry in one transaction. Only the definer role writes the
+  columns. Platform staff read them with the rest of the row, as the console already read it; the
+  worker's table grant becomes a grant on the check's own columns, so it never reads a note.
+  `ops.record_queue_waits` is created again with the same signature (dropped by its owner and
+  recreated, as 0011 explains), its owner and grants restored.
+- **Nothing else changes:** acknowledging neither changes whether the queue is late nor its alert:
+  the email (ADR-096) still tells each spell once, before anyone could acknowledge it, and the
+  overview counts late queues as before.
+- **The CSV** of Job queues (ADR-158) gains "Acknowledged (UTC)" after "Staff emailed (UTC)": when,
+  never who or the note, as for dead letters.
+
+Not built: acknowledging quarantine entries (receipts: built by ADR-179), assigning a late queue to
+someone, a reminder while an acknowledged queue stays late, and deleting a note (a new
+acknowledgement replaces it).
+
+## ADR-178 Template syncs asked for go first (2026-10-05)
+
+Context: a member's "Refresh from Meta" promises statuses "within a minute", and Meta's template
+webhooks (an approval, a rejection, a pause) only mark the account as asking for a sync, which the
+minute sweep then queues. The sweep lists at most 100 accounts a minute, never synced first and then
+the oldest sync (0005), and queued their syncs in that order; a member's refresh was queued at once
+but behind every sync queued before it. With many newly connected accounts, a refresh or an approval
+could wait behind syncs nobody was waiting for. Found when the template webhook test could not find
+its account in the sweep's list, which the suite's shared database fills with accounts that never
+synced (fixed then by reading the account's row instead).
+
+Decision:
+
+- **Asked for first:** `ops.template_sync_due` (migration 0126) lists the accounts asked for since
+  their last sync first, oldest request first, then the rest as before, and says which they are
+  (`requested`). Which accounts are due is unchanged.
+- **Queued ahead:** a member's refresh, and the sweep's sync of an account asked for, are queued at
+  a higher pg-boss priority (10) than routine syncs (0), and the template.sync queue fetches higher
+  priorities first, so they run before syncs queued earlier. A sync already queued or running for
+  the account still stands for the request (one per account, 0005), and a request made while a sync
+  runs is queued by the next sweep, as before.
+- **Migration 0126:** the function is created again with the new column and order (dropped by its
+  owner and recreated, as 0011 explains), its owner and grant restored.
+
+Not built: a refresh for one template rather than the account's whole list, and showing on the
+Templates page when the refresh ran.
+
+## ADR-179 Acknowledging webhook receipts on the operations console (P5-10) (2026-10-05)
+
+Context: Operations → Integrations lists the Meta and Razorpay receipts that used all their attempts
+or have waited too long, and every platform administrator is emailed about the first kind (ADR-091).
+As for dead letters (ADR-169) and late queues (ADR-177), nothing there said that someone had already
+looked at a receipt, whether its retry was pointless (a malformed body, a test account), or what was
+fixed before retrying it.
+
+Decision:
+
+- **Acknowledged with a note:** in the receipts list, a platform administrator acknowledges a
+  receipt with a note of 10 to 500 characters, retried or not. The row shows who acknowledged it,
+  when, and the note; another administrator may acknowledge it again, replacing the note. The
+  platform audit log keeps each (`platform.webhook_receipt_acknowledged`, the note as its reason,
+  the receipt, its provider and status in the metadata, no company: a receipt is not yet a
+  company's).
+- **Kept with the receipt:** notes live in `ops.receipt_acknowledgements` (migration 0127), one per
+  receipt, deleted with it (a foreign key that cascades), so the retention sweep's deletion of
+  receipts after 90 days takes their notes too. A retried receipt keeps its note while it is listed.
+  A table of its own, because the runtime role writes receipts (table grants since 0003) and must
+  not write notes.
+- **Where it is enforced:** `ops.platform_acknowledge_webhook_receipt` (SECURITY DEFINER, executable
+  by the platform role only) checks the administrator, the note (trimmed) and the receipt, then
+  writes the note and the audit entry in one transaction. Platform staff read the notes; the runtime
+  and auth roles cannot read or write them.
+- **Nothing else changes:** acknowledging neither retries the receipt nor changes whether it can be
+  retried, and the alert email still tells each receipt that used its attempts once.
+- **The CSV** of the receipts list (ADR-158) gains "Acknowledged (UTC)" as its last column: when,
+  never who or the note.
+
+Not built: acknowledging quarantine entries (they are resolved with a resolution instead), assigning
+a receipt to someone, and deleting a note (a new acknowledgement replaces it).
+
+## ADR-180 Changing a contact's typed number through the public API (P5-08) (2026-10-05)
+
+Context: `PATCH /contacts/{id}` changes a contact's name, email, custom field values and tags
+(ADR-112), never its number: a number WhatsApp gave is the contact's identity, and members change
+typed numbers in the app. A CRM or shop that fixes a mistyped number (an import, a checkout form)
+had a member retype it. Members' rule already tells the two apart: a contact linked to a WhatsApp
+identity keeps its number, and any other contact's number can be changed to one no other contact
+has.
+
+Decision:
+
+- **`phone` on `PATCH /contacts/{id}`,** with the country code and a leading +, as `POST /contacts`
+  takes it, under the same `contacts.write` scope. It changes as members change it: a contact with a
+  WhatsApp identity (it wrote to one of the company's numbers) keeps its number (412, "This number
+  comes from WhatsApp and cannot be changed."); a number another contact of the company has is
+  refused with 409, without naming that contact (a key may not read contacts); a number on the
+  company's suppression list is refused with 412, as `POST /contacts` refuses to create a contact
+  for it. A number that is not one is refused with 422 naming `phone`, before anything is read; the
+  same number in another form changes nothing.
+- **One call:** only `PATCH /contacts/{id}` changes numbers. Changing many contacts at once
+  (ADR-122) or the contacts a search finds (ADR-165) does not take `phone`: two contacts in one call
+  could swap numbers, which each check alone would not see.
+- **As any change:** in the transaction that locks the contact; audited as `contact.updated` with
+  `phone` among what changed, never the number; `contact.updated` webhooks name `phone` (ADR-121)
+  and the contact feed lists the contact (ADR-114), from the triggers as for members. Two keys
+  moving two contacts to one number at once: the unique number index refuses the second (409).
+  Consent stays with the contact, as when members change a number.
+
+Not built: numbers in calls that change many contacts, clearing a number, and moving a WhatsApp
+identity to another contact.
+
+## ADR-181 Choosing the members whose assigned conversations' events a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint can take the message and conversation events of chosen teams' conversations
+(ADR-174), but some receivers follow members, not teams: a sales representative's own CRM, the
+dashboard of a supervisor who looks after a few members, an outsourced agent's tool that should see
+that agent's conversations only. Each was sent every conversation of the team or the company and had
+to look the assignee up and drop the rest. ADR-174 left filters by the member a conversation is
+assigned to unbuilt.
+
+Decision:
+
+- **A list of members per endpoint,** for the events teams narrow: `message.received`,
+  `message.status`, `conversation.status_changed`, `conversation.assignment_changed` and
+  `conversation.team_changed`. Null receives every conversation's events, as before; a list holds 1
+  to 50 members, by the ids `GET /members` lists them by (and conversation events name them by), in
+  the order given with repeats merged. It is chosen in Settings → Webhooks ("Members": every
+  conversation's events, or only those of the conversations assigned to the members ticked) and
+  shown on the endpoint as "Members whose conversations’ events are sent: …", and through the API as
+  `assigneeIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every
+  endpoint the API answers.
+- **Only with those events:** a list given for an endpoint that takes none of them is refused
+  (`assigneeIds`; 422 through the API). A change that removes them clears it, and a `PATCH` that
+  leaves it out keeps it; Settings always sends it. A check in the database holds the same rule
+  (null, or 1 to 50 ids without a null while one of the five events is among the endpoint's).
+- **A conversation's member is the one it is assigned to when the event is captured,** read from the
+  conversation with its team (after the change, for the conversation's own events), so an unassigned
+  conversation is on no list, and `conversation.assignment_changed` reaches the endpoints of the
+  member the conversation left (its stored `previousAssigneeId`) as well as of the member it went
+  to. Applied in `app.capture_webhook_event` with the endpoints' other filters, so an endpoint that
+  names teams and members receives the events of those members' conversations in those teams; the
+  member is read only when an active endpoint of the company that takes the event names teams or
+  members, and no event is written when none takes it. Stored events and payloads are unchanged;
+  replays and test events too. Other events are not narrowed: an endpoint that names members still
+  receives every other event it takes.
+- **Members who take conversations:** a list given now may add only members conversations can be
+  assigned to: active members of the endpoint's company whose role reads and answers conversations,
+  those `GET /members` lists and routing gives conversations to. A member who later leaves, is
+  suspended or removed, or loses that role stays on the lists that held them: their conversations
+  are released then (`conversation.assignment_changed` events, which those endpoints receive), and
+  they match nothing while they hold none; a list given again may keep them but not add them back
+  until they take conversations again. Settings names such a member "… (no longer takes
+  conversations)". Memberships are never deleted, so a list never names one that is gone.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `assigneeIds` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The choices list the members conversations can be assigned to,
+  by name, to members with `developer.manage` (owners and administrators, who can read members
+  anyway); a refusal tells a key only whether an id it gives is such a member of its company.
+- **Migration 0128:** `assignee_ids uuid[]` on `app.webhook_endpoints` with the check, validated at
+  once (a company has at most 10 endpoints), an update grant on the column for the runtime role, and
+  `app.capture_webhook_event` replaced with the same signature (0123's, with the member condition),
+  so its owner and grants stay. The definer role already reads a conversation's member (0009). The
+  triggers are unchanged. Existing endpoints keep null; nothing is backfilled.
+
+Not built: members for automation run and order events, filters by who sent a message (a list names
+whom a conversation is assigned to, not who wrote in it), and members chosen per event type.
+
+## ADR-182 Naming the tags a `contact.updated` added and removed (P5-09) (2026-10-05)
+
+Context: since ADR-121 a `contact.updated` names the parts its change changed, `tags` among them,
+but not which tags. A receiver that keeps a list in step with a tag (a CRM segment for `vip`, a flow
+it starts when `refund` is added) still had to keep a copy of every contact's tags to compare;
+ADR-121 left it unbuilt. Unlike the parts, the tags cannot be told when the event is delivered: by
+then the contact's tags may have changed again.
+
+Decision:
+
+- **`tagsAdded` and `tagsRemoved` on `contact.updated`:** the tags the change added and those it
+  removed, as the contact lists them, sorted. Always given: both empty when the change touched no
+  tag, or when it undid itself (a tag added and removed again in one transaction is in neither list,
+  and so is one removed and added back). Null for an event captured before migration 0129, which a
+  replay within the 30 days kept can send, and once the contact is erased. `contact.created` lists
+  none: its contact carries its tags.
+- **Net within the transaction:** still one event per contact and transaction. The tag trigger notes
+  each tag on the event its transaction captured through `app.note_contact_webhook_tag`, a definer
+  function that, like `app.add_contact_webhook_changes` (ADR-121), changes only an event the calling
+  transaction captured, which no delivery can have read yet: adding a tag the transaction removed
+  takes it off the removed list and otherwise puts it on the added list, and removing one likewise.
+  A savepoint that rolls back takes back what it noted.
+- **Stored, so erasure clears them:** ADR-053 keeps events to ids and non-personal facts and builds
+  personal data when it delivers. Tags cannot be built then, and a tag can say something about a
+  person, so they are the one exception: kept no longer than the event (30 days), sent only to the
+  company's own endpoints, and cleared from every event of a contact when it is erased (in
+  `app.capture_contact_webhook_event`'s erasure branch, as the definer role erasure runs as, through
+  the contact events' index), so a delivery or replay after an erasure names no tag. The payload of
+  an erased contact carries none either.
+- **Events stay history:** the runtime role still only inserts and reads events; the definer role
+  gains the update of the two columns, for the function and for erasure. A database check keeps the
+  lists together, on `contact.updated` only, without a null entry or a tag in both.
+- **Migrations 0129 and 0130:** 0129 adds `tags_added` and `tags_removed` with the check, added NOT
+  VALID so that captures wait for its lock only briefly, the definer function, and replaces
+  `app.capture_contact_webhook_event` and the tag trigger function with the same signatures, so
+  their triggers and grants stay; 0130 validates the check while captures go on. Existing events
+  keep null.
+
+Not built: the tags in `GET /contact-changes` (ADR-114 merges a contact's changes), the values a
+change replaced for other parts (they stay out of events), and endpoints taking the changes of
+chosen tags only.
+
+## ADR-183 Choosing what started the runs a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint that takes `automation.run_started` or `automation.run_ended` receives the
+events of every live run, or of the automations it names (ADR-145), and of the ends it chooses
+(ADR-151). A receiver often follows some runs only: a shop the runs its own calls start through the
+API, a store connector those its order messages start, a chatbot dashboard the runs customers'
+messages start. Each was sent every run and had to read `run.trigger` and drop the rest. ADR-145 and
+ADR-151 left filters on a run's trigger unbuilt.
+
+Decision:
+
+- **A list of triggers per endpoint,** for both run events: `keyword`, `conversation_started`,
+  `any_message`, `store_event` and `api`, the trigger the payload reports as `run.trigger`. Null
+  receives every run, as before; a list holds 1 to 5 of them, kept in the order the automation
+  builder lists triggers. It is chosen in Settings → Webhooks ("Runs started by": all ticked unless
+  some are unticked, named as the automation pages name triggers) and shown on the endpoint as
+  "Automation runs started by: …", and through the API as `runTriggers` on `POST /webhook-endpoints`
+  and `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only with a run event:** a list given for an endpoint that takes neither is refused
+  (`runTriggers`; 422 through the API). A change that removes both clears it, and a `PATCH` that
+  leaves it out keeps it; Settings always sends it. A check in the database holds the same rule
+  (null, or 1 to 5 known triggers without a null while a run event is among the endpoint's).
+  Members' test runs send no events, so `test` is not a choice.
+- **Matched as captured:** the run trigger passes what started the run as `runTrigger` in the
+  event's detail, and `app.capture_webhook_event` takes it out with the number and the sender before
+  the event is stored (ADR-172's way), so stored events stay as they were; the payload reads the
+  trigger from the run. A run's trigger is set when it starts and no role can change it, so the
+  start and the end of a run always match the same endpoints' lists. Applied with the endpoints'
+  other filters (automations, ends, numbers); no event is written when no endpoint takes it.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `runTriggers` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0131:** `run_triggers text[]` on `app.webhook_endpoints` with the check, validated at
+  once (a company has at most 10 endpoints), an update grant on the column for the runtime role, and
+  `app.capture_webhook_event` and the run trigger function replaced with the same signatures, so
+  their owners, grants and triggers stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: filters on the key that started a run, on a store event's kind (placed, shipped,
+delivered, cancelled), on a run's end reason, and triggers chosen per event (one list serves both
+run events).
+
+## ADR-184 Choosing the custom fields whose changes a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint can take `contact.updated` only for some parts of a contact (ADR-123), `fields`
+standing for a change of any custom field. A receiver that keeps a few fields in step (a loyalty
+tier its own system sets, a city for delivery zones) was sent every field's change and had to read
+`changes` and drop the rest; ADR-123 left choosing fields one by one unbuilt.
+
+Decision:
+
+- **A list of fields per endpoint,** by key (as `GET /contact-fields` lists them): null receives
+  every field's changes, as before; a list holds 1 to 50 keys (a company has at most 50 fields), in
+  the order given with repeats merged. It narrows field changes only: a change of a custom field
+  (`fields.<key>` in `changes`) counts for the endpoint only when its key is listed, while changes
+  of the name, number, email and tags are narrowed by the parts alone. An event still names every
+  part its change changed. Chosen in Settings → Webhooks ("Custom fields": every custom field's
+  changes, or only those of the fields ticked, named by label and key), shown on the endpoint as
+  "Custom fields whose changes are sent: …", and through the API as `contactFieldKeys` on
+  `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every endpoint the API
+  answers.
+- **Only while field changes are taken:** a list given for an endpoint that does not take
+  `contact.updated`, or whose parts leave out `fields`, is refused (`contactFieldKeys`; 422 through
+  the API), checked against the parts the endpoint keeps. A change that drops the event or `fields`
+  clears it, and a `PATCH` that leaves it out keeps it; Settings always sends it. A check in the
+  database holds the same rule (null, or 1 to 50 well-formed keys without a null, with
+  `contact.updated` and every part or `fields`).
+- **Applied at capture:** `app.capture_contact_webhook_event` creates a delivery for an endpoint
+  when one of the parts the change names passes both its parts and its fields; a later change of the
+  contact in the same transaction queues the endpoints it newly concerns, as before. Stored events
+  and payloads are unchanged.
+- **The company's fields:** a list given now may add only keys of the company's fields. A field
+  deleted later stays on the lists that held it, and a list given again may keep it but not add it
+  back; keys never change, so a field added later with the same key matches it again. Settings names
+  a deleted field "… (deleted)"; the API answers its key.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `contactFieldKeys` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The choices list the company's fields by label to members with
+  `developer.manage`.
+- **Migration 0132:** `contact_field_keys text[]` on `app.webhook_endpoints` with the check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role, and `app.capture_contact_webhook_event` replaced with the same signature (0129's,
+  with the field condition), so its owner and grants stay. Existing endpoints keep null; nothing is
+  backfilled.
+
+Not built: filters on a field's value (a tier becoming `gold`), fields for `contact.created`, and
+fields chosen by type.
+
+## ADR-185 Choosing the campaigns whose message statuses and changes a webhook endpoint receives (P5-09) (2026-10-05)
+
+Context: an endpoint can take the statuses of the messages campaigns send (`sentBy` `campaign`,
+ADR-172) and every campaign's changes, or those of chosen statuses (ADR-146), but not one
+campaign's. A receiver that reports on some campaigns only (one market's, an agency client's) was
+sent every campaign's and could not tell them apart: a message's status named its template and that
+a campaign sent it, never which campaign. ADR-172 and ADR-175 left filters by campaign unbuilt.
+
+Decision:
+
+- **The campaign in each message status:** `message.status` payloads gain `message.campaignId`, the
+  campaign that sent the message as `GET /campaigns` lists it, or null for a message no campaign
+  sent. It is read from the message when the delivery is prepared (a message's campaign never
+  changes), so a replay of an event captured before this change names it too.
+- **A list of campaigns per endpoint,** for `message.status` and `campaign.status_changed`: null
+  receives every campaign's, as before; a list holds 1 to 50 of the company's campaigns, by id, in
+  the order given with repeats merged. It narrows message statuses to those of the messages a listed
+  campaign sent (a message no campaign sent, such as a member's reply or an automation's, is on no
+  list) and campaign changes to those of a listed campaign; other events are not narrowed. Chosen in
+  Settings → Webhooks ("Campaigns": every message's statuses and every campaign's changes, or only
+  those of the campaigns ticked, named by name and status), shown on the endpoint as "Campaigns
+  whose statuses and changes are sent: …", and through the API as `campaignIds` on
+  `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every endpoint the API
+  answers.
+- **Only while one of those events is taken:** a list given for an endpoint that takes neither is
+  refused (`campaignIds`; 422 through the API). A change that drops both clears it, and a `PATCH`
+  that leaves it out keeps it; Settings always sends it. A check in the database holds the same rule
+  (null, or 1 to 50 ids in one dimension without a null, with one of the two events).
+- **Applied at capture:** the message trigger passes the message's campaign in the event's detail,
+  and `app.capture_webhook_event` matches it, or the campaign a campaign's event names, against each
+  endpoint's list, then takes the message's out of the detail before the event is stored, so stored
+  events are unchanged. With the other filters (numbers, teams, templates, members, statuses and
+  senders) an event reaches an endpoint only when it passes them all, and no event is written when
+  no endpoint takes it.
+- **The company's campaigns:** a list given now may hold only campaigns of the company, which are
+  kept until the company is deleted, so a list never names one that is gone. Settings offers the
+  company's 200 newest campaigns, whatever their status (a draft can be chosen before it starts),
+  says when there are more, and keeps listing an older one the endpoint already names; the API takes
+  any of the company's.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `campaignIds` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The choices list the company's campaigns by name and status to
+  members with `developer.manage`.
+- **Migration 0133:** `campaign_ids uuid[]` on `app.webhook_endpoints` with the check, validated at
+  once (a company has at most 10 endpoints), an update grant on the column for the runtime role, and
+  `app.capture_webhook_event` and `app.webhook_capture_message` replaced with the same signatures
+  (0131's and 0120's, with the campaign), so their owners, grants and triggers stay. Existing
+  endpoints keep null; nothing is backfilled.
+
+Not built: the campaign a reply is attributed to (ADR-025) in `message.received`, filters by a
+campaign's template or audience, and campaigns chosen per event type (one list serves both events).
+
+## ADR-186 Creating and editing campaign drafts through the public API (P5-08) (2026-10-05)
+
+Context: keys read campaigns (ADR-125) and pause, cancel and resume them (ADR-128, ADR-176), but
+every campaign was made in the app: an integration that plans campaigns elsewhere (a CRM's segments,
+a merchandising calendar) had a member type each one again. ADR-128 kept creating and editing with
+members because a campaign sends under a member's authority, but a draft sends nothing.
+
+Decision:
+
+- **A new writing scope, `campaigns.write`** ("Create and edit campaign drafts"), granted only by
+  members holding `campaigns.write`, the permission members create and edit drafts with (owners,
+  administrators and marketers by default). Existing keys gain nothing; a plan version that chose
+  its scopes (ADR-092) leaves it out until a new version includes it, and one with every scope
+  (`NULL`) includes it. As a writing scope it is refused while the company is suspended or
+  restricted (423, ADR-052).
+- **Drafts only:** `POST /campaigns` creates a draft with the settings given, and
+  `PATCH /campaigns/{id}` changes the settings given and keeps the others. The settings are those of
+  members' editor: the name, the number (`channelId`), the template, its variables, the audience (a
+  segment, or conditions as a segment holds them: `POST /contacts/search`'s conditions without
+  groups), the schedule (now, or a date and time in a time zone), the daily window, the rate, the
+  message cap, the spending cap and the sending period. Settings left out of a new draft start as a
+  member's new draft does: none, at once, in the company's time zone, sending for 24 hours.
+  Submitting, approving and starting stay with members, under the authority of a member allowed to
+  send campaigns and with every check a submission makes; a campaign that is no longer a draft is
+  refused with 409 naming its status.
+- **Members' checks, one implementation:** members' save and the API both call
+  `prepareCampaignDraft` (the time zone, window, variables, date and time, and spending cap) and
+  then `writeLockedCampaignDraft` on the locked draft (the company's number, template and segment, a
+  segment not archived, and conditions by segments' rules), in `campaigns/service.ts`; members' save
+  keeps its checks and their order.
+- **Versions:** every change raises the draft's version, members' and keys' alike. `PATCH` takes an
+  optional `expectedVersion`: given, a draft changed since (by a member or another key) is refused
+  with 409 and keeps its settings; left out, the change applies to the draft as it is. Members' save
+  compares the version they loaded, as before, so a key's change between a member's load and save is
+  reported to the member.
+- **Answers:** both calls answer the campaign as `GET /campaigns/{id}` describes it, with `version`
+  and `settings` (as members' editor holds them: the date and time as YYYY-MM-DDTHH:mm, the window
+  as HH:MM, the spending cap in major units). `GET /campaigns/{id}` answers both to a key that also
+  holds `campaigns.write`, and null for both to a key that only reads campaigns, which still gets
+  counts only (ADR-125: no audience, variables, pacing or costs).
+- **Who did it:** a key's draft has no creator (`created_by_user_id` null); its `created` and
+  `edited` campaign events name no member and carry the key's id (`apiKeyId`), so members' history
+  reads "through the API, key “name”"; the audit rows `campaign.created` and `campaign.updated` are
+  the key's (`api_key`), with the request's id and `source` `api`.
+- **Retries:** `POST` takes an optional `Idempotency-Key` (one draft per key: a retry answers the
+  first draft); `PATCH` sets values, so a retry sets the same settings again and raises the version.
+- **Migration 0134** replaces the key and plan scope checks with the 18 scopes (as 0124 did);
+  existing rows already satisfy them.
+
+Not built: submitting, approving, scheduling or starting campaigns through the API (a key is not a
+member), cancelling drafts (built by ADR-187) or deleting them, test sends, a draft's review (the
+audience breakdown and the cost estimate) through the API, and creating many drafts in one call.
+
+## ADR-187 Cancelling campaign drafts through the public API (P5-08) (2026-10-05)
+
+Context: since ADR-186 keys create and edit drafts, but a draft a key made by mistake (a duplicate,
+a promotion called off) stayed for a member to cancel: `POST /campaigns/{id}/cancel` refused drafts
+(ADR-128), because only members wrote them.
+
+Decision:
+
+- **Drafts with `campaigns.write`:** `POST /campaigns/{id}/cancel` cancels a draft for a key holding
+  `campaigns.write`, whoever wrote the draft, as members cancel drafts with the permission of that
+  name (and anything else with `campaigns.send`). Everything else it cancels still needs
+  `campaigns.stop`: a key holding only `campaigns.write` is refused any other campaign with 403
+  naming `campaigns.stop`, and a key holding only `campaigns.stop` is refused a draft with 409
+  naming its status, as before. A cancelled or completed campaign is answered as it is to a key with
+  either scope, so a retry is harmless.
+- **Checked before anything is read:** the key must hold one of the two scopes within the company's
+  plan, and, both being writing scopes, the company must be active (423 otherwise); the campaign is
+  then locked in the key's company.
+- **As members cancel it:** `cancelLockedCampaign`, which members' cancel calls too (a draft has no
+  recipients or sends to cancel); the `canceled` event names no member and carries the key's id,
+  members' history names the key, the audit row `campaign.canceled` is the key's with `source`
+  `api`, and `campaign.status_changed` reports the change.
+- **No migration.**
+
+Not built: deleting drafts (a cancelled draft is kept, as members' are) and cancelling many
+campaigns in one call.

@@ -16,15 +16,22 @@ import {
   Table,
 } from '@w360/ui';
 import { CompanyLink, ListTitle, Utc } from '@/components/platform/ops';
-import { AcknowledgeDeadLetterForm, RetryDeadLetterForm } from '@/components/platform/ops-forms';
+import {
+  AcknowledgeDeadLetterForm,
+  AcknowledgeLateQueueForm,
+  RetryDeadLetterForm,
+} from '@/components/platform/ops-forms';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
 
 export const metadata: Metadata = { title: 'Queues · Operations' };
 export const dynamic = 'force-dynamic';
 
-/** The oldest ready job's wait at the worker's last check, and whether the queue is late. */
-function QueueWaitCell({ wait }: { wait: QueueWait | null }) {
+/**
+ * The oldest ready job's wait at the worker's last check, whether the queue is late, and while it
+ * is, who acknowledged it with what note (ADR-177).
+ */
+function QueueWaitCell({ queue, wait }: { queue: string; wait: QueueWait | null }) {
   if (wait === null) return <span className="text-sm text-muted-foreground">Not checked</span>;
   if (wait.oldestWaitMs === null) return <span className="text-muted-foreground">—</span>;
   return (
@@ -40,6 +47,18 @@ function QueueWaitCell({ wait }: { wait: QueueWait | null }) {
               Staff emailed <Utc at={wait.alertedAt} />
             </span>
           ) : null}
+          {wait.acknowledgement ? (
+            <span className="max-w-xs">
+              Acknowledged by {wait.acknowledgement.byName ?? 'an administrator'},{' '}
+              <Utc at={wait.acknowledgement.at} />
+              <span className="block break-words">{wait.acknowledgement.note}</span>
+            </span>
+          ) : null}
+          <AcknowledgeLateQueueForm
+            queue={queue}
+            lateSince={wait.lateSince.toISOString()}
+            acknowledged={wait.acknowledgement !== null}
+          />
         </span>
       ) : null}
     </div>
@@ -63,7 +82,10 @@ export default async function OpsQueuesPage() {
             checked ({o.waitsCheckedAt ? <Utc at={o.waitsCheckedAt} /> : 'not yet'}). A queue is
             late once it reaches its limit, until the wait is back under half of it; platform
             administrators are emailed once each time, at most every 15 minutes (ADR-096; last email{' '}
-            {o.lastQueueAlertAt ? <Utc at={o.lastQueueAlertAt} /> : 'never'}).
+            {o.lastQueueAlertAt ? <Utc at={o.lastQueueAlertAt} /> : 'never'}). Acknowledge a late
+            queue with a note to tell the other administrators what you found or did; a later note
+            replaces it, the platform audit log keeps each, and the note is forgotten once the queue
+            is back on time (ADR-177). The CSV gives when, never who or the note.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
@@ -111,7 +133,7 @@ export default async function OpsQueuesPage() {
                     <>
                       <TD className="tabular-nums">{q.counts.ready}</TD>
                       <TD>
-                        <QueueWaitCell wait={q.wait} />
+                        <QueueWaitCell queue={q.name} wait={q.wait} />
                       </TD>
                       <TD className="tabular-nums">{q.counts.deferred}</TD>
                       <TD className="tabular-nums">{q.counts.active}</TD>

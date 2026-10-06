@@ -342,7 +342,9 @@ as `templates.sync_failed`.
 
 **Template statuses look stale.** Press "Refresh from Meta" on the Templates page. If the account
 shows as not connected, reconnect it in Settings → Channels. Verify that the Meta app is subscribed
-to the template webhook fields (docs/META-SETUP.md).
+to the template webhook fields (docs/META-SETUP.md). A refresh, and a sync Meta's template webhook
+asks for, is queued ahead of routine syncs (ADR-178): if statuses still take more than a few
+minutes, look at the template.sync queue's oldest wait on Operations → Queues.
 
 **A template send failed with 132015 / 132016.** Meta paused or disabled the template; HyFib marks it
 and requests a sync. Improve the template (quality) or use another one; do not resend blindly.
@@ -1780,10 +1782,39 @@ resumes a paused campaign as any other (messages released by the pause are queue
 cancelled campaign is not resumed: create a new one. 403 `forbidden` names the scope the key lacks,
 `campaigns.stop` (keys keep the scopes they were created with: create a key with it); `not_in_plan`
 means the plan leaves it out (ADR-092). 404 means the id is not one of the key's company's
-campaigns. 409 names the campaign's status: only scheduled and running campaigns pause, and drafts
-are not cancelled through the API. 423 means the company is suspended or its plan ended (nothing
-sends then anyway). To stop a key from stopping campaigns, revoke it and create one without the
-scope.
+campaigns. 409 names the campaign's status: only scheduled and running campaigns pause, and a draft
+is cancelled only by a key with `campaigns.write` (ADR-187). 423 means the company is suspended or
+its plan ended (nothing sends then anyway). To stop a key from stopping campaigns, revoke it and
+create one without the scope.
+
+**A campaign was resumed through the API, or `POST /api/v1/campaigns/{id}/resume` answers 403, 404,
+409, 412 or 423 (ADR-176).** Its history names the key ("Resumed through the API, key “name”"), and
+Settings → Audit log lists `campaign.resumed` with the key as the actor and the request's id; it
+sends under the authority of the member who launched it, as before the pause. 403 `forbidden` names
+the scope the key lacks, `campaigns.resume` (a key with `campaigns.stop` only does not resume;
+create a key with it), or `not_in_plan` (ADR-092). 404 means the id is not one of the key's
+company's campaigns. 409 names the campaign's status, or its `pauseReason` when a member or HyFib
+paused it: only a key's pause (`api`) is lifted through the API, and members resume the rest in the
+app. 412 names the check that failed: the template no longer approved, the number not active, a cap
+reached (members raise it in the app), no rate card for the spending cap's currency, or the member
+who launched the campaign has left or can no longer send campaigns (a member who can resumes it in
+the app, under their own authority). 423 means the company is suspended or its plan ended. To stop a
+key from resuming campaigns, revoke it and create one without the scope.
+
+**A key created or changed a campaign draft, or `POST /api/v1/campaigns` or
+`PATCH /api/v1/campaigns/{id}` answers 403, 404, 409, 422 or 423 (ADR-186).** The draft's history
+names the key ("Created through the API, key “name”", "Edited through the API, key “name”"), and
+Settings → Audit log lists `campaign.created` and `campaign.updated` with the key as the actor and
+the request's id. A key's draft sends nothing until a member submits and starts it. 403 `forbidden`
+names the scope the key lacks, `campaigns.write` (create a key with it), or `not_in_plan` (ADR-092).
+404 names what is not the company's: the campaign, the WhatsApp number, the template or the segment
+(an archived segment too). 409 names the campaign's status (only drafts are edited) or, with
+`expectedVersion`, the draft's version: someone changed it since the key read it, so read it again
+(`GET /campaigns/{id}` with a key that also holds `campaigns.write`) and retry. 422 names the
+setting that failed members' checks (a condition by segments' rules, the time zone, the window, the
+date and time, the spending cap). 423 means the company is suspended or its plan ended. To stop a
+key from writing drafts, revoke it and create one without the scope; members edit or cancel the
+drafts it wrote in the app.
 
 **`GET /api/v1/orders` answers 403 or 404, or an order seems missing (ADR-167).** 403 `forbidden`
 names the scope the key lacks, `orders.read` (keys keep the scopes they were created with: create a
@@ -2089,6 +2120,16 @@ every change, including parts added later), or `PATCH /webhook-endpoints/{id}` w
 for a contact's whole transaction and names every part it changed, so an endpoint taking only
 emails also receives an event that changed the email and the tags, naming both.
 
+**A receiver misses a custom field's changes (ADR-184).** An endpoint can take the changes of chosen
+custom fields only. The endpoints list shows them ("Custom fields whose changes are sent: …"), and
+the API answers `contactFieldKeys` (null takes every field's). A change of another field is never
+queued for the endpoint (one that also changed a part the endpoint takes is, naming every part), and
+when no endpoint of the company takes a change, it is not recorded for it, so there is nothing to
+replay. A field deleted since it was chosen shows as "… (deleted)". To take more, tick the fields
+under "Custom fields" on the endpoint's page or choose "Every custom field’s changes", or
+`PATCH /webhook-endpoints/{id}` with `contactFieldKeys` (null for every field). Leaving out Contact
+changed, or its custom field values, clears the list.
+
 **A receiver gets no automation run events for an automation (ADR-145).** An endpoint can take
 the runs of chosen automations only; the endpoints list shows them ("Automation runs sent: …",
 archived ones marked), and the API answers `automationIds` (null takes every automation's runs). A
@@ -2196,6 +2237,63 @@ secret again), or `PATCH /webhook-endpoints/{id}` with `oauth`. A token the endp
 is dropped and a new one is asked for at the next attempt; a 401 every time means the receiver does
 not accept the server's tokens (often the scope). Tokens live in each worker's memory, so restarting
 workers makes them ask again. Replay what failed meanwhile with the "No valid answer" failures.
+
+**A receiver misses a conversation's events (ADR-174).** An endpoint can take the message and
+conversation events of chosen teams' conversations only. The endpoints list shows them ("Teams whose
+conversations’ events are sent: …"), and the API answers `teamIds` (null takes every
+conversation's). A conversation's events go by the team it is in when they happen: one in no team,
+or in another team, is never queued for the endpoint (a change of team reaches the team it left as
+well as the one it joined), and when no endpoint of the company takes an event, it is not recorded
+at all, so there is nothing to replay. A team deleted since it was chosen shows as "A deleted team"
+and matches nothing. To take more, tick the teams under "Teams" on the endpoint's page or choose
+"Every conversation’s events", or `PATCH /webhook-endpoints/{id}` with `teamIds` (null for every
+conversation). Removing every message and conversation event clears the list.
+
+**A receiver misses a message's statuses or a template's changes (ADR-175).** An endpoint can take
+the statuses and changes of chosen templates only. The endpoints list shows them ("Templates whose
+statuses and changes are sent: …"), and the API answers `templateIds` (null takes every template's).
+A message's statuses go by the template it was sent with: those of a message sent without one (a
+member's reply, an automation's text) or with another template are never queued for the endpoint,
+and when no endpoint of the company takes an event, it is not recorded at all, so there is nothing
+to replay. To take more, tick the templates under "Templates" on the endpoint's page or choose
+"Every message’s statuses and every template’s changes", or `PATCH /webhook-endpoints/{id}` with
+`templateIds` (null for every template). Removing both Message status and Template status clears the
+list.
+
+**A receiver misses a campaign's message statuses or changes (ADR-185).** An endpoint can take the
+statuses and changes of chosen campaigns only. The endpoints list shows them ("Campaigns whose
+statuses and changes are sent: …"), and the API answers `campaignIds` (null takes every campaign's).
+A message's statuses go by the campaign that sent it: those of a message no campaign sent (a
+member's reply, an automation's message) or another campaign sent are never queued for the endpoint,
+and when no endpoint of the company takes an event, it is not recorded at all, so there is nothing
+to replay. Settings lists the 200 newest campaigns; an older one can be chosen through the API. To
+take more, tick the campaigns under "Campaigns" on the endpoint's page or choose "Every message’s
+statuses and every campaign’s changes", or `PATCH /webhook-endpoints/{id}` with `campaignIds` (null
+for every campaign). Removing both Message status and Campaign status clears the list. Each status
+names its campaign as `message.campaignId`, null for a message no campaign sent.
+
+**A receiver misses a run's events (ADR-183).** An endpoint can take the run events of the runs
+started by chosen triggers only. The endpoints list shows them ("Automation runs started by: …"),
+and the API answers `runTriggers` (null takes every run). A run's events go by what started it, as
+`run.trigger` names it: those of a run started otherwise are never queued for the endpoint, and when
+no endpoint of the company takes an event, it is not recorded at all, so there is nothing to replay.
+To take more, tick the triggers under "Runs started by" on the endpoint's page, or
+`PATCH /webhook-endpoints/{id}` with `runTriggers` (null for every run). Removing both Automation
+started and Automation ended clears the list.
+
+**A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
+message and conversation events of the conversations assigned to chosen members only. The endpoints
+list shows them ("Members whose conversations’ events are sent: …"), and the API answers
+`assigneeIds` (null takes every conversation's). A conversation's events go by the member it is
+assigned to when they happen: an unassigned conversation, or one assigned to someone else, is never
+queued for the endpoint (a change of assignee reaches the member it left as well as the one it went
+to), and when no endpoint of the company takes an event, it is not recorded at all, so there is
+nothing to replay. An endpoint that names teams too receives only those members' conversations in
+those teams. A member who left, was suspended or lost the role that answers conversations shows as
+"(no longer takes conversations)" and matches nothing until they hold conversations again. To take
+more, tick the members under "Members" on the endpoint's page or choose "Every conversation’s
+events", or `PATCH /webhook-endpoints/{id}` with `assigneeIds` (null for every conversation).
+Removing every message and conversation event clears the list.
 
 **A campaign event's results differ from the campaign page (ADR-150).** `campaign.results` are
 counted when the request is built (the `t` of its `W360-Signature`), as `GET /campaigns/{id}` counts
@@ -2357,6 +2455,14 @@ changed". A name changed and changed back in one transaction is still named. To 
 holds: `SELECT type, contact_changes, captured_xact FROM app.webhook_events WHERE tenant_id = $1 AND
 id = $2`. An event's list cannot be changed after its transaction commits, by design.
 
+**Which tags a `contact.updated` added or removed (ADR-182).** Since migration 0129 the event's
+`tagsAdded` and `tagsRemoved` list them, sorted, net within the change: a tag added and removed
+again in one change is in neither, so both can be empty while `changes` names `tags`. Both are null
+for events captured before the migration and for an erased contact, whose stored events lose them
+when it is erased. To see what an event holds:
+`SELECT type, contact_changes, tags_added, tags_removed FROM app.webhook_events WHERE tenant_id = $1
+AND id = $2`.
+
 **Migration 0096 or 0097 failed.** 0096 runs in one transaction, so a failure applies nothing: it
 adds `contact_changes` with its check (`NOT VALID`), the definer function
 `app.add_contact_webhook_changes`, the four-argument `app.capture_contact_webhook_event` (dropping
@@ -2453,6 +2559,34 @@ dead letter (30 days after its job failed); a later failure of the same work is 
 unacknowledged dead letter. Acknowledging neither retries the job nor changes whether it can be
 retried, and does not stop the alert email, which tells each dead letter once anyway. "Dead letter
 not found." means it was purged since the page loaded.
+
+**Acknowledging a late queue (ADR-177).** The administrator who looks at a late queue opens
+Acknowledge under its lateness on Job queues and writes a note of 10 to 500 characters: what was
+found or done ("Worker restarted at 10:05; draining", "Shopify rate limits; it catches up by
+itself"). The row then shows who, when and the note, so the others need not look again; a later note
+replaces it, and the platform audit log keeps each (`platform.late_queue_acknowledged`). The note
+lasts while the queue stays late: the worker's check that finds it back under half its limit clears
+it, and the next time it falls behind it starts unacknowledged and is emailed again. Acknowledging
+changes neither the lateness nor the alert. "This queue is no longer late since then." means the
+queue recovered, or fell behind again, since the page loaded: reload it.
+
+**Acknowledging a webhook receipt (ADR-179).** The administrator who looks at a receipt that needs
+attention opens Acknowledge on its row and writes a note of 10 to 500 characters: what was found or
+done ("Malformed body from a Meta test account; not retrying", "Parser fixed in 1.4.3; retried").
+The row then shows who, when and the note, so the others need not look again; a later note replaces
+it, and the platform audit log keeps each (`platform.webhook_receipt_acknowledged`). The note stays
+with the receipt, retried or not, and is deleted with it after 90 days. Acknowledging neither
+retries the receipt nor stops the alert email. "Receipt not found." means it was deleted since the
+page loaded.
+
+**`PATCH /api/v1/contacts/{id}` with `phone` answers 409, 412 or 422 (ADR-180).** 412 "This number
+comes from WhatsApp and cannot be changed." means the contact has written to one of the company's
+numbers: its number is its identity and stays (members cannot change it either); 412 about the
+suppression list means the new number is suppressed (remove it from the list in the app first, if
+that is right). 409 means another contact of the company has the number: find it with
+`GET /contacts?phone=` (with `contacts.read`) and merge or fix them in the app. 422 naming `phone`
+means it is not a number with its country code and a leading +. Calls that change many contacts do
+not take `phone`.
 
 **A dead letter of those three queues stays unsettled.** The sweep leaves one alone while its
 company is being deleted, while a job for the same work waits or runs (the company started it again,
@@ -2646,6 +2780,92 @@ servers of the previous release work with it.
 held on the table: fix it and run the migrations again). Workers and web servers of this release
 need it before they start (their reads of endpoints name the columns); those of the previous release
 work with it.
+
+**Migration 0122 failed.** It adds `team_ids` to `app.webhook_endpoints` with the check
+`webhook_endpoints_team_ids`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event`, in one transaction; a failure rolls it all back (usually the bootstrap
+roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
+release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
+endpoints name the column); workers of either release and web servers of the previous release work
+with it.
+
+**Migration 0123 failed.** It adds `template_ids` to `app.webhook_endpoints` with the check
+`webhook_endpoints_template_ids`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event`, in one transaction; a failure rolls it all back (usually the bootstrap
+roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
+release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
+endpoints name the column); workers of either release and web servers of the previous release work
+with it.
+
+**Migration 0124 failed.** It replaces `api_keys_scopes_check` on `app.api_keys` and
+`plans_api_scopes_check` on `ops.plans` with checks that also accept `campaigns.resume`, in one
+transaction; a failure rolls it all back (usually a lock held on one of the tables: run the
+migrations again). Web servers of this release need it before a key or plan version holds the new
+scope; those of the previous release work with it.
+
+**Migration 0125 failed.** It adds the acknowledgement columns and their check to `ops.queue_waits`,
+replaces the worker role's read of the table with a read of the check's columns, creates
+`ops.record_queue_waits` again and adds `ops.platform_acknowledge_late_queue`, in one transaction; a
+failure rolls it all back (usually the bootstrap roles, or a lock held on the table by a sweep: run
+the migrations again). Web servers of this release need it before they show the Queues tab; workers
+of either release and web servers of the previous release work with it.
+
+**Migration 0126 failed.** It drops `ops.template_sync_due` as its owner and creates it again with
+the `requested` column and the new order, in one transaction; a failure rolls it all back (usually
+the bootstrap roles: fix them and run the migrations again). Workers of this release need it before
+they start (their sweep reads the column); workers of the previous release work with it.
+
+**Migration 0127 failed.** It creates `ops.receipt_acknowledgements` and
+`ops.platform_acknowledge_webhook_receipt`, in one transaction; a failure rolls it all back (usually
+the bootstrap roles: fix them and run the migrations again). Web servers of this release need it
+before they show the Integrations tab; workers and web servers of the previous release work with it.
+
+**Migration 0128 failed.** It adds `assignee_ids` to `app.webhook_endpoints` with the check
+`webhook_endpoints_assignee_ids`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event`, in one transaction; a failure rolls it all back (usually the bootstrap
+roles, or a lock held on the table: fix it and run the migrations again). Web servers of this
+release need it before they start, or Settings → Webhooks and the endpoints API fail (their reads of
+endpoints name the column); workers of either release and web servers of the previous release work
+with it.
+
+**Migration 0129 or 0130 failed.** 0129 runs in one transaction, so a failure applies nothing: it
+adds `tags_added` and `tags_removed` to `app.webhook_events` with their check (`NOT VALID`), the
+definer function `app.note_contact_webhook_tag`, and replaces `app.capture_contact_webhook_event`
+and `app.webhook_capture_contact_tag`. A failure usually means the bootstrap roles (`w360_definer`
+must exist to own the function) or a function of that name created by hand. 0130 validates the check
+without blocking captures; it fails only if a stored event has a list, which nothing wrote before
+0129: look for rows with `tags_added IS NOT NULL OR tags_removed IS NOT NULL` before running it
+again.
+
+**Migration 0131 failed.** It adds `run_triggers` to `app.webhook_endpoints` with the check
+`webhook_endpoints_run_triggers`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event` and `app.webhook_capture_automation_run`, in one transaction; a failure
+rolls it all back (usually the bootstrap roles, or a lock held on the table: fix it and run the
+migrations again). Web servers of this release need it before they start, or Settings → Webhooks and
+the endpoints API fail (their reads of endpoints name the column); workers of either release and web
+servers of the previous release work with it.
+
+**Migration 0132 failed.** It adds `contact_field_keys` to `app.webhook_endpoints` with the check
+`webhook_endpoints_contact_field_keys`, grants its update to the runtime role, and replaces
+`app.capture_contact_webhook_event`, in one transaction; a failure rolls it all back (usually the
+bootstrap roles, or a lock held on the table: fix it and run the migrations again). Web servers of
+this release need it before they start, or Settings → Webhooks and the endpoints API fail (their
+reads of endpoints name the column); workers of either release and web servers of the previous
+release work with it.
+
+**Migration 0133 failed.** It adds `campaign_ids` to `app.webhook_endpoints` with the check
+`webhook_endpoints_campaign_ids`, grants its update to the runtime role, and replaces
+`app.capture_webhook_event` and `app.webhook_capture_message`, in one transaction; a failure rolls
+it all back (usually the bootstrap roles, or a lock held on the table: fix it and run the migrations
+again). Web servers of this release need it before they start, or Settings → Webhooks and the
+endpoints API fail (their reads of endpoints name the column); workers of either release and web
+servers of the previous release work with it.
+
+**Migration 0134 failed.** It replaces `api_keys_scopes_check` on `app.api_keys` and
+`plans_api_scopes_check` on `ops.plans` with checks that also accept `campaigns.write`, in one
+transaction; a failure rolls it all back (usually a lock held on one of the tables: run the
+migrations again). Web servers of this release need it before a key or plan version holds the new
+scope; those of the previous release work with it.
 
 **Migration 0072 failed.** It creates `ops.queue_waits`, adds `queues` to the kinds of
 `ops.platform_alerts` (replacing its check `platform_alerts_kind_check`) and creates

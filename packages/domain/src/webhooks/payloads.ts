@@ -27,7 +27,7 @@ import { apiContactColumns, apiContactSchema, toApiContact } from '../api/contac
 import { campaignAnalytics, campaignResultsSchema, toCampaignResults } from '../campaigns/results';
 import { COMMERCE_LIMITS } from '../commerce/model';
 import { findAnsweredMessageId } from '../messaging/reply-context';
-import { WEBHOOK_MESSAGE_STATUSES } from './model';
+import { WEBHOOK_MESSAGE_STATUSES, WEBHOOK_RUN_TRIGGERS } from './model';
 
 /**
  * The JSON bodies of outgoing webhooks (ADR-053, ADR-074, ADR-078, ADR-085, ADR-087). The zod schemas
@@ -138,6 +138,12 @@ export const messageStatusPayloadSchema = envelope(
         .uuid()
         .nullable()
         .describe('The API key that sent it, for messages sent through the API.'),
+      campaignId: z
+        .uuid()
+        .nullable()
+        .describe(
+          'The campaign that sent it, as GET /campaigns lists it, for messages a campaign sent; null otherwise.',
+        ),
     }),
     error: z.object({ code: z.string().nullable(), title: z.string().nullable() }).nullable(),
     conversation: z.object({ id: z.uuid() }),
@@ -278,21 +284,24 @@ export const contactUpdatedPayloadSchema = envelope(
       .describe(
         'What the change changed, sorted, once each: `name`, `phone`, `email`, `tags` (a tag added or removed), and `fields.<key>` for each custom field whose value changed (GET /contact-fields). Names only: the contact carries the values as they are now. Null for an event captured before HyFib recorded what changed.',
       ),
+    tagsAdded: z
+      .array(z.string())
+      .nullable()
+      .describe(
+        'The tags the change added, sorted, as the contact lists them; empty when it added none. A tag added and removed again in the same change is in neither list. Null for an event captured before HyFib recorded tags, and once the contact is erased.',
+      ),
+    tagsRemoved: z
+      .array(z.string())
+      .nullable()
+      .describe(
+        'The tags the change removed, sorted, as the contact listed them; empty when it removed none. Null for an event captured before HyFib recorded tags, and once the contact is erased.',
+      ),
   }),
 );
 export const contactErasedPayloadSchema = envelope(
   'contact.erased',
   z.object({ contact: webhookContactSchema }),
 );
-
-/** What starts a live run; members' test runs send no events. */
-export const WEBHOOK_RUN_TRIGGERS = [
-  'keyword',
-  'conversation_started',
-  'any_message',
-  'store_event',
-  'api',
-] as const;
 
 const webhookRunSchema = z.object({
   id: z.uuid(),
@@ -466,7 +475,10 @@ export const pingPayloadSchema = envelope(
 
 export type WebhookPayload = { id: string; type: string; createdAt: string; data: unknown };
 
-/** The event as stored (ids and non-personal facts). */
+/**
+ * The event as stored: ids and non-personal facts, and the tags a contact change added and removed,
+ * which erasing the contact clears (ADR-182).
+ */
 export interface StoredWebhookEvent {
   id: string;
   tenantId: string;
@@ -479,6 +491,9 @@ export interface StoredWebhookEvent {
   detail: Record<string, unknown>;
   /** What a contact.updated event's transaction changed (ADR-121); null for other events. */
   contactChanges: string[] | null;
+  /** The tags a contact.updated event's transaction added and removed (ADR-182). */
+  tagsAdded: string[] | null;
+  tagsRemoved: string[] | null;
   occurredAt: Date;
 }
 
@@ -586,6 +601,7 @@ async function messageContext(tx: Tx, tenantId: string, messageId: string | null
       conversationId: messages.conversationId,
       senderType: messages.senderType,
       apiKeyId: messages.apiKeyId,
+      campaignId: messages.campaignId,
       templateId: messages.templateId,
       channelId: messages.channelAccountId,
       channelPhone: channelAccounts.displayPhoneNumber,
@@ -904,9 +920,18 @@ export async function buildWebhookPayload(
     case 'contact.erased': {
       const contact = await webhookContactOf(tx, tenantId, event.contactId);
       if (!contact) throw new WebhookEventGoneError();
-      // What changed as captured (ADR-121); the contact as it is now.
+      // What changed and the tags as captured (ADR-121, ADR-182), none of an erased contact; the
+      // contact as it is now.
       return event.type === 'contact.updated'
-        ? { ...base, data: { contact, changes: event.contactChanges } }
+        ? {
+            ...base,
+            data: {
+              contact,
+              changes: event.contactChanges,
+              tagsAdded: contact.erased ? null : event.tagsAdded,
+              tagsRemoved: contact.erased ? null : event.tagsRemoved,
+            },
+          }
         : { ...base, data: { contact } };
     }
     case 'automation.run_started':
@@ -1047,6 +1072,7 @@ export async function buildWebhookPayload(
             templateName: template?.name ?? null,
             sentBy: sentBy(message.senderType),
             apiKeyId: message.apiKeyId,
+            campaignId: message.campaignId,
           },
           error: errorCode || errorTitle ? { code: errorCode, title: errorTitle } : null,
           conversation,

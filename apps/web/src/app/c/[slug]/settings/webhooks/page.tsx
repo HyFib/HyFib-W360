@@ -11,12 +11,18 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_RUN_END_STATUS_LABELS,
+  WEBHOOK_RUN_TRIGGER_LABELS,
   WEBHOOK_MESSAGE_SENDER_LABELS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
+  webhookAssigneeText,
+  webhookCampaignText,
   webhookChannelText,
+  webhookFieldText,
   webhookOAuthText,
   webhookHost,
+  webhookTeamText,
+  webhookTemplateText,
   type WebhookEndpointView,
 } from '@w360/domain';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
@@ -46,10 +52,24 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'developer.manage')) notFound();
   const { webhooks } = await getRuntime();
-  const [endpoints, automationChoices, channelChoices] = await Promise.all([
+  const [
+    endpoints,
+    automationChoices,
+    channelChoices,
+    teamChoices,
+    templateChoices,
+    campaignChoices,
+    assigneeChoices,
+    contactFieldChoices,
+  ] = await Promise.all([
     webhooks.list(ctx),
     webhooks.automationChoices(ctx),
     webhooks.channelChoices(ctx),
+    webhooks.teamChoices(ctx),
+    webhooks.templateChoices(ctx),
+    webhooks.campaignChoices(ctx),
+    webhooks.assigneeChoices(ctx),
+    webhooks.contactFieldChoices(ctx),
   ]);
   const tz = ctx.tenant.timezone;
   const base = `/c/${ctx.tenant.slug}/settings/webhooks`;
@@ -159,6 +179,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.contactParts.map((p) => WEBHOOK_CONTACT_PART_LABELS[p]).join(', ')}
                       </p>
                     ) : null}
+                    {e.contactFields ? (
+                      <p className="text-xs text-muted-foreground">
+                        Custom fields whose changes are sent:{' '}
+                        {e.contactFields.map(webhookFieldText).join(', ')}
+                      </p>
+                    ) : null}
                     {e.orderStatuses ? (
                       <p className="text-xs text-muted-foreground">
                         Order statuses sent:{' '}
@@ -187,10 +213,40 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.runEndStatuses.map((s) => WEBHOOK_RUN_END_STATUS_LABELS[s]).join(', ')}
                       </p>
                     ) : null}
+                    {e.runTriggers ? (
+                      <p className="text-xs text-muted-foreground">
+                        Automation runs started by:{' '}
+                        {e.runTriggers.map((t) => WEBHOOK_RUN_TRIGGER_LABELS[t]).join(', ')}
+                      </p>
+                    ) : null}
                     {e.channels ? (
                       <p className="text-xs text-muted-foreground">
                         Numbers whose events are sent:{' '}
                         {e.channels.map(webhookChannelText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.templates ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Templates whose statuses and changes are sent:{' '}
+                        {e.templates.map(webhookTemplateText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.campaigns ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Campaigns whose statuses and changes are sent:{' '}
+                        {e.campaigns.map(webhookCampaignText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.teams ? (
+                      <p className="text-xs text-muted-foreground">
+                        Teams whose conversations’ events are sent:{' '}
+                        {e.teams.map(webhookTeamText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.assignees ? (
+                      <p className="text-xs text-muted-foreground">
+                        Members whose conversations’ events are sent:{' '}
+                        {e.assignees.map(webhookAssigneeText).join(', ')}
                       </p>
                     ) : null}
                     {e.headerNames.length > 0 ? (
@@ -313,6 +369,11 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
             slug={ctx.tenant.slug}
             automationChoices={automationChoices}
             channelChoices={channelChoices}
+            teamChoices={teamChoices}
+            templateChoices={templateChoices}
+            campaignChoices={campaignChoices}
+            assigneeChoices={assigneeChoices}
+            contactFieldChoices={contactFieldChoices}
             atLimit={endpoints.length >= WEBHOOK_LIMITS.endpoints}
           />
         </CardContent>

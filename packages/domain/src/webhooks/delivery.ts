@@ -335,6 +335,8 @@ async function claimDeliveries(
             status: webhookEvents.status,
             detail: webhookEvents.detail,
             contactChanges: webhookEvents.contactChanges,
+            tagsAdded: webhookEvents.tagsAdded,
+            tagsRemoved: webhookEvents.tagsRemoved,
             occurredAt: webhookEvents.occurredAt,
           })
           .from(webhookEvents)

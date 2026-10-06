@@ -8,6 +8,7 @@ import type {
   WebhookMessageStatus,
   WebhookOrderStatus,
   WebhookRunEndStatus,
+  WebhookRunTrigger,
   WebhookTemplateStatus,
 } from '@w360/db';
 
@@ -20,6 +21,7 @@ export type {
   WebhookMessageStatus,
   WebhookOrderStatus,
   WebhookRunEndStatus,
+  WebhookRunTrigger,
   WebhookTemplateStatus,
 } from '@w360/db';
 
@@ -89,7 +91,7 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
     'contact.updated': {
       label: 'Contact changed',
       description:
-        'A contact’s name, number, email, tags or custom field values changed. The event says which.',
+        'A contact’s name, number, email, tags or custom field values changed. The event says which, and which tags were added or removed.',
     },
     'contact.erased': {
       label: 'Contact erased',
@@ -179,6 +181,34 @@ export const WEBHOOK_CONTACT_PARTS = [
   'tags',
   'fields',
 ] as const satisfies readonly WebhookContactPart[];
+
+/**
+ * Whether an endpoint with these events and parts takes changes of custom fields (ADR-184): it takes
+ * `contact.updated` for every part (null) or for `fields` among others, and can choose fields.
+ */
+export function webhookTakesFieldChanges(
+  eventTypes: readonly WebhookEventType[],
+  parts: readonly WebhookContactPart[] | null,
+): boolean {
+  return eventTypes.includes('contact.updated') && (parts === null || parts.includes('fields'));
+}
+
+/** A custom field of the company, which an endpoint can choose to take the changes of (ADR-184). */
+export interface WebhookFieldChoice {
+  key: string;
+  label: string;
+}
+
+/** A custom field an endpoint takes the changes of (ADR-184), as stored. */
+export interface WebhookEndpointField {
+  key: string;
+  /** The field's label; null for a field deleted since it was chosen. */
+  label: string | null;
+}
+
+/** A field as Settings → Webhooks lists it: its label and key. */
+export const webhookFieldText = (field: WebhookEndpointField): string =>
+  field.label === null ? `${field.key} (deleted)` : `${field.label} (${field.key})`;
 
 /** How Settings names each part an endpoint can choose (ADR-123). */
 export const WEBHOOK_CONTACT_PART_LABELS: Record<WebhookContactPart, string> = {
@@ -304,6 +334,27 @@ export const WEBHOOK_RUN_END_STATUS_LABELS: Record<WebhookRunEndStatus, string> 
   failed: 'Failed',
 };
 
+/**
+ * What starts a live run (ADR-078), which an endpoint taking run events can choose (ADR-183), in the
+ * order the automation builder lists triggers; members' test runs send no events.
+ */
+export const WEBHOOK_RUN_TRIGGERS = [
+  'keyword',
+  'conversation_started',
+  'any_message',
+  'store_event',
+  'api',
+] as const satisfies readonly WebhookRunTrigger[];
+
+/** How Settings names what started a run (ADR-183), as the automation pages name triggers. */
+export const WEBHOOK_RUN_TRIGGER_LABELS: Record<WebhookRunTrigger, string> = {
+  keyword: 'Keyword',
+  conversation_started: 'New conversation',
+  any_message: 'Any message',
+  store_event: 'Order messages',
+  api: 'API',
+};
+
 export const WEBHOOK_LIMITS = {
   endpoints: 10,
   urlLength: 2048,
@@ -324,6 +375,18 @@ export const WEBHOOK_LIMITS = {
   automations: 20,
   /** The WhatsApp numbers an endpoint can choose to take the events of (ADR-170). */
   channels: 100,
+  /** The teams an endpoint can choose to take the conversations' events of (ADR-174). */
+  teams: 50,
+  /** The templates an endpoint can choose to take the statuses and changes of (ADR-175). */
+  templates: 50,
+  /** The members an endpoint can choose to take the assigned conversations' events of (ADR-181). */
+  assignees: 50,
+  /** The custom fields an endpoint can choose to take the changes of (ADR-184): every field. */
+  contactFields: 50,
+  /** The campaigns an endpoint can choose to take the statuses and changes of (ADR-185). */
+  campaigns: 50,
+  /** The newest campaigns Settings offers to choose from (ADR-185); the API takes any of them. */
+  campaignChoices: 200,
   /**
    * An endpoint's OAuth client (ADR-173): its identifier, secret and scope, short enough that the
    * Basic header stays within what the egress client sends, and the longest token kept.
@@ -394,6 +457,137 @@ export interface WebhookEndpointChannel {
   label: string;
   /** Null only for a number the company no longer had, which cannot happen: numbers are kept. */
   status: ChannelStatus | null;
+}
+
+/**
+ * The events of a conversation, which an endpoint can take for chosen teams' conversations
+ * (ADR-174): its messages and its changes. A conversation's team is the one it is in when the event
+ * happens; `conversation.team_changed` belongs to the team it left as well.
+ */
+export const WEBHOOK_TEAM_EVENTS = [
+  'message.received',
+  'message.status',
+  'conversation.status_changed',
+  'conversation.assignment_changed',
+  'conversation.team_changed',
+] as const satisfies readonly WebhookEventType[];
+
+/** A team of the company, which an endpoint can choose to take the conversations' events of. */
+export interface WebhookTeamChoice {
+  id: string;
+  name: string;
+}
+
+/** A team an endpoint takes the conversations' events of (ADR-174), as stored. */
+export interface WebhookEndpointTeam {
+  id: string;
+  /** The team's name; null for a team deleted since it was chosen, which matches nothing. */
+  name: string | null;
+}
+
+/** A team as Settings → Webhooks lists it. */
+export const webhookTeamText = (team: WebhookEndpointTeam): string => team.name ?? 'A deleted team';
+
+/** Whether an endpoint with these events takes events of conversations, and can choose teams. */
+export function webhookTakesTeamEvents(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_TEAM_EVENTS.some((type) => eventTypes.includes(type));
+}
+
+/**
+ * A member conversations can be assigned to (active, with a role that reads and answers them), whom
+ * an endpoint can choose to take the events of the conversations assigned to (ADR-181): the events
+ * of `WEBHOOK_TEAM_EVENTS`. A conversation's member is the one it is assigned to when the event
+ * happens; `conversation.assignment_changed` belongs to the member it left as well.
+ */
+export interface WebhookAssigneeChoice {
+  id: string;
+  name: string;
+}
+
+/** A member an endpoint takes the assigned conversations' events of (ADR-181), as stored. */
+export interface WebhookEndpointAssignee {
+  id: string;
+  /** Null only for a membership the company no longer had, which cannot happen: they are kept. */
+  name: string | null;
+  /**
+   * Whether conversations can be assigned to the member now. One who left, was suspended or
+   * removed, or lost the role that answers them stays chosen, and matches nothing while holding no
+   * conversation.
+   */
+  assignable: boolean;
+}
+
+/** A member as Settings → Webhooks lists them. */
+export const webhookAssigneeText = (assignee: WebhookEndpointAssignee): string => {
+  const name = assignee.name ?? 'Unknown member';
+  return assignee.assignable ? name : `${name} (no longer takes conversations)`;
+};
+
+/**
+ * The events of a template, which an endpoint can take for chosen templates (ADR-175): the statuses
+ * of the messages sent with it, and its own changes.
+ */
+export const WEBHOOK_TEMPLATE_EVENTS = [
+  'message.status',
+  'template.status_changed',
+] as const satisfies readonly WebhookEventType[];
+
+/**
+ * A template of the company, which an endpoint can choose to take the statuses and changes of
+ * (ADR-175). Templates are never deleted, so a list never names one that is gone.
+ */
+export interface WebhookTemplateChoice {
+  id: string;
+  name: string;
+  language: string;
+}
+
+/** A template as Settings → Webhooks names it: its name and language. */
+export const webhookTemplateText = (template: { name: string; language: string }): string =>
+  `${template.name} (${template.language})`;
+
+/** Whether an endpoint with these events takes events of templates, and can choose templates. */
+export function webhookTakesTemplateEvents(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_TEMPLATE_EVENTS.some((type) => eventTypes.includes(type));
+}
+
+/**
+ * The events of a campaign, which an endpoint can take for chosen campaigns (ADR-185): the statuses
+ * of the messages it sent, and its own changes.
+ */
+export const WEBHOOK_CAMPAIGN_EVENTS = [
+  'message.status',
+  'campaign.status_changed',
+] as const satisfies readonly WebhookEventType[];
+
+/**
+ * A campaign of the company, which an endpoint can choose to take the statuses and changes of
+ * (ADR-185). Campaigns are kept until the company is deleted, so a list never names one that is
+ * gone.
+ */
+export interface WebhookCampaignChoice {
+  id: string;
+  name: string;
+  status: WebhookCampaignStatus;
+}
+
+/** A campaign an endpoint takes the events of (ADR-185), as stored. */
+export interface WebhookEndpointCampaign {
+  id: string;
+  name: string;
+  /** Null only for a campaign that could not be read, which keeping campaigns rules out. */
+  status: WebhookCampaignStatus | null;
+}
+
+/** A campaign as Settings → Webhooks names it: its name and status. */
+export const webhookCampaignText = (campaign: WebhookEndpointCampaign): string =>
+  campaign.status === null
+    ? campaign.name
+    : `${campaign.name} (${WEBHOOK_CAMPAIGN_STATUS_LABELS[campaign.status]})`;
+
+/** Whether an endpoint with these events takes events of campaigns, and can choose campaigns. */
+export function webhookTakesCampaignEvents(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_CAMPAIGN_EVENTS.some((type) => eventTypes.includes(type));
 }
 
 /**

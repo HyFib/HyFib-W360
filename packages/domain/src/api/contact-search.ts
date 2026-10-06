@@ -50,7 +50,7 @@ import { API_LIMITS } from './model';
  * (ADR-164).
  */
 
-const apiSearchConditionSchema = z.discriminatedUnion('type', [
+export const apiSearchConditionSchema = z.discriminatedUnion('type', [
   z
     .object({
       type: z.literal('field'),

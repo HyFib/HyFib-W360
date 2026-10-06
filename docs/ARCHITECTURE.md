@@ -237,8 +237,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `template_status_events`. Worker queues: `template.submit` (write-ahead create),
   `template.delete`, `template.sync` (paged listing, reconcile by id then by name and language).
   Syncs are signalled by template webhooks (`whatsapp_accounts.templates_sync_requested_at`), by the
-  per-minute messaging sweep (`ops.template_sync_due`: requested, in review every 5 minutes, or older
-  than 6 hours) and by members.
+  per-minute messaging sweep (`ops.template_sync_due`: requested, in review every 5 minutes, or
+  older than 6 hours) and by members. The sweep lists the accounts asked for first, and their syncs,
+  like members' refreshes, are queued at a higher pg-boss priority than routine ones (ADR-178).
 - **Template sends** reuse the Phase 2 pipeline: `queueTemplateMessage` writes the message and send
   intent (type `template`, rendered text stored for the thread, request body without secrets); the
   worker skips the 24-hour window check for templates but re-checks template approval, consent and
@@ -889,12 +890,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   returned. `GET /contact-fields` (`api/contacts.ts`, `contacts.read`) lists the fields by label.
   `POST /contacts` takes `fields` (an existing contact gets only those it has no value for, merged
   under its own values), and `PATCH /contacts/{id}` (`apiUpdateContact`, `contacts.write`) changes
-  the name, email, field values and tags in one transaction: `apiFieldChanges` reads the named
-  fields `FOR SHARE` (the order a field's deletion takes its locks) and checks each value with
-  `apiFieldValue` (`contacts/fields.ts`: JSON types, no coercion), then the contact row is locked
-  `FOR UPDATE`; only what differs is written and audited as `contact.updated` (keys and counts, no
-  values). A refused value names `fields.<key>` in `issues` and nothing is saved. Both writes keep
-  the app's 50-tag limit.
+  the name, email, a typed number (ADR-180: `assertNumberFree` refuses a contact with a WhatsApp
+  identity, a number another contact has and a suppressed one), field values and tags in one
+  transaction: `apiFieldChanges` reads the named fields `FOR SHARE` (the order a field's deletion
+  takes its locks) and checks each value with `apiFieldValue` (`contacts/fields.ts`: JSON types, no
+  coercion), then the contact row is locked `FOR UPDATE`; only what differs is written and audited
+  as `contact.updated` (keys and counts, no values). A refused value names `fields.<key>` in
+  `issues` and nothing is saved. Both writes keep the app's 50-tag limit.
 - **Finding contacts (ADR-113):** `GET /contacts` also takes `email` (compared through the
   `lower(email)` index), `tag` and up to 5 `fields[<key>]` (`contactListQuery` turns the
   `deepObject` parameters into one object for the schema). `apiFieldFilters` checks each key against
@@ -926,6 +928,28 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `canceled_by_user_id` null. The audit row is the key's (`recordSystemAudit` with `apiActor`), and
   `campaign.status_changed` comes from the status trigger (0065). Members' campaign history joins
   the key's name on the event's `apiKeyId`.
+- **Resuming campaigns keys paused (0124, ADR-176):** `apiResumeCampaign` (`api/campaigns.ts`,
+  `campaigns.resume`, writing) locks the campaign row, answers a scheduled or running campaign as it
+  is, refuses any status but paused and any pause reason but `api`, checks the launcher with
+  `campaignLauncherStanding` (which the runner uses before each batch too) and calls
+  `resumeLockedCampaign` (`campaigns/service.ts`), which members' resume calls too: members' checks,
+  the counters counted again, the status and next run set and the runner signalled, with the event
+  naming the key (`apiKeyId`, no member) and `launched_by_user_id` kept. The audit row is the key's,
+  and `campaign.status_changed` comes from the status trigger.
+- **Campaign drafts (0134, ADR-186):** `apiCreateCampaign` and `apiUpdateCampaign`
+  (`api/campaigns.ts`, `campaigns.write`, writing) turn the request into members' draft input
+  (`apiDraftInputFrom`, from a new draft's defaults or from the locked draft through
+  `campaignDraftInputOf`), then call `prepareCampaignDraft` and `writeLockedCampaignDraft`
+  (`campaigns/service.ts`), which members' save calls too. A key's draft is inserted without a
+  creator; the `created` and `edited` events carry the key's id and the audit rows are the key's.
+  `PATCH` refuses any status but draft and, when given, a version other than the draft's. Answers
+  add `version` and `settings`, which `GET /campaigns/{id}` gives only to keys that hold
+  `campaigns.write`.
+- **Cancelling drafts (ADR-187):** `apiCancelCampaign` takes `campaigns.stop` or `campaigns.write`,
+  each checked as a writing scope before the campaign is read, then needs `campaigns.write` for a
+  draft and `campaigns.stop` for any other campaign it cancels; a cancelled or completed campaign is
+  answered to either. It calls `cancelLockedCampaign` as members' cancel does, with the key named in
+  the event and the audit.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions (`last_message` with `conversations.read` and `campaign` with
   `campaigns.read` since ADR-126, a named campaign checked to be the company's, `name` since
@@ -1315,10 +1339,10 @@ true`); the same key with another request (method, path and body hashed) answers
   `app.conversations` (`conversation.status_changed` with the status before;
   `conversation.assignment_changed` for every change of the member and, since 0070 (ADR-094),
   `conversation.team_changed` for every change of the team, each with the ids before and after and
-  stamped with the time it is captured), `app.contacts` (`contact.created`; `contact.updated` for the name, number or email,
-  and since 0090 (ADR-112) for a value of one of the company's custom fields, compared by key so
-  that a field's deletion captures nothing; `contact.erased`) and `app.contact_tags`
-  (`contact.updated`). Contact events go through
+  stamped with the time it is captured), `app.contacts` (`contact.created`; `contact.updated` for
+  the name, number or email, and since 0090 (ADR-112) for a value of one of the company's custom
+  fields, compared by key so that a field's deletion captures nothing; `contact.erased`) and
+  `app.contact_tags` (`contact.updated`). Contact events go through
   `app.capture_contact_webhook_event`: `contact.created` and `contact.updated` are captured when an
   active endpoint takes either, once per contact and top-level transaction (`captured_xact`, found
   by a partial index built concurrently), and `contact.erased` first deletes what its own
@@ -1329,11 +1353,15 @@ true`); the same key with another request (method, path and body hashed) answers
   updates only an event its caller's transaction captured. Since 0098 (ADR-123) a `contact.updated`
   delivery is created only for an endpoint whose `contact_parts` is null or holds a part the change
   names (`fields` for any `fields.<key>`), and a later change in the transaction queues the
-  endpoints it newly concerns. Their payloads are built when
-  delivered: conversation events as the message events are, contact events with the API's contact
-  (`api/contact-view.ts`, shared with the public API) and `erased`, an erased contact keeping its
-  id, source and creation time only, and `contact.updated` with `changes` (null for events captured
-  before 0096).
+  endpoints it newly concerns. Since 0129 (ADR-182) the event also keeps `tags_added` and
+  `tags_removed`, noted by the tag trigger through `app.note_contact_webhook_tag`, a definer
+  function that changes only its caller's transaction's event and nets a tag added and removed
+  again, and `contact.erased` clears both from the contact's other events. Their payloads are built
+  when delivered: conversation events as the message events are, contact events with the API's
+  contact (`api/contact-view.ts`, shared with the public API) and `erased`, an erased contact
+  keeping its id, source and creation time only, and `contact.updated` with `changes` (null for
+  events captured before 0096) and `tagsAdded` and `tagsRemoved` (null before 0129 and for an erased
+  contact).
 - **Automation run events** (migrations 0055–0056, ADR-078): triggers on `app.automation_runs`
   capture `automation.run_started` when a live run is inserted and `automation.run_ended` when one
   moves from running or waiting to an ended status, through `app.capture_webhook_event` (the run and
@@ -1496,6 +1524,59 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   the client credentials grant with HTTP Basic, RFC 6749 section 4.4), sends it as a bearer token,
   and drops it when the endpoint answers 401. A delivery that gets no token fails its attempt with
   an `oauth_token_…` code and no status. The lease of such a delivery covers both requests.
+- **Team filters** (migration 0122, ADR-174): `team_ids` on an endpoint lists the teams whose
+  conversations' message and conversation events it takes, null for every conversation's; a check
+  keeps it to 1 to 50 ids and to endpoints that take such an event. `app.capture_webhook_event`
+  (replaced with the same signature) reads the conversation's team when an active endpoint of the
+  company that takes the event names teams, and creates a delivery only for endpoints whose list is
+  null or holds that team or, for `conversation.team_changed`, the team the conversation left; it
+  writes no event when none does. Settings (radio buttons and checkboxes under "Teams") and the API
+  (`teamIds`) set it; the services check the teams a list adds; a change that drops the events
+  clears it.
+- **Template filters** (migration 0123, ADR-175): `template_ids` on an endpoint lists the templates
+  whose messages' statuses and changes it takes, null for every template's; a check keeps it to 1 to
+  50 ids and to endpoints that take `message.status` or `template.status_changed`.
+  `app.capture_webhook_event` (replaced with the same signature) creates a delivery of those events
+  only for endpoints whose list is null or holds the event's template (the message's, which the
+  message trigger passes and which is null for a message sent without one, or the template that
+  changed), and writes no event when none does. Settings (radio buttons and checkboxes under
+  "Templates") and the API (`templateIds`) set it; the services check the templates a list gives; a
+  change that drops both events clears it.
+- **Assignee filters** (migration 0128, ADR-181): `assignee_ids` on an endpoint lists the members
+  (membership ids) whose assigned conversations' message and conversation events it takes, null for
+  every conversation's; a check keeps it to 1 to 50 ids and to endpoints that take such an event.
+  `app.capture_webhook_event` (replaced with the same signature) reads the conversation's member
+  with its team when an active endpoint of the company that takes the event names teams or members,
+  and creates a delivery only for endpoints whose list is null or holds that member or, for
+  `conversation.assignment_changed`, the member the conversation left; it writes no event when none
+  does. Settings (radio buttons and checkboxes under "Members") and the API (`assigneeIds`) set it;
+  the services check that the members a list adds take conversations; a change that drops the events
+  clears it.
+- **Run trigger filters** (migration 0131, ADR-183): `run_triggers` on an endpoint lists what
+  started the runs whose `automation.run_started` and `automation.run_ended` it takes, null for
+  every run; a check keeps it to 1 to 5 known triggers and to endpoints that take a run event. The
+  run trigger passes `runTrigger` in the detail, and `app.capture_webhook_event` (replaced with the
+  same signature) creates a delivery of a run event only for endpoints whose list is null or holds
+  it, taking it out of the detail before the event is stored. Settings (checkboxes under "Runs
+  started by") and the API (`runTriggers`) set it; a change that drops both events clears it.
+- **Custom field filters** (migration 0132, ADR-184): `contact_field_keys` on an endpoint lists the
+  custom fields whose changes it takes as `contact.updated`, null for every field's; a check keeps
+  it to 1 to 50 well-formed keys and to endpoints taking `contact.updated` for every part or for
+  `fields`. `app.capture_contact_webhook_event` (replaced with the same signature) creates a
+  delivery only when one of the parts a change names passes the endpoint's parts and, for
+  `fields.<key>`, its fields. Settings (radio buttons and checkboxes under "Custom fields") and the
+  API (`contactFieldKeys`) set it; the services check the keys a list adds; a change that drops the
+  event or `fields` clears it.
+- **Campaign filters** (migration 0133, ADR-185): `campaign_ids` on an endpoint lists the campaigns
+  whose messages' statuses (`message.status`) and changes (`campaign.status_changed`) it takes, null
+  for every campaign's; a check keeps it to 1 to 50 ids and to endpoints taking one of those events.
+  The message trigger passes the message's `campaign_id` as `campaignId` in the detail, and
+  `app.capture_webhook_event` (replaced with the same signature) matches it, or a campaign event's
+  stored `campaignId`, against the list, then takes the message's out before storing the event.
+  `message.status` payloads name the campaign (`message.campaignId`), read from the message when
+  prepared. Settings (radio buttons and checkboxes under "Campaigns", the 200 newest campaigns) and
+  the API (`campaignIds`) set it; the services check the campaigns of a list given; a change that
+  drops both events clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and
@@ -1625,6 +1706,20 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   platform role only) with the platform audit entry in one transaction. The Queues tab's read
   (`recentDeadLetters`) joins the administrator's name through `acknowledgers`, an alias of
   `auth.users` beside the one for who retried; the CSV writes the time only.
+- **Acknowledging late queues** (ADR-177, migration 0125): `acknowledged_at`,
+  `acknowledged_by_user_id` and `acknowledgement` on `ops.queue_waits`, set together and only while
+  the queue is late (the check `queue_waits_acknowledged`), written by
+  `ops.platform_acknowledge_late_queue` (definer, platform role only, the lateness named by its
+  start) with the platform audit entry in one transaction, and cleared by `ops.record_queue_waits`
+  when the check finds the queue back on time, as it clears the alert's mark. The Queues tab's read
+  (`queueWaitsByName`) joins the administrator's name through `acknowledgers`; the worker's grant
+  covers the check's columns only; the CSV writes the time only.
+- **Acknowledging webhook receipts** (ADR-179, migration 0127): `ops.receipt_acknowledgements`, one
+  note per receipt (who, when, the note), deleted with the receipt through a cascading foreign key,
+  written only by `ops.platform_acknowledge_webhook_receipt` (definer, platform role only) with the
+  platform audit entry in one transaction and read by the platform role. The Integrations tab's read
+  (`receiptsNeedingAttention`) joins it and the administrator's name through `acknowledgers`; the
+  CSV writes the time only.
 - **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
   90 days) and a health card on each company's platform page. Every page re-checks the platform
   actor. The functions read every company on each view, which suits the test envelope; paging and

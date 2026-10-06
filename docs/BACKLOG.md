@@ -602,12 +602,29 @@ verification, app review, Embedded Signup configuration).
   with the new `channels.read` scope, granted with the permission of the same name: every number of
   the company oldest first on exact pages, filtered by status, with its number, verified name and
   status and the id the rest of the API names it by, never Meta's ids; migration 0119).
+  **[Resuming the campaigns keys paused built; its database tests run only in CI]** (ADR-176:
+  `POST /campaigns/{id}/resume` with the new `campaigns.resume` scope, granted with
+  `campaigns.send`: a campaign a key paused runs again after members' checks, under the
+  authority of the member who launched it, who must still be allowed to send campaigns; what
+  members or HyFib paused stays with members; migration 0124).
+  **[Changing typed numbers built; its database tests run only in CI]** (ADR-180:
+  `PATCH /contacts/{id}` takes `phone` and changes a number as members do: one WhatsApp gave
+  stays, one another contact has or one on the suppression list is refused; only that call
+  changes numbers; no migration).
+  **[Creating and editing campaign drafts built; its database tests run only in CI]** (ADR-186:
+  `POST /campaigns` and `PATCH /campaigns/{id}` with the new `campaigns.write` scope, granted with
+  `campaigns.write`: a draft's settings as members edit them, checked as members' are, with a
+  version; members submit and start it; migration 0134).
+  **[Cancelling campaign drafts built; its database tests run only in CI]** (ADR-187:
+  `POST /campaigns/{id}/cancel` cancels a draft for a key holding `campaigns.write`, as members
+  cancel drafts; anything else still needs `campaigns.stop`; no migration).
   Remaining: media messages, call-to-action messages through the API, taking reactions back,
   media downloads, a contact card's contacts (Meta's
   contact object is not confirmed), changing a field's type, changing
-  numbers,
+  numbers in calls that change many contacts,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
-  resuming, approving, scheduling, creating and editing campaigns through the API, campaign
+  resuming what members or HyFib paused, approving, scheduling and starting campaigns
+  through the API, campaign
   recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose
   per scope since ADR-092). The one-argument key lookup kept for rolling deploys (0051) is dropped
   (0074). Replaying many deliveries in one call is built with P5-09 (ADR-095).
@@ -704,12 +721,34 @@ verification, app review, Embedded Signup configuration).
   names). **[OAuth client credentials built; their database tests run only in CI]** (ADR-173: an
   endpoint gets an access token from its receiver's authorization server as the client a member or
   key sets, and sends it as a bearer token with every delivery; the secret sealed and needed again
-  for a new token URL, tokens kept in the worker's memory only). Remaining: filters for other event
-  types and on a message's
-  or contact's values (such as by campaign, template, team, assigned member, tag or field key, or a
-  run's trigger or end reason), which tags were added or removed, other authentication (headers
-  computed per delivery, other OAuth grants), mutual TLS, fixed egress addresses, events for store
-  orders, Payment Links and each step of a run, `createdAt` finer than the millisecond, load tests.
+  for a new token URL, tokens kept in the worker's memory only). **[Team filters built; their
+  database tests run only in CI]** (ADR-174: an endpoint takes the message and conversation events
+  of the conversations of the teams it chooses, 1 to 50 of the company's teams, in Settings or
+  through the API, or every conversation's as before; by the team a conversation is in when the
+  event is captured, a change of team also reaching the team it left). **[Template filters built;
+  their database tests run only in CI]** (ADR-175: an endpoint takes `message.status` for the
+  messages sent with the templates it chooses and `template.status_changed` for their changes, 1
+  to 50 of the company's templates, in Settings or through the API, or every template's as
+  before). **[Assignee filters built; their database tests run only in CI]** (ADR-181: an endpoint
+  takes the message and conversation events of the conversations assigned to the members it chooses,
+  1 to 50 members who take conversations, in Settings or through the API, or every conversation's as
+  before; by the member a conversation is assigned to when the event is captured, a change of
+  assignee also reaching the member it left). **[Tag changes built; their database tests run only in
+  CI]** (ADR-182: a `contact.updated` names the tags its change added and removed, net within the
+  change, cleared from stored events when the contact is erased). **[Run trigger filters built;
+  their database tests run only in CI]** (ADR-183: an endpoint takes the run events of the runs
+  started by the triggers it chooses, in Settings or through the API, or every run's as before).
+  **[Custom field filters built; their database tests run only in CI]** (ADR-184: an endpoint takes
+  the changes of the custom fields it chooses, 1 to 50 of the company's fields, alongside the parts
+  it takes, or every field's as before). **[Campaign filters built; their database tests run only in
+  CI]** (ADR-185: `message.status` names the campaign that sent the message, and an endpoint takes
+  the statuses of the messages of the campaigns it chooses and their changes, 1 to 50 of the
+  company's campaigns, in Settings or through the API, or every campaign's as before). Remaining:
+  filters for other event types and on a message's or contact's values (such as by tag or a field's
+  value, or a run's end reason or key), other authentication (headers computed
+  per delivery, other OAuth grants),
+  mutual TLS, fixed egress addresses, events for store orders, Payment Links and each step of a run,
+  `createdAt` finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,
@@ -756,10 +795,18 @@ verification, app review, Embedded Signup configuration).
   left out). **[Acknowledging dead letters built; its database tests run only in CI]** (ADR-169: a
   platform administrator acknowledges a dead letter on the Queues tab with a note, shown with who
   and when to the other administrators, replaced by a later note and kept in the platform audit log;
-  it lasts as long as the dead letter, and the CSV gives when, never who or the note). Remaining:
+  it lasts as long as the dead letter, and the CSV gives when, never who or the note).
+  **[Acknowledging late queues built; its database tests run only in CI]** (ADR-177: a platform
+  administrator acknowledges a late queue on the Queues tab with a note, shown with who and when
+  to the other administrators, replaced by a later note and kept in the platform audit log; it
+  lasts while the queue stays late, and the CSV gives when, never who or the note).
+  **[Acknowledging webhook receipts built; its database tests run only in CI]** (ADR-179: a
+  platform administrator acknowledges a Meta or Razorpay receipt that needs attention with a
+  note, shown with who and when, replaced by a later note, audited and deleted with the
+  receipt; the CSV gives when, never who or the note). Remaining:
   other alert channels, longer trends and charts, Meta's quality webhook (unconfirmed), exports
-  beyond the rows a tab lists, assigning failures and acknowledging receipts, quarantine entries and
-  late queues, paging and rollups for many companies.
+  beyond the rows a tab lists, assigning failures and acknowledging quarantine entries, paging
+  and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

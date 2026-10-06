@@ -40,6 +40,7 @@ import {
   createTemplatesService,
   createWebhooksService,
   messageReceivedPayloadSchema,
+  messageStatusPayloadSchema,
   orderReceivedPayloadSchema,
   orderStatusChangedPayloadSchema,
   processCommerceSync,
@@ -129,6 +130,9 @@ async function addEndpoint(
   conversationStatuses: string[] | null = null,
   runEndStatuses: string[] | null = null,
   channelIds: string[] | null = null,
+  runTriggers: string[] | null = null,
+  contactFieldKeys: string[] | null = null,
+  campaignIds: string[] | null = null,
 ) {
   const path = `/ok/${randomBytes(6).toString('hex')}`;
   const owner = await fx.ctx(c, c.owner);
@@ -142,6 +146,9 @@ async function addEndpoint(
     conversationStatuses,
     runEndStatuses,
     channelIds,
+    runTriggers,
+    contactFieldKeys,
+    campaignIds,
   });
   return { ...created, path };
 }
@@ -1251,6 +1258,268 @@ describe('contact part filters (ADR-123)', () => {
   });
 });
 
+describe('custom field filters (ADR-184)', () => {
+  it('queue a field change only for the endpoints whose fields hold its key, other parts by the parts alone, and a later change in the transaction for those it newly concerns', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    await service.createField(owner, { label: 'City', key: 'city', type: 'text' });
+    await service.createField(owner, { label: 'Tier', key: 'tier', type: 'text' });
+    /** An endpoint for contact.updated with the parts and fields given. */
+    const add = (parts: WebhookContactPart[] | null, fields: string[] | null) =>
+      addEndpoint(c, ['contact.updated'], parts, null, null, null, null, null, null, null, fields);
+    const tierOnly = await add(['fields'], ['tier']);
+    const everyPartButTier = await add(null, ['tier']);
+    const every = await add(null, null);
+    const names = new Map([
+      [tierOnly.id, 'tierOnly'],
+      [everyPartButTier.id, 'everyPartButTier'],
+      [every.id, 'every'],
+    ]);
+    const { id: contactId } = await service.createContact(owner, {
+      displayName: 'Esha',
+      phone: '+919811100101',
+    });
+    const save = (change: Record<string, unknown>) =>
+      service.updateContact(owner, contactId, { displayName: 'Esha', ...change });
+    // The city alone, the tier alone, the email alone, then the city and the email in one save.
+    await save({ attributes: { city: 'Pune' } });
+    await save({ attributes: { city: 'Pune', tier: 'gold' } });
+    await save({ attributes: { city: 'Pune', tier: 'gold' }, email: 'esha@example.test' });
+    await save({ attributes: { city: 'Delhi', tier: 'gold' }, email: 'esha@example.org' });
+    // The city, then the tier, in one transaction: the tier's endpoints are queued with it.
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(sql`update app.contacts set attributes = attributes || '{"city": "Agra"}'
+        where id = ${contactId}::uuid`);
+      await tx.execute(sql`update app.contacts set attributes = attributes || '{"tier": "silver"}'
+        where id = ${contactId}::uuid`);
+    });
+    const updates = await fx.query<{ changes: string[]; endpoints: string[] }>(
+      `SELECT e.contact_changes AS changes,
+              coalesce((SELECT array_agg(d.endpoint_id::text) FROM app.webhook_deliveries d
+                         WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id), '{}') AS endpoints
+         FROM app.webhook_events e
+        WHERE e.tenant_id = $1 AND e.type = 'contact.updated' ORDER BY e.created_at, e.id`,
+      [c.tenant.id],
+    );
+    expect(
+      updates.map((u) => [u.changes, u.endpoints.map((id) => names.get(id) ?? id).sort()]),
+    ).toEqual([
+      [['fields.city'], ['every']],
+      [['fields.tier'], ['every', 'everyPartButTier', 'tierOnly']],
+      [['email'], ['every', 'everyPartButTier']],
+      [
+        ['email', 'fields.city'],
+        ['every', 'everyPartButTier'],
+      ],
+      [
+        ['fields.city', 'fields.tier'],
+        ['every', 'everyPartButTier', 'tierOnly'],
+      ],
+    ]);
+    // Each delivery still names every part that changed.
+    await deliverDue(c);
+    const changesAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) => (b.data.changes as string[]).join('+'))
+        .sort();
+    expect(changesAt(tierOnly.path)).toEqual(['fields.city+fields.tier', 'fields.tier']);
+  });
+});
+
+describe('contact tag changes (ADR-182)', () => {
+  /** The company's contact events, oldest first: type, what changed and the tags it listed. */
+  const tagsOf = async (c: Company) =>
+    (
+      await fx.query<{
+        id: string;
+        type: string;
+        changes: string[] | null;
+        added: string[] | null;
+        removed: string[] | null;
+      }>(
+        `SELECT id, type, contact_changes AS changes, tags_added AS added, tags_removed AS removed
+           FROM app.webhook_events
+          WHERE tenant_id = $1 AND type LIKE 'contact.%' ORDER BY created_at, id`,
+        [c.tenant.id],
+      )
+    ).map((e) => ({ ...e, row: [e.type, e.changes, e.added, e.removed] }));
+
+  it('keep the tags each change added and removed, sorted and net within its transaction, empty for a change of no tag, and none for a contact added with its tags', async () => {
+    const c = await fx.company();
+    const endpoint = await addEndpoint(c, ['contact.created', 'contact.updated']);
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    // Added with a tag: one contact.created, which lists no tags.
+    const { id: contactId } = await service.createContact(owner, {
+      displayName: 'Hema',
+      phone: '+919811100091',
+      tags: ['trial'],
+    });
+    await service.addTags(owner, contactId, ['vip', 'north']);
+    await service.removeTag(owner, contactId, 'trial');
+    await service.updateContact(owner, contactId, { displayName: 'Hema K' });
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    const addTag = (tag: string) =>
+      sql`insert into app.contact_tags (id, tenant_id, contact_id, tag)
+        values (gen_random_uuid(), ${c.tenant.id}::uuid, ${contactId}::uuid, ${tag})`;
+    const removeTag = (tag: string) =>
+      sql`delete from app.contact_tags where contact_id = ${contactId}::uuid and tag = ${tag}`;
+    // One transaction: a tag added and removed again, one removed and added back, one removed and
+    // one added. Only the last two are listed.
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(addTag('gold'));
+      await tx.execute(removeTag('gold'));
+      await tx.execute(removeTag('vip'));
+      await tx.execute(addTag('vip'));
+      await tx.execute(removeTag('north'));
+      await tx.execute(addTag('south'));
+    });
+    // A change of tags that undoes itself is still a change of tags, with both lists empty.
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(addTag('gold'));
+      await tx.execute(removeTag('gold'));
+    });
+    const events = await tagsOf(c);
+    expect(events.map((e) => e.row)).toEqual([
+      ['contact.created', null, null, null],
+      ['contact.updated', ['tags'], ['north', 'vip'], []],
+      ['contact.updated', ['tags'], [], ['trial']],
+      ['contact.updated', ['name'], [], []],
+      ['contact.updated', ['tags'], ['south'], ['north']],
+      ['contact.updated', ['tags'], [], []],
+    ]);
+
+    // Each update is delivered with its lists; the created event has none.
+    await deliverDue(c);
+    const bodies = bodiesAt(endpoint.path);
+    expect(bodies).toHaveLength(6);
+    const byId = new Map(events.map((e) => [e.id, e]));
+    for (const body of bodies) {
+      const event = byId.get(body.id)!;
+      if (body.type === 'contact.created') {
+        expect(Object.keys(body.data)).toEqual(['contact']);
+        continue;
+      }
+      expect(contactUpdatedPayloadSchema.safeParse(body).success).toBe(true);
+      expect([body.data.changes, body.data.tagsAdded, body.data.tagsRemoved]).toEqual([
+        event.changes,
+        event.added,
+        event.removed,
+      ]);
+      expect(body.data.contact).toMatchObject({ tags: ['south', 'vip'], erased: false });
+    }
+  });
+
+  it('erasing a contact clears the tags its events listed and sends none, and nothing else changes the lists', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const endpoint = await addEndpoint(c, ['contact.updated', 'contact.erased']);
+    await addEndpoint(other, ['contact.updated']);
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const { id: contactId } = await service.createContact(owner, { phone: '+919811100093' });
+    await service.addTags(owner, contactId, ['diabetic', 'vip']);
+    await service.removeTag(owner, contactId, 'vip');
+    // Another company's contact, tagged too.
+    const otherOwner = await fx.ctx(other, other.owner);
+    const { id: otherContact } = await service.createContact(otherOwner, {
+      phone: '+919811100094',
+    });
+    await service.addTags(otherOwner, otherContact, ['vip']);
+    const listsOf = async (company: Company) =>
+      (await tagsOf(company)).filter((e) => e.type === 'contact.updated').map((e) => e.row);
+
+    // The company role cannot write the lists, and the function that notes a tag changes only an
+    // event its own transaction captured.
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    const [first] = (await tagsOf(c)).filter((e) => e.type === 'contact.updated');
+    await expectRefusedBy(
+      fx.dbs.app.run(scope, (tx) =>
+        tx.execute(sql`update app.webhook_events set tags_added = '{}'
+          where id = ${first!.id}::uuid`),
+      ),
+      /permission denied for table webhook_events/,
+    );
+    await fx.dbs.app.run(scope, (tx) =>
+      tx.execute(sql`select app.note_contact_webhook_tag(${c.tenant.id}::uuid, ${contactId}::uuid,
+        'gold', true)`),
+    );
+    expect(await listsOf(c)).toEqual([
+      ['contact.updated', ['tags'], ['diabetic', 'vip'], []],
+      ['contact.updated', ['tags'], [], ['vip']],
+    ]);
+
+    // Erased: the lists are cleared from every event of the contact; the other company's stay.
+    await service.eraseContact(owner, { contactId, suppress: false });
+    expect(await listsOf(c)).toEqual([
+      ['contact.updated', ['tags'], null, null],
+      ['contact.updated', ['tags'], null, null],
+    ]);
+    expect(await listsOf(other)).toEqual([['contact.updated', ['tags'], ['vip'], []]]);
+
+    // Delivered after the erasure, the updates say what changed and name no tag.
+    await deliverDue(c);
+    const bodies = bodiesAt(endpoint.path);
+    expect(bodies.map((b) => b.type).sort()).toEqual([
+      'contact.erased',
+      'contact.updated',
+      'contact.updated',
+    ]);
+    for (const body of bodies.filter((b) => b.type === 'contact.updated')) {
+      expect(body.data).toMatchObject({ changes: ['tags'], tagsAdded: null, tagsRemoved: null });
+      expect(JSON.stringify(body)).not.toMatch(/diabetic|vip/);
+    }
+  });
+
+  it('stores tag lists on updates only, both or neither, without a null entry or a tag in both', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { id: contactId } = await contactsService().createContact(owner, {
+      phone: '+919811100095',
+    });
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    const store = (
+      type: string,
+      added: readonly (string | null)[] | null,
+      removed: readonly (string | null)[] | null,
+    ) =>
+      fx.dbs.app.run(scope, (tx) =>
+        tx.execute(sql`insert into app.webhook_events
+            (id, tenant_id, type, contact_id, contact_changes, tags_added, tags_removed)
+          values (gen_random_uuid(), ${c.tenant.id}::uuid, ${type}, ${contactId}::uuid,
+            ${type === 'contact.updated' ? '{tags}' : null}::text[], ${textArray(added)}::text[],
+            ${textArray(removed)}::text[])`),
+      );
+    await store('contact.updated', ['repeat', 'vip'], ['trial']);
+    await store('contact.updated', [], []);
+    await store('contact.updated', null, null);
+    await store('contact.created', null, null);
+    const check = /webhook_events_tag_changes_check/;
+    for (const [added, removed] of [
+      [['vip'], null],
+      [null, []],
+      [['vip', null], []],
+      [[], [null]],
+      [['vip'], ['trial', 'vip']],
+    ] as const) {
+      await expectRefusedBy(store('contact.updated', added, removed), check);
+    }
+    await expectRefusedBy(store('contact.created', [], []), check);
+    await expectRefusedBy(store('contact.erased', ['vip'], []), check);
+    await expectRefusedBy(
+      fx.dbs.app.run(scope, (tx) =>
+        tx.execute(sql`insert into app.webhook_events
+            (id, tenant_id, type, contact_id, contact_changes, tags_added, tags_removed)
+          values (gen_random_uuid(), ${c.tenant.id}::uuid, 'contact.updated', ${contactId}::uuid,
+            '{tags}', array[array['a'], array['b']], '{}')`),
+      ),
+      check,
+    );
+  });
+});
+
 describe('message events (ADR-082)', () => {
   it('name the message a customer quotes or reacts to, when it is in the conversation', async () => {
     const c = await fx.company();
@@ -1765,6 +2034,76 @@ describe('automation run events (ADR-078)', () => {
         .filter((e) => e.detail.runId === later)
         .map((e) => [e.type, e.deliveries]),
     ).toEqual([['automation.run_started', 1]]);
+  });
+
+  it('sends an endpoint that names what started the runs only those runs, others every run, and captures no run event nobody takes (ADR-183)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await publishAutomation(owner, 'Brochure', keyword('brochure'), sayGraph('Here it is.'));
+    await publishAutomation(
+      owner,
+      'Welcome',
+      { type: 'conversation_started', hours: 'any', cooldownMinutes: 0 },
+      sayGraph('Welcome!'),
+    );
+    // Both events of keyword runs only; the start of every run.
+    const keywords = await addEndpoint(
+      c,
+      ['automation.run_started', 'automation.run_ended'],
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      ['keyword'],
+    );
+    const everyStart = await addEndpoint(c, ['automation.run_started']);
+    const runOf = async (text: string) => {
+      const { conversation_id: conversationId } = await inbound(c, waId(), text);
+      const [run] = await runsIn(conversationId);
+      if (!run) throw new Error(`no run started by “${text}”`);
+      expect(await driveRun(c, run.id)).toBe('ended');
+      return run.id;
+    };
+    // A keyword in a new conversation starts Brochure; a greeting starts Welcome.
+    const brochure = await runOf('Send the brochure');
+    const welcome = await runOf('Good morning');
+    // Welcome's end is taken by no endpoint, so it is not captured; what started a run is not
+    // stored with its events.
+    const events = await eventsOf(c, 'automation.');
+    expect(events.map((e) => [e.type, e.detail.runId, e.deliveries])).toEqual([
+      ['automation.run_started', brochure, 2],
+      ['automation.run_ended', brochure, 1],
+      ['automation.run_started', welcome, 1],
+    ]);
+    for (const event of events) expect(event.detail).not.toHaveProperty('runTrigger');
+
+    await deliverDue(c);
+    const runsAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) => {
+          const { run } = (
+            b.type === 'automation.run_started'
+              ? automationRunStartedPayloadSchema
+              : automationRunEndedPayloadSchema
+          ).parse(b).data;
+          return [b.type, run.id, run.trigger];
+        })
+        .sort();
+    expect(runsAt(keywords.path)).toEqual(
+      [
+        ['automation.run_ended', brochure, 'keyword'],
+        ['automation.run_started', brochure, 'keyword'],
+      ].sort(),
+    );
+    expect(runsAt(everyStart.path)).toEqual(
+      [
+        ['automation.run_started', brochure, 'keyword'],
+        ['automation.run_started', welcome, 'conversation_started'],
+      ].sort(),
+    );
   });
 
   it('names the key that started a run through the API', async () => {
@@ -2890,6 +3229,72 @@ describe('campaign events (ADR-087)', () => {
         .sort(),
     ).toEqual(['accepted', 'canceled']);
     expect(statusesAt(every.path)).toEqual([]);
+  });
+
+  it("sends an endpoint that names campaigns only their messages' statuses and their changes, and names the campaign in each message status (ADR-185)", async () => {
+    const s = await campaignCompany(1);
+    const { c } = s;
+    const owner = await fx.ctx(c, c.owner);
+    const weekend = await s.draft(owner, 'Weekend sale');
+    const monday = await s.draft(owner, 'Monday sale');
+    const types: WebhookEventType[] = ['campaign.status_changed', 'message.status'];
+    const chosen = await addEndpoint(
+      c,
+      types,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      [weekend],
+    );
+    const every = await addEndpoint(c, types);
+    expect((await webhooks().list(owner)).find((e) => e.id === chosen.id)?.campaigns).toEqual([
+      { id: weekend, name: 'Weekend sale', status: 'draft' },
+    ]);
+
+    // The weekend sale reaches its one contact; the Monday sale is cancelled before it starts.
+    await s.campaigns.submitCampaign(owner, weekend, { expectedVersion: 1 }, {});
+    expect(await s.tick(weekend)).toMatchObject({ outcome: 'progress', queued: 1 });
+    expect(await s.dispatch(weekend)).toEqual(['accepted']);
+    await s.campaigns.cancelCampaign(owner, monday, {});
+    expect(await changesOf(weekend)).toEqual([
+      ['scheduled', 'draft', null, null, 2],
+      ['running', 'scheduled', null, null, 2],
+    ]);
+    expect(await changesOf(monday)).toEqual([['canceled', 'draft', null, null, 1]]);
+
+    await deliverDue(c);
+    const campaignsAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) =>
+          b.type === 'message.status'
+            ? [b.type, messageStatusPayloadSchema.parse(b).data.message.campaignId]
+            : [b.type, campaignStatusChangedPayloadSchema.parse(b).data.campaign.id],
+        )
+        .sort();
+    // The runner's message names its campaign; the accepted status reached both endpoints.
+    expect(campaignsAt(chosen.path)).toEqual([
+      ['campaign.status_changed', weekend],
+      ['campaign.status_changed', weekend],
+      ['message.status', weekend],
+    ]);
+    expect(campaignsAt(every.path)).toEqual(
+      [
+        ['campaign.status_changed', weekend],
+        ['campaign.status_changed', weekend],
+        ['campaign.status_changed', monday],
+        ['message.status', weekend],
+      ].sort(),
+    );
+    const [status] = bodiesAt(chosen.path)
+      .filter((b) => b.type === 'message.status')
+      .map((b) => messageStatusPayloadSchema.parse(b).data.message);
+    expect(status).toMatchObject({ status: 'accepted', sentBy: 'campaign', campaignId: weekend });
   });
 
   it('sends an endpoint that names numbers only the campaigns that send from them; a campaign without a number is on none (ADR-170)', async () => {

@@ -32,6 +32,8 @@ export async function createWebhookEndpointAction(
     messageSenders: string[] | null;
     /** The contact parts it takes as contact.updated; null takes every change. */
     contactParts: string[] | null;
+    /** The custom fields whose changes it takes (ADR-184); null takes every field's. */
+    contactFieldKeys: string[] | null;
     /** The automations whose runs it takes (ADR-145); null takes every automation. */
     automationIds: string[] | null;
     /** The campaign statuses it takes (ADR-146); null takes every status. */
@@ -44,8 +46,18 @@ export async function createWebhookEndpointAction(
     conversationStatuses: string[] | null;
     /** How the runs it takes as `automation.run_ended` ended (ADR-151); null takes every end. */
     runEndStatuses: string[] | null;
+    /** What started the runs whose events it takes (ADR-183); null takes every run's. */
+    runTriggers: string[] | null;
     /** The WhatsApp numbers whose events it takes (ADR-170); null takes every number. */
     channelIds: string[] | null;
+    /** The teams whose conversations' events it takes (ADR-174); null takes every one's. */
+    teamIds: string[] | null;
+    /** The templates whose statuses and changes it takes (ADR-175); null takes every one's. */
+    templateIds: string[] | null;
+    /** The campaigns whose messages' statuses and changes it takes (ADR-185); null: every one's. */
+    campaignIds: string[] | null;
+    /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
+    assigneeIds: string[] | null;
     /** Its OAuth client (ADR-173); null: none. */
     oauth: WebhookOAuthActionInput | null;
   },
@@ -74,6 +86,8 @@ export async function updateWebhookEndpointAction(
     messageSenders: string[] | null;
     /** The contact parts it takes as contact.updated; null takes every change. */
     contactParts: string[] | null;
+    /** The custom fields whose changes it takes (ADR-184); null takes every field's. */
+    contactFieldKeys: string[] | null;
     /** The automations whose runs it takes (ADR-145); null takes every automation. */
     automationIds: string[] | null;
     /** The campaign statuses it takes (ADR-146); null takes every status. */
@@ -86,8 +100,18 @@ export async function updateWebhookEndpointAction(
     conversationStatuses: string[] | null;
     /** How the runs it takes as `automation.run_ended` ended (ADR-151); null takes every end. */
     runEndStatuses: string[] | null;
+    /** What started the runs whose events it takes (ADR-183); null takes every run's. */
+    runTriggers: string[] | null;
     /** The WhatsApp numbers whose events it takes (ADR-170); null takes every number. */
     channelIds: string[] | null;
+    /** The teams whose conversations' events it takes (ADR-174); null takes every one's. */
+    teamIds: string[] | null;
+    /** The templates whose statuses and changes it takes (ADR-175); null takes every one's. */
+    templateIds: string[] | null;
+    /** The campaigns whose messages' statuses and changes it takes (ADR-185); null: every one's. */
+    campaignIds: string[] | null;
+    /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
+    assigneeIds: string[] | null;
     /**
      * Given, its OAuth client (null removes it, ADR-173): a secret left out keeps the stored one
      * while the token URL stays the same. Left out, it stays.

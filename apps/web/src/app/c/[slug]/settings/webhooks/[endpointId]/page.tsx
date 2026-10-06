@@ -42,10 +42,24 @@ export default async function WebhookEndpointPage({
   const endpoint = (await webhooks.list(ctx)).find((e) => e.id === endpointId);
   if (!endpoint) notFound();
   const failedOnly = failed === '1';
-  const [deliveries, automationChoices, channelChoices] = await Promise.all([
+  const [
+    deliveries,
+    automationChoices,
+    channelChoices,
+    teamChoices,
+    templateChoices,
+    campaignChoices,
+    assigneeChoices,
+    contactFieldChoices,
+  ] = await Promise.all([
     webhooks.deliveries(ctx, { endpointId, failedOnly }),
     webhooks.automationChoices(ctx),
     webhooks.channelChoices(ctx),
+    webhooks.teamChoices(ctx),
+    webhooks.templateChoices(ctx),
+    webhooks.campaignChoices(ctx),
+    webhooks.assigneeChoices(ctx),
+    webhooks.contactFieldChoices(ctx),
   ]);
   const tz = ctx.tenant.timezone;
   const host = webhookHost(endpoint.url) ?? endpoint.url;
@@ -185,17 +199,28 @@ export default async function WebhookEndpointPage({
               messageStatuses: endpoint.messageStatuses,
               messageSenders: endpoint.messageSenders,
               contactParts: endpoint.contactParts,
+              contactFields: endpoint.contactFields,
               automationIds: endpoint.automations?.map((a) => a.id) ?? null,
               campaignStatuses: endpoint.campaignStatuses,
               orderStatuses: endpoint.orderStatuses,
               templateStatuses: endpoint.templateStatuses,
               conversationStatuses: endpoint.conversationStatuses,
               runEndStatuses: endpoint.runEndStatuses,
+              runTriggers: endpoint.runTriggers,
               channelIds: endpoint.channels?.map((c) => c.id) ?? null,
+              teams: endpoint.teams,
+              templateIds: endpoint.templates?.map((t) => t.id) ?? null,
+              campaigns: endpoint.campaigns,
+              assignees: endpoint.assignees,
               oauth: endpoint.oauth,
             }}
             automationChoices={automationChoices}
             channelChoices={channelChoices}
+            teamChoices={teamChoices}
+            templateChoices={templateChoices}
+            campaignChoices={campaignChoices}
+            assigneeChoices={assigneeChoices}
+            contactFieldChoices={contactFieldChoices}
           />
         </CardContent>
       </Card>

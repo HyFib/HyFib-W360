@@ -84,6 +84,13 @@ export type WebhookConversationStatus = 'open' | 'resolved';
  */
 export type WebhookRunEndStatus = 'completed' | 'handed_off' | 'taken_over' | 'stopped' | 'failed';
 
+/**
+ * What started a live automation run (ADR-078), which an endpoint taking run events can choose
+ * (ADR-183), as the event's `run.trigger` says; members' test runs send no events.
+ */
+export type WebhookRunTrigger =
+  'keyword' | 'conversation_started' | 'any_message' | 'store_event' | 'api';
+
 export const WEBHOOK_DELIVERY_STATES = ['pending', 'delivering', 'succeeded', 'failed'] as const;
 export type WebhookDeliveryState = (typeof WEBHOOK_DELIVERY_STATES)[number];
 
@@ -121,6 +128,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   contactParts: text('contact_parts').array().$type<WebhookContactPart[]>(),
   /**
+   * The custom fields (keys) whose changes it takes as `contact.updated` (ADR-184); null takes every
+   * field's. Set only while it takes `contact.updated` for every part or for `fields`.
+   */
+  contactFieldKeys: text('contact_field_keys').array(),
+  /**
    * The automations whose runs it takes as `automation.run_started` and `automation.run_ended`
    * (ADR-145); null takes every automation. Set only while one of those is among its events.
    */
@@ -151,11 +163,37 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   runEndStatuses: text('run_end_statuses').array().$type<WebhookRunEndStatus[]>(),
   /**
+   * What started the runs whose events it takes (ADR-183); null takes every run's. Set only while
+   * `automation.run_started` or `automation.run_ended` is among its events.
+   */
+  runTriggers: text('run_triggers').array().$type<WebhookRunTrigger[]>(),
+  /**
    * The WhatsApp numbers (channel accounts) whose events it takes (ADR-170): message,
    * conversation, automation run, order and campaign events; null takes every number. Set only
    * while one of those is among its events.
    */
   channelAccountIds: uuid('channel_account_ids').array(),
+  /**
+   * The teams whose conversations' message and conversation events it takes (ADR-174); null takes
+   * every conversation's. Set only while one of those events is among its events.
+   */
+  teamIds: uuid('team_ids').array(),
+  /**
+   * The templates whose messages' statuses and changes it takes (ADR-175); null takes every
+   * template's. Set only while `message.status` or `template.status_changed` is among its events.
+   */
+  templateIds: uuid('template_ids').array(),
+  /**
+   * The members (memberships) whose assigned conversations' message and conversation events it
+   * takes (ADR-181); null takes every conversation's. Set only while one of those events is among
+   * its events.
+   */
+  assigneeIds: uuid('assignee_ids').array(),
+  /**
+   * The campaigns whose messages' statuses and changes it takes (ADR-185); null takes every
+   * campaign's. Set only while `message.status` or `campaign.status_changed` is among its events.
+   */
+  campaignIds: uuid('campaign_ids').array(),
   /**
    * The endpoint's OAuth client (ADR-173): its authorization server's token endpoint, the client
    * identifier, the secret encrypted by the keyring and the scope to ask for (null: none). All
@@ -196,6 +234,12 @@ export const webhookEvents = appSchema.table('webhook_events', {
   detail: jsonb('detail').notNull().$type<Record<string, unknown>>(),
   /** What a contact.updated event's transaction changed (ADR-121); null for other events. */
   contactChanges: text('contact_changes').array(),
+  /**
+   * The tags a contact.updated event's transaction added and removed (ADR-182), both null for other
+   * events, for those captured before migration 0129 and once the contact is erased.
+   */
+  tagsAdded: text('tags_added').array(),
+  tagsRemoved: text('tags_removed').array(),
   occurredAt: tz('occurred_at').notNull().defaultNow(),
   createdAt: tz('created_at').notNull().defaultNow(),
 });

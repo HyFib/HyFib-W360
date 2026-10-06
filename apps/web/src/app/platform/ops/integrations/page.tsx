@@ -24,6 +24,7 @@ import {
 import { CompanyLink, ListTitle, Utc } from '@/components/platform/ops';
 import {
   AcknowledgeFailureForm,
+  AcknowledgeReceiptForm,
   ResolveQuarantineForm,
   RetryReceiptForm,
 } from '@/components/platform/ops-forms';
@@ -129,7 +130,10 @@ export default async function OpsIntegrationsPage() {
             Receipts that failed all 12 attempts, or whose worker stopped during the last one, or
             that have waited over 10 minutes (quarantined ones are listed below). Retry one after
             fixing the cause: it goes back to processing, which is idempotent. A receipt&apos;s body
-            is erased after 7 days, and then it cannot be processed again. Platform administrators
+            is erased after 7 days, and then it cannot be processed again. Acknowledge a receipt
+            with a note to tell the other administrators what you found or did, retried or not; a
+            later note replaces it, the platform audit log keeps each, and the note goes with the
+            receipt (ADR-179). The CSV gives when, never who or the note. Platform administrators
             are emailed about each receipt that failed all its attempts, each quarantined event and
             each dead letter, at most every 15 minutes (ADR-091);{' '}
             {o.lastFailureAlertAt ? (
@@ -154,6 +158,7 @@ export default async function OpsIntegrationsPage() {
                   <TH>Attempts</TH>
                   <TH>Last error</TH>
                   <TH />
+                  <TH>Acknowledged</TH>
                 </TR>
               </THead>
               <TBody>
@@ -189,6 +194,23 @@ export default async function OpsIntegrationsPage() {
                       ) : (
                         <span className="text-xs text-muted-foreground">Body erased</span>
                       )}
+                    </TD>
+                    <TD className="max-w-xs text-sm">
+                      {r.acknowledgement ? (
+                        <div className="mb-2">
+                          <div>
+                            By {r.acknowledgement.byName ?? 'an administrator'},{' '}
+                            <Utc at={r.acknowledgement.at} />
+                          </div>
+                          <div className="break-words text-xs text-muted-foreground">
+                            {r.acknowledgement.note}
+                          </div>
+                        </div>
+                      ) : null}
+                      <AcknowledgeReceiptForm
+                        receiptId={r.id}
+                        acknowledged={r.acknowledgement !== null}
+                      />
                     </TD>
                   </TR>
                 ))}

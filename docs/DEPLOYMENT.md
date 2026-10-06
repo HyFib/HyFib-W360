@@ -243,6 +243,92 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    sweep leaves the OAuth secrets for the new ones. Rolling workers back while endpoints have
    clients sends their deliveries without a token: receivers refuse them, and they are retried until
    the new workers return or the endpoints have failed for 72 hours.
+   Migration 0122 (ADR-174) adds `team_ids` to `app.webhook_endpoints` with a check validated by
+   reading the table, and replaces `app.capture_webhook_event` (keeping 0109's to 0120's filters)
+   with the same signature; every endpoint starts with none. Web servers of this release need it, as
+   their reads of endpoints name the column; workers do not read it. Web servers from before it
+   neither show nor change the column: until the web rollout ends, an old server's change that drops
+   every message and conversation event from an endpoint with a list fails on the check, and its
+   other changes keep it.
+   Migration 0123 (ADR-175) adds `template_ids` to `app.webhook_endpoints` with a check validated by
+   reading the table, and replaces `app.capture_webhook_event` (keeping the filters of 0095 to 0122)
+   with the same signature; every endpoint starts with none. Web servers of this release need it, as
+   their reads of endpoints name the column; workers do not read it. Web servers from before it
+   neither show nor change the column: until the web rollout ends, an old server's change that drops
+   both `message.status` and `template.status_changed` from an endpoint with a list fails on the
+   check, and its other changes keep it.
+   Migration 0124 (ADR-176) widens the same scope checks again, with the same brief locks. Web
+   servers from before it do not know `campaigns.resume`: until the web rollout ends, an old server
+   answers Settings → API keys with an error for a company with a key holding it (and the platform
+   plan pages for a plan version including it), and `/api/v1/campaigns/{id}/resume` with 404;
+   rolling web servers back to an image from before it does the same. Workers are not affected: the
+   runner checks a campaign's launcher as before.
+   Migration 0125 (ADR-177) adds three nullable columns and a check to `ops.queue_waits` (a row per
+   queue, so the check is validated at once), narrows the worker role's read of the table to the
+   check's columns, creates `ops.record_queue_waits` again with the same signature and owner, and
+   adds `ops.platform_acknowledge_late_queue`. Workers of either release keep working: their sweep
+   reads only those columns and calls the function as before. Web servers of this release need it,
+   as the Queues tab reads the new columns; web servers from before it show no acknowledgements, and
+   a note written meanwhile stays for the new ones.
+   Migration 0126 (ADR-178) creates `ops.template_sync_due` again with a `requested` column and the
+   accounts asked for first. Workers of this release read the column, so it must run before they
+   start (this step does); workers from before it select the columns they know and queue every sync
+   at the default priority, as before. Web servers are not involved beyond queueing a member's
+   refresh at the higher priority, which workers of either release run.
+   Migration 0127 (ADR-179) creates `ops.receipt_acknowledgements` (empty) and
+   `ops.platform_acknowledge_webhook_receipt`. Workers are not involved. Web servers of this release
+   need it, as the Integrations tab reads the table; web servers from before it show no
+   acknowledgements.
+   ADR-180 adds no migration. Until the web rollout ends, a web server from before it refuses
+   `phone` in `PATCH /contacts/{id}` with 422, as it always did; rolling back does the same.
+   Migration 0128 (ADR-181) adds `assignee_ids` to `app.webhook_endpoints` with a check validated by
+   reading the table, and replaces `app.capture_webhook_event` (keeping the filters of 0095 to 0123)
+   with the same signature; every endpoint starts with none. Web servers of this release need it, as
+   their reads of endpoints name the column; workers do not read it. Web servers from before it
+   neither show nor change the column: until the web rollout ends, an old server's change that drops
+   every message and conversation event from an endpoint with a list fails on the check, and its
+   other changes keep it.
+   Migration 0129 (ADR-182) adds two nullable columns to `app.webhook_events` with a check added
+   `NOT VALID` (no rewrite and no table read, so captures wait for its lock only briefly) and a
+   definer function, and replaces the contact capture and tag trigger functions, which record the
+   tags from then on; 0130 validates the check while captures go on. Workers from before it deliver
+   `contact.updated` without the tag lists until the worker rollout ends; rolling workers back to an
+   image from before it does the same, and the recorded lists stay for later deliveries and replays
+   (an erasure clears them whatever the image).
+   Migration 0131 (ADR-183) adds `run_triggers` to `app.webhook_endpoints` with a check validated by
+   reading the table, and replaces `app.capture_webhook_event` (keeping the filters of 0095 to 0128)
+   and the run trigger function with the same signatures; every endpoint starts with none. Web
+   servers of this release need it, as their reads of endpoints name the column; workers do not read
+   it. Web servers from before it neither show nor change the column: until the web rollout ends, an
+   old server's change that drops both run events from an endpoint with a list fails on the check,
+   and its other changes keep it.
+   Migration 0132 (ADR-184) adds `contact_field_keys` to `app.webhook_endpoints` with a check
+   validated by reading the table, and replaces `app.capture_contact_webhook_event` (keeping 0129's
+   tag lists) with the same signature; every endpoint starts with none. Web servers of this release
+   need it, as their reads of endpoints name the column; workers do not read it. Web servers from
+   before it neither show nor change the column: until the web rollout ends, an old server's change
+   that drops `contact.updated` or `fields` from an endpoint with a list fails on the check, and its
+   other changes keep it.
+
+   Migration 0133 (ADR-185) adds `campaign_ids` to `app.webhook_endpoints` with a check validated by
+   reading the table, and replaces `app.capture_webhook_event` (keeping 0131's run trigger filter)
+   and the message trigger's function with the same signatures; every endpoint starts with none. Web
+   servers of this release need it, as their reads of endpoints name the column; workers do not read
+   it. Web servers from before it neither show nor change the column: until the web rollout ends, an
+   old server's change that drops both `message.status` and `campaign.status_changed` from an
+   endpoint with a list fails on the check, and its other changes keep it. `message.status` payloads
+   gain `message.campaignId` from workers of this release: until the worker rollout ends, a delivery
+   an older worker prepares leaves it out.
+
+   Migration 0134 (ADR-186) widens the same scope checks again, with the same brief locks. Web
+   servers from before it do not know `campaigns.write`: until the web rollout ends, an old server
+   answers Settings → API keys with an error for a company with a key holding it (and the platform
+   plan pages for a plan version including it), and `POST /api/v1/campaigns` and
+   `PATCH /api/v1/campaigns/{id}` with 405 (their routes only read there); rolling web servers back
+   to an image from before it does the same. Workers are not affected.
+
+   ADR-187 has no migration: until the web rollout ends, an old web server refuses a key's cancel of
+   a draft with 409, as before.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

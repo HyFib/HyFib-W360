@@ -23,27 +23,48 @@ import {
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_RUN_END_STATUS_LABELS,
   WEBHOOK_RUN_END_STATUSES,
+  WEBHOOK_RUN_TRIGGER_LABELS,
+  WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUSES,
+  webhookAssigneeText,
+  webhookCampaignText,
   webhookChannelText,
+  webhookFieldText,
   webhookOAuthText,
   webhookReplayAllSummary,
   webhookReplaySummary,
   webhookTakesAutomationRuns,
+  webhookTakesCampaignEvents,
   webhookTakesChannelEvents,
+  webhookTakesFieldChanges,
+  webhookTakesTeamEvents,
+  webhookTakesTemplateEvents,
+  webhookTeamText,
+  webhookTemplateText,
+  type WebhookAssigneeChoice,
   type WebhookAutomationChoice,
   type WebhookCampaignStatus,
   type WebhookChannelChoice,
+  type WebhookCampaignChoice,
   type WebhookContactPart,
   type WebhookConversationStatus,
+  type WebhookEndpointAssignee,
+  type WebhookEndpointCampaign,
+  type WebhookEndpointField,
   type WebhookEndpointOAuth,
+  type WebhookEndpointTeam,
   type WebhookEventType,
   type WebhookFailureKind,
+  type WebhookFieldChoice,
   type WebhookMessageSender,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookReplayPeriod,
   type WebhookRunEndStatus,
+  type WebhookRunTrigger,
+  type WebhookTeamChoice,
+  type WebhookTemplateChoice,
   type WebhookTemplateStatus,
 } from '@w360/domain/webhook-model';
 import {
@@ -178,6 +199,52 @@ function SenderChoices({
 }
 
 /**
+ * What started the runs whose events an endpoint takes (ADR-183), shown while it takes a run event:
+ * every run unless some are unticked.
+ */
+function TriggerChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: WebhookRunTrigger[];
+  onChange: (next: WebhookRunTrigger[]) => void;
+}) {
+  return (
+    <fieldset className="grid gap-1">
+      <legend className="mb-1 text-sm font-medium">Runs started by</legend>
+      <p className="text-xs text-muted-foreground">
+        Automation started and Automation ended are sent for the runs started by the ways ticked
+        (all of them unless you untick some).
+      </p>
+      {WEBHOOK_RUN_TRIGGERS.map((trigger) => {
+        const id = `${prefix}-run-trigger-${trigger}`;
+        return (
+          <div key={trigger} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(trigger)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_RUN_TRIGGERS.filter((t) => t === trigger || chosen.includes(t))
+                    : chosen.filter((t) => t !== trigger),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {WEBHOOK_RUN_TRIGGER_LABELS[trigger]}{' '}
+              <span className="font-mono text-xs">({trigger})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
  * The statuses a campaign (`campaign.status_changed`, ADR-146), an order
  * (`order.status_changed`, ADR-147), a template (`template.status_changed`, ADR-148) or a
  * conversation (`conversation.status_changed`, ADR-149) reaches, or a run ends with
@@ -270,6 +337,104 @@ function PartChoices({
           </div>
         );
       })}
+    </fieldset>
+  );
+}
+
+/**
+ * The custom fields whose changes an endpoint takes as `contact.updated` (ADR-184), shown while it
+ * takes field changes: every field's, or those of the fields ticked. A field deleted since it was
+ * chosen stays listed, ticked, until it is unticked.
+ */
+function FieldChoices({
+  prefix,
+  choices,
+  stored,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  choices: WebhookFieldChoice[];
+  /** The fields the endpoint names now, so a deleted one stays listed until it is saved without. */
+  stored: readonly WebhookEndpointField[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const listed = [
+    ...choices.map((c) => ({ key: c.key, text: webhookFieldText(c) })),
+    ...stored
+      .filter((f) => f.label === null)
+      .map((f) => ({ key: f.key, text: webhookFieldText(f) })),
+  ];
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Custom fields</legend>
+      <p className="text-xs text-muted-foreground">
+        A change of a custom field is sent only for the fields ticked; changes of the other parts of
+        a contact are sent as chosen under Contact changed.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-fields`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every custom field’s changes
+          <span className="block text-xs text-muted-foreground">Including fields added later.</span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-fields`}
+          className="mt-1"
+          checked={!every}
+          disabled={listed.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only the changes of the fields ticked
+          {listed.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">
+              The company has no custom field yet.
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid max-h-64 gap-1 overflow-y-auto">
+          {listed.map((f) => {
+            const id = `${prefix}-field-${f.key}`;
+            return (
+              <div key={f.key} className="flex items-center gap-2">
+                <Checkbox
+                  id={id}
+                  checked={chosen.includes(f.key)}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? listed
+                            .filter((l) => l.key === f.key || chosen.includes(l.key))
+                            .map((l) => l.key)
+                        : chosen.filter((x) => x !== f.key),
+                    )
+                  }
+                />
+                <Label htmlFor={id} className="font-normal break-all">
+                  {f.text}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
     </fieldset>
   );
 }
@@ -455,6 +620,405 @@ function ChannelChoices({
               </div>
             );
           })}
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
+/**
+ * The teams whose conversations' events an endpoint takes (ADR-174): every conversation's, or those
+ * of the teams ticked. A team deleted since it was chosen stays listed, ticked, until it is
+ * unticked: it matches no conversation.
+ */
+function TeamChoices({
+  prefix,
+  choices,
+  stored,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  choices: WebhookTeamChoice[];
+  /** The teams the endpoint names now, so a deleted one stays listed until it is saved without. */
+  stored: readonly WebhookEndpointTeam[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const listed = [
+    ...choices.map((c) => ({ id: c.id, text: c.name })),
+    ...stored.filter((t) => t.name === null).map((t) => ({ id: t.id, text: webhookTeamText(t) })),
+  ];
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Teams</legend>
+      <p className="text-xs text-muted-foreground">
+        Message and conversation events belong to the team the conversation is in when they happen,
+        and a change of team to the team it left as well. Other events are sent whichever teams are
+        chosen.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-teams`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every conversation’s events
+          <span className="block text-xs text-muted-foreground">
+            Including teams added later, and conversations in no team.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-teams`}
+          className="mt-1"
+          checked={!every}
+          disabled={listed.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only the events of the conversations of the teams ticked
+          {listed.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">
+              The company has no team yet.
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid gap-1">
+          {listed.map((t) => {
+            const id = `${prefix}-team-${t.id}`;
+            return (
+              <div key={t.id} className="flex items-center gap-2">
+                <Checkbox
+                  id={id}
+                  checked={chosen.includes(t.id)}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? listed
+                            .filter((l) => l.id === t.id || chosen.includes(l.id))
+                            .map((l) => l.id)
+                        : chosen.filter((x) => x !== t.id),
+                    )
+                  }
+                />
+                <Label htmlFor={id} className="font-normal">
+                  {t.text}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
+/**
+ * The members whose assigned conversations' events an endpoint takes (ADR-181): every
+ * conversation's, or those of the conversations assigned to the members ticked. A member who no
+ * longer takes conversations stays listed, ticked, until unticked: they hold none.
+ */
+function AssigneeChoices({
+  prefix,
+  choices,
+  stored,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  choices: WebhookAssigneeChoice[];
+  /** The members the endpoint names now, so one who stopped stays listed until saved without. */
+  stored: readonly WebhookEndpointAssignee[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const listed = [
+    ...choices.map((c) => ({ id: c.id, text: c.name })),
+    ...stored
+      .filter((m) => !choices.some((c) => c.id === m.id))
+      .map((m) => ({ id: m.id, text: webhookAssigneeText(m) })),
+  ];
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Members</legend>
+      <p className="text-xs text-muted-foreground">
+        Message and conversation events belong to the member the conversation is assigned to when
+        they happen, and a change of assignee to the member it left as well. Other events are sent
+        whichever members are chosen.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-assignees`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every conversation’s events
+          <span className="block text-xs text-muted-foreground">
+            Including unassigned conversations, and members who join later.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-assignees`}
+          className="mt-1"
+          checked={!every}
+          disabled={listed.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only the events of the conversations assigned to the members ticked
+          {listed.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">
+              No member takes conversations yet.
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid max-h-64 gap-1 overflow-y-auto">
+          {listed.map((m) => {
+            const id = `${prefix}-assignee-${m.id}`;
+            return (
+              <div key={m.id} className="flex items-center gap-2">
+                <Checkbox
+                  id={id}
+                  checked={chosen.includes(m.id)}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? listed
+                            .filter((l) => l.id === m.id || chosen.includes(l.id))
+                            .map((l) => l.id)
+                        : chosen.filter((x) => x !== m.id),
+                    )
+                  }
+                />
+                <Label htmlFor={id} className="font-normal break-all">
+                  {m.text}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
+/**
+ * The templates whose messages' statuses and changes an endpoint takes (ADR-175): every
+ * template's, or those of the templates ticked.
+ */
+function TemplateChoices({
+  prefix,
+  choices,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  choices: WebhookTemplateChoice[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Templates</legend>
+      <p className="text-xs text-muted-foreground">
+        Message statuses and template changes belong to a template; a message sent without one, such
+        as a member’s reply, belongs to none. Other events are sent whichever templates are chosen.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-templates`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every message’s statuses and every template’s changes
+          <span className="block text-xs text-muted-foreground">
+            Including templates added later.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-templates`}
+          className="mt-1"
+          checked={!every}
+          disabled={choices.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only those of the templates ticked
+          {choices.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">
+              The company has no template yet.
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid max-h-64 gap-1 overflow-y-auto">
+          {choices.map((t) => {
+            const id = `${prefix}-template-${t.id}`;
+            return (
+              <div key={t.id} className="flex items-center gap-2">
+                <Checkbox
+                  id={id}
+                  checked={chosen.includes(t.id)}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? choices
+                            .filter((l) => l.id === t.id || chosen.includes(l.id))
+                            .map((l) => l.id)
+                        : chosen.filter((x) => x !== t.id),
+                    )
+                  }
+                />
+                <Label htmlFor={id} className="font-normal break-all">
+                  {webhookTemplateText(t)}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
+/**
+ * The campaigns whose messages' statuses and changes an endpoint takes (ADR-185): every campaign's,
+ * or those of the campaigns ticked. The company's newest campaigns are offered; one the endpoint
+ * already names stays listed, ticked, until it is unticked.
+ */
+function CampaignChoices({
+  prefix,
+  choices,
+  more,
+  stored,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  choices: WebhookCampaignChoice[];
+  /** Whether the company has campaigns older than those offered. */
+  more: boolean;
+  /** The campaigns the endpoint names now, so an older one stays listed until it is saved without. */
+  stored: readonly WebhookEndpointCampaign[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const listed: WebhookEndpointCampaign[] = [
+    ...choices,
+    ...stored.filter((s) => !choices.some((c) => c.id === s.id)),
+  ];
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Campaigns</legend>
+      <p className="text-xs text-muted-foreground">
+        Message statuses and campaign changes belong to a campaign; a message no campaign sent, such
+        as a member’s reply, belongs to none. Other events are sent whichever campaigns are chosen.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-campaigns`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every message’s statuses and every campaign’s changes
+          <span className="block text-xs text-muted-foreground">
+            Including campaigns added later.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-campaigns`}
+          className="mt-1"
+          checked={!every}
+          disabled={listed.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only those of the campaigns ticked
+          {listed.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">
+              The company has no campaign yet.
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid gap-1">
+          <div className="grid max-h-64 gap-1 overflow-y-auto">
+            {listed.map((c) => {
+              const id = `${prefix}-campaign-${c.id}`;
+              return (
+                <div key={c.id} className="flex items-center gap-2">
+                  <Checkbox
+                    id={id}
+                    checked={chosen.includes(c.id)}
+                    onChange={(e) =>
+                      onChange(
+                        e.target.checked
+                          ? listed
+                              .filter((l) => l.id === c.id || chosen.includes(l.id))
+                              .map((l) => l.id)
+                          : chosen.filter((x) => x !== c.id),
+                      )
+                    }
+                  />
+                  <Label htmlFor={id} className="font-normal break-all">
+                    {webhookCampaignText(c)}
+                  </Label>
+                </div>
+              );
+            })}
+          </div>
+          {more ? (
+            <p className="text-xs text-muted-foreground">
+              The {WEBHOOK_LIMITS.campaignChoices} newest campaigns are listed; an older one can be
+              chosen through the API.
+            </p>
+          ) : null}
         </div>
       ) : null}
     </fieldset>
@@ -831,6 +1395,11 @@ export function WebhookEndpointForm({
   endpoint,
   automationChoices,
   channelChoices,
+  teamChoices,
+  templateChoices,
+  campaignChoices,
+  assigneeChoices,
+  contactFieldChoices,
   atLimit = false,
 }: {
   slug: string;
@@ -843,19 +1412,41 @@ export function WebhookEndpointForm({
     messageStatuses: WebhookMessageStatus[] | null;
     messageSenders: WebhookMessageSender[] | null;
     contactParts: WebhookContactPart[] | null;
+    /** The custom fields it names (ADR-184), deleted ones without a label; null for every field. */
+    contactFields: WebhookEndpointField[] | null;
     automationIds: string[] | null;
     campaignStatuses: WebhookCampaignStatus[] | null;
     orderStatuses: WebhookOrderStatus[] | null;
     templateStatuses: WebhookTemplateStatus[] | null;
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
+    /** What started the runs it takes (ADR-183); null for every run. */
+    runTriggers: WebhookRunTrigger[] | null;
     channelIds: string[] | null;
+    /** The teams it names (ADR-174), deleted ones without a name; null for every team. */
+    teams: WebhookEndpointTeam[] | null;
+    /** The templates it names (ADR-175); null for every template. */
+    templateIds: string[] | null;
+    /** The campaigns it names (ADR-185), with their names and statuses; null for every campaign. */
+    campaigns: WebhookEndpointCampaign[] | null;
+    /** The members it names (ADR-181), with whether they still take conversations; null: all. */
+    assignees: WebhookEndpointAssignee[] | null;
     oauth: WebhookEndpointOAuth | null;
   };
   /** The company's published automations, which an endpoint can choose (ADR-145). */
   automationChoices: WebhookAutomationChoice[];
   /** The company's WhatsApp numbers, which an endpoint can choose (ADR-170). */
   channelChoices: WebhookChannelChoice[];
+  /** The company's teams, which an endpoint can choose (ADR-174). */
+  teamChoices: WebhookTeamChoice[];
+  /** The company's templates, which an endpoint can choose (ADR-175). */
+  templateChoices: WebhookTemplateChoice[];
+  /** The company's newest campaigns, which an endpoint can choose, and whether there are more. */
+  campaignChoices: { campaigns: WebhookCampaignChoice[]; more: boolean };
+  /** The company's members who take conversations, whom an endpoint can choose (ADR-181). */
+  assigneeChoices: WebhookAssigneeChoice[];
+  /** The company's custom fields, which an endpoint can choose (ADR-184). */
+  contactFieldChoices: WebhookFieldChoice[];
   atLimit?: boolean;
 }) {
   const prefix = useId();
@@ -886,10 +1477,29 @@ export function WebhookEndpointForm({
   const [runEndStatuses, setRunEndStatuses] = useState<WebhookRunEndStatus[]>(
     endpoint?.runEndStatuses ?? [...WEBHOOK_RUN_END_STATUSES],
   );
+  const [runTriggers, setRunTriggers] = useState<WebhookRunTrigger[]>(
+    endpoint?.runTriggers ?? [...WEBHOOK_RUN_TRIGGERS],
+  );
   const [everyAutomation, setEveryAutomation] = useState(!endpoint?.automationIds);
   const [automationIds, setAutomationIds] = useState<string[]>(endpoint?.automationIds ?? []);
   const [everyChannel, setEveryChannel] = useState(!endpoint?.channelIds);
   const [channelIds, setChannelIds] = useState<string[]>(endpoint?.channelIds ?? []);
+  const [everyTeam, setEveryTeam] = useState(!endpoint?.teams);
+  const [teamIds, setTeamIds] = useState<string[]>(endpoint?.teams?.map((t) => t.id) ?? []);
+  const [everyTemplate, setEveryTemplate] = useState(!endpoint?.templateIds);
+  const [templateIds, setTemplateIds] = useState<string[]>(endpoint?.templateIds ?? []);
+  const [everyCampaign, setEveryCampaign] = useState(!endpoint?.campaigns);
+  const [campaignIds, setCampaignIds] = useState<string[]>(
+    endpoint?.campaigns?.map((c) => c.id) ?? [],
+  );
+  const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
+  const [everyField, setEveryField] = useState(!endpoint?.contactFields);
+  const [fieldKeys, setFieldKeys] = useState<string[]>(
+    endpoint?.contactFields?.map((f) => f.key) ?? [],
+  );
+  const [assigneeIds, setAssigneeIds] = useState<string[]>(
+    endpoint?.assignees?.map((m) => m.id) ?? [],
+  );
   const [headers, setHeaders] = useState<HeaderRow[]>([]);
   // Changing an endpoint keeps its headers unless they are given again.
   const [replaceHeaders, setReplaceHeaders] = useState(false);
@@ -935,6 +1545,9 @@ export function WebhookEndpointForm({
           eventTypes.includes('contact.updated') && parts.length < WEBHOOK_CONTACT_PARTS.length
             ? parts
             : null;
+        // Every custom field's changes unless the fields ticked are chosen (ADR-184).
+        const chosenFields =
+          webhookTakesFieldChanges(eventTypes, contactParts) && !everyField ? fieldKeys : null;
         // Every automation's runs unless the automations ticked are chosen (ADR-145).
         const chosenAutomations =
           webhookTakesAutomationRuns(eventTypes) && !everyAutomation ? automationIds : null;
@@ -968,9 +1581,25 @@ export function WebhookEndpointForm({
           runEndStatuses.length < WEBHOOK_RUN_END_STATUSES.length
             ? runEndStatuses
             : null;
+        // Every way a run starts ticked takes every run (null, ADR-183).
+        const chosenRunTriggers =
+          webhookTakesAutomationRuns(eventTypes) && runTriggers.length < WEBHOOK_RUN_TRIGGERS.length
+            ? runTriggers
+            : null;
         // Every number's events unless the numbers ticked are chosen (ADR-170).
         const chosenChannels =
           webhookTakesChannelEvents(eventTypes) && !everyChannel ? channelIds : null;
+        // Every conversation's events unless the teams ticked are chosen (ADR-174).
+        const chosenTeams = webhookTakesTeamEvents(eventTypes) && !everyTeam ? teamIds : null;
+        // Every template's statuses and changes unless the templates ticked are chosen (ADR-175).
+        const chosenTemplates =
+          webhookTakesTemplateEvents(eventTypes) && !everyTemplate ? templateIds : null;
+        // Every campaign's statuses and changes unless the campaigns ticked are chosen (ADR-185).
+        const chosenCampaigns =
+          webhookTakesCampaignEvents(eventTypes) && !everyCampaign ? campaignIds : null;
+        // Every conversation's events unless the members ticked are chosen (ADR-181).
+        const chosenAssignees =
+          webhookTakesTeamEvents(eventTypes) && !everyAssignee ? assigneeIds : null;
         const input = {
           url,
           description,
@@ -978,13 +1607,19 @@ export function WebhookEndpointForm({
           messageStatuses,
           messageSenders,
           contactParts,
+          contactFieldKeys: chosenFields,
           automationIds: chosenAutomations,
           campaignStatuses: chosenCampaignStatuses,
           orderStatuses: chosenOrderStatuses,
           templateStatuses: chosenTemplateStatuses,
           conversationStatuses: chosenConversationStatuses,
           runEndStatuses: chosenRunEndStatuses,
+          runTriggers: chosenRunTriggers,
           channelIds: chosenChannels,
+          teamIds: chosenTeams,
+          templateIds: chosenTemplates,
+          campaignIds: chosenCampaigns,
+          assigneeIds: chosenAssignees,
         };
         const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
           setBusy(false);
@@ -1037,10 +1672,21 @@ export function WebhookEndpointForm({
               setTemplateStatuses([...WEBHOOK_TEMPLATE_STATUSES]);
               setConversationStatuses([...WEBHOOK_CONVERSATION_STATUSES]);
               setRunEndStatuses([...WEBHOOK_RUN_END_STATUSES]);
+              setRunTriggers([...WEBHOOK_RUN_TRIGGERS]);
               setEveryAutomation(true);
               setAutomationIds([]);
               setEveryChannel(true);
               setChannelIds([]);
+              setEveryTeam(true);
+              setTeamIds([]);
+              setEveryTemplate(true);
+              setTemplateIds([]);
+              setEveryCampaign(true);
+              setCampaignIds([]);
+              setEveryAssignee(true);
+              setAssigneeIds([]);
+              setEveryField(true);
+              setFieldKeys([]);
               setHeaders([]);
               setOAuthChange('keep');
               setOAuthFields(oauthFieldsOf(null));
@@ -1108,6 +1754,17 @@ export function WebhookEndpointForm({
         runEndStatuses={runEndStatuses}
         onRunEndStatusesChange={setRunEndStatuses}
       />
+      {webhookTakesFieldChanges(eventTypes, parts) ? (
+        <FieldChoices
+          prefix={prefix}
+          choices={contactFieldChoices}
+          stored={endpoint?.contactFields ?? []}
+          every={everyField}
+          onEveryChange={setEveryField}
+          chosen={fieldKeys}
+          onChange={setFieldKeys}
+        />
+      ) : null}
       {webhookTakesAutomationRuns(eventTypes) ? (
         <AutomationChoices
           prefix={prefix}
@@ -1119,6 +1776,9 @@ export function WebhookEndpointForm({
           onChange={setAutomationIds}
         />
       ) : null}
+      {webhookTakesAutomationRuns(eventTypes) ? (
+        <TriggerChoices prefix={prefix} chosen={runTriggers} onChange={setRunTriggers} />
+      ) : null}
       {webhookTakesChannelEvents(eventTypes) ? (
         <ChannelChoices
           prefix={prefix}
@@ -1127,6 +1787,50 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryChannel}
           chosen={channelIds}
           onChange={setChannelIds}
+        />
+      ) : null}
+      {webhookTakesTemplateEvents(eventTypes) ? (
+        <TemplateChoices
+          prefix={prefix}
+          choices={templateChoices}
+          every={everyTemplate}
+          onEveryChange={setEveryTemplate}
+          chosen={templateIds}
+          onChange={setTemplateIds}
+        />
+      ) : null}
+      {webhookTakesCampaignEvents(eventTypes) ? (
+        <CampaignChoices
+          prefix={prefix}
+          choices={campaignChoices.campaigns}
+          more={campaignChoices.more}
+          stored={endpoint?.campaigns ?? []}
+          every={everyCampaign}
+          onEveryChange={setEveryCampaign}
+          chosen={campaignIds}
+          onChange={setCampaignIds}
+        />
+      ) : null}
+      {webhookTakesTeamEvents(eventTypes) ? (
+        <TeamChoices
+          prefix={prefix}
+          choices={teamChoices}
+          stored={endpoint?.teams ?? []}
+          every={everyTeam}
+          onEveryChange={setEveryTeam}
+          chosen={teamIds}
+          onChange={setTeamIds}
+        />
+      ) : null}
+      {webhookTakesTeamEvents(eventTypes) ? (
+        <AssigneeChoices
+          prefix={prefix}
+          choices={assigneeChoices}
+          stored={endpoint?.assignees ?? []}
+          every={everyAssignee}
+          onEveryChange={setEveryAssignee}
+          chosen={assigneeIds}
+          onChange={setAssigneeIds}
         />
       ) : null}
       <fieldset className="grid gap-2">

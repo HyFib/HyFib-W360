@@ -4,6 +4,7 @@ import {
   and,
   asc,
   contactFields,
+  contactIdentities,
   contactTags,
   contacts,
   desc,
@@ -12,6 +13,7 @@ import {
   inArray,
   isNull,
   sql,
+  suppressions,
   type ContactFieldType,
   type SQL,
   type Tx,
@@ -26,6 +28,7 @@ import {
   normalizeTag,
   type AttributeValue,
 } from '../contacts/fields';
+import { normalizePhone } from '../contacts/phone';
 import type { OutboundDeps } from '../messaging/outbound';
 import { encodeKeysetCursor, parseInput } from '../validation';
 import { apiContactById, apiContactColumns, toApiContact, type ApiContact } from './contact-view';
@@ -93,10 +96,26 @@ const someChange = [
   'Give name, email, fields, addTags or removeTags.',
 ] as const;
 
+/**
+ * `PATCH /contacts/{id}`: what any change takes, and a number typed for the contact (ADR-180), which
+ * only this call changes: changing many contacts' numbers at once could swap them.
+ */
 export const apiContactUpdateSchema = z
-  .object(contactChange)
+  .object({
+    ...contactChange,
+    phone: z
+      .string()
+      .max(40)
+      .optional()
+      .describe(
+        "The contact's number with its country code, starting with + (for example +919876543210). Only a number typed for the contact changes: one WhatsApp gave (the contact wrote to one of the company's numbers) is its identity and is refused, and so is a number another contact has or one on the company's suppression list.",
+      ),
+  })
   .strict()
-  .refine(...someChange);
+  .refine(
+    (v) => someChange[0](v) || v.phone !== undefined,
+    'Give name, email, phone, fields, addTags or removeTags.',
+  );
 
 /**
  * `POST /contacts/update-many` (ADR-122): 1 to 100 contacts, each once, each with what
@@ -420,17 +439,31 @@ export async function apiListContactFields(
   return rows.map((r) => ({ ...r, createdAt: r.createdAt.toISOString() }));
 }
 
-/** A change checked before its transaction: the email normalized and the tags as the app keeps them. */
+/**
+ * A change checked before its transaction: the email and the number normalized and the tags as the
+ * app keeps them.
+ */
 export interface ContactChange {
   name: string | null | undefined;
   email: string | null | undefined;
+  /** The number to give the contact, as E.164 (ADR-180; `PATCH /contacts/{id}` only). */
+  phone: string | undefined;
   fields: Record<string, unknown> | undefined;
   addTags: string[];
   removeTags: string[];
 }
 
 /** Checks what does not need the database; a refusal names `<at><field>`. */
-function prepareContactChange(data: ContactChangeInput, at: string): ContactChange {
+function prepareContactChange(
+  data: ContactChangeInput & { phone?: string },
+  at: string,
+): ContactChange {
+  let phone: string | undefined;
+  if (data.phone !== undefined) {
+    const normalized = normalizePhone(data.phone, { kind: 'explicit' });
+    if (!normalized.ok) throw invalidField(`${at}phone`, normalized.message);
+    phone = normalized.e164;
+  }
   let email: string | null | undefined;
   if (data.email !== undefined) {
     const normalized = normalizeEmail(data.email ?? '');
@@ -443,7 +476,7 @@ function prepareContactChange(data: ContactChangeInput, at: string): ContactChan
   if (both) {
     throw invalidField(`${at}removeTags`, `The tag ${both} cannot be both added and removed.`);
   }
-  return { name: data.name, email, fields: data.fields, addTags, removeTags };
+  return { name: data.name, email, phone, fields: data.fields, addTags, removeTags };
 }
 
 /** What `FOR UPDATE` reads of a contact before changing it. */
@@ -451,6 +484,7 @@ const lockedContactColumns = {
   id: contacts.id,
   name: contacts.displayName,
   email: contacts.email,
+  phone: contacts.phoneE164,
   attributes: contacts.attributes,
   erasedAt: contacts.erasedAt,
 };
@@ -459,7 +493,51 @@ interface LockedContact {
   id: string;
   name: string | null;
   email: string | null;
+  phone: string | null;
   attributes: Record<string, AttributeValue>;
+}
+
+/**
+ * Refuses a new number for a contact unless members could give it the same (ADR-180): a contact
+ * whose number WhatsApp gave keeps it (it is the contact's identity), no other contact of the company
+ * has the number, and it is not on the company's suppression list, as `POST /contacts` refuses.
+ */
+async function assertNumberFree(
+  tx: Tx,
+  tenantId: string,
+  contactId: string,
+  phone: string,
+): Promise<void> {
+  const [identity] = await tx
+    .select({ id: contactIdentities.id })
+    .from(contactIdentities)
+    .where(
+      and(eq(contactIdentities.tenantId, tenantId), eq(contactIdentities.contactId, contactId)),
+    )
+    .limit(1);
+  if (identity) {
+    throw new AppError(
+      'precondition_failed',
+      'This number comes from WhatsApp and cannot be changed.',
+    );
+  }
+  const [suppressed] = await tx
+    .select({ id: suppressions.id })
+    .from(suppressions)
+    .where(and(eq(suppressions.tenantId, tenantId), eq(suppressions.phoneE164, phone)))
+    .limit(1);
+  if (suppressed) {
+    throw new AppError(
+      'precondition_failed',
+      'This number is on the company’s suppression list, so no contact is given it.',
+    );
+  }
+  const [taken] = await tx
+    .select({ id: contacts.id })
+    .from(contacts)
+    .where(and(eq(contacts.tenantId, tenantId), eq(contacts.phoneE164, phone)))
+    .limit(1);
+  if (taken) throw new AppError('conflict', 'Another contact already has this phone number.');
 }
 
 /**
@@ -479,6 +557,7 @@ async function changeLockedContact(
   const set: {
     displayName?: string | null;
     email?: string | null;
+    phoneE164?: string;
     attributes?: Record<string, AttributeValue>;
   } = {};
   const changed: string[] = [];
@@ -489,6 +568,12 @@ async function changeLockedContact(
   if (change.email !== undefined && change.email !== current.email) {
     set.email = change.email;
     changed.push('email');
+  }
+  // A typed number changes as members change it (ADR-180), and only to one free for it.
+  if (change.phone !== undefined && change.phone !== current.phone) {
+    await assertNumberFree(tx, ctx.tenant.id, contactId, change.phone);
+    set.phoneE164 = change.phone;
+    changed.push('phone');
   }
   const fieldKeys: string[] = [];
   const next = new Map(Object.entries(current.attributes));
@@ -614,10 +699,10 @@ export async function changeContactsAlike(
 }
 
 /**
- * Changes a contact's name, email, custom field values and tags as a member's change does, in one
- * transaction with the contact row locked: an erased contact is not found, and what the contact
- * already has changes nothing (no audit entry, and the `contact.updated` webhook event is captured
- * only by a change). The phone number is not changed through the API.
+ * Changes a contact's name, email, number, custom field values and tags as a member's change does,
+ * in one transaction with the contact row locked: an erased contact is not found, and what the
+ * contact already has changes nothing (no audit entry, and the `contact.updated` webhook event is
+ * captured only by a change). A number changes only when typed for the contact (ADR-180).
  */
 export async function apiUpdateContact(
   deps: Pick<OutboundDeps, 'db'>,

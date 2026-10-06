@@ -23,6 +23,7 @@ import {
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
+  WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_RETRY_SECONDS,
   WEBHOOK_TEMPLATE_STATUSES,
 } from '../webhooks/model';
@@ -59,8 +60,10 @@ import {
 } from './automations';
 import {
   apiCampaignRecipientSchema,
+  apiCampaignDetailSchema,
   apiCampaignSchema,
-  apiCampaignWithResultsSchema,
+  apiCreateCampaignSchema,
+  apiUpdateCampaignSchema,
 } from './campaigns';
 import { apiContactFieldCreateSchema, apiContactFieldUpdateSchema } from './contact-fields';
 import { apiContactSearchSchema, apiUpdateMatchingContactsSchema } from './contact-search';
@@ -488,6 +491,12 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       'The parts of a contact whose change the endpoint receives as contact.updated (fields: a change of any custom field); null receives every change, including parts added later.',
     ),
+  contactFieldKeys: z
+    .array(z.string())
+    .nullable()
+    .describe(
+      'The custom fields (their keys, as GET /contact-fields lists them) whose value changes the endpoint receives as contact.updated; null receives every field’s, including fields added later. Changes of the other parts are not narrowed.',
+    ),
   automationIds: z
     .array(z.uuid())
     .nullable()
@@ -524,11 +533,41 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       'The statuses a run ended with that the endpoint receives as automation.run_ended; null receives every end.',
     ),
+  runTriggers: z
+    .array(z.enum(WEBHOOK_RUN_TRIGGERS))
+    .nullable()
+    .describe(
+      'What started the runs whose events (automation.run_started and automation.run_ended) the endpoint receives, as run.trigger names it; null receives every run.',
+    ),
   channelIds: z
     .array(z.uuid())
     .nullable()
     .describe(
       "The WhatsApp numbers whose message, conversation, automation run, order and campaign events the endpoint receives; null receives every number's, including numbers connected later. Consent, contact and template events are not narrowed.",
+    ),
+  teamIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The teams whose conversations' message and conversation events the endpoint receives, by the team a conversation is in when the event happens (conversation.team_changed also by the team it left); null receives every conversation's. Other events are not narrowed.",
+    ),
+  templateIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The templates whose messages' statuses (message.status) and changes (template.status_changed) the endpoint receives; a message sent without a template is on no list. null receives every template's. Other events are not narrowed.",
+    ),
+  campaignIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The campaigns whose messages' statuses (message.status) and changes (campaign.status_changed) the endpoint receives; a message no campaign sent is on no list. null receives every campaign's. Other events are not narrowed.",
+    ),
+  assigneeIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The members whose assigned conversations' message and conversation events the endpoint receives, by the member a conversation is assigned to when the event happens (conversation.assignment_changed also by the member it left); null receives every conversation's. Other events are not narrowed.",
     ),
   oauth: z
     .object({
@@ -651,7 +690,7 @@ const errors = (...statuses: number[]) =>
             401: 'No valid API key: missing, unknown, revoked or expired.',
             403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one or Commerce when sending products or reading or changing orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
             404: 'Not found in the company.',
-            409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit). Pausing or cancelling a campaign: its status does not allow it, and the message names the status.',
+            409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit). Pausing, resuming or cancelling a campaign: its status does not allow it, or, resuming, a member or HyFib paused it; the message names the status or the pause reason.',
             412: "A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it. Starting an automation: it is not published, archived or not started through the API (automation_unavailable), paused (automation_paused), its number is not active (channel_unavailable), or the plan's automation runs for the month are used up (automation_quota).",
             415: 'The body must be JSON (Content-Type: application/json).',
             422: 'The request body or parameters are invalid.',
@@ -724,7 +763,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, pause and cancel campaigns, list your WhatsApp numbers, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -733,7 +772,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         '',
         `POST /messages needs an \`Idempotency-Key\` header: a retry with the same key and body returns the first response (header \`Idempotent-Replayed: true\`) and never sends twice; responses are kept ${API_LIMITS.idempotencyHours} hours. Delivery itself follows WhatsApp: read the status with GET /messages/{id}.`,
         '',
-        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact and template event it takes.`,
+        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact and template event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens, or members (its \`assigneeIds\`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens. And it can name templates (its \`templateIds\`): then it receives the statuses of the messages sent with them and their changes only, or campaigns (its \`campaignIds\`): then the statuses of the messages they sent and their changes only.`,
       ].join('\n'),
     },
     servers: [{ url: serverUrl }],
@@ -896,8 +935,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         },
         patch: {
           operationId: 'updateContact',
-          summary: 'Change a contact’s name, email, custom fields or tags',
-          description: `${scopeNote('contacts.write')} A field's value must have its type (GET /contact-fields); a refusal names \`fields.<key>\` and saves nothing. Tags are lower-cased, 50 at most per contact. The phone number is not changed through the API. What the contact already has changes nothing, so a retry is safe without an \`Idempotency-Key\`. Erased contacts are not found.`,
+          summary: 'Change a contact’s name, email, number, custom fields or tags',
+          description: `${scopeNote('contacts.write')} A field's value must have its type (GET /contact-fields); a refusal names \`fields.<key>\` and saves nothing. Tags are lower-cased, 50 at most per contact. A number changes only when it was typed for the contact, as members change it: one WhatsApp gave (the contact wrote to one of the company's numbers) is the contact's identity and is refused with 412, as is a number on the company's suppression list; a number another contact has is refused with 409, without naming that contact. Only this call changes numbers. What the contact already has changes nothing, so a retry is safe without an \`Idempotency-Key\`. Erased contacts are not found.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           requestBody: { required: true, content: json(ref('ContactUpdate')) },
           responses: {
@@ -905,7 +944,7 @@ export function buildOpenApiDocument(serverUrl: string) {
               description: 'The contact as it is now.',
               content: json(dataOf(ref('Contact'))),
             },
-            ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
+            ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -1372,19 +1411,47 @@ export function buildOpenApiDocument(serverUrl: string) {
             ...errors(401, 403, 422, 429, 500),
           },
         },
+        post: {
+          operationId: 'createCampaign',
+          summary: 'Create a campaign draft',
+          description: `${scopeNote('campaigns.write')} A draft with the settings given, checked as members' drafts are: the number, template and segment must be the company's (a segment not archived), and conditions are checked by segments' rules (a field's comparisons by its type, a campaign of the company). Settings left out start as a member's new draft does: no number, template or audience, starting at once once submitted, in the company's time zone, sending for 24 hours. A draft sends nothing: members review, submit and start it in the app, under the authority of a member allowed to send campaigns, and a submission checks what a draft needs (an approved template of the number's WhatsApp account, every variable filled, an audience). Its history in the app names the key. One draft per \`Idempotency-Key\`: a retry answers with the draft as first created.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateCampaign')) },
+          responses: {
+            '201': {
+              description: 'The draft, with its settings.',
+              content: json(dataOf(ref('CampaignWithResults'))),
+            },
+            ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
+          },
+        },
       },
       '/campaigns/{id}': {
         get: {
           operationId: 'getCampaign',
-          summary: 'A campaign with its results',
-          description: `${scopeNote('campaigns.read')} The results are counted when the campaign is read, as its page in the app counts them: messages sent, delivered, read and failed, replies and opt-outs, why recipients were skipped and the commonest WhatsApp error codes of failed messages; null for a draft. Counts only (GET /campaigns/{id}/recipients lists the recipients): never members or costs.`,
+          summary: 'A campaign with its results and settings',
+          description: `${scopeNote('campaigns.read')} The results are counted when the campaign is read, as its page in the app counts them: messages sent, delivered, read and failed, replies and opt-outs, why recipients were skipped and the commonest WhatsApp error codes of failed messages; null for a draft. Counts only (GET /campaigns/{id}/recipients lists the recipients): never members or costs. A key that also holds \`campaigns.write\` gets its settings, as members edit them while it is a draft, and its version; other keys get null for both.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           responses: {
             '200': {
-              description: 'The campaign with its results.',
+              description: 'The campaign with its results and settings.',
               content: json(dataOf(ref('CampaignWithResults'))),
             },
             ...errors(401, 403, 404, 429, 500),
+          },
+        },
+        patch: {
+          operationId: 'updateCampaign',
+          summary: 'Edit a campaign draft',
+          description: `${scopeNote('campaigns.write')} Changes the settings given and keeps the others, as a member saving the draft would, with the same checks as POST /campaigns. Only a draft is edited: any other status is refused with 409, naming it. With \`expectedVersion\`, a draft changed since you read it (by a member or a key) is refused with 409 and keeps its settings. A retry sets the same settings again. Its history in the app names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateCampaign')) },
+          responses: {
+            '200': {
+              description: 'The draft, with its settings.',
+              content: json(dataOf(ref('CampaignWithResults'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -1415,7 +1482,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           operationId: 'pauseCampaign',
           summary: 'Pause a campaign',
           description: [
-            `${scopeNote('campaigns.stop')} Pauses a scheduled or running campaign as a member pauses it, and its \`pauseReason\` is \`api\`: messages it queued that are not yet on their way to WhatsApp are not sent, and their recipients wait again. A message already on its way cannot be recalled and ends as it ends. Members resume the campaign in the app; a key cannot.`,
+            `${scopeNote('campaigns.stop')} Pauses a scheduled or running campaign as a member pauses it, and its \`pauseReason\` is \`api\`: messages it queued that are not yet on their way to WhatsApp are not sent, and their recipients wait again. A message already on its way cannot be recalled and ends as it ends. Members resume the campaign in the app, and so can a key with \`campaigns.resume\` (POST /campaigns/{id}/resume).`,
             'A paused campaign is answered as it is, whatever paused it, so a retry is harmless. A draft, a campaign waiting for approval, a completed and a cancelled one are refused with 409, naming the status. No `Idempotency-Key` is needed. `campaign.status_changed` webhooks report the change.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/Id' }],
@@ -1428,13 +1495,31 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/campaigns/{id}/resume': {
+        post: {
+          operationId: 'resumeCampaign',
+          summary: 'Resume a campaign a key paused',
+          description: [
+            `${scopeNote('campaigns.resume')} Resumes a campaign whose \`pauseReason\` is \`api\`, after the checks members' resuming makes: the template is still approved by Meta and the number active (412 otherwise), neither the message cap nor the spending cap is reached (412: members raise them in the app), and a rate card is published for a spending cap's currency (412). It sends again, or waits for its scheduled time if it never started, under the authority of the member who launched it, who must still be allowed to send campaigns (412 otherwise: a member who can resumes it in the app). Its recipients waiting since the pause are queued again.`,
+            'A scheduled or running campaign is answered as it is, so a retry is harmless. A campaign a member or HyFib paused (any other `pauseReason`) is refused with 409, naming it: members resume it in the app. A draft, a campaign waiting for approval, a completed and a cancelled one are refused with 409, naming the status. No `Idempotency-Key` is needed. `campaign.status_changed` webhooks report the change.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The campaign, as it is now.',
+              content: json(dataOf(ref('Campaign'))),
+            },
+            ...errors(401, 403, 404, 409, 412, 423, 429, 500),
+          },
+        },
+      },
       '/campaigns/{id}/cancel': {
         post: {
           operationId: 'cancelCampaign',
           summary: 'Cancel a campaign',
           description: [
             `${scopeNote('campaigns.stop')} Cancels a campaign waiting for approval, scheduled, running or paused, as a member cancels it: recipients still waiting, and messages it queued that are not yet on their way to WhatsApp, are cancelled (GET /campaigns/{id}/recipients lists them as \`canceled\`, with the message error \`campaign_canceled\` for the messages). A message already on its way cannot be recalled and ends as it ends. A cancelled campaign is never resumed.`,
-            'A cancelled or completed campaign is answered as it is, so a retry is harmless. A draft is refused with 409: it sends nothing until a member submits it, and members edit or cancel drafts in the app. No `Idempotency-Key` is needed. `campaign.status_changed` webhooks report the change.',
+            'A draft is cancelled by a key with `campaigns.write` instead, as members cancel drafts with the permission of that name. A cancelled or completed campaign is answered as it is to a key with either scope, so a retry is harmless. A draft is refused with 409 to a key without `campaigns.write`: it sends nothing until a member submits it, and members edit or cancel drafts in the app. A key with only `campaigns.write` is refused any other campaign with 403. No `Idempotency-Key` is needed. `campaign.status_changed` webhooks report the change.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/Id' }],
           responses: {
@@ -2117,7 +2202,9 @@ export function buildOpenApiDocument(serverUrl: string) {
         Campaign: jsonSchema(apiCampaignSchema),
         Order: jsonSchema(apiOrderSchema),
         UpdateOrder: jsonSchema(apiUpdateOrderSchema, 'input'),
-        CampaignWithResults: jsonSchema(apiCampaignWithResultsSchema),
+        CampaignWithResults: jsonSchema(apiCampaignDetailSchema),
+        CreateCampaign: jsonSchema(apiCreateCampaignSchema, 'input'),
+        UpdateCampaign: jsonSchema(apiUpdateCampaignSchema, 'input'),
         CampaignRecipient: jsonSchema(apiCampaignRecipientSchema),
         Automation: jsonSchema(apiAutomationSchema),
         AutomationRun: jsonSchema(apiAutomationRunSchema),
@@ -2188,9 +2275,12 @@ export const API_ROUTES = [
   ['get', '/members'],
   ['get', '/teams'],
   ['get', '/campaigns'],
+  ['post', '/campaigns'],
   ['get', '/campaigns/{id}'],
+  ['patch', '/campaigns/{id}'],
   ['get', '/campaigns/{id}/recipients'],
   ['post', '/campaigns/{id}/pause'],
+  ['post', '/campaigns/{id}/resume'],
   ['post', '/campaigns/{id}/cancel'],
   ['get', '/automations'],
   ['post', '/automations/{id}/runs'],

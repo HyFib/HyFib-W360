@@ -8,13 +8,18 @@ import {
   asc,
   automationVersions,
   automations,
+  campaigns,
   channelAccounts,
+  contactFields,
   desc,
   eq,
   gt,
   inArray,
   isNotNull,
+  memberships,
+  messageTemplates,
   sql,
+  teams,
   users,
   webhookDeliveries,
   webhookEndpoints,
@@ -27,6 +32,8 @@ import {
 import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
+import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
+import { INBOX_WORKER_ROLES } from '../inbox/routing';
 import { parseInput } from '../validation';
 import {
   WEBHOOK_CAMPAIGN_STATUSES,
@@ -37,6 +44,7 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
+  WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_MESSAGE_SENDERS,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
@@ -44,20 +52,34 @@ import {
   WEBHOOK_UNATTEMPTED_ERRORS,
   webhookHost,
   webhookTakesAutomationRuns,
+  webhookTakesCampaignEvents,
   webhookTakesChannelEvents,
+  webhookTakesFieldChanges,
+  webhookTakesTeamEvents,
+  webhookTakesTemplateEvents,
+  type WebhookAssigneeChoice,
   type WebhookAutomationChoice,
+  type WebhookCampaignChoice,
   type WebhookCampaignStatus,
   type WebhookChannelChoice,
   type WebhookContactPart,
   type WebhookConversationStatus,
+  type WebhookEndpointAssignee,
   type WebhookEndpointAutomation,
+  type WebhookEndpointCampaign,
   type WebhookEndpointChannel,
+  type WebhookEndpointField,
+  type WebhookFieldChoice,
   type WebhookEndpointOAuth,
+  type WebhookEndpointTeam,
   type WebhookFailureKind,
   type WebhookMessageSender,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookRunEndStatus,
+  type WebhookRunTrigger,
+  type WebhookTeamChoice,
+  type WebhookTemplateChoice,
   type WebhookTemplateStatus,
 } from './model';
 import {
@@ -449,6 +471,34 @@ export function webhookRunEndStatusesFor(
 }
 
 /**
+ * What started the runs whose events an endpoint takes (ADR-183), in the order the automation
+ * builder lists triggers; null takes every run's.
+ */
+export const webhookRunTriggersSchema = z
+  .array(z.enum(WEBHOOK_RUN_TRIGGERS, { error: 'Choose what started the runs from the list.' }))
+  .min(1, 'Choose at least one way a run starts, or take every run.')
+  .max(WEBHOOK_RUN_TRIGGERS.length, 'Give each way a run starts once.')
+  .transform((chosen) => WEBHOOK_RUN_TRIGGERS.filter((trigger) => chosen.includes(trigger)))
+  .nullable();
+
+export const WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS =
+  'Choose what started the runs only for an endpoint that receives Automation started or Automation ended.';
+
+/**
+ * The run triggers an endpoint keeps after it is added or changed: every run (null) unless it takes
+ * a run event; then those given, or else the ones it had.
+ */
+export function webhookRunTriggersFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookRunTrigger[] | null | undefined,
+  current: readonly WebhookRunTrigger[] | null,
+): WebhookRunTrigger[] | null {
+  if (!webhookTakesAutomationRuns(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
  * The parts of a contact whose change an endpoint takes as `contact.updated` (ADR-123), in the
  * order Settings lists them; null takes every change, including parts added later.
  */
@@ -474,6 +524,73 @@ export function webhookContactPartsFor(
   if (!eventTypes.includes('contact.updated')) return null;
   const kept = given === undefined ? current : given;
   return kept ? [...kept] : null;
+}
+
+/**
+ * The custom fields whose changes an endpoint takes as `contact.updated` (ADR-184), by key (as
+ * GET /contact-fields lists them), each once; null takes every field's, including fields added
+ * later.
+ */
+export const webhookContactFieldKeysSchema = z
+  .array(
+    z
+      .string({ error: 'Choose fields from the list.' })
+      .regex(CONTACT_FIELD_KEY_RE, 'Choose fields from the list.'),
+  )
+  .min(1, 'Choose at least one field, or take every field.')
+  .max(WEBHOOK_LIMITS.contactFields, `Choose at most ${WEBHOOK_LIMITS.contactFields} fields.`)
+  .transform((keys) => [...new Set(keys)])
+  .nullable();
+
+export const WEBHOOK_FIELDS_NEED_THE_PART =
+  'Choose fields only for an endpoint that receives Contact changed with custom field values.';
+
+export const WEBHOOK_FIELDS_NOT_FOUND = 'Choose fields of this company.';
+
+/** A list of fields given for an endpoint that takes no field changes is refused (ADR-184). */
+export const webhookFieldsNeedThePart = () =>
+  new AppError('validation_failed', WEBHOOK_FIELDS_NEED_THE_PART, {
+    issues: [{ path: 'contactFieldKeys', message: WEBHOOK_FIELDS_NEED_THE_PART }],
+  });
+
+/**
+ * The fields an endpoint keeps after it is added or changed, given the parts it keeps: every field
+ * (null) unless it takes field changes; then those given, or else the ones it had.
+ */
+export function webhookContactFieldKeysFor(
+  eventTypes: readonly WebhookEventType[],
+  parts: readonly WebhookContactPart[] | null,
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesFieldChanges(eventTypes, parts)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses fields a list adds to an endpoint unless each is one of the company's (ADR-184). Fields
+ * the endpoint's list already held may have been deleted since, and stay. `tx` is in the company's
+ * scope.
+ */
+export async function assertWebhookContactFields(
+  tx: Tx,
+  tenantId: string,
+  keys: readonly string[] | null | undefined,
+  held: readonly string[] | null = null,
+): Promise<void> {
+  const added = (keys ?? []).filter((key) => !held?.includes(key));
+  if (added.length === 0) return;
+  const rows = await tx
+    .select({ key: contactFields.key })
+    .from(contactFields)
+    .where(and(eq(contactFields.tenantId, tenantId), inArray(contactFields.key, added)));
+  const found = new Set(rows.map((r) => r.key));
+  const index = (keys ?? []).findIndex((key) => added.includes(key) && !found.has(key));
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_FIELDS_NOT_FOUND, {
+    issues: [{ path: `contactFieldKeys.${index}`, message: WEBHOOK_FIELDS_NOT_FOUND }],
+  });
 }
 
 /**
@@ -604,6 +721,20 @@ export function webhookChannelLabel(channel: {
   return phone ?? name ?? `Phone number ID ${channel.phoneNumberId}`;
 }
 
+/** A template as Settings → Webhooks names it (ADR-175). */
+const templateChoiceColumns = {
+  id: messageTemplates.id,
+  name: messageTemplates.name,
+  language: messageTemplates.language,
+};
+
+/** A campaign as Settings → Webhooks names it (ADR-185). */
+const campaignChoiceColumns = {
+  id: campaigns.id,
+  name: campaigns.name,
+  status: campaigns.status,
+};
+
 /** The columns `webhookChannelLabel` reads, with the number's id and status. */
 const channelChoiceColumns = {
   id: channelAccounts.id,
@@ -612,6 +743,230 @@ const channelChoiceColumns = {
   phoneNumberId: channelAccounts.phoneNumberId,
   status: channelAccounts.status,
 };
+
+/**
+ * The templates whose messages' statuses and changes an endpoint takes (ADR-175), each once; null
+ * takes every template's, including templates added later.
+ */
+export const webhookTemplateIdsSchema = z
+  .array(z.uuid({ error: 'Choose templates from the list.' }))
+  .min(1, 'Choose at least one template, or take every template.')
+  .max(WEBHOOK_LIMITS.templates, `Choose at most ${WEBHOOK_LIMITS.templates} templates.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_TEMPLATES_NEED_THE_EVENTS =
+  'Choose templates only for an endpoint that receives Message status or Template status.';
+
+export const WEBHOOK_TEMPLATES_NOT_FOUND = 'Choose templates of this company.';
+
+/**
+ * The templates an endpoint keeps after it is added or changed: every template (null) unless it
+ * takes an event of a template; then those given, or else the ones it had.
+ */
+export function webhookTemplateIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesTemplateEvents(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses templates given for an endpoint unless each is the company's (ADR-175). A company's
+ * templates are never deleted (one deleted at Meta keeps its row), so a list never names one that is
+ * gone. `tx` is in the company's scope.
+ */
+export async function assertWebhookTemplates(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+): Promise<void> {
+  if (!ids || ids.length === 0) return;
+  const rows = await tx
+    .select({ id: messageTemplates.id })
+    .from(messageTemplates)
+    .where(and(eq(messageTemplates.tenantId, tenantId), inArray(messageTemplates.id, [...ids])));
+  const found = new Set(rows.map((r) => r.id));
+  const index = ids.findIndex((id) => !found.has(id));
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_TEMPLATES_NOT_FOUND, {
+    issues: [{ path: `templateIds.${index}`, message: WEBHOOK_TEMPLATES_NOT_FOUND }],
+  });
+}
+
+/**
+ * The campaigns whose messages' statuses and changes an endpoint takes (ADR-185), each once; null
+ * takes every campaign's, including campaigns added later.
+ */
+export const webhookCampaignIdsSchema = z
+  .array(z.uuid({ error: 'Choose campaigns from the list.' }))
+  .min(1, 'Choose at least one campaign, or take every campaign.')
+  .max(WEBHOOK_LIMITS.campaigns, `Choose at most ${WEBHOOK_LIMITS.campaigns} campaigns.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS =
+  'Choose campaigns only for an endpoint that receives Message status or Campaign status.';
+
+export const WEBHOOK_CAMPAIGNS_NOT_FOUND = 'Choose campaigns of this company.';
+
+/**
+ * The campaigns an endpoint keeps after it is added or changed: every campaign (null) unless it
+ * takes an event of a campaign; then those given, or else the ones it had.
+ */
+export function webhookCampaignIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesCampaignEvents(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses campaigns given for an endpoint unless each is the company's (ADR-185). A company's
+ * campaigns are kept until the company is deleted, so a list never names one that is gone. `tx` is
+ * in the company's scope.
+ */
+export async function assertWebhookCampaigns(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+): Promise<void> {
+  if (!ids || ids.length === 0) return;
+  const rows = await tx
+    .select({ id: campaigns.id })
+    .from(campaigns)
+    .where(and(eq(campaigns.tenantId, tenantId), inArray(campaigns.id, [...ids])));
+  const found = new Set(rows.map((r) => r.id));
+  const index = ids.findIndex((id) => !found.has(id));
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_CAMPAIGNS_NOT_FOUND, {
+    issues: [{ path: `campaignIds.${index}`, message: WEBHOOK_CAMPAIGNS_NOT_FOUND }],
+  });
+}
+
+/**
+ * The teams whose conversations' message and conversation events an endpoint takes (ADR-174), each
+ * once; null takes every conversation's, including those of teams added later.
+ */
+export const webhookTeamIdsSchema = z
+  .array(z.uuid({ error: 'Choose teams from the list.' }))
+  .min(1, 'Choose at least one team, or take every conversation.')
+  .max(WEBHOOK_LIMITS.teams, `Choose at most ${WEBHOOK_LIMITS.teams} teams.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_TEAMS_NEED_THE_EVENTS =
+  'Choose teams only for an endpoint that receives message or conversation events.';
+
+export const WEBHOOK_TEAMS_NOT_FOUND = 'Choose teams of this company.';
+
+/**
+ * The teams an endpoint keeps after it is added or changed: every conversation (null) unless it
+ * takes an event of a conversation; then those given, or else the ones it had.
+ */
+export function webhookTeamIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesTeamEvents(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses teams a list adds to an endpoint unless each is the company's (ADR-174). Teams the
+ * endpoint's list already held may have been deleted since, and stay: they match no conversation.
+ * `tx` is in the company's scope.
+ */
+export async function assertWebhookTeams(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+  held: readonly string[] | null = null,
+): Promise<void> {
+  const added = (ids ?? []).filter((id) => !held?.includes(id));
+  if (added.length === 0) return;
+  const rows = await tx
+    .select({ id: teams.id })
+    .from(teams)
+    .where(and(eq(teams.tenantId, tenantId), inArray(teams.id, added)));
+  const found = new Set(rows.map((r) => r.id));
+  const index = (ids ?? []).findIndex((id) => added.includes(id) && !found.has(id));
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_TEAMS_NOT_FOUND, {
+    issues: [{ path: `teamIds.${index}`, message: WEBHOOK_TEAMS_NOT_FOUND }],
+  });
+}
+
+/**
+ * The members whose assigned conversations' message and conversation events an endpoint takes
+ * (ADR-181), each once; null takes every conversation's, including unassigned ones.
+ */
+export const webhookAssigneeIdsSchema = z
+  .array(z.uuid({ error: 'Choose members from the list.' }))
+  .min(1, 'Choose at least one member, or take every conversation.')
+  .max(WEBHOOK_LIMITS.assignees, `Choose at most ${WEBHOOK_LIMITS.assignees} members.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_ASSIGNEES_NEED_THE_EVENTS =
+  'Choose members only for an endpoint that receives message or conversation events.';
+
+export const WEBHOOK_ASSIGNEES_NOT_FOUND = 'Choose members of this company who take conversations.';
+
+/**
+ * The members an endpoint keeps after it is added or changed: every conversation (null) unless it
+ * takes an event of a conversation; then those given, or else the ones it had.
+ */
+export function webhookAssigneeIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesTeamEvents(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/** Whether conversations can be assigned to a member: active, with a role that answers them. */
+const takesConversations = () =>
+  sql<boolean>`(${memberships.status} = 'active'
+    and ${memberships.roles} && ${sql.param([...INBOX_WORKER_ROLES])}::text[])`;
+
+/**
+ * Refuses members a list adds to an endpoint unless conversations can be assigned to each now: a
+ * member of the company, active, with a role that reads and answers them (ADR-181). Members the
+ * endpoint's list already held may have left or lost that role since, and stay: their conversations
+ * were released, and they match nothing while holding none. `tx` is in the company's scope.
+ */
+export async function assertWebhookAssignees(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+  held: readonly string[] | null = null,
+): Promise<void> {
+  const added = (ids ?? []).filter((id) => !held?.includes(id));
+  if (added.length === 0) return;
+  const rows = await tx
+    .select({ id: memberships.id })
+    .from(memberships)
+    .where(
+      and(eq(memberships.tenantId, tenantId), inArray(memberships.id, added), takesConversations()),
+    );
+  const found = new Set(rows.map((r) => r.id));
+  const index = (ids ?? []).findIndex((id) => added.includes(id) && !found.has(id));
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_ASSIGNEES_NOT_FOUND, {
+    issues: [{ path: `assigneeIds.${index}`, message: WEBHOOK_ASSIGNEES_NOT_FOUND }],
+  });
+}
 
 /** A new signing secret: `whsec_` and 32 random bytes. */
 export function generateWebhookSecret(): string {
@@ -657,6 +1012,11 @@ const endpointFields = z.object({
    */
   contactParts: webhookContactPartsSchema.optional(),
   /**
+   * Given, the custom fields whose changes it takes (null: every field, ADR-184); left out, they
+   * stay.
+   */
+  contactFieldKeys: webhookContactFieldKeysSchema.optional(),
+  /**
    * Given, the automations whose runs it takes (null: every automation, ADR-145); left out, they
    * stay.
    */
@@ -675,10 +1035,32 @@ const endpointFields = z.object({
   conversationStatuses: webhookConversationStatusesSchema.optional(),
   /** Given, how the runs it takes ended (null: every end, ADR-151); left out, they stay. */
   runEndStatuses: webhookRunEndStatusesSchema.optional(),
+  /** Given, what started the runs it takes (null: every run, ADR-183); left out, they stay. */
+  runTriggers: webhookRunTriggersSchema.optional(),
   /**
    * Given, the numbers whose events it takes (null: every number, ADR-170); left out, they stay.
    */
   channelIds: webhookChannelIdsSchema.optional(),
+  /**
+   * Given, the teams whose conversations' events it takes (null: every conversation's, ADR-174);
+   * left out, they stay.
+   */
+  teamIds: webhookTeamIdsSchema.optional(),
+  /**
+   * Given, the templates whose messages' statuses and changes it takes (null: every template's,
+   * ADR-175); left out, they stay.
+   */
+  templateIds: webhookTemplateIdsSchema.optional(),
+  /**
+   * Given, the campaigns whose messages' statuses and changes it takes (null: every campaign's,
+   * ADR-185); left out, they stay.
+   */
+  campaignIds: webhookCampaignIdsSchema.optional(),
+  /**
+   * Given, the members whose assigned conversations' events it takes (null: every conversation's,
+   * ADR-181); left out, they stay.
+   */
+  assigneeIds: webhookAssigneeIdsSchema.optional(),
   /** Given, its OAuth client (null: none, ADR-173); left out, it stays. */
   oauth: webhookOAuthSchema.nullable().optional(),
 });
@@ -739,11 +1121,41 @@ const runEndStatusesNeedTheEvent = {
     !data.runEndStatuses || data.eventTypes.includes('automation.run_ended'),
   options: { path: ['runEndStatuses'], message: WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT },
 };
+/** What started the runs is chosen only for an endpoint that takes run events (ADR-183). */
+const runTriggersNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; runTriggers?: unknown }) =>
+    !data.runTriggers || webhookTakesAutomationRuns(data.eventTypes),
+  options: { path: ['runTriggers'], message: WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS },
+};
 /** Numbers are chosen only for an endpoint that takes events of numbers (ADR-170). */
 const channelsNeedTheEvents = {
   check: (data: { eventTypes: WebhookEventType[]; channelIds?: unknown }) =>
     !data.channelIds || webhookTakesChannelEvents(data.eventTypes),
   options: { path: ['channelIds'], message: WEBHOOK_CHANNELS_NEED_THE_EVENTS },
+};
+/** Teams are chosen only for an endpoint that takes events of conversations (ADR-174). */
+const teamsNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; teamIds?: unknown }) =>
+    !data.teamIds || webhookTakesTeamEvents(data.eventTypes),
+  options: { path: ['teamIds'], message: WEBHOOK_TEAMS_NEED_THE_EVENTS },
+};
+/** Templates are chosen only for an endpoint that takes events of templates (ADR-175). */
+const templatesNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; templateIds?: unknown }) =>
+    !data.templateIds || webhookTakesTemplateEvents(data.eventTypes),
+  options: { path: ['templateIds'], message: WEBHOOK_TEMPLATES_NEED_THE_EVENTS },
+};
+/** Campaigns are chosen only for an endpoint that takes events of campaigns (ADR-185). */
+const campaignsNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; campaignIds?: unknown }) =>
+    !data.campaignIds || webhookTakesCampaignEvents(data.eventTypes),
+  options: { path: ['campaignIds'], message: WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS },
+};
+/** Members are chosen only for an endpoint that takes events of conversations (ADR-181). */
+const assigneesNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; assigneeIds?: unknown }) =>
+    !data.assigneeIds || webhookTakesTeamEvents(data.eventTypes),
+  options: { path: ['assigneeIds'], message: WEBHOOK_ASSIGNEES_NEED_THE_EVENTS },
 };
 const endpointSchema = endpointFields
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
@@ -755,7 +1167,12 @@ const endpointSchema = endpointFields
   .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
-  .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options);
+  .refine(runTriggersNeedTheEvents.check, runTriggersNeedTheEvents.options)
+  .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
+  .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
+  .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options)
+  .refine(campaignsNeedTheEvents.check, campaignsNeedTheEvents.options)
+  .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options);
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointFields
   .extend({ endpointId: z.uuid() })
@@ -768,7 +1185,12 @@ const updateSchema = endpointFields
   .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
-  .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options);
+  .refine(runTriggersNeedTheEvents.check, runTriggersNeedTheEvents.options)
+  .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
+  .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
+  .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options)
+  .refine(campaignsNeedTheEvents.check, campaignsNeedTheEvents.options)
+  .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
 const replayAllFailedSchema = z.object({
@@ -804,6 +1226,11 @@ export interface WebhookEndpointView {
   /** The contact parts it takes as `contact.updated` (ADR-123); null takes every change. */
   contactParts: WebhookContactPart[] | null;
   /**
+   * The custom fields whose changes it takes (ADR-184), as stored, labelled; null takes every
+   * field's.
+   */
+  contactFields: WebhookEndpointField[] | null;
+  /**
    * The automations whose runs it takes (ADR-145), as stored, with their names and whether they
    * are archived; null takes every automation.
    */
@@ -818,8 +1245,30 @@ export interface WebhookEndpointView {
   conversationStatuses: WebhookConversationStatus[] | null;
   /** How the runs it takes as `automation.run_ended` ended (ADR-151); null takes every end. */
   runEndStatuses: WebhookRunEndStatus[] | null;
+  /** What started the runs whose events it takes (ADR-183); null takes every run's. */
+  runTriggers: WebhookRunTrigger[] | null;
   /** The numbers whose events it takes (ADR-170), as stored, named; null takes every number. */
   channels: WebhookEndpointChannel[] | null;
+  /**
+   * The teams whose conversations' events it takes (ADR-174), as stored, named; null takes every
+   * conversation's.
+   */
+  teams: WebhookEndpointTeam[] | null;
+  /**
+   * The templates whose messages' statuses and changes it takes (ADR-175), as stored, named; null
+   * takes every template's.
+   */
+  templates: WebhookTemplateChoice[] | null;
+  /**
+   * The campaigns whose messages' statuses and changes it takes (ADR-185), as stored, named; null
+   * takes every campaign's.
+   */
+  campaigns: WebhookEndpointCampaign[] | null;
+  /**
+   * The members whose assigned conversations' events it takes (ADR-181), as stored, named, with
+   * whether conversations can still be assigned to them; null takes every conversation's.
+   */
+  assignees: WebhookEndpointAssignee[] | null;
   /** Where it gets OAuth tokens and as which client (ADR-173); the secret is never shown. */
   oauth: WebhookEndpointOAuth | null;
   createdAt: Date;
@@ -1039,13 +1488,19 @@ export async function lockWebhookEndpoint(
       messageStatuses: webhookEndpoints.messageStatuses,
       messageSenders: webhookEndpoints.messageSenders,
       contactParts: webhookEndpoints.contactParts,
+      contactFieldKeys: webhookEndpoints.contactFieldKeys,
       automationIds: webhookEndpoints.automationIds,
       campaignStatuses: webhookEndpoints.campaignStatuses,
       orderStatuses: webhookEndpoints.orderStatuses,
       templateStatuses: webhookEndpoints.templateStatuses,
       conversationStatuses: webhookEndpoints.conversationStatuses,
       runEndStatuses: webhookEndpoints.runEndStatuses,
+      runTriggers: webhookEndpoints.runTriggers,
       channelAccountIds: webhookEndpoints.channelAccountIds,
+      teamIds: webhookEndpoints.teamIds,
+      templateIds: webhookEndpoints.templateIds,
+      campaignIds: webhookEndpoints.campaignIds,
+      assigneeIds: webhookEndpoints.assigneeIds,
       headerNames: webhookEndpoints.headerNames,
       oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
       oauthClientId: webhookEndpoints.oauthClientId,
@@ -1086,13 +1541,19 @@ export async function insertWebhookEndpoint(
     messageStatuses: WebhookMessageStatus[] | null;
     messageSenders: WebhookMessageSender[] | null;
     contactParts: WebhookContactPart[] | null;
+    contactFieldKeys: string[] | null;
     automationIds: string[] | null;
     campaignStatuses: WebhookCampaignStatus[] | null;
     orderStatuses: WebhookOrderStatus[] | null;
     templateStatuses: WebhookTemplateStatus[] | null;
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
+    runTriggers: WebhookRunTrigger[] | null;
     channelAccountIds: string[] | null;
+    teamIds: string[] | null;
+    templateIds: string[] | null;
+    campaignIds: string[] | null;
+    assigneeIds: string[] | null;
     /** Its OAuth client (ADR-173), checked by `checkedWebhookOAuth` with nothing stored. */
     oauth: CheckedWebhookOAuth | null;
     creator: WebhookEndpointCreator;
@@ -1122,13 +1583,19 @@ export async function insertWebhookEndpoint(
     messageStatuses: input.messageStatuses,
     messageSenders: input.messageSenders,
     contactParts: input.contactParts,
+    contactFieldKeys: input.contactFieldKeys,
     automationIds: input.automationIds,
     campaignStatuses: input.campaignStatuses,
     orderStatuses: input.orderStatuses,
     templateStatuses: input.templateStatuses,
     conversationStatuses: input.conversationStatuses,
     runEndStatuses: input.runEndStatuses,
+    runTriggers: input.runTriggers,
     channelAccountIds: input.channelAccountIds,
+    teamIds: input.teamIds,
+    templateIds: input.templateIds,
+    campaignIds: input.campaignIds,
+    assigneeIds: input.assigneeIds,
     ...webhookOAuthColumns(keyring, tenantId, id, input.oauth, NO_WEBHOOK_OAUTH),
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
@@ -1507,13 +1974,19 @@ export function createWebhooksService(deps: {
               messageStatuses: webhookEndpoints.messageStatuses,
               messageSenders: webhookEndpoints.messageSenders,
               contactParts: webhookEndpoints.contactParts,
+              contactFieldKeys: webhookEndpoints.contactFieldKeys,
               automationIds: webhookEndpoints.automationIds,
               campaignStatuses: webhookEndpoints.campaignStatuses,
               orderStatuses: webhookEndpoints.orderStatuses,
               templateStatuses: webhookEndpoints.templateStatuses,
               conversationStatuses: webhookEndpoints.conversationStatuses,
               runEndStatuses: webhookEndpoints.runEndStatuses,
+              runTriggers: webhookEndpoints.runTriggers,
               channelAccountIds: webhookEndpoints.channelAccountIds,
+              teamIds: webhookEndpoints.teamIds,
+              templateIds: webhookEndpoints.templateIds,
+              campaignIds: webhookEndpoints.campaignIds,
+              assigneeIds: webhookEndpoints.assigneeIds,
               oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
               oauthClientId: webhookEndpoints.oauthClientId,
               oauthScope: webhookEndpoints.oauthScope,
@@ -1578,6 +2051,78 @@ export function createWebhooksService(deps: {
                     ),
                   );
           const numberById = new Map(numbered.map((n) => [n.id, n]));
+          // The teams endpoints chose (ADR-174); one deleted since is named by its absence.
+          const teamIds = [...new Set(rows.flatMap((r) => r.teamIds ?? []))];
+          const namedTeams =
+            teamIds.length === 0
+              ? []
+              : await tx
+                  .select({ id: teams.id, name: teams.name })
+                  .from(teams)
+                  .where(and(eq(teams.tenantId, ctx.tenant.id), inArray(teams.id, teamIds)));
+          const teamNameById = new Map(namedTeams.map((t) => [t.id, t.name]));
+          // The templates endpoints chose (ADR-175).
+          const templateIds = [...new Set(rows.flatMap((r) => r.templateIds ?? []))];
+          const namedTemplates =
+            templateIds.length === 0
+              ? []
+              : await tx
+                  .select(templateChoiceColumns)
+                  .from(messageTemplates)
+                  .where(
+                    and(
+                      eq(messageTemplates.tenantId, ctx.tenant.id),
+                      inArray(messageTemplates.id, templateIds),
+                    ),
+                  );
+          const templateById = new Map(namedTemplates.map((t) => [t.id, t]));
+          // The campaigns endpoints chose (ADR-185).
+          const campaignIds = [...new Set(rows.flatMap((r) => r.campaignIds ?? []))];
+          const namedCampaigns =
+            campaignIds.length === 0
+              ? []
+              : await tx
+                  .select(campaignChoiceColumns)
+                  .from(campaigns)
+                  .where(
+                    and(eq(campaigns.tenantId, ctx.tenant.id), inArray(campaigns.id, campaignIds)),
+                  );
+          const campaignById = new Map(namedCampaigns.map((c) => [c.id, c]));
+          // The members endpoints chose (ADR-181), and whether they still take conversations.
+          const assigneeIds = [...new Set(rows.flatMap((r) => r.assigneeIds ?? []))];
+          const namedAssignees =
+            assigneeIds.length === 0
+              ? []
+              : await tx
+                  .select({
+                    id: memberships.id,
+                    name: users.name,
+                    assignable: takesConversations(),
+                  })
+                  .from(memberships)
+                  .innerJoin(users, eq(users.id, memberships.userId))
+                  .where(
+                    and(
+                      eq(memberships.tenantId, ctx.tenant.id),
+                      inArray(memberships.id, assigneeIds),
+                    ),
+                  );
+          const assigneeById = new Map(namedAssignees.map((m) => [m.id, m]));
+          // The custom fields endpoints chose (ADR-184); one deleted since is named by its absence.
+          const fieldKeys = [...new Set(rows.flatMap((r) => r.contactFieldKeys ?? []))];
+          const namedFields =
+            fieldKeys.length === 0
+              ? []
+              : await tx
+                  .select({ key: contactFields.key, label: contactFields.label })
+                  .from(contactFields)
+                  .where(
+                    and(
+                      eq(contactFields.tenantId, ctx.tenant.id),
+                      inArray(contactFields.key, fieldKeys),
+                    ),
+                  );
+          const fieldLabelByKey = new Map(namedFields.map((f) => [f.key, f.label]));
           return rows.map((r) => {
             const recent: Record<WebhookDeliveryState, number> = {
               pending: 0,
@@ -1592,6 +2137,11 @@ export function createWebhooksService(deps: {
               keyPrefix,
               automationIds,
               channelAccountIds,
+              teamIds: chosenTeams,
+              templateIds: chosenTemplates,
+              campaignIds: chosenCampaigns,
+              assigneeIds: chosenAssignees,
+              contactFieldKeys: chosenFields,
               oauthTokenUrl,
               oauthClientId,
               oauthScope,
@@ -1610,6 +2160,32 @@ export function createWebhooksService(deps: {
                       ? { id, label: webhookChannelLabel(number), status: number.status }
                       : { id, label: 'Unknown number', status: null };
                   })
+                : null,
+              teams: chosenTeams
+                ? chosenTeams.map((id) => ({ id, name: teamNameById.get(id) ?? null }))
+                : null,
+              templates: chosenTemplates
+                ? chosenTemplates.map(
+                    (id) => templateById.get(id) ?? { id, name: 'Unknown template', language: '-' },
+                  )
+                : null,
+              campaigns: chosenCampaigns
+                ? chosenCampaigns.map(
+                    (id): WebhookEndpointCampaign =>
+                      campaignById.get(id) ?? { id, name: 'Unknown campaign', status: null },
+                  )
+                : null,
+              contactFields: chosenFields
+                ? chosenFields.map((key): WebhookEndpointField => ({
+                    key,
+                    label: fieldLabelByKey.get(key) ?? null,
+                  }))
+                : null,
+              assignees: chosenAssignees
+                ? chosenAssignees.map(
+                    (id): WebhookEndpointAssignee =>
+                      assigneeById.get(id) ?? { id, name: null, assignable: false },
+                  )
                 : null,
               automations: automationIds
                 ? automationIds.map((id) => {
@@ -1686,6 +2262,110 @@ export function createWebhooksService(deps: {
       return rows.map((r) => ({ id: r.id, label: webhookChannelLabel(r), status: r.status }));
     },
 
+    /**
+     * The templates an endpoint can choose to take the statuses and changes of (ADR-175): every
+     * template of the company, whatever its status, by name and language.
+     */
+    async templateChoices(ctx: TenantContext): Promise<WebhookTemplateChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      return db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select(templateChoiceColumns)
+            .from(messageTemplates)
+            .where(eq(messageTemplates.tenantId, ctx.tenant.id))
+            .orderBy(
+              asc(messageTemplates.name),
+              asc(messageTemplates.language),
+              asc(messageTemplates.id),
+            ),
+        { accessMode: 'read only' },
+      );
+    },
+
+    /**
+     * The campaigns an endpoint can choose to take the statuses and changes of (ADR-185): the
+     * company's newest campaigns, whatever their status, at most `WEBHOOK_LIMITS.campaignChoices`;
+     * `more` says whether older ones exist (the API takes any of the company's).
+     */
+    async campaignChoices(
+      ctx: TenantContext,
+    ): Promise<{ campaigns: WebhookCampaignChoice[]; more: boolean }> {
+      assertCan(ctx, 'developer.manage');
+      const rows = await db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select(campaignChoiceColumns)
+            .from(campaigns)
+            .where(eq(campaigns.tenantId, ctx.tenant.id))
+            .orderBy(desc(campaigns.createdAt), desc(campaigns.id))
+            .limit(WEBHOOK_LIMITS.campaignChoices + 1),
+        { accessMode: 'read only' },
+      );
+      return {
+        campaigns: rows.slice(0, WEBHOOK_LIMITS.campaignChoices),
+        more: rows.length > WEBHOOK_LIMITS.campaignChoices,
+      };
+    },
+
+    /**
+     * The teams an endpoint can choose to take the conversations' events of (ADR-174): every team
+     * of the company, by name.
+     */
+    async teamChoices(ctx: TenantContext): Promise<WebhookTeamChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      return db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({ id: teams.id, name: teams.name })
+            .from(teams)
+            .where(eq(teams.tenantId, ctx.tenant.id))
+            .orderBy(asc(teams.name), asc(teams.id)),
+        { accessMode: 'read only' },
+      );
+    },
+
+    /**
+     * The members an endpoint can choose to take the assigned conversations' events of (ADR-181):
+     * those conversations can be assigned to (active, with a role that reads and answers them), by
+     * name.
+     */
+    async assigneeChoices(ctx: TenantContext): Promise<WebhookAssigneeChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      return db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({ id: memberships.id, name: users.name })
+            .from(memberships)
+            .innerJoin(users, eq(users.id, memberships.userId))
+            .where(and(eq(memberships.tenantId, ctx.tenant.id), takesConversations()))
+            .orderBy(asc(users.name), asc(memberships.id)),
+        { accessMode: 'read only' },
+      );
+    },
+
+    /**
+     * The custom fields an endpoint can choose to take the changes of (ADR-184): every field of the
+     * company, by label.
+     */
+    async contactFieldChoices(ctx: TenantContext): Promise<WebhookFieldChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      return db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({ key: contactFields.key, label: contactFields.label })
+            .from(contactFields)
+            .where(eq(contactFields.tenantId, ctx.tenant.id))
+            .orderBy(asc(contactFields.label), asc(contactFields.key)),
+        { accessMode: 'read only' },
+      );
+    },
+
     /** A new endpoint; its secret is returned once. */
     async create(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'developer.manage');
@@ -1701,6 +2381,17 @@ export function createWebhooksService(deps: {
         );
         const messageSenders = webhookMessageSendersFor(data.eventTypes, data.messageSenders, null);
         const contactParts = webhookContactPartsFor(data.eventTypes, data.contactParts, null);
+        // Fields narrow field changes only: refused for parts that take none (ADR-184).
+        if (data.contactFieldKeys && !webhookTakesFieldChanges(data.eventTypes, contactParts)) {
+          throw webhookFieldsNeedThePart();
+        }
+        const contactFieldKeys = webhookContactFieldKeysFor(
+          data.eventTypes,
+          contactParts,
+          data.contactFieldKeys,
+          null,
+        );
+        await assertWebhookContactFields(tx, ctx.tenant.id, contactFieldKeys);
         const automationIds = webhookAutomationIdsFor(data.eventTypes, data.automationIds, null);
         await assertWebhookAutomations(tx, ctx.tenant.id, automationIds);
         const campaignStatuses = webhookCampaignStatusesFor(
@@ -1720,8 +2411,17 @@ export function createWebhooksService(deps: {
           null,
         );
         const runEndStatuses = webhookRunEndStatusesFor(data.eventTypes, data.runEndStatuses, null);
+        const runTriggers = webhookRunTriggersFor(data.eventTypes, data.runTriggers, null);
         const channelIds = webhookChannelIdsFor(data.eventTypes, data.channelIds, null);
         await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
+        const teamIds = webhookTeamIdsFor(data.eventTypes, data.teamIds, null);
+        await assertWebhookTeams(tx, ctx.tenant.id, teamIds);
+        const templateIds = webhookTemplateIdsFor(data.eventTypes, data.templateIds, null);
+        await assertWebhookTemplates(tx, ctx.tenant.id, templateIds);
+        const campaignIds = webhookCampaignIdsFor(data.eventTypes, data.campaignIds, null);
+        await assertWebhookCampaigns(tx, ctx.tenant.id, campaignIds);
+        const assigneeIds = webhookAssigneeIdsFor(data.eventTypes, data.assigneeIds, null);
+        await assertWebhookAssignees(tx, ctx.tenant.id, assigneeIds);
         const oauth = data.oauth
           ? checkedWebhookOAuth(data.oauth, NO_WEBHOOK_OAUTH, deps.egressPolicy)
           : null;
@@ -1738,13 +2438,19 @@ export function createWebhooksService(deps: {
           messageStatuses,
           messageSenders,
           contactParts,
+          contactFieldKeys,
           automationIds,
           campaignStatuses,
           orderStatuses,
           templateStatuses,
           conversationStatuses,
           runEndStatuses,
+          runTriggers,
           channelAccountIds: channelIds,
+          teamIds,
+          templateIds,
+          campaignIds,
+          assigneeIds,
           oauth,
           creator: { userId: ctx.user.id },
         });
@@ -1762,13 +2468,19 @@ export function createWebhooksService(deps: {
               ...(messageStatuses ? { messageStatuses } : {}),
               ...(messageSenders ? { messageSenders } : {}),
               ...(contactParts ? { contactParts } : {}),
+              ...(contactFieldKeys ? { contactFieldKeys } : {}),
               ...(automationIds ? { automationIds } : {}),
               ...(campaignStatuses ? { campaignStatuses } : {}),
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(templateStatuses ? { templateStatuses } : {}),
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
+              ...(runTriggers ? { runTriggers } : {}),
               ...(channelIds ? { channelIds } : {}),
+              ...(teamIds ? { teamIds } : {}),
+              ...(templateIds ? { templateIds } : {}),
+              ...(campaignIds ? { campaignIds } : {}),
+              ...(assigneeIds ? { assigneeIds } : {}),
               ...(oauth ? { oauthTokenHost: oauth.host } : {}),
             },
           },
@@ -1800,6 +2512,25 @@ export function createWebhooksService(deps: {
           data.contactParts,
           endpoint.contactParts,
         );
+        // Fields narrow field changes only: refused for parts that take none (ADR-184).
+        if (data.contactFieldKeys && !webhookTakesFieldChanges(data.eventTypes, contactParts)) {
+          throw webhookFieldsNeedThePart();
+        }
+        const contactFieldKeys = webhookContactFieldKeysFor(
+          data.eventTypes,
+          contactParts,
+          data.contactFieldKeys,
+          endpoint.contactFieldKeys,
+        );
+        // And the fields it adds: those it held may have been deleted since (ADR-184).
+        if (data.contactFieldKeys !== undefined) {
+          await assertWebhookContactFields(
+            tx,
+            ctx.tenant.id,
+            contactFieldKeys,
+            endpoint.contactFieldKeys,
+          );
+        }
         const automationIds = webhookAutomationIdsFor(
           data.eventTypes,
           data.automationIds,
@@ -1834,6 +2565,11 @@ export function createWebhooksService(deps: {
           data.runEndStatuses,
           endpoint.runEndStatuses,
         );
+        const runTriggers = webhookRunTriggersFor(
+          data.eventTypes,
+          data.runTriggers,
+          endpoint.runTriggers,
+        );
         const channelIds = webhookChannelIdsFor(
           data.eventTypes,
           data.channelIds,
@@ -1842,6 +2578,38 @@ export function createWebhooksService(deps: {
         // Only a list given now is checked: the numbers kept were checked when chosen.
         if (data.channelIds !== undefined) {
           await assertWebhookChannels(tx, ctx.tenant.id, channelIds);
+        }
+        const teamIds = webhookTeamIdsFor(data.eventTypes, data.teamIds, endpoint.teamIds);
+        // And the teams it adds: those it held may have been deleted since (ADR-174).
+        if (data.teamIds !== undefined) {
+          await assertWebhookTeams(tx, ctx.tenant.id, teamIds, endpoint.teamIds);
+        }
+        const templateIds = webhookTemplateIdsFor(
+          data.eventTypes,
+          data.templateIds,
+          endpoint.templateIds,
+        );
+        // Only a list given now is checked: the templates kept were checked when chosen.
+        if (data.templateIds !== undefined) {
+          await assertWebhookTemplates(tx, ctx.tenant.id, templateIds);
+        }
+        const campaignIds = webhookCampaignIdsFor(
+          data.eventTypes,
+          data.campaignIds,
+          endpoint.campaignIds,
+        );
+        // Likewise the campaigns: those kept were checked when chosen (ADR-185).
+        if (data.campaignIds !== undefined) {
+          await assertWebhookCampaigns(tx, ctx.tenant.id, campaignIds);
+        }
+        const assigneeIds = webhookAssigneeIdsFor(
+          data.eventTypes,
+          data.assigneeIds,
+          endpoint.assigneeIds,
+        );
+        // And the members it adds: those it held may no longer take conversations (ADR-181).
+        if (data.assigneeIds !== undefined) {
+          await assertWebhookAssignees(tx, ctx.tenant.id, assigneeIds, endpoint.assigneeIds);
         }
         // Left out, the OAuth client stays as it is (ADR-173).
         const oauth = data.oauth
@@ -1861,13 +2629,19 @@ export function createWebhooksService(deps: {
             messageStatuses,
             messageSenders,
             contactParts,
+            contactFieldKeys,
             automationIds,
             campaignStatuses,
             orderStatuses,
             templateStatuses,
             conversationStatuses,
             runEndStatuses,
+            runTriggers,
             channelAccountIds: channelIds,
+            teamIds,
+            templateIds,
+            campaignIds,
+            assigneeIds,
             ...(data.headers
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
               : {}),
@@ -1896,13 +2670,19 @@ export function createWebhooksService(deps: {
               ...(messageStatuses ? { messageStatuses } : {}),
               ...(messageSenders ? { messageSenders } : {}),
               ...(contactParts ? { contactParts } : {}),
+              ...(contactFieldKeys ? { contactFieldKeys } : {}),
               ...(automationIds ? { automationIds } : {}),
               ...(campaignStatuses ? { campaignStatuses } : {}),
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(templateStatuses ? { templateStatuses } : {}),
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
+              ...(runTriggers ? { runTriggers } : {}),
               ...(channelIds ? { channelIds } : {}),
+              ...(teamIds ? { teamIds } : {}),
+              ...(templateIds ? { templateIds } : {}),
+              ...(campaignIds ? { campaignIds } : {}),
+              ...(assigneeIds ? { assigneeIds } : {}),
               ...webhookOAuthAudit(oauth, endpoint),
             },
           },

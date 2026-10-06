@@ -356,6 +356,17 @@ export const webhookReceipts = opsSchema.table('webhook_receipts', {
   exhaustedAlertedAt: tz('exhausted_alerted_at'),
 });
 
+/**
+ * An administrator's note on a webhook receipt the console lists (ADR-179), deleted with the
+ * receipt. Platform staff read it; only `ops.platform_acknowledge_webhook_receipt` writes it.
+ */
+export const receiptAcknowledgements = opsSchema.table('receipt_acknowledgements', {
+  receiptId: uuid('receipt_id').primaryKey(),
+  acknowledgedByUserId: text('acknowledged_by_user_id').notNull(),
+  acknowledgedAt: tz('acknowledged_at').notNull(),
+  note: text('note').notNull(),
+});
+
 export const webhookQuarantine = opsSchema.table('webhook_quarantine', {
   id: uuid('id').primaryKey(),
   receiptId: uuid('receipt_id').notNull(),

@@ -34,6 +34,11 @@ import {
   WEBHOOK_CONVERSATION_STATUSES,
   WEBHOOK_RUN_END_STATUS_LABELS,
   WEBHOOK_RUN_END_STATUSES,
+  WEBHOOK_RUN_TRIGGER_LABELS,
+  WEBHOOK_RUN_TRIGGERS,
+  WEBHOOK_CAMPAIGN_EVENTS,
+  WEBHOOK_TEAM_EVENTS,
+  WEBHOOK_TEMPLATE_EVENTS,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
@@ -47,7 +52,11 @@ import {
   WEBHOOK_RETRY_SECONDS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUSES,
+  webhookAssigneeText,
+  webhookCampaignText,
   webhookErrorLabel,
+  webhookFieldText,
+  webhookTakesFieldChanges,
   webhookHost,
   webhookReplayAllSummary,
   webhookReplaySummary,
@@ -55,7 +64,12 @@ import {
   webhookOAuthText,
   webhookRetryDelaySeconds,
   webhookTakesAutomationRuns,
+  webhookTakesCampaignEvents,
   webhookTakesChannelEvents,
+  webhookTakesTeamEvents,
+  webhookTakesTemplateEvents,
+  webhookTeamText,
+  webhookTemplateText,
 } from './model';
 import {
   automationRunEndedPayloadSchema,
@@ -95,6 +109,8 @@ import {
   webhookOAuthAudit,
   webhookOAuthColumns,
   webhookOAuthSchema,
+  webhookAssigneeIdsFor,
+  webhookAssigneeIdsSchema,
   webhookAutomationIdsFor,
   webhookAutomationIdsSchema,
   webhookCampaignStatusesFor,
@@ -102,12 +118,16 @@ import {
   webhookChannelIdsFor,
   webhookChannelIdsSchema,
   webhookChannelLabel,
+  webhookContactFieldKeysFor,
+  webhookContactFieldKeysSchema,
   webhookContactPartsFor,
   webhookContactPartsSchema,
   webhookConversationStatusesFor,
   webhookConversationStatusesSchema,
   webhookRunEndStatusesFor,
   webhookRunEndStatusesSchema,
+  webhookRunTriggersFor,
+  webhookRunTriggersSchema,
   webhookHeadersAad,
   webhookHeadersSchema,
   webhookMessageSendersFor,
@@ -116,6 +136,12 @@ import {
   webhookMessageStatusesSchema,
   webhookOrderStatusesFor,
   webhookOrderStatusesSchema,
+  webhookTeamIdsFor,
+  webhookTeamIdsSchema,
+  webhookTemplateIdsFor,
+  webhookTemplateIdsSchema,
+  webhookCampaignIdsFor,
+  webhookCampaignIdsSchema,
   webhookTemplateStatusesFor,
   webhookTemplateStatusesSchema,
 } from './service';
@@ -314,6 +340,7 @@ describe('webhook payload schemas', () => {
             templateName: null,
             sentBy: 'api',
             apiKeyId: base.id,
+            campaignId: null,
           },
           error: { code: '131026', title: 'Message undeliverable' },
           conversation,
@@ -322,6 +349,32 @@ describe('webhook payload schemas', () => {
         },
       }).success,
     ).toBe(true);
+    // A campaign's message names its campaign (ADR-185); the field is always there.
+    const campaignMessage = {
+      id: base.id,
+      status: 'delivered',
+      templateId: base.id,
+      templateName: 'autumn_sale',
+      sentBy: 'campaign',
+      apiKeyId: null,
+      campaignId: base.id,
+    };
+    const campaignStatus = {
+      ...base,
+      type: 'message.status',
+      data: { message: campaignMessage, error: null, conversation, contact, channel },
+    };
+    expect(messageStatusPayloadSchema.safeParse(campaignStatus).success).toBe(true);
+    const { campaignId: _left, ...withoutCampaign } = campaignMessage;
+    for (const message of [withoutCampaign, { ...campaignMessage, campaignId: 'autumn' }]) {
+      expect(
+        messageStatusPayloadSchema.safeParse({
+          ...campaignStatus,
+          data: { ...campaignStatus.data, message },
+        }).success,
+        JSON.stringify(message),
+      ).toBe(false);
+    }
     expect(
       consentChangedPayloadSchema.safeParse({
         ...base,
@@ -475,6 +528,7 @@ describe('webhook payload schemas', () => {
       erased: true,
     };
     // An update also names what it changed (ADR-121), even once the contact is erased: names only.
+    // Its tags are given while the contact is not erased (ADR-182).
     const changes = { 'contact.updated': ['email', 'fields.city', 'tags'] };
     for (const [schema, type] of [
       [contactCreatedPayloadSchema, 'contact.created'],
@@ -483,7 +537,13 @@ describe('webhook payload schemas', () => {
     ] as const) {
       const data = (shown: unknown) =>
         type === 'contact.updated'
-          ? { contact: shown, changes: changes[type] }
+          ? {
+              contact: shown,
+              changes: changes[type],
+              ...(shown === erased
+                ? { tagsAdded: null, tagsRemoved: null }
+                : { tagsAdded: ['vip'], tagsRemoved: ['new'] }),
+            }
           : { contact: shown };
       for (const shown of [person, erased]) {
         expect(schema.safeParse({ ...base, type, data: data(shown) }).success, type).toBe(true);
@@ -533,7 +593,11 @@ describe('webhook payload schemas', () => {
       erased: false,
     };
     const parse = (data: Record<string, unknown>) =>
-      contactUpdatedPayloadSchema.safeParse({ ...base, type: 'contact.updated', data }).success;
+      contactUpdatedPayloadSchema.safeParse({
+        ...base,
+        type: 'contact.updated',
+        data: { tagsAdded: [], tagsRemoved: [], ...data },
+      }).success;
     for (const changes of [
       ['name'],
       ['email', 'fields.city', 'name', 'phone', 'tags'],
@@ -560,6 +624,47 @@ describe('webhook payload schemas', () => {
       expect(parse({ contact: person, changes: [part] }), part).toBe(false);
     }
     expect(parse({ contact: person, changes: 'name' })).toBe(false);
+  });
+
+  it('say which tags a contact.updated added and removed: lists of tags, or null for an older event or an erased contact (ADR-182)', () => {
+    const person = {
+      id: contact.id,
+      name: 'Priya',
+      phone: '+919876543210',
+      email: null,
+      tags: ['repeat', 'vip'],
+      fields: {},
+      consent: { marketing: null, utility: null },
+      source: 'manual',
+      createdAt: base.createdAt,
+      erased: false,
+    };
+    const parse = (tags: Record<string, unknown>) =>
+      contactUpdatedPayloadSchema.safeParse({
+        ...base,
+        type: 'contact.updated',
+        data: { contact: person, changes: ['tags'], ...tags },
+      }).success;
+    for (const tags of [
+      { tagsAdded: ['vip'], tagsRemoved: [] },
+      { tagsAdded: [], tagsRemoved: ['new'] },
+      { tagsAdded: ['repeat', 'vip'], tagsRemoved: ['new', 'trial'] },
+      { tagsAdded: [], tagsRemoved: [] },
+      { tagsAdded: null, tagsRemoved: null },
+    ]) {
+      expect(parse(tags), JSON.stringify(tags)).toBe(true);
+    }
+    // Always given, as lists of tags or null.
+    for (const tags of [
+      {},
+      { tagsAdded: ['vip'] },
+      { tagsRemoved: [] },
+      { tagsAdded: 'vip', tagsRemoved: [] },
+      { tagsAdded: [42], tagsRemoved: [] },
+      { tagsAdded: [], tagsRemoved: [null] },
+    ]) {
+      expect(parse(tags), JSON.stringify(tags)).toBe(false);
+    }
   });
 
   it('describe the automation run events (ADR-078)', () => {
@@ -843,6 +948,7 @@ describe('webhook payload schemas', () => {
             templateName: null,
             sentBy: 'agent',
             apiKeyId: null,
+            campaignId: null,
           },
           error: null,
           conversation,
@@ -1003,12 +1109,33 @@ describe('the OpenAPI document', () => {
       };
     };
     const data = updated.properties.data;
-    expect(data.required).toEqual(['contact', 'changes']);
+    expect(data.required).toEqual(['contact', 'changes', 'tagsAdded', 'tagsRemoved']);
     const list = data.properties.changes?.anyOf?.find((s) => s.items);
     expect(list?.items?.pattern).toBe(CONTACT_CHANGE_PART_RE.source);
     expect(data.properties.changes?.anyOf).toContainEqual({ type: 'null' });
     const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
-    expect(webhooks['contact.updated']?.post?.description).toContain('The event says which.');
+    expect(webhooks['contact.updated']?.post?.description).toContain('The event says which');
+  });
+
+  it('gives the tags a contact.updated added and removed, as lists or null (ADR-182)', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = doc.components.schemas as Record<string, unknown>;
+    type Tags = { anyOf?: { type?: unknown; items?: { type?: unknown } }[]; description?: string };
+    const updated = schemas.WebhookContactUpdated as {
+      properties: { data: { properties: { tagsAdded?: Tags; tagsRemoved?: Tags } } };
+    };
+    const { tagsAdded, tagsRemoved } = updated.properties.data.properties;
+    for (const tags of [tagsAdded, tagsRemoved]) {
+      expect(tags?.anyOf).toEqual([{ type: 'array', items: { type: 'string' } }, { type: 'null' }]);
+      expect(tags?.description).toContain('once the contact is erased');
+    }
+    expect(tagsAdded?.description).toContain(
+      'A tag added and removed again in the same change is in neither list.',
+    );
+    const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
+    expect(webhooks['contact.updated']?.post?.description).toContain(
+      'and which tags were added or removed.',
+    );
   });
 
   it('carry a campaign’s results as the API answers them, without the cost estimate members see (ADR-150)', () => {
@@ -1999,5 +2126,392 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     expect(webhookErrorLabel('oauth_token_refused_400', 500)).toBe(
       'The authorization server refused an access token (HTTP 400)',
     );
+  });
+});
+
+describe('team filters (ADR-174)', () => {
+  const support = '2a3b4c5d-6e7f-4081-9293-a4b5c6d7e8f9';
+  const sales = '3b4c5d6e-7f80-4192-a3b4-c5d6e7f8091a';
+
+  it('take 1 to 50 teams, once each and in lower case, in the order given; null takes every conversation', () => {
+    expect(webhookTeamIdsSchema.parse([sales, support.toUpperCase(), sales, support])).toEqual([
+      sales,
+      support,
+    ]);
+    expect(webhookTeamIdsSchema.parse(null)).toBeNull();
+    const ids = Array.from(
+      { length: WEBHOOK_LIMITS.teams + 1 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(WEBHOOK_LIMITS.teams).toBe(50);
+    expect(webhookTeamIdsSchema.parse(ids.slice(1))).toEqual(ids.slice(1));
+    for (const refused of [[], ids, ['support'], [support, null], support, [42]]) {
+      expect(webhookTeamIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(false);
+    }
+    expect(webhookTeamIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one team, or take every conversation.',
+    );
+    expect(webhookTeamIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 50 teams.',
+    );
+  });
+
+  it("apply to a conversation's messages and changes, whose payloads name it, and no other event", () => {
+    expect(WEBHOOK_TEAM_EVENTS).toEqual([
+      'message.received',
+      'message.status',
+      'conversation.status_changed',
+      'conversation.assignment_changed',
+      'conversation.team_changed',
+    ]);
+    const payloads = {
+      'message.received': messageReceivedPayloadSchema,
+      'message.status': messageStatusPayloadSchema,
+      'conversation.status_changed': conversationStatusPayloadSchema,
+      'conversation.assignment_changed': conversationAssignmentPayloadSchema,
+      'conversation.team_changed': conversationTeamPayloadSchema,
+    } satisfies Record<(typeof WEBHOOK_TEAM_EVENTS)[number], unknown>;
+    for (const type of WEBHOOK_EVENT_KEYS) {
+      const ofATeam = WEBHOOK_TEAM_EVENTS.some((t) => t === type);
+      expect(webhookTakesTeamEvents([type]), type).toBe(ofATeam);
+    }
+    // Each names the conversation it belongs to, so a receiver can look its team up.
+    for (const type of WEBHOOK_TEAM_EVENTS) {
+      expect('conversation' in payloads[type].shape.data.shape, type).toBe(true);
+    }
+    expect(webhookTakesTeamEvents(['consent.changed', 'message.status'])).toBe(true);
+    expect(webhookTakesTeamEvents(['order.received', 'automation.run_started'])).toBe(false);
+    expect(webhookTakesTeamEvents([])).toBe(false);
+  });
+
+  it('are kept only while the endpoint takes an event of a conversation: given, kept, or cleared', () => {
+    expect(webhookTeamIdsFor(['message.received'], [support], null)).toEqual([support]);
+    expect(webhookTeamIdsFor(['conversation.team_changed'], undefined, [sales])).toEqual([sales]);
+    expect(webhookTeamIdsFor(['message.status'], null, [sales])).toBeNull();
+    expect(webhookTeamIdsFor(['message.received'], undefined, null)).toBeNull();
+    expect(webhookTeamIdsFor(['consent.changed', 'order.received'], [support], [sales])).toBeNull();
+    expect(webhookTeamIdsFor(['automation.run_ended'], undefined, [sales])).toBeNull();
+  });
+
+  it('name a team, or say it was deleted', () => {
+    expect(webhookTeamText({ id: support, name: 'Support' })).toBe('Support');
+    expect(webhookTeamText({ id: sales, name: null })).toBe('A deleted team');
+  });
+});
+
+describe('template filters (ADR-175)', () => {
+  const orders = '4c5d6e7f-8091-42a3-b4c5-d6e7f8091a2b';
+  const otp = '5d6e7f80-91a2-43b4-85d6-e7f8091a2b3c';
+
+  it('take 1 to 50 templates, once each and in lower case, in the order given; null takes every template', () => {
+    expect(webhookTemplateIdsSchema.parse([otp, orders.toUpperCase(), otp, orders])).toEqual([
+      otp,
+      orders,
+    ]);
+    expect(webhookTemplateIdsSchema.parse(null)).toBeNull();
+    const ids = Array.from(
+      { length: WEBHOOK_LIMITS.templates + 1 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(WEBHOOK_LIMITS.templates).toBe(50);
+    expect(webhookTemplateIdsSchema.parse(ids.slice(1))).toEqual(ids.slice(1));
+    for (const refused of [[], ids, ['order_update'], [orders, null], orders, [42]]) {
+      expect(webhookTemplateIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookTemplateIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one template, or take every template.',
+    );
+    expect(webhookTemplateIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 50 templates.',
+    );
+  });
+
+  it('apply to message statuses and template changes, whose payloads name the template, and no other event', () => {
+    expect(WEBHOOK_TEMPLATE_EVENTS).toEqual(['message.status', 'template.status_changed']);
+    for (const type of WEBHOOK_EVENT_KEYS) {
+      const ofATemplate = WEBHOOK_TEMPLATE_EVENTS.some((t) => t === type);
+      expect(webhookTakesTemplateEvents([type]), type).toBe(ofATemplate);
+    }
+    // Each names its template, so a receiver can tell them apart.
+    expect('templateId' in messageStatusPayloadSchema.shape.data.shape.message.shape).toBe(true);
+    expect('id' in templateStatusPayloadSchema.shape.data.shape.template.shape).toBe(true);
+    expect(webhookTakesTemplateEvents(['message.received', 'template.status_changed'])).toBe(true);
+    expect(webhookTakesTemplateEvents(['message.received', 'campaign.status_changed'])).toBe(false);
+  });
+
+  it('are kept only while the endpoint takes an event of a template: given, kept, or cleared', () => {
+    expect(webhookTemplateIdsFor(['message.status'], [orders], null)).toEqual([orders]);
+    expect(webhookTemplateIdsFor(['template.status_changed'], undefined, [otp])).toEqual([otp]);
+    expect(webhookTemplateIdsFor(['message.status'], null, [otp])).toBeNull();
+    expect(webhookTemplateIdsFor(['message.status'], undefined, null)).toBeNull();
+    expect(webhookTemplateIdsFor(['message.received'], [orders], [otp])).toBeNull();
+  });
+
+  it('name a template by its name and language', () => {
+    expect(webhookTemplateText({ name: 'order_update', language: 'en_US' })).toBe(
+      'order_update (en_US)',
+    );
+  });
+});
+
+describe('campaign filters (ADR-185)', () => {
+  const autumn = '8091a2b3-c4d5-46e7-b8f9-0a1b2c3d4e5f';
+  const diwali = '91a2b3c4-d5e6-47f8-89a0-b1c2d3e4f5a6';
+
+  it('take 1 to 50 campaigns, once each and in lower case, in the order given; null takes every campaign', () => {
+    expect(webhookCampaignIdsSchema.parse([diwali, autumn.toUpperCase(), diwali, autumn])).toEqual([
+      diwali,
+      autumn,
+    ]);
+    expect(webhookCampaignIdsSchema.parse(null)).toBeNull();
+    const ids = Array.from(
+      { length: WEBHOOK_LIMITS.campaigns + 1 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(WEBHOOK_LIMITS.campaigns).toBe(50);
+    expect(webhookCampaignIdsSchema.parse(ids.slice(1))).toEqual(ids.slice(1));
+    for (const refused of [[], ids, ['autumn_launch'], [autumn, null], autumn, [42]]) {
+      expect(webhookCampaignIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookCampaignIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one campaign, or take every campaign.',
+    );
+    expect(webhookCampaignIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 50 campaigns.',
+    );
+    expect(webhookCampaignIdsSchema.safeParse(['autumn_launch']).error?.issues[0]?.message).toBe(
+      'Choose campaigns from the list.',
+    );
+    // Settings offers the 200 newest; the API takes any of the company's.
+    expect(WEBHOOK_LIMITS.campaignChoices).toBe(200);
+  });
+
+  it('apply to message statuses and campaign changes, whose payloads name the campaign, and no other event', () => {
+    expect(WEBHOOK_CAMPAIGN_EVENTS).toEqual(['message.status', 'campaign.status_changed']);
+    for (const type of WEBHOOK_EVENT_KEYS) {
+      const ofACampaign = WEBHOOK_CAMPAIGN_EVENTS.some((t) => t === type);
+      expect(webhookTakesCampaignEvents([type]), type).toBe(ofACampaign);
+    }
+    // Each names its campaign, so a receiver can tell them apart.
+    expect('campaignId' in messageStatusPayloadSchema.shape.data.shape.message.shape).toBe(true);
+    expect('id' in campaignStatusChangedPayloadSchema.shape.data.shape.campaign.shape).toBe(true);
+    expect(webhookTakesCampaignEvents(['message.received', 'campaign.status_changed'])).toBe(true);
+    expect(webhookTakesCampaignEvents(['message.received', 'template.status_changed'])).toBe(false);
+  });
+
+  it('are kept only while the endpoint takes an event of a campaign: given, kept, or cleared', () => {
+    expect(webhookCampaignIdsFor(['message.status'], [autumn], null)).toEqual([autumn]);
+    expect(webhookCampaignIdsFor(['campaign.status_changed'], undefined, [diwali])).toEqual([
+      diwali,
+    ]);
+    expect(webhookCampaignIdsFor(['message.status'], null, [diwali])).toBeNull();
+    expect(webhookCampaignIdsFor(['message.status'], undefined, null)).toBeNull();
+    expect(webhookCampaignIdsFor(['template.status_changed'], [autumn], [diwali])).toBeNull();
+  });
+
+  it('name a campaign by its name and status, as Campaigns does', () => {
+    expect(webhookCampaignText({ id: autumn, name: 'Autumn launch', status: 'running' })).toBe(
+      'Autumn launch (Sending)',
+    );
+    expect(
+      webhookCampaignText({ id: autumn, name: 'Autumn launch', status: 'pending_approval' }),
+    ).toBe('Autumn launch (Waiting for approval)');
+    expect(webhookCampaignText({ id: autumn, name: 'Autumn launch', status: null })).toBe(
+      'Autumn launch',
+    );
+  });
+});
+
+describe('assignee filters (ADR-181)', () => {
+  const mira = '6e7f8091-a2b3-44c5-96e7-f8091a2b3c4d';
+  const ravi = '7f8091a2-b3c4-45d6-a7f8-091a2b3c4d5e';
+
+  it('take 1 to 50 members, once each and in lower case, in the order given; null takes every conversation', () => {
+    expect(webhookAssigneeIdsSchema.parse([ravi, mira.toUpperCase(), ravi, mira])).toEqual([
+      ravi,
+      mira,
+    ]);
+    expect(webhookAssigneeIdsSchema.parse(null)).toBeNull();
+    const ids = Array.from(
+      { length: WEBHOOK_LIMITS.assignees + 1 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(WEBHOOK_LIMITS.assignees).toBe(50);
+    expect(webhookAssigneeIdsSchema.parse(ids.slice(1))).toEqual(ids.slice(1));
+    for (const refused of [[], ids, ['mira@example.com'], [mira, null], mira, [42]]) {
+      expect(webhookAssigneeIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookAssigneeIdsSchema.safeParse(['mira']).error?.issues[0]?.message).toBe(
+      'Choose members from the list.',
+    );
+    expect(webhookAssigneeIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one member, or take every conversation.',
+    );
+    expect(webhookAssigneeIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 50 members.',
+    );
+  });
+
+  it("apply to the events teams narrow, and an assignment's payload names both members", () => {
+    for (const type of WEBHOOK_EVENT_KEYS) {
+      const ofAConversation = WEBHOOK_TEAM_EVENTS.some((t) => t === type);
+      expect(webhookAssigneeIdsFor([type], [mira], null), type).toEqual(
+        ofAConversation ? [mira] : null,
+      );
+    }
+    // The member it went to and the member it left, as GET /members lists them.
+    const assignment = conversationAssignmentPayloadSchema.shape.data.shape.conversation.shape;
+    expect('assigneeId' in assignment && 'previousAssigneeId' in assignment).toBe(true);
+  });
+
+  it('are kept only while the endpoint takes an event of a conversation: given, kept, or cleared', () => {
+    expect(webhookAssigneeIdsFor(['message.received'], [mira], null)).toEqual([mira]);
+    expect(webhookAssigneeIdsFor(['conversation.assignment_changed'], undefined, [ravi])).toEqual([
+      ravi,
+    ]);
+    expect(webhookAssigneeIdsFor(['message.status'], null, [ravi])).toBeNull();
+    expect(webhookAssigneeIdsFor(['message.received'], undefined, null)).toBeNull();
+    expect(webhookAssigneeIdsFor(['consent.changed', 'order.received'], [mira], [ravi])).toBeNull();
+    expect(webhookAssigneeIdsFor(['automation.run_ended'], undefined, [ravi])).toBeNull();
+  });
+
+  it('name a member, and say when one no longer takes conversations', () => {
+    expect(webhookAssigneeText({ id: mira, name: 'Mira', assignable: true })).toBe('Mira');
+    expect(webhookAssigneeText({ id: ravi, name: 'Ravi', assignable: false })).toBe(
+      'Ravi (no longer takes conversations)',
+    );
+    expect(webhookAssigneeText({ id: ravi, name: null, assignable: false })).toBe(
+      'Unknown member (no longer takes conversations)',
+    );
+  });
+});
+
+describe('run trigger filters (ADR-183)', () => {
+  it('take 1 to 5 of the ways a live run starts, once each in the builder’s order; null takes every run', () => {
+    expect(WEBHOOK_RUN_TRIGGERS).toEqual([
+      'keyword',
+      'conversation_started',
+      'any_message',
+      'store_event',
+      'api',
+    ]);
+    expect(webhookRunTriggersSchema.parse(['api', 'keyword'])).toEqual(['keyword', 'api']);
+    expect(webhookRunTriggersSchema.parse([...WEBHOOK_RUN_TRIGGERS].reverse())).toEqual([
+      ...WEBHOOK_RUN_TRIGGERS,
+    ]);
+    expect(webhookRunTriggersSchema.parse(null)).toBeNull();
+    // Members' test runs send no events, so `test` is not a choice; nor is anything else.
+    for (const refused of [
+      [],
+      ['test'],
+      ['API'],
+      ['keyword', null],
+      'api',
+      [...WEBHOOK_RUN_TRIGGERS, 'api'],
+    ]) {
+      expect(webhookRunTriggersSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookRunTriggersSchema.safeParse(['test']).error?.issues[0]?.message).toBe(
+      'Choose what started the runs from the list.',
+    );
+    expect(webhookRunTriggersSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one way a run starts, or take every run.',
+    );
+    expect(
+      webhookRunTriggersSchema.safeParse([...WEBHOOK_RUN_TRIGGERS, 'api']).error?.issues[0]
+        ?.message,
+    ).toBe('Give each way a run starts once.');
+  });
+
+  it('are the triggers the run events report, each named as the automation pages name it', () => {
+    for (const schema of [automationRunStartedPayloadSchema, automationRunEndedPayloadSchema]) {
+      expect(schema.shape.data.shape.run.shape.trigger.options).toEqual([...WEBHOOK_RUN_TRIGGERS]);
+    }
+    expect(WEBHOOK_RUN_TRIGGER_LABELS).toEqual({
+      keyword: 'Keyword',
+      conversation_started: 'New conversation',
+      any_message: 'Any message',
+      store_event: 'Order messages',
+      api: 'API',
+    });
+  });
+
+  it('are kept only while the endpoint takes a run event: given, kept, or cleared', () => {
+    expect(webhookRunTriggersFor(['automation.run_started'], ['api'], null)).toEqual(['api']);
+    expect(webhookRunTriggersFor(['automation.run_ended'], undefined, ['keyword'])).toEqual([
+      'keyword',
+    ]);
+    expect(
+      webhookRunTriggersFor(['automation.run_started', 'message.received'], null, ['api']),
+    ).toBeNull();
+    expect(webhookRunTriggersFor(['automation.run_ended'], undefined, null)).toBeNull();
+    expect(
+      webhookRunTriggersFor(['message.received', 'order.received'], ['api'], ['api']),
+    ).toBeNull();
+  });
+});
+
+describe('custom field filters (ADR-184)', () => {
+  it('take 1 to 50 field keys, once each in the order given; null takes every field', () => {
+    expect(webhookContactFieldKeysSchema.parse(['tier', 'city', 'tier'])).toEqual(['tier', 'city']);
+    expect(webhookContactFieldKeysSchema.parse(null)).toBeNull();
+    const keys = Array.from({ length: WEBHOOK_LIMITS.contactFields + 1 }, (_, i) => `f${i}`);
+    expect(WEBHOOK_LIMITS.contactFields).toBe(50);
+    expect(webhookContactFieldKeysSchema.parse(keys.slice(1))).toEqual(keys.slice(1));
+    // Keys as GET /contact-fields lists them: no labels, parts or a whole `fields.<key>`.
+    for (const refused of [
+      [],
+      keys,
+      ['City'],
+      ['fields.city'],
+      ['1st'],
+      ['city', null],
+      'city',
+      [7],
+    ]) {
+      expect(
+        webhookContactFieldKeysSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookContactFieldKeysSchema.safeParse(['City']).error?.issues[0]?.message).toBe(
+      'Choose fields from the list.',
+    );
+    expect(webhookContactFieldKeysSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one field, or take every field.',
+    );
+    expect(webhookContactFieldKeysSchema.safeParse(keys).error?.issues[0]?.message).toBe(
+      'Choose at most 50 fields.',
+    );
+  });
+
+  it('apply while an endpoint takes contact.updated for every part or for fields, and are kept or cleared with them', () => {
+    expect(webhookTakesFieldChanges(['contact.updated'], null)).toBe(true);
+    expect(webhookTakesFieldChanges(['contact.updated'], ['email', 'fields'])).toBe(true);
+    expect(webhookTakesFieldChanges(['contact.updated'], ['email', 'tags'])).toBe(false);
+    expect(webhookTakesFieldChanges(['contact.created', 'contact.erased'], null)).toBe(false);
+    expect(webhookContactFieldKeysFor(['contact.updated'], null, ['city'], null)).toEqual(['city']);
+    expect(
+      webhookContactFieldKeysFor(['contact.updated'], ['fields'], undefined, ['tier']),
+    ).toEqual(['tier']);
+    expect(webhookContactFieldKeysFor(['contact.updated'], null, null, ['tier'])).toBeNull();
+    // Parts without fields, or no contact.updated, clear them.
+    expect(
+      webhookContactFieldKeysFor(['contact.updated'], ['name'], undefined, ['tier']),
+    ).toBeNull();
+    expect(webhookContactFieldKeysFor(['contact.created'], null, ['city'], ['tier'])).toBeNull();
+  });
+
+  it('name a field by its label and key, or say it was deleted', () => {
+    expect(webhookFieldText({ key: 'city', label: 'City' })).toBe('City (city)');
+    expect(webhookFieldText({ key: 'tier', label: null })).toBe('tier (deleted)');
   });
 });

@@ -4,6 +4,8 @@ import { Button, Field, Textarea } from '@w360/ui';
 import {
   acknowledgeDeadLetterAction,
   acknowledgeIntegrationFailureAction,
+  acknowledgeLateQueueAction,
+  acknowledgeReceiptAction,
   resolveQuarantineAction,
   retryDeadLetterAction,
   retryWebhookReceiptAction,
@@ -190,6 +192,117 @@ export function AcknowledgeDeadLetterForm({
         <div>
           <Button type="submit" size="sm" disabled={busy || note.trim().length < 10}>
             {busy ? 'Saving…' : 'Acknowledge dead letter'}
+          </Button>
+        </div>
+      </ClientForm>
+    </details>
+  );
+}
+
+/**
+ * Acknowledges a webhook receipt the console lists with a note, or replaces the note (audited,
+ * ADR-179): the other administrators see who looked at it.
+ */
+export function AcknowledgeReceiptForm({
+  receiptId,
+  acknowledged,
+}: {
+  receiptId: string;
+  acknowledged: boolean;
+}) {
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const result = await acknowledgeReceiptAction({ receiptId, note });
+    setBusy(false);
+    if (!result.ok) setError(result.message);
+    else setNote('');
+  }
+  const id = `acknowledge-receipt-${receiptId}`;
+  return (
+    <details className="group">
+      <summary className="cursor-pointer text-sm text-primary underline-offset-4 hover:underline">
+        {acknowledged ? 'Replace the note' : 'Acknowledge'}
+      </summary>
+      <ClientForm onSubmit={submit} className="mt-2 grid w-64 max-w-full gap-2">
+        <FormError message={error} />
+        <Field id={id} label="Note (what was found or done)">
+          {(aria) => (
+            <Textarea
+              {...aria}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              minLength={10}
+              maxLength={500}
+              rows={2}
+              required
+            />
+          )}
+        </Field>
+        <div>
+          <Button type="submit" size="sm" disabled={busy || note.trim().length < 10}>
+            {busy ? 'Saving…' : 'Acknowledge receipt'}
+          </Button>
+        </div>
+      </ClientForm>
+    </details>
+  );
+}
+
+/**
+ * Acknowledges a queue that is late now with a note, or replaces the note (audited, ADR-177): the
+ * other administrators see who looked at it. The lateness is named by when it began, as the page
+ * shows it, so a page left open does not acknowledge a later one.
+ */
+export function AcknowledgeLateQueueForm({
+  queue,
+  lateSince,
+  acknowledged,
+}: {
+  queue: string;
+  lateSince: string;
+  acknowledged: boolean;
+}) {
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const result = await acknowledgeLateQueueAction({ queue, lateSince, note });
+    setBusy(false);
+    if (!result.ok) setError(result.message);
+    else setNote('');
+  }
+  const id = `acknowledge-late-queue-${queue}`;
+  return (
+    <details className="group">
+      <summary className="cursor-pointer text-sm text-primary underline-offset-4 hover:underline">
+        {acknowledged ? 'Replace the note' : 'Acknowledge'}
+      </summary>
+      <ClientForm onSubmit={submit} className="mt-2 grid w-64 max-w-full gap-2">
+        <FormError message={error} />
+        <Field id={id} label="Note (what was found or done)">
+          {(aria) => (
+            <Textarea
+              {...aria}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              minLength={10}
+              maxLength={500}
+              rows={2}
+              required
+            />
+          )}
+        </Field>
+        <div>
+          <Button type="submit" size="sm" disabled={busy || note.trim().length < 10}>
+            {busy ? 'Saving…' : 'Acknowledge late queue'}
           </Button>
         </div>
       </ClientForm>

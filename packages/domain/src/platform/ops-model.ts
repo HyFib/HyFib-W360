@@ -668,6 +668,8 @@ export interface ReceiptNeedingAttention {
   retryable: boolean;
   /** When platform staff were emailed that it used all its attempts (ADR-091). */
   alertedAt: Date | null;
+  /** Who noted that they looked at it, when, and what they noted (ADR-179). */
+  acknowledgement: { at: Date; byName: string | null; note: string } | null;
 }
 
 /** An open quarantine entry, with only the provider ids staff may see (`quarantineExternalIds`). */
@@ -706,6 +708,8 @@ export interface QueueWait {
   /** When platform staff were emailed that it was late (ADR-096). */
   alertedAt: Date | null;
   checkedAt: Date;
+  /** Who noted that they looked at it while it is late, when, and what they noted (ADR-177). */
+  acknowledgement: { at: Date; byName: string | null; note: string } | null;
 }
 
 /**
@@ -867,9 +871,13 @@ export const RECEIPTS_CSV_COLUMNS = [
   'Last error',
   'Staff emailed (UTC)',
   'Retry',
+  'Acknowledged (UTC)',
 ] as const;
 
-/** Meta and Razorpay receipts that failed all their attempts or have waited too long. */
+/**
+ * Meta and Razorpay receipts that failed all their attempts or have waited too long, and when one
+ * was acknowledged (never who or the note, ADR-179).
+ */
 export function receiptsCsv(rows: readonly ReceiptNeedingAttention[]): string {
   return csvFile(
     RECEIPTS_CSV_COLUMNS,
@@ -888,6 +896,7 @@ export function receiptsCsv(rows: readonly ReceiptNeedingAttention[]): string {
         : r.problem === 'waiting'
           ? 'Retried by the sweep'
           : 'Body erased',
+      csvMinute(r.acknowledgement?.at ?? null),
     ]),
   );
 }
@@ -942,6 +951,7 @@ export const QUEUES_CSV_COLUMNS = [
   'Oldest wait (minutes)',
   'Late since (UTC)',
   'Staff emailed (UTC)',
+  'Acknowledged (UTC)',
   'Waits checked (UTC)',
   'Dead letters (24 hours)',
   'Dead letters (7 days)',
@@ -949,7 +959,8 @@ export const QUEUES_CSV_COLUMNS = [
 
 /**
  * Each queue's policy, pg-boss's counts, the oldest wait at the worker's last check in whole
- * minutes (empty when none waited or the queue was not checked) and its dead letters.
+ * minutes (empty when none waited or the queue was not checked), when a late queue was
+ * acknowledged (never who or the note, ADR-177) and its dead letters.
  */
 export function queuesCsv(rows: readonly QueueRow[]): string {
   return csvFile(
@@ -968,6 +979,7 @@ export function queuesCsv(rows: readonly QueueRow[]): string {
       q.wait ? waitMinutes(q.wait.oldestWaitMs) : null,
       csvMinute(q.wait?.lateSince ?? null),
       csvMinute(q.wait?.alertedAt ?? null),
+      csvMinute(q.wait?.acknowledgement?.at ?? null),
       csvMinute(q.wait?.checkedAt ?? null),
       q.deadLetters.last24h,
       q.deadLetters.last7d,

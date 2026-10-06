@@ -17,8 +17,20 @@ import {
   apiListCampaignRecipients,
   apiListCampaigns,
   apiPauseCampaign,
+  apiResumeCampaign,
+  apiCreateCampaign,
+  apiCreateCampaignSchema,
+  apiDraftInputFrom,
+  apiUpdateCampaign,
+  apiUpdateCampaignSchema,
 } from './campaigns';
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
+import {
+  campaignDraftInputOf,
+  microsToAmount,
+  prepareCampaignDraft,
+  type CampaignDraftInput,
+} from '../campaigns/service';
 import { allowedNetworksSchema, bearerToken, generateApiToken, networkEntryProblem } from './keys';
 import {
   apiAddressRefusal,
@@ -105,17 +117,26 @@ import {
   endpointAnnouncement,
 } from './webhook-endpoints';
 import {
+  WEBHOOK_FIELDS_NEED_THE_PART,
+  WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
+  WEBHOOK_ASSIGNEES_NEED_THE_EVENTS,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
+  WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
   WEBHOOK_CHANNELS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
   WEBHOOK_SENDERS_NEED_THE_EVENT,
+  WEBHOOK_TEAMS_NEED_THE_EVENTS,
+  WEBHOOK_TEMPLATES_NEED_THE_EVENTS,
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
 } from '../webhooks/service';
 import {
+  WEBHOOK_CAMPAIGN_EVENTS,
   WEBHOOK_CHANNEL_EVENTS,
+  WEBHOOK_TEAM_EVENTS,
+  WEBHOOK_TEMPLATE_EVENTS,
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_FAILURE_KINDS,
   WEBHOOK_LIMITS,
@@ -187,7 +208,9 @@ describe('API scopes', () => {
       'messages.send_marketing',
       'messages.reply',
       'conversations.write',
+      'campaigns.write',
       'campaigns.stop',
+      'campaigns.resume',
       'automations.start',
       'orders.write',
       'webhooks.manage',
@@ -206,6 +229,10 @@ describe('API scopes', () => {
     expect(API_SCOPE_INFO['contact_fields.manage'].permission).toBe('tenant.settings.manage');
     // Members pause and cancel campaigns with campaigns.send (ADR-128).
     expect(API_SCOPE_INFO['campaigns.stop'].permission).toBe('campaigns.send');
+    // And resume them with it (ADR-176).
+    expect(API_SCOPE_INFO['campaigns.resume'].permission).toBe('campaigns.send');
+    // Members create and edit drafts with campaigns.write (ADR-186).
+    expect(API_SCOPE_INFO['campaigns.write'].permission).toBe('campaigns.write');
     expect(API_SCOPE_INFO['conversations.read'].permission).toBe('inbox.read_all');
     expect(API_SCOPE_INFO['conversations.write'].permission).toBe('inbox.supervise');
     expect(API_SCOPE_INFO['automations.start'].permission).toBe('automations.publish');
@@ -1343,9 +1370,12 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       additionalProperties: unknown;
     };
     expect(Object.keys(update.properties).sort()).toEqual([
+      'assigneeIds',
       'automationIds',
+      'campaignIds',
       'campaignStatuses',
       'channelIds',
+      'contactFieldKeys',
       'contactParts',
       'conversationStatuses',
       'description',
@@ -1357,6 +1387,9 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'oauth',
       'orderStatuses',
       'runEndStatuses',
+      'runTriggers',
+      'teamIds',
+      'templateIds',
       'templateStatuses',
     ]);
     expect(update.additionalProperties).toBe(false);
@@ -1541,6 +1574,373 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(keys(answered.properties.oauth)).toEqual(['clientId', 'scope', 'tokenUrl']);
     expect(answered.required).toContain('oauth');
     expect(doc.info.description).toContain('send it as `Authorization: Bearer <token>`');
+  });
+
+  it('take templates only with message.status or template.status_changed, each once, and a list of them alone is a change (ADR-175)', () => {
+    const a = '0190e9a1-0000-7000-8000-00000000002a';
+    const b = '0190e9a1-0000-7000-8000-00000000002b';
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    for (const event of WEBHOOK_TEMPLATE_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          templateIds: [b, a.toUpperCase(), b],
+        }).templateIds,
+        event,
+      ).toEqual([b, a]);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.received', 'campaign.status_changed'],
+      templateIds: [a],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['templateIds', WEBHOOK_TEMPLATES_NEED_THE_EVENTS],
+    ]);
+    const statuses = { ...base, events: ['message.status'] };
+    for (const body of [
+      { ...statuses, templateIds: [] },
+      { ...statuses, templateIds: ['order_update'] },
+      {
+        ...statuses,
+        templateIds: Array.from(
+          { length: WEBHOOK_LIMITS.templates + 1 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...statuses, templateIds: null }).templateIds,
+    ).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ templateIds: null })).toEqual({
+      templateIds: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ templateIds: [a] })).toEqual({
+      templateIds: [a],
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.templateIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('templateIds');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('templateIds');
+    expect(doc.info.description).toContain(
+      'And it can name templates (its `templateIds`): then it receives the statuses of the messages sent with them and their changes only',
+    );
+  });
+
+  it('take campaigns only with message.status or campaign.status_changed, each once, and a list of them alone is a change (ADR-185)', () => {
+    const a = '0190e9a1-0000-7000-8000-00000000003a';
+    const b = '0190e9a1-0000-7000-8000-00000000003b';
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    for (const event of WEBHOOK_CAMPAIGN_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          campaignIds: [b, a.toUpperCase(), b],
+        }).campaignIds,
+        event,
+      ).toEqual([b, a]);
+    }
+    // Template changes are not a campaign's.
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.received', 'template.status_changed'],
+      campaignIds: [a],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['campaignIds', WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS],
+    ]);
+    const statuses = { ...base, events: ['campaign.status_changed'] };
+    for (const body of [
+      { ...statuses, campaignIds: [] },
+      { ...statuses, campaignIds: ['autumn_launch'] },
+      {
+        ...statuses,
+        campaignIds: Array.from(
+          { length: WEBHOOK_LIMITS.campaigns + 1 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...statuses, campaignIds: null }).campaignIds,
+    ).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ campaignIds: null })).toEqual({
+      campaignIds: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ campaignIds: [a] })).toEqual({
+      campaignIds: [a],
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.campaignIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('campaignIds');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('campaignIds');
+    expect(doc.info.description).toContain(
+      'or campaigns (its `campaignIds`): then the statuses of the messages they sent and their changes only.',
+    );
+  });
+
+  it('take custom fields only with contact.updated for every part or for fields, each once, and a list of them alone is a change (ADR-184)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.updated'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, contactFieldKeys: ['tier', 'city', 'tier'] })
+        .contactFieldKeys,
+    ).toEqual(['tier', 'city']);
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        contactParts: ['email', 'fields'],
+        contactFieldKeys: ['city'],
+      }).contactFieldKeys,
+    ).toEqual(['city']);
+    // Parts without fields, or no contact.updated, take no field changes to narrow.
+    for (const body of [
+      { ...base, contactParts: ['email', 'tags'], contactFieldKeys: ['city'] },
+      { ...base, events: ['contact.created'], contactFieldKeys: ['city'] },
+    ]) {
+      const refused = apiCreateWebhookEndpointSchema.safeParse(body);
+      expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toContainEqual([
+        'contactFieldKeys',
+        WEBHOOK_FIELDS_NEED_THE_PART,
+      ]);
+    }
+    for (const contactFieldKeys of [[], ['City'], ['fields.city']]) {
+      expect(
+        apiCreateWebhookEndpointSchema.safeParse({ ...base, contactFieldKeys }).success,
+        JSON.stringify(contactFieldKeys),
+      ).toBe(false);
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ contactFieldKeys: null })).toEqual({
+      contactFieldKeys: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ contactFieldKeys: ['tier'] })).toEqual({
+      contactFieldKeys: ['tier'],
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.contactFieldKeys?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('contactFieldKeys');
+    const created = schemas.CreateWebhookEndpoint as {
+      properties: Record<string, { description?: string }>;
+    };
+    expect(created.properties.contactFieldKeys?.description).toContain('GET /contact-fields');
+  });
+
+  it('take what started the runs only with a run event, each once, and a list of them alone is a change (ADR-183)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    for (const event of ['automation.run_started', 'automation.run_ended']) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          runTriggers: ['api', 'keyword', 'api'],
+        }).runTriggers,
+        event,
+      ).toEqual(['keyword', 'api']);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.received', 'order.received'],
+      runTriggers: ['api'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['runTriggers', WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS],
+    ]);
+    const runs = { ...base, events: ['automation.run_started'] };
+    for (const body of [
+      { ...runs, runTriggers: [] },
+      { ...runs, runTriggers: ['test'] },
+      { ...runs, runTriggers: ['webhook'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiCreateWebhookEndpointSchema.parse({ ...runs, runTriggers: null }).runTriggers).toBe(
+      null,
+    );
+    expect(apiUpdateWebhookEndpointSchema.parse({ runTriggers: null })).toEqual({
+      runTriggers: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ runTriggers: ['api'] })).toEqual({
+      runTriggers: ['api'],
+    });
+    // Answered as a list of the triggers run events name, or null.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: unknown } }[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.runTriggers?.anyOf?.find((s) => s.items)?.items?.enum).toEqual([
+      'keyword',
+      'conversation_started',
+      'any_message',
+      'store_event',
+      'api',
+    ]);
+    expect(answered.required).toContain('runTriggers');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('runTriggers');
+  });
+
+  it('take members only with an event of a conversation, each once, and a list of them alone is a change (ADR-181)', () => {
+    const a = '0190e9a1-0000-7000-8000-00000000003a';
+    const b = '0190e9a1-0000-7000-8000-00000000003b';
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    // Each event of a conversation allows a list, alongside events of none.
+    for (const event of WEBHOOK_TEAM_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          assigneeIds: [b, a.toUpperCase(), b],
+        }).assigneeIds,
+        event,
+      ).toEqual([b, a]);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['order.received', 'automation.run_started', 'template.status_changed'],
+      assigneeIds: [a],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['assigneeIds', WEBHOOK_ASSIGNEES_NEED_THE_EVENTS],
+    ]);
+    const message = { ...base, events: ['message.received'] };
+    for (const body of [
+      { ...message, assigneeIds: [] },
+      { ...message, assigneeIds: ['agent@example.com'] },
+      {
+        ...message,
+        assigneeIds: Array.from(
+          { length: WEBHOOK_LIMITS.assignees + 1 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...message, assigneeIds: null }).assigneeIds,
+    ).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ assigneeIds: null })).toEqual({
+      assigneeIds: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ assigneeIds: [a] })).toEqual({
+      assigneeIds: [a],
+    });
+    // Answered as a list or null, given as GET /members lists members, and in the overview.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.assigneeIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('assigneeIds');
+    const created = schemas.CreateWebhookEndpoint as {
+      properties: Record<string, { description?: string }>;
+    };
+    expect(created.properties.assigneeIds?.description).toContain('as GET /members lists them');
+    expect(doc.info.description).toContain(
+      'or members (its `assigneeIds`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens.',
+    );
+  });
+
+  it('take teams only with an event of a conversation, each once, and a list of them alone is a change (ADR-174)', () => {
+    const a = '0190e9a1-0000-7000-8000-00000000001a';
+    const b = '0190e9a1-0000-7000-8000-00000000001b';
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    // Each event of a conversation allows a list, alongside events of none.
+    for (const event of WEBHOOK_TEAM_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          teamIds: [b, a.toUpperCase(), b],
+        }).teamIds,
+        event,
+      ).toEqual([b, a]);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['order.received', 'automation.run_started', 'campaign.status_changed'],
+      teamIds: [a],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['teamIds', WEBHOOK_TEAMS_NEED_THE_EVENTS],
+    ]);
+    const message = { ...base, events: ['message.received'] };
+    for (const body of [
+      { ...message, teamIds: [] },
+      { ...message, teamIds: ['support'] },
+      {
+        ...message,
+        teamIds: Array.from(
+          { length: WEBHOOK_LIMITS.teams + 1 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiCreateWebhookEndpointSchema.parse({ ...message, teamIds: null }).teamIds).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ teamIds: null })).toEqual({ teamIds: null });
+    expect(apiUpdateWebhookEndpointSchema.parse({ teamIds: [a] })).toEqual({ teamIds: [a] });
+    // Answered as a list or null, and described in the overview.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.teamIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('teamIds');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('teamIds');
+    expect(doc.info.description).toContain(
+      'It can likewise name teams (its `teamIds`, or the teams chosen in Settings → Webhooks)',
+    );
   });
 
   it('take numbers only with an event that happens on one, each once, and a list of them alone is a change (ADR-170)', () => {
@@ -2606,7 +3006,7 @@ describe('contact custom fields and changes (ADR-112)', () => {
     expect(apiTags([], 'removeTags')).toEqual([]);
   });
 
-  it('change at least one of name, email, fields and tags, and nothing else', () => {
+  it('change at least one of name, email, number, fields and tags, and nothing else', () => {
     expect(apiContactUpdateSchema.parse({ name: '  Priya  ', email: null })).toEqual({
       name: 'Priya',
       email: null,
@@ -2615,9 +3015,23 @@ describe('contact custom fields and changes (ADR-112)', () => {
       addTags: ['vip'],
       removeTags: ['new'],
     });
+    // A number alone is a change (ADR-180); only PATCH takes one.
+    expect(apiContactUpdateSchema.parse({ phone: '+919876543210' })).toEqual({
+      phone: '+919876543210',
+    });
+    expect(apiContactUpdateSchema.safeParse({}).error?.issues[0]?.message).toBe(
+      'Give name, email, phone, fields, addTags or removeTags.',
+    );
+    expect(
+      apiUpdateManyContactsSchema.safeParse({
+        contacts: [{ id: '0190a000-0000-7000-8000-000000000001', phone: '+919876543210' }],
+      }).success,
+    ).toBe(false);
     for (const bad of [
       {},
-      { phone: '+919876543210' },
+      { phone: null },
+      { phone: 919876543210 },
+      { phone: '+9'.padEnd(41, '1') },
       { name: 'x'.repeat(201) },
       { email: 7 },
       { addTags: Array.from({ length: 21 }, (_, i) => `t${i}`) },
@@ -2645,6 +3059,10 @@ describe('contact custom fields and changes (ADR-112)', () => {
     expect(await update(ctx(['contacts.write']), id, { addTags: ['a,b'] })).toBe(
       'validation_failed',
     );
+    // A number that is not one is refused by its place before any read (ADR-180).
+    await expect(
+      apiUpdateContact({} as never, ctx(['contacts.write']), id, { phone: '98111' }),
+    ).rejects.toMatchObject({ code: 'validation_failed', issues: [{ path: 'phone' }] });
     // A tag both added and removed, however it is written.
     const both = await apiUpdateContact({} as never, ctx(['contacts.write']), id, {
       addTags: ['VIP'],
@@ -2743,9 +3161,18 @@ describe('contact custom fields and changes (ADR-112)', () => {
     expect(paths['/contacts/{id}']?.patch?.operationId).toBe('updateContact');
     expect(paths['/contacts/{id}']?.patch?.description).toContain('`contacts.write`');
     expect(paths['/contacts/{id}']?.patch?.description).toContain('`fields.<key>`');
-    expect(paths['/contacts/{id}']?.patch?.description).toContain(
-      'The phone number is not changed through the API.',
-    );
+    for (const words of [
+      'A number changes only when it was typed for the contact, as members change it',
+      'is refused with 412, as is a number on the company',
+      'a number another contact has is refused with 409, without naming that contact',
+      'Only this call changes numbers.',
+    ]) {
+      expect(paths['/contacts/{id}']?.patch?.description).toContain(words);
+    }
+    const patchResponses = (
+      paths['/contacts/{id}']?.patch as unknown as { responses: Record<string, unknown> }
+    ).responses;
+    expect(Object.keys(patchResponses)).toEqual(expect.arrayContaining(['409', '412', '422']));
     expect(paths['/contact-fields']?.get?.operationId).toBe('listContactFields');
     expect(paths['/contact-fields']?.get?.description).toContain('`contacts.read`');
     const schemas = doc.components.schemas as Record<
@@ -2759,6 +3186,7 @@ describe('contact custom fields and changes (ADR-112)', () => {
       'email',
       'fields',
       'name',
+      'phone',
       'removeTags',
     ]);
     expect(schemas.ContactCreate?.properties).toHaveProperty('fields');
@@ -3060,12 +3488,21 @@ describe('reading campaigns (ADR-125)', () => {
     expect(schemas.CampaignWithResults?.properties.results).toMatchObject({
       anyOf: expect.arrayContaining([{ type: 'null' }]),
     });
-    // Counts only: no recipients, members, costs or the draft's settings.
+    // Counts only: no recipients, members or costs. The draft's settings and version are answered
+    // to keys that edit drafts only, and are null for the others (ADR-186).
     expect(Object.keys(schemas.CampaignWithResults?.properties ?? {}).sort()).toEqual(
-      [...Object.keys(schemas.Campaign?.properties ?? {}), 'results'].sort(),
+      [...Object.keys(schemas.Campaign?.properties ?? {}), 'results', 'settings', 'version'].sort(),
     );
     for (const hidden of ['recipients', 'variables', 'budgetMicros', 'launchedBy', 'segmentId']) {
       expect(Object.keys(schemas.CampaignWithResults?.properties ?? {})).not.toContain(hidden);
+    }
+    for (const held of ['settings', 'version'] as const) {
+      expect(schemas.CampaignWithResults?.properties[held]).toMatchObject({
+        anyOf: expect.arrayContaining([{ type: 'null' }]),
+      });
+      expect(schemas.CampaignWithResults?.properties[held]?.description).toContain(
+        'Null unless the key holds campaigns.write.',
+      );
     }
     expect(doc.info.description).toContain('read campaigns, their results and their recipients');
     expect(API_ROUTES).toEqual(
@@ -3240,7 +3677,7 @@ describe('pausing and cancelling campaigns (ADR-128)', () => {
       writes: true,
     });
     expect(API_SCOPE_INFO['campaigns.stop'].description).toContain(
-      "Resuming, approving, scheduling and editing stay in the app, under a member's authority.",
+      "Approving, scheduling and editing stay in the app, under a member's authority, and so does resuming, except a campaign a key paused.",
     );
     // Reading them stays its own scope: stopping does not read results or recipients.
     expect(API_SCOPE_INFO['campaigns.read'].writes).toBe(false);
@@ -3292,7 +3729,9 @@ describe('pausing and cancelling campaigns (ADR-128)', () => {
       );
     }
     expect(pause?.description).toContain('its `pauseReason` is `api`');
-    expect(pause?.description).toContain('Members resume the campaign in the app; a key cannot.');
+    expect(pause?.description).toContain(
+      'Members resume the campaign in the app, and so can a key with `campaigns.resume`',
+    );
     expect(pause?.description).toContain(
       'A draft, a campaign waiting for approval, a completed and a cancelled one are refused with 409',
     );
@@ -3303,7 +3742,7 @@ describe('pausing and cancelling campaigns (ADR-128)', () => {
       { description: string }
     >;
     expect(responses['409']?.description).toContain(
-      'Pausing or cancelling a campaign: its status does not allow it, and the message names the status.',
+      'Pausing, resuming or cancelling a campaign: its status does not allow it, or, resuming, a member or HyFib paused it; the message names the status or the pause reason.',
     );
     expect(doc.info.description).toContain('pause and cancel campaigns');
     const schemas = doc.components.schemas as unknown as Record<
@@ -3323,6 +3762,453 @@ describe('pausing and cancelling campaigns (ADR-128)', () => {
         ['post', '/campaigns/{id}/cancel'],
       ]),
     );
+  });
+});
+
+describe('resuming campaigns keys paused (ADR-176)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const id = '0190a000-0000-7000-8000-000000000002';
+
+  it("have their own writing scope, which members who resume campaigns grant, keeping the launcher's authority", () => {
+    expect(API_SCOPE_KEYS.indexOf('campaigns.resume')).toBe(
+      API_SCOPE_KEYS.indexOf('campaigns.stop') + 1,
+    );
+    expect(API_SCOPE_INFO['campaigns.resume']).toMatchObject({
+      label: 'Resume campaigns keys paused',
+      permission: 'campaigns.send',
+      writes: true,
+    });
+    for (const words of [
+      'Resume a campaign a key paused',
+      'the template still approved, the number active, neither cap reached',
+      'under the authority of the member who launched it, who must still be allowed to send campaigns',
+      'A campaign a member or HyFib paused stays for members to resume in the app.',
+    ]) {
+      expect(API_SCOPE_INFO['campaigns.resume'].description).toContain(words);
+    }
+  });
+
+  it('are refused before anything is read: without the scope (stopping is not enough), outside the plan, while the company is not active, and a bad id is not found', async () => {
+    for (const scopes of [['campaigns.read'], ['campaigns.stop']]) {
+      expect(await code(apiResumeCampaign({} as never, ctx(scopes), id))).toBe('forbidden');
+    }
+    await expect(apiResumeCampaign({} as never, ctx(['campaigns.stop']), id)).rejects.toThrow(
+      'This API key does not have the campaigns.resume scope.',
+    );
+    await expect(
+      apiResumeCampaign({} as never, ctx(['campaigns.resume'], 'active', ['campaigns.stop']), id),
+    ).rejects.toMatchObject({ code: 'forbidden', details: { apiReason: 'not_in_plan' } });
+    for (const status of ['suspended', 'restricted']) {
+      expect(
+        await code(apiResumeCampaign({} as never, ctx(['campaigns.resume'], status), id)),
+      ).toBe('tenant_suspended');
+    }
+    expect(await code(apiResumeCampaign({} as never, ctx(['campaigns.resume']), 'not-an-id'))).toBe(
+      'not_found',
+    );
+  });
+
+  it('are described: the scope, the checks, the pauses it lifts and refuses, and the campaign as the answer', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    type Operation = {
+      operationId: string;
+      description: string;
+      parameters: Record<string, unknown>[];
+      requestBody?: unknown;
+      responses: Record<string, unknown>;
+    };
+    const paths = doc.paths as unknown as Record<string, Record<string, Operation>>;
+    const resume = paths['/campaigns/{id}/resume']?.post;
+    expect(resume?.operationId).toBe('resumeCampaign');
+    for (const words of [
+      'Scope: `campaigns.resume`.',
+      'Resumes a campaign whose `pauseReason` is `api`',
+      'the template is still approved by Meta and the number active (412 otherwise)',
+      'neither the message cap nor the spending cap is reached (412',
+      'under the authority of the member who launched it, who must still be allowed to send campaigns (412 otherwise',
+      'A scheduled or running campaign is answered as it is, so a retry is harmless.',
+      'A campaign a member or HyFib paused (any other `pauseReason`) is refused with 409, naming it',
+      'A draft, a campaign waiting for approval, a completed and a cancelled one are refused with 409',
+      'No `Idempotency-Key` is needed.',
+      '`campaign.status_changed` webhooks report the change.',
+    ]) {
+      expect(resume?.description).toContain(words);
+    }
+    expect(resume?.parameters.map((p) => p.$ref)).toEqual(['#/components/parameters/Id']);
+    expect(resume?.requestBody).toBeUndefined();
+    expect(JSON.stringify(resume?.responses['200'])).toContain('#/components/schemas/Campaign"');
+    expect(Object.keys(resume?.responses ?? {})).toEqual(
+      expect.arrayContaining(['403', '404', '409', '412', '423']),
+    );
+    expect(doc.info.description).toContain(
+      'pause and cancel campaigns and resume the ones you paused',
+    );
+    expect(API_ROUTES).toEqual(expect.arrayContaining([['post', '/campaigns/{id}/resume']]));
+  });
+});
+
+describe('campaign drafts through the API (ADR-186)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const id = '0190a000-0000-7000-8000-000000000003';
+  const segment = '0190a000-0000-7000-8000-000000000004';
+  const number = '0190a000-0000-7000-8000-000000000005';
+  const base: CampaignDraftInput = {
+    name: 'Diwali offer',
+    channelAccountId: number,
+    templateId: null,
+    variables: { header: [], body: [{ source: 'name', fallback: 'there' }] },
+    audience: { kind: 'segment', segmentId: segment },
+    schedule: { kind: 'later', local: '2026-11-01T09:00', timezone: 'Asia/Kolkata' },
+    window: { start: '09:00', end: '20:00' },
+    ratePerMinute: 100,
+    maxMessages: 5000,
+    budget: { amount: '2500.5', currency: 'INR' },
+    stopAfterHours: 48,
+  };
+
+  it('have their own writing scope, which members who edit drafts grant, and never start a campaign', () => {
+    expect(API_SCOPE_KEYS.indexOf('campaigns.write')).toBe(
+      API_SCOPE_KEYS.indexOf('campaigns.read') + 1,
+    );
+    expect(API_SCOPE_INFO['campaigns.write']).toMatchObject({
+      label: 'Create and edit campaign drafts',
+      permission: 'campaigns.write',
+      writes: true,
+    });
+    for (const words of [
+      'Create campaign drafts and edit them as members do',
+      'the audience (a segment or conditions)',
+      'A draft sends nothing: members submit and start it in the app, under the authority of a member allowed to send campaigns.',
+    ]) {
+      expect(API_SCOPE_INFO['campaigns.write'].description).toContain(words);
+    }
+  });
+
+  it('are refused before anything is read: without the scope, outside the plan, while the company is not active, and a bad id is not found', async () => {
+    const body = { name: 'Diwali offer' };
+    for (const scopes of [['campaigns.read'], ['campaigns.stop', 'campaigns.resume']]) {
+      expect(await code(apiCreateCampaign({} as never, ctx(scopes), body, null))).toBe('forbidden');
+      expect(await code(apiUpdateCampaign({} as never, ctx(scopes), id, body))).toBe('forbidden');
+    }
+    await expect(
+      apiCreateCampaign({} as never, ctx(['campaigns.read']), body, null),
+    ).rejects.toThrow('This API key does not have the campaigns.write scope.');
+    await expect(
+      apiUpdateCampaign(
+        {} as never,
+        ctx(['campaigns.write'], 'active', ['campaigns.read']),
+        id,
+        body,
+      ),
+    ).rejects.toMatchObject({ code: 'forbidden', details: { apiReason: 'not_in_plan' } });
+    for (const status of ['suspended', 'restricted']) {
+      expect(
+        await code(apiCreateCampaign({} as never, ctx(['campaigns.write'], status), body, null)),
+      ).toBe('tenant_suspended');
+    }
+    expect(
+      await code(apiUpdateCampaign({} as never, ctx(['campaigns.write']), 'not-an-id', body)),
+    ).toBe('not_found');
+  });
+
+  it("take a name and any of a draft's settings, refusing unknown or malformed ones", () => {
+    expect(apiCreateCampaignSchema.parse({ name: '  Diwali offer ' })).toEqual({
+      name: 'Diwali offer',
+    });
+    const full = {
+      name: 'Diwali offer',
+      channelId: number,
+      templateId: null,
+      variables: { body: [{ source: 'static', value: 'Asha' }] },
+      audience: { conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
+      schedule: { kind: 'later', local: '2026-11-01T09:00' },
+      window: { start: '09:00', end: '20:00' },
+      ratePerMinute: 100,
+      maxMessages: 5000,
+      budget: { amount: '2500', currency: 'INR' },
+      stopAfterHours: 48,
+    };
+    expect(apiCreateCampaignSchema.parse(full)).toEqual({
+      ...full,
+      variables: { header: [], body: [{ source: 'static', value: 'Asha' }] },
+      audience: { match: 'all', conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
+    });
+    expect(apiCreateCampaignSchema.parse({ name: 'A', audience: { segmentId: segment } })).toEqual({
+      name: 'A',
+      audience: { segmentId: segment },
+    });
+    for (const body of [
+      {},
+      { name: ' ' },
+      { name: 'x'.repeat(121) },
+      { name: 'A', launch: true },
+      { name: 'A', status: 'scheduled' },
+      { name: 'A', channelId: 'main' },
+      { name: 'A', audience: { segmentId: segment, conditions: [] } },
+      { name: 'A', audience: { conditions: [] } },
+      {
+        name: 'A',
+        audience: {
+          conditions: [
+            { type: 'group', match: 'any', conditions: [{ type: 'tag', op: 'has', tag: 'a' }] },
+          ],
+        },
+      },
+      { name: 'A', schedule: { kind: 'later' } },
+      { name: 'A', schedule: { kind: 'soon' } },
+      { name: 'A', variables: { body: [{ source: 'static', value: '' }] } },
+      { name: 'A', ratePerMinute: 0 },
+      { name: 'A', maxMessages: 1_000_001 },
+      { name: 'A', budget: { amount: '2500', currency: 'inr' } },
+      { name: 'A', stopAfterHours: 169 },
+      { name: 'A', window: { start: '09:00' } },
+    ]) {
+      expect(apiCreateCampaignSchema.safeParse(body).success, JSON.stringify(body)).toBe(false);
+    }
+    expect(apiUpdateCampaignSchema.parse({ maxMessages: null })).toEqual({ maxMessages: null });
+    expect(apiUpdateCampaignSchema.parse({ expectedVersion: 3, name: 'B' })).toEqual({
+      expectedVersion: 3,
+      name: 'B',
+    });
+    for (const body of [{}, { expectedVersion: 3 }, { expectedVersion: -1, name: 'B' }]) {
+      expect(apiUpdateCampaignSchema.safeParse(body).success, JSON.stringify(body)).toBe(false);
+    }
+    expect(
+      apiUpdateCampaignSchema.safeParse({ expectedVersion: 3 }).error?.issues[0]?.message,
+    ).toBe('Give at least one setting to change');
+  });
+
+  it('keep every setting left out, clear those given as null and keep the time zone without one', () => {
+    expect(apiDraftInputFrom(base, {})).toEqual(base);
+    expect(apiDraftInputFrom(base, { name: 'Renamed', maxMessages: null })).toEqual({
+      ...base,
+      name: 'Renamed',
+      maxMessages: null,
+    });
+    expect(
+      apiDraftInputFrom(base, {
+        channelId: null,
+        audience: null,
+        window: null,
+        ratePerMinute: null,
+        budget: null,
+      }),
+    ).toEqual({
+      ...base,
+      channelAccountId: null,
+      audience: { kind: 'none' },
+      window: null,
+      ratePerMinute: null,
+      budget: null,
+    });
+    const conditions = {
+      match: 'any' as const,
+      conditions: [{ type: 'tag' as const, op: 'has' as const, tag: 'vip' }],
+    };
+    expect(apiDraftInputFrom(base, { audience: conditions }).audience).toEqual({
+      kind: 'conditions',
+      definition: conditions,
+    });
+    expect(apiDraftInputFrom(base, { schedule: { kind: 'now' } }).schedule).toEqual({
+      kind: 'now',
+      timezone: 'Asia/Kolkata',
+    });
+    expect(
+      apiDraftInputFrom(base, {
+        schedule: { kind: 'later', local: '2026-12-01T10:30', timezone: 'Europe/London' },
+      }).schedule,
+    ).toEqual({ kind: 'later', local: '2026-12-01T10:30', timezone: 'Europe/London' });
+  });
+
+  it('read a stored draft back as members type it, and pass members’ checks again unchanged', () => {
+    expect([2_500_000_000, 2_500_500_000, 1, 0].map(microsToAmount)).toEqual([
+      '2500',
+      '2500.5',
+      '0.000001',
+      '0',
+    ]);
+    const stored = {
+      name: 'Diwali offer',
+      channelAccountId: number,
+      templateId: null,
+      variables: { header: [], body: [{ source: 'name', fallback: 'there' }] },
+      segmentId: null,
+      audienceDefinition: { match: 'all', conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
+      scheduleKind: 'later',
+      scheduledLocal: '2026-11-01 09:00:00',
+      timezone: 'Asia/Kolkata',
+      windowStart: '09:00:00',
+      windowEnd: '20:00:00',
+      ratePerMinute: 100,
+      maxMessages: 5000,
+      budgetMicros: 2_500_500_000,
+      budgetCurrency: 'INR',
+      stopAfterHours: 48,
+    } as unknown as Parameters<typeof campaignDraftInputOf>[0];
+    const input = campaignDraftInputOf(stored);
+    expect(input).toEqual({
+      ...base,
+      audience: { kind: 'conditions', definition: stored.audienceDefinition },
+    });
+    const prepared = prepareCampaignDraft(input);
+    expect(prepared).toMatchObject({
+      scheduledLocal: '2026-11-01 09:00:00',
+      budget: { budgetMicros: 2_500_500_000, budgetCurrency: 'INR' },
+    });
+    expect(
+      campaignDraftInputOf({
+        ...stored,
+        segmentId: segment,
+        audienceDefinition: null,
+        scheduleKind: 'now',
+        scheduledLocal: null,
+        windowStart: null,
+        windowEnd: null,
+        budgetMicros: null,
+        budgetCurrency: null,
+      }),
+    ).toMatchObject({
+      audience: { kind: 'segment', segmentId: segment },
+      schedule: { kind: 'now', timezone: 'Asia/Kolkata' },
+      window: null,
+      budget: null,
+    });
+  });
+
+  it('are described: the scope, the checks, drafts only, the version and the draft as the answer', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    type Operation = {
+      operationId: string;
+      description: string;
+      parameters: Record<string, unknown>[];
+      requestBody?: unknown;
+      responses: Record<string, unknown>;
+    };
+    const paths = doc.paths as unknown as Record<string, Record<string, Operation>>;
+    const create = paths['/campaigns']?.post;
+    expect(create?.operationId).toBe('createCampaign');
+    expect(create?.parameters).toEqual([
+      { $ref: '#/components/parameters/IdempotencyKeyOptional' },
+    ]);
+    expect(JSON.stringify(create?.requestBody)).toContain('#/components/schemas/CreateCampaign"');
+    expect(JSON.stringify(create?.responses['201'])).toContain('CampaignWithResults');
+    for (const words of [
+      'Scope: `campaigns.write`.',
+      "checked as members' drafts are",
+      'A draft sends nothing: members review, submit and start it in the app',
+      'One draft per `Idempotency-Key`',
+    ]) {
+      expect(create?.description).toContain(words);
+    }
+    const update = paths['/campaigns/{id}']?.patch;
+    expect(update?.operationId).toBe('updateCampaign');
+    expect(Object.keys(update?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '404', '409', '422', '423']),
+    );
+    for (const words of [
+      'Scope: `campaigns.write`.',
+      'Changes the settings given and keeps the others',
+      'Only a draft is edited: any other status is refused with 409, naming it.',
+      'With `expectedVersion`, a draft changed since you read it',
+    ]) {
+      expect(update?.description).toContain(words);
+    }
+    const schemas = doc.components.schemas as unknown as Record<
+      string,
+      { properties: Record<string, unknown>; required?: string[] }
+    >;
+    expect(schemas.CreateCampaign?.required).toEqual(['name']);
+    expect(Object.keys(schemas.UpdateCampaign?.properties ?? {})).toContain('expectedVersion');
+    expect(Object.keys(schemas.CreateCampaign?.properties ?? {})).not.toContain('expectedVersion');
+    expect(paths['/campaigns/{id}']?.get?.description).toContain(
+      'A key that also holds `campaigns.write` gets its settings',
+    );
+    expect(API_ROUTES).toEqual(
+      expect.arrayContaining([
+        ['post', '/campaigns'],
+        ['patch', '/campaigns/{id}'],
+      ]),
+    );
+  });
+});
+
+describe('cancelling campaign drafts through the API (ADR-187)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const code = (promise: Promise<unknown>) =>
+    promise.then(
+      () => 'done',
+      (error: unknown) => (isAppError(error) ? error.code : String(error)),
+    );
+  const cancel = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    apiCancelCampaign({} as never, ctx(scopes, status, planScopes), 'not-an-id');
+
+  it('take a key that writes drafts as well as one that stops campaigns, checked before anything is read', async () => {
+    // Either scope passes the checks made before the campaign is read (a bad id is then not found).
+    for (const scopes of [
+      ['campaigns.write'],
+      ['campaigns.stop'],
+      ['campaigns.write', 'campaigns.stop'],
+    ]) {
+      expect(await code(cancel(scopes)), scopes.join()).toBe('not_found');
+    }
+    // Neither: refused naming campaigns.stop, as before.
+    await expect(cancel(['campaigns.read', 'campaigns.resume'])).rejects.toThrow(
+      'This API key does not have the campaigns.stop scope.',
+    );
+    // A writing scope: refused while the company is not active, and outside the plan.
+    for (const status of ['suspended', 'restricted']) {
+      expect(await code(cancel(['campaigns.write'], status))).toBe('tenant_suspended');
+    }
+    await expect(cancel(['campaigns.write'], 'active', ['campaigns.read'])).rejects.toMatchObject({
+      code: 'forbidden',
+      details: { apiReason: 'not_in_plan' },
+    });
+    // A stopping key outside the plan with a writing key in it cancels drafts only.
+    expect(
+      await code(cancel(['campaigns.write', 'campaigns.stop'], 'active', ['campaigns.write'])),
+    ).toBe('not_found');
+  });
+
+  it('are described: drafts with campaigns.write, everything else with campaigns.stop', () => {
+    expect(API_SCOPE_INFO['campaigns.write'].description).toContain('; and cancel drafts.');
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const cancelOp = (
+      doc.paths as unknown as Record<string, Record<string, { description: string }>>
+    )['/campaigns/{id}/cancel']?.post;
+    for (const words of [
+      'Scope: `campaigns.stop`.',
+      'A draft is cancelled by a key with `campaigns.write` instead',
+      'A cancelled or completed campaign is answered as it is to a key with either scope',
+      'A draft is refused with 409 to a key without `campaigns.write`',
+      'A key with only `campaigns.write` is refused any other campaign with 403.',
+    ]) {
+      expect(cancelOp?.description).toContain(words);
+    }
   });
 });
 
