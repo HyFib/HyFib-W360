@@ -421,6 +421,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   and `remove_conversation_tag` effects and reads `RunFacts.conversationTags`, which `loadFacts`
   reads; `applyConversationEffect` in the runner applies them under the conversation lock the step
   holds.
+- **Read receipts and typing indicators** (`inbox/read-receipts.ts`, ADR-223): `markRead` in
+  `messaging/inbox.ts` calls `queueReadReceipt` in its transaction; the composer calls
+  `showTypingAction` at most every 20 seconds, which `showTyping` checks and queues; both sign a job
+  (`message.read` or `message.typing`, the message's id as its reference) on the `message.read`
+  queue. The worker's `messageReadHandler` verifies the envelope for the kind it claims and runs
+  `sendReadReceipt`, which checks again and calls `GraphClient.markRead`.
 - **Files customers send** (`messaging/received-media.ts`, ADR-216): the route
   `/c/<company>/inbox/<conversation>/media/<message>` checks that the member can see the
   conversation and reads the message's media record and the receiving account's token in one

@@ -320,6 +320,73 @@ test('a member tags a conversation and lists the inbox by its tags (ADR-220)', a
   await expect(conversation).toBeVisible();
 });
 
+test('with read receipts on, opening a conversation marks the message read and writing shows a typing indicator (ADR-223)', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('inbox-read');
+  const slug = `read-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Rita Reads', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Reading Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  // Off until the company turns it on.
+  await page.goto(`/c/${slug}/settings/inbox`);
+  const setting = page.getByLabel(/Show customers when their messages are read/);
+  await expect(setting).not.toBeChecked();
+  await setting.check();
+  await page.getByRole('button', { name: 'Save read receipt settings' }).click();
+  await expect(page.getByText('Read receipt settings saved.')).toBeVisible();
+
+  const wamid = `wamid.e2e.read.${Date.now()}`;
+  await sendSignedWebhook(
+    request,
+    inboundMessage(wabaId, phoneNumberId, randomWaId(), 'Is anyone there?', new Date(), wamid),
+  );
+  const reads = async () =>
+    (await standInRequests(request)).filter(
+      (r) =>
+        r.path === `/v26.0/${phoneNumberId}/messages` &&
+        (r.body as { message_id?: string } | null)?.message_id === wamid,
+    );
+
+  // Opening the conversation marks the customer's message read in WhatsApp.
+  await page.goto(`/c/${slug}/inbox`);
+  const conversation = page.getByRole('link', { name: /Priya Customer/ });
+  await expect(conversation).toBeVisible({ timeout: 20_000 });
+  await conversation.click();
+  await expect
+    .poll(async () => (await reads()).map((r) => r.body), { timeout: 30_000 })
+    .toEqual([{ messaging_product: 'whatsapp', status: 'read', message_id: wamid }]);
+
+  // Writing a reply shows the customer a typing indicator.
+  const reply = page.getByLabel('Reply');
+  await expect(reply).toBeEnabled();
+  await reply.fill('Let me check that for you');
+  await expect
+    .poll(
+      async () =>
+        (await reads()).filter(
+          (r) => (r.body as { typing_indicator?: unknown }).typing_indicator !== undefined,
+        ).length,
+      { timeout: 30_000 },
+    )
+    .toBe(1);
+  const typing = (await reads()).find(
+    (r) => (r.body as { typing_indicator?: unknown }).typing_indicator !== undefined,
+  );
+  expect(typing?.authorization).toBe(`Bearer ${E2E_CHANNEL_TOKEN}`);
+  expect(typing?.body).toEqual({
+    messaging_product: 'whatsapp',
+    status: 'read',
+    message_id: wamid,
+    typing_indicator: { type: 'text' },
+  });
+});
+
 test('webhooks with a bad signature are refused and store nothing', async ({ request }) => {
   const res = await request.post('/api/webhooks/meta', {
     data: JSON.stringify({ object: 'whatsapp_business_account', entry: [] }),

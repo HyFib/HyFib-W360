@@ -40,6 +40,7 @@ import { automationStateForConversation } from '../automations/service';
 import { latestConversationSource } from '../growth/sources';
 import { conversationHasTag, conversationTagsOf } from '../inbox/conversation-tags';
 import { latestCsatSurvey, queueCsatSurvey } from '../inbox/csat';
+import { queueReadReceipt } from '../inbox/read-receipts';
 import { MENTION_EMAIL_DELAY_MS, scheduleMentionEmail } from '../inbox/mention-emails';
 import {
   INBOX_WORKER_ROLES,
@@ -217,6 +218,7 @@ export function createInboxService(deps: InboxDeps) {
   const csatDeps =
     deps.jobs && deps.signer ? { jobs: deps.jobs, signer: deps.signer, clock } : null;
   const mentionDeps = deps.jobs && deps.signer ? { jobs: deps.jobs, signer: deps.signer } : null;
+  const receiptDeps = mentionDeps;
 
   function visibilityFilter(ctx: TenantContext): SQL | undefined {
     if (can(ctx, 'inbox.read_all')) return undefined;
@@ -1248,6 +1250,11 @@ export function createInboxService(deps: InboxDeps) {
             conversationId: current.id,
             assignedMembershipId: current.assignedMembershipId,
           });
+        }
+        // The customer's latest message is marked read in WhatsApp, when the company turned read
+        // receipts on (ADR-223).
+        if (updated.length > 0 && receiptDeps) {
+          await queueReadReceipt(tx, receiptDeps, ctx.tenant.id, current.id);
         }
       });
     },

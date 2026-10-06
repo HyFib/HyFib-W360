@@ -41,7 +41,7 @@ export default async function ConversationPage({
   const sp = await searchParams;
   const ctx = await requireTenant(slug);
   if (!canUseInbox(ctx)) notFound();
-  const { inbox, savedReplies, crm, flows, commerce, stores } = await getRuntime();
+  const { inbox, savedReplies, crm, flows, commerce, stores, readReceipts } = await getRuntime();
   const since = await liveEventCursor(ctx);
   const before = typeof sp.before === 'string' ? sp.before : undefined;
   let thread: Awaited<ReturnType<typeof inbox.getConversation>>;
@@ -68,6 +68,7 @@ export default async function ConversationPage({
     products,
     orders,
     storeOrders,
+    receipts,
   ] = await Promise.all([
     loadInboxList(ctx, sp),
     can(ctx, 'inbox.assign') && can(ctx, 'members.read')
@@ -87,6 +88,7 @@ export default async function ConversationPage({
       : Promise.resolve([]),
     showCommerce ? commerce.orders(ctx, { conversationId }) : null,
     showStoreOrders ? stores.conversationStoreOrders(ctx, conversationId) : null,
+    canReply ? readReceipts.getSettings(ctx) : null,
   ]);
   const conv = thread.conversation;
   const unread = list.items.find((i) => i.id === conv.id)?.unreadCount ?? 0;
@@ -323,6 +325,7 @@ export default async function ConversationPage({
             disabledReason={disabledReason}
             savedReplies={replies}
             {...(latestMessageId ? { latestMessageId } : {})}
+            typingIndicator={receipts?.enabled ?? false}
           />
           {disabledReason === null ? (
             <Card>

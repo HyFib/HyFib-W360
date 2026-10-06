@@ -1,5 +1,53 @@
 # Progress
 
+## 2026-10-06 — Phase 3 follow-up: read receipts and typing indicators (P3-06, ADR-223)
+
+Status: **Implemented; its database and browser tests run in CI only.** Customers never saw that the
+team read their message or was writing. The local PostgreSQL is unavailable (its Docker daemon
+stopped), so migration 0146 and the new integration and e2e tests below were written but not run
+here.
+
+### Completed
+
+- **Design (ADR-223):** a company setting, off by default; a read receipt when a member opens a
+  conversation with unread messages; a typing indicator while a member writes; signed jobs on a new
+  queue; the request of research M-045.
+- **Migration 0146:** `app.messaging_settings.read_receipts` and the runtime role's update of it.
+- **Domain:** `inbox/read-receipts.ts` (settings, `queueReadReceipt`, `showTyping`,
+  `sendReadReceipt`), `GraphClient.markRead`, `markRead` queuing the receipt; the `message.read`
+  queue in the contracts.
+- **Web and worker:** the setting in Settings → Inbox, the composer's indicator, the worker's
+  `messageReadHandler`; the Graph stand-in answers read receipts as Meta does.
+- **Tests:**
+  - Unit (3 new in `inbox/read-receipts.test.ts`): the request with and without the indicator, the
+    answer, the refusals before the database.
+  - Integration (3 new in `read-receipts.test.ts`): off by default, one receipt per opening with
+    unread messages, typing within the window and sight, the checks when the job runs, Meta's
+    refusals. Written for CI; not run here.
+  - E2E (1 new in `inbox.spec.ts`): the setting turned on, the receipt and the indicator reach the
+    stand-in. Written for CI; not run here.
+- **Docs:** ADR-223; ARCHITECTURE; SECURITY; THREAT-MODEL T210; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P3-06.
+- **Mutation checks:** 9 deliberate regressions tried, all caught on the unit-tested parts. The
+  checks in the company's scope need the database, so their regressions are left to the integration
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                               |
+| `pnpm test` (unit)                                 | 965 passed (97 files)                                               |
+| `pnpm test:integration`, e2e, migration 0146       | not run here: the local PostgreSQL is unavailable; CI runs them     |
+| `pnpm build`                                       | passed                                                              |
+| Mutation checks                                    | 9 deliberate regressions tried, all caught on the unit-tested parts |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                      |
+
+### Known gaps
+
+- Members' presence in the inbox; read receipts with a real WABA (Meta's behaviour for earlier
+  messages and the indicator's duration was not verifiable here).
+
 ## 2026-10-06 — Phase 4 follow-up: automations that tag the conversation (P4-01, W-035, ADR-222)
 
 Status: **Implemented; its database and browser tests run in CI only.** Automations could tag

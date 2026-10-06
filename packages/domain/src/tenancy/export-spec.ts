@@ -1266,6 +1266,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'csat_enabled',
       'csat_question',
       'csat_labels',
+      'read_receipts',
     ],
   },
   {

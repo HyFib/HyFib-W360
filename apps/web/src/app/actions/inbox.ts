@@ -138,3 +138,18 @@ export async function removeConversationTagAction(
     return null;
   });
 }
+
+/**
+ * Shows the customer that a member is writing (ADR-223), when the company turned read receipts on.
+ * Best effort: says whether an indicator was queued and changes nothing else.
+ */
+export async function showTypingAction(
+  slug: string,
+  conversationId: string,
+): Promise<ActionResult<{ outcome: string }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { readReceipts } = await getRuntime();
+    return { outcome: await readReceipts.showTyping(ctx, String(conversationId)) };
+  });
+}

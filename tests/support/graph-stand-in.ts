@@ -131,6 +131,8 @@ export interface StandInState {
   mediaCounter: number;
   /** When set, uploads fail with this Graph error (ADR-218). */
   uploadError: { status: number; code: number; message: string } | null;
+  /** When set, read receipts and typing indicators fail with this Graph error (ADR-223). */
+  readError: { status: number; code: number; message: string } | null;
 }
 
 export interface GraphStandIn {
@@ -333,6 +335,33 @@ function productMessageProblem(
  * Checks a reaction message (research M-182): `reaction` holds only `message_id` and `emoji`, both
  * given. Taking a reaction back (recalled as an empty emoji, M-185) is not in the spec: refused.
  */
+/**
+ * A read receipt as research M-045 gives it: `messaging_product`, `status: read` and the id of the
+ * customer's message, optionally with a text typing indicator, and nothing else.
+ */
+function readReceiptProblem(body: unknown): string | null {
+  const b = (body ?? {}) as Record<string, unknown>;
+  if (b.messaging_product !== 'whatsapp') return 'messaging_product';
+  if (typeof b.message_id !== 'string' || b.message_id.length === 0 || b.message_id.length > 256) {
+    return 'message_id';
+  }
+  if (b.typing_indicator !== undefined) {
+    const typing = b.typing_indicator as Record<string, unknown> | null;
+    if (
+      typeof typing !== 'object' ||
+      typing === null ||
+      typing.type !== 'text' ||
+      Object.keys(typing).length !== 1
+    ) {
+      return 'typing_indicator';
+    }
+  }
+  const extra = Object.keys(b).find(
+    (key) => !['messaging_product', 'status', 'message_id', 'typing_indicator'].includes(key),
+  );
+  return extra ?? null;
+}
+
 function reactionProblem(body: unknown): string | null {
   const b = body as { type?: unknown; reaction?: unknown } | undefined;
   if (b?.type !== 'reaction') return b?.reaction === undefined ? null : 'reaction';
@@ -623,6 +652,7 @@ export async function startGraphStandIn(options: {
     media: new Map(),
     mediaCounter: 0,
     uploadError: null,
+    readError: null,
   };
   for (const token of options.acceptTokens ?? []) {
     state.tokens.set(token, {
@@ -885,6 +915,22 @@ export async function startGraphStandIn(options: {
         return json(res, 200, { id });
       }
       if (req.method === 'POST' && first && second === 'messages') {
+        // A read receipt, with or without a typing indicator (research M-045).
+        if ((body as { status?: unknown } | undefined)?.status === 'read') {
+          const readInvalid = readReceiptProblem(body);
+          if (readInvalid) {
+            return graphError(res, 400, 100, `(#100) Invalid parameter: ${readInvalid}`);
+          }
+          if (state.readError) {
+            return graphError(
+              res,
+              state.readError.status,
+              state.readError.code,
+              state.readError.message,
+            );
+          }
+          return json(res, 200, { success: true });
+        }
         const flowInvalid = flowMessageProblem(body, state.flows);
         if (flowInvalid)
           return graphError(res, 400, 100, `(#100) Invalid parameter: ${flowInvalid}`);

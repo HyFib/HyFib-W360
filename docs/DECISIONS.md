@@ -8736,3 +8736,35 @@ Decision:
 
 Not built: a trigger when a conversation is tagged, tagging from the API's runs, and tags set from
 saved answers.
+
+## ADR-223 Telling customers their message was read and a member is writing (P3-06) (2026-10-06)
+
+Context: a customer who writes to a company on HyFib never saw that anyone read their message: HyFib
+did not send WhatsApp's read receipts, nor the typing indicator WhatsApp offers in the same request
+(research M-045). P3-06 listed typing indicators.
+
+Decision:
+
+- **A company setting, off by default** (Settings → Inbox, "Read receipts and typing";
+  `tenant.settings.manage`, audited as `inbox.read_receipts_updated`; migration 0146 adds
+  `app.messaging_settings.read_receipts`): whether customers may see that the business read their
+  message is the company's choice.
+- **Read receipts:** when a member opens a conversation with unread messages, the transaction that
+  marks it read queues one read receipt for the customer's latest message WhatsApp named (one job
+  per message, signed, on the new `message.read` queue). Earlier messages are not marked one by one;
+  whether WhatsApp shows them read too was not verifiable from this environment.
+- **Typing indicators:** while a member who can reply and see the conversation writes in the
+  composer, inside the 24-hour window on an active number, the composer asks at most every 20
+  seconds; the server queues a typing indicator for the customer's latest message (which marks it
+  read as well). Best effort: a refusal changes nothing for the member, and the composer stops
+  asking once told the setting is off. How long WhatsApp shows the indicator is Meta's; it was not
+  verifiable.
+- **The worker sends** `POST /{phone-number-id}/messages` with `status: read`, the message's id and,
+  for typing, `typing_indicator: {type: text}` (`GraphClient.markRead`), after checking again in the
+  company's scope: the setting still on, an inbound message, the contact not erased, the number
+  active and its account connected. Meta's refusal is logged with what Meta said; a failure worth
+  trying again is retried for a read receipt (marking read again is harmless) and dropped for a
+  typing indicator, which would only show late.
+
+Not built: members' presence in the inbox (who else is viewing or writing in a conversation), read
+receipts for automations' or keys' replies, and marking each unread message read.

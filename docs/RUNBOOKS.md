@@ -514,6 +514,13 @@ conversation already has the maximum number of tags" (20), or "the contact was e
 failed as `version_unreadable` right after a deploy was read by a worker of the previous release:
 roll the workers out, then start the run again.
 
+**Customers do not see that their messages were read (ADR-223).** Settings → Inbox, "Read receipts
+and typing", must be on. A receipt is queued when a member opens a conversation with unread
+messages, for the customer's latest message; the worker logs each job as `read receipt` with its
+outcome (`off`, `contact_erased`, `channel_inactive`, `account_disconnected`, `rejected` with what
+Meta said). Jobs that kept failing are in the dead letters of the `message.read` queue. Typing
+indicators are queued only inside the 24-hour window, at most every 20 seconds per composer.
+
 **Migration 0010 failed.** It builds `app.conversations_team_idx` concurrently. If it failed, an
 INVALID index can remain: run `DROP INDEX CONCURRENTLY app.conversations_team_idx;` and run the
 migrations again.

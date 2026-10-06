@@ -66,6 +66,7 @@ import {
   createRateCardsService,
   createSavedRepliesService,
   createConversationTagsService,
+  createReadReceiptsService,
   createSegmentsService,
   createTeamsService,
   createTemplatesService,
@@ -117,6 +118,7 @@ import {
   type RateCardsService,
   type SavedRepliesService,
   type ConversationTagsService,
+  type ReadReceiptsService,
   type SegmentsService,
   type TeamsService,
   type TemplatesService,
@@ -182,6 +184,8 @@ export interface Runtime {
   savedReplies: SavedRepliesService;
   /** Tags members put on conversations (ADR-220). */
   conversationTags: ConversationTagsService;
+  /** Read receipts and typing indicators to customers (ADR-223). */
+  readReceipts: ReadReceiptsService;
   csat: CsatService;
   outbound: OutboundDeps;
   /** Emails to the members who can approve a campaign waiting for approval (ADR-204). */
@@ -346,6 +350,7 @@ async function init(): Promise<Runtime> {
   const businessHours = createBusinessHoursService({ db, clock: systemClock });
   const savedReplies = createSavedRepliesService({ db, clock: systemClock });
   const conversationTags = createConversationTagsService({ db });
+  const readReceipts = createReadReceiptsService({ db, clock: systemClock, jobs, signer });
   const csat = createCsatService({ db, clock: systemClock });
   const outbound: OutboundDeps = { db, jobs, signer, clock: systemClock };
   const contacts = createContactsService({ db, clock: systemClock });
@@ -559,6 +564,7 @@ async function init(): Promise<Runtime> {
     businessHours,
     savedReplies,
     conversationTags,
+    readReceipts,
     csat,
     outbound,
     campaignNotices,

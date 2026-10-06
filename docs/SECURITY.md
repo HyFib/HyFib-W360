@@ -178,6 +178,10 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   Changes through the API are audited with the counts added and removed, never the tags.
   Automations (ADR-222) tag only the conversation their run answers, under its row lock, with the
   same limit, and never the conversation of an erased contact.
+  Read receipts and typing indicators (ADR-223) are off until a member who manages company settings
+  turns them on (audited). Typing needs `inbox.reply` and sight of the conversation; jobs carry only
+  the message's id in a signed envelope, and the worker re-reads everything in the company's scope
+  and uses the receiving account's token only towards Graph. Nothing is sent for an erased contact.
   Files customers send (ADR-216) are given only to members who can see the conversation, fetched for
   each request with the receiving account's token, which goes only to Graph and to the https address
   Graph returned (no user name or password, no redirects; the address is never stored or logged),

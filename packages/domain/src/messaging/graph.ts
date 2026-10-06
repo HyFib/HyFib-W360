@@ -332,6 +332,28 @@ export class GraphClient {
     );
   }
 
+  /**
+   * POST /{phone-number-id}/messages with `status: read` (research M-045): marks the customer's
+   * message read and, with `typing`, shows the customer a typing indicator. Meta answers
+   * `success: true`.
+   */
+  markRead(phoneNumberId: string, token: string, input: { messageId: string; typing: boolean }) {
+    return this.request(
+      'POST',
+      `/${encodeURIComponent(phoneNumberId)}/messages`,
+      {
+        token,
+        body: {
+          messaging_product: 'whatsapp',
+          status: 'read',
+          message_id: input.messageId,
+          ...(input.typing ? { typing_indicator: { type: 'text' } } : {}),
+        },
+      },
+      (json) => (json.success === true ? { read: true as const } : null),
+    );
+  }
+
   /** POST /{waba-id}/message_templates (response: id, status, category). */
   createTemplate(wabaId: string, token: string, body: Record<string, unknown>) {
     return this.request(

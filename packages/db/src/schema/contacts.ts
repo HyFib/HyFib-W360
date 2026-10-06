@@ -153,6 +153,8 @@ export const messagingSettings = appSchema.table('messaging_settings', {
   csatEnabled: boolean('csat_enabled').notNull().default(false),
   csatQuestion: text('csat_question'),
   csatLabels: text('csat_labels').array(),
+  /** Read receipts and typing indicators to customers (migration 0146, ADR-223). */
+  readReceipts: boolean('read_receipts').notNull().default(false),
   updatedByUserId: text('updated_by_user_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),

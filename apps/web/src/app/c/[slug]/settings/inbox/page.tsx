@@ -6,6 +6,7 @@ import {
   BusinessHoursForm,
   ClosedDaysManager,
   CsatSettingsForm,
+  ReadReceiptsForm,
 } from '@/components/settings/inbox-settings';
 import { ResponseTargetForm } from '@/components/settings/response-target';
 import { formatDayLong } from '@/lib/report-format';
@@ -21,11 +22,12 @@ export default async function InboxSettingsPage({ params }: { params: Promise<{ 
   const ctx = await requireTenant(slug);
   const manage = can(ctx, 'tenant.settings.manage');
   if (!manage && !canUseInbox(ctx)) notFound();
-  const { inbox, businessHours, csat } = await getRuntime();
-  const [target, hours, survey] = await Promise.all([
+  const { inbox, businessHours, csat, readReceipts } = await getRuntime();
+  const [target, hours, survey, receipts] = await Promise.all([
     inbox.getResponseTarget(ctx),
     businessHours.getBusinessHours(ctx),
     csat.getCsatSettings(ctx),
+    readReceipts.getSettings(ctx),
   ]);
   return (
     <div className="grid grid-cols-1 gap-6">
@@ -83,6 +85,18 @@ export default async function InboxSettingsPage({ params }: { params: Promise<{ 
         </CardHeader>
         <CardContent>
           <CsatSettingsForm slug={ctx.tenant.slug} initial={survey} canEdit={manage} />
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Read receipts and typing</CardTitle>
+          <CardDescription>
+            Whether customers see in WhatsApp that the team read their message and is writing a
+            reply. Off until you turn it on.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <ReadReceiptsForm slug={ctx.tenant.slug} initial={receipts.enabled} canEdit={manage} />
         </CardContent>
       </Card>
     </div>

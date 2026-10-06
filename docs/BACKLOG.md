@@ -129,11 +129,14 @@ verification, app review, Embedded Signup configuration).
   turns off, per company, the notice emails about mentions and campaigns; security, sign-in and
   billing emails stay on). **[Conversation tags built; their database and browser tests run only in
   CI]** (ADR-220, W-035, migration 0145: members who can reply tag the conversations they can see,
-  and the inbox shows the tags and filters by one; erasing the contact deletes them). **Remaining:**
-  per-team SLA targets and calendars, SLA breach notifications (email or in-app), presence and
-  typing indicators, private team queues (would change visibility, ADR-029), CSAT by template
-  outside the window (needs a consent decision), CSAT with a real WABA, phone-number masking
-  (W-044).
+  and the inbox shows the tags and filters by one; erasing the contact deletes them). **[Read
+  receipts and typing indicators built; their database and browser tests run only in CI]** (ADR-223,
+  migration 0146: a company setting, off by default, marks the customer's message read when a member
+  opens the conversation and shows the customer a typing indicator while a member writes).
+  **Remaining:** per-team SLA targets and calendars, SLA breach notifications (email or in-app),
+  presence of members (who is viewing a conversation), private team queues (would change visibility,
+  ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA,
+  phone-number masking (W-044).
 
 ## Phase 4 — automation, Flows, CRM, commerce
 

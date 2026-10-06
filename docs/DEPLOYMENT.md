@@ -479,6 +479,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    previous release cannot read a published version with a "Tag the conversation" step and would
    fail its runs as unreadable.
 
+   Migration 0146 (ADR-223) adds `app.messaging_settings.read_receipts` (off) without rewriting the
+   table, and the migration command creates the `message.read` queue: run it before the rollout, or
+   a member opening a conversation of a company that turned read receipts on fails to queue the job.
+   Old servers ignore the column; until the web rollout ends, an old web server shows no setting and
+   queues no receipts.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back
