@@ -48,7 +48,11 @@ verification, app review, Embedded Signup configuration).
   warnings (phase 3 with presence), template picker (phase 3), byte ranges so Safari plays
   recordings and videos.
 - **P2-10 Channel settings UI** — done: connect (Embedded Signup), setup progress and errors, retry,
-  disconnect, quality and health time. Remaining: messaging limits and granted permissions display.
+  disconnect, quality and health time. **[The overview's setup checklist built from the company's
+  data; its database and browser tests run only in CI]** (ADR-233, W-026: two-factor, an active
+  number or one to reconnect, an approved template, contacts, teammates or a pending invitation, a
+  first-response target, each shown to members who can read its data; no migration). Remaining:
+  messaging limits and granted permissions display.
 - **P2-11 Platform quarantine view** — done with P5-10 (ADR-054): the operations console's
   Integrations page lists quarantined webhooks without their content and platform administrators
   resolve them, or retry their receipts, with a reason in the platform audit log.

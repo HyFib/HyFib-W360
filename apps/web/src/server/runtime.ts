@@ -44,6 +44,7 @@ import {
   createFlowsService,
   createReportsService,
   createConsentService,
+  createSetupChecklistService,
   createContactMergeService,
   createContactsService,
   createEmailPreferencesService,
@@ -100,6 +101,7 @@ import {
   type GrowthService,
   type ReportsService,
   type ConsentService,
+  type SetupChecklistService,
   type ContactMergeService,
   type ContactsService,
   type EmailPreferencesService,
@@ -196,6 +198,8 @@ export interface Runtime {
   /** Merging two contacts into one (ADR-224). */
   contactMerges: ContactMergeService;
   consent: ConsentService;
+  /** The company's setup checklist (ADR-233). */
+  setup: SetupChecklistService;
   templates: TemplatesService;
   segments: SegmentsService;
   campaigns: CampaignsService;
@@ -360,6 +364,7 @@ async function init(): Promise<Runtime> {
   const contacts = createContactsService({ db, clock: systemClock });
   const contactMerges = createContactMergeService({ db, clock: systemClock });
   const consent = createConsentService({ db, clock: systemClock });
+  const setup = createSetupChecklistService({ db, clock: systemClock });
   const templates = createTemplatesService({ db, jobs, signer, clock: systemClock });
   const segments = createSegmentsService({ db, clock: systemClock });
   const campaignNotices: CampaignNoticeDeps = { outbox, appBaseUrl: config.APP_BASE_URL };
@@ -576,6 +581,7 @@ async function init(): Promise<Runtime> {
     contacts,
     contactMerges,
     consent,
+    setup,
     templates,
     segments,
     campaigns,

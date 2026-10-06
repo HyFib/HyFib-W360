@@ -14,6 +14,7 @@ export * from './tenancy/deletion-run';
 export * from './tenancy/export';
 export * from './tenancy/export-spec';
 export * from './tenancy/email-preferences';
+export * from './tenancy/setup-checklist';
 export * from './platform/service';
 export * from './jobs/authorize';
 export * from './email/process';

@@ -9101,3 +9101,30 @@ Decision:
 
 Not built: starters in other languages, starters with media headers or website buttons, a gallery of
 other companies' approved templates, and starters through the API.
+
+## ADR-233 The setup checklist from the company's own data (W-026) (2026-10-06)
+
+Context: the overview's "Get started" list was written in phase 1: verifying an email (always done),
+two-factor authentication, inviting the team, and a WhatsApp number marked as not available until
+phase 2. Numbers have long been connectable, yet the step never showed one as connected, and nothing
+pointed new companies at templates, contacts or a reply target.
+
+Decision:
+
+- **Steps from data:** two-factor authentication (the member's own); a WhatsApp number (done while
+  one is active; a number to reconnect is said so); a template Meta approved (a draft is not
+  enough); a contact that is not erased; a teammate who is active or invited and not expired; a
+  first-response target. `createSetupChecklistService` reads them in one read-only transaction in
+  the company's scope, and `setupSteps` turns them into steps with links.
+- **What each member sees:** a step appears only to members who can read its data (`channels.read`,
+  `templates.read`, `contacts.read`, `members.read`; the target to those who set it,
+  `tenant.settings.manage`), and its fact is not even read for others. Links go to the page where
+  the step is taken; a member who cannot write templates is sent to the list, one who can to a new
+  draft with HyFib's starters (ADR-232).
+- **Honest about the deployment:** with no number and Meta's Embedded Signup not set up for the
+  deployment, the number step says so instead of pointing at a page that cannot connect one.
+- **Not a step:** Meta's business verification, which HyFib cannot read, and checking a member's
+  email, which every member has done. No migration.
+
+Not built: dismissing the checklist, steps for automations, campaigns or stores, and counting
+progress across members.

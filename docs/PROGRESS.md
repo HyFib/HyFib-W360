@@ -1,5 +1,43 @@
 # Progress
 
+## 2026-10-06 — The setup checklist from the company's data (W-026, ADR-233)
+
+Status: **Implemented; its database and browser tests run in CI only.** The overview's "Get started"
+list never showed a connected number and pointed nowhere past the team. The local PostgreSQL is
+unavailable, so the integration tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-233):** steps worked out from the company's data, each shown to members who can read
+  it, with links and honest notes; no migration.
+- **Domain:** `tenancy/setup-checklist.ts` (`setupSteps`, `createSetupChecklistService`).
+- **Web:** the overview lists the service's steps with how many are done; the runtime builds the
+  service.
+- **Tests:**
+  - Unit (4 new in `setup-checklist.test.ts`).
+  - Integration (3 in `setup-checklist.test.ts`, one taking a starter template through Meta's review
+    at the stand-in). Written for CI; not run here.
+  - E2E: `onboarding.spec.ts` checks a new company's steps and the team step done by an invitation.
+    Runs in CI.
+- **Docs:** ADR-233; ARCHITECTURE; SECURITY; BACKLOG P2-10; feature matrix W-026.
+- **Mutation checks:** 10/10 deliberate regressions caught, one after a survivor led to a stronger
+  test.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                                           |
+| -------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                            |
+| `pnpm test` (unit)                                 | 102 files, 1013 tests passed                                                     |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it                    |
+| `pnpm build`                                       | passed                                                                           |
+| Mutation checks                                    | 10/10 deliberate regressions caught, one after a survivor led to a stronger test |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                                   |
+
+### Known gaps
+
+- The checklist cannot be dismissed, and Meta's business verification is not a step.
+
 ## 2026-10-06 — Starter templates (W-070, ADR-232)
 
 Status: **Implemented; its browser test runs in CI only.** Members started every template from an

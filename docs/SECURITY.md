@@ -158,8 +158,11 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
 - Notice email choices (ADR-215): a member changes only their own, through
   `app.set_own_email_opt_outs` (SECURITY DEFINER, executable by the runtime role only), which takes
   the membership from the scope, never an argument; the runtime role has no update on memberships.
-  Only the five listed kinds can be turned off (a check constraint); security, sign-in and billing
-  emails cannot be. Each change is audited.
+  Only the listed kinds (six since overdue replies, ADR-230) can be turned off (a check constraint);
+  security, sign-in and billing emails cannot be. Each change is audited.
+- The overview's setup checklist (ADR-233) shows each step only to members who can read its data,
+  and reads no fact for the others; it gives whether something exists (an active number, an approved
+  template, a contact, a teammate, a target), never the records.
 - Bulk tag edits need `contacts.write`, match only the company's contacts that are not erased,
   change at most 10,000 at once and only the number the member was shown, and are audited
   (`contacts.bulk_tagged`: the tag, counts and the filters used, never the search text; ADR-213).

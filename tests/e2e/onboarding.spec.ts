@@ -24,12 +24,26 @@ test('owner signs up, verifies email, creates a company and invites a teammate w
   await expect(owner.getByRole('heading', { name: 'E2E Trading Co' })).toBeVisible();
   // Owners are privileged: the MFA grace-period banner must be shown.
   await expect(owner.getByText('Set up two-factor authentication').first()).toBeVisible();
+  // The setup checklist is worked out from the company's data (ADR-233): nothing done yet.
+  for (const step of [
+    'Connect a WhatsApp Business number',
+    'Add your contacts',
+    'Invite your team',
+    'Set a first-response target',
+  ]) {
+    await expect(owner.getByRole('link', { name: step })).toBeVisible();
+  }
 
   await owner.getByRole('link', { name: 'Settings' }).click();
   await owner.getByRole('link', { name: 'Members' }).click();
   await owner.getByLabel('Email address').fill(agentEmail);
   await owner.getByRole('button', { name: 'Send invitation' }).click();
   await expect(owner.getByText(`Invitation sent to ${agentEmail}.`)).toBeVisible();
+  // A pending invitation is a team: the step is done.
+  await owner.goto(`/c/${slug}`);
+  await expect(owner.getByText('Invite your team (done)')).toBeVisible();
+  await expect(owner.getByRole('link', { name: 'Invite your team' })).toHaveCount(0);
+  await owner.goto(`/c/${slug}/settings/members`);
 
   const invitation = await waitForEmail(agentEmail, "You're invited");
   const inviteUrl = firstLink(invitation);

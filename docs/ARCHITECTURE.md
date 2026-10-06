@@ -168,6 +168,13 @@ lists the kinds turned off (`EMAIL_NOTICE_KINDS` in `tenancy/email-preferences.t
 skips a member with `wantsEmail` before queueing, and the member's own list changes only through
 `app.set_own_email_opt_outs`. Security, sign-in and billing emails are not kinds.
 
+The overview's setup checklist (ADR-233): `createSetupChecklistService`
+(`tenancy/setup-checklist.ts`) reads, in one read-only transaction in the company's scope, only the
+facts the member's permissions cover (numbers by status, an approved template, a contact not erased,
+another active member or an unexpired invitation, the first-response target), and `setupSteps` turns
+them into steps with links. The page says whether the deployment can connect numbers (Embedded
+Signup configured).
+
 ## 6. Messaging pipeline **[built — verified against a local Graph stand-in; no live Meta traffic yet]**
 
 - **Ingestion:** `POST /api/webhooks/meta` reads the raw body with a hard 4 MB cap (Meta payloads can
