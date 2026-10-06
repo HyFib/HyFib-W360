@@ -13,7 +13,7 @@ import {
   standInRequests,
   statusUpdate,
 } from './messaging-support';
-import { signUpAndVerify, uniqueEmail } from './support';
+import { openFromNav, signUpAndVerify, uniqueEmail } from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
 
@@ -49,7 +49,8 @@ test('an inbound WhatsApp message appears live, the agent replies and delivery u
   await expect(page.getByText(/Window open until/)).toBeVisible();
 
   await page.getByLabel('Reply').fill('Yes, in all sizes.');
-  await page.getByRole('button', { name: 'Send' }).click();
+  // Exact: the conversation also has a “Send file” button.
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   // Scoped to the thread: the conversation list shows the same text as its preview.
   const thread = page.getByRole('list', { name: /^Messages with/ });
   await expect(thread.getByText('Yes, in all sizes.')).toBeVisible();
@@ -301,8 +302,10 @@ test('a member tags a conversation and lists the inbox by its tags (ADR-220)', a
   await expect(page.getByRole('button', { name: 'Remove tag vip' })).toBeVisible();
 
   // The list shows them, and its filter offers the tags in use and lists the conversations with
-  // the one chosen.
-  await page.goto(`/c/${slug}/inbox`);
+  // the one chosen. Each change refreshes the conversation, so it is left through the navigation,
+  // not a page load (see openFromNav).
+  await openFromNav(page, 'Inbox');
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}/inbox$`));
   await expect(conversation).toContainText('refund');
   await expect(conversation).toContainText('vip');
   await page.getByLabel('Tag', { exact: true }).selectOption('vip');
@@ -310,13 +313,18 @@ test('a member tags a conversation and lists the inbox by its tags (ADR-220)', a
   await expect(page).toHaveURL(/[?&]tag=vip/);
   await expect(conversation).toBeVisible();
 
-  // Once the tag is removed, the conversation leaves the list filtered by it.
+  // Once the tag is removed, the conversation leaves the list filtered by it. The filter no
+  // longer offers the tag, so the list is loaded by its address, again if a refresh interrupts.
   await conversation.click();
   await page.getByRole('button', { name: 'Remove tag vip' }).click();
   await expect(tags.getByRole('listitem')).toHaveCount(1);
-  await page.goto(`/c/${slug}/inbox?view=all&status=open&tag=vip`);
-  await expect(page.getByText('No conversations here')).toBeVisible();
-  await page.goto(`/c/${slug}/inbox?view=all&status=open&tag=refund`);
+  await expect(async () => {
+    await page.goto(`/c/${slug}/inbox?view=all&status=open&tag=vip`);
+    await expect(page.getByText('No conversations here')).toBeVisible({ timeout: 5_000 });
+  }).toPass({ timeout: 30_000 });
+  await page.getByLabel('Tag', { exact: true }).selectOption('refund');
+  await page.getByRole('button', { name: 'Apply filters' }).click();
+  await expect(page).toHaveURL(/[?&]tag=refund/);
   await expect(conversation).toBeVisible();
 });
 

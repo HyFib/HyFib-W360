@@ -148,7 +148,7 @@ test('an owner merges a customer known only by WhatsApp user id into the contact
   await expect(page.getByText('These contacts cannot be merged')).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
   await page.getByRole('button', { name: 'Merge contacts' }).click();
-  await page.getByRole('dialog').getByRole('button', { name: 'Merge contacts' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Merge contacts' }).click();
 
   // The kept contact has the customer's WhatsApp identity and conversation now.
   await expect(page.getByText('Contacts merged')).toBeVisible();
