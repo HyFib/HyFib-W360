@@ -234,7 +234,7 @@ export const apiUpdateMatchingContactsSchema = z
   })
   .strict();
 
-type ApiSearchCondition = z.infer<typeof apiSearchConditionSchema>;
+export type ApiSearchCondition = z.infer<typeof apiSearchConditionSchema>;
 type ApiSearchItem = z.infer<typeof apiSearchItemSchema>;
 
 /** A condition of the search with its place, like `conditions.2.conditions.1`. */
@@ -378,6 +378,27 @@ async function assertCampaignsExist(
       );
     }
   }
+}
+
+/**
+ * Conditions given through the API as a segment's (ADR-207), checked as a search's are: each
+ * against the company's fields by segments' rules, and campaigns of the company; a problem is
+ * refused naming the condition's place under `base`, like `definition.conditions.1.key`. Segments
+ * hold no groups.
+ */
+export async function apiSegmentConditions(
+  tx: Tx,
+  tenantId: string,
+  conditions: readonly ApiSearchCondition[],
+  base: string,
+): Promise<SegmentCondition[]> {
+  const fields = await loadFieldTypes(tx, tenantId);
+  const placed = conditions.map((condition, i) => ({ condition, place: `${base}.${i}` }));
+  const converted = placed.map(({ condition, place }) =>
+    segmentCondition(condition, place, fields),
+  );
+  await assertCampaignsExist(tx, tenantId, placed);
+  return converted;
 }
 
 /**

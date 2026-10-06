@@ -73,7 +73,12 @@ import {
   apiSubmitCampaignSchema,
   apiUpdateCampaignSchema,
 } from './campaigns';
-import { apiSegmentDetailSchema, apiSegmentSchema } from './segments';
+import {
+  apiCreateSegmentSchema,
+  apiSegmentDetailSchema,
+  apiSegmentSchema,
+  apiUpdateSegmentSchema,
+} from './segments';
 import { apiContactFieldCreateSchema, apiContactFieldUpdateSchema } from './contact-fields';
 import { apiContactSearchSchema, apiUpdateMatchingContactsSchema } from './contact-search';
 import { apiContactSchema } from './contact-view';
@@ -815,7 +820,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, read saved segments, create, edit, review and submit campaign drafts for a member’s approval, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen and assign conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, read and manage saved segments, create, edit, review and submit campaign drafts for a member’s approval, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -1661,6 +1666,20 @@ export function buildOpenApiDocument(serverUrl: string) {
             ...errors(401, 403, 422, 429, 500),
           },
         },
+        post: {
+          operationId: 'createSegment',
+          summary: 'Create a saved segment',
+          description: `${scopeNote('campaigns.write')} A segment with the name and conditions given, as members create them on the Segments page: each condition is checked as POST /contacts/search checks it (a custom field of the company and a comparison its type takes, a valid tag or date, a campaign of the company), and a problem is refused with 422 naming the condition, like \`definition.conditions.1.key\`. A name another segment of the company has, whatever its case, is refused with 409. Members see it on the Segments page; the audit names the key. One segment per \`Idempotency-Key\`: a retry answers with the segment as first created.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateSegment')) },
+          responses: {
+            '201': {
+              description: 'The segment, counted now.',
+              content: json(dataOf(ref('SegmentWithCount'))),
+            },
+            ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
+          },
+        },
       },
       '/segments/{id}': {
         get: {
@@ -1674,6 +1693,42 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('SegmentWithCount'))),
             },
             ...errors(401, 403, 404, 429, 500),
+          },
+        },
+        patch: {
+          operationId: 'updateSegment',
+          summary: 'Change a saved segment',
+          description: `${scopeNote('campaigns.write')} Changes the name or the conditions given, as members change a segment: what is left out stays, new conditions replace its conditions and are checked as POST /contacts/search checks them, and its version goes up. With \`expectedVersion\`, a segment changed since you read it is refused with 409; so is a name another segment has. Campaigns already submitted keep the audience they were submitted with; drafts with this segment take its new conditions. The audit names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateSegment')) },
+          responses: {
+            '200': {
+              description: 'The segment as changed, counted now.',
+              content: json(dataOf(ref('SegmentWithCount'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+        delete: {
+          operationId: 'archiveSegment',
+          summary: 'Archive a saved segment',
+          description: `${scopeNote('campaigns.write')} Archives it, as members do: it leaves the lists and reads, and its name is free again. Campaigns already submitted keep their audience; a draft with it cannot be submitted until it takes another audience. A segment already archived is answered as it is, so a retry is harmless; another company's is not found. The audit names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'Archived.',
+              content: json(
+                dataOf({
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string', format: 'uuid' },
+                    archived: { const: true },
+                  },
+                  required: ['id', 'archived'],
+                }),
+              ),
+            },
+            ...errors(401, 403, 404, 423, 429, 500),
           },
         },
       },
@@ -2363,6 +2418,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         CampaignRecipient: jsonSchema(apiCampaignRecipientSchema),
         Segment: jsonSchema(apiSegmentSchema),
         SegmentWithCount: jsonSchema(apiSegmentDetailSchema),
+        CreateSegment: jsonSchema(apiCreateSegmentSchema, 'input'),
+        UpdateSegment: jsonSchema(apiUpdateSegmentSchema, 'input'),
         Automation: jsonSchema(apiAutomationSchema),
         AutomationRun: jsonSchema(apiAutomationRunSchema),
         StartAutomationRun: jsonSchema(apiStartAutomationSchema, 'input'),
@@ -2443,7 +2500,10 @@ export const API_ROUTES = [
   ['post', '/campaigns/{id}/resume'],
   ['post', '/campaigns/{id}/cancel'],
   ['get', '/segments'],
+  ['post', '/segments'],
   ['get', '/segments/{id}'],
+  ['patch', '/segments/{id}'],
+  ['delete', '/segments/{id}'],
   ['get', '/automations'],
   ['post', '/automations/{id}/runs'],
   ['post', '/automations/{id}/runs/start-many'],

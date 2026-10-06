@@ -30,7 +30,14 @@ import {
   apiWithdrawCampaign,
   toApiCampaignReview,
 } from './campaigns';
-import { apiGetSegment, apiListSegments } from './segments';
+import {
+  apiArchiveSegment,
+  apiCreateSegment,
+  apiGetSegment,
+  apiListSegments,
+  apiUpdateSegment,
+} from './segments';
+import { SEGMENT_NAME_TAKEN, segmentNameRefusal } from '../campaigns/segments';
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import {
   campaignDraftInputOf,
@@ -6227,6 +6234,197 @@ describe('reading saved segments through the API (ADR-206)', () => {
       expect.arrayContaining([
         ['get', '/segments'],
         ['get', '/segments/{id}'],
+      ]),
+    );
+  });
+});
+
+describe('writing saved segments through the API (ADR-207)', () => {
+  const ctx = (scopes: string[], status = 'active', planScopes: string[] | null = null) =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: planScopes ? new Set(planScopes) : null,
+    }) as unknown as ApiContext;
+  const refusal = (promise: Promise<unknown>) =>
+    promise.then(
+      () => ({ code: 'done', paths: [] as string[], message: '' }),
+      (error: unknown) =>
+        isAppError(error)
+          ? {
+              code: error.code,
+              paths: (error.issues ?? []).map((i) => i.path),
+              message: error.publicMessage,
+            }
+          : { code: String(error), paths: [], message: '' },
+    );
+  const id = '0190a000-0000-7000-8000-000000000005';
+  const reached = {
+    db: { run: () => Promise.reject(new Error('the database was reached')) },
+    clock: { now: () => new Date() },
+  } as never;
+  const writer = ctx(['campaigns.write']);
+  const vip = { match: 'all', conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] };
+
+  it('are refused before anything is read: without the scope, outside the plan, while the company is not active, a bad id or a bad body', async () => {
+    const all = (c: ApiContext) => [
+      apiCreateSegment(reached, c, { name: 'VIP', definition: vip }, null),
+      apiUpdateSegment(reached, c, id, { name: 'VIP' }),
+      apiArchiveSegment(reached, c, id),
+    ];
+    for (const attempt of all(ctx(['campaigns.read', 'contacts.write']))) {
+      expect(await refusal(attempt)).toMatchObject({
+        code: 'forbidden',
+        message: 'This API key does not have the campaigns.write scope.',
+      });
+    }
+    for (const attempt of all(ctx(['campaigns.write'], 'active', ['campaigns.read']))) {
+      await expect(attempt).rejects.toMatchObject({ details: { apiReason: 'not_in_plan' } });
+    }
+    for (const status of ['suspended', 'restricted']) {
+      for (const attempt of all(ctx(['campaigns.write'], status))) {
+        expect((await refusal(attempt)).code).toBe('tenant_suspended');
+      }
+    }
+    for (const attempt of [
+      apiUpdateSegment(reached, writer, 'not-an-id', { name: 'VIP' }),
+      apiArchiveSegment(reached, writer, 'not-an-id'),
+    ]) {
+      expect((await refusal(attempt)).code).toBe('not_found');
+    }
+    const tooMany = Array.from({ length: 21 }, (_, i) => ({
+      type: 'tag',
+      op: 'has',
+      tag: `t${i}`,
+    }));
+    for (const [body, paths] of [
+      [{}, ['name', 'definition']],
+      [{ name: ' ', definition: vip }, ['name']],
+      [{ name: 'N'.repeat(81), definition: vip }, ['name']],
+      [{ name: 'VIP', definition: { conditions: [] } }, ['definition.conditions']],
+      [{ name: 'VIP', definition: { conditions: tooMany } }, ['definition.conditions']],
+      [{ name: 'VIP', definition: { ...vip, extra: true } }, ['definition']],
+      [
+        {
+          name: 'VIP',
+          definition: { conditions: [{ type: 'group', match: 'any', conditions: vip.conditions }] },
+        },
+        ['definition.conditions.0.type'],
+      ],
+      [{ name: 'VIP', definition: vip, owner: 'me' }, ['']],
+    ] as const) {
+      expect(
+        await refusal(apiCreateSegment(reached, writer, body, null)),
+        JSON.stringify(body),
+      ).toMatchObject({ code: 'validation_failed', paths });
+    }
+    expect(await refusal(apiUpdateSegment(reached, writer, id, { expectedVersion: 1 }))).toEqual({
+      code: 'validation_failed',
+      paths: [''],
+      message: 'Give a name or conditions to change',
+    });
+    expect(
+      (await refusal(apiUpdateSegment(reached, writer, id, { expectedVersion: -1, name: 'x' })))
+        .paths,
+    ).toEqual(['expectedVersion']);
+    // A good request reaches the database.
+    for (const attempt of all(writer)) {
+      await expect(attempt).rejects.toThrow('the database was reached');
+    }
+  });
+
+  it('refuse a name another segment has with words that say so, members included', () => {
+    const taken = segmentNameRefusal(
+      new AppError('conflict', 'A record with the same unique value already exists.', {
+        details: { constraint: 'segments_name_uq' },
+      }),
+    );
+    expect(taken).toMatchObject({
+      code: 'conflict',
+      publicMessage: 'Another segment already has this name.',
+      issues: [{ path: 'name', message: SEGMENT_NAME_TAKEN }],
+    });
+    const other = new AppError('conflict', 'A record with the same unique value already exists.', {
+      details: { constraint: 'campaigns_pkey' },
+    });
+    expect(segmentNameRefusal(other)).toBe(other);
+    const unexpected = new Error('connection lost');
+    expect(segmentNameRefusal(unexpected)).toBe(unexpected);
+  });
+
+  it('are described: checked as searches are, a taken name refused, archiving answered as it is', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const paths = doc.paths as unknown as Record<
+      string,
+      Record<
+        string,
+        {
+          operationId: string;
+          description: string;
+          parameters: { $ref?: string }[];
+          requestBody?: { content: unknown };
+          responses: Record<string, { content?: unknown }>;
+        }
+      >
+    >;
+    const create = paths['/segments']?.post;
+    expect(create?.operationId).toBe('createSegment');
+    expect(create?.parameters).toEqual([
+      { $ref: '#/components/parameters/IdempotencyKeyOptional' },
+    ]);
+    expect(create?.requestBody?.content).toEqual({
+      'application/json': { schema: { $ref: '#/components/schemas/CreateSegment' } },
+    });
+    expect(Object.keys(create?.responses ?? {})).toEqual(
+      expect.arrayContaining(['201', '409', '422', '423']),
+    );
+    for (const words of [
+      'Scope: `campaigns.write`.',
+      'each condition is checked as POST /contacts/search checks it',
+      'naming the condition, like `definition.conditions.1.key`',
+      'A name another segment of the company has, whatever its case, is refused with 409.',
+      'One segment per `Idempotency-Key`',
+    ]) {
+      expect(create?.description).toContain(words);
+    }
+    const update = paths['/segments/{id}']?.patch;
+    expect(update?.operationId).toBe('updateSegment');
+    expect(update?.requestBody?.content).toEqual({
+      'application/json': { schema: { $ref: '#/components/schemas/UpdateSegment' } },
+    });
+    for (const words of [
+      'what is left out stays, new conditions replace its conditions',
+      'With `expectedVersion`, a segment changed since you read it is refused with 409',
+      'Campaigns already submitted keep the audience they were submitted with',
+    ]) {
+      expect(update?.description).toContain(words);
+    }
+    const archive = paths['/segments/{id}']?.delete;
+    expect(archive?.operationId).toBe('archiveSegment');
+    expect(archive?.requestBody).toBeUndefined();
+    for (const words of [
+      'it leaves the lists and reads, and its name is free again',
+      'A segment already archived is answered as it is, so a retry is harmless',
+    ]) {
+      expect(archive?.description).toContain(words);
+    }
+    const schemas = (
+      doc.components as unknown as { schemas: Record<string, { properties: object }> }
+    ).schemas;
+    expect(Object.keys(schemas.CreateSegment?.properties ?? {})).toEqual(['name', 'definition']);
+    expect(Object.keys(schemas.UpdateSegment?.properties ?? {})).toEqual([
+      'expectedVersion',
+      'name',
+      'definition',
+    ]);
+    expect(API_SCOPE_INFO['campaigns.write'].description).toContain(
+      "Also create, change and archive the company's saved segments.",
+    );
+    expect(API_ROUTES).toEqual(
+      expect.arrayContaining([
+        ['post', '/segments'],
+        ['patch', '/segments/{id}'],
+        ['delete', '/segments/{id}'],
       ]),
     );
   });

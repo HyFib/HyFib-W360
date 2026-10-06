@@ -980,6 +980,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `app.segments` in a read-only transaction, check each definition with `segmentDefinitionSchema`
   and `checkSegmentDefinition` (`campaigns/segments.ts`), as members' segment page does, and count
   one with `segmentWhere` in the company's time zone.
+- **Writing segments (ADR-207):** `apiCreateSegment`, `apiUpdateSegment` and `apiArchiveSegment`
+  (`api/segments.ts`) convert conditions with `apiSegmentConditions` (`api/contact-search.ts`), the
+  search's own checks, write `app.segments` and record a system audit with the key; a unique
+  violation of `segments_name_uq` becomes a 409 through `segmentNameRefusal`
+  (`campaigns/segments.ts`), which members' `createSegment` and `updateSegment` use too.
 - **Media from links (ADR-194):** `apiSendMedia` (`api/resources.ts`) parses `type` `image`,
   `video`, `audio` or `document`, an https `link` (`isMediaLink`) and a caption except for audio,
   and sends through `sendReply` as text replies do: the content keeps the link and the caption, the

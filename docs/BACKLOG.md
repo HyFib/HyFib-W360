@@ -659,6 +659,10 @@ verification, app review, Embedded Signup configuration).
   **[Reading saved segments built; its database tests run only in CI]** (ADR-206: `GET /segments`
   and `GET /segments/{id}` with `campaigns.read` give the company's segments with their conditions
   in the API's words, why one cannot be used and how many contacts one matches now; no migration).
+  **[Writing saved segments built; its database tests run only in CI]** (ADR-207: `POST /segments`,
+  `PATCH /segments/{id}` and `DELETE /segments/{id}` with `campaigns.write` create, change and
+  archive segments as members do, with conditions checked as searches are; a name another segment
+  has is refused with words that say so, for members too; no migration).
   Remaining: uploaded media, call-to-action messages through the API, taking
   reactions back,
   media downloads, changing a field's type,

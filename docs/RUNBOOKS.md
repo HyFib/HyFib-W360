@@ -1852,6 +1852,13 @@ submitted, and `count` is null. `count` is read when asked, from the contacts as
 (erased contacts left out), with dates in the company's time zone, so it changes as contacts do; an
 archived segment is not found.
 
+**A segment a key wrote is refused or not where expected (ADR-207).** A 422 names the condition at
+fault, as `POST /contacts/search` would (a custom field key the company lacks, a comparison its type
+does not take, a campaign of another company); a 409 is a name another segment of the company has,
+whatever its case, or a stale `expectedVersion`. The audit log shows which key created, changed or
+archived a segment. An archived segment leaves members' Segments page and the API's reads; drafts
+with it need another audience before they are submitted.
+
 **A draft's review through the API shows no estimate, or other counts than expected (ADR-193).**
 `GET /campaigns/{id}/review` reads the saved draft as members' review does, now: save the draft
 first. `estimate` is null without a currency (the spending cap's, or else Settings → Messaging),

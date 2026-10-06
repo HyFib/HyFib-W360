@@ -8257,3 +8257,35 @@ Decision:
 
 Not built: creating, changing or archiving segments through the API, and segments' members as pages
 (`POST /contacts/search` with the same conditions finds them).
+
+## ADR-207 Creating, changing and archiving saved segments through the API (P5-08) (2026-10-06)
+
+Context: keys read segments (ADR-206) and give one as a draft's audience (ADR-186), but an
+integration that keeps its audiences elsewhere had to ask a member to build each segment on the
+Segments page. Separately, a member who saved a segment under a name another segment has got only
+the database's generic conflict, "A record with the same unique value already exists".
+
+Decision:
+
+- **Writes with `campaigns.write`,** the permission members create and change segments with:
+  `POST /segments` (the name and conditions; once per `Idempotency-Key`), `PATCH /segments/{id}`
+  (the name or the conditions given, the rest kept, with an optional `expectedVersion`) and
+  `DELETE /segments/{id}`, which archives it as members do. Each answers with the segment as
+  `GET /segments/{id}` reads it, counted now; archiving answers its id.
+- **Checked as a search is:** the conditions go through the code that checks `POST /contacts/search`
+  (`apiSegmentConditions`): a custom field of the company and a comparison its type takes, a valid
+  tag (stored normalized) or date, a campaign of the company; a problem is refused with 422 naming
+  the condition, like `definition.conditions.1.key`. Segments hold no groups. Saving needs no other
+  scope (a condition on messages or campaigns reads nothing when saved; counting it is
+  `GET /segments/{id}`, with `campaigns.read`).
+- **Names:** a name another segment of the company has that is not archived, whatever its case
+  (`segments_name_uq`), is refused with 409 "Another segment already has this name." naming `name`,
+  for keys and for members alike (`segmentNameRefusal`). Archiving frees the name.
+- **Archiving** leaves submitted campaigns' audiences as they were; a draft with the segment cannot
+  be submitted until it takes another audience, as when a member archives it. A segment already
+  archived is answered as it is, so a retry is harmless; another company's is not found.
+- **The audit names the key** (`segment.created`, `segment.updated`, `segment.archived` with source
+  `api`); the segment records no member as its author or last editor.
+- **No migration.**
+
+Not built: segments' members as pages, and restoring an archived segment (members cannot either).

@@ -3,8 +3,10 @@ import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/co
 import { authorizedTenantScope, type TenantScope } from '@w360/db';
 import {
   RECIPIENT_OUTCOMES,
+  apiArchiveSegment,
   apiCancelCampaign,
   apiCreateCampaign,
+  apiCreateSegment,
   apiGetCampaign,
   apiGetSegment,
   apiListCampaignRecipients,
@@ -17,6 +19,7 @@ import {
   apiSearchContacts,
   apiSubmitCampaign,
   apiUpdateCampaign,
+  apiUpdateSegment,
   apiWithdrawCampaign,
   authenticateApiToken,
   campaignApprovalNotice,
@@ -2669,6 +2672,187 @@ describe('reading saved segments through the API (ADR-206)', () => {
     expect(draft.status).toBe(201);
     expect((draft.body as { data: { settings: { audience: unknown } } }).data.settings).toEqual(
       expect.objectContaining({ audience: { segmentId: vip.id } }),
+    );
+  });
+});
+
+describe('writing saved segments through the API (ADR-207)', () => {
+  const idem = (key: string, request: string) => ({ key, requestHash: sha256Hex(request) });
+  /** The code, message and paths of a refusal. */
+  async function refused(promise: Promise<unknown>) {
+    try {
+      await promise;
+    } catch (error) {
+      if (!isAppError(error)) throw error;
+      return {
+        code: error.code,
+        message: error.publicMessage,
+        paths: (error.issues ?? []).map((i) => i.path),
+      };
+    }
+    throw new Error('expected a refusal');
+  }
+  const dataOf = (response: { body: unknown }) =>
+    (response.body as { data: { id: string } & Record<string, unknown> }).data;
+
+  it('creates, changes and archives segments as members do, checked as searches are, the key named in the audit', async () => {
+    const s = await setup();
+    await s.contact('+919820008211', 'Asha');
+    await s.contact('+919820008212', 'Ravi', false);
+    const writer = await apiKey(s.c, ['campaigns.write'], 'Segments');
+    const reader = await apiKey(s.c, ['campaigns.read'], 'Segment reader');
+    const segmentsService = createSegmentsService({ db: fx.dbs.app, clock: systemClock });
+
+    // Created with its conditions checked and normalized as a search's are, once per key.
+    const body = {
+      name: 'VIP buyers',
+      definition: { conditions: [{ type: 'tag', op: 'has', tag: ' VIP ' }] },
+    };
+    const key = idem('vip-1', JSON.stringify(body));
+    const created = await apiCreateSegment(writeDeps(), writer, body, key);
+    expect(created.status).toBe(201);
+    const segment = dataOf(created);
+    expect(segment).toMatchObject({
+      name: 'VIP buyers',
+      definition: { match: 'all', conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
+      problem: null,
+      version: 0,
+      count: 2,
+    });
+    expect((await apiCreateSegment(writeDeps(), writer, body, key)).body).toEqual(created.body);
+    expect(
+      await fx.query(`SELECT count(*)::int AS n FROM app.segments WHERE tenant_id = $1`, [
+        s.c.tenant.id,
+      ]),
+    ).toEqual([{ n: 1 }]);
+    // Members find it among their segments, counted alike.
+    expect((await segmentsService.getSegment(s.owner, segment.id)).preview?.count).toBe(2);
+
+    // Refused naming the condition, as a search is; a name another segment has, whatever its case.
+    const other = await setup();
+    const theirCampaign = await other.draft('Theirs');
+    for (const [given, expected] of [
+      [
+        {
+          name: 'Tiers',
+          definition: {
+            conditions: [{ type: 'field', key: 'tier', op: 'equals', value: 'gold' }],
+          },
+        },
+        { code: 'validation_failed', paths: ['definition.conditions.0.key'] },
+      ],
+      [
+        {
+          name: 'Theirs',
+          definition: {
+            conditions: [
+              { type: 'tag', op: 'has', tag: 'vip' },
+              { type: 'campaign', campaignId: theirCampaign, outcome: 'replied' },
+            ],
+          },
+        },
+        { code: 'validation_failed', paths: ['definition.conditions.1.campaignId'] },
+      ],
+      [
+        { name: 'vip BUYERS', definition: body.definition },
+        { code: 'conflict', message: 'Another segment already has this name.', paths: ['name'] },
+      ],
+    ] as const) {
+      expect(
+        await refused(apiCreateSegment(writeDeps(), writer, given, null)),
+        JSON.stringify(given),
+      ).toMatchObject(expected);
+    }
+    // Members get the same words for a name another segment has.
+    expect(
+      await refused(
+        segmentsService.createSegment(
+          s.owner,
+          {
+            name: 'VIP Buyers',
+            definition: { conditions: [{ type: 'tag', op: 'has', tag: 'x' }] },
+          },
+          {},
+        ),
+      ),
+    ).toMatchObject({ code: 'conflict', message: 'Another segment already has this name.' });
+
+    // Changed: the name alone, then the conditions at the version read; a stale version refused.
+    expect(
+      await apiUpdateSegment(deps(), writer, segment.id, { name: 'Top buyers' }),
+    ).toMatchObject({ name: 'Top buyers', version: 1, definition: segment.definition, count: 2 });
+    const consented = {
+      match: 'any',
+      conditions: [{ type: 'consent', purpose: 'marketing', status: 'opted_in' }],
+    };
+    expect(
+      await apiUpdateSegment(deps(), writer, segment.id, {
+        expectedVersion: 1,
+        definition: consented,
+      }),
+    ).toMatchObject({ name: 'Top buyers', version: 2, definition: consented, count: 1 });
+    expect(
+      await refused(
+        apiUpdateSegment(deps(), writer, segment.id, { expectedVersion: 1, name: 'x' }),
+      ),
+    ).toEqual({
+      code: 'conflict',
+      message:
+        'This segment has changed since you read it: its version is 2. Read it again and give the version it has.',
+      paths: [],
+    });
+    const second = dataOf(
+      await apiCreateSegment(writeDeps(), writer, { name: 'Second', definition: consented }, null),
+    );
+    expect(
+      await refused(apiUpdateSegment(deps(), writer, second.id, { name: 'TOP buyers' })),
+    ).toMatchObject({ code: 'conflict', paths: ['name'] });
+
+    // Archived, a retry answered as it is; it leaves the reads and its name is free again.
+    for (let i = 0; i < 2; i += 1) {
+      expect(await apiArchiveSegment(writeDeps(), writer, segment.id)).toEqual({
+        id: segment.id,
+        archived: true,
+      });
+    }
+    expect((await refused(apiGetSegment(deps(), reader, segment.id))).code).toBe('not_found');
+    expect(
+      (await refused(apiUpdateSegment(deps(), writer, segment.id, { name: 'Back' }))).code,
+    ).toBe('not_found');
+    expect(
+      (
+        await apiCreateSegment(
+          writeDeps(),
+          writer,
+          { name: 'Top buyers', definition: consented },
+          null,
+        )
+      ).status,
+    ).toBe(201);
+    // Another company's segment is not found.
+    const theirs = await segmentsService.createSegment(
+      other.owner,
+      { name: 'Theirs', definition: { conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] } },
+      {},
+    );
+    expect(
+      (await refused(apiUpdateSegment(deps(), writer, theirs.id, { name: 'Mine' }))).code,
+    ).toBe('not_found');
+    expect((await refused(apiArchiveSegment(writeDeps(), writer, theirs.id))).code).toBe(
+      'not_found',
+    );
+
+    // The audit names the key: created, changed twice, archived once.
+    expect(
+      await fx.query(
+        `SELECT action, actor_type, actor_id, metadata->>'source' AS source FROM app.audit_events
+          WHERE subject_id = $1 ORDER BY occurred_at, id`,
+        [segment.id],
+      ),
+    ).toEqual(
+      ['segment.created', 'segment.updated', 'segment.updated', 'segment.archived'].map(
+        (action) => ({ action, actor_type: 'api_key', actor_id: writer.key.id, source: 'api' }),
+      ),
     );
   });
 });

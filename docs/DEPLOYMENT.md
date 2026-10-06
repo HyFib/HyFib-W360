@@ -412,6 +412,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-206 has no migration: until the web rollout ends, an old web server answers `GET /segments`
    and `GET /segments/{id}` with 404.
 
+   ADR-207 has no migration: until the web rollout ends, an old web server answers `POST /segments`
+   and `PATCH` and `DELETE /segments/{id}` with 404, and gives members the generic message for a
+   segment name another segment has.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back
