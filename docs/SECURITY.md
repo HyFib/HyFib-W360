@@ -634,10 +634,10 @@ Phase 5 rules (Public API, P5-08):
   names (ADR-125, ADR-186), `campaigns.send` for `campaigns.stop` (ADR-128) and `campaigns.resume`
   (ADR-176), `commerce.read` for `orders.read` (ADR-167), `inbox.reply` for `orders.write` (ADR-168)
   and `orders.request_payment` (ADR-283), `channels.read` for the scope of the same name (ADR-171),
-  `crm.read` for `deals.read` (ADR-253), `tasks.read` (ADR-258) and `notes.read` (ADR-279), and
-  `crm.write` for `deals.write` (ADR-254, ADR-255), `tasks.write` (ADR-259) and `notes.write`
-  (ADR-268). Nobody grants a key more than they hold, and rotating needs the same. A key keeps the
-  scopes it was created with.
+  `reports.read` for the scope of the same name (ADR-297), `crm.read` for `deals.read` (ADR-253),
+  `tasks.read` (ADR-258) and `notes.read` (ADR-279), and `crm.write` for `deals.write` (ADR-254,
+  ADR-255), `tasks.write` (ADR-259) and `notes.write` (ADR-268). Nobody grants a key more than they
+  hold, and rotating needs the same. A key keeps the scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -1198,6 +1198,12 @@ Phase 5 rules (Public API, P5-08):
   for the company with no member, and the worker checks its signature, kind and company before it
   calls Meta with the account's stored credential, which keys never see. The audit log names the key
   (unit tests; integration tests, run in CI only).
+- Reports (ADR-297): `GET /reports` needs `reports.read`, granted only by members who hold it,
+  checked before any query; the query is checked before any query too, and the period in the
+  company's time zone read from the database, never from the request. The report is read under row
+  security in the key's company, in one read-only snapshot, and holds counts and the names of
+  members, campaigns, automations, pipelines and stages: never a message, a contact, a conversation,
+  a member's role or email (unit tests; integration tests, run in CI only).
 - Reading a deal's history (ADR-281): `GET /deals/{id}/history` needs `deals.read` and the CRM in
   the plan, checked before anything is read; it reads the key's company's deal only (another
   company's answers 404, as an unknown one does; an id that is not a UUID is refused before any

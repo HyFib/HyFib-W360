@@ -963,6 +963,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    Rolling web servers back does the same. Workers need no change: they already run template jobs
    that name no member.
 
+   Migration 0219 (ADR-297) replaces the API keys' and plans' scope checks with `reports.read`
+   (validated at once). Until the web rollout ends, an old web server answers Settings → API keys
+   with an error for a company with a key holding `reports.read`, and answers `GET /api/v1/reports`
+   with 404; rolling web servers back does the same. Workers are unaffected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

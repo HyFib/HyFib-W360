@@ -1,5 +1,38 @@
 # Progress
 
+## 2026-10-07 — The Reports page's numbers through the public API (P5-08, H-033, W-157, ADR-297)
+
+Status: **Implemented; its database tests run in CI only.** Keys read the records but not the
+Reports page's numbers, so a company feeding a BI tool downloaded the CSV exports by hand. The local
+PostgreSQL is unavailable, so the migration and the integration tests below were written but not run
+here; migration 0219 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0219 (`reports.read` in the scope checks of keys and plans).
+- **Domain:** `api/reports.ts` (`apiGetReport`, `apiReportQuerySchema`, `apiReportSchema`,
+  `toApiReport`); `readReport` shared from `reports/service.ts` with the page's `getReport`; the
+  forecast's API schema moved to `api/pipeline-forecast.ts`; the scope; the OpenAPI operation and
+  component.
+- **Web:** `GET /api/v1/reports`.
+- **Tests:** unit (`api/reports.test.ts`, 5: the scope, the query, the period cut in the company's
+  time zone, the snapshot, the mapping and its schema, the OpenAPI entry); integration (2 new in
+  `api.test.ts`). Written for CI; the integration tests were not run here. No e2e test.
+- **Docs:** ADR-297; ARCHITECTURE; SECURITY; THREAT-MODEL T265; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-157.
+- **Mutation checks:** 28/28 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 133 files, 1268 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0219                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Template submission and deletion at Meta through the public API (P5-08, H-033, W-059, ADR-296)
 
 Status: **Implemented; its database tests run in CI only.** Keys could add and change drafts

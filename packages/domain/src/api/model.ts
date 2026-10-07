@@ -42,6 +42,7 @@ export const API_SCOPE_KEYS = [
   'business_hours.read',
   'business_hours.manage',
   'saved_replies.manage',
+  'reports.read',
   'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
 
@@ -283,6 +284,13 @@ export const API_SCOPE_INFO: Record<
       "Read, add, change and delete the company's saved replies, the answers members put in the reply box, as members who supervise the inbox do in Settings → Saved replies, recorded as changed through the API and in the audit log as done by the key. Keys that send replies read them too.",
     permission: 'inbox.supervise',
     writes: true,
+  },
+  'reports.read': {
+    label: 'Read reports',
+    description:
+      "Read the numbers the Reports page shows for a period: messaging outcomes, estimated Meta charges, the inbox's reply and resolution times, satisfaction surveys, automation runs, CRM deals and forecasts, each member's activity and the funnel of campaigns, with what each metric counts. Counts, with the names of members, campaigns, automations and pipelines: never a message, contact or conversation.",
+    permission: 'reports.read',
+    writes: false,
   },
   'webhooks.manage': {
     label: 'Manage webhook endpoints',

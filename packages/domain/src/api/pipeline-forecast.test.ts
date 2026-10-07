@@ -5,8 +5,12 @@ import type { Database, SQL, Tx } from '@w360/db';
 import { forecastByMonth, readForecastGroups } from '../crm/forecast';
 import type { ApiContext } from './context';
 import { API_SCOPE_INFO } from './model';
-import { API_ROUTES, apiPipelineForecastSchema, buildOpenApiDocument } from './openapi';
-import { apiGetPipelineForecast, toApiPipelineForecast } from './pipeline-forecast';
+import { API_ROUTES, buildOpenApiDocument } from './openapi';
+import {
+  apiGetPipelineForecast,
+  apiPipelineForecastSchema,
+  toApiPipelineForecast,
+} from './pipeline-forecast';
 
 const TENANT = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
 const PIPELINE = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';

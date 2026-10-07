@@ -39,6 +39,7 @@ export const API_SCOPES = [
   'business_hours.read',
   'business_hours.manage',
   'saved_replies.manage',
+  'reports.read',
   'webhooks.manage',
 ] as const;
 export type ApiScope = (typeof API_SCOPES)[number];

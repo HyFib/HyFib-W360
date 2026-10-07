@@ -2140,6 +2140,15 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**A report request answers 403 or 422, or its numbers differ from the Reports page (ADR-297).** 403:
+the key lacks `reports.read` (its creator needed that permission), or the plan leaves it out (reason
+`not_in_plan`). 422: the period is not one the page takes: a preset, or `custom` with `from` and
+`to` (YYYY-MM-DD) spanning at most 92 days, the last not after today in the company's time zone, and
+no other query parameter. The API and the page read the same report for the same period: numbers
+differ only when read at different moments (statuses Meta reports late, the inbox and open deals
+now) or when the period differs, for example a key's `custom` dates read in another time zone than
+the company's (Settings → Company).
+
 **A template submission or deletion at Meta answers 403, 404, 409, 412 or 422, or a template stays
 `submitting` or `pending_deletion` (ADR-296).** 403: the key lacks `templates.submit` (its creator
 needed that permission), or, deleting, `templates.write`. 404: another company's template, or an id

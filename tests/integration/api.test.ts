@@ -37,6 +37,7 @@ import {
   apiGetDeal,
   apiGetOrder,
   apiGetPipelineForecast,
+  apiGetReport,
   apiGetMessage,
   apiGetMessageTemplate,
   apiGetNote,
@@ -121,6 +122,7 @@ import {
   remindExpiringApiKeys,
   routeDueConversations,
   syncTemplates,
+  toApiReport,
   type ApiAutomationRun,
   type ApiAutomationRunStart,
   type ApiContext,
@@ -9886,6 +9888,124 @@ describe('template submission and deletion at Meta through the API (ADR-296)', (
       keys.create(narrower, { name: 'Submit', scopes: ['templates.submit'], expiresInDays: 30 }),
       'forbidden',
       /Submit templates/,
+    );
+  });
+});
+
+describe('reports through the API (ADR-297)', () => {
+  it('read the Reports page’s numbers for a period, as the page reads them, for the company only', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['reports.read']);
+    // Customers write to both companies, and the company has an open deal.
+    await inbound(c, '919811100301', [{ text: 'Is my order on its way?' }]);
+    await inbound(other, '919811100302', [{ text: 'Hello' }, { text: 'Anyone there?' }]);
+    const crm = createCrmService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    const { id: pipelineId } = await crm.createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: [{ name: 'New', winPercent: 20 }],
+    });
+    const stageId = (await crm.listPipelines(owner)).find((p) => p.id === pipelineId)!.stages[0]!
+      .id;
+    const { id: contactId } = await createContactsService({
+      db: fx.dbs.app,
+      clock: systemClock,
+    }).createContact(owner, { displayName: 'Ira', phone: '+919811100303' });
+    await crm.createDeal(owner, {
+      contactId,
+      pipelineId,
+      stageId,
+      title: 'Annual plan',
+      value: '1,000',
+      expectedCloseOn: null,
+    });
+
+    // The same numbers as the page, read at the same moment.
+    const when = at(new Date());
+    const query = { preset: 'last_30_days' };
+    const api = await apiGetReport(deps(when), reader.ctx, query);
+    const page = await createReportsService({ db: fx.dbs.app, clock: when }).getReport(
+      owner,
+      query,
+    );
+    expect(api).toEqual(toApiReport(page));
+    expect(api.period).toMatchObject({
+      preset: 'last_30_days',
+      timeZone: owner.tenant.timezone,
+      inProgress: true,
+    });
+    expect(api.period.days).toHaveLength(30);
+    // The company's own: one customer message, its deal, its members.
+    expect(api.messaging.totals.inbound).toBe(1);
+    expect(api.deals.pipelines).toEqual([
+      expect.objectContaining({
+        id: pipelineId,
+        name: 'Sales',
+        currency: 'INR',
+        stages: [expect.objectContaining({ id: stageId, deals: 1, valueMinor: 100_000 })],
+      }),
+    ]);
+    const agent = await fx.ctx(c, c.agent);
+    const theirAgent = await fx.ctx(other, other.agent);
+    const members = api.members.map((m) => m.memberId);
+    expect(members).toContain(agent.membership.id);
+    expect(members).not.toContain(theirAgent.membership.id);
+    expect(Object.keys(api.members[0]!).sort()).toEqual([
+      'csatAnswered',
+      'csatBest',
+      'medianSeconds',
+      'memberId',
+      'name',
+      'replies',
+      'resolved',
+      'templates',
+      'turnsAnswered',
+    ]);
+
+    // A custom period, read while the company is suspended too.
+    const suspended: ApiContext = {
+      ...reader.ctx,
+      tenant: { ...reader.ctx.tenant, status: 'suspended' as const },
+    };
+    const custom = await apiGetReport(deps(when), suspended, {
+      preset: 'custom',
+      from: api.period.to,
+      to: api.period.to,
+    });
+    expect(custom.period).toMatchObject({ preset: 'custom', days: [api.period.to] });
+    expect(custom.messaging.totals.inbound).toBe(1);
+  });
+
+  it('refuse a key without the scope, periods the page refuses, and need reports.read to grant', async () => {
+    const c = await fx.company();
+    const reader = await apiKey(c, ['reports.read']);
+    const other = await apiKey(c, ['deals.read', 'conversations.read']);
+    await expectAppError(apiGetReport(deps(), other.ctx, {}), 'forbidden', /reports\.read/);
+    for (const query of [
+      { preset: 'custom', from: '2099-01-01', to: '2099-01-02' },
+      { preset: 'custom', from: '2026-01-01', to: '2026-06-30' },
+      { preset: 'custom', from: '2026-03-02', to: '2026-03-01' },
+      { preset: 'custom' },
+      { preset: 'last_7_days', section: 'inbox' },
+    ]) {
+      await expectAppError(apiGetReport(deps(), reader.ctx, query), 'validation_failed');
+    }
+    const owner = await fx.ctx(c, c.owner);
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'reports.read')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'BI', scopes: ['reports.read'], expiresInDays: 30 }),
+      'forbidden',
+      /Read reports/,
     );
   });
 });

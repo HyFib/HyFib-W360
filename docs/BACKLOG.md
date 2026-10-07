@@ -911,6 +911,9 @@ verification, app review, Embedded Signup configuration).
   only in CI]** (ADR-296, migration 0218: `templates.submit` submits drafts to Meta for review and,
   with `templates.write`, deletes templates Meta has, through the Templates page's writes, the
   requests to Meta queued with the change).
+  **[Reports through the public API built; their database tests run only in CI]** (ADR-297,
+  migration 0219: `reports.read` reads the numbers the Reports page shows for a period, by the
+  page's reader in one snapshot, with members by id and name).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact

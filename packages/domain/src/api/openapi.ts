@@ -76,7 +76,6 @@ import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import { SEGMENT_LIMITS } from '../campaigns/segments';
 import { ORDER_REFERENCE_RE } from '../commerce/model';
 import { CRM_LIMITS } from '../crm/common';
-import { CLOSE_BUCKETS } from '../crm/forecast';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
 import { MAX_TAGS_PER_CONVERSATION } from '../inbox/conversation-tags';
@@ -137,6 +136,9 @@ import {
 } from './deals';
 import { API_NOTE_MAX_LENGTH, apiCreateNoteSchema } from './notes';
 import { apiCreatePipelineSchema, apiUpdatePipelineSchema } from './pipelines';
+import { apiPipelineForecastSchema } from './pipeline-forecast';
+import { apiReportSchema } from './reports';
+import { MAX_PERIOD_DAYS, PERIOD_PRESETS } from '../reports/period';
 import { apiCreateTeamSchema, apiUpdateTeamSchema } from './teams';
 import { apiUpdateMemberSchema } from './members';
 import { apiCreateClosedDaySchema, apiUpdateBusinessHoursSchema } from './business-hours';
@@ -450,57 +452,6 @@ export const apiPipelineSchema = z.object({
     .nullable()
     .describe('With `createdBy` `api`, the key that added it; null otherwise.'),
   createdAt: z.iso.datetime(),
-});
-
-/** A CRM pipeline's weighted forecast (ADR-288). */
-export const apiPipelineForecastSchema = z.object({
-  pipelineId: z.uuid(),
-  currency: z.string().describe('ISO 4217, like INR: the currency of every value.'),
-  timeZone: z
-    .string()
-    .describe('The company’s time zone, like Asia/Kolkata: the months are its calendar months.'),
-  months: z
-    .array(z.string())
-    .length(3)
-    .describe('This month and the next two, YYYY-MM: the months of the first three buckets.'),
-  asOf: z.iso.datetime().describe('When the forecast was read.'),
-  hasChances: z
-    .boolean()
-    .describe(
-      'Whether any active stage of the pipeline has a chance of winning; without one nothing is weighed and every `weightedMinor` is null.',
-    ),
-  buckets: z
-    .array(
-      z.object({
-        bucket: z
-          .enum(CLOSE_BUCKETS)
-          .describe(
-            'When the deals are expected to close: `this_month` (dates already past included, as on the board), `next_month`, `month_after`, `later`, or `undated`.',
-          ),
-        deals: z.number().int().min(0),
-        valueMinor: z
-          .number()
-          .int()
-          .min(0)
-          .describe(
-            'Their value in the currency’s minor units (paise for INR); deals without a value count 0.',
-          ),
-        weightedMinor: z
-          .number()
-          .int()
-          .min(0)
-          .nullable()
-          .describe(
-            'Each stage’s value in the bucket times its chance, rounded to the minor unit; stages without a chance add nothing. Null when no stage has a chance.',
-          ),
-      }),
-    )
-    .describe('The five buckets, always in this order: `this_month` to `undated`.'),
-  dealsWithoutChance: z
-    .number()
-    .int()
-    .min(0)
-    .describe('Deals counted in the buckets but not weighed: their stage has no chance.'),
 });
 
 /** A CRM deal (ADR-253). */
@@ -2358,6 +2309,44 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/reports': {
+        get: {
+          operationId: 'getReport',
+          summary: 'The company’s report for a period',
+          description: [
+            `${scopeNote('reports.read')} The numbers the Reports page shows, for one period: messaging outcomes, estimated Meta charges, the inbox and its reply and resolution times, satisfaction surveys, automation runs, CRM deals with each pipeline’s forecast, each member’s activity and the funnel of the campaigns started in the period, with what each metric counts (\`definitions\`). Read as the Reports page reads them, in the company’s time zone and in one snapshot, so they agree with each other and with the page at that moment. Members are named by id and name only, as GET /members names them.`,
+            `A period is a preset (\`last_7_days\` by default, \`last_30_days\`, \`this_month\` or \`last_month\`) or \`custom\` days \`from\` and \`to\`, at most ${MAX_PERIOD_DAYS} days and not after today (422 otherwise). Numbers are computed from HyFib’s records when asked: statuses Meta reports late change them later, and the inbox (\`inbox.now\`) and open deals are as they are when asked. Estimated charges are estimates from the published rates, never an invoice.`,
+          ].join('\n\n'),
+          parameters: [
+            {
+              name: 'preset',
+              in: 'query',
+              schema: {
+                type: 'string',
+                enum: [...PERIOD_PRESETS, 'custom'],
+                default: 'last_7_days',
+              },
+              description: 'The period, ending today, or `custom` for the days `from` and `to`.',
+            },
+            {
+              name: 'from',
+              in: 'query',
+              schema: { type: 'string', format: 'date' },
+              description: 'With `custom`: the first day, YYYY-MM-DD, in the company’s time zone.',
+            },
+            {
+              name: 'to',
+              in: 'query',
+              schema: { type: 'string', format: 'date' },
+              description: 'With `custom`: the last day, included, YYYY-MM-DD.',
+            },
+          ],
+          responses: {
+            '200': { description: 'The report.', content: json(dataOf(ref('Report'))) },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
       '/members': {
         get: {
           operationId: 'listMembers',
@@ -4185,6 +4174,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         UpdateBusinessHours: jsonSchema(apiUpdateBusinessHoursSchema, 'input'),
         ClosedDay: jsonSchema(apiClosedDaySchema),
         SatisfactionSurvey: jsonSchema(apiSatisfactionSurveySchema),
+        Report: jsonSchema(apiReportSchema),
         MessageTemplate: jsonSchema(apiMessageTemplateSchema),
         MessageTemplateDetail: jsonSchema(apiMessageTemplateDetailSchema),
         CreateMessageTemplate: jsonSchema(apiCreateMessageTemplateSchema, 'input'),
@@ -4318,6 +4308,7 @@ export const API_ROUTES = [
   ['get', '/conversations/{id}/notes'],
   ['get', '/conversations/{id}/messages'],
   ['get', '/satisfaction-surveys'],
+  ['get', '/reports'],
   ['get', '/members'],
   ['patch', '/members/{id}'],
   ['get', '/business-hours'],

@@ -11306,3 +11306,41 @@ Decision:
 Not built: changing a template Meta has (members change it in WhatsApp Manager), submitting many
 drafts in one call, and a webhook event for `submitting` or `submit_failed` (template.status_changed
 reports Meta's decisions).
+
+## ADR-297 The Reports page's numbers through the public API (P5-08) (2026-10-07)
+
+Context: members with `reports.read` see on the Reports page messaging outcomes, estimated Meta
+charges, the inbox's reply and resolution times, satisfaction surveys, automation runs, CRM deals
+and forecasts, each member's activity and campaign funnels, computed on request under persisted
+definitions (ADR-026), and members with `reports.export` download each section as CSV. A company
+that keeps its numbers in a BI tool or a spreadsheet downloaded those files by hand: keys read the
+records (messages, conversations, deals, campaigns) but not the page's numbers, whose denominators,
+time-zone days and missing-data rules a reader would have had to repeat.
+
+Decision:
+
+- **A `reports.read` scope** ("Read reports"), granted only by members who hold `reports.read`
+  (owners, administrators, marketers and analysts do), reading, so a suspended or restricted
+  company's keys read reports as its members do. Existing keys and plans that chose their scopes do
+  not gain it. With it the API has 35 scopes.
+- **`GET /api/v1/reports`** (`getReport`) answers the report for a period as the page's form chooses
+  it: a preset (`last_7_days` by default, `last_30_days`, `this_month` or `last_month`) or `custom`
+  days `from` and `to`, at most 92 days and not after today, in the company's time zone (422
+  otherwise, and for any other query parameter). It gives every section the page shows (`messaging`,
+  `costs`, `inbox`, `csat`, `automations`, `deals`, `members`, `campaigns`) and `definitions`, the
+  latest version of every metric definition.
+- **One reader:** the page's report is now `readReport`, which both run in one repeatable-read,
+  read-only transaction (ADR-026), so the API's numbers are the page's for the same period and
+  moment; an integration test compares them.
+- **What the API gives differently:** times in ISO 8601; members by id, as `GET /members` names
+  them, and name, without their roles or membership status; estimated Meta charges in millionths of
+  the currency's main unit, as the exports give them (`estimated_cost_micros`), never rounded sums;
+  each pipeline's forecast as `GET /pipelines/{id}/forecast` gives it (ADR-288); definitions without
+  the page's wording of when numbers are computed. Deals are given whatever the plan, as the page
+  shows them.
+- **Migration 0219** replaces the scope checks of keys and plans with the new scope, validated at
+  once. The forecast's API schema moved next to its endpoint (`api/pipeline-forecast.ts`), so the
+  report reuses it.
+
+Not built: reading one section alone, periods longer than 92 days (read several), and the CSV
+exports through the API.

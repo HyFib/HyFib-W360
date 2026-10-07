@@ -1651,6 +1651,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `writeDeleteTemplateAtMeta`, `enqueueTemplateJob`): each queues its `template.submit` or
   `template.delete` job in the write's transaction, signed for the company with no member, and the
   template workers run it as before.
+- **Reports through the API (ADR-297):** `api/reports.ts` reads with `reports.read` the report the
+  Reports page shows: `readReport` in `reports/service.ts`, now shared with the page's `getReport`,
+  run in one repeatable-read, read-only transaction for a period `resolvePeriod` cuts in the
+  company's time zone (read from `tenants`); `toApiReport` maps it (ISO times, members by id and
+  name, the forecast through `toApiPipelineForecast`), and `apiReportSchema` describes it in the
+  OpenAPI document.
 - **Many conversations at once (ADR-120):** `POST /conversations/update-many`
   (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
   transaction it locks the member first (as a suspension does before releasing its conversations),

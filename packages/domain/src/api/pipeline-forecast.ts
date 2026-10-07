@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { notFound } from '@w360/core';
 import { and, crmPipelines, crmStages, eq, isNull, tenants } from '@w360/db';
 import {
+  CLOSE_BUCKETS,
   forecastByMonth,
   forecastMonths,
   readForecastGroups,
@@ -17,6 +18,57 @@ import { assertCrmInPlan } from './deals';
  * open deals by the month they are expected to close, each stage's value weighed by its chance of
  * winning, as Reports shows it (ADR-252) and with the same reader and arithmetic, so the two agree.
  */
+
+/** A CRM pipeline's weighted forecast (ADR-288). */
+export const apiPipelineForecastSchema = z.object({
+  pipelineId: z.uuid(),
+  currency: z.string().describe('ISO 4217, like INR: the currency of every value.'),
+  timeZone: z
+    .string()
+    .describe('The company’s time zone, like Asia/Kolkata: the months are its calendar months.'),
+  months: z
+    .array(z.string())
+    .length(3)
+    .describe('This month and the next two, YYYY-MM: the months of the first three buckets.'),
+  asOf: z.iso.datetime().describe('When the forecast was read.'),
+  hasChances: z
+    .boolean()
+    .describe(
+      'Whether any active stage of the pipeline has a chance of winning; without one nothing is weighed and every `weightedMinor` is null.',
+    ),
+  buckets: z
+    .array(
+      z.object({
+        bucket: z
+          .enum(CLOSE_BUCKETS)
+          .describe(
+            'When the deals are expected to close: `this_month` (dates already past included, as on the board), `next_month`, `month_after`, `later`, or `undated`.',
+          ),
+        deals: z.number().int().min(0),
+        valueMinor: z
+          .number()
+          .int()
+          .min(0)
+          .describe(
+            'Their value in the currency’s minor units (paise for INR); deals without a value count 0.',
+          ),
+        weightedMinor: z
+          .number()
+          .int()
+          .min(0)
+          .nullable()
+          .describe(
+            'Each stage’s value in the bucket times its chance, rounded to the minor unit; stages without a chance add nothing. Null when no stage has a chance.',
+          ),
+      }),
+    )
+    .describe('The five buckets, always in this order: `this_month` to `undated`.'),
+  dealsWithoutChance: z
+    .number()
+    .int()
+    .min(0)
+    .describe('Deals counted in the buckets but not weighed: their stage has no chance.'),
+});
 
 /** One column of the forecast: open deals expected to close in it. */
 export interface ApiForecastBucket {
