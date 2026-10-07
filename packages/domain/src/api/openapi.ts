@@ -74,6 +74,7 @@ import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import { SEGMENT_LIMITS } from '../campaigns/segments';
 import { ORDER_REFERENCE_RE } from '../commerce/model';
 import { CRM_LIMITS } from '../crm/common';
+import { CLOSE_BUCKETS } from '../crm/forecast';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
 import { MAX_TAGS_PER_CONVERSATION } from '../inbox/conversation-tags';
@@ -433,6 +434,57 @@ export const apiPipelineSchema = z.object({
     .nullable()
     .describe('With `createdBy` `api`, the key that added it; null otherwise.'),
   createdAt: z.iso.datetime(),
+});
+
+/** A CRM pipeline's weighted forecast (ADR-288). */
+export const apiPipelineForecastSchema = z.object({
+  pipelineId: z.uuid(),
+  currency: z.string().describe('ISO 4217, like INR: the currency of every value.'),
+  timeZone: z
+    .string()
+    .describe('The company’s time zone, like Asia/Kolkata: the months are its calendar months.'),
+  months: z
+    .array(z.string())
+    .length(3)
+    .describe('This month and the next two, YYYY-MM: the months of the first three buckets.'),
+  asOf: z.iso.datetime().describe('When the forecast was read.'),
+  hasChances: z
+    .boolean()
+    .describe(
+      'Whether any active stage of the pipeline has a chance of winning; without one nothing is weighed and every `weightedMinor` is null.',
+    ),
+  buckets: z
+    .array(
+      z.object({
+        bucket: z
+          .enum(CLOSE_BUCKETS)
+          .describe(
+            'When the deals are expected to close: `this_month` (dates already past included, as on the board), `next_month`, `month_after`, `later`, or `undated`.',
+          ),
+        deals: z.number().int().min(0),
+        valueMinor: z
+          .number()
+          .int()
+          .min(0)
+          .describe(
+            'Their value in the currency’s minor units (paise for INR); deals without a value count 0.',
+          ),
+        weightedMinor: z
+          .number()
+          .int()
+          .min(0)
+          .nullable()
+          .describe(
+            'Each stage’s value in the bucket times its chance, rounded to the minor unit; stages without a chance add nothing. Null when no stage has a chance.',
+          ),
+      }),
+    )
+    .describe('The five buckets, always in this order: `this_month` to `undated`.'),
+  dealsWithoutChance: z
+    .number()
+    .int()
+    .min(0)
+    .describe('Deals counted in the buckets but not weighed: their stage has no chance.'),
 });
 
 /** A CRM deal (ADR-253). */
@@ -2635,6 +2687,21 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/pipelines/{id}/forecast': {
+        get: {
+          operationId: 'getPipelineForecast',
+          summary: 'A CRM pipeline’s weighted forecast',
+          description: `${scopeNote('deals.read')} The pipeline’s open deals in active stages by the month they are expected to close, in the company’s time zone: this month (dates already past included, as on the board), the next two months, later, and without a date, each with the number of deals, their value and that value weighed by each stage’s chance of winning, as Reports shows it. This month’s weighted value is the board’s. Deals in stages without a chance are counted but not weighed (\`dealsWithoutChance\`); a pipeline without any chance has no weighted values. It is read now, in one snapshot, and not stored; an archived pipeline holds no open deals, so its buckets are empty. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The forecast.',
+              content: json(dataOf(ref('PipelineForecast'))),
+            },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+      },
       '/deals': {
         get: {
           operationId: 'listDeals',
@@ -3585,6 +3652,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         PaymentLink: jsonSchema(apiPaymentLinkSchema),
         UpdateOrder: jsonSchema(apiUpdateOrderSchema, 'input'),
         Pipeline: jsonSchema(apiPipelineSchema),
+        PipelineForecast: jsonSchema(apiPipelineForecastSchema),
         CreatePipeline: jsonSchema(apiCreatePipelineSchema, 'input'),
         UpdatePipeline: jsonSchema(apiUpdatePipelineSchema, 'input'),
         Deal: jsonSchema(apiDealSchema),
@@ -3727,6 +3795,7 @@ export const API_ROUTES = [
   ['get', '/pipelines'],
   ['post', '/pipelines'],
   ['patch', '/pipelines/{id}'],
+  ['get', '/pipelines/{id}/forecast'],
   ['get', '/deals'],
   ['post', '/deals'],
   ['get', '/deals/{id}'],

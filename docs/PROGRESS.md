@@ -1,5 +1,37 @@
 # Progress
 
+## 2026-10-07 — A CRM pipeline's weighted forecast through the public API (P5-08, P4-04, H-033, ADR-288)
+
+Status: **Implemented; its database test runs in CI only.** Members saw the weighted forecast on the
+board and in Reports, but integrations had to rebuild it from deals. No migration. The local
+PostgreSQL is unavailable, so the integration test below was written but not run here.
+
+### Completed
+
+- **Domain:** `readForecastGroups` in `crm/forecast.ts`, now Reports' reader too;
+  `apiGetPipelineForecast` and `toApiPipelineForecast` (`api/pipeline-forecast.ts`); the scope's
+  description; the OpenAPI entry; the CRM module's description, which still said forecasting was not
+  available.
+- **Web:** `GET /api/v1/pipelines/{id}/forecast`.
+- **Tests:** unit (`api/pipeline-forecast.test.ts`: the answer, no chance, the reader's conditions,
+  refusals before any query, the read-only snapshot, the OpenAPI entry); integration (1 new in
+  `api.test.ts`: equal to Reports and the board, no chance, another company's and an unknown
+  pipeline, the scope, a suspended company and the plan). Written for CI; the integration test was
+  not run here. No e2e test.
+- **Docs:** ADR-288; ARCHITECTURE; SECURITY; THREAT-MODEL T256; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-012 and H-033.
+- **Mutation checks:** 17/17 deliberate regressions caught
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 126 files, 1202 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Managing teams through the public API (P5-08, H-033, W-037, ADR-287)
 
 Status: **Implemented; its database tests run in CI only.** Keys listed teams and moved

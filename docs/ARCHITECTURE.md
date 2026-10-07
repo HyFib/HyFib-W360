@@ -1496,6 +1496,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   stages' order, names and chances compared before anything is written), `writeArchivePipeline` and
   `writeRestorePipeline`. Each change is audited as the key, and the answer is read by
   `readApiPipeline`, which shares `withStages` with `GET /pipelines`.
+- **A pipeline's forecast through the API (ADR-288):** `GET /pipelines/{id}/forecast`
+  (`apiGetPipelineForecast` in `api/pipeline-forecast.ts`, `deals.read`) reads, in one
+  repeatable-read, read-only transaction after the CRM check, the pipeline, the company's time zone,
+  the chances of the pipeline's active stages, and its open deals through
+  `readForecastGroups(tx, tenantId, pipelineId)`, the reader `dealReport` uses for every active
+  pipeline; it then weighs them with `forecastMonths` and `forecastByMonth` as Reports does, and
+  `toApiPipelineForecast` gives null weighted values when no stage has a chance.
 - **Moving CRM deals to another pipeline through the API (ADR-257):** `pipelineId` on
   `PATCH /deals/{id}` takes the move path for another pipeline: after any reopen, `entryStage`
   (shared with `apiCreateDeal`) shares the target pipeline and finds the stage given or its first

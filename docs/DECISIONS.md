@@ -10945,3 +10945,37 @@ Decision:
 Not built: webhook events for changes to teams, setting members' availability through the API
 (members set their own, and supervisors theirs in Settings), the round robin's place, and a version
 check on teams (a change applies to the team as it is when the request runs, its row locked).
+
+## ADR-288 A CRM pipeline's weighted forecast through the public API (P5-08, P4-04) (2026-10-07)
+
+Context: members see a pipeline's open deals weighed by each stage's chance of winning on the board
+(ADR-242) and by expected close month in Reports (ADR-252), but integrations had only the deals and
+the stages' chances (ADR-253) to rebuild it, with the company's months, past dates counted in this
+month and the rounding per stage left for each integration to get right, so a sales dashboard could
+show figures that disagree with Reports. ADR-242 left the forecast through the API unbuilt.
+
+Decision:
+
+- **`GET /api/v1/pipelines/{id}/forecast`** (`getPipelineForecast`), with `deals.read` and the CRM
+  in the plan (403, reason `not_in_plan`), gives one pipeline's forecast now: its open deals in
+  active stages by the month they are expected to close in the company's time zone (this month with
+  dates already past, the next two months, later, and without a date), each bucket with its deals,
+  their value and that value weighed by each stage's chance, rounded once per stage. `months`,
+  `timeZone`, `currency` and `asOf` say what the buckets are; `dealsWithoutChance` counts the deals
+  in stages without a chance, which add nothing to the weighted values; and when no active stage of
+  the pipeline has a chance every `weightedMinor` is null, where Reports says where to set them.
+  Another company's pipeline and an unknown one answer 404; an archived pipeline holds no open
+  deals, so its buckets are empty.
+- **Reports' reader and arithmetic:** `readForecastGroups` (`crm/forecast.ts`) now reads the deals
+  for Reports and for the API, for every active pipeline or for one, and `forecastByMonth` weighs
+  them, so the API's buckets are Reports' and this month's weighted value is the board's (an
+  integration test compares the three). The forecast is read in one repeatable-read, read-only
+  snapshot, so the deals and the chances are of one moment; nothing is stored, and it reads while
+  the company is suspended, as every read does.
+- **The scope:** `deals.read` keys read it, since it adds up what the deals and the stages' chances
+  they already read say; the scope's description now names it. No migration.
+- **Also corrected:** the CRM module's description, shown to administrators, still said forecasting
+  was not available, though the board and Reports have shown it since ADR-242 and ADR-252.
+
+Not built: forecasts by owner or of many pipelines in one call, months further ahead, the forecast
+as it was at a past date, and the forecast in webhooks.

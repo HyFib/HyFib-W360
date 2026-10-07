@@ -182,7 +182,7 @@ export const API_SCOPE_INFO: Record<
   'deals.read': {
     label: 'Read CRM deals',
     description:
-      "List the company's CRM pipelines with their stages and each stage's chance of winning, and its deals with their pipeline, stage, status, value, expected close date and owner, and their contact and conversation ids. Never notes, tasks or the timeline. Needs the CRM in the company's plan.",
+      "List the company's CRM pipelines with their stages and each stage's chance of winning, and its deals with their pipeline, stage, status, value, expected close date and owner, and their contact and conversation ids, and read each pipeline's weighted forecast as Reports shows it. Never notes, tasks or the timeline. Needs the CRM in the company's plan.",
     permission: 'crm.read',
     writes: false,
   },

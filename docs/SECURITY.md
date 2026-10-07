@@ -1124,6 +1124,13 @@ Phase 5 rules (Public API, P5-08):
   company's, and the plan's limit of teams holds. Teams decide who receives conversations, not who
   may read them, so no change here widens what a member reads. Each change is audited as the key
   (unit tests; integration tests, run in CI only).
+- A pipeline's forecast (ADR-288): `GET /pipelines/{id}/forecast` needs `deals.read` and the CRM in
+  the plan, checked before anything is read, and reads the key's company's pipeline only (row
+  security and an explicit company condition on the pipeline, its stages and its deals; another
+  company's answers 404, as an unknown one does; an id that is not a UUID is refused before any
+  query), in a read-only transaction. It gives counts and sums of the pipeline's open deals by
+  month, which the deals `deals.read` already lists add up to, and names no deal, contact, owner or
+  member (unit tests; integration tests, run in CI only).
 - Reading a deal's history (ADR-281): `GET /deals/{id}/history` needs `deals.read` and the CRM in
   the plan, checked before anything is read; it reads the key's company's deal only (another
   company's answers 404, as an unknown one does; an id that is not a UUID is refused before any

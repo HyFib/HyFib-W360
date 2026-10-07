@@ -878,6 +878,10 @@ verification, app review, Embedded Signup configuration).
   `teams.manage` scope, granted with `inbox.supervise`, read, add, change and delete teams with
   their settings, members and numbers through the Settings writes, recorded as the key's; a team's
   members are only those who answer conversations, in Settings too).
+  **[A pipeline's forecast through the public API built; its database tests run only in CI]**
+  (ADR-288, no migration: `GET /pipelines/{id}/forecast` with `deals.read` gives the pipeline's open
+  deals by expected close month in the company's time zone, weighed by each stage's chance with
+  Reports' reader and arithmetic).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact

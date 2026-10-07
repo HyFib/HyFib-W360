@@ -1,3 +1,4 @@
+import { sql, type Tx } from '@w360/db';
 import { zonedParts } from '../campaigns/schedule';
 
 /**
@@ -162,4 +163,41 @@ export function forecastByMonth(
     total.weightedMinor += weigh(entry.valueMinor, entry.winPercent);
   }
   return { months, buckets, hasChances, dealsWithoutChance };
+}
+
+/**
+ * The open deals in active stages of the company's active pipelines, or of one of them (ADR-288),
+ * by stage and expected close month, as `forecastByMonth` takes them (ADR-252). Reports and the
+ * API read them here, so both weigh the same deals.
+ */
+export async function readForecastGroups(
+  tx: Tx,
+  tenantId: string,
+  pipelineId?: string,
+): Promise<(ForecastGroup & { pipelineId: string })[]> {
+  const rows = await tx.execute<{
+    pipeline_id: string;
+    stage_id: string;
+    win_percent: number | null;
+    close_month: string | null;
+    deals: number;
+    value: string;
+  }>(sql`
+    select s.pipeline_id, s.id as stage_id, s.win_percent,
+           to_char(d.expected_close_on, 'YYYY-MM') as close_month, count(*)::int as deals,
+           coalesce(sum(d.value_minor), 0)::text as value
+      from app.crm_deals d
+      join app.crm_stages s on s.tenant_id = d.tenant_id and s.id = d.stage_id and s.archived_at is null
+      join app.crm_pipelines p on p.tenant_id = s.tenant_id and p.id = s.pipeline_id and p.archived_at is null
+     where d.tenant_id = ${tenantId} and d.status = 'open'
+       ${pipelineId === undefined ? sql`` : sql`and s.pipeline_id = ${pipelineId}`}
+     group by s.pipeline_id, s.id, s.win_percent, close_month`);
+  return rows.rows.map((r) => ({
+    pipelineId: r.pipeline_id,
+    stageId: r.stage_id,
+    winPercent: r.win_percent,
+    closeMonth: r.close_month,
+    deals: r.deals,
+    valueMinor: Number(r.value),
+  }));
 }

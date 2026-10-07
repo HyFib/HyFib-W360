@@ -2140,6 +2140,16 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**`GET /api/v1/pipelines/{id}/forecast` answers 403 or 404, or differs from what an integration
+added up (ADR-288).** 403 `forbidden` names the scope the key lacks, `deals.read`, or with reason
+`not_in_plan` the company's plan leaves out the CRM or the scope. 404 means the pipeline is not one
+of the key's company's. The buckets are months in the company's time zone (`timeZone`), this month
+including deals whose expected close date has passed; only open deals in active stages count, and
+each stage's value in a bucket is weighed by its chance and rounded once, so deals weighed one by
+one can add up to a minor unit or two more or less. `weightedMinor` is null while no active stage of
+the pipeline has a chance (set them in Settings → Pipelines), and `dealsWithoutChance` counts the
+deals left unweighed. Reports shows the same figures, and the board this month's.
+
 **`POST /api/v1/teams`, or `PATCH` or `DELETE /api/v1/teams/{id}`, answers 403, 404, 409, 412, 422
 or 423 (ADR-287).** 403 `forbidden` names the scope the key lacks, `teams.manage` (granted by
 members who supervise the inbox), or with reason `not_in_plan` the company's plan leaves the scope

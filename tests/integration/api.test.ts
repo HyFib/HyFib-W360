@@ -26,6 +26,7 @@ import {
   apiGetConversation,
   apiGetDeal,
   apiGetOrder,
+  apiGetPipelineForecast,
   apiGetMessage,
   apiGetNote,
   apiGetTask,
@@ -78,13 +79,16 @@ import {
   createCsatService,
   createInboxService,
   createPlanAdminService,
+  createReportsService,
   createTeamsService,
   createTemplatesService,
   createTenancyService,
   createWebhooksService,
   credentialAad,
   dayOf,
+  forecastMonths,
   generateApiToken,
+  monthEndIn,
   outboxAad,
   processCommerceSync,
   processSendIntent,
@@ -6472,6 +6476,115 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       'forbidden',
       /Manage CRM pipelines/,
     );
+  });
+
+  it('read a pipeline’s weighted forecast as Reports and the board weigh it (ADR-288)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['deals.read']);
+    const sales = await pipelineOf(owner, 'Sales', 'INR', [
+      { name: 'New', winPercent: 10 },
+      { name: 'Qualified', winPercent: 50 },
+      'Proposal',
+    ]);
+    const [fresh, qualified, proposal] = sales.stages as [string, string, string];
+    const contactId = await contactOf(owner, 'Ira');
+    const months = forecastMonths(new Date(), owner.tenant.timezone);
+    const monthEnd = monthEndIn(new Date(), owner.tenant.timezone);
+    const deal = (stageId: string, title: string, value: string, expectedCloseOn: string | null) =>
+      crm().createDeal(owner, {
+        contactId,
+        pipelineId: sales.id,
+        stageId,
+        title,
+        value,
+        expectedCloseOn,
+      });
+    // A date already past, this month, the next two months, much later and no date; a closed deal
+    // is not forecast.
+    await deal(fresh, 'Overdue', '1,000', '2020-01-15');
+    await deal(qualified, 'This month', '500', monthEnd);
+    await deal(qualified, 'Next month', '300', `${months[1]}-15`);
+    await deal(fresh, 'Month after', '200', `${months[2]}-01`);
+    await deal(qualified, 'Much later', '100', '2099-06-30');
+    await deal(proposal, 'Undated', '2,000', null);
+    const closed = await deal(qualified, 'Closed', '9,999', monthEnd);
+    await crm().closeDeal(owner, { id: closed.id, expectedVersion: 1, outcome: 'won' });
+
+    const forecast = await apiGetPipelineForecast(deps(), reader.ctx, sales.id);
+    expect(forecast).toMatchObject({
+      pipelineId: sales.id,
+      currency: 'INR',
+      timeZone: owner.tenant.timezone,
+      months,
+      hasChances: true,
+      dealsWithoutChance: 1,
+      buckets: [
+        { bucket: 'this_month', deals: 2, valueMinor: 150_000, weightedMinor: 35_000 },
+        { bucket: 'next_month', deals: 1, valueMinor: 30_000, weightedMinor: 15_000 },
+        { bucket: 'month_after', deals: 1, valueMinor: 20_000, weightedMinor: 2_000 },
+        { bucket: 'later', deals: 1, valueMinor: 10_000, weightedMinor: 5_000 },
+        { bucket: 'undated', deals: 1, valueMinor: 200_000, weightedMinor: 0 },
+      ],
+    });
+    // Reports gives the same buckets, and this month's weighted value is the board's.
+    const report = await createReportsService({ db: fx.dbs.app, clock: systemClock }).getReport(
+      owner,
+      { preset: 'last_7_days' },
+    );
+    const inReports = report.deals.pipelines.find((p) => p.id === sales.id)!.forecast;
+    expect([forecast.months, forecast.buckets]).toEqual([inReports.months, inReports.buckets]);
+    expect((await crm().board(owner, { pipelineId: sales.id }))!.forecast.weightedMonthMinor).toBe(
+      35_000,
+    );
+
+    // A pipeline without any chance has values but nothing weighed.
+    const plain = await pipelineOf(owner, 'Plain', 'USD', ['Open']);
+    await crm().createDeal(owner, {
+      contactId,
+      pipelineId: plain.id,
+      stageId: plain.stages[0]!,
+      title: 'Plain',
+      value: '10',
+      expectedCloseOn: null,
+    });
+    const unweighed = await apiGetPipelineForecast(deps(), reader.ctx, plain.id);
+    expect(unweighed).toMatchObject({ currency: 'USD', hasChances: false, dealsWithoutChance: 1 });
+    expect(unweighed.buckets.map((b) => [b.valueMinor, b.weightedMinor])).toEqual([
+      [0, null],
+      [0, null],
+      [0, null],
+      [0, null],
+      [1_000, null],
+    ]);
+
+    // Another company's pipeline and an unknown one are not found; the scope reads it, while the
+    // company is suspended too, and only with the CRM in the plan.
+    const theirs = await pipelineOf(await fx.ctx(other, other.owner), 'Theirs', 'INR', ['Open']);
+    for (const id of [theirs.id, uuidv7()]) {
+      await expectAppError(apiGetPipelineForecast(deps(), reader.ctx, id), 'not_found', /Pipeline/);
+    }
+    const writer = await apiKey(c, ['deals.write']);
+    await expectAppError(
+      apiGetPipelineForecast(deps(), writer.ctx, sales.id),
+      'forbidden',
+      /deals\.read/,
+    );
+    const suspended = {
+      ...reader.ctx,
+      tenant: { ...reader.ctx.tenant, status: 'suspended' as const },
+    };
+    expect((await apiGetPipelineForecast(deps(), suspended, sales.id)).buckets[0]?.deals).toBe(2);
+    await onPlan(c, []);
+    const error = await expectAppError(
+      apiGetPipelineForecast(deps(), reader.ctx, sales.id),
+      'forbidden',
+      /does not include the CRM/,
+    );
+    expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    await onPlan(c, ['crm']);
+    expect((await apiGetPipelineForecast(deps(), reader.ctx, sales.id)).pipelineId).toBe(sales.id);
   });
 });
 
