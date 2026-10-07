@@ -1,5 +1,36 @@
 # Progress
 
+## 2026-10-07 — Adding notes to the CRM timeline through the public API (P5-08, P4-04, H-033, ADR-268)
+
+Status: **Implemented; its database tests run in CI only.** Keys read and changed deals and tasks
+but could not leave a note on a customer's timeline. The local PostgreSQL is unavailable, so the
+migration and the integration tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0184 (the API keys' and plan versions' scope checks with `notes.write`).
+- **Domain:** the `notes.write` scope (granted with `crm.write`), `POST /notes`
+  (`apiCreateNoteSchema`, `apiCreateNote`: a note on a contact or a deal and its contact, the
+  members' rules, a `note` activity naming the key, a `crm.note_added` audit row without the text,
+  idempotent), the route, and the OpenAPI entries (`createNote`, `CreateNote`, `Note`).
+- **Tests:** unit (4 new in `notes.test.ts`, the scopes' write list in `api.test.ts`); integration
+  (2 in `api.test.ts`). Written for CI; the integration tests were not run here. No e2e test: the
+  timeline already says when an entry came through the API, and the e2e suite is near its time
+  limit.
+- **Docs:** ADR-268; ARCHITECTURE; SECURITY; THREAT-MODEL T236; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08
+  and P4-04; feature matrix W-134, H-012 and H-033.
+- **Mutation checks:** 18/18 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 118 files, 1129 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Choosing the contact tags whose conversations' events an endpoint receives (P5-09, H-014, ADR-267)
 
 Status: **Implemented; its database tests run in CI only.** Endpoints could narrow message and

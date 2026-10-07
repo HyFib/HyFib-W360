@@ -283,14 +283,15 @@ verification, app review, Embedded Signup configuration).
   recorded under P5-08). **[Creating tasks through the public API built; its database tests run only
   in CI]** (ADR-259, migrations 0175 and 0176; recorded under P5-08). **[Changing tasks through the
   public API built; its database tests run only in CI]** (ADR-260, no migration; recorded under
-  P5-08). **[Task webhook events built; their database tests run only in CI]** (ADR-261, migrations
-  0177 and 0178; recorded under P5-09). **[Pipeline filters for deal webhook events built; their
-  database and browser tests run only in CI]** (ADR-263, migration 0179; recorded under P5-09).
-  **[Stage filters for deal webhook events built; their database and browser tests run only in
-  CI]** (ADR-264, migration 0180; recorded under P5-09). **[Owner filters for deal webhook events
-  built; their database tests run only in CI]** (ADR-265, migration 0181; recorded under P5-09).
-  **[Assignee filters for task webhook events built; their database tests run only in CI]**
-  (ADR-266, migration 0182; recorded under P5-09).
+  P5-08). **[Notes through the public API built; their database tests run only in CI]** (ADR-268,
+  migration 0184; recorded under P5-08). **[Task webhook events built; their database tests run only
+  in CI]** (ADR-261, migrations 0177 and 0178; recorded under P5-09). **[Pipeline filters for deal
+  webhook events built; their database and browser tests run only in CI]** (ADR-263, migration 0179;
+  recorded under P5-09). **[Stage filters for deal webhook events built; their database and browser
+  tests run only in CI]** (ADR-264, migration 0180; recorded under P5-09). **[Owner filters for deal
+  webhook events built; their database tests run only in CI]** (ADR-265, migration 0181; recorded
+  under P5-09). **[Assignee filters for task webhook events built; their database tests run only in
+  CI]** (ADR-266, migration 0182; recorded under P5-09).
   **Remaining:** custom deal fields, products on deals, deal import, CRM connectors (HubSpot,
   Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
   checklist).
@@ -837,6 +838,9 @@ verification, app review, Embedded Signup configuration).
   **[Changing CRM tasks built; its database tests run only in CI]** (ADR-260: `PATCH /tasks/{id}`
   edits an open task's details, completes, cancels and reopens tasks as members do, from an expected
   version, recorded as done through the API; no migration).
+  **[Adding CRM notes built; its database tests run only in CI]** (ADR-268, migration 0184:
+  `notes.write` adds a note to a contact's or a deal's timeline as members do, recorded as written
+  through the API; notes are not read through the API).
   Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,

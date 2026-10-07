@@ -110,6 +110,7 @@ import {
 } from './conversations';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
 import { apiCreateDealSchema, apiUpdateDealSchema } from './deals';
+import { API_NOTE_MAX_LENGTH, apiCreateNoteSchema } from './notes';
 import { apiCreateTaskSchema, apiUpdateTaskSchema } from './tasks';
 import { apiUpdateOrderSchema } from './orders';
 import {
@@ -440,6 +441,20 @@ export const apiDealSchema = z.object({
 });
 
 /** A CRM task (ADR-258). */
+/** A note on the CRM timeline, as `POST /notes` answers it (ADR-268). */
+export const apiNoteSchema = z.object({
+  id: z.uuid().describe('The note, on the CRM timeline.'),
+  body: z.string().describe('The note as kept: its text, spaces around it trimmed.'),
+  contactId: z
+    .uuid()
+    .describe('The contact whose timeline holds the note: the one given, or the deal’s.'),
+  dealId: z
+    .uuid()
+    .nullable()
+    .describe('The deal the note is about; null when it is about the contact only.'),
+  createdAt: z.iso.datetime().describe('When the note was added.'),
+});
+
 export const apiTaskSchema = z.object({
   id: z.uuid(),
   title: z.string(),
@@ -2363,6 +2378,19 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/notes': {
+        post: {
+          operationId: 'createNote',
+          summary: 'Add a note to the CRM timeline',
+          description: `${scopeNote('notes.write')} As members add a note on the contact and deal pages: to a contact (not erased), or to a deal and so to its contact, up to ${API_NOTE_MAX_LENGTH} characters. The note is recorded as written through the API: the timeline says so, and the audit log names the key, never the note’s text. Notes, like the rest of the timeline, are not read through the API. An unknown deal or a contact other than the deal’s is answered with 422 naming the field; an unknown or erased contact with 404, and a deal whose contact was erased with 409. Needs the CRM in the company’s plan (403, reason not_in_plan). With an \`Idempotency-Key\`, a retry answers the first response. ${MERGED_CONTACT_NOTE}`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateNote')) },
+          responses: {
+            '201': { description: 'The note added.', content: json(dataOf(ref('Note'))) },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
       '/webhook-endpoints': {
         get: {
           operationId: 'listWebhookEndpoints',
@@ -3028,6 +3056,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         Task: jsonSchema(apiTaskSchema),
         CreateTask: jsonSchema(apiCreateTaskSchema, 'input'),
         UpdateTask: jsonSchema(apiUpdateTaskSchema, 'input'),
+        Note: jsonSchema(apiNoteSchema),
+        CreateNote: jsonSchema(apiCreateNoteSchema, 'input'),
         CampaignWithResults: jsonSchema(apiCampaignDetailSchema),
         CampaignReview: jsonSchema(apiCampaignReviewSchema),
         CreateCampaign: jsonSchema(apiCreateCampaignSchema, 'input'),
@@ -3150,6 +3180,7 @@ export const API_ROUTES = [
   ['post', '/tasks'],
   ['get', '/tasks/{id}'],
   ['patch', '/tasks/{id}'],
+  ['post', '/notes'],
   ['get', '/webhook-endpoints'],
   ['post', '/webhook-endpoints'],
   ['post', '/webhook-endpoints/replay-failed'],

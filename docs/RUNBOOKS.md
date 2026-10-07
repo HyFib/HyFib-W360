@@ -2180,6 +2180,18 @@ again), or a merge moved it while it was being changed (try again). 422 names th
 `remindAt` in the past or over a year ahead. A task's contact and deal cannot be changed: create a
 new task. A retry changes nothing.
 
+**`POST /api/v1/notes` answers 403, 404, 409, 422 or 423 (ADR-268).** 403 `forbidden` names the
+scope the key lacks, `notes.write` (granted by members with `crm.write`; keys keep the scopes they
+were created with), or with reason `not_in_plan` the company's plan leaves out the CRM or the scope.
+422 names the field: `body` empty or over 4,000 characters, `dealId` for a deal the company does not
+have, `contactId` for a contact other than the deal's (leave it out with a deal), or neither given.
+404 means the contact is not one of the company's or was erased (reason `contact_merged` and
+`mergedInto` name the contact a merged one belongs to now). 409 means the deal's contact was erased,
+or a merge moved the deal while the note was being added (try again). 423 means the company is
+suspended or its plan has ended. A note added cannot be read, changed or deleted through the API;
+members see it on the timeline as written through the API. A retry with the same `Idempotency-Key`
+answers the first note.
+
 **`GET /api/v1/channels` answers 403, or a number shows no phone or name (ADR-171).** 403
 `forbidden` names the scope the key lacks, `channels.read` (keys keep the scopes they were created
 with: create a key with it); reason `not_in_plan` means the company's plan leaves the scope out

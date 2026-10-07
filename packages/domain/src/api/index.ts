@@ -20,6 +20,7 @@ export * from './rate-limits';
 export * from './conversations';
 export * from './orders';
 export * from './deals';
+export * from './notes';
 export * from './tasks';
 export * from './message-changes';
 export * from './members';

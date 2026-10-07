@@ -10152,3 +10152,39 @@ Decision:
 Not built: contact events by tag (a contact's tags are often written after the event that adds it is
 captured, in the same transaction), every listed tag required rather than any, tags to leave out,
 events of a conversation by its own tags (ADR-220), and other values of a contact (a field's value).
+
+## ADR-268 Adding notes to the CRM timeline through the public API (P5-08, P4-04) (2026-10-07)
+
+Context: keys read and change deals and tasks (ADR-253 to ADR-260), but a call centre, a telephony
+system or a CRM kept in step with HyFib could not leave a note of what happened on the customer's
+timeline, where members read it; ADR-253, ADR-255 and ADR-258 left notes unbuilt.
+
+Decision:
+
+- **`POST /notes`** (`createNote`) with a new scope, `notes.write` ("Add notes to the CRM
+  timeline"), granted only by members holding `crm.write`, who add notes in the app: a note on one
+  of the company's contacts (not erased), or on one of its deals and so on the deal's contact, as
+  members add notes on the contact and deal pages: the text trimmed, 1 to 4,000 characters
+  (`app.crm_activities`' own limit), with `contactId`, `dealId` or both (a contact other than the
+  deal's is refused, naming `contactId`). It answers 201 with the note: its id, text, contact, deal
+  and time.
+- **Recorded as the key's:** the note is a `note` activity without a member actor that names the key
+  in its data, as the API's deal and task activities do, so the contact's and the deal's timelines
+  say it came through the API; the audit log records `crm.note_added` as the key, with the contact
+  and deal, never the text. No webhook event and no contact change are recorded, as members' notes
+  record none.
+- **Members' rules:** the CRM must be in the company's plan (403, reason `not_in_plan`), the company
+  active (writing scopes are refused while it is suspended or restricted), and the contact is locked
+  against erasure and merges until the note is in (key share), as the API's tasks lock it: an
+  unknown or erased contact given alone answers 404 (a merged one names the contact it belongs to
+  now), an unknown or another company's deal 422 naming `dealId`, and a deal whose contact was
+  erased, or that a merge moved meanwhile, 409. With an `Idempotency-Key` a retry answers the first
+  response.
+- **Notes are not read through the API:** the timeline stays in the app, as ADR-253 and ADR-258
+  decided; a key that adds a note keeps its id.
+- **Migration 0184** widens the API keys' and plan versions' scope checks (24 scopes), validated at
+  once (one row per key and per plan version). Existing keys keep their scopes, and a plan version
+  that chose its scopes leaves the new one out until a new version includes it.
+
+Not built: reading notes or the timeline through the API, changing or deleting notes (members cannot
+either), notes on tasks, mentions in notes, and webhook events for notes.

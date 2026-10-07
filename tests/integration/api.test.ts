@@ -14,6 +14,7 @@ import {
   apiAddConversationNote,
   apiCreateContact,
   apiCreateDeal,
+  apiCreateNote,
   apiCreateTask,
   apiErrorResponse,
   apiGetAutomationRun,
@@ -5495,6 +5496,208 @@ describe('CRM pipelines and deals (ADR-253)', () => {
     expect(await versionOf()).toBe(1);
     await onPlan(c, ['crm']);
     expect((await change({ status: 'done' })).status).toBe('done');
+  });
+
+  it('add notes as members add them, as the key, and a retry answers the first (ADR-268)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const writer = await apiKey(c, ['notes.write'], 'Call centre');
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New']);
+    const asha = await contactOf(owner, 'Asha');
+    const deal = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan',
+    });
+    type Note = { id: string; body: string; contactId: string; dealId: string | null };
+
+    // A note on the deal, and so on its contact's timeline, trimmed as members' notes are.
+    const created = await apiCreateNote(
+      deps(),
+      writer.ctx,
+      { body: '  Called: will renew in March  ', dealId: deal.id },
+      null,
+    );
+    expect([created.status, created.replayed]).toEqual([201, false]);
+    const note = (created.body as { data: Note }).data;
+    expect(note).toEqual({
+      id: expect.any(String),
+      body: 'Called: will renew in March',
+      contactId: asha,
+      dealId: deal.id,
+      createdAt: expect.any(String),
+    });
+    const onDeal = (await crm().getDeal(owner, deal.id)).timeline.filter((a) => a.kind === 'note');
+    expect(onDeal.map((a) => [a.id, a.body, a.actor, a.data.apiKeyId])).toEqual([
+      [note.id, 'Called: will renew in March', null, writer.id],
+    ]);
+    // One on the contact alone, with the deal's contact given too for the first.
+    const plain = (
+      (await apiCreateNote(deps(), writer.ctx, { body: 'Prefers WhatsApp', contactId: asha }, null))
+        .body as { data: Note }
+    ).data;
+    expect([plain.contactId, plain.dealId]).toEqual([asha, null]);
+    const both = (
+      (
+        await apiCreateNote(
+          deps(),
+          writer.ctx,
+          { body: 'Sent the quote', contactId: asha, dealId: deal.id },
+          null,
+        )
+      ).body as { data: Note }
+    ).data;
+    expect([both.contactId, both.dealId]).toEqual([asha, deal.id]);
+    const onContact = (await crm().contactCrm(owner, asha)).timeline.filter(
+      (a) => a.kind === 'note',
+    );
+    expect(onContact.map((a) => a.id).sort()).toEqual([note.id, plain.id, both.id].sort());
+
+    // The audit log names the key and the contact, never the note's text.
+    const audits = await fx.query<{
+      actor_type: string;
+      actor_id: string;
+      subject_id: string;
+      metadata: Record<string, unknown>;
+    }>(
+      `SELECT actor_type, actor_id, subject_id, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'crm.note_added' ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(audits).toEqual([
+      {
+        actor_type: 'api_key',
+        actor_id: writer.id,
+        subject_id: note.id,
+        metadata: { contactId: asha, dealId: deal.id, source: 'api' },
+      },
+      {
+        actor_type: 'api_key',
+        actor_id: writer.id,
+        subject_id: plain.id,
+        metadata: { contactId: asha, source: 'api' },
+      },
+      {
+        actor_type: 'api_key',
+        actor_id: writer.id,
+        subject_id: both.id,
+        metadata: { contactId: asha, dealId: deal.id, source: 'api' },
+      },
+    ]);
+
+    // A retry with the same Idempotency-Key answers the first, once.
+    const request = { body: 'Wants a call on Monday', contactId: asha };
+    const key = idem('note-monday-1', JSON.stringify(request));
+    const first = await apiCreateNote(deps(), writer.ctx, request, key);
+    const again = await apiCreateNote(deps(), writer.ctx, request, key);
+    expect([first.replayed, again.replayed]).toEqual([false, true]);
+    expect(again.body).toEqual(first.body);
+    expect(
+      await fx.query('SELECT id FROM app.crm_activities WHERE tenant_id = $1 AND body = $2', [
+        c.tenant.id,
+        'Wants a call on Monday',
+      ]),
+    ).toHaveLength(1);
+  });
+
+  it('refuse notes members are refused, and need the scope, an active company and the CRM (ADR-268)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const theirOwner = await fx.ctx(other, other.owner);
+    const writer = await apiKey(c, ['notes.write']);
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New']);
+    const theirSales = await pipelineOf(theirOwner, 'Theirs', 'INR', ['Open']);
+    const asha = await contactOf(owner, 'Asha');
+    const ravi = await contactOf(owner, 'Ravi');
+    const theirContact = await contactOf(theirOwner, 'Mira');
+    const deal = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan',
+    });
+    const theirDeal = await crm().createDeal(theirOwner, {
+      contactId: theirContact,
+      pipelineId: theirSales.id,
+      stageId: theirSales.stages[0],
+      title: 'Theirs',
+    });
+    const create = (input: Record<string, unknown>) =>
+      apiCreateNote(deps(), writer.ctx, { body: 'Called back', ...input }, null);
+    const paths = (error: unknown) =>
+      isAppError(error) ? (error.issues ?? []).map((i) => i.path) : [];
+
+    // Another company's or an unknown deal, and a contact other than the deal's, are named.
+    for (const [input, path] of [
+      [{ dealId: theirDeal.id }, 'dealId'],
+      [{ dealId: uuidv7() }, 'dealId'],
+      [{ dealId: deal.id, contactId: ravi }, 'contactId'],
+    ] as const) {
+      expect(paths(await expectAppError(create(input), 'validation_failed'))).toEqual([path]);
+    }
+    // Another company's or an unknown contact is not found, nor is an erased one, and a contact
+    // merged into another names the one it belongs to now; a deal whose contact was erased takes
+    // no new notes.
+    await expectAppError(create({ contactId: theirContact }), 'not_found', /Contact/);
+    await expectAppError(create({ contactId: uuidv7() }), 'not_found', /Contact/);
+    const merged = await contactByUserId(c);
+    await createContactMergeService({ db: fx.dbs.app, clock: systemClock }).mergeContacts(owner, {
+      keepContactId: ravi,
+      mergeContactId: merged,
+    });
+    const gone = await expectAppError(create({ contactId: merged }), 'not_found', /merged/);
+    expect(isAppError(gone) && gone.details).toEqual({
+      apiReason: 'contact_merged',
+      mergedInto: ravi,
+    });
+    await contacts().eraseContact(owner, { contactId: asha, suppress: false });
+    await expectAppError(create({ contactId: asha }), 'not_found', /Contact/);
+    await expectAppError(create({ dealId: deal.id }), 'conflict', /erased/);
+    const [none] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM app.crm_activities WHERE tenant_id = $1 AND kind = 'note'`,
+      [c.tenant.id],
+    );
+    expect(none?.n).toBe(0);
+
+    // A key without the scope, or one of a suspended company, adds none.
+    const unscoped = await apiKey(c, ['tasks.write', 'deals.write']);
+    await expectAppError(
+      apiCreateNote(deps(), unscoped.ctx, { body: 'x', contactId: ravi }, null),
+      'forbidden',
+      /notes\.write/,
+    );
+    const suspended = {
+      ...writer.ctx,
+      tenant: { ...writer.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(
+      apiCreateNote(deps(), suspended, { body: 'x', contactId: ravi }, null),
+      'tenant_suspended',
+    );
+
+    // A plan without the CRM adds none; with it again, the note is added.
+    await onPlan(c, []);
+    const error = await expectAppError(
+      create({ contactId: ravi }),
+      'forbidden',
+      /does not include the CRM/,
+    );
+    expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    await onPlan(c, ['crm']);
+    expect((await create({ contactId: ravi })).status).toBe(201);
+
+    // Granting the scope needs crm.write, which members add notes with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'crm.write')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Notes', scopes: ['notes.write'], expiresInDays: 30 }),
+      'forbidden',
+      /Add notes to the CRM timeline/,
+    );
   });
 });
 

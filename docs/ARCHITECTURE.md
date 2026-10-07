@@ -1489,6 +1489,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   schedules a new pending reminder (`scheduleTaskReminder`), adds the reopen and close activities
   without an actor naming the key for a task about a contact, and a `crm.task_updated` audit row
   listing the changes, and answers the task as `GET /tasks/{id}` reads it.
+- **Adding CRM notes through the API (ADR-268):** `POST /notes` (`api/notes.ts`, `apiCreateNote`,
+  `notes.write`) claims the `Idempotency-Key` in the note's transaction, checks the CRM in the plan,
+  finds a deal's contact (a contact other than the deal's is refused), locks the contact (key share;
+  `apiContactNotFound` for a missing or erased contact given alone, 409 for a deal's contact erased
+  or merged away), adds a `note` activity (`addActivity`) without an actor naming the key, and a
+  `crm.note_added` audit row as the key without the text, and answers the note.
 - **Numbers through the API (ADR-171):** `GET /channels` (`api/channels.ts`, `channels.read`) reads
   `channel_accounts` in the company oldest first on exact keyset cursors (`created_at`, `id`), with
   `status` as an equality, and gives the id, `display_phone_number`, `verified_name`, the status and

@@ -603,8 +603,8 @@ Phase 5 rules (Public API, P5-08):
   `campaigns.resume` (ADR-176), `commerce.read` for `orders.read` (ADR-167), `inbox.reply` for
   `orders.write` (ADR-168), `channels.read` for the scope of the same name (ADR-171), `crm.read` for
   `deals.read` (ADR-253) and `tasks.read` (ADR-258), and `crm.write` for `deals.write` (ADR-254,
-  ADR-255) and `tasks.write` (ADR-259). Nobody grants a key more than they hold, and rotating needs
-  the same. A key keeps the scopes it was created with.
+  ADR-255), `tasks.write` (ADR-259) and `notes.write` (ADR-268). Nobody grants a key more than they
+  hold, and rotating needs the same. A key keeps the scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -1071,6 +1071,13 @@ Phase 5 rules (Public API, P5-08):
   closed task is reopened before it changes, and `expectedVersion` refuses a change to a task
   changed since. Reopening and closing are on the timeline naming the key, and every change is in
   the audit log as the key's (unit tests; integration and e2e tests, run in CI only).
+- Adding CRM notes (ADR-268): `POST /notes` needs `notes.write`, granted only with `crm.write`, an
+  active company and the CRM in the company's plan. A deal or contact is found in the key's company
+  only (another company's is named or not found, as an unknown one is), and a note on a deal is
+  always on the deal's contact, locked against erasure and merges until the note is in, so a note
+  never lands on an erased contact or the wrong one. The note is recorded as the key's (the timeline
+  and the audit log, which never holds its text), and notes are never read through the API (unit
+  tests; integration tests, run in CI only).
 - Defining contact fields (ADR-115): adding, renaming and deleting the company's custom fields needs
   `contact_fields.manage`, which only members holding `tenant.settings.manage` (owners and
   administrators, who define fields in Settings) grant, and an active company. Fields are named by

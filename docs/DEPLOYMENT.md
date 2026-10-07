@@ -712,6 +712,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    event of a conversation from an endpoint with a list of tags fails on the check, and its other
    changes keep it.
 
+   Migration 0184 (ADR-268) widens the API keys' and plan versions' scope checks again for
+   `notes.write`, with the same brief locks, validated at once. Web servers from before it do not
+   know `notes.write`: until the web rollout ends, an old server answers Settings → API keys with an
+   error for a company with a key holding it (and the platform plan pages for a plan version
+   including it), and `POST /api/v1/notes` with 404. Workers are not affected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back
