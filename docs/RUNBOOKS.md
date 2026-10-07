@@ -2098,6 +2098,15 @@ suspended or its plan has ended. An order waits for payment until Razorpay repor
 ended; the order page shows the link ("through the API"), whether it was sent in the chat and why
 not, and `order.status_changed` events report the outcome.
 
+**`GET /api/v1/orders/{id}/payment-links` shows a link not sent, or answers 403 or 404 (ADR-284).**
+`notSentReason` says why HyFib did not send a link in the chat, as the order page does: the customer
+service window had closed, the number is inactive, the contact has no number, or Razorpay gave no
+https address for it. Members copy the link from the order page, or cancel it and ask again once the
+customer writes. `error` says what went wrong at Razorpay (a `failed` link was never created). 403
+`forbidden` names the scope the key lacks (`orders.read`), or with reason `not_in_plan` the
+company's plan leaves out Commerce; 404 means the order is not one of the company's. A link's
+address and Razorpay's ids are never given.
+
 **`GET /api/v1/deals` or `GET /api/v1/pipelines` answers 403 or 404, or a deal seems missing
 (ADR-253).** 403 `forbidden` names the scope the key lacks, `deals.read` (keys keep the scopes they
 were created with: create a key with it); reason `not_in_plan` means the company's plan leaves out

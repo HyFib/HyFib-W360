@@ -1452,6 +1452,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `writePaymentLinkCancel`, shared with members' `cancelPaymentLink`. The worker sends a key's link
   message with `sender_type` `api` and the key (`queueLinkMessage`), and the order page reads
   `throughApi`.
+- **An order's Payment Links through the API (ADR-284):** `GET /orders/{id}/payment-links`
+  (`apiListOrderPaymentLinks`, `orders.read`) checks Commerce in the plan and the order in the
+  company, then reads its `commerce_payment_links` newest first on exact keyset cursors
+  (`created_at`, `id`; `commerce_payment_links_order_idx`) in a read-only transaction.
+  `toApiPaymentLink` gives `notSentReason` only while no message was queued and `requestedBy` from
+  `created_by_api_key_id`; `short_url`, `provider_link_id` and `reference` are never selected.
 - **CRM pipelines and deals through the API (ADR-253):** `GET /pipelines`, `GET /deals` and
   `GET /deals/{id}` (`api/deals.ts`, `deals.read`) check the CRM in the plan first
   (`loadEntitlements`, reason `not_in_plan`). Pipelines are read oldest first on exact keyset

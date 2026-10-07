@@ -12,6 +12,7 @@ import {
   MESSAGE_TYPES,
   ORDER_STATUSES,
   ORDER_STATUS_CHANGERS,
+  PAYMENT_LINK_STATUSES,
   REMINDER_STATES,
   TASK_STATUSES,
   WEBHOOK_DELIVERY_STATES,
@@ -373,6 +374,58 @@ export const apiOrderSchema = z.object({
   receivedAt: z.iso.datetime(),
   paidAt: z.iso.datetime().nullable().describe('When Razorpay reported its Payment Link paid.'),
   updatedAt: z.iso.datetime().describe('When anything about the order last changed.'),
+});
+
+/** A Payment Link of an order, as `GET /orders/{id}/payment-links` gives it (ADR-284). */
+export const apiPaymentLinkSchema = z.object({
+  id: z.uuid(),
+  orderId: z.uuid(),
+  status: z
+    .enum(PAYMENT_LINK_STATUSES)
+    .describe(
+      'As the order page shows it: creating (HyFib is creating it at Razorpay), created (open, unpaid), partially_paid (open, part paid), paid (the whole amount paid, which marks the order paid), expired, cancelled, or failed (Razorpay could not create it: error says why).',
+    ),
+  amountMinor: z.number().int().describe('The amount asked for, in the currency’s minor units.'),
+  amountPaidMinor: z
+    .number()
+    .int()
+    .describe('What Razorpay reports paid so far, in the currency’s minor units.'),
+  currency: z.enum(['INR']),
+  expiresAt: z.iso.datetime().describe('When the link expires if it is not paid first.'),
+  paidAt: z.iso.datetime().nullable().describe('When Razorpay reported it paid.'),
+  cancelRequestedAt: z.iso
+    .datetime()
+    .nullable()
+    .describe(
+      'When its cancellation was asked for (by a member, a key, or HyFib when the contact was erased); it stays open until Razorpay reports it cancelled.',
+    ),
+  messageId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The message that sent it in the order’s conversation (GET /messages/{id}); null while it was not sent.',
+    ),
+  notSentReason: z
+    .string()
+    .nullable()
+    .describe(
+      'Why it was not sent in the chat (the customer service window had closed, the number is inactive…), as the order page says it; null once it was sent, and while nothing stopped it.',
+    ),
+  error: z
+    .string()
+    .nullable()
+    .describe('What went wrong at Razorpay with it, as the order page says it; null otherwise.'),
+  requestedBy: z
+    .enum(['member', 'api'])
+    .describe(
+      'Who asked for the payment: a member on the order page (member, never which member) or an API key (api, named by requestedByApiKeyId).',
+    ),
+  requestedByApiKeyId: z
+    .uuid()
+    .nullable()
+    .describe('The API key that asked for it, when requestedBy is api; null otherwise.'),
+  createdAt: z.iso.datetime(),
+  checkedAt: z.iso.datetime().nullable().describe('When HyFib last read it from Razorpay.'),
 });
 
 /** A CRM pipeline with its stages (ADR-253). */
@@ -2347,7 +2400,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           summary: 'WhatsApp orders, newest first',
           description: [
             `${scopeNote('orders.read')} The carts customers send from the company’s WhatsApp catalog, as the Orders page lists them, newest first by when they were received; pages never skip or repeat an order. Each order has its items, total and note, with its conversation, contact and number by id. Needs Commerce in the company’s plan (403, reason not_in_plan).`,
-            'Amounts are integers in the currency’s minor units (paise for INR). Payment Links and Razorpay’s payment ids are never read here: the company’s Razorpay account reports those. An erased contact’s orders are listed without the note, which erasure clears. To catch up on changes, ask for `updatedSince` a little before your previous pass began (a minute, say) and expect to see some orders again: a change carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
+            'Amounts are integers in the currency’s minor units (paise for INR). An order’s Payment Links are read with GET /orders/{id}/payment-links, never their address or Razorpay’s ids. An erased contact’s orders are listed without the note, which erasure clears. To catch up on changes, ask for `updatedSince` a little before your previous pass began (a minute, say) and expect to see some orders again: a change carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
             '`statusChangedBy` says who made an order’s latest status change, with the key for one made through the API (`statusChangedByApiKeyId`), so an integration can tell the orders it changed last from those members or payments did.',
           ].join('\n\n'),
           parameters: [
@@ -2418,6 +2471,24 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('Order'))),
             },
             ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/orders/{id}/payment-links': {
+        get: {
+          operationId: 'listOrderPaymentLinks',
+          summary: 'A WhatsApp order’s Payment Links, newest first',
+          description: [
+            `${scopeNote('orders.read')} The Payment Links asked for the order, by members on the order page or by API keys, newest first by when they were asked for, as the order page lists them: each one’s status, amount and amount paid, expiry, whether it was sent in the order’s conversation (the message’s id) or why not, what went wrong at Razorpay, and who asked. Needs Commerce in the company’s plan (403, reason not_in_plan).`,
+            'Never the link’s address or Razorpay’s ids for the link and its payments: HyFib sends the link in the chat, and members copy it from the order page. Only Razorpay’s report marks a link paid, and with it the order.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }, ...pageParams],
+          responses: {
+            '200': {
+              description: 'A page of the order’s Payment Links.',
+              content: pageOf('PaymentLink'),
+            },
+            ...errors(401, 403, 404, 422, 429, 500),
           },
         },
       },
@@ -3412,6 +3483,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         ConversationNote: jsonSchema(apiConversationNoteSchema),
         Campaign: jsonSchema(apiCampaignSchema),
         Order: jsonSchema(apiOrderSchema),
+        PaymentLink: jsonSchema(apiPaymentLinkSchema),
         UpdateOrder: jsonSchema(apiUpdateOrderSchema, 'input'),
         Pipeline: jsonSchema(apiPipelineSchema),
         Deal: jsonSchema(apiDealSchema),
@@ -3542,6 +3614,7 @@ export const API_ROUTES = [
   ['post', '/automation-runs/stop-many'],
   ['get', '/orders'],
   ['get', '/orders/{id}'],
+  ['get', '/orders/{id}/payment-links'],
   ['patch', '/orders/{id}'],
   ['post', '/orders/{id}/request-payment'],
   ['post', '/orders/{id}/cancel-payment'],

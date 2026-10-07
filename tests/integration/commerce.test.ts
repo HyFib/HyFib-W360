@@ -5,6 +5,7 @@ import { authorizedTenantScope, sql } from '@w360/db';
 import {
   ORDER_CSV_COLUMNS,
   apiCancelOrderPayment,
+  apiListOrderPaymentLinks,
   apiRequestOrderPayment,
   authenticateApiToken,
   createApiKeysService,
@@ -229,6 +230,17 @@ async function paymentAccount(c: Company, owner: TenantContext) {
   );
   expect(await processPaymentAccountCheck(workerDeps(), scopeOf(c), account!.id)).toBe('done');
   return { keyId, keySecret, webhookSecret, publicId: account!.webhook_public_id };
+}
+
+/** A key of the company with these scopes, as a request authenticates it. */
+async function apiKeyOf(company: Company, scopes: ApiScope[]) {
+  const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+    await fx.ctx(company, company.owner),
+    { name: `Shop ${scopes.join(' ')}`, scopes, expiresInDays: 0 },
+  );
+  const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+  if (!key) throw new Error('a new key does not authenticate');
+  return key;
 }
 
 let planCodes = 0;
@@ -1130,18 +1142,7 @@ describe('payment links', () => {
     const owner = await fx.ctx(c, c.owner);
     await syncedCatalog(c, owner, '5550015', 2);
     const svc = service();
-    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
-    const keyOf = async (company: Company, scopes: ApiScope[]) => {
-      const created = await keys.create(await fx.ctx(company, company.owner), {
-        name: `Shop ${scopes.join(' ')}`,
-        scopes,
-        expiresInDays: 0,
-      });
-      const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
-      if (!key) throw new Error('a new key does not authenticate');
-      return key;
-    };
-    const payer = await keyOf(c, ['orders.read', 'orders.request_payment']);
+    const payer = await apiKeyOf(c, ['orders.read', 'orders.request_payment']);
     const apiDeps = { db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer };
     const ask = (
       orderId: string,
@@ -1166,7 +1167,7 @@ describe('payment links', () => {
     await paymentAccount(c, owner);
 
     // A key that only moves orders on never asks for payment.
-    const mover = await keyOf(c, ['orders.write']);
+    const mover = await apiKeyOf(c, ['orders.write']);
     await expectAppError(
       apiRequestOrderPayment(apiDeps, mover, orderId, null),
       'forbidden',
@@ -1288,7 +1289,7 @@ describe('payment links', () => {
     await expectAppError(ask(orderId), 'conflict', /This order's status is paid\.$/);
 
     // Another company's key finds neither the order nor its link; an unknown id is not found.
-    const theirs = await keyOf(other, ['orders.request_payment']);
+    const theirs = await apiKeyOf(other, ['orders.request_payment']);
     await expectAppError(apiRequestOrderPayment(apiDeps, theirs, orderId, null), 'not_found');
     await expectAppError(apiCancelOrderPayment(apiDeps, theirs, orderId), 'not_found');
     await expectAppError(ask(uuidv7()), 'not_found');
@@ -1306,6 +1307,95 @@ describe('payment links', () => {
     expect((await orderOf(convRavi.id)).status).toBe('received');
     await onPlan(c, ['commerce']);
     expect((await ask(ravisOrder)).status).toBe(200);
+  });
+
+  it('reads an order’s Payment Links through the API as the order page lists them (ADR-284)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    await syncedCatalog(c, owner, '5550016', 1);
+    await paymentAccount(c, owner);
+    const svc = service();
+    const reader = await apiKeyOf(c, ['orders.read']);
+    const payer = await apiKeyOf(c, ['orders.request_payment']);
+    const apiDeps = { db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer };
+    const links = (orderId: string, query: Record<string, string | null> = {}) =>
+      apiListOrderPaymentLinks(apiDeps, reader, orderId, query);
+
+    // An order of ₹20.00 with no link yet.
+    const asha = waId();
+    await fx.deliver(
+      orderMessage(c, asha, '5550016', [{ retailerId: 'sku-1', quantity: 2, price: 10 }]),
+    );
+    const conv = await conversationOf(c, asha);
+    const order = await orderOf(conv.id);
+    const orderId = order.id as string;
+    expect(await links(orderId)).toEqual({ data: [], nextCursor: null });
+
+    // A member asks: the link is sent in the chat, then cancelled at the member's request.
+    await svc.requestPayment(agent, { id: orderId, expectedVersion: order.version as number });
+    const first = await linkRow(orderId);
+    expect(await processPaymentLink(workerDeps(), scopeOf(c), first.id as string)).toBe('done');
+    const sent = await linkRow(orderId);
+    expect(sent.message_id).toEqual(expect.any(String));
+    await svc.cancelPaymentLink(agent, { orderId });
+    expect(await processPaymentLink(workerDeps(), scopeOf(c), first.id as string)).toBe('done');
+
+    // A key asks again; Razorpay gives no address for the link, so it is not sent.
+    rzp.state.omitShortUrl = true;
+    expect((await apiRequestOrderPayment(apiDeps, payer, orderId, null)).status).toBe(200);
+    const second = await linkRow(orderId);
+    expect(await processPaymentLink(workerDeps(), scopeOf(c), second.id as string)).toBe('done');
+
+    // Newest first, a page at a time: the key's unsent link, then the member's cancelled one.
+    const page = await links(orderId, { limit: '1' });
+    expect(page.data.map((l) => l.id)).toEqual([second.id]);
+    expect(page.nextCursor).toEqual(expect.any(String));
+    const rest = await links(orderId, { limit: '1', cursor: page.nextCursor });
+    expect(rest.data.map((l) => l.id)).toEqual([first.id]);
+    expect(rest.nextCursor).toBeNull();
+    expect(page.data[0]).toMatchObject({
+      orderId,
+      status: 'created',
+      amountMinor: 2000,
+      amountPaidMinor: 0,
+      currency: 'INR',
+      paidAt: null,
+      cancelRequestedAt: null,
+      messageId: null,
+      notSentReason: expect.stringMatching(/no https address/),
+      error: null,
+      requestedBy: 'api',
+      requestedByApiKeyId: payer.key.id,
+      checkedAt: expect.any(String),
+    });
+    expect(rest.data[0]).toMatchObject({
+      status: 'cancelled',
+      cancelRequestedAt: expect.any(String),
+      messageId: sent.message_id,
+      notSentReason: null,
+      requestedBy: 'member',
+      requestedByApiKeyId: null,
+    });
+    // Never the address or Razorpay's ids for the link.
+    const read = JSON.stringify([...page.data, ...rest.data]);
+    for (const hidden of [sent.short_url, sent.provider_link_id, sent.reference]) {
+      expect(read).not.toContain(hidden as string);
+    }
+
+    // Another company's key finds no order; a key without orders.read reads none, and a plan
+    // without Commerce none either.
+    const theirs = await apiKeyOf(other, ['orders.read']);
+    await expectAppError(apiListOrderPaymentLinks(apiDeps, theirs, orderId, {}), 'not_found');
+    await expectAppError(
+      apiListOrderPaymentLinks(apiDeps, payer, orderId, {}),
+      'forbidden',
+      /orders\.read/,
+    );
+    await onPlan(c, []);
+    const refused = await expectAppError(links(orderId), 'forbidden', /does not include Commerce/);
+    expect(isAppError(refused) && refused.details).toEqual({ apiReason: 'not_in_plan' });
   });
 
   it('keeps each key check with the keys it used, and explains a link without an address', async () => {

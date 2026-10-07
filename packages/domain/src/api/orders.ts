@@ -5,6 +5,7 @@ import {
   asc,
   commerceOrderItems,
   commerceOrders,
+  commercePaymentLinks,
   desc,
   eq,
   exactTimestamp,
@@ -13,6 +14,7 @@ import {
   sql,
   type OrderStatus,
   type OrderStatusChanger,
+  type PaymentLinkStatus,
   type Tx,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
@@ -46,7 +48,8 @@ import { API_LIMITS } from './model';
  * never read; an erased contact's orders keep no note (erasure clears it). With `orders.write` a
  * key confirms, fulfils and cancels them as members do (ADR-168); with `orders.request_payment` it
  * asks the customer to pay with a Payment Link, and cancels one, as members do (ADR-283). Payment
- * statuses come only from Razorpay.
+ * statuses come only from Razorpay. With `orders.read` a key reads an order's Payment Links as the
+ * order page lists them, never their address or Razorpay's ids (ADR-284).
  */
 
 export const apiOrderListQuerySchema = z
@@ -67,6 +70,14 @@ export const apiOrderListQuerySchema = z
       .describe(
         'Only orders changed at or after this time (received, a new status, or the note cleared when the contact was erased).',
       ),
+  })
+  .strict();
+
+/** What `GET /orders/{id}/payment-links` takes (ADR-284): a page. */
+export const apiPaymentLinkListQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(API_LIMITS.pageSize).default(50),
+    cursor: z.string().max(200).optional().describe('`nextCursor` from the previous page.'),
   })
   .strict();
 
@@ -517,4 +528,135 @@ export async function apiCancelOrderPayment(
   });
   if (!order) throw notFound('Order');
   return order;
+}
+
+/**
+ * A Payment Link as the API gives it (ADR-284): as the order page lists it, with who asked (a key by
+ * its id, never which member), never its address or Razorpay's ids for the link and its payments.
+ */
+export interface ApiPaymentLink {
+  id: string;
+  orderId: string;
+  status: PaymentLinkStatus;
+  amountMinor: number;
+  amountPaidMinor: number;
+  currency: 'INR';
+  expiresAt: string;
+  paidAt: string | null;
+  cancelRequestedAt: string | null;
+  messageId: string | null;
+  /** Why it was not sent in the chat, while it was not. */
+  notSentReason: string | null;
+  error: string | null;
+  requestedBy: 'member' | 'api';
+  requestedByApiKeyId: string | null;
+  createdAt: string;
+  checkedAt: string | null;
+}
+
+/** A Payment Link's row as the API reads it. */
+export interface PaymentLinkRow {
+  id: string;
+  orderId: string;
+  status: PaymentLinkStatus;
+  amountMinor: number;
+  amountPaidMinor: number;
+  currency: 'INR';
+  expiresAt: Date;
+  paidAt: Date | null;
+  cancelRequestedAt: Date | null;
+  messageId: string | null;
+  sendError: string | null;
+  error: string | null;
+  apiKeyId: string | null;
+  createdAt: Date;
+  checkedAt: Date | null;
+}
+
+/** A link as the API gives it: a reason it was not sent only while it was not (ADR-284). */
+export const toApiPaymentLink = (row: PaymentLinkRow): ApiPaymentLink => ({
+  id: row.id,
+  orderId: row.orderId,
+  status: row.status,
+  amountMinor: row.amountMinor,
+  amountPaidMinor: row.amountPaidMinor,
+  currency: row.currency,
+  expiresAt: row.expiresAt.toISOString(),
+  paidAt: row.paidAt?.toISOString() ?? null,
+  cancelRequestedAt: row.cancelRequestedAt?.toISOString() ?? null,
+  messageId: row.messageId,
+  notSentReason: row.messageId ? null : row.sendError,
+  error: row.error,
+  requestedBy: row.apiKeyId ? 'api' : 'member',
+  requestedByApiKeyId: row.apiKeyId,
+  createdAt: row.createdAt.toISOString(),
+  checkedAt: row.checkedAt?.toISOString() ?? null,
+});
+
+/**
+ * The Payment Links of one of the company's orders, newest first by when they were asked for, on
+ * exact keyset pages (ADR-284), read-only: an order of another company, or none, is not found.
+ */
+export async function apiListOrderPaymentLinks(
+  deps: Pick<OutboundDeps, 'db'>,
+  ctx: ApiContext,
+  orderId: string,
+  query: unknown,
+): Promise<{ data: ApiPaymentLink[]; nextCursor: string | null }> {
+  assertScope(ctx, 'orders.read');
+  if (!z.uuid().safeParse(orderId).success) throw notFound('Order');
+  const q = parseInput(apiPaymentLinkListQuerySchema, query);
+  const cursor = decodeKeysetCursor(q.cursor);
+  const result = await deps.db.run(
+    ctx.scope,
+    async (tx) => {
+      await assertCommerceInPlan(tx, ctx.tenant.id);
+      const [order] = await tx
+        .select({ id: commerceOrders.id })
+        .from(commerceOrders)
+        .where(and(eq(commerceOrders.tenantId, ctx.tenant.id), eq(commerceOrders.id, orderId)));
+      if (!order) return null;
+      const rows = await tx
+        .select({
+          id: commercePaymentLinks.id,
+          orderId: commercePaymentLinks.orderId,
+          status: commercePaymentLinks.status,
+          amountMinor: commercePaymentLinks.amountMinor,
+          amountPaidMinor: commercePaymentLinks.amountPaidMinor,
+          currency: commercePaymentLinks.currency,
+          expiresAt: commercePaymentLinks.expiresAt,
+          paidAt: commercePaymentLinks.paidAt,
+          cancelRequestedAt: commercePaymentLinks.cancelRequestedAt,
+          messageId: commercePaymentLinks.messageId,
+          sendError: commercePaymentLinks.sendError,
+          error: commercePaymentLinks.error,
+          apiKeyId: commercePaymentLinks.createdByApiKeyId,
+          createdAt: commercePaymentLinks.createdAt,
+          checkedAt: commercePaymentLinks.checkedAt,
+          cursorAt: exactTimestamp(commercePaymentLinks.createdAt),
+        })
+        .from(commercePaymentLinks)
+        .where(
+          and(
+            eq(commercePaymentLinks.tenantId, ctx.tenant.id),
+            eq(commercePaymentLinks.orderId, orderId),
+            cursor
+              ? sql`(${commercePaymentLinks.createdAt}, ${commercePaymentLinks.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
+              : undefined,
+          ),
+        )
+        .orderBy(desc(commercePaymentLinks.createdAt), desc(commercePaymentLinks.id))
+        .limit(q.limit + 1);
+      const shown = rows.slice(0, q.limit);
+      const last = shown.at(-1);
+      return {
+        data: shown.map(toApiPaymentLink),
+        nextCursor:
+          rows.length > q.limit && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
+      };
+    },
+    { accessMode: 'read only' },
+  );
+  if (!result) throw notFound('Order');
+  return result;
 }

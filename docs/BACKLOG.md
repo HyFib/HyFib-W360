@@ -737,6 +737,10 @@ verification, app review, Embedded Signup configuration).
   `inbox.reply`, and Commerce in the plan: a Payment Link for the order's total from the company's
   own Razorpay account, sent in the chat as the key, and cancelled, as members do; only Razorpay's
   report marks an order paid).
+  **[Reading an order's Payment Links built; its database tests run only in CI]** (ADR-284, no
+  migration: `GET /orders/{id}/payment-links` with `orders.read` gives an order's links newest first
+  on exact pages, each with its status, amounts, expiry, the message that sent it or why it was not
+  sent, and who asked, never its address or Razorpay's ids).
   **[Who last changed an order, through the API, built; its database and browser tests run only in
   CI]** (ADR-271, no migration: `GET /orders`, `GET /orders/{id}` and the answer of
   `PATCH /orders/{id}` name who made an order's latest status change, a member, a key by its id or

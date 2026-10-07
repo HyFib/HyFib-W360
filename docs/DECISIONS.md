@@ -10764,3 +10764,35 @@ Decision:
 Not built: reading an order's Payment Links through the API (their status, address, amount paid, or
 why a link was not sent), Payment Link webhook events, refunds, links for an amount other than the
 order's total, and asking for payment of store orders.
+
+## ADR-284 Reading an order's Payment Links through the public API (P5-08, P4-06a) (2026-10-07)
+
+Context: since ADR-283 a key asks the customer to pay an order and cancels its link, but an
+integration could follow only the order's status: it could not tell whether the link reached the
+customer (the customer service window may have closed, and members then copy it from the order
+page), what was paid of a partly paid link, when it expires, or why Razorpay could not create it,
+all of which members see on the order page. ADR-167 kept Payment Links out of the API, and ADR-283
+left reading them unbuilt.
+
+Decision:
+
+- **`GET /api/v1/orders/{id}/payment-links`** (`listOrderPaymentLinks`) with `orders.read` and
+  Commerce in the plan (403, reason `not_in_plan`): the order's links, newest first by when they
+  were asked for, on exact keyset pages, as the order page lists them. Each gives its status
+  (creating, created, partially_paid, paid, expired, cancelled or failed), the amount and the amount
+  paid in minor units, its expiry, when it was paid and when its cancellation was asked for, the
+  message that sent it in the chat or why it was not sent (`notSentReason`, as the order page says
+  it, null once it was sent), what went wrong at Razorpay, who asked (`requestedBy`: `member`, never
+  which member, or `api` with `requestedByApiKeyId`) and when HyFib last read it from Razorpay.
+  Another company's order and an unknown id answer 404, and an id that is not a UUID is refused
+  before any query.
+- **Never the link's address or Razorpay's ids** (the link's id and reference at Razorpay, and
+  payment ids), as webhooks never carry them (ADR-085): HyFib sends the link in the chat, members
+  copy it from the order page, and the company's Razorpay account reports its payments. Only
+  Razorpay's report marks a link paid, and with it the order.
+- **No new scope and no migration:** `orders.read` already reads orders (granted with
+  `commerce.read`, with which members see the links on the order page); one read-only transaction
+  per call, served by `commerce_payment_links_order_idx`. A call counts as one request.
+
+Not built: a link's address through the API, the links of many orders in one call, filters by
+status, and Payment Link webhook events.

@@ -811,7 +811,7 @@ Phase 5 rules (Public API, P5-08):
   company's order answers 404 as an unknown one does, an id that is not a UUID is refused before any
   query, and every filter is typed (a status from the list, UUIDs, the reference's eight-capital
   pattern, an ISO time). Orders name the contact, conversation and number by id only, never the
-  customer's number or name, the Payment Link or Razorpay's payment ids; an erased contact's orders
+  customer's number or name, a Payment Link's address or Razorpay's ids; an erased contact's orders
   are read without the note erasure clears (unit tests; integration and e2e tests, run in CI only).
   An order names who made its latest status change (ADR-271) as `order.status_changed` does: a
   member never by name, a key by its id, HyFib's Payment Link, or nobody when nothing was recorded,
@@ -835,6 +835,13 @@ Phase 5 rules (Public API, P5-08):
   fetched from Razorpay does. The link names the key as its creator (a database check holds exactly
   one creator), its message is sent as the key, and both requests are audited as the key (unit
   tests; integration tests, run in CI only).
+- Reading Payment Links (ADR-284): `GET /orders/{id}/payment-links` needs `orders.read`, granted
+  only with `commerce.read` (with which members see the links on the order page), and Commerce in
+  the company's plan, both checked before a link is read. It reads in the key's company only (row
+  security and an explicit company condition; another company's order answers 404 as an unknown one
+  does), in a read-only transaction, and never gives a link's address, its id or reference at
+  Razorpay, or payment ids; who asked is a member never by name, or a key of the company's own by
+  its id (unit tests; integration tests, run in CI only).
 - Reading numbers (ADR-171): `GET /channels` needs `channels.read`, granted only with the permission
   of the same name, checked before anything is read. It reads in the key's company only (row
   security and an explicit company condition), takes a page and a status from the list and nothing

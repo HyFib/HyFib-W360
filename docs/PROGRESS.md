@@ -1,5 +1,34 @@
 # Progress
 
+## 2026-10-07 — An order's Payment Links through the public API (P5-08, P4-06a, H-033, W-114, ADR-284)
+
+Status: **Implemented; its database tests run in CI only.** Keys asked for payment but could follow
+only the order's status, not whether the link was sent or what was paid. No migration. The local
+PostgreSQL is unavailable, so the integration test below was written but not run here.
+
+### Completed
+
+- **Domain:** `apiListOrderPaymentLinks` and `toApiPaymentLink` (`api/orders.ts`), the `PaymentLink`
+  OpenAPI schema and `GET /orders/{id}/payment-links`; the `orders.read` description and the order
+  list's now point to it.
+- **Web:** `GET /api/v1/orders/{id}/payment-links`.
+- **Tests:** unit (`api/orders.test.ts`: the mapping, the page parameters, refusals before any read,
+  the read-only transaction, the OpenAPI entries); integration (1 new in `commerce.test.ts`, against
+  the Razorpay stand-in). Written for CI; the integration test was not run here. No e2e test.
+- **Docs:** ADR-284; ARCHITECTURE; SECURITY; THREAT-MODEL T252; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-114.
+- **Mutation checks:** 16/16 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 122 files, 1169 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Asking for payment of WhatsApp orders through the public API (P5-08, P4-06a, H-033, W-114, ADR-283)
 
 Status: **Implemented; its database tests run in CI only.** Order systems moved orders on through

@@ -1,19 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import { isAppError } from '@w360/core';
-import { API_SCOPES, ORDER_STATUSES, type Database } from '@w360/db';
+import { API_SCOPES, ORDER_STATUSES, PAYMENT_LINK_STATUSES, type Database } from '@w360/db';
 import { ROLE_PERMISSIONS } from '../authz/permissions';
 import { ORDER_REFERENCE_RE } from '../commerce/model';
 import type { ApiContext } from './context';
 import { API_SCOPE_INFO } from './model';
-import { API_ROUTES, apiOrderSchema, buildOpenApiDocument } from './openapi';
+import { API_ROUTES, apiOrderSchema, apiPaymentLinkSchema, buildOpenApiDocument } from './openapi';
 import {
   apiCancelOrderPayment,
   apiGetOrder,
+  apiListOrderPaymentLinks,
   apiListOrders,
   apiOrderListQuerySchema,
+  apiPaymentLinkListQuerySchema,
   apiRequestOrderPayment,
   apiUpdateOrder,
   apiUpdateOrderSchema,
+  toApiPaymentLink,
+  type PaymentLinkRow,
 } from './orders';
 
 const TENANT = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
@@ -64,7 +68,11 @@ describe('WhatsApp orders through the API (ADR-167)', () => {
       permission: 'commerce.read',
       writes: false,
     });
-    for (const words of ['Never Payment Links or payment ids', 'Commerce']) {
+    for (const words of [
+      'Payment Links, with their status, amounts and whether they were sent',
+      "never their address or Razorpay's ids",
+      'Commerce',
+    ]) {
       expect(API_SCOPE_INFO['orders.read'].description).toContain(words);
     }
     // Only owners and administrators create keys, and both read orders in the app.
@@ -171,7 +179,7 @@ describe('WhatsApp orders through the API (ADR-167)', () => {
       'pages never skip or repeat an order',
       '(403, reason not_in_plan)',
       'integers in the currency’s minor units',
-      'Payment Links and Razorpay’s payment ids are never read here',
+      'An order’s Payment Links are read with GET /orders/{id}/payment-links, never their address or Razorpay’s ids.',
       'without the note',
       '`updatedSince` a little before your previous pass began',
       // Who made each order's latest change (ADR-271).
@@ -485,5 +493,163 @@ describe('asking for payment of WhatsApp orders through the API (ADR-283)', () =
     ]) {
       expect(cancel.description).toContain(words);
     }
+  });
+});
+
+describe('an order’s Payment Links through the API (ADR-284)', () => {
+  const at = new Date('2026-10-07T10:00:00.000Z');
+  const row: PaymentLinkRow = {
+    id: OTHER,
+    orderId: TENANT,
+    status: 'created',
+    amountMinor: 3000,
+    amountPaidMinor: 1000,
+    currency: 'INR',
+    expiresAt: new Date('2026-10-14T10:00:00.000Z'),
+    paidAt: null,
+    cancelRequestedAt: null,
+    messageId: null,
+    sendError: 'The link was created but not sent: the 24-hour customer service window had closed.',
+    error: null,
+    apiKeyId: null,
+    createdAt: at,
+    checkedAt: at,
+  };
+
+  it('take a page and nothing else', () => {
+    const parse = (input: unknown) => apiPaymentLinkListQuerySchema.safeParse(input);
+    const parsed = parse({});
+    expect(parsed.success && [parsed.data.limit, parsed.data.cursor]).toEqual([50, undefined]);
+    expect(parse({ limit: '100', cursor: 'abc' }).success).toBe(true);
+    for (const input of [
+      { limit: '0' },
+      { limit: '101' },
+      { status: 'paid' },
+      { orderId: TENANT },
+    ]) {
+      expect(parse(input).success, JSON.stringify(input)).toBe(false);
+    }
+  });
+
+  it('give each link as the order page lists it, a reason it was not sent only while it was not', () => {
+    expect(toApiPaymentLink(row)).toEqual({
+      id: OTHER,
+      orderId: TENANT,
+      status: 'created',
+      amountMinor: 3000,
+      amountPaidMinor: 1000,
+      currency: 'INR',
+      expiresAt: '2026-10-14T10:00:00.000Z',
+      paidAt: null,
+      cancelRequestedAt: null,
+      messageId: null,
+      notSentReason:
+        'The link was created but not sent: the 24-hour customer service window had closed.',
+      error: null,
+      requestedBy: 'member',
+      requestedByApiKeyId: null,
+      createdAt: '2026-10-07T10:00:00.000Z',
+      checkedAt: '2026-10-07T10:00:00.000Z',
+    });
+    const sent = toApiPaymentLink({
+      ...row,
+      status: 'paid',
+      amountPaidMinor: 3000,
+      paidAt: at,
+      cancelRequestedAt: at,
+      messageId: TENANT,
+      error: 'Razorpay could not be reached.',
+      apiKeyId: OTHER,
+      checkedAt: null,
+    });
+    expect(sent).toMatchObject({
+      messageId: TENANT,
+      notSentReason: null,
+      paidAt: at.toISOString(),
+      cancelRequestedAt: at.toISOString(),
+      error: 'Razorpay could not be reached.',
+      requestedBy: 'api',
+      requestedByApiKeyId: OTHER,
+      checkedAt: null,
+    });
+  });
+
+  it('need orders.read and refuse bad requests before reading anything, while suspended too', async () => {
+    const list = (scopes: string[], id = TENANT, query: unknown = {}, status = 'active') =>
+      apiListOrderPaymentLinks({ db: untouched }, ctx(scopes, status), id, query);
+    expect(await refusal(list(['orders.write', 'orders.request_payment']))).toEqual([
+      'forbidden',
+      'This API key does not have the orders.read scope.',
+      [],
+    ]);
+    expect((await refusal(list(['orders.read'], 'not-an-id')))[0]).toBe('not_found');
+    expect((await refusal(list(['orders.read'], TENANT, { status: 'paid' })))[0]).toBe(
+      'validation_failed',
+    );
+    const { db, runs } = reached();
+    await expect(
+      apiListOrderPaymentLinks({ db }, ctx(['orders.read'], 'suspended'), TENANT, {}),
+    ).rejects.toThrow('reached the database');
+    expect(runs).toEqual([{ accessMode: 'read only' }]);
+  });
+
+  it('are described: the scope, what each link says, and never its address or Razorpay’s ids', () => {
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      paths: Record<string, Record<string, Record<string, unknown>>>;
+      components: {
+        schemas: Record<string, { properties: Record<string, unknown>; required: string[] }>;
+      };
+    };
+    expect(API_ROUTES).toContainEqual(['get', '/orders/{id}/payment-links']);
+    const op = doc.paths['/orders/{id}/payment-links']?.get as {
+      operationId: string;
+      description: string;
+      parameters: { $ref?: string; name?: string }[];
+      responses: Record<string, { content?: unknown }>;
+    };
+    expect(op.operationId).toBe('listOrderPaymentLinks');
+    expect(op.parameters[0]).toEqual({ $ref: '#/components/parameters/Id' });
+    expect(op.parameters.slice(1).map((p) => p.name)).toEqual(['limit', 'cursor']);
+    expect(Object.keys(op.responses)).toEqual(
+      expect.arrayContaining(['200', '403', '404', '422', '429']),
+    );
+    for (const words of [
+      'Scope: `orders.read`.',
+      'asked for the order, by members on the order page or by API keys, newest first',
+      'whether it was sent in the order’s conversation (the message’s id) or why not',
+      '(403, reason not_in_plan)',
+      'Never the link’s address or Razorpay’s ids for the link and its payments',
+      'Only Razorpay’s report marks a link paid, and with it the order.',
+    ]) {
+      expect(op.description).toContain(words);
+    }
+    const schema = doc.components.schemas.PaymentLink!;
+    expect(Object.keys(schema.properties)).toEqual([
+      'id',
+      'orderId',
+      'status',
+      'amountMinor',
+      'amountPaidMinor',
+      'currency',
+      'expiresAt',
+      'paidAt',
+      'cancelRequestedAt',
+      'messageId',
+      'notSentReason',
+      'error',
+      'requestedBy',
+      'requestedByApiKeyId',
+      'createdAt',
+      'checkedAt',
+    ]);
+    expect(schema.required).toEqual(Object.keys(schema.properties));
+    expect(JSON.stringify(schema)).not.toMatch(
+      /"(url|shortUrl|reference|providerLinkId|paymentId)"/,
+    );
+    expect(apiPaymentLinkSchema.shape.status.options).toEqual([...PAYMENT_LINK_STATUSES]);
+    expect(apiPaymentLinkSchema.shape.requestedBy.description).toContain(
+      'a member on the order page (member, never which member)',
+    );
+    expect(apiPaymentLinkSchema.shape.notSentReason.description).toContain('null once it was sent');
   });
 });
