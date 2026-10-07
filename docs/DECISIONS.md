@@ -9568,3 +9568,28 @@ Decision:
 
 Not built: recording the automation on the deal row as its closer (the timeline names it), and a
 reason filled in from the conversation.
+
+## ADR-252 A weighted CRM forecast in Reports (P4-04) (2026-10-07)
+
+Context: the CRM board weighs open deals by each stage's chance of winning for the pipeline and for
+the current month (ADR-242), but Reports showed only the open pipeline by stage, so a company could
+not see what to expect in the coming months.
+
+Decision:
+
+- **What:** under each pipeline's open pipeline, a "Weighted forecast" (`crm.forecast`, version 1)
+  of its open deals in active stages by the month they are expected to close: this month (dates
+  already past included, as on the board), the next two months, later, and without a date, each with
+  the number of deals, their value and that value weighed by each stage's chance, in the pipeline's
+  currency. Months are the company's.
+- **The same arithmetic as the board:** each stage's deals in a bucket are weighed once
+  (`forecastByMonth`), so this month's weighted value equals the board's. Deals in stages without a
+  chance count in the deals and the value and are named apart; a pipeline without any chance shows
+  no weighed values and says where to set them.
+- **Like every report number:** computed when the page loads in the report's read-only snapshot,
+  with `reports.read`; its definition is persisted with the others (migration 0166) and a test keeps
+  the table equal to the registry. It is a state now, not a period figure, so it is not in the deals
+  section's CSV export, as the open pipeline is not.
+
+Not built: forecasts by owner or by month beyond the third, and history of past forecasts (nothing
+is stored).

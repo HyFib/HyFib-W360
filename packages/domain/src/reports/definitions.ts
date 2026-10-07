@@ -964,6 +964,23 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     available: true,
   },
   {
+    key: 'crm.forecast',
+    version: 1,
+    label: 'Weighted forecast',
+    unit: 'count',
+    description:
+      'Open deals by the month they are expected to close, with their value and that value weighed by each stage’s chance of winning, in each pipeline’s currency, now.',
+    numerator:
+      'Open deals in active stages, by expected close month: this month (dates already past included), the next two months, later, and without a date.',
+    denominator: null,
+    window: null,
+    timezoneRule: 'Months of the company’s time zone.',
+    missingData:
+      'Deals in stages without a chance of winning count in the deals and the value but add nothing to the weighted value. Deals without a value count in the number of deals only.',
+    freshness: NOW,
+    available: true,
+  },
+  {
     key: 'contacts.retention',
     version: 1,
     label: 'Retention cohorts',

@@ -33,6 +33,7 @@ import { openPeriods } from '../inbox/business-hours';
 import { loadReplyTarget, type ReplyTarget } from '../inbox/sla';
 import { parseInput } from '../validation';
 import { METRIC_DEFINITIONS, type MetricDefinition } from './definitions';
+import { forecastByMonth, forecastMonths, type MonthForecast } from '../crm/forecast';
 import { resolvePeriod, type ReportPeriod } from './period';
 
 /**
@@ -232,6 +233,8 @@ export interface DealReport {
     name: string;
     currency: string;
     stages: { id: string; name: string; deals: number; valueMinor: number }[];
+    /** Its open deals by expected close month, weighed by each stage's chance (ADR-252). */
+    forecast: MonthForecast;
   }[];
   /** Closed deals per day and currency (days without any are left out). */
   days: {
@@ -857,8 +860,13 @@ async function automationReport(
   };
 }
 
-/** Deals closed in the period (by close time) and open deals now. */
-async function dealReport(tx: Tx, tenantId: string, period: ReportPeriod): Promise<DealReport> {
+/** Deals closed in the period (by close time) and open deals now, with their forecast. */
+async function dealReport(
+  tx: Tx,
+  tenantId: string,
+  period: ReportPeriod,
+  now: Date,
+): Promise<DealReport> {
   const closed = await tx.execute<{
     day: string;
     currency: string;
@@ -901,6 +909,24 @@ async function dealReport(tx: Tx, tenantId: string, period: ReportPeriod): Promi
      where p.tenant_id = ${tenantId} and p.archived_at is null
      group by p.id, p.name, p.currency, p.position, s.id, s.name, s.position
      order by p.position, lower(p.name), s.position`);
+  // The forecast (ADR-252): open deals in active stages by stage and expected close month.
+  const byMonth = await tx.execute<{
+    pipeline_id: string;
+    stage_id: string;
+    win_percent: number | null;
+    close_month: string | null;
+    deals: number;
+    value: string;
+  }>(sql`
+    select s.pipeline_id, s.id as stage_id, s.win_percent,
+           to_char(d.expected_close_on, 'YYYY-MM') as close_month, count(*)::int as deals,
+           coalesce(sum(d.value_minor), 0)::text as value
+      from app.crm_deals d
+      join app.crm_stages s on s.tenant_id = d.tenant_id and s.id = d.stage_id and s.archived_at is null
+      join app.crm_pipelines p on p.tenant_id = s.tenant_id and p.id = s.pipeline_id and p.archived_at is null
+     where d.tenant_id = ${tenantId} and d.status = 'open'
+     group by s.pipeline_id, s.id, s.win_percent, close_month`);
+  const months = forecastMonths(now, period.timezone);
 
   const totals = (status: 'won' | 'lost'): DealAmount[] => {
     const byCurrency = new Map<string, DealAmount>();
@@ -921,7 +947,24 @@ async function dealReport(tx: Tx, tenantId: string, period: ReportPeriod): Promi
   for (const r of open.rows) {
     let pipeline = pipelines.find((p) => p.id === r.pipeline_id);
     if (!pipeline) {
-      pipeline = { id: r.pipeline_id, name: r.pipeline_name, currency: r.currency, stages: [] };
+      pipeline = {
+        id: r.pipeline_id,
+        name: r.pipeline_name,
+        currency: r.currency,
+        stages: [],
+        forecast: forecastByMonth(
+          byMonth.rows
+            .filter((m) => m.pipeline_id === r.pipeline_id)
+            .map((m) => ({
+              stageId: m.stage_id,
+              winPercent: m.win_percent,
+              closeMonth: m.close_month,
+              deals: m.deals,
+              valueMinor: num(m.value),
+            })),
+          months,
+        ),
+      };
       pipelines.push(pipeline);
     }
     pipeline.stages.push({
@@ -1451,7 +1494,7 @@ export function createReportsService(deps: ReportsDeps) {
         const inbox = await inboxReport(tx, ctx.tenant.id, period, now, settings.target);
         const csat = await csatReport(tx, ctx.tenant.id, period, settings.csatEnabled);
         const automations = await automationReport(tx, ctx.tenant.id, period);
-        const deals = await dealReport(tx, ctx.tenant.id, period);
+        const deals = await dealReport(tx, ctx.tenant.id, period, now);
         const agents = await agentReport(tx, ctx.tenant.id, period);
         const campaigns = await campaignFunnel(tx, ctx.tenant.id, period, settings.costCurrency);
         const definitions = await loadDefinitions(tx);

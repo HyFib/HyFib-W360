@@ -191,10 +191,12 @@ verification, app review, Embedded Signup configuration).
   in short words or numbers, ranked below every match without typos; no migration). **[Form steps
   built; their database and browser tests run only in CI]** (ADR-248: a published form sent in the
   conversation with a token of its own, as a member sends it, while the plan includes WhatsApp
-  Flows; no migration). **Remaining:** catalog steps (sending products from a run), starting runs
-  from the public API or campaigns, enrolling contacts or segments in a sequence without a customer
-  message or order event, a drag-and-drop canvas (ADR-034), usage billing for automation steps, a
-  real sandbox run (release checklist).
+  Flows; no migration). Steps that create, move and close CRM tasks and deals are recorded under
+  P4-04 (ADR-244 to ADR-247, ADR-249 to ADR-251), and runs started through the public API under
+  P5-08 (ADR-077). **Remaining:** catalog steps (sending products from a run), starting runs from
+  campaigns, enrolling contacts or segments in a sequence without a customer message or order event,
+  a drag-and-drop canvas (ADR-034), usage billing for automation steps, a real sandbox run (release
+  checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
   local target server only_: "Call a web address" steps (method, address with URL-encoded
   placeholders, headers, JSON body, values saved from the response, success and failure branches);
@@ -263,8 +265,10 @@ verification, app review, Embedded Signup configuration).
   contact's single open deal in a pipeline moved to an active stage, as the automation; nothing
   moves when it is unclear which deal). **[Automation steps that close deals built; their database
   test runs only in CI]** (ADR-251, migrations 0164 and 0165: the contact's single open deal in a
-  pipeline closed as won or lost, with an optional reason, as the automation). **Remaining:** custom
-  deal fields, products on deals, deal import, forecasts in Reports, CRM connectors (HubSpot,
+  pipeline closed as won or lost, with an optional reason, as the automation). **[A weighted
+  forecast in Reports built; its database and browser tests run only in CI]** (ADR-252, migration
+  0166: open deals by expected close month, weighed by each stage's chance as on the board).
+  **Remaining:** custom deal fields, products on deals, deal import, CRM connectors (HubSpot,
   Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
   checklist).
 - **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad

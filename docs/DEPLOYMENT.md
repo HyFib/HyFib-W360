@@ -608,6 +608,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    servers. Old servers show a deal an automation closed as closed by nobody; the timeline names the
    automation on new servers.
 
+   Migration 0166 (ADR-252) adds the definition of the Reports page's weighted forecast to
+   `ops.metric_definitions`. Until the web rollout ends, an old web server's Reports page shows no
+   forecast; nothing else reads the new row.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

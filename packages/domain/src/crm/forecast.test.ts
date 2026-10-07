@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { forecast, weigh, type StageTotals } from './forecast';
+import {
+  closeBucket,
+  forecast,
+  forecastByMonth,
+  forecastMonths,
+  weigh,
+  type ForecastGroup,
+  type StageTotals,
+} from './forecast';
 import {
   createPipelineSchema,
   newStageSchema,
@@ -96,5 +104,74 @@ describe('the weighted pipeline (ADR-242)', () => {
       ],
     });
     expect(update.stages.map((s) => s.winPercent)).toEqual([undefined, 90, null]);
+  });
+});
+
+describe('the forecast by month in Reports (ADR-252)', () => {
+  const months: [string, string, string] = ['2026-10', '2026-11', '2026-12'];
+
+  it('names this month and the next two in the company’s time, across a year end', () => {
+    expect(forecastMonths(new Date('2026-10-06T12:00:00Z'), 'Asia/Kolkata')).toEqual(months);
+    // Already November in Kolkata, still October in UTC.
+    expect(forecastMonths(new Date('2026-10-31T20:00:00Z'), 'Asia/Kolkata')).toEqual([
+      '2026-11',
+      '2026-12',
+      '2027-01',
+    ]);
+    expect(forecastMonths(new Date('2026-10-31T20:00:00Z'), 'UTC')).toEqual(months);
+  });
+
+  it('counts a past date in this month, as the board does, and a date beyond the third month as later', () => {
+    expect(closeBucket('2026-10', months)).toBe('this_month');
+    expect(closeBucket('2026-03', months)).toBe('this_month');
+    expect(closeBucket('2025-12', months)).toBe('this_month');
+    expect(closeBucket('2026-11', months)).toBe('next_month');
+    expect(closeBucket('2026-12', months)).toBe('month_after');
+    expect(closeBucket('2027-01', months)).toBe('later');
+    expect(closeBucket(null, months)).toBe('undated');
+  });
+
+  it('weighs each stage’s deals in a bucket once, and counts the deals of stages without a chance apart', () => {
+    const group = (overrides: Partial<ForecastGroup>): ForecastGroup => ({
+      stageId: 'qualified',
+      winPercent: 50,
+      closeMonth: '2026-10',
+      deals: 1,
+      valueMinor: 1_001,
+      ...overrides,
+    });
+    const result = forecastByMonth(
+      [
+        // Overdue and this month in one stage: 1,001 + 1,001 weighed at 50% once (1,001), not 501 + 501.
+        group({}),
+        group({ closeMonth: '2026-09' }),
+        group({ stageId: 'proposal', winPercent: 80, closeMonth: '2026-11', valueMinor: 10_000 }),
+        group({ closeMonth: '2026-12', deals: 2, valueMinor: 0 }),
+        group({ closeMonth: '2027-03', valueMinor: 5_000 }),
+        group({ stageId: 'new', winPercent: null, closeMonth: null, deals: 3, valueMinor: 9_000 }),
+        group({ closeMonth: null, valueMinor: 2_000 }),
+      ],
+      months,
+    );
+    expect(result).toEqual({
+      months,
+      buckets: [
+        { bucket: 'this_month', deals: 2, valueMinor: 2_002, weightedMinor: 1_001 },
+        { bucket: 'next_month', deals: 1, valueMinor: 10_000, weightedMinor: 8_000 },
+        { bucket: 'month_after', deals: 2, valueMinor: 0, weightedMinor: 0 },
+        { bucket: 'later', deals: 1, valueMinor: 5_000, weightedMinor: 2_500 },
+        { bucket: 'undated', deals: 4, valueMinor: 11_000, weightedMinor: 1_000 },
+      ],
+      hasChances: true,
+      dealsWithoutChance: 3,
+    });
+    // Only stages without a chance: nothing to weigh.
+    expect(
+      forecastByMonth(
+        [group({ winPercent: null }), group({ stageId: 'new', winPercent: null })],
+        months,
+      ),
+    ).toMatchObject({ hasChances: false, dealsWithoutChance: 2 });
+    expect(forecastByMonth([], months).buckets.map((b) => b.deals)).toEqual([0, 0, 0, 0, 0]);
   });
 });

@@ -1,5 +1,36 @@
 # Progress
 
+## 2026-10-07 — A weighted CRM forecast in Reports (P4-04, H-024, ADR-252)
+
+Status: **Implemented; its database and browser tests run in CI only.** Reports showed the open
+pipeline by stage but no forecast. The local PostgreSQL is unavailable, so migration 0166 and the
+integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0166 (the `crm.forecast` definition).
+- **Domain:** `forecastMonths`, `closeBucket` and `forecastByMonth` in `crm/forecast.ts`; the
+  forecast of each pipeline in `dealReport`; the metric in the registry.
+- **Web:** the forecast table under each pipeline in Reports → Deals, with `formatMonth`.
+- **Tests:** unit (3 new in `forecast.test.ts`); integration (1 new in `crm.test.ts`: every bucket,
+  a closed deal left out, this month equal to the board); e2e (`crm.spec.ts`: the undated deal
+  weighed in Reports). Written for CI; not run here.
+- **Docs:** ADR-252; ARCHITECTURE §6C; DEPLOYMENT; BACKLOG P4-04 (and P4-01, which now points to
+  where the CRM steps and API-started runs are recorded); feature matrix H-024.
+- **Mutation checks:** 10 of 11 deliberate regressions caught; the survivor is equivalent (for the
+  next month, after this month’s check, ‘up to’ and ‘equal to’ match the same month).
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                                     | Result                                                                                                                                                         |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`          | clean                                                                                                                                                          |
+| `pnpm test` (unit)                                          | 1073 passed (115 files)                                                                                                                                        |
+| `pnpm test:integration`, `pnpm test:e2e`, `pnpm db:migrate` | not run here: the local PostgreSQL is unavailable; CI runs them                                                                                                |
+| `pnpm build`                                                | passed                                                                                                                                                         |
+| Mutation checks                                             | 10 of 11 deliberate regressions caught; the survivor is equivalent (for the next month, after this month’s check, ‘up to’ and ‘equal to’ match the same month) |
+| gitleaks 8.30.1 on the staged changes                       | no leaks found                                                                                                                                                 |
+
 ## 2026-10-06 — Automation steps that close a CRM deal (P4-01, P4-04, H-012, ADR-251)
 
 Status: **Implemented; its database test runs in CI only.** Automations could move deals (ADR-250)

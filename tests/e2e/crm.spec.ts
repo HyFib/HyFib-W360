@@ -106,6 +106,13 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   await expect(page.getByText('50% chance · weighted ₹13,000.00')).toBeVisible();
   await expect(page.getByText('Weighted pipeline')).toBeVisible();
   await expectNoHorizontalOverflow(page);
+  // Reports forecast it by its expected close date, here none, weighed the same way (ADR-252).
+  await page.goto(`/c/${slug}/reports`);
+  await expect(page.getByRole('heading', { name: 'Weighted forecast: Sales' })).toBeVisible();
+  const undated = page.getByRole('row').filter({ hasText: 'No expected date' });
+  await expect(undated).toContainText('₹26,000.00');
+  await expect(undated).toContainText('₹13,000.00');
+  await expectNoHorizontalOverflow(page);
   await page.goto(editedUrl);
 
   // A second rupee pipeline takes the deal with its value (ADR-234).

@@ -361,6 +361,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   and immutable; a test keeps the table equal to the registry. Metrics HyFib cannot measure
   (clicks, conversions, automation outcomes, deal outcomes, retention cohorts) are rows with
   `available = false` and a reason, shown instead of numbers.
+- **CRM forecast** (ADR-252): `dealReport` groups open deals in active stages by stage and expected
+  close month (`to_char(expected_close_on, 'YYYY-MM')`), and `forecastByMonth` in `crm/forecast.ts`
+  puts them in this month (past dates included), the next two months, later and no date for the
+  company's months (`forecastMonths`), weighing each stage's bucket once with the board's `weigh`.
 - **Periods** (`reports/period.ts`): whole calendar days in the company's time zone, from local
   midnight to local midnight (daylight-saving days last 23 or 25 hours; a skipped midnight starts the
   day at its first real instant), at most 92 days; days are bucketed with `AT TIME ZONE` in SQL.
