@@ -6075,6 +6075,112 @@ describe('note events (ADR-280)', () => {
     expect(bodiesAt(tasksOnly.path)).toEqual([]);
   });
 
+  it("sends an endpoint that names pipelines, stages or owners of notes' deals only the notes about deals in them or owned by them when each note is added, and with more than one only those passing them all (ADR-305)", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const svc = crm();
+    const { id: salesId } = await svc.createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New', 'Proposal'],
+    });
+    const { id: supportId } = await svc.createPipeline(owner, {
+      name: 'Support',
+      currency: 'INR',
+      stages: ['Open'],
+    });
+    const pipelines = await svc.listPipelines(owner);
+    const stageOf = (pipelineId: string, name: string) =>
+      pipelines.find((p) => p.id === pipelineId)!.stages.find((st) => st.name === name)!.id;
+    const [fresh, proposal, open] = [
+      stageOf(salesId, 'New'),
+      stageOf(salesId, 'Proposal'),
+      stageOf(supportId, 'Open'),
+    ];
+    /** An endpoint of the company taking the notes of the lists' deals. */
+    const add = async (
+      eventTypes: WebhookEventType[],
+      notePipelineIds: string[] | null,
+      noteStageIds: string[] | null,
+      noteDealOwnerIds: string[] | null,
+    ) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        notePipelineIds,
+        noteStageIds,
+        noteDealOwnerIds,
+      });
+      return { ...created, path };
+    };
+    const salesNotes = await add(['note.created', 'deal.created'], [salesId], null, null);
+    const proposalNotes = await add(['note.created'], null, [proposal], null);
+    const agentsNotes = await add(['note.created'], null, null, [agent.membership.id]);
+    const agentsSalesProposals = await add(
+      ['note.created'],
+      [salesId],
+      [proposal],
+      [agent.membership.id],
+    );
+    const everyNote = await add(['note.created'], null, null, null);
+    const jaya = await newContact(owner, 'Jaya');
+    // A new sales deal of the agent's, and a support deal nobody owns.
+    const { id: big } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: salesId,
+      stageId: fresh,
+      title: 'Annual plan',
+      ownerMembershipId: agent.membership.id,
+    });
+    const { id: ticket } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: supportId,
+      stageId: open,
+      title: 'Login help',
+    });
+    const first = await svc.addNote(owner, { dealId: big, body: 'Asked for a call' });
+    const onSupport = await svc.addNote(owner, { dealId: ticket, body: 'Cannot sign in' });
+    const onContact = await svc.addNote(owner, { contactId: jaya.id, body: 'Prefers mornings' });
+    // The agent's deal becomes a proposal and the support deal is given to the agent: the notes
+    // added after go by the new stage and owner.
+    await svc.moveDeal(owner, { id: big, expectedVersion: 1, stageId: proposal });
+    await svc.updateDeal(owner, {
+      id: ticket,
+      expectedVersion: 1,
+      title: 'Login help',
+      value: '',
+      ownerMembershipId: agent.membership.id,
+      expectedCloseOn: null,
+    });
+    const later = await svc.addNote(owner, { dealId: big, body: 'Sent the proposal' });
+    const given = await svc.addNote(owner, { dealId: ticket, body: 'Called back' });
+
+    // Each note is captured once, with a delivery to each endpoint its deal's pipeline, stage and
+    // owner reach when it is added; a note about the contact alone reaches no list.
+    expect((await noteEventsOf(c)).map((e) => [e.detail.noteId, e.deliveries])).toEqual([
+      [first.id, 3],
+      [onSupport.id, 1],
+      [onContact.id, 1],
+      [later.id, 5],
+      [given.id, 2],
+    ]);
+    await deliverDue(c);
+    const notesAt = (path: string) =>
+      bodiesAt(path)
+        .filter((b) => b.type === 'note.created')
+        .map((b) => (b.data.note as { id: string }).id)
+        .sort();
+    expect(notesAt(salesNotes.path)).toEqual([first.id, later.id].sort());
+    expect(notesAt(proposalNotes.path)).toEqual([later.id]);
+    expect(notesAt(agentsNotes.path)).toEqual([first.id, later.id, given.id].sort());
+    expect(notesAt(agentsSalesProposals.path)).toEqual([later.id]);
+    expect(notesAt(everyNote.path)).toHaveLength(5);
+    // Deal events are not narrowed by the pipelines of notes' deals.
+    expect(bodiesAt(salesNotes.path).filter((b) => b.type === 'deal.created')).toHaveLength(2);
+  });
+
   it('gives a moved note with the contact kept, and sends nothing for a note erasure deleted', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);

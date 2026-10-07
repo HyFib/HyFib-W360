@@ -1,5 +1,47 @@
 # Progress
 
+## 2026-10-07 — Pipeline, stage and owner filters for note webhook events (P5-09, P4-04, H-014, W-138, ADR-305)
+
+Status: **Implemented; its database tests run in CI only.** Endpoints taking `note.created` received
+every note, while deal and task events could be narrowed by the deal's pipeline, stage and owner.
+The local PostgreSQL is unavailable, so the migration and the integration tests below were written
+but not run here; migration 0228 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0228 (`note_pipeline_ids`, `note_stage_ids` and `note_deal_owner_ids` on
+  `app.webhook_endpoints` with their checks and update grants; `app.capture_webhook_event` with the
+  note's deal's pipeline, stage and owner, read in one query only when an endpoint names any of
+  them).
+- **Domain:** `webhookTakesNoteEvents` in `webhooks/model.ts`; the three lists' schemas, `…For` and
+  `assertWebhookNote…` functions in `webhooks/service.ts` (on the deals' and tasks' shared checks),
+  the endpoint view's `notePipelines`, `noteStages` and `noteDealOwners`, creation, changes, audits
+  and the export columns; `notePipelineIds`, `noteStageIds` and `noteDealOwnerIds` in
+  `api/webhook-endpoints.ts` and the OpenAPI document, whose `note.created` entry now names them.
+  The descriptions that said an event must pass "both" lists (the deals' stages, the pipelines of
+  tasks' deals) now say every list.
+- **Web:** Settings → Webhooks' "Pipelines of notes’ deals", "Stages of notes’ deals" and "Owners of
+  notes’ deals" (the three fieldsets given a `notes` kind), and the endpoints list's lines for them.
+- **Tests:** unit (3 new: the three lists' rules, keeping and clearing in
+  `webhooks/webhooks.test.ts`; the API schemas and OpenAPI entries in `api/api.test.ts`; 3 existing
+  assertions moved to the new wording); integration (3 new: capture in `webhook-events.test.ts`, the
+  services in `webhooks.test.ts`, the API in `api-webhook-endpoints.test.ts`). Written for CI; the
+  integration tests were not run here. No e2e test.
+- **Docs:** ADR-305; ARCHITECTURE; SECURITY; THREAT-MODEL T273; DEPLOYMENT; RUNBOOKS; BACKLOG P4-04
+  and P5-09; feature matrix H-014 and W-138.
+- **Mutation checks:** 46/46 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 137 files, 1298 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0228                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Stage and owner filters for task webhook events (P5-09, P4-04, H-014, W-138, ADR-304)
 
 Status: **Implemented; its database tests run in CI only.** Endpoints taking task events could name

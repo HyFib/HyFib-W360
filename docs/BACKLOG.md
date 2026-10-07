@@ -301,6 +301,8 @@ verification, app review, Embedded Signup configuration).
   built; their database tests run only in CI]** (ADR-303, migration 0226; recorded under P5-09).
   **[Stage and owner filters for task webhook events built; their database tests run only in CI]**
   (ADR-304, migration 0227; recorded under P5-09).
+  **[Pipeline, stage and owner filters for note webhook events built; their database tests run only
+  in CI]** (ADR-305, migration 0228; recorded under P5-09).
   **[Deal owner webhook events built; their database tests run only in CI]** (ADR-269, migrations
   0185 and 0186; recorded under P5-09).
   **Remaining:** custom deal fields, products on deals, deal import, CRM connectors (HubSpot,
@@ -1123,6 +1125,12 @@ verification, app review, Embedded Signup configuration).
   happen; an owner list adds only members who can own deals and keeps those who left; a task about
   no deal matches neither list; with task assignees or pipelines too, an event must pass every list;
   deal and other events are not narrowed).
+  **[Pipeline, stage and owner filters for note events built; their database tests run only in CI]**
+  (ADR-305, migration 0228: an endpoint takes the events of the notes about the deals in 1 to 50 of
+  the company's pipelines or stages, archived and removed ones included, or owned by 1 to 50 chosen
+  members, when each note is added; an owner list adds only members who can own deals and keeps
+  those who left; a note about a contact alone matches no list; with more than one list, an event
+  must pass them all; deal, task and other events are not narrowed).
   **[Contact tag filters for message and conversation events built; their database tests run only in
   CI]** (ADR-267, migration 0183: an endpoint takes the events of the conversations whose contact
   has any of 1 to 50 tags when the events happen; tags are compared as contacts carry them, and one
@@ -1172,11 +1180,11 @@ verification, app review, Embedded Signup configuration).
   **[Satisfaction survey events built; their database tests run only in CI]** (ADR-293, migrations
   0213 and 0214: `satisfaction_survey.answered` once for each survey a customer answers, with the
   survey as `GET /satisfaction-surveys` reads it, narrowed by the conversation's number).
-  Remaining: filters for other event types (note events by their deal's pipeline, among
-  them) and on a message's or contact's values (such as a field's value, contact events by
-  tag, or the key that started a run), other authentication (headers computed per delivery, other
-  OAuth grants), mutual TLS, fixed egress addresses, events for store orders and each step of a run,
-  `createdAt` finer than the millisecond, load tests.
+  Remaining: filters for other event types (note events by who wrote them, among them) and on a
+  message's or contact's values (such as a field's value, contact events by tag, or the key that
+  started a run), other authentication (headers computed per delivery, other OAuth grants), mutual
+  TLS, fixed egress addresses, events for store orders and each step of a run, `createdAt` finer
+  than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

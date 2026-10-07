@@ -3002,6 +3002,23 @@ tick stages or members under "Stages of tasks’ deals" or "Owners of tasks’ d
 page or choose "Every task’s events", or `PATCH /webhook-endpoints/{id}` with `taskStageIds` or
 `taskDealOwnerIds` (null for every task). Removing every task event clears both lists.
 
+**A receiver misses the notes of a pipeline, stage or deal owner it follows (ADR-305).** An endpoint
+can take the events of the notes about the deals in chosen pipelines or stages, or owned by chosen
+members, only. The endpoints list shows them ("Pipelines whose deals’ notes’ events are sent: …",
+"Stages whose deals’ notes’ events are sent: …", "Members whose deals’ notes’ events are sent: …"),
+and the API answers `notePipelineIds`, `noteStageIds` and `noteDealOwnerIds` (null takes every
+note's). A note's event goes by its deal's pipeline, stage and owner when the note is added: a note
+about a contact alone matches no list, a deal without an owner matches no list of owners, a deal
+moved or given away takes its later notes with it, and events no endpoint takes are not recorded, so
+there is nothing to replay. With more than one list chosen, an event must pass them all. The
+payload's `note.dealId` names the deal, and `GET /deals/{id}` gives its pipeline, stage and owner
+now. An archived pipeline stays on a list, "(archived)", a removed stage, "(removed)", and a member
+who left, "(no longer uses the CRM)", matching the deals they still own. To take more, tick
+pipelines, stages or members under "Pipelines of notes’ deals", "Stages of notes’ deals" or "Owners
+of notes’ deals" on the endpoint's page or choose "Every note’s events", or
+`PATCH /webhook-endpoints/{id}` with `notePipelineIds`, `noteStageIds` or `noteDealOwnerIds` (null
+for every note). Removing Note added clears the three lists.
+
 **A receiver misses a task's change of assignee, or doubts one (ADR-274).** Endpoints that take
 `task.assignee_changed` ("Task assignee") are sent one event each time a member gives a task to
 another member by editing it, or a key changes its `assigneeId`. Automations set an assignee only on

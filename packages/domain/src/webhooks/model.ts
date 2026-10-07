@@ -668,6 +668,12 @@ export const WEBHOOK_LIMITS = {
   taskStages: 50,
   /** The members an endpoint can choose to take the events of the tasks of their deals (ADR-304). */
   taskDealOwners: 50,
+  /** The CRM pipelines whose deals' notes' events an endpoint can choose to take (ADR-305). */
+  notePipelines: 50,
+  /** The CRM stages whose deals' notes' events an endpoint can choose to take (ADR-305). */
+  noteStages: 50,
+  /** The members whose deals' notes' events an endpoint can choose to take (ADR-305). */
+  noteDealOwners: 50,
   /** The contact tags an endpoint can choose to take the conversations' events of (ADR-267). */
   contactTags: 50,
   /** The conversation tags an endpoint can choose to take the conversations' events of (ADR-273). */
@@ -1009,6 +1015,16 @@ export const WEBHOOK_TASK_EVENTS = [
 /** Whether an endpoint with these events takes task events, and can choose assignees. */
 export function webhookTakesTaskEvents(eventTypes: readonly WebhookEventType[]): boolean {
   return WEBHOOK_TASK_EVENTS.some((type) => eventTypes.includes(type));
+}
+
+/**
+ * Whether an endpoint with these events takes note events (ADR-280), and can choose the pipelines,
+ * stages and owners of the notes' deals (ADR-305), chosen and stored as the deals' are
+ * (`WebhookPipelineChoice`, `WebhookEndpointPipeline`, `webhookPipelineText`, and the stages' and
+ * owners' own).
+ */
+export function webhookTakesNoteEvents(eventTypes: readonly WebhookEventType[]): boolean {
+  return eventTypes.includes('note.created');
 }
 
 /**

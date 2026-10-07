@@ -164,6 +164,9 @@ import {
   WEBHOOK_TASK_PIPELINES_NEED_THE_EVENTS,
   WEBHOOK_TASK_STAGES_NEED_THE_EVENTS,
   WEBHOOK_TASK_DEAL_OWNERS_NEED_THE_EVENTS,
+  WEBHOOK_NOTE_PIPELINES_NEED_THE_EVENTS,
+  WEBHOOK_NOTE_STAGES_NEED_THE_EVENTS,
+  WEBHOOK_NOTE_DEAL_OWNERS_NEED_THE_EVENTS,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
@@ -1465,6 +1468,9 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'messageSenders',
       'messageStatuses',
       'messageTypes',
+      'noteDealOwnerIds',
+      'notePipelineIds',
+      'noteStageIds',
       'oauth',
       'orderStatuses',
       'ownerIds',
@@ -1922,7 +1928,9 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(JSON.stringify(given.stageIds)).toContain(
       'deal.stage_changed reaches the endpoints of the stage the deal left',
     );
-    expect(JSON.stringify(given.stageIds)).toContain('With pipelines too');
+    expect(JSON.stringify(given.stageIds)).toContain(
+      'With pipelines (`pipelineIds`) or owners (`ownerIds`) too, an event must pass them all.',
+    );
     expect(doc.info.description).toContain(
       'or stages (its `stageIds`): then those of the deals in those stages only',
     );
@@ -2051,7 +2059,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       taskAssigneeIds: [dev],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals, the members, the contact tags, the conversation tags, the OAuth client',
+      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, the members, the contact tags, the conversation tags, the OAuth client',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -2265,6 +2273,108 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         'task.created, task.updated, task.assignee_changed or task.status_changed',
       );
     }
+  });
+
+  it('take the pipelines, stages and owners of notes’ deals only with note.created, each once, and a list of them alone is a change (ADR-305)', () => {
+    const sales = '0190e9a1-0000-7000-8000-00000000008d';
+    const proposal = '0190e9a1-0000-7000-8000-00000000008e';
+    const asha = '0190e9a1-0000-7000-8000-00000000008f';
+    const base = {
+      url: 'https://hooks.example.com/w360',
+      events: ['contact.created', 'note.created'],
+    };
+    const parsed = apiCreateWebhookEndpointSchema.parse({
+      ...base,
+      notePipelineIds: [sales, sales.toUpperCase()],
+      noteStageIds: [proposal],
+      noteDealOwnerIds: [asha, asha],
+    });
+    expect([parsed.notePipelineIds, parsed.noteStageIds, parsed.noteDealOwnerIds]).toEqual([
+      [sales],
+      [proposal],
+      [asha],
+    ]);
+    // Deal and task events take lists of their own.
+    for (const [field, message] of [
+      ['notePipelineIds', WEBHOOK_NOTE_PIPELINES_NEED_THE_EVENTS],
+      ['noteStageIds', WEBHOOK_NOTE_STAGES_NEED_THE_EVENTS],
+      ['noteDealOwnerIds', WEBHOOK_NOTE_DEAL_OWNERS_NEED_THE_EVENTS],
+    ] as const) {
+      const refused = apiCreateWebhookEndpointSchema.safeParse({
+        ...base,
+        events: ['deal.created', 'task.created'],
+        [field]: [asha],
+      });
+      expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+        [field, message],
+      ]);
+      const notes = { ...base, events: ['note.created'] };
+      for (const value of [
+        [],
+        ['Sales'],
+        Array.from(
+          { length: 51 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      ]) {
+        expect(
+          apiCreateWebhookEndpointSchema.safeParse({ ...notes, [field]: value }).success,
+          `${field} ${JSON.stringify(value)}`,
+        ).toBe(false);
+      }
+      expect(apiCreateWebhookEndpointSchema.parse({ ...notes, [field]: null })[field]).toBe(null);
+      expect(apiUpdateWebhookEndpointSchema.parse({ [field]: null })).toEqual({ [field]: null });
+      expect(apiUpdateWebhookEndpointSchema.parse({ [field]: [asha] })).toEqual({
+        [field]: [asha],
+      });
+    }
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    for (const field of ['notePipelineIds', 'noteStageIds', 'noteDealOwnerIds']) {
+      expect(answered.properties[field]?.anyOf, field).toHaveLength(2);
+      expect(answered.required).toContain(field);
+    }
+    expect(JSON.stringify(answered.properties.notePipelineIds)).toContain(
+      "by the pipeline of the note's deal when the note is added; a note about a contact alone is on no list",
+    );
+    expect(JSON.stringify(answered.properties.noteStageIds)).toContain(
+      "by the stage of the note's deal when the note is added; a note about a contact alone is on no list",
+    );
+    expect(JSON.stringify(answered.properties.noteDealOwnerIds)).toContain(
+      "by the owner of the note's deal when the note is added; a note about a contact alone, or of a deal without an owner, is on no list",
+    );
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.notePipelineIds)).toContain(
+      "A note's event belongs to the pipeline of the deal the note is about when the note is added",
+    );
+    expect(JSON.stringify(given.noteStageIds)).toContain(
+      "A note's event belongs to the stage of the deal the note is about when the note is added",
+    );
+    expect(JSON.stringify(given.noteDealOwnerIds)).toContain(
+      "A note's event belongs to the member who owns the deal the note is about when the note is added",
+    );
+    for (const field of ['notePipelineIds', 'noteStageIds', 'noteDealOwnerIds']) {
+      expect(JSON.stringify(given[field]), field).toContain('only with note.created');
+    }
+    expect(doc.info.description).toContain(
+      'And it can name the pipelines, stages or owners of the deals whose notes it takes (its `notePipelineIds`, `noteStageIds` and `noteDealOwnerIds`): then it receives the events of the notes about deals in those pipelines or stages, or owned by those members, when the note is added only',
+    );
+    expect(doc.info.description).toContain(
+      'and still every consent, contact, template, deal, task and note event it takes',
+    );
+    const noteEvent = (doc.webhooks as Record<string, { post?: { description?: string } }>)[
+      'note.created'
+    ]?.post?.description;
+    expect(noteEvent).toContain(
+      'An endpoint can narrow it by the pipeline, stage or owner of the note’s deal when the note is added (`notePipelineIds`, `noteStageIds`, `noteDealOwnerIds`): a note about a contact alone then matches none.',
+    );
+    expect(noteEvent).not.toContain('No endpoint filter narrows it.');
   });
 
   it('take contact tags only with an event of a conversation, as contacts carry them, and a list of them alone is a change (ADR-267)', () => {

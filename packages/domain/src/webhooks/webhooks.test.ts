@@ -90,6 +90,7 @@ import {
   webhookTakesChannelEvents,
   webhookTakesPipelineEvents,
   webhookTakesTaskEvents,
+  webhookTakesNoteEvents,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   webhookTeamText,
@@ -221,6 +222,15 @@ import {
   webhookTaskDealOwnerIdsFor,
   webhookTaskDealOwnerIdsSchema,
   WEBHOOK_TASK_DEAL_OWNERS_NEED_THE_EVENTS,
+  webhookNotePipelineIdsFor,
+  webhookNotePipelineIdsSchema,
+  WEBHOOK_NOTE_PIPELINES_NEED_THE_EVENTS,
+  webhookNoteStageIdsFor,
+  webhookNoteStageIdsSchema,
+  WEBHOOK_NOTE_STAGES_NEED_THE_EVENTS,
+  webhookNoteDealOwnerIdsFor,
+  webhookNoteDealOwnerIdsSchema,
+  WEBHOOK_NOTE_DEAL_OWNERS_NEED_THE_EVENTS,
   webhookContactTagsFor,
   webhookContactTagsSchema,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
@@ -1750,7 +1760,7 @@ describe('the OpenAPI document', () => {
     // No number filter narrows them: an endpoint that names numbers still receives every one it
     // takes (pipelines can, ADR-263).
     expect(doc.info.description).toContain(
-      'still every consent, contact, template, deal and task event it takes',
+      'still every consent, contact, template, deal, task and note event it takes',
     );
     const schemas = doc.components.schemas as unknown as Record<
       string,
@@ -3615,6 +3625,68 @@ describe('stage and owner filters for task events (ADR-304)', () => {
   });
 });
 
+describe('pipeline, stage and owner filters for note events (ADR-305)', () => {
+  const sales = 'a4b5c6d7-e8f9-4a0b-8c1d-2e3f4a5b6c7d';
+  const proposal = 'b5c6d7e8-f9a0-4b1c-9d2e-3f4a5b6c7d8e';
+  const asha = 'c6d7e8f9-a0b1-4c2d-8e3f-4a5b6c7d8e9f';
+  const dev = 'd7e8f9a0-b1c2-4d3e-9f4a-5b6c7d8e9f0a';
+  const many = (n: number) =>
+    Array.from({ length: n }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`);
+
+  it('take 1 to 50 pipelines, stages or members, once each and in lower case, in the order given; null takes every note', () => {
+    for (const [schema, first, second, noun] of [
+      [webhookNotePipelineIdsSchema, sales, proposal, 'pipeline'],
+      [webhookNoteStageIdsSchema, proposal, sales, 'stage'],
+      [webhookNoteDealOwnerIdsSchema, dev, asha, 'member'],
+    ] as const) {
+      expect(schema.parse([second, first.toUpperCase(), second]), noun).toEqual([second, first]);
+      expect(schema.parse(null), noun).toBeNull();
+      expect(schema.parse(many(51).slice(1)), noun).toEqual(many(51).slice(1));
+      for (const refused of [[], many(51), ['Sales'], [first, null], first, [42]]) {
+        expect(schema.safeParse(refused).success, `${noun} ${JSON.stringify(refused)}`).toBe(false);
+      }
+      expect(schema.safeParse([]).error?.issues[0]?.message).toBe(
+        `Choose at least one ${noun}, or take every note.`,
+      );
+      expect(schema.safeParse(many(51)).error?.issues[0]?.message).toBe(
+        `Choose at most 50 ${noun}s.`,
+      );
+      expect(schema.safeParse(['Sales']).error?.issues[0]?.message).toBe(
+        `Choose ${noun}s from the list.`,
+      );
+    }
+    expect(WEBHOOK_LIMITS.notePipelines).toBe(50);
+    expect(WEBHOOK_LIMITS.noteStages).toBe(50);
+    expect(WEBHOOK_LIMITS.noteDealOwners).toBe(50);
+  });
+
+  it('are kept only while the endpoint takes note events: given, kept, or cleared', () => {
+    expect(webhookTakesNoteEvents(['note.created'])).toBe(true);
+    expect(webhookTakesNoteEvents(['contact.created', 'note.created'])).toBe(true);
+    expect(webhookTakesNoteEvents(['deal.created', ...WEBHOOK_TASK_EVENTS])).toBe(false);
+    for (const [keep, given, current] of [
+      [webhookNotePipelineIdsFor, sales, proposal],
+      [webhookNoteStageIdsFor, proposal, sales],
+      [webhookNoteDealOwnerIdsFor, asha, dev],
+    ] as const) {
+      expect(keep(['note.created'], [given], null)).toEqual([given]);
+      expect(keep(['contact.created', 'note.created'], undefined, [current])).toEqual([current]);
+      expect(keep(['note.created'], null, [current])).toBeNull();
+      expect(keep(['note.created'], undefined, null)).toBeNull();
+      // Deal and task events have lists of their own.
+      expect(keep(['deal.created', 'task.created'], [given], [current])).toBeNull();
+    }
+    // The refusals name the event as Settings lists it.
+    for (const message of [
+      WEBHOOK_NOTE_PIPELINES_NEED_THE_EVENTS,
+      WEBHOOK_NOTE_STAGES_NEED_THE_EVENTS,
+      WEBHOOK_NOTE_DEAL_OWNERS_NEED_THE_EVENTS,
+    ]) {
+      expect(message).toContain(WEBHOOK_EVENT_INFO['note.created'].label);
+    }
+  });
+});
+
 describe('assignee filters (ADR-181)', () => {
   const mira = '6e7f8091-a2b3-44c5-96e7-f8091a2b3c4d';
   const ravi = '7f8091a2-b3c4-45d6-a7f8-091a2b3c4d5e';
@@ -4270,7 +4342,7 @@ describe('the event of a CRM note (ADR-280)', () => {
       'Never the note’s text, which may hold anything a member wrote: read the note with GET /notes/{id} (`notes.read`).',
       'Notes are never changed, so no other note event is sent',
       'erasing a contact deletes its notes, so the events of an erased contact’s notes are no longer delivered',
-      'No endpoint filter narrows it.',
+      'An endpoint can narrow it by the pipeline, stage or owner of the note’s deal when the note is added',
     ]) {
       expect(described).toContain(words);
     }

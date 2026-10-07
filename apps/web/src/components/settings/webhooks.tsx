@@ -54,6 +54,7 @@ import {
   webhookTakesFieldChanges,
   webhookTakesPipelineEvents,
   webhookTakesTaskEvents,
+  webhookTakesNoteEvents,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   webhookTeamText,
@@ -1244,7 +1245,10 @@ function CampaignChoices({
   );
 }
 
-/** What the pipelines' fieldset says for deals' events (ADR-263) and tasks' events (ADR-303). */
+/**
+ * What the pipelines' fieldset says for deals' events (ADR-263), tasks' events (ADR-303) and notes'
+ * events (ADR-305).
+ */
 const PIPELINE_WORDS = {
   deals: {
     legend: 'Pipelines',
@@ -1256,19 +1260,28 @@ const PIPELINE_WORDS = {
   },
   tasks: {
     legend: 'Pipelines of tasks’ deals',
-    help: 'A task’s events belong to the pipeline of the deal it is about when they happen; a task about no deal belongs to none. With task assignees chosen too, an event must pass both. Deal and other events are sent whichever pipelines are chosen.',
+    help: 'A task’s events belong to the pipeline of the deal it is about when they happen; a task about no deal belongs to none. With task assignees, or the stages or owners of tasks’ deals chosen too, an event must pass them all. Deal and other events are sent whichever pipelines are chosen.',
     every: 'Every task’s events',
     everyHelp: 'Including tasks about no deal, and pipelines added later.',
     only: 'Only those of the tasks about deals in the pipelines ticked',
     idPart: 'task-pipeline',
   },
+  notes: {
+    legend: 'Pipelines of notes’ deals',
+    help: 'A note’s event belongs to the pipeline of the deal it is about when it is added; a note about a contact alone belongs to none. With the stages or owners of notes’ deals chosen too, an event must pass them all. Deal, task and other events are sent whichever pipelines are chosen.',
+    every: 'Every note’s events',
+    everyHelp: 'Including notes about a contact alone, and pipelines added later.',
+    only: 'Only those of the notes about deals in the pipelines ticked',
+    idPart: 'note-pipeline',
+  },
 } as const;
 
 /**
- * The CRM pipelines whose deals' events (ADR-263) or deals' tasks' events (ADR-303) an endpoint
- * takes, as `kind` says: every deal's or task's, or those of the deals in the pipelines ticked, or
- * of the tasks about them. The pipelines the company uses are offered; an archived one the endpoint
- * already names stays listed, ticked, until it is unticked.
+ * The CRM pipelines whose deals' events (ADR-263), deals' tasks' events (ADR-303) or deals' notes'
+ * events (ADR-305) an endpoint takes, as `kind` says: every deal's, task's or note's, or those of
+ * the deals in the pipelines ticked, or of the tasks or notes about them. The pipelines the company
+ * uses are offered; an archived one the endpoint already names stays listed, ticked, until it is
+ * unticked.
  */
 function PipelineChoices({
   kind,
@@ -1361,11 +1374,14 @@ function PipelineChoices({
   );
 }
 
-/** What the stages' fieldset says for deals' events (ADR-264) and tasks' events (ADR-304). */
+/**
+ * What the stages' fieldset says for deals' events (ADR-264), tasks' events (ADR-304) and notes'
+ * events (ADR-305).
+ */
 const STAGE_WORDS = {
   deals: {
     legend: 'Stages',
-    help: 'A deal’s events belong to its stage; a deal moved to another stage belongs to both for that move. With pipelines chosen too, an event must pass both. Task and other events are sent whichever stages are chosen.',
+    help: 'A deal’s events belong to its stage; a deal moved to another stage belongs to both for that move. With pipelines or deal owners chosen too, an event must pass them all. Task and other events are sent whichever stages are chosen.',
     every: 'Every stage’s deals',
     everyHelp: 'Including stages added later.',
     only: 'Only those of the deals in the stages ticked',
@@ -1379,13 +1395,22 @@ const STAGE_WORDS = {
     only: 'Only those of the tasks about deals in the stages ticked',
     idPart: 'task-stage',
   },
+  notes: {
+    legend: 'Stages of notes’ deals',
+    help: 'A note’s event belongs to the stage of the deal it is about when it is added; a note about a contact alone belongs to none. With the pipelines or owners of notes’ deals chosen too, an event must pass them all. Deal, task and other events are sent whichever stages are chosen.',
+    every: 'Every note’s events',
+    everyHelp: 'Including notes about a contact alone, and stages added later.',
+    only: 'Only those of the notes about deals in the stages ticked',
+    idPart: 'note-stage',
+  },
 } as const;
 
 /**
- * The CRM stages whose deals' events (ADR-264) or deals' tasks' events (ADR-304) an endpoint takes,
- * as `kind` says: every stage's, or those of the stages ticked, named with their pipelines. The
- * stages in use of the pipelines the company uses are offered; a removed one, or one of an archived
- * pipeline, the endpoint already names stays listed, ticked, until it is unticked.
+ * The CRM stages whose deals' events (ADR-264), deals' tasks' events (ADR-304) or deals' notes'
+ * events (ADR-305) an endpoint takes, as `kind` says: every stage's, or those of the stages ticked,
+ * named with their pipelines. The stages in use of the pipelines the company uses are offered; a
+ * removed one, or one of an archived pipeline, the endpoint already names stays listed, ticked,
+ * until it is unticked.
  */
 function StageChoices({
   kind,
@@ -1486,7 +1511,7 @@ function StageChoices({
 
 /**
  * What the members' fieldset says for deal owners (ADR-265), task assignees (ADR-266) and the owners
- * of tasks' deals (ADR-304).
+ * of tasks' deals (ADR-304) and of notes' deals (ADR-305).
  */
 const CRM_MEMBER_WORDS = {
   owners: {
@@ -1505,6 +1530,15 @@ const CRM_MEMBER_WORDS = {
     only: 'Only those of the tasks about deals the members ticked own',
     idPart: 'task-deal-owner',
   },
+  noteDealOwners: {
+    legend: 'Owners of notes’ deals',
+    help: 'A note’s event belongs to the member who owns the deal it is about when it is added; a note about a contact alone, or of a deal without an owner, belongs to no one. With the pipelines or stages of notes’ deals chosen too, an event must pass them all. Deal, task and other events are sent whichever owners are chosen.',
+    every: 'Every note’s events',
+    everyHelp:
+      'Including notes about a contact alone, deals without an owner, and members who join later.',
+    only: 'Only those of the notes about deals the members ticked own',
+    idPart: 'note-deal-owner',
+  },
   taskAssignees: {
     legend: 'Task assignees',
     help: 'A task’s events belong to the member it is assigned to when they happen, and a change of assignee to the member it left as well. Deal and other events are sent whichever assignees are chosen.',
@@ -1516,11 +1550,12 @@ const CRM_MEMBER_WORDS = {
 } as const;
 
 /**
- * The members whose deals' events (ADR-265), tasks' events (ADR-266) or deals' tasks' events
- * (ADR-304) an endpoint takes, as `kind` says: every deal's or task's, or those of the deals the
- * members ticked own, of the tasks assigned to them, or of the tasks about the deals they own, when
- * the events happen. Members who can own deals and be assigned tasks are offered; one the endpoint
- * already names who no longer can stays listed, ticked, until it is unticked.
+ * The members whose deals' events (ADR-265), tasks' events (ADR-266), deals' tasks' events
+ * (ADR-304) or deals' notes' events (ADR-305) an endpoint takes, as `kind` says: every deal's,
+ * task's or note's, or those of the deals the members ticked own, of the tasks assigned to them, or
+ * of the tasks or notes about the deals they own, when the events happen. Members who can own
+ * deals and be assigned tasks are offered; one the endpoint already names who no longer can stays
+ * listed, ticked, until it is unticked.
  */
 function CrmMemberChoices({
   kind,
@@ -2233,6 +2268,12 @@ export function WebhookEndpointForm({
     taskStages: WebhookEndpointStage[] | null;
     /** The members whose deals' tasks it takes (ADR-304), with whether they can own deals; null: all. */
     taskDealOwners: WebhookEndpointOwner[] | null;
+    /** The CRM pipelines whose deals' notes it takes (ADR-305), archived or not; null: all. */
+    notePipelines: WebhookEndpointPipeline[] | null;
+    /** The CRM stages whose deals' notes it takes (ADR-305), with their pipelines; null: all. */
+    noteStages: WebhookEndpointStage[] | null;
+    /** The members whose deals' notes it takes (ADR-305), and if they can own deals; null: all. */
+    noteDealOwners: WebhookEndpointOwner[] | null;
     /** The members it names (ADR-181), with whether they still take conversations; null: all. */
     assignees: WebhookEndpointAssignee[] | null;
     /** The contact tags it names (ADR-267); null for every conversation. */
@@ -2344,6 +2385,18 @@ export function WebhookEndpointForm({
   const [everyTaskDealOwner, setEveryTaskDealOwner] = useState(!endpoint?.taskDealOwners);
   const [taskDealOwnerIds, setTaskDealOwnerIds] = useState<string[]>(
     endpoint?.taskDealOwners?.map((m) => m.id) ?? [],
+  );
+  const [everyNotePipeline, setEveryNotePipeline] = useState(!endpoint?.notePipelines);
+  const [notePipelineIds, setNotePipelineIds] = useState<string[]>(
+    endpoint?.notePipelines?.map((p) => p.id) ?? [],
+  );
+  const [everyNoteStage, setEveryNoteStage] = useState(!endpoint?.noteStages);
+  const [noteStageIds, setNoteStageIds] = useState<string[]>(
+    endpoint?.noteStages?.map((st) => st.id) ?? [],
+  );
+  const [everyNoteDealOwner, setEveryNoteDealOwner] = useState(!endpoint?.noteDealOwners);
+  const [noteDealOwnerIds, setNoteDealOwnerIds] = useState<string[]>(
+    endpoint?.noteDealOwners?.map((m) => m.id) ?? [],
   );
   const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
   const [everyField, setEveryField] = useState(!endpoint?.contactFields);
@@ -2498,6 +2551,14 @@ export function WebhookEndpointForm({
           webhookTakesTaskEvents(eventTypes) && !everyTaskStage ? taskStageIds : null;
         const chosenTaskDealOwners =
           webhookTakesTaskEvents(eventTypes) && !everyTaskDealOwner ? taskDealOwnerIds : null;
+        // Every note's events unless the pipelines, stages or owners of their deals ticked are
+        // chosen (ADR-305).
+        const chosenNotePipelines =
+          webhookTakesNoteEvents(eventTypes) && !everyNotePipeline ? notePipelineIds : null;
+        const chosenNoteStages =
+          webhookTakesNoteEvents(eventTypes) && !everyNoteStage ? noteStageIds : null;
+        const chosenNoteDealOwners =
+          webhookTakesNoteEvents(eventTypes) && !everyNoteDealOwner ? noteDealOwnerIds : null;
         // Every conversation's events unless the members ticked are chosen (ADR-181).
         const chosenAssignees =
           webhookTakesTeamEvents(eventTypes) && !everyAssignee ? assigneeIds : null;
@@ -2547,6 +2608,9 @@ export function WebhookEndpointForm({
           taskPipelineIds: chosenTaskPipelines,
           taskStageIds: chosenTaskStages,
           taskDealOwnerIds: chosenTaskDealOwners,
+          notePipelineIds: chosenNotePipelines,
+          noteStageIds: chosenNoteStages,
+          noteDealOwnerIds: chosenNoteDealOwners,
           assigneeIds: chosenAssignees,
           contactTags: chosenContactTags,
           conversationTags: chosenConversationTags,
@@ -2631,6 +2695,12 @@ export function WebhookEndpointForm({
               setTaskStageIds([]);
               setEveryTaskDealOwner(true);
               setTaskDealOwnerIds([]);
+              setEveryNotePipeline(true);
+              setNotePipelineIds([]);
+              setEveryNoteStage(true);
+              setNoteStageIds([]);
+              setEveryNoteDealOwner(true);
+              setNoteDealOwnerIds([]);
               setEveryAssignee(true);
               setAssigneeIds([]);
               setEveryContactTag(true);
@@ -2893,6 +2963,42 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryTaskDealOwner}
           chosen={taskDealOwnerIds}
           onChange={setTaskDealOwnerIds}
+        />
+      ) : null}
+      {webhookTakesNoteEvents(eventTypes) ? (
+        <PipelineChoices
+          kind="notes"
+          prefix={prefix}
+          choices={pipelineChoices}
+          stored={endpoint?.notePipelines ?? []}
+          every={everyNotePipeline}
+          onEveryChange={setEveryNotePipeline}
+          chosen={notePipelineIds}
+          onChange={setNotePipelineIds}
+        />
+      ) : null}
+      {webhookTakesNoteEvents(eventTypes) ? (
+        <StageChoices
+          kind="notes"
+          prefix={prefix}
+          choices={stageChoices}
+          stored={endpoint?.noteStages ?? []}
+          every={everyNoteStage}
+          onEveryChange={setEveryNoteStage}
+          chosen={noteStageIds}
+          onChange={setNoteStageIds}
+        />
+      ) : null}
+      {webhookTakesNoteEvents(eventTypes) ? (
+        <CrmMemberChoices
+          kind="noteDealOwners"
+          prefix={prefix}
+          choices={ownerChoices}
+          stored={endpoint?.noteDealOwners ?? []}
+          every={everyNoteDealOwner}
+          onEveryChange={setEveryNoteDealOwner}
+          chosen={noteDealOwnerIds}
+          onChange={setNoteDealOwnerIds}
         />
       ) : null}
       <fieldset className="grid gap-2">

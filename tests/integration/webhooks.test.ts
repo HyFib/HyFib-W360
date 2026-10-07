@@ -4650,6 +4650,295 @@ describe('stage and owner filters for task events (ADR-304)', () => {
   });
 });
 
+describe('pipeline, stage and owner filters for note events (ADR-305)', () => {
+  const crm = () =>
+    createCrmService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
+  /**
+   * The company's pipelines Sales (New, Proposal; Lost removed) and Old leads, archived: their ids
+   * and Sales' stages'.
+   */
+  async function crmOf(c: Company) {
+    const owner = await fx.ctx(c, c.owner);
+    const svc = crm();
+    const { id: sales } = await svc.createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New', 'Proposal', 'Lost'],
+    });
+    const { id: old } = await svc.createPipeline(owner, {
+      name: 'Old leads',
+      currency: 'INR',
+      stages: ['New'],
+    });
+    const pipelines = await svc.listPipelines(owner);
+    const salesNow = pipelines.find((p) => p.id === sales)!;
+    await svc.updatePipeline(owner, {
+      id: sales,
+      expectedVersion: salesNow.version,
+      name: 'Sales',
+      stages: salesNow.stages.slice(0, 2).map((st) => ({ id: st.id, name: st.name })),
+    });
+    await svc.archivePipeline(owner, {
+      id: old,
+      expectedVersion: pipelines.find((p) => p.id === old)!.version,
+    });
+    const stage = (name: string) => salesNow.stages.find((st) => st.name === name)!.id;
+    return {
+      owner,
+      sales,
+      old,
+      fresh: stage('New'),
+      proposal: stage('Proposal'),
+      lost: stage('Lost'),
+    };
+  }
+  const url = 'https://hooks.example.com/in';
+  const needsTheEvents = /only for an endpoint that receives Note added/;
+  const notOwners = /active members of this company who use the CRM/;
+  const columns = ['note_pipeline_ids', 'note_stage_ids', 'note_deal_owner_ids'] as const;
+
+  it("take the pipelines, stages and owners of notes' deals: refused without note.created, empty, over 50 or naming another company's; named in Settings apart from the deals' and tasks' lists, an archived pipeline, a removed stage and a member who left too; kept by a change that leaves them out and cleared with the event; the database keeps them to it", async () => {
+    const c = await fx.company();
+    const { owner, sales, old, fresh, proposal, lost } = await crmOf(c);
+    const ownerId = owner.membership.id;
+    const agent = (await fx.ctx(c, c.agent)).membership.id;
+    // A marketer cannot use the CRM, and another company's pipelines, stages and members are not
+    // this one's.
+    const marketer = (await fx.ctx(c, c.marketer)).membership.id;
+    const other = await fx.company();
+    const theirs = await crmOf(other);
+    const elsewhere = (await fx.ctx(other, other.agent)).membership.id;
+    const refused = async (
+      eventTypes: string[],
+      field: string,
+      ids: unknown,
+      message: RegExp,
+      path = field,
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes, [field]: ids }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, `${field} ${JSON.stringify(ids)}`).toBe(
+        path,
+      );
+    };
+    // Deal and task events take lists of their own.
+    for (const [field, id, noun] of [
+      ['notePipelineIds', sales, 'pipeline'],
+      ['noteStageIds', proposal, 'stage'],
+      ['noteDealOwnerIds', agent, 'member'],
+    ] as const) {
+      await refused(['deal.created', 'task.created'], field, [id], needsTheEvents);
+      await refused(['note.created'], field, [], new RegExp(`at least one ${noun}`));
+      await refused(['note.created'], field, ['Sales'], /from the list/, `${field}.0`);
+      await refused(
+        ['note.created'],
+        field,
+        Array.from({ length: 51 }, () => uuidv7()),
+        /at most 50/,
+      );
+    }
+    await refused(
+      ['note.created'],
+      'notePipelineIds',
+      [sales, theirs.sales],
+      /of this company/,
+      'notePipelineIds.1',
+    );
+    await refused(
+      ['note.created'],
+      'noteStageIds',
+      [proposal, theirs.proposal],
+      /of this company/,
+      'noteStageIds.1',
+    );
+    await refused(
+      ['note.created'],
+      'noteDealOwnerIds',
+      [agent, marketer],
+      notOwners,
+      'noteDealOwnerIds.1',
+    );
+    await refused(
+      ['note.created'],
+      'noteDealOwnerIds',
+      [elsewhere],
+      notOwners,
+      'noteDealOwnerIds.0',
+    );
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    // An archived pipeline and a removed stage can be named: both are kept.
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['note.created', 'deal.created', 'task.created'],
+      pipelineIds: [sales],
+      taskStageIds: [fresh],
+      notePipelineIds: [old, sales.toUpperCase(), old],
+      noteStageIds: [lost, proposal],
+      noteDealOwnerIds: [agent, ownerId],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: Record<string, unknown> }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => [
+        a.metadata.notePipelineIds ?? null,
+        a.metadata.noteStageIds ?? null,
+        a.metadata.noteDealOwnerIds ?? null,
+      ]);
+    expect(await audits('webhook.endpoint_created')).toEqual([
+      [
+        [old, sales],
+        [lost, proposal],
+        [agent, ownerId],
+      ],
+    ]);
+    const shown = async () => (await webhooks().list(owner)).find((e) => e.id === created.id);
+    // The agent is suspended: kept, named as no longer able to own deals.
+    await fx.query(`UPDATE app.memberships SET status = 'suspended' WHERE id = $1`, [agent]);
+    const view = await shown();
+    expect(view?.notePipelines).toEqual([
+      { id: old, name: 'Old leads', archived: true },
+      { id: sales, name: 'Sales', archived: false },
+    ]);
+    expect(view?.noteStages).toEqual([
+      { id: lost, name: 'Lost', pipelineName: 'Sales', removed: true, pipelineArchived: false },
+      {
+        id: proposal,
+        name: 'Proposal',
+        pipelineName: 'Sales',
+        removed: false,
+        pipelineArchived: false,
+      },
+    ]);
+    expect(view?.noteDealOwners).toEqual([
+      { id: agent, name: 'Agent', active: false },
+      { id: ownerId, name: 'Owner', active: true },
+    ]);
+    // The deals' and the tasks' lists are their own.
+    expect([
+      view?.pipelines,
+      view?.stages,
+      view?.owners,
+      view?.taskPipelines,
+      view?.taskStages?.map((st) => st.id),
+      view?.taskDealOwners,
+    ]).toEqual([[{ id: sales, name: 'Sales', archived: false }], null, null, null, [fresh], null]);
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['note.created', 'deal.created', 'task.created'],
+        ...fields,
+      });
+    const lists = async () => {
+      const e = await shown();
+      return [
+        e?.notePipelines?.map((p) => p.id) ?? null,
+        e?.noteStages?.map((st) => st.id) ?? null,
+        e?.noteDealOwners?.map((m) => m.id) ?? null,
+      ];
+    };
+    // Left out, the lists are kept; given again, a list keeps the suspended agent it holds, but
+    // cannot add a member who cannot use the CRM, nor another company's pipeline or stage.
+    await change({ description: 'kept' });
+    expect(await lists()).toEqual([
+      [old, sales],
+      [lost, proposal],
+      [agent, ownerId],
+    ]);
+    await change({ noteDealOwnerIds: [agent, ownerId] });
+    await expectAppError(
+      change({ noteDealOwnerIds: [agent, marketer] }),
+      'validation_failed',
+      notOwners,
+    );
+    await expectAppError(
+      change({ notePipelineIds: [theirs.sales] }),
+      'validation_failed',
+      /of this company/,
+    );
+    await expectAppError(
+      change({ noteStageIds: [theirs.proposal] }),
+      'validation_failed',
+      /of this company/,
+    );
+    await change({ notePipelineIds: [sales], noteStageIds: null, noteDealOwnerIds: [ownerId] });
+    expect(await lists()).toEqual([[sales], null, [ownerId]]);
+    // Dropped, the suspended agent cannot be added back until they can own deals again.
+    await expectAppError(change({ noteDealOwnerIds: [agent] }), 'validation_failed', notOwners);
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [
+        [old, sales],
+        [lost, proposal],
+        [agent, ownerId],
+      ],
+      [
+        [old, sales],
+        [lost, proposal],
+        [agent, ownerId],
+      ],
+      [[sales], null, [ownerId]],
+    ]);
+    // The lists stay while the endpoint takes note.created, and go with it.
+    await change({ eventTypes: ['note.created'], noteStageIds: [fresh] });
+    expect(await lists()).toEqual([[sales], [fresh], [ownerId]]);
+    await change({ eventTypes: ['deal.created', 'task.created'] });
+    expect(await lists()).toEqual([null, null, null]);
+    for (const [field, id] of [
+      ['notePipelineIds', sales],
+      ['noteStageIds', fresh],
+      ['noteDealOwnerIds', ownerId],
+    ] as const) {
+      await expectAppError(
+        change({ eventTypes: ['deal.created'], [field]: [id] }),
+        'validation_failed',
+        needsTheEvents,
+      );
+    }
+    // The database refuses an empty list, more than 50, a missing id or a list of lists from an
+    // endpoint taking note.created…
+    await change({ eventTypes: ['note.created'] });
+    const setInDatabase = (column: string, value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET ${column} = ${value} WHERE id = $1`, [created.id]);
+    const many = `ARRAY[${Array.from({ length: 51 }, () => `'${uuidv7()}'`).join(',')}]::uuid[]`;
+    for (const column of columns) {
+      for (const bad of [
+        `'{}'`,
+        many,
+        `ARRAY['${sales}', NULL]::uuid[]`,
+        `ARRAY[ARRAY['${sales}'::uuid], ARRAY['${fresh}'::uuid]]`,
+      ]) {
+        await expect(setInDatabase(column, bad), `${column} ${bad}`).rejects.toThrow(
+          new RegExp(`webhook_endpoints_${column}`),
+        );
+      }
+      await setInDatabase(column, `ARRAY['${sales}']::uuid[]`);
+      const [grant] = await fx.query<{ can_update: boolean }>(
+        `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', $1, 'UPDATE')
+                AS can_update`,
+        [column],
+      );
+      expect(grant?.can_update, column).toBe(true);
+    }
+    // …and any list for an endpoint that does not take it.
+    await change({ eventTypes: ['deal.created'] });
+    expect(await lists()).toEqual([null, null, null]);
+    for (const column of columns) {
+      await expect(setInDatabase(column, `ARRAY['${sales}']::uuid[]`), column).rejects.toThrow(
+        new RegExp(`webhook_endpoints_${column}`),
+      );
+    }
+  });
+});
+
 describe('contact tag filters (ADR-267)', () => {
   /** Puts a tag on a contact, or takes it off, as the contacts service writes tags. */
   const tag = (c: Company, contactId: string, name: string) =>

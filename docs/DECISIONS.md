@@ -11634,3 +11634,66 @@ Decision:
 
 Not built: stages and owners chosen per task event (each list serves the four events), and note
 events narrowed by their deal.
+
+## ADR-305 Choosing the CRM pipelines, stages and deal owners whose deals' notes' events a webhook endpoint receives (P5-09, P4-04) (2026-10-07)
+
+Context: an endpoint taking `note.created` (ADR-280) received every note, while the deal and task
+events can be narrowed by the deal's pipeline, stage and owner (ADR-263 to ADR-265, ADR-303,
+ADR-304). A receiver serving one pipeline, one stage of it or one sales rep's deals was sent the
+notes of every deal and of contacts alone, and had to look each deal up. ADR-304 left note events
+narrowed by their deal unbuilt.
+
+Decision:
+
+- **Three lists per endpoint for its note events,** apart from the deals' and the tasks': the
+  pipelines of notes' deals (`notePipelineIds`), their stages (`noteStageIds`) and the members
+  owning them (`noteDealOwnerIds`), for `note.created`. Null receives every note's, as before; a
+  list holds 1 to 50 of the company's pipelines, stages or members, by id, in the order given with
+  repeats merged. A note's event counts when the note is about a deal and that deal's pipeline,
+  stage or owner is listed when the note is added: a note about a contact alone matches no list, and
+  a deal without an owner matches no list of owners. Notes are never changed, so a note has one
+  event, matched once, by its deal as it is then; a deal moved or given away later takes its later
+  notes with it. With more than one list, an event must pass them all. Deal, task and every other
+  event are not narrowed, and the deals' and tasks' lists do not narrow note events. Chosen in
+  Settings → Webhooks ("Pipelines of notes’ deals", "Stages of notes’ deals" and "Owners of notes’
+  deals"), shown on the endpoint as "Pipelines whose deals’ notes’ events are sent: …", "Stages
+  whose deals’ notes’ events are sent: …" and "Members whose deals’ notes’ events are sent: …", and
+  through the API as `notePipelineIds`, `noteStageIds` and `noteDealOwnerIds` on
+  `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every endpoint the API
+  answers.
+- **Chosen as the deals' are:** a pipeline list may hold only the company's pipelines, archived ones
+  included, and a stage list only its stages, removed ones and those of archived pipelines included,
+  by the checks the deals' and tasks' lists share; an owner list may add only members who can own
+  deals now (active, with access to the CRM), by the check deal owners, task assignees and the
+  owners of tasks' deals share, and keeps members it held who have left or lost the access since,
+  matching the deals they still own. Settings offers the pipelines and stages in use and the members
+  who can own deals, and keeps listing what the endpoint already names, marked as archived, removed
+  or no longer using the CRM.
+- **Only while `note.created` is taken:** a list given for an endpoint that does not take it is
+  refused (`notePipelineIds`, `noteStageIds` or `noteDealOwnerIds`; 422 through the API). A change
+  that drops the event clears all three, and a `PATCH` that leaves one out keeps it; Settings always
+  sends them. A check in the database holds the same rule for each (null, or 1 to 50 ids in one
+  dimension without a null, with `note.created`).
+- **Applied at capture:** `app.capture_webhook_event` reads the pipeline, stage and owner of the
+  note's deal in one query (`app.crm_activities` joined to `app.crm_deals`, by the note the trigger
+  stores in the event's detail, as the transaction sees them), only when an active endpoint of the
+  company that takes `note.created` names any of the three lists, and matches each endpoint's lists.
+  The note trigger runs as whoever adds the note (a member or a key, the runtime role in the
+  company's scope). No event is written when no endpoint takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `notePipelineIds`, `noteStageIds` and `noteDealOwnerIds` when the endpoint has the lists, and the
+  company data export carries the columns.
+- **Wording put right on the way:** the descriptions of the deals' stage list (since ADR-265) and of
+  the pipelines of tasks' deals (since ADR-304), in Settings, the API's fields and the OpenAPI
+  document, said an event must pass "both" lists where three or four may be chosen; they now say
+  every list. The OpenAPI overview also names note events among those the numbers do not narrow.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0228:** `note_pipeline_ids uuid[]`, `note_stage_ids uuid[]` and
+  `note_deal_owner_ids uuid[]` on `app.webhook_endpoints` with their checks, validated at once (a
+  company has at most 10 endpoints), an update grant on the three columns for the runtime role, and
+  `app.capture_webhook_event` replaced with the same signature (0227's, with the note's deal), so
+  its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: note events narrowed by who wrote them (a member, or the key by its id, which the payload
+already gives) or by the contact's values.

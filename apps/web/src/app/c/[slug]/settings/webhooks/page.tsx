@@ -319,6 +319,24 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.taskDealOwners.map(webhookOwnerText).join(', ')}
                       </p>
                     ) : null}
+                    {e.notePipelines ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Pipelines whose deals’ notes’ events are sent:{' '}
+                        {e.notePipelines.map(webhookPipelineText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.noteStages ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Stages whose deals’ notes’ events are sent:{' '}
+                        {e.noteStages.map(webhookStageText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.noteDealOwners ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Members whose deals’ notes’ events are sent:{' '}
+                        {e.noteDealOwners.map(webhookOwnerText).join(', ')}
+                      </p>
+                    ) : null}
                     {e.teams ? (
                       <p className="text-xs text-muted-foreground">
                         Teams whose conversations’ events are sent:{' '}

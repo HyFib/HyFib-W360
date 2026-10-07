@@ -191,12 +191,13 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   recorded. A note's event (`note.created`, ADR-280) gives the note's id, deal id and who wrote it
   (a member, never which, or a key by its id) with its contact as the API describes it, never its
   text: endpoints take events without scopes, so a note's text is read only with `notes.read`.
-  Members and keys capture it as the runtime role in the company's scope; erasing a contact deletes
-  its notes, so their pending events are not delivered (`event_gone`). A Payment Link's event
-  (`payment_link.status_changed`, ADR-285) gives the link as `GET /orders/{id}/payment-links` reads
-  it (who asked: a member never by name, or a key by its id), never its address or Razorpay's ids;
-  the commerce worker captures it as the runtime role in the company's scope, and an endpoint that
-  names numbers hears it only for its order's number.
+  Members and keys capture it as the runtime role in the company's scope, which also reads the
+  note's own deal when an endpoint names the pipelines, stages or owners of notes' deals (ADR-305);
+  erasing a contact deletes its notes, so their pending events are not delivered (`event_gone`). A
+  Payment Link's event (`payment_link.status_changed`, ADR-285) gives the link as
+  `GET /orders/{id}/payment-links` reads it (who asked: a member never by name, or a key by its id),
+  never its address or Razorpay's ids; the commerce worker captures it as the runtime role in the
+  company's scope, and an endpoint that names numbers hears it only for its order's number.
 - Customers' numbers (ADR-226): a company's owners and administrators choose the roles (supervisor,
   agent, marketer, analyst) whose members see them masked; the context leaves out
   `contacts.view_numbers` for a member whose every role that grants it is masked, and the services
@@ -1623,6 +1624,16 @@ Phase 5 rules (outgoing webhooks, P5-09):
   company's scope, a task without a deal matching neither: they narrow what one endpoint receives
   and never add an event or a delivery for another endpoint or company. Audited with the lists (unit
   tests; integration tests, run in CI only).
+- An endpoint can take the events of the notes about the deals in chosen pipelines or stages, or
+  owned by chosen members, only (ADR-305), chosen as the deals' and tasks' lists are. The pipeline
+  and stage lists hold only the endpoint's company's, archived and removed ones included, and an
+  owner list may add only members of the company who can own deals (active, with access to the CRM),
+  all checked in its scope; each is kept only while the endpoint takes `note.created` (a database
+  check too, which also refuses a null entry), and all are applied in `app.capture_webhook_event` to
+  the pipeline, stage and owner it reads from the note's own deal in the company's scope, a note
+  about a contact alone matching none: they narrow what one endpoint receives and never add an event
+  or a delivery for another endpoint or company. Audited with the lists (unit tests; integration
+  tests, run in CI only).
 - An endpoint can take the message and conversation events of the conversations whose contact has
   chosen tags only (ADR-267), chosen the same way. A list holds tags in the form contacts carry them
   (the services normalise them; a database check holds the form, the count and the events, and

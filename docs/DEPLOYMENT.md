@@ -1025,6 +1025,16 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    endpoint with either list fails on the checks, its other changes keep them, and its API refuses
    `taskStageIds` and `taskDealOwnerIds` (422) and leaves them out of the endpoints it answers.
 
+   Migration 0228 (ADR-305) adds `note_pipeline_ids`, `note_stage_ids` and `note_deal_owner_ids` to
+   `app.webhook_endpoints` with checks validated by reading the table, and replaces
+   `app.capture_webhook_event` (keeping 0227's filters) with the same signature; every endpoint
+   starts with none of the lists. Web servers of this release need it, as their reads of endpoints
+   name the columns; workers do not read them. Web servers from before it neither show nor change
+   the columns: until the web rollout ends, an old server's change that drops `note.created` from an
+   endpoint with any of the lists fails on the checks, its other changes keep them, and its API
+   refuses `notePipelineIds`, `noteStageIds` and `noteDealOwnerIds` (422) and leaves them out of the
+   endpoints it answers.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

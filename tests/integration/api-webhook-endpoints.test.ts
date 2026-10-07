@@ -280,6 +280,9 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       taskPipelineIds: null,
       taskStageIds: null,
       taskDealOwnerIds: null,
+      notePipelineIds: null,
+      noteStageIds: null,
+      noteDealOwnerIds: null,
       assigneeIds: null,
       contactTags: null,
       conversationTags: null,
@@ -3103,6 +3106,186 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     ).toMatchObject({ taskStageIds: null, taskDealOwnerIds: null });
     expect(await issueOf(api().update(key.ctx, id, { taskStageIds: [] }))).toMatchObject({
       path: 'taskStageIds',
+    });
+  });
+
+  it("choose the pipelines, stages and owners of the deals whose notes' events an endpoint receives, a member who left too, kept by changes that leave them out and cleared with the event (ADR-305)", async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const owner = await fx.ctx(c, c.owner);
+    const ownerId = owner.membership.id;
+    const agent = (await fx.ctx(c, c.agent)).membership.id;
+    const marketer = (await fx.ctx(c, c.marketer)).membership.id;
+    const other = await fx.company();
+    const crm = createCrmService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    const salesOf = async (company: Company) => {
+      const companyOwner = await fx.ctx(company, company.owner);
+      const { id } = await crm.createPipeline(companyOwner, {
+        name: 'Sales',
+        currency: 'INR',
+        stages: ['New', 'Proposal'],
+      });
+      const [sales] = (await crm.listPipelines(companyOwner)).filter((p) => p.id === id);
+      return { pipeline: id, proposal: sales!.stages.find((st) => st.name === 'Proposal')!.id };
+    };
+    const { pipeline: sales, proposal } = await salesOf(c);
+    const theirs = await salesOf(other);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // They need note.created (deal and task events take lists of their own), at least one, each the
+    // company's pipeline or stage, or a member of it who can own deals (named by place).
+    const refusals = [
+      ['notePipelineIds', ['deal.created', 'task.created'], [sales], 'notePipelineIds'],
+      ['notePipelineIds', ['note.created'], [], 'notePipelineIds'],
+      ['notePipelineIds', ['note.created'], [sales, theirs.pipeline], 'notePipelineIds.1'],
+      ['noteStageIds', ['task.created'], [proposal], 'noteStageIds'],
+      ['noteStageIds', ['note.created'], [proposal, 'Proposal'], 'noteStageIds.1'],
+      ['noteStageIds', ['note.created'], [theirs.proposal], 'noteStageIds.0'],
+      ['noteDealOwnerIds', ['deal.created'], [agent], 'noteDealOwnerIds'],
+      ['noteDealOwnerIds', ['note.created'], [agent, marketer], 'noteDealOwnerIds.1'],
+    ] as const;
+    for (const [index, [field, events, ids, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, [field]: ids },
+            idem(`note-deal-bad-${index}`, JSON.stringify(ids)),
+          ),
+        ),
+        `${field} ${JSON.stringify(ids)}`,
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'note-deals-1', {
+      url: receiverUrl(),
+      events: ['note.created', 'deal.created'],
+      pipelineIds: [sales],
+      notePipelineIds: [sales.toUpperCase(), sales],
+      noteStageIds: [proposal],
+      noteDealOwnerIds: [agent, ownerId.toUpperCase(), agent],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data).toMatchObject({
+      pipelineIds: [sales],
+      taskPipelineIds: null,
+      notePipelineIds: [sales],
+      noteStageIds: [proposal],
+      noteDealOwnerIds: [agent, ownerId],
+    });
+    expect(await api().get(key.ctx, id)).toMatchObject({
+      notePipelineIds: [sales],
+      noteStageIds: [proposal],
+      noteDealOwnerIds: [agent, ownerId],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: Record<string, unknown> }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => [
+        a.metadata.notePipelineIds ?? null,
+        a.metadata.noteStageIds ?? null,
+        a.metadata.noteDealOwnerIds ?? null,
+      ]);
+    expect(await audits('webhook.endpoint_created')).toEqual([
+      [[sales], [proposal], [agent, ownerId]],
+    ]);
+    // Settings names them, and the agent, gone, as no longer using the CRM, still on the list.
+    await fx.query(`UPDATE app.memberships SET status = 'removed' WHERE id = $1`, [agent]);
+    const shown = (await settings().list(owner)).find((e) => e.id === id);
+    expect([
+      shown?.notePipelines,
+      shown?.noteStages?.map((st) => st.id),
+      shown?.noteDealOwners,
+    ]).toEqual([
+      [{ id: sales, name: 'Sales', archived: false }],
+      [proposal],
+      [
+        { id: agent, name: 'Agent', active: false },
+        { id: ownerId, name: 'Owner', active: true },
+      ],
+    ]);
+    expect(await api().update(key.ctx, id, { description: 'Notes of deals' })).toMatchObject({
+      notePipelineIds: [sales],
+      noteStageIds: [proposal],
+      noteDealOwnerIds: [agent, ownerId],
+    });
+    // Given again, a list keeps a member it held; one it adds must be able to own deals.
+    expect(
+      await api().update(key.ctx, id, { noteStageIds: null, noteDealOwnerIds: [agent, ownerId] }),
+    ).toMatchObject({ noteStageIds: null, noteDealOwnerIds: [agent, ownerId] });
+    expect(
+      await issueOf(api().update(key.ctx, id, { noteDealOwnerIds: [ownerId, marketer] })),
+    ).toMatchObject({ path: 'noteDealOwnerIds.1' });
+    expect(
+      await issueOf(api().update(key.ctx, id, { notePipelineIds: [theirs.pipeline] })),
+    ).toMatchObject({ path: 'notePipelineIds.0' });
+    expect(
+      await issueOf(api().update(key.ctx, id, { noteStageIds: [theirs.proposal] })),
+    ).toMatchObject({ path: 'noteStageIds.0' });
+    expect(await api().update(key.ctx, id, { noteDealOwnerIds: [ownerId] })).toMatchObject({
+      notePipelineIds: [sales],
+      noteStageIds: null,
+      noteDealOwnerIds: [ownerId],
+    });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [[sales], [proposal], [agent, ownerId]],
+      [[sales], null, [agent, ownerId]],
+      [[sales], null, [ownerId]],
+    ]);
+    // note.created keeps the lists; events without it clear them.
+    expect(await api().update(key.ctx, id, { events: ['note.created'] })).toMatchObject({
+      notePipelineIds: [sales],
+      noteDealOwnerIds: [ownerId],
+      pipelineIds: null,
+    });
+    expect(await api().update(key.ctx, id, { events: ['deal.created'] })).toMatchObject({
+      events: ['deal.created'],
+      notePipelineIds: null,
+      noteStageIds: null,
+      noteDealOwnerIds: null,
+    });
+    for (const [field, value] of [
+      ['notePipelineIds', sales],
+      ['noteStageIds', proposal],
+      ['noteDealOwnerIds', ownerId],
+    ] as const) {
+      expect(await issueOf(api().update(key.ctx, id, { [field]: [value] })), field).toMatchObject({
+        path: field,
+      });
+    }
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['note.created'],
+        notePipelineIds: [sales],
+        noteStageIds: [proposal],
+        noteDealOwnerIds: [ownerId],
+      }),
+    ).toMatchObject({
+      notePipelineIds: [sales],
+      noteStageIds: [proposal],
+      noteDealOwnerIds: [ownerId],
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        notePipelineIds: null,
+        noteStageIds: null,
+        noteDealOwnerIds: null,
+      }),
+    ).toMatchObject({ notePipelineIds: null, noteStageIds: null, noteDealOwnerIds: null });
+    expect(await issueOf(api().update(key.ctx, id, { notePipelineIds: [] }))).toMatchObject({
+      path: 'notePipelineIds',
     });
   });
 

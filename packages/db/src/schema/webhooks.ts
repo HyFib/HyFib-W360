@@ -277,6 +277,25 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   taskDealOwnerIds: uuid('task_deal_owner_ids').array(),
   /**
+   * The CRM pipelines whose deals' notes' events it takes (migration 0228, ADR-305), by the
+   * pipeline of the note's deal when the note is added; a note about a contact alone is in none.
+   * null takes every note's. Set only while `note.created` is among its events.
+   */
+  notePipelineIds: uuid('note_pipeline_ids').array(),
+  /**
+   * The CRM stages whose deals' notes' events it takes (migration 0228, ADR-305), by the stage of
+   * the note's deal when the note is added; a note about a contact alone is in none. null takes
+   * every note's. Set only while `note.created` is among its events.
+   */
+  noteStageIds: uuid('note_stage_ids').array(),
+  /**
+   * The members (memberships) whose deals' notes' events it takes (migration 0228, ADR-305), by the
+   * owner of the note's deal when the note is added; a note about a contact alone, or of a deal
+   * without an owner, has none. null takes every note's. Set only while `note.created` is among its
+   * events.
+   */
+  noteDealOwnerIds: uuid('note_deal_owner_ids').array(),
+  /**
    * The consent changes it takes as `consent.changed` (ADR-189), by purpose and action; null takes
    * every change. Set only while `consent.changed` is among its events.
    */

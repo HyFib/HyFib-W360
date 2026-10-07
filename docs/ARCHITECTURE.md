@@ -2240,6 +2240,17 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   (`taskStageIds`, `taskDealOwnerIds`) set them; the services check stages as they check the deals'
   (one shared check) and members as they check deal owners and task assignees, and a change that
   drops every task event clears both.
+- **Pipeline, stage and owner filters for note events** (migration 0228, ADR-305):
+  `note_pipeline_ids`, `note_stage_ids` and `note_deal_owner_ids` on an endpoint list the pipelines,
+  stages and members owning the deals whose notes' events it takes, null for every note's; checks
+  keep each to 1 to 50 ids and to endpoints taking `note.created`. `app.capture_webhook_event` reads
+  the note's deal's pipeline, stage and owner in one query (the note's row in `app.crm_activities`
+  joined to its deal), only when an active endpoint of the company taking the event names any of the
+  three lists, and matches each; a note about a contact alone, or of a deal without an owner,
+  matches none of the lists that need them. Settings (the pipelines', stages' and members' fieldsets
+  given a `notes` kind) and the API (`notePipelineIds`, `noteStageIds`, `noteDealOwnerIds`) set
+  them; the services check them with the deals' and tasks' shared checks, and a change that drops
+  `note.created` clears all three.
 - **Contact tag filters** (migration 0183, ADR-267): `contact_tags` on an endpoint lists the contact
   tags whose conversations' message and conversation events it takes, null for every conversation's;
   a check keeps it to 1 to 50 tags in `app.contact_tags`' form and to endpoints taking such an
