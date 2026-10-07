@@ -1407,6 +1407,16 @@ Phase 5 rules (outgoing webhooks, P5-09):
   scope: it narrows what one endpoint receives and never adds an event or a delivery for another
   endpoint or company. Tags name no rows, so naming one reveals nothing about the company's
   contacts. Audited with the list (unit tests; integration tests, run in CI only).
+- An endpoint can take the message and conversation events of the conversations that have chosen
+  tags only (ADR-273), chosen the same way and kept apart from contact tags. A list holds tags in
+  the form conversations carry them (the services normalise them; a database check holds the form,
+  the count and the events, and refuses a null entry), is kept only while the endpoint takes such an
+  event, and is applied in `app.capture_webhook_event` to the conversation's tags, read in the
+  company's scope: it narrows what one endpoint receives and never adds an event or a delivery for
+  another endpoint or company. The definer role gains only a read of the tag column, its rows
+  limited to the current company by its existing policy. Tags name no rows, so naming one reveals
+  nothing about the company's conversations. Audited with the list (unit tests; integration tests,
+  run in CI only).
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

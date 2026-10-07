@@ -218,6 +218,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   contactTags: text('contact_tags').array(),
   /**
+   * The conversation tags whose message and conversation events it takes (migration 0189,
+   * ADR-273), by the tags the conversation has when the event happens; null takes every
+   * conversation's. Set only while one of those events is among its events.
+   */
+  conversationTags: text('conversation_tags').array(),
+  /**
    * The campaigns whose messages' statuses and changes it takes (ADR-185); null takes every
    * campaign's. Set only while `message.status` or `campaign.status_changed` is among its events.
    */

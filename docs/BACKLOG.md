@@ -1029,6 +1029,11 @@ verification, app review, Embedded Signup configuration).
   0188: `order.status_changed` names who made each change, a member, an API key by its id or the
   Payment Link, recorded with the status; a change that does not record its maker names nobody,
   never the one before).
+  **[Conversation tag filters for message and conversation events built; their database tests run
+  only in CI]** (ADR-273, migration 0189: an endpoint takes the events of the conversations that
+  have any of 1 to 50 tags when the events happen; tags are compared as conversations carry them,
+  and one no conversation has yet may be named; with numbers, teams, members or contact tags too, an
+  event must pass every list).
   Remaining: filters for other event types (task events by their deal's pipeline, stage or owner,
   among them) and on a message's or contact's values (such as a field's value, contact events by
   tag, or the key that started a run), other authentication (headers computed per delivery, other

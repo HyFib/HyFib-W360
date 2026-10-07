@@ -1,5 +1,41 @@
 # Progress
 
+## 2026-10-07 — Choosing the conversation tags whose events an endpoint receives (P5-09, H-014, ADR-273)
+
+Status: **Implemented; its database tests run in CI only.** Endpoints could narrow message and
+conversation events by number, team, member and the contact's tags, but not by the conversation's
+own tags. The local PostgreSQL is unavailable, so the migration and the integration tests below were
+written but not run here; migration 0189 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0189 (`conversation_tags` on `app.webhook_endpoints` with its check and
+  column grant, the definer role's read of `app.conversation_tags.tag`, and
+  `app.capture_webhook_event` reading the conversation's tags when an endpoint names them).
+- **Domain:** the list's schema, normalising tags as conversations carry them, and its rules
+  (`webhookConversationTagsSchema`, `webhookConversationTagsFor`), the list in Settings' view,
+  create and update in Settings and the API (`conversationTags`), the audits, the OpenAPI entries
+  and the export.
+- **Web:** "Conversation tags" in the endpoint form (every conversation's events, or the tags typed,
+  separated by commas) and the endpoints list naming them.
+- **Tests:** unit (2 new in `webhooks.test.ts`, 1 in `api.test.ts`); integration (3 in
+  `webhooks.test.ts`, 1 in `api-webhook-endpoints.test.ts`, and the API's endpoint shape). Written
+  for CI; the integration tests were not run here. No e2e test: the e2e suite is near its time
+  limit.
+- **Docs:** ADR-273; ARCHITECTURE; SECURITY; THREAT-MODEL T241; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix W-138 and H-014.
+- **Mutation checks:** 20/20 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 120 files, 1139 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Listing the tags in use through the public API (P5-08, H-033, ADR-272)
 
 Status: **Implemented; its database tests run in CI only.** Keys read, filtered by and changed tags

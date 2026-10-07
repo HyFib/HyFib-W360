@@ -201,6 +201,9 @@ import {
   webhookContactTagsFor,
   webhookContactTagsSchema,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
+  webhookConversationTagsFor,
+  webhookConversationTagsSchema,
+  WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS,
   webhookTemplateStatusesFor,
   webhookTemplateStatusesSchema,
 } from './service';
@@ -3305,6 +3308,52 @@ describe('contact tag filters (ADR-267)', () => {
     ).toBeNull();
     expect(WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS).toBe(
       'Choose contact tags only for an endpoint that receives message or conversation events.',
+    );
+  });
+});
+
+describe('conversation tag filters (ADR-273)', () => {
+  it('take 1 to 50 tags as conversations carry them, once each, in the order given; null takes every conversation', () => {
+    expect(
+      webhookConversationTagsSchema.parse(['Refund', ' urgent ', 'refund', 'Delivery   Delay']),
+    ).toEqual(['refund', 'urgent', 'delivery delay']);
+    expect(webhookConversationTagsSchema.parse(null)).toBeNull();
+    const tags = Array.from({ length: WEBHOOK_LIMITS.conversationTags + 1 }, (_, i) => `tag ${i}`);
+    expect(WEBHOOK_LIMITS.conversationTags).toBe(50);
+    expect(webhookConversationTagsSchema.parse(tags.slice(1))).toEqual(tags.slice(1));
+    const refusal = (given: unknown) => {
+      const issue = webhookConversationTagsSchema.safeParse(given).error?.issues[0];
+      return issue && [issue.path.join('.'), issue.message];
+    };
+    expect(refusal([])).toEqual(['', 'Give at least one tag, or take every conversation.']);
+    expect(refusal(tags)).toEqual(['', 'Give at most 50 tags.']);
+    expect(refusal(['refund', 'a,b'])).toEqual([
+      '1',
+      'Tags cannot contain commas or control characters.',
+    ]);
+    expect(refusal(['refund', 'urgent', '   '])).toEqual(['2', 'Tags cannot be empty.']);
+    expect(refusal(['x'.repeat(41)])).toEqual(['0', 'Tags are limited to 40 characters.']);
+    expect(refusal(['refund', 42])).toEqual(['1', 'Give tags as text.']);
+    expect(webhookConversationTagsSchema.parse(['x'.repeat(40)])).toEqual(['x'.repeat(40)]);
+    expect(webhookConversationTagsSchema.safeParse('refund').success).toBe(false);
+  });
+
+  it('apply to the events of a conversation only, and are kept only while one is taken: given, kept, or cleared', () => {
+    for (const type of WEBHOOK_EVENT_KEYS) {
+      expect(webhookConversationTagsFor([type], ['refund'], null), type).toEqual(
+        (WEBHOOK_TEAM_EVENTS as readonly string[]).includes(type) ? ['refund'] : null,
+      );
+    }
+    expect(
+      webhookConversationTagsFor(['conversation.assignment_changed'], undefined, ['refund']),
+    ).toEqual(['refund']);
+    expect(webhookConversationTagsFor(['message.status'], null, ['refund'])).toBeNull();
+    expect(webhookConversationTagsFor(['message.received'], undefined, null)).toBeNull();
+    expect(
+      webhookConversationTagsFor(['deal.created', 'contact.created'], ['refund'], ['urgent']),
+    ).toBeNull();
+    expect(WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS).toBe(
+      'Choose conversation tags only for an endpoint that receives message or conversation events.',
     );
   });
 });

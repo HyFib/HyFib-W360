@@ -10332,3 +10332,58 @@ Decision:
 Not built: renaming, merging or deleting tags through the API (members cannot either), tags across
 both lists in one call, other orders (by count), and tags of contacts or conversations matching a
 filter.
+
+## ADR-273 Choosing the conversation tags whose events a webhook endpoint receives (P5-09) (2026-10-07)
+
+Context: an endpoint taking message or conversation events could be narrowed by numbers, teams and
+members and, since ADR-267, by the tags of the conversation's contact. Members tag the conversations
+themselves (ADR-220: "refund", "follow up"), automations tag them (ADR-222) and keys change their
+tags (ADR-221), but a receiver that handles some conversations (a refunds desk, a courier system for
+delivery questions) was sent every conversation's events and had to read each conversation to drop
+the rest. ADR-267 left events of a conversation by its own tags unbuilt.
+
+Decision:
+
+- **A list of conversation tags per endpoint,** for the events of a conversation
+  (`message.received`, `message.status`, `conversation.status_changed`,
+  `conversation.assignment_changed`, `conversation.team_changed`): null receives every
+  conversation's, as before; a list holds 1 to 50 tags as conversations carry them (`normalizeTag`,
+  as contact tags: trimmed, spaces inside collapsed, lower case, 1 to 40 characters, no comma or
+  control character), in the order given with repeats merged. Such an event counts when its
+  conversation has any of the listed tags when the event happens, as the transaction that captures
+  it sees the conversation's tags: a tag put on later counts from the next event on, and one taken
+  off no longer does. With numbers, teams, members or contact tags too, an event must pass them all;
+  contact tags and conversation tags are separate lists. Deal, task, order, contact and other events
+  are not narrowed. Chosen in Settings → Webhooks ("Conversation tags": every conversation's events,
+  or only those of the conversations that have any of the tags typed, separated by commas), shown on
+  the endpoint as "Conversation tags whose events are sent: …", and through the API as
+  `conversationTags` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every
+  endpoint the API answers; `GET /conversation-tags` (ADR-272) lists the tags in use.
+- **Tags are labels:** a list may name a tag no conversation has yet, which matches nothing until a
+  conversation gets it, so nothing is checked against the company's conversations; a tag no
+  conversation carries any more stays listed until it is taken off.
+- **Only while an event of a conversation is taken:** a list given for an endpoint that takes none
+  is refused (`conversationTags`; 422 through the API). A change that drops them all clears it, and
+  a `PATCH` that leaves it out keeps it; Settings always sends it. A check in the database holds the
+  same rule and the tags' form (null, or 1 to 50 tags in one dimension without a null, each as
+  `app.conversation_tags` allows a tag, with an event of a conversation).
+- **Applied at capture:** `app.capture_webhook_event` reads the conversation's tags only when an
+  active endpoint of the company that takes the event names conversation tags, and creates a
+  delivery only for the endpoints whose list is null or shares a tag with them. The triggers run as
+  whoever changes messages and conversations: the runtime role reads the tags in the company's
+  scope, and the definer role, whose erasure cancels a contact's unsent messages before it deletes
+  their conversations' tags, is granted a read of the tag column (its rows are the current
+  company's, by its existing policy). No event is written when no endpoint takes it, and stored
+  events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `conversationTags` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0189:** `conversation_tags text[]` on `app.webhook_endpoints` with the check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role, a select grant on `app.conversation_tags.tag` for the definer role, and
+  `app.capture_webhook_event` replaced with the same signature (0185's, with the conversation's
+  tags), so its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: every listed tag required rather than any, tags to leave out, contact events by tag
+(ADR-267), an event when a conversation is tagged or untagged, and other values of a conversation.

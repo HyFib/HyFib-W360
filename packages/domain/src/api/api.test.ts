@@ -162,6 +162,7 @@ import {
   WEBHOOK_OWNERS_NEED_THE_EVENTS,
   WEBHOOK_TASK_ASSIGNEES_NEED_THE_EVENTS,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
+  WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
   WEBHOOK_CHANNELS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
@@ -1440,6 +1441,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'contactSources',
       'contactTags',
       'conversationStatuses',
+      'conversationTags',
       'description',
       'enabled',
       'events',
@@ -2030,7 +2032,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       taskAssigneeIds: [dev],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the deal owners, the task assignees, the members, the contact tags, the OAuth client',
+      'the deal owners, the task assignees, the members, the contact tags, the conversation tags, the OAuth client',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -2106,6 +2108,82 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     );
     expect(doc.info.description).toContain(
       'or contact tags (its `contactTags`): then those of the conversations whose contact has any of the tags when the event happens only',
+    );
+  });
+
+  it('take conversation tags only with an event of a conversation, as conversations carry them, and a list of them alone is a change (ADR-273)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    for (const event of WEBHOOK_TEAM_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          conversationTags: ['Refund', 'refund ', 'Delivery   Delay'],
+        }).conversationTags,
+        event,
+      ).toEqual(['refund', 'delivery delay']);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['deal.created', 'task.created'],
+      conversationTags: ['refund'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['conversationTags', WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS],
+    ]);
+    const messages = { ...base, events: ['message.received'] };
+    for (const body of [
+      { ...messages, conversationTags: [] },
+      { ...messages, conversationTags: ['a,b'] },
+      { ...messages, conversationTags: ['x'.repeat(41)] },
+      { ...messages, conversationTags: Array.from({ length: 51 }, (_, i) => `tag ${i}`) },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...messages, conversationTags: null })
+        .conversationTags,
+    ).toBe(null);
+    // Contact tags and conversation tags are separate lists.
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...messages,
+        contactTags: ['vip'],
+        conversationTags: ['refund'],
+      }),
+    ).toMatchObject({ contactTags: ['vip'], conversationTags: ['refund'] });
+    expect(apiUpdateWebhookEndpointSchema.parse({ conversationTags: null })).toEqual({
+      conversationTags: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ conversationTags: ['Urgent'] })).toEqual({
+      conversationTags: ['urgent'],
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[]; description?: string }>;
+      required?: string[];
+    };
+    expect(answered.properties.conversationTags?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('conversationTags');
+    expect(JSON.stringify(answered.properties.conversationTags)).toContain(
+      'by the tags the conversation has when the event happens',
+    );
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.conversationTags)).toContain(
+      'counts when its conversation has any of the tags when the event happens',
+    );
+    expect(JSON.stringify(given.conversationTags)).toContain('GET /conversation-tags');
+    expect(doc.info.description).toContain(
+      'or conversation tags (its `conversationTags`): then those of the conversations that have any of the tags when the event happens only',
+    );
+    const paths = doc.paths as Record<string, Record<string, { description?: string }>>;
+    expect(paths['/conversation-tags']?.get?.description).toContain(
+      'webhook endpoints name (`conversationTags`)',
     );
   });
 
