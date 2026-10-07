@@ -18,6 +18,8 @@ import {
   apiCreateNote,
   apiCreatePipeline,
   apiCreateTask,
+  apiCreateTeam,
+  apiDeleteTeam,
   apiErrorResponse,
   apiGetAutomationRun,
   apiGetContact,
@@ -27,6 +29,7 @@ import {
   apiGetMessage,
   apiGetNote,
   apiGetTask,
+  apiGetTeam,
   apiKeyReminderNotice,
   apiListAutomations,
   apiListChannels,
@@ -52,6 +55,7 @@ import {
   apiUpdateConversation,
   apiUpdateDeal,
   apiUpdatePipeline,
+  apiUpdateTeam,
   apiUpdateTask,
   apiUpdateManyConversations,
   apiUpdateMatchingConversations,
@@ -100,6 +104,7 @@ import {
   type ApiNote,
   type ApiPipeline,
   type ApiTask,
+  type ApiTeamSettings,
   type ApiKeyReminderDeps,
   type ApiKeysService,
   type ApiScope,
@@ -7375,6 +7380,9 @@ describe('assigning conversations (ADR-093)', () => {
       [c.tenant.id, id],
     );
 
+  const settingsOfBody = (response: { body: unknown }) =>
+    (response.body as { data: ApiTeamSettings }).data;
+
   /** The conversation of a customer who wrote once. */
   async function conversationWith(c: Company, waId: string) {
     await inbound(c, waId, [{ text: 'Hello' }]);
@@ -8401,6 +8409,182 @@ describe('assigning conversations (ADR-093)', () => {
       expect((await changes(c, id)).map((a) => a.action)).toEqual(['conversation.status_changed']);
     }
     expect(await call()).toEqual({ data: [], nextCursor: null });
+  });
+
+  it('add, read, change and delete teams as Settings does, as the key (ADR-287)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const supervisor = await joined(c, 'supervisor', 'Sam Supervisor');
+    const manager = await apiKey(c, ['teams.manage']);
+
+    // Added with its settings, members and number, as the key's, once per Idempotency-Key.
+    const request = {
+      name: ' Support ',
+      description: 'Orders and returns',
+      assignment: 'round_robin',
+      maxOpenPerMember: 5,
+      routingKeywords: ['Refund', 'refund ', 'Order status'],
+      memberIds: [agent.membership.id, supervisor.membership.id],
+      channelIds: [c.channelAccountId],
+    };
+    const key = idem('team-support-1', JSON.stringify(request));
+    const created = await apiCreateTeam(deps(), manager.ctx, request, key);
+    const again = await apiCreateTeam(deps(), manager.ctx, request, key);
+    expect([created.status, created.replayed, again.replayed]).toEqual([201, false, true]);
+    expect(again.body).toEqual(created.body);
+    const support = settingsOfBody(created);
+    expect(support).toMatchObject({
+      name: 'Support',
+      description: 'Orders and returns',
+      assignment: 'round_robin',
+      maxOpenPerMember: 5,
+      routingKeywords: ['refund', 'order status'],
+      channelIds: [c.channelAccountId],
+    });
+    expect([...support.memberIds].sort()).toEqual(
+      [agent.membership.id, supervisor.membership.id].sort(),
+    );
+    expect(await apiGetTeam(deps(), manager.ctx, support.id)).toEqual(support);
+    const [inSettings] = (await teams().listTeams(owner)).filter((t) => t.id === support.id);
+    expect(inSettings?.channelIds).toEqual([c.channelAccountId]);
+    expect((await apiListTeams(deps(), manager.ctx, {})).data.map((t) => t.id)).toEqual([
+      support.id,
+    ]);
+
+    // A change of some settings keeps the rest; the same change again writes nothing.
+    const update = (input: Record<string, unknown>) =>
+      apiUpdateTeam(deps(), manager.ctx, support.id, input);
+    const renamed = await update({ name: 'Customer care', memberIds: [agent.membership.id] });
+    expect(renamed).toMatchObject({
+      name: 'Customer care',
+      assignment: 'round_robin',
+      maxOpenPerMember: 5,
+      routingKeywords: ['refund', 'order status'],
+      memberIds: [agent.membership.id],
+      channelIds: [c.channelAccountId],
+    });
+    expect(await update({ name: 'Customer care', description: 'Orders and returns' })).toEqual(
+      renamed,
+    );
+
+    // Members who cannot answer conversations, another company's number and a name in use are
+    // refused, naming the field; nothing changes.
+    const other = await fx.company();
+    const paths = (error: unknown) =>
+      isAppError(error) ? (error.issues ?? []).map((i) => i.path) : [];
+    const marketer = await fx.ctx(c, c.marketer);
+    expect(
+      paths(
+        await expectAppError(update({ memberIds: [marketer.membership.id] }), 'validation_failed'),
+      ),
+    ).toEqual(['memberIds']);
+    expect(
+      paths(
+        await expectAppError(update({ channelIds: [other.channelAccountId] }), 'validation_failed'),
+      ),
+    ).toEqual(['channelIds']);
+    await apiCreateTeam(deps(), manager.ctx, { name: 'Sales' }, null);
+    await expectAppError(update({ name: 'sales' }), 'conflict', /Another team already has/);
+    expect(await apiGetTeam(deps(), manager.ctx, support.id)).toEqual(renamed);
+
+    // A member given a role that cannot answer conversations is no longer the team's, here and in
+    // Settings, and a change that leaves the members out keeps the team's others.
+    await update({ memberIds: [agent.membership.id, supervisor.membership.id] });
+    await fx.query(`UPDATE app.memberships SET roles = ARRAY['marketer']::text[] WHERE id = $1`, [
+      supervisor.membership.id,
+    ]);
+    expect((await apiGetTeam(deps(), manager.ctx, support.id)).memberIds).toEqual([
+      agent.membership.id,
+    ]);
+    const [shown] = (await teams().listTeams(owner)).filter((t) => t.id === support.id);
+    expect(shown?.members.map((m) => m.membershipId)).toEqual([agent.membership.id]);
+    expect((await update({ description: 'Orders, returns and refunds' })).memberIds).toEqual([
+      agent.membership.id,
+    ]);
+
+    // Deleted with its conversations leaving it; deleting it again is not found.
+    const conversation = await conversationWith(c, '919811100531');
+    await fx.query('UPDATE app.conversations SET team_id = $2 WHERE id = $1', [
+      conversation.id,
+      support.id,
+    ]);
+    expect(await apiDeleteTeam(deps(), manager.ctx, support.id)).toEqual({
+      id: support.id,
+      deleted: true,
+      conversations: 1,
+    });
+    expect((await conversationRow(conversation.id)).team_id).toBeNull();
+    await expectAppError(apiDeleteTeam(deps(), manager.ctx, support.id), 'not_found', /Team/);
+    await expectAppError(apiGetTeam(deps(), manager.ctx, support.id), 'not_found', /Team/);
+
+    // The audit log names the key for each change, and only for changes.
+    const audits = await fx.query<{ action: string; actor_type: string; actor_id: string }>(
+      `SELECT action, actor_type, actor_id FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 ORDER BY occurred_at, id`,
+      [c.tenant.id, support.id],
+    );
+    expect(audits.map((a) => [a.action, a.actor_type, a.actor_id])).toEqual([
+      ['team.created', 'api_key', manager.id],
+      ['team.updated', 'api_key', manager.id],
+      ['team.updated', 'api_key', manager.id],
+      ['team.updated', 'api_key', manager.id],
+      ['team.deleted', 'api_key', manager.id],
+    ]);
+  });
+
+  it('manage teams with the scope and an active company only, granted with inbox.supervise (ADR-287)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const manager = await apiKey(c, ['teams.manage']);
+    const reader = await apiKey(c, ['conversations.read']);
+    const { teamId: theirs } = await teams().createTeam(await fx.ctx(other, other.owner), {
+      name: 'Theirs',
+    });
+
+    // Another company's team and an unknown one are not found.
+    for (const id of [theirs, uuidv7()]) {
+      await expectAppError(apiGetTeam(deps(), manager.ctx, id), 'not_found');
+      await expectAppError(apiUpdateTeam(deps(), manager.ctx, id, { name: 'Mine' }), 'not_found');
+      await expectAppError(apiDeleteTeam(deps(), manager.ctx, id), 'not_found');
+    }
+
+    // A key that reads conversations lists teams but manages none.
+    for (const call of [
+      () => apiCreateTeam(deps(), reader.ctx, { name: 'Support' }, null),
+      () => apiGetTeam(deps(), reader.ctx, theirs),
+    ]) {
+      await expectAppError(call(), 'forbidden', /teams\.manage/);
+    }
+
+    // A suspended company's key changes nothing, but reads.
+    const { id } = settingsOfBody(
+      await apiCreateTeam(deps(), manager.ctx, { name: 'Support' }, null),
+    );
+    expect((await apiListTeams(deps(), reader.ctx, {})).data.map((t) => t.id)).toEqual([id]);
+    const suspended = {
+      ...manager.ctx,
+      tenant: { ...manager.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(
+      apiCreateTeam(deps(), suspended, { name: 'Sales' }, null),
+      'tenant_suspended',
+    );
+    await expectAppError(apiUpdateTeam(deps(), suspended, id, { name: 'X' }), 'tenant_suspended');
+    await expectAppError(apiDeleteTeam(deps(), suspended, id), 'tenant_suspended');
+    expect((await apiGetTeam(deps(), suspended, id)).name).toBe('Support');
+
+    // Granting the scope needs inbox.supervise, which members manage teams with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'inbox.supervise')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Teams', scopes: ['teams.manage'], expiresInDays: 30 }),
+      'forbidden',
+      /Manage teams/,
+    );
   });
 });
 

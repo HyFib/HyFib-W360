@@ -35,6 +35,7 @@ export const API_SCOPE_KEYS = [
   'tasks.write',
   'notes.read',
   'notes.write',
+  'teams.manage',
   'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
 
@@ -225,6 +226,13 @@ export const API_SCOPE_INFO: Record<
     description:
       "Add notes to the timeline of one of the company's contacts, or of one of its deals and so the deal's contact, as members do on the contact and deal pages, recorded as written through the API. Never read the timeline. Needs the CRM in the company's plan.",
     permission: 'crm.write',
+    writes: true,
+  },
+  'teams.manage': {
+    label: 'Manage teams',
+    description:
+      "Read the company's teams with their settings, members and numbers, add teams, change how they give out conversations, their routing keywords, members and numbers, and delete them, as members who supervise the inbox do in Settings → Teams, recorded in the audit log as done by the key. A deleted team's conversations leave it and keep their assignees.",
+    permission: 'inbox.supervise',
     writes: true,
   },
   'webhooks.manage': {

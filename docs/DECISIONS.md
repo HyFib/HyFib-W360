@@ -10892,3 +10892,56 @@ Decision:
 Not built: deleting pipelines or stages (they are archived, as in Settings), bringing an archived
 stage back, changing a pipeline's currency or its place among the company's pipelines, and webhook
 events for pipeline changes.
+
+## ADR-287 Managing teams through the public API (P5-08) (2026-10-07)
+
+Context: since ADR-093 integrations list a company's teams with `conversations.read` and move
+conversations between them with `conversations.write`, but only members who supervise the inbox
+could add teams or change them, in Settings → Teams: who is in a team, which numbers feed it, its
+routing keywords and how it gives out conversations. An integration that keeps teams in step with a
+rota or a staff directory (people joining and leaving shifts, a new branch's number), or sets up a
+new company, had a supervisor change each team by hand. ADR-093 left team settings through the API
+unbuilt.
+
+Decision:
+
+- **A new writing scope, `teams.manage`** ("Manage teams"), granted with `inbox.supervise`, the
+  permission members manage teams with (owners, administrators and supervisors; owners and
+  administrators create keys). Like every writing scope it is refused while the company is suspended
+  or restricted (423), while reading a team works then, as reading scopes do. Existing keys keep
+  their scopes, and a plan version that chose its scopes (ADR-092) leaves it out until a new version
+  includes it (migration 0208 adds it to both scope checks).
+- **`GET /api/v1/teams/{id}`** (`getTeam`) gives a team's settings: name, description, `assignment`,
+  `maxOpenPerMember`, `routingKeywords`, `memberIds` (its members as `GET /members` lists them, in
+  the order they joined) and `channelIds` (the numbers whose new conversations go to it), with
+  `createdAt` and `updatedAt`. `GET /teams` takes `teams.manage` as well as `conversations.read`,
+  and still gives ids, names and how each team gives out conversations.
+- **`POST /api/v1/teams`** (`createTeam`) adds a team from a name and any of those settings, and
+  **`PATCH /api/v1/teams/{id}`** (`updateTeam`) changes the settings given, the rest kept as the
+  team has them; `memberIds` and `channelIds` replace the team's lists. Both go through the writes
+  Settings uses (`writeCreateTeam`, `writeUpdateTeam`), so the rules are the same: a name unique
+  among the company's teams ignoring case (409), keywords lowercased without repeats (at most 20, of
+  up to 40 characters), members who answer conversations (422 naming `memberIds`), the company's
+  numbers (422 naming `channelIds`; a number named here leaves the team it was in), and the plan's
+  limit of teams counted under its lock (412). Waiting conversations are routed again after the
+  change, as after a save in Settings. With an `Idempotency-Key` a retried addition answers the
+  first response; a change that leaves the team as it is answers it with no write or audit entry, so
+  a retried change needs no key.
+- **`DELETE /api/v1/teams/{id}`** (`deleteTeam`) deletes a team as Settings does
+  (`writeDeleteTeam`): its conversations leave it and keep their assignees, each sending
+  `conversation.team_changed`, and its numbers no longer route to it; the answer counts the
+  conversations that left it. A team already deleted answers 404.
+- **Recorded as the key's:** the audit log records `team.created`, `team.updated` and `team.deleted`
+  as the key, with `source: 'api'` and the request id; routing that follows is the system's, as
+  always. Teams name no creator, so no table changes beyond the scope checks.
+- **A team's members are those who answer conversations:** Settings listed every active member of a
+  team whatever their role, so a team with a member given a role that cannot answer conversations (a
+  marketer, analyst or billing manager) could no longer be saved: its form sent the member, which
+  the check refuses. Settings and the API now give as a team's members only its active members whose
+  role answers conversations, the members routing gives conversations to. Such a member stays in
+  `team_members`, listed again if their role changes back before the team is next saved, which
+  leaves them out.
+
+Not built: webhook events for changes to teams, setting members' availability through the API
+(members set their own, and supervisors theirs in Settings), the round robin's place, and a version
+check on teams (a change applies to the team as it is when the request runs, its row locked).

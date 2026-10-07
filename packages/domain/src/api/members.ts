@@ -14,7 +14,7 @@ import {
 import { INBOX_WORKER_ROLES } from '../inbox/routing';
 import type { OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
-import { assertScope, type ApiContext } from './context';
+import { assertAnyScope, assertScope, type ApiContext } from './context';
 import { API_LIMITS } from './model';
 
 /**
@@ -113,7 +113,8 @@ export async function apiListTeams(
   ctx: ApiContext,
   query: unknown,
 ): Promise<{ data: ApiTeam[]; nextCursor: string | null }> {
-  assertScope(ctx, 'conversations.read');
+  // Keys that manage teams (ADR-287) list them too.
+  assertAnyScope(ctx, ['conversations.read', 'teams.manage']);
   const q = parseInput(apiTeamListQuerySchema, query);
   const cursor = decodeKeysetCursor(q.cursor);
   return deps.db.run(

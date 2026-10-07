@@ -22,6 +22,7 @@ export * from './orders';
 export * from './payment-link-view';
 export * from './deals';
 export * from './pipelines';
+export * from './teams';
 export * from './notes';
 export * from './tasks';
 export * from './message-changes';

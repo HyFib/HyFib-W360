@@ -873,6 +873,11 @@ verification, app review, Embedded Signup configuration).
   granted with `tenant.settings.manage`, add pipelines with their stages and chances, rename them,
   change their stages, and archive and restore them through the Settings writes, recorded as the
   key's; pipelines carry `version`, `createdBy` and `createdByApiKeyId`).
+  **[Managing teams built; its database tests run only in CI]** (ADR-287, migration 0208:
+  `GET /teams/{id}`, `POST /teams`, `PATCH /teams/{id}` and `DELETE /teams/{id}` with the new
+  `teams.manage` scope, granted with `inbox.supervise`, read, add, change and delete teams with
+  their settings, members and numbers through the Settings writes, recorded as the key's; a team's
+  members are only those who answer conversations, in Settings too).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact

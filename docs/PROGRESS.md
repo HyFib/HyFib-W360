@@ -1,5 +1,40 @@
 # Progress
 
+## 2026-10-07 — Managing teams through the public API (P5-08, H-033, W-037, ADR-287)
+
+Status: **Implemented; its database tests run in CI only.** Keys listed teams and moved
+conversations between them, but only supervisors could add, change or delete teams. The local
+PostgreSQL is unavailable, so the migration and the integration tests below were written but not run
+here; migration 0208 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0208 (the `teams.manage` scope in the key and plan checks).
+- **Domain:** `writeCreateTeam`, `writeUpdateTeam`, `writeDeleteTeam` and `readTeamSettings` in
+  `inbox/teams.ts`, now shared by the Settings operations, with members who answer conversations
+  only (also in Settings' `listTeams`), and the member and number refusals naming their field;
+  `apiGetTeam`, `apiCreateTeam`, `apiUpdateTeam` and `apiDeleteTeam` (`api/teams.ts`); `GET /teams`
+  with `teams.manage` too; the scope; the OpenAPI entries.
+- **Web:** `POST /api/v1/teams`, and `GET`, `PATCH` and `DELETE /api/v1/teams/{id}`.
+- **Tests:** unit (`api/teams.test.ts`: the scope, the requests, normalization as Settings saves,
+  unchanged teams, refusals before any query, read-only reads while suspended, the OpenAPI entries;
+  the scope lists updated); integration (2 new in `api.test.ts`). Written for CI; the integration
+  tests were not run here. No e2e test.
+- **Docs:** ADR-287; ARCHITECTURE; SECURITY; THREAT-MODEL T255; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-037.
+- **Mutation checks:** 29/29 deliberate regressions caught
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 125 files, 1197 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0208                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Managing CRM pipelines through the public API (P5-08, P4-04, H-033, ADR-286)
 
 Status: **Implemented; its database tests run in CI only.** Keys read pipelines and moved deals in

@@ -2140,6 +2140,20 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**`POST /api/v1/teams`, or `PATCH` or `DELETE /api/v1/teams/{id}`, answers 403, 404, 409, 412, 422
+or 423 (ADR-287).** 403 `forbidden` names the scope the key lacks, `teams.manage` (granted by
+members who supervise the inbox), or with reason `not_in_plan` the company's plan leaves the scope
+out. 404 means the team is not one of the key's company's, or was deleted. 409 `conflict`: another
+team has the name, ignoring case. 412 `precondition_failed`: the company has as many teams as its
+plan allows (delete one first). 422 names the field: `memberIds` for a member who cannot answer
+conversations (a marketer, analyst or billing manager, or a member suspended or removed;
+`GET /members` lists those who can), `channelIds` for a number that is not the company's
+(`GET /channels` lists them), or `routingKeywords` for a keyword over 40 characters or more than 20.
+423 means the company is suspended or its plan has ended; `GET /teams/{id}` still reads. A member
+left out of a team's `memberIds` after their role changed cannot answer conversations; the team's
+next change drops them. The audit log has each change with the key, and deleting a team sends
+`conversation.team_changed` for each of its conversations.
+
 **`POST /api/v1/pipelines` or `PATCH /api/v1/pipelines/{id}` answers 403, 404, 409, 422 or 423
 (ADR-286).** 403 `forbidden` names the scope the key lacks, `pipelines.manage` (granted by owners
 and administrators, who manage pipelines in Settings), or with reason `not_in_plan` the company's

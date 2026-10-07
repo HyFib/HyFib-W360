@@ -129,6 +129,7 @@ import {
 } from './deals';
 import { API_NOTE_MAX_LENGTH, apiCreateNoteSchema } from './notes';
 import { apiCreatePipelineSchema, apiUpdatePipelineSchema } from './pipelines';
+import { apiCreateTeamSchema, apiUpdateTeamSchema } from './teams';
 import { apiCreateTaskSchema, apiUpdateTaskSchema } from './tasks';
 import { apiUpdateOrderSchema } from './orders';
 import {
@@ -748,6 +749,32 @@ export const apiTeamSchema = z.object({
     .describe(
       '`round_robin`: conversations moved to the team without a member go to its available members in turn; `manual`: they wait for someone to take them.',
     ),
+});
+
+/** A team with its settings, members and numbers (ADR-287). */
+export const apiTeamSettingsSchema = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  description: z.string().nullable(),
+  assignment: apiTeamSchema.shape.assignment,
+  maxOpenPerMember: z
+    .number()
+    .int()
+    .nullable()
+    .describe(
+      'With round robin, the open conversations a member is given at most; null for no limit.',
+    ),
+  routingKeywords: z
+    .array(z.string())
+    .describe('Words in a customer’s first message that route the conversation to the team.'),
+  memberIds: z
+    .array(z.uuid())
+    .describe('The team’s active members, as GET /members lists them, in the order they joined.'),
+  channelIds: z
+    .array(z.uuid())
+    .describe('The WhatsApp numbers whose new conversations go to the team (GET /channels).'),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
 });
 
 /** A note a key added to a conversation (ADR-084). */
@@ -1961,11 +1988,74 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listTeams',
           summary: 'Teams, oldest first',
-          description: `${scopeNote('conversations.read')} The company's teams and how each gives out conversations.`,
+          description: `${scopeNote('conversations.read', 'teams.manage')} The company's teams and how each gives out conversations; GET /teams/{id} gives a team's settings, members and numbers.`,
           parameters: pageParams,
           responses: {
             '200': { description: 'A page of teams.', content: pageOf('Team') },
             ...errors(401, 403, 422, 429, 500),
+          },
+        },
+        post: {
+          operationId: 'createTeam',
+          summary: 'Add a team',
+          description: `${scopeNote('teams.manage')} As members who supervise the inbox add one in Settings → Teams: a name unique among the company’s teams ignoring case (409 otherwise), how it gives out conversations, its routing keywords, members (active members whose role answers conversations; 422 naming \`memberIds\` otherwise) and numbers (the company’s; a number named here leaves the team it was in). A plan may limit how many teams a company has (412 at the limit: delete one first). Waiting conversations are routed again, so some may go to the new team at once. The audit log names the key. With an \`Idempotency-Key\`, a retry answers the first response.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateTeam')) },
+          responses: {
+            '201': {
+              description: 'The team added, with its settings.',
+              content: json(dataOf(ref('TeamSettings'))),
+            },
+            ...errors(400, 401, 403, 409, 412, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/teams/{id}': {
+        get: {
+          operationId: 'getTeam',
+          summary: 'A team with its settings',
+          description: `${scopeNote('teams.manage')} The team’s settings, its active members and its numbers, as Settings → Teams shows them. Reading works while the company is suspended.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': { description: 'The team.', content: json(dataOf(ref('TeamSettings'))) },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+        patch: {
+          operationId: 'updateTeam',
+          summary: 'Change a team',
+          description: `${scopeNote('teams.manage')} As members save a team in Settings → Teams: the settings given change and the rest stay as they are; \`memberIds\` and \`channelIds\` replace the team’s lists. The same checks as when adding one apply (409 for a name in use, 422 naming \`memberIds\` or \`channelIds\`). Waiting conversations are routed again. A change that leaves the team as it is answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateTeam')) },
+          responses: {
+            '200': {
+              description: 'The team as it is now.',
+              content: json(dataOf(ref('TeamSettings'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+        delete: {
+          operationId: 'deleteTeam',
+          summary: 'Delete a team',
+          description: `${scopeNote('teams.manage')} As members delete one in Settings → Teams: its conversations leave the team and keep their assignees, its numbers no longer route new conversations to it, and \`conversations\` counts the conversations that left it. A team already deleted answers 404. The audit log names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'Deleted.',
+              content: json(
+                dataOf({
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string', format: 'uuid' },
+                    deleted: { const: true },
+                    conversations: { type: 'integer', minimum: 0 },
+                  },
+                  required: ['id', 'deleted', 'conversations'],
+                }),
+              ),
+            },
+            ...errors(401, 403, 404, 423, 429, 500),
           },
         },
       },
@@ -3485,6 +3575,9 @@ export function buildOpenApiDocument(serverUrl: string) {
         Channel: jsonSchema(apiChannelSchema),
         Member: jsonSchema(apiMemberSchema),
         Team: jsonSchema(apiTeamSchema),
+        TeamSettings: jsonSchema(apiTeamSettingsSchema),
+        CreateTeam: jsonSchema(apiCreateTeamSchema, 'input'),
+        UpdateTeam: jsonSchema(apiUpdateTeamSchema, 'input'),
         AddConversationNote: jsonSchema(apiAddNoteSchema, 'input'),
         ConversationNote: jsonSchema(apiConversationNoteSchema),
         Campaign: jsonSchema(apiCampaignSchema),
@@ -3598,6 +3691,10 @@ export const API_ROUTES = [
   ['get', '/conversations/{id}/messages'],
   ['get', '/members'],
   ['get', '/teams'],
+  ['post', '/teams'],
+  ['get', '/teams/{id}'],
+  ['patch', '/teams/{id}'],
+  ['delete', '/teams/{id}'],
   ['get', '/campaigns'],
   ['post', '/campaigns'],
   ['get', '/campaigns/{id}'],
