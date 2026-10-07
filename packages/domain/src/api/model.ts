@@ -27,6 +27,7 @@ export const API_SCOPE_KEYS = [
   'campaigns.stop',
   'campaigns.resume',
   'chat_links.read',
+  'chat_links.write',
   'automations.start',
   'flows.read',
   'orders.read',
@@ -181,6 +182,13 @@ export const API_SCOPE_INFO: Record<
       "List the company's chat links, the short links and QR codes that open a chat with one of its numbers with a message ready to send, and read each one with its clicks per day and the conversations it started in the last 30 days.",
     permission: 'campaigns.read',
     writes: false,
+  },
+  'chat_links.write': {
+    label: 'Write chat links',
+    description:
+      "Create chat links on the company's active numbers, change their name, number and message and whether the message carries the link's reference, and archive or restore them, as members who write campaigns do on the Growth pages. Links a key creates name it as their author.",
+    permission: 'campaigns.write',
+    writes: true,
   },
   'automations.start': {
     label: 'Start automations',

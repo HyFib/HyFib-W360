@@ -982,6 +982,16 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `GET /api/v1/chat-links` and `GET /api/v1/chat-links/{id}` with 404; rolling web servers back
    does the same. Workers are unaffected.
 
+   Migration 0223 (ADR-300) replaces the API keys' and plans' scope checks with `chat_links.write`
+   (validated at once), drops NOT NULL from `chat_links.created_by_membership_id` and adds
+   `created_by_api_key_id` with its composite foreign key to the company's keys and the one-author
+   check, both NOT VALID (brief locks; no row is read); 0224 validates them, reading the table
+   without blocking its writes. Until the web rollout ends, an old web server answers Settings → API
+   keys with an error for a company with a key holding `chat_links.write`, answers
+   `POST /api/v1/chat-links` and `PATCH /api/v1/chat-links/{id}` with 404 (405 on one with ADR-299
+   but not ADR-300), and gives links without `createdBy`; it always names the member who adds a
+   link, so the check holds. Rolling web servers back does the same. Workers are unaffected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -257,6 +257,7 @@ describe('API scopes', () => {
       'campaigns.write',
       'campaigns.stop',
       'campaigns.resume',
+      'chat_links.write',
       'automations.start',
       'orders.write',
       'orders.request_payment',

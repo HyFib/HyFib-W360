@@ -139,13 +139,19 @@ import { apiCreatePipelineSchema, apiUpdatePipelineSchema } from './pipelines';
 import { apiPipelineForecastSchema } from './pipeline-forecast';
 import { apiReportSchema } from './reports';
 import { apiFlowResponseSchema, apiFlowSchema, apiJsonValueSchema } from './flows';
-import { apiChatLinkDetailSchema, apiChatLinkSchema } from './chat-links';
+import {
+  apiChatLinkDetailSchema,
+  apiChatLinkSchema,
+  apiCreateChatLinkSchema,
+  apiUpdateChatLinkSchema,
+} from './chat-links';
 import { MAX_PERIOD_DAYS, PERIOD_PRESETS } from '../reports/period';
 import { apiCreateTeamSchema, apiUpdateTeamSchema } from './teams';
 import { apiUpdateMemberSchema } from './members';
 import { apiCreateClosedDaySchema, apiUpdateBusinessHoursSchema } from './business-hours';
 import { MAX_RANGES_PER_DAY } from '../inbox/business-hours';
 import { MAX_SAVED_REPLIES } from '../inbox/saved-replies';
+import { GROWTH_LIMITS } from '../growth/model';
 import {
   SATISFACTION_SURVEY_STATUSES,
   apiSatisfactionSurveySchema,
@@ -2389,6 +2395,17 @@ export function buildOpenApiDocument(serverUrl: string) {
             ...errors(401, 403, 422, 429, 500),
           },
         },
+        post: {
+          operationId: 'createChatLink',
+          summary: 'Add a chat link',
+          description: `${scopeNote('chat_links.write')} As members who write campaigns add one under Growth → Chat links: on one of the company’s active numbers (422 otherwise), with a new reference and short link. A company keeps at most ${GROWTH_LIMITS.links} links in use (409 at the limit: archive some first). The link names the key as its author (\`createdBy\` \`api\`), and the audit log names it too. With an \`Idempotency-Key\`, a retry answers the first response.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateChatLink')) },
+          responses: {
+            '201': { description: 'The chat link.', content: json(dataOf(ref('ChatLink'))) },
+            ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
+          },
+        },
       },
       '/chat-links/{id}': {
         get: {
@@ -2402,6 +2419,17 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('ChatLinkDetail'))),
             },
             ...errors(401, 403, 404, 429, 500),
+          },
+        },
+        patch: {
+          operationId: 'updateChatLink',
+          summary: 'Change, archive or restore a chat link',
+          description: `${scopeNote('chat_links.write')} As members edit one under Growth → Chat links: what is given changes and the rest stays as it is, with the same checks as when adding one; a new number must be active. An archived link is changed only once restored (409): \`archived\` archives or restores it, in a request of its own. Its short link, QR code and buttons open nothing while it is archived. With \`expectedVersion\`, a link changed since is refused (409). A change that leaves the link as it is answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateChatLink')) },
+          responses: {
+            '200': { description: 'The chat link now.', content: json(dataOf(ref('ChatLink'))) },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -4275,6 +4303,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         FlowResponse: jsonSchema(apiFlowResponseSchema),
         ChatLink: jsonSchema(apiChatLinkSchema),
         ChatLinkDetail: jsonSchema(apiChatLinkDetailSchema),
+        CreateChatLink: jsonSchema(apiCreateChatLinkSchema, 'input'),
+        UpdateChatLink: jsonSchema(apiUpdateChatLinkSchema, 'input'),
         JsonValue: {
           description:
             'Any JSON value: text, a number, true or false, null, a list of JSON values or an object of them.',
@@ -4424,7 +4454,9 @@ export const API_ROUTES = [
   ['get', '/flows'],
   ['get', '/flow-responses'],
   ['get', '/chat-links'],
+  ['post', '/chat-links'],
   ['get', '/chat-links/{id}'],
+  ['patch', '/chat-links/{id}'],
   ['get', '/members'],
   ['patch', '/members/{id}'],
   ['get', '/business-hours'],

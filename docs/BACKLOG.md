@@ -921,6 +921,9 @@ verification, app review, Embedded Signup configuration).
   **[Reading chat links through the public API built; its database tests run only in CI]** (ADR-299,
   migration 0222: `chat_links.read` lists the company's chat links newest first on exact pages and
   reads each one with its clicks per day, counted as the Growth pages count them).
+  **[Writing chat links through the public API built; its database tests run only in CI]** (ADR-300,
+  migrations 0223 and 0224: `chat_links.write` adds links on the company's active numbers, changes,
+  archives and restores them through the Growth pages' writes, recorded as the key's).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact

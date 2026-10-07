@@ -1,5 +1,41 @@
 # Progress
 
+## 2026-10-07 — Chat links written through the public API (P5-08, H-033, W-160, ADR-300)
+
+Status: **Implemented; its database tests run in CI only.** Keys read the company's chat links
+(ADR-299) but could not add or archive them. The local PostgreSQL is unavailable, so the migrations
+and the integration test below were written but not run here; migrations 0223 and 0224 passed the
+pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0223 (`chat_links.write` in the scope checks;
+  `chat_links.created_by_api_key_id` with its foreign key and the one-author check, NOT VALID;
+  `created_by_membership_id` nullable); 0224 (validates them).
+- **Domain:** `apiCreateChatLink`, `apiUpdateChatLink` and their schemas in `api/chat-links.ts`;
+  links give `createdBy` and `createdByApiKeyId`; the Growth pages' writers shared from
+  `growth/service.ts` (`writeCreateChatLink`, `writeUpdateChatLink`, `writeSetChatLinkArchived`,
+  `assertLinkChannel`, `lockChatLink`, `withFreshIds`); the scope; the export of
+  `created_by_api_key_id`; the OpenAPI operations and components.
+- **Web:** `POST /api/v1/chat-links`, `PATCH /api/v1/chat-links/{id}`.
+- **Tests:** unit (`api/chat-links.test.ts`, 5 new: the scope and its refusals, the addition, the
+  changes, archiving and restoring, the OpenAPI entries); integration (1 new in
+  `api-chat-links.test.ts`). Written for CI; the integration test was not run here. No e2e test.
+- **Docs:** ADR-300; ARCHITECTURE; SECURITY; THREAT-MODEL T268; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-160.
+- **Mutation checks:** 43/43 deliberate regressions caught, one after a test was added.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 135 files, 1281 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migrations 0223 and 0224         | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Chat links through the public API (P5-08, H-033, W-160, ADR-299)
 
 Status: **Implemented; its database tests run in CI only.** Keys could not read the company's chat

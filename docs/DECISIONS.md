@@ -11418,3 +11418,39 @@ Decision:
 
 Not built: creating, changing, archiving and restoring links through the API (next), website
 buttons, the ads that started conversations, and which conversations a link started.
+
+## ADR-300 Chat links written through the public API (P5-08) (2026-10-07)
+
+Context: keys read the company's chat links since ADR-299, but a company that makes a link for each
+email, ad or product page from its own tools still created each one under Growth → Chat links, and
+archived it there when the campaign ended.
+
+Decision:
+
+- **A `chat_links.write` scope** ("Write chat links"), granted only by members who hold
+  `campaigns.write` (owners, administrators and marketers do), writing, so a suspended or restricted
+  company's keys are refused (423), as its members' writes are. Existing keys and plans that chose
+  their scopes do not gain it. With it the API has 38 scopes.
+- **`POST /api/v1/chat-links`** (`createChatLink`) adds a link as members do: a name, one of the
+  company's active numbers (`channelId`; 422 otherwise, another company's number included), a
+  message (none by default) and whether it carries the reference (yes by default), with a new
+  reference and short link, within the 500 links in use (409 at the limit). With an
+  `Idempotency-Key`, a retry answers the first response. It answers the link as
+  `GET /chat-links/{id}` gives it (201).
+- **`PATCH /api/v1/chat-links/{id}`** (`updateChatLink`) changes what is given (name, number,
+  message, reference), the rest kept, with the same checks; an archived link is changed only once
+  restored (409); `archived` archives or restores it, in a request of its own (422 otherwise). With
+  `expectedVersion`, a link changed since is refused (409), as deals are. A change that leaves the
+  link as it is writes nothing and adds no audit entry.
+- **One set of writes:** the Growth pages' add, edit and archive now run the same transaction-level
+  writers (`writeCreateChatLink`, `writeUpdateChatLink`, `writeSetChatLinkArchived` and
+  `assertLinkChannel` in `growth/service.ts`), so a key's link is checked and stored as a member's.
+  The audit log has `growth.link_created`, `growth.link_updated`, `growth.link_archived` and
+  `growth.link_restored` with the key as actor and `source: api`.
+- **Who added a link:** migration 0223 adds `chat_links.created_by_api_key_id` with a composite
+  foreign key to the company's keys and a check that exactly one author is set (both NOT VALID; 0224
+  validates them), and drops NOT NULL from `created_by_membership_id`. Links give `createdBy`
+  (`member` or `api`) and `createdByApiKeyId`; a member is never named.
+
+Not built: deleting links (members archive them too), website buttons through the API, and choosing
+a link's reference or short link.

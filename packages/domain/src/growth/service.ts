@@ -46,19 +46,31 @@ import {
 const idSchema = z.object({ id: z.uuid() });
 const versioned = idSchema.extend({ expectedVersion: z.number().int().min(1) });
 
+/** A link's name, as members and keys (ADR-300) give it. */
+export const chatLinkNameSchema = z
+  .string()
+  .trim()
+  .min(1, 'Name the link.')
+  .max(GROWTH_LIMITS.nameLength, `Use at most ${GROWTH_LIMITS.nameLength} characters.`);
+
+/** The message a link opens the chat with, likewise (empty for none). */
+export const chatLinkMessageSchema = z
+  .string()
+  .max(GROWTH_LIMITS.messageLength, `Use at most ${GROWTH_LIMITS.messageLength} characters.`)
+  .transform((v) => v.trim());
+
 const linkSchema = z.object({
-  name: z
-    .string()
-    .trim()
-    .min(1, 'Name the link.')
-    .max(GROWTH_LIMITS.nameLength, `Use at most ${GROWTH_LIMITS.nameLength} characters.`),
+  name: chatLinkNameSchema,
   channelAccountId: z.uuid('Choose a WhatsApp number.'),
-  message: z
-    .string()
-    .max(GROWTH_LIMITS.messageLength, `Use at most ${GROWTH_LIMITS.messageLength} characters.`)
-    .transform((v) => v.trim()),
+  message: chatLinkMessageSchema,
   includeRef: z.boolean(),
 });
+
+/** What a link is made of, members' and keys' alike. */
+export type ChatLinkFields = z.infer<typeof linkSchema>;
+
+/** Who adds a link: a member on the Growth pages, or a key through the API (ADR-300). */
+export type ChatLinkAuthor = { membershipId: string } | { apiKeyId: string };
 
 const widgetSchema = z.object({
   linkId: z.uuid('Choose the link the button opens.'),
@@ -157,8 +169,14 @@ const stale = () =>
     'Someone else changed this. Reload to see the latest version, then try again.',
   );
 
+/** The constraints a new link's random reference and slug can collide on. */
+export const CHAT_LINK_ID_CONSTRAINTS = ['chat_links_ref_uq', 'chat_links_slug_uq'];
+
 /** Retries an insert whose random identifier collided (a new transaction per attempt). */
-async function withFreshIds<T>(attempt: () => Promise<T>, constraints: string[]): Promise<T> {
+export async function withFreshIds<T>(
+  attempt: () => Promise<T>,
+  constraints: string[],
+): Promise<T> {
   for (let i = 0; ; i += 1) {
     try {
       return await attempt();
@@ -169,35 +187,131 @@ async function withFreshIds<T>(attempt: () => Promise<T>, constraints: string[])
   }
 }
 
+/**
+ * Refuses a number that is not one of the company's active ones (422 at `path`): links open only
+ * those.
+ */
+export async function assertLinkChannel(
+  tx: Tx,
+  tenantId: string,
+  channelAccountId: string,
+  path = 'channelAccountId',
+) {
+  const [channel] = await tx
+    .select({ id: channelAccounts.id, status: channelAccounts.status })
+    .from(channelAccounts)
+    .where(and(eq(channelAccounts.tenantId, tenantId), eq(channelAccounts.id, channelAccountId)));
+  if (!channel || channel.status !== 'active') {
+    const message = 'Choose an active WhatsApp number.';
+    throw new AppError('validation_failed', message, { issues: [{ path, message }] });
+  }
+}
+
+/** Locks a link to change it from `expectedVersion`: 404 for none, 409 for another version. */
+export async function lockChatLink(tx: Tx, tenantId: string, id: string, expectedVersion: number) {
+  const [row] = await tx
+    .select()
+    .from(chatLinks)
+    .where(and(eq(chatLinks.tenantId, tenantId), eq(chatLinks.id, id)))
+    .for('update');
+  if (!row) throw notFound('Link');
+  if (row.version !== expectedVersion) throw stale();
+  return row;
+}
+
+/**
+ * Adds a link in the caller's transaction, as the Growth pages and the API (ADR-300) do: on an
+ * active number, within the cap on open links, with a new reference and short link. Either can
+ * collide with another link's, which aborts the transaction: run it in `withFreshIds`.
+ */
+export async function writeCreateChatLink(
+  tx: Tx,
+  tenantId: string,
+  data: ChatLinkFields,
+  author: ChatLinkAuthor,
+  channelPath = 'channelAccountId',
+): Promise<string> {
+  await assertLinkChannel(tx, tenantId, data.channelAccountId, channelPath);
+  const [open] = await tx
+    .select({ n: count() })
+    .from(chatLinks)
+    .where(and(eq(chatLinks.tenantId, tenantId), isNull(chatLinks.archivedAt)));
+  if ((open?.n ?? 0) >= GROWTH_LIMITS.links) {
+    throw new AppError(
+      'conflict',
+      `A company can have at most ${GROWTH_LIMITS.links} links; archive some first.`,
+    );
+  }
+  const id = uuidv7();
+  await tx.insert(chatLinks).values({
+    id,
+    tenantId,
+    channelAccountId: data.channelAccountId,
+    name: data.name,
+    message: data.message,
+    refCode: newRefCode(),
+    includeRef: data.includeRef,
+    slug: newSlug(),
+    ...('membershipId' in author
+      ? { createdByMembershipId: author.membershipId }
+      : { createdByApiKeyId: author.apiKeyId }),
+  });
+  return id;
+}
+
+/**
+ * Sets a locked link's name, number, message and reference, as the Growth pages' edit and the API
+ * (ADR-300) do: never an archived link's (restore it first), and only an active number when the
+ * number changes. Returns the link's new version.
+ */
+export async function writeUpdateChatLink(
+  tx: Tx,
+  tenantId: string,
+  row: typeof chatLinks.$inferSelect,
+  data: ChatLinkFields,
+  channelPath = 'channelAccountId',
+): Promise<number> {
+  if (row.archivedAt) throw new AppError('conflict', 'Restore the link before changing it.');
+  if (row.channelAccountId !== data.channelAccountId) {
+    await assertLinkChannel(tx, tenantId, data.channelAccountId, channelPath);
+  }
+  await tx
+    .update(chatLinks)
+    .set({
+      name: data.name,
+      channelAccountId: data.channelAccountId,
+      message: data.message,
+      includeRef: data.includeRef,
+      version: row.version + 1,
+    })
+    .where(and(eq(chatLinks.tenantId, tenantId), eq(chatLinks.id, row.id)));
+  return row.version + 1;
+}
+
+/**
+ * Archives or restores a locked link (an archived link's short link and buttons open nothing), as
+ * the Growth pages and the API (ADR-300) do. Returns the new version, or null when it already was.
+ */
+export async function writeSetChatLinkArchived(
+  tx: Tx,
+  tenantId: string,
+  row: typeof chatLinks.$inferSelect,
+  archived: boolean,
+  at: Date,
+): Promise<number | null> {
+  if (Boolean(row.archivedAt) === archived) return null;
+  await tx
+    .update(chatLinks)
+    .set({ archivedAt: archived ? at : null, version: row.version + 1 })
+    .where(and(eq(chatLinks.tenantId, tenantId), eq(chatLinks.id, row.id)));
+  return row.version + 1;
+}
+
 export function createGrowthService(deps: { db: Database; clock: Clock }) {
   const { db } = deps;
 
   const readable = (ctx: TenantContext) => assertCan(ctx, 'campaigns.read');
   const writable = (ctx: TenantContext) => assertCan(ctx, 'campaigns.write');
-
-  async function activeChannel(tx: Tx, tenantId: string, channelAccountId: string) {
-    const [channel] = await tx
-      .select({ id: channelAccounts.id, status: channelAccounts.status })
-      .from(channelAccounts)
-      .where(and(eq(channelAccounts.tenantId, tenantId), eq(channelAccounts.id, channelAccountId)));
-    if (!channel || channel.status !== 'active') {
-      const message = 'Choose an active WhatsApp number.';
-      throw new AppError('validation_failed', message, {
-        issues: [{ path: 'channelAccountId', message }],
-      });
-    }
-  }
-
-  async function lockLink(tx: Tx, tenantId: string, id: string, expectedVersion: number) {
-    const [row] = await tx
-      .select()
-      .from(chatLinks)
-      .where(and(eq(chatLinks.tenantId, tenantId), eq(chatLinks.id, id)))
-      .for('update');
-    if (!row) throw notFound('Link');
-    if (row.version !== expectedVersion) throw stale();
-    return row;
-  }
 
   async function lockWidget(tx: Tx, tenantId: string, id: string, expectedVersion: number) {
     const [row] = await tx
@@ -351,28 +465,8 @@ export function createGrowthService(deps: { db: Database; clock: Clock }) {
       return withFreshIds(
         () =>
           db.run(ctx.scope, async (tx) => {
-            await activeChannel(tx, ctx.tenant.id, data.channelAccountId);
-            const [open] = await tx
-              .select({ n: count() })
-              .from(chatLinks)
-              .where(and(eq(chatLinks.tenantId, ctx.tenant.id), isNull(chatLinks.archivedAt)));
-            if ((open?.n ?? 0) >= GROWTH_LIMITS.links) {
-              throw new AppError(
-                'conflict',
-                `A company can have at most ${GROWTH_LIMITS.links} links; archive some first.`,
-              );
-            }
-            const id = uuidv7();
-            await tx.insert(chatLinks).values({
-              id,
-              tenantId: ctx.tenant.id,
-              channelAccountId: data.channelAccountId,
-              name: data.name,
-              message: data.message,
-              refCode: newRefCode(),
-              includeRef: data.includeRef,
-              slug: newSlug(),
-              createdByMembershipId: ctx.membership.id,
+            const id = await writeCreateChatLink(tx, ctx.tenant.id, data, {
+              membershipId: ctx.membership.id,
             });
             await recordAudit(
               tx,
@@ -387,7 +481,7 @@ export function createGrowthService(deps: { db: Database; clock: Clock }) {
             );
             return { id };
           }),
-        ['chat_links_ref_uq', 'chat_links_slug_uq'],
+        CHAT_LINK_ID_CONSTRAINTS,
       );
     },
 
@@ -395,21 +489,8 @@ export function createGrowthService(deps: { db: Database; clock: Clock }) {
       writable(ctx);
       const data = parseInput(versioned.extend(linkSchema.shape), input);
       return db.run(ctx.scope, async (tx) => {
-        const row = await lockLink(tx, ctx.tenant.id, data.id, data.expectedVersion);
-        if (row.archivedAt) throw new AppError('conflict', 'Restore the link before changing it.');
-        if (row.channelAccountId !== data.channelAccountId) {
-          await activeChannel(tx, ctx.tenant.id, data.channelAccountId);
-        }
-        await tx
-          .update(chatLinks)
-          .set({
-            name: data.name,
-            channelAccountId: data.channelAccountId,
-            message: data.message,
-            includeRef: data.includeRef,
-            version: row.version + 1,
-          })
-          .where(and(eq(chatLinks.tenantId, ctx.tenant.id), eq(chatLinks.id, row.id)));
+        const row = await lockChatLink(tx, ctx.tenant.id, data.id, data.expectedVersion);
+        const version = await writeUpdateChatLink(tx, ctx.tenant.id, row, data);
         await recordAudit(
           tx,
           ctx,
@@ -421,7 +502,7 @@ export function createGrowthService(deps: { db: Database; clock: Clock }) {
           },
           meta,
         );
-        return { version: row.version + 1 };
+        return { version };
       });
     },
 
@@ -435,12 +516,15 @@ export function createGrowthService(deps: { db: Database; clock: Clock }) {
       writable(ctx);
       const data = parseInput(versioned, input);
       return db.run(ctx.scope, async (tx) => {
-        const row = await lockLink(tx, ctx.tenant.id, data.id, data.expectedVersion);
-        if (Boolean(row.archivedAt) === archived) return { version: row.version };
-        await tx
-          .update(chatLinks)
-          .set({ archivedAt: archived ? deps.clock.now() : null, version: row.version + 1 })
-          .where(and(eq(chatLinks.tenantId, ctx.tenant.id), eq(chatLinks.id, row.id)));
+        const row = await lockChatLink(tx, ctx.tenant.id, data.id, data.expectedVersion);
+        const version = await writeSetChatLinkArchived(
+          tx,
+          ctx.tenant.id,
+          row,
+          archived,
+          deps.clock.now(),
+        );
+        if (version === null) return { version: row.version };
         await recordAudit(
           tx,
           ctx,
@@ -452,7 +536,7 @@ export function createGrowthService(deps: { db: Database; clock: Clock }) {
           },
           meta,
         );
-        return { version: row.version + 1 };
+        return { version };
       });
     },
 

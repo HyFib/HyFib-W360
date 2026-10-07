@@ -1671,6 +1671,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   counts are the Growth pages' SQL, now shared from `growth/service.ts` (`linkClicks30`,
   `linkConversations30`); the short link is built on `APP_BASE_URL`, which the route passes, as the
   link's page builds it.
+- **Chat links written through the API (ADR-300):** `apiCreateChatLink` and `apiUpdateChatLink` in
+  `api/chat-links.ts` run the Growth pages' writers, now shared in `growth/service.ts`
+  (`writeCreateChatLink` with its author, a member or a key; `writeUpdateChatLink`;
+  `writeSetChatLinkArchived`; `assertLinkChannel`, which names the field it refuses), in one
+  transaction with the idempotency claim and the audit entry (`recordSystemAudit` as the key). A new
+  link's random reference and slug can collide with another's, which aborts the transaction, so
+  `withFreshIds` runs it again, claim included.
 - **Many conversations at once (ADR-120):** `POST /conversations/update-many`
   (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
   transaction it locks the member first (as a suspension does before releasing its conversations),

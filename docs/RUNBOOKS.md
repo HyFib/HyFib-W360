@@ -2140,6 +2140,16 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**Adding or changing a chat link through the API answers 403, 404, 409, 422 or 423 (ADR-300).** 403:
+the key lacks `chat_links.write` (its creator needed `campaigns.write`), or the plan leaves it out
+(reason `not_in_plan`). 404: the id is not one of the company's links. 409: the company has 500
+links in use (archive some first), the link is archived (restore it with `archived: false` first),
+or `expectedVersion` is not the link's version (read it again). 422: the number is not one of the
+company's active numbers (Settings → WhatsApp numbers), a field is missing, too long or unknown, or
+`archived` came with other changes. 423: the company is suspended or restricted. The audit log shows
+each change with the key (`growth.link_created`, `growth.link_updated`, `growth.link_archived`,
+`growth.link_restored`, source `api`).
+
 **A chat-links request answers 403, 404 or 422, or its counts differ from the Growth pages
 (ADR-299).** 403: the key lacks `chat_links.read` (its creator needed `campaigns.read`), or the plan
 leaves it out (reason `not_in_plan`). 404: the id is not one of the company's links. 422: a filter
