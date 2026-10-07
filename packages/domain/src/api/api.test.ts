@@ -259,6 +259,7 @@ describe('API scopes', () => {
       'orders.write',
       'orders.request_payment',
       'deals.write',
+      'pipelines.manage',
       'tasks.write',
       'notes.write',
       'webhooks.manage',

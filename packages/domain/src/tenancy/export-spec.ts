@@ -991,6 +991,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'archived_at',
       'version',
       'created_by_membership_id',
+      'created_by_api_key_id',
       'created_at',
       'updated_at',
     ],

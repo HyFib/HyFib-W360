@@ -1,5 +1,43 @@
 # Progress
 
+## 2026-10-07 — Managing CRM pipelines through the public API (P5-08, P4-04, H-033, ADR-286)
+
+Status: **Implemented; its database tests run in CI only.** Keys read pipelines and moved deals in
+them, but only members could add or change pipelines. The local PostgreSQL is unavailable, so the
+migrations and the integration tests below were written but not run here; migrations 0206 and 0207
+passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migrations 0206 (the `pipelines.manage` scope in the key and plan checks;
+  `crm_pipelines.created_by_api_key_id` with its foreign key and the one-creator check, both NOT
+  VALID) and 0207 (validating them).
+- **Domain:** `writeCreatePipeline`, `writeUpdatePipeline` (with `keepUnchanged`),
+  `writeArchivePipeline` and `writeRestorePipeline` in `crm/pipelines.ts`, now shared by the
+  Settings operations; `apiCreatePipeline` and `apiUpdatePipeline` (`api/pipelines.ts`); `version`,
+  `createdBy` and `createdByApiKeyId` on API pipelines (`readApiPipeline`, `withStages`); the scope;
+  the OpenAPI entries; the export column.
+- **Web:** `POST /api/v1/pipelines` and `PATCH /api/v1/pipelines/{id}`; Settings → Pipelines marks
+  pipelines added through the API.
+- **Tests:** unit (`api/pipelines.test.ts`: the scope, the requests, refusals before any write, the
+  OpenAPI entries; `crm/pipeline-writes.test.ts`: the shared writes as a key and as a member,
+  unchanged pipelines kept, removals, refusals and versions; the scope lists updated); integration
+  (2 new in `api.test.ts`). Written for CI; the integration tests were not run here. No e2e test.
+- **Docs:** ADR-286; ARCHITECTURE; SECURITY; THREAT-MODEL T254; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-012 and H-033.
+- **Mutation checks:** 29/29 deliberate regressions caught (two after a test was added).
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 124 files, 1189 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migrations 0206 and 0207         | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Review fix: the Reports forecast reads every stage's chance (P4-04, H-024, ADR-252)
 
 Status: **Implemented; its database test runs in CI only.** The Codex review of PR #38 found that

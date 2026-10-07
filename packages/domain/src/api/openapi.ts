@@ -73,6 +73,7 @@ import {
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import { SEGMENT_LIMITS } from '../campaigns/segments';
 import { ORDER_REFERENCE_RE } from '../commerce/model';
+import { CRM_LIMITS } from '../crm/common';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
 import { MAX_TAGS_PER_CONVERSATION } from '../inbox/conversation-tags';
@@ -127,6 +128,7 @@ import {
   type ApiDealHistoryType,
 } from './deals';
 import { API_NOTE_MAX_LENGTH, apiCreateNoteSchema } from './notes';
+import { apiCreatePipelineSchema, apiUpdatePipelineSchema } from './pipelines';
 import { apiCreateTaskSchema, apiUpdateTaskSchema } from './tasks';
 import { apiUpdateOrderSchema } from './orders';
 import {
@@ -416,6 +418,19 @@ export const apiPipelineSchema = z.object({
       }),
     )
     .describe('In board order, archived stages last.'),
+  version: z
+    .number()
+    .int()
+    .describe(
+      'Moves on with every change of the pipeline or its stages; PATCH /pipelines/{id} takes it as `expectedVersion`.',
+    ),
+  createdBy: z
+    .enum(['member', 'api'])
+    .describe('Who added the pipeline: a member in Settings (never which), or an API key.'),
+  createdByApiKeyId: z
+    .uuid()
+    .nullable()
+    .describe('With `createdBy` `api`, the key that added it; null otherwise.'),
   createdAt: z.iso.datetime(),
 });
 
@@ -2493,6 +2508,42 @@ export function buildOpenApiDocument(serverUrl: string) {
             ...errors(401, 403, 422, 429, 500),
           },
         },
+        post: {
+          operationId: 'createPipeline',
+          summary: 'Add a CRM pipeline',
+          description: `${scopeNote('pipelines.manage')} As owners and administrators add one in Settings → Pipelines: a name unique among the company’s active pipelines (409 otherwise), a currency for every deal’s value in it, which never changes, and its stages in board order, each with a chance of winning if wanted. It is placed after the company’s other pipelines; a company uses at most ${CRM_LIMITS.pipelines} active pipelines (409 at the limit: archive one first). The pipeline is recorded as added through the API, which Settings shows, and the audit log names the key. Needs the CRM in the company’s plan (403, reason not_in_plan). With an \`Idempotency-Key\`, a retry answers the first response.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreatePipeline')) },
+          responses: {
+            '201': {
+              description: 'The pipeline added, with its stages.',
+              content: json(dataOf(ref('Pipeline'))),
+            },
+            ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/pipelines/{id}': {
+        patch: {
+          operationId: 'updatePipeline',
+          summary: 'Change, archive or restore a CRM pipeline',
+          description: [
+            `${scopeNote('pipelines.manage')} As owners and administrators do in Settings → Pipelines. \`name\` renames the pipeline. \`stages\` lists all its stages as they should be, in board order: a stage with its \`id\` is kept with its deals, renamed, moved or given another chance (left out, its chance stays); a stage without one is added; and an active stage left out is removed from the board (archived, as Settings removes stages), refused with 409 while it holds open deals. An archived stage cannot be listed (422) or brought back: the closed deals closed in it keep it. \`archived\` \`true\` archives the pipeline, refused with 409 while it holds open deals, and \`false\` restores it (409 at the company’s limit of ${CRM_LIMITS.pipelines} active pipelines, or when another active pipeline took its name meanwhile); archiving or restoring goes in a request of its own (422), and an archived pipeline is restored before it is changed (409).`,
+            'A change that leaves the pipeline as it is (the same name and stages, archiving an archived pipeline, restoring an active one) answers it as it is, with no new version or audit entry. With `expectedVersion`, a pipeline changed since is refused with 409; send it, or an `Idempotency-Key`, when a request adds stages, so a retry never adds them twice. The audit log names the key. Needs the CRM in the company’s plan (403, reason not_in_plan). The currency never changes, and pipelines are never deleted.',
+          ].join('\n\n'),
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKeyOptional' },
+          ],
+          requestBody: { required: true, content: json(ref('UpdatePipeline')) },
+          responses: {
+            '200': {
+              description: 'The pipeline as it is now, with its stages.',
+              content: json(dataOf(ref('Pipeline'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
       },
       '/deals': {
         get: {
@@ -3441,6 +3492,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         PaymentLink: jsonSchema(apiPaymentLinkSchema),
         UpdateOrder: jsonSchema(apiUpdateOrderSchema, 'input'),
         Pipeline: jsonSchema(apiPipelineSchema),
+        CreatePipeline: jsonSchema(apiCreatePipelineSchema, 'input'),
+        UpdatePipeline: jsonSchema(apiUpdatePipelineSchema, 'input'),
         Deal: jsonSchema(apiDealSchema),
         DealHistoryEntry: jsonSchema(apiDealHistoryEntrySchema),
         CreateDeal: jsonSchema(apiCreateDealSchema, 'input'),
@@ -3575,6 +3628,8 @@ export const API_ROUTES = [
   ['post', '/orders/{id}/request-payment'],
   ['post', '/orders/{id}/cancel-payment'],
   ['get', '/pipelines'],
+  ['post', '/pipelines'],
+  ['patch', '/pipelines/{id}'],
   ['get', '/deals'],
   ['post', '/deals'],
   ['get', '/deals/{id}'],

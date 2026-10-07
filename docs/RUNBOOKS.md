@@ -2140,6 +2140,20 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**`POST /api/v1/pipelines` or `PATCH /api/v1/pipelines/{id}` answers 403, 404, 409, 422 or 423
+(ADR-286).** 403 `forbidden` names the scope the key lacks, `pipelines.manage` (granted by owners
+and administrators, who manage pipelines in Settings), or with reason `not_in_plan` the company's
+plan leaves out the CRM or the scope. 404 means the pipeline is not one of the key's company's. 409
+`conflict` says why: another active pipeline has the name, the company already uses 20 pipelines
+(archive one first), the pipeline changed since the `expectedVersion` given (read it again), a stage
+left out still holds open deals (move them first), the pipeline holds open deals (close or move them
+before archiving), or it is archived (restore it with `archived: false` first). 422 names what is
+wrong: two stages of one name, a stage id that is not an active stage of the pipeline, or `archived`
+sent with other changes. 423 means the company is suspended or its plan has ended. Settings →
+Pipelines marks the pipelines a key added, and the audit log has each change with the key. A request
+that adds stages, retried without `expectedVersion` or an `Idempotency-Key`, archives the stages the
+first one added and adds them again: send one of them.
+
 **`GET /api/v1/deals/{id}/history` answers 403, 404 or 422, or leaves a change out (ADR-281).** 403
 `forbidden` names the scope the key lacks, `deals.read`, or with reason `not_in_plan` the company's
 plan leaves out the CRM or the scope. 404 means the id is not one of the company's deals. 422 names

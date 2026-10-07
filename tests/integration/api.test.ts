@@ -9,12 +9,14 @@ import {
   API_MESSAGE_FEED_WINDOW,
   API_SCOPE_KEYS,
   API_TOKEN_RE,
+  CRM_LIMITS,
   RUN_BUDGETS,
   advanceAutomationRun,
   apiAddConversationNote,
   apiCreateContact,
   apiCreateDeal,
   apiCreateNote,
+  apiCreatePipeline,
   apiCreateTask,
   apiErrorResponse,
   apiGetAutomationRun,
@@ -49,6 +51,7 @@ import {
   apiSendTemplate,
   apiUpdateConversation,
   apiUpdateDeal,
+  apiUpdatePipeline,
   apiUpdateTask,
   apiUpdateManyConversations,
   apiUpdateMatchingConversations,
@@ -95,6 +98,7 @@ import {
   type ApiConversation,
   type ApiDeal,
   type ApiNote,
+  type ApiPipeline,
   type ApiTask,
   type ApiKeyReminderDeps,
   type ApiKeysService,
@@ -6201,6 +6205,267 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       keys.create(narrower, { name: 'Notes', scopes: ['notes.read'], expiresInDays: 30 }),
       'forbidden',
       /Read CRM notes/,
+    );
+  });
+
+  it('add, change, archive and restore pipelines as Settings does, as the key (ADR-286)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const manager = await apiKey(c, ['pipelines.manage', 'deals.write']);
+    const dataOf = (response: { body: unknown }) => (response.body as { data: ApiPipeline }).data;
+    await pipelineOf(owner, 'Sales', 'INR', ['New']);
+
+    // Added with its stages and chances after the company's other pipelines, as the key's, once
+    // per Idempotency-Key.
+    const request = {
+      name: ' Renewals ',
+      currency: 'inr',
+      stages: [
+        { name: 'Due' },
+        { name: 'Quoted', winPercent: 60 },
+        { name: 'Signed', winPercent: null },
+      ],
+    };
+    const key = idem('pipeline-renewals-1', JSON.stringify(request));
+    const created = await apiCreatePipeline(deps(), manager.ctx, request, key);
+    const again = await apiCreatePipeline(deps(), manager.ctx, request, key);
+    expect([created.status, created.replayed, again.replayed]).toEqual([201, false, true]);
+    expect(again.body).toEqual(created.body);
+    const renewals = dataOf(created);
+    expect(renewals).toMatchObject({
+      name: 'Renewals',
+      currency: 'INR',
+      position: 1,
+      archived: false,
+      version: 1,
+      createdBy: 'api',
+      createdByApiKeyId: manager.id,
+    });
+    expect(renewals.stages.map((s) => [s.name, s.position, s.archived, s.winPercent])).toEqual([
+      ['Due', 0, false, null],
+      ['Quoted', 1, false, 60],
+      ['Signed', 2, false, null],
+    ]);
+    const settings = await crm().listPipelines(owner);
+    expect(settings.map((p) => [p.name, p.addedThroughApi])).toEqual([
+      ['Sales', false],
+      ['Renewals', true],
+    ]);
+    const [row] = await fx.query<{
+      created_by_api_key_id: string | null;
+      created_by_membership_id: string | null;
+    }>(
+      'SELECT created_by_api_key_id, created_by_membership_id FROM app.crm_pipelines WHERE id = $1',
+      [renewals.id],
+    );
+    expect(row).toEqual({ created_by_api_key_id: manager.id, created_by_membership_id: null });
+    const listed = await apiListPipelines(
+      deps(),
+      await apiKey(c, ['deals.read']).then((k) => k.ctx),
+      {},
+    );
+    expect(listed.data.find((p) => p.id === renewals.id)).toEqual(renewals);
+
+    // Renamed; stages kept, renamed, reordered and given chances, one added and one removed, in
+    // one change.
+    const [due, quoted, signed] = renewals.stages;
+    const update = (input: Record<string, unknown>) =>
+      apiUpdatePipeline(deps(), manager.ctx, renewals.id, input, null);
+    const changed = dataOf(
+      await update({
+        name: 'Renewals 2026',
+        stages: [
+          { id: quoted!.id, name: 'Quote sent', winPercent: 70 },
+          { id: due!.id, name: 'Due' },
+          { name: 'Negotiating', winPercent: 85 },
+        ],
+        expectedVersion: 1,
+      }),
+    );
+    const which = (id: string) =>
+      ({ [due!.id]: 'due', [quoted!.id]: 'quoted', [signed!.id]: 'signed' })[id] ?? 'new';
+    expect([changed.name, changed.version]).toEqual(['Renewals 2026', 2]);
+    expect(changed.stages.map((s) => [which(s.id), s.name, s.archived, s.winPercent])).toEqual([
+      ['quoted', 'Quote sent', false, 70],
+      ['due', 'Due', false, null],
+      ['new', 'Negotiating', false, 85],
+      ['signed', 'Signed', true, null],
+    ]);
+
+    // The same name and stages again change nothing: no new version or audit entry.
+    const active = changed.stages
+      .filter((s) => !s.archived)
+      .map((s) => ({ id: s.id, name: s.name, winPercent: s.winPercent }));
+    expect(dataOf(await update({ name: 'Renewals 2026', stages: active })).version).toBe(2);
+    expect(dataOf(await update({ name: 'Renewals 2026' })).version).toBe(2);
+
+    // A version moved on, a name in use, a stage no longer in the pipeline, and removing a stage
+    // that holds an open deal are refused.
+    await expectAppError(
+      update({ name: 'Renewals', expectedVersion: 1 }),
+      'conflict',
+      /changed since version 1; its version is 2\. Read it again\.$/,
+    );
+    await expectAppError(update({ name: 'sales' }), 'conflict', /Another pipeline already has/);
+    await expectAppError(
+      update({ stages: [{ id: signed!.id, name: 'Signed' }] }),
+      'validation_failed',
+      /“Signed” is not in this pipeline/,
+    );
+    const asha = await contactOf(owner, 'Asha');
+    const deal = (
+      (
+        await apiCreateDeal(
+          deps(),
+          manager.ctx,
+          { contactId: asha, pipelineId: renewals.id, stageId: due!.id, title: 'Annual renewal' },
+          null,
+        )
+      ).body as { data: ApiDeal }
+    ).data;
+    await expectAppError(
+      update({ stages: [{ id: quoted!.id, name: 'Quote sent' }] }),
+      'conflict',
+      /Move the 1 open deal out of “Due” before removing it\./,
+    );
+
+    // Archived once it holds no open deal, as it is when archived again, and changed only once
+    // restored.
+    await expectAppError(update({ archived: true }), 'conflict', /Close or move the 1 open deal/);
+    await apiUpdateDeal(deps(), manager.ctx, deal.id, { status: 'won' });
+    const archived = dataOf(await update({ archived: true }));
+    expect([archived.archived, archived.version]).toEqual([true, 3]);
+    expect(dataOf(await update({ archived: true })).version).toBe(3);
+    await expectAppError(
+      update({ name: 'Old renewals' }),
+      'conflict',
+      /Restore the pipeline first/,
+    );
+    const restored = dataOf(await update({ archived: false, expectedVersion: 3 }));
+    expect([restored.archived, restored.version]).toEqual([false, 4]);
+    expect(dataOf(await update({ archived: false })).version).toBe(4);
+
+    // The audit log names the key for each change, and only for changes.
+    const audits = await fx.query<{
+      action: string;
+      actor_type: string;
+      actor_id: string;
+      metadata: Record<string, unknown>;
+    }>(
+      `SELECT action, actor_type, actor_id, metadata FROM app.audit_events
+        WHERE subject_id = $1 ORDER BY id`,
+      [renewals.id],
+    );
+    expect(audits.map((a) => [a.action, a.actor_type, a.actor_id, a.metadata])).toEqual([
+      [
+        'crm.pipeline_created',
+        'api_key',
+        manager.id,
+        { currency: 'INR', stages: 3, source: 'api' },
+      ],
+      [
+        'crm.pipeline_updated',
+        'api_key',
+        manager.id,
+        { stages: 3, added: 1, removed: 1, source: 'api' },
+      ],
+      ['crm.pipeline_archived', 'api_key', manager.id, { source: 'api' }],
+      ['crm.pipeline_restored', 'api_key', manager.id, { source: 'api' }],
+    ]);
+  });
+
+  it('refuse what Settings refuses, and need the scope, an active company and the CRM (ADR-286)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const manager = await apiKey(c, ['pipelines.manage']);
+    const body = (input: Record<string, unknown> = {}) => ({
+      name: 'Partners',
+      currency: 'INR',
+      stages: [{ name: 'Open' }],
+      ...input,
+    });
+    const create = (input: Record<string, unknown> = {}) =>
+      apiCreatePipeline(deps(), manager.ctx, body(input), null);
+
+    // Another company's pipeline and an unknown one are not found.
+    const theirs = await pipelineOf(await fx.ctx(other, other.owner), 'Theirs', 'INR', ['Open']);
+    for (const id of [theirs.id, uuidv7()]) {
+      await expectAppError(
+        apiUpdatePipeline(deps(), manager.ctx, id, { name: 'Mine' }, null),
+        'not_found',
+        /Pipeline/,
+      );
+    }
+
+    // A key without the scope, or of a suspended company, changes nothing.
+    const writer = await apiKey(c, ['deals.read', 'deals.write']);
+    await expectAppError(
+      apiCreatePipeline(deps(), writer.ctx, body(), null),
+      'forbidden',
+      /pipelines\.manage/,
+    );
+    const suspended = {
+      ...manager.ctx,
+      tenant: { ...manager.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(apiCreatePipeline(deps(), suspended, body(), null), 'tenant_suspended');
+
+    // A plan without the CRM changes none; with it again, the pipeline is added, once by name.
+    await onPlan(c, []);
+    const error = await expectAppError(create(), 'forbidden', /does not include the CRM/);
+    expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    await onPlan(c, ['crm']);
+    const added = await create();
+    expect(added.status).toBe(201);
+    await expectAppError(create({ name: 'partners' }), 'conflict', /Another pipeline already has/);
+
+    // At most CRM_LIMITS.pipelines active pipelines, as in Settings.
+    const [count] = await fx.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM app.crm_pipelines WHERE tenant_id = $1 AND archived_at IS NULL',
+      [c.tenant.id],
+    );
+    for (let i = count!.n; i < CRM_LIMITS.pipelines; i += 1) {
+      expect((await create({ name: `Pipeline ${i}` })).status).toBe(201);
+    }
+    await expectAppError(
+      create({ name: 'One too many' }),
+      'conflict',
+      new RegExp(`at most ${CRM_LIMITS.pipelines} pipelines`),
+    );
+
+    // The database keeps exactly one creator, a key of the pipeline's company.
+    const made = (added.body as { data: ApiPipeline }).data;
+    for (const bad of [
+      `created_by_membership_id = '${owner.membership.id}'`,
+      'created_by_api_key_id = NULL',
+    ]) {
+      await expect(
+        fx.query(`UPDATE app.crm_pipelines SET ${bad} WHERE id = $1`, [made.id]),
+        bad,
+      ).rejects.toThrow(/crm_pipelines_creator/);
+    }
+    const elsewhere = await apiKey(other, ['deals.read']);
+    await expect(
+      fx.query('UPDATE app.crm_pipelines SET created_by_api_key_id = $2 WHERE id = $1', [
+        made.id,
+        elsewhere.id,
+      ]),
+    ).rejects.toThrow(/crm_pipelines_created_by_api_key_fk/);
+
+    // Granting the scope needs tenant.settings.manage, which members manage pipelines with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'tenant.settings.manage')),
+    };
+    await expectAppError(
+      keys.create(narrower, {
+        name: 'Pipelines',
+        scopes: ['pipelines.manage'],
+        expiresInDays: 30,
+      }),
+      'forbidden',
+      /Manage CRM pipelines/,
     );
   });
 });

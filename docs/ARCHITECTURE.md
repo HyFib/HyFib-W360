@@ -1486,6 +1486,16 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   working copy, collecting the members' activity kinds; when anything changed it writes the row once
   with the next version, adds the activities without an actor naming the key and a
   `crm.deal_updated` audit row, and answers the deal as `readApiDeal` reads it.
+- **Managing CRM pipelines through the API (ADR-286):** `POST /pipelines` (`apiCreatePipeline`) and
+  `PATCH /pipelines/{id}` (`apiUpdatePipeline`), both `pipelines.manage` in `api/pipelines.ts`,
+  claim the `Idempotency-Key` in the request's transaction, check the CRM in the plan, and call the
+  writes of `crm/pipelines.ts` that the Settings operations now call too: `writeCreatePipeline` (the
+  company's active pipelines counted under its advisory lock, then the pipeline with
+  `created_by_api_key_id` and its stages), `writeUpdatePipeline` (the pipeline's row locked,
+  `expectedVersion` checked in the API's words, and with `keepUnchanged` the name and the active
+  stages' order, names and chances compared before anything is written), `writeArchivePipeline` and
+  `writeRestorePipeline`. Each change is audited as the key, and the answer is read by
+  `readApiPipeline`, which shares `withStages` with `GET /pipelines`.
 - **Moving CRM deals to another pipeline through the API (ADR-257):** `pipelineId` on
   `PATCH /deals/{id}` takes the move path for another pipeline: after any reopen, `entryStage`
   (shared with `apiCreateDeal`) shares the target pipeline and finds the stage given or its first

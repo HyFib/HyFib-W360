@@ -30,6 +30,7 @@ export const API_SCOPE_KEYS = [
   'orders.request_payment',
   'deals.read',
   'deals.write',
+  'pipelines.manage',
   'tasks.read',
   'tasks.write',
   'notes.read',
@@ -189,6 +190,13 @@ export const API_SCOPE_INFO: Record<
     description:
       "Create deals for the company's contacts in its active pipelines and change them as members do on the board: their title, value, owner and expected close date, their stage or pipeline, and closing them as won or lost or reopening them, recorded as done through the API. Needs the CRM in the company's plan.",
     permission: 'crm.write',
+    writes: true,
+  },
+  'pipelines.manage': {
+    label: 'Manage CRM pipelines',
+    description:
+      "Add CRM pipelines with their stages and each stage's chance of winning, rename them, add, rename, reorder and remove their stages and change the chances, and archive and restore them, as owners and administrators do in Settings → Pipelines, recorded in the audit log as done by the key. Never deletes a pipeline or its deals. Needs the CRM in the company's plan.",
+    permission: 'tenant.settings.manage',
     writes: true,
   },
   'tasks.read': {

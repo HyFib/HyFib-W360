@@ -10837,3 +10837,58 @@ Decision:
 
 Not built: an event when payment is asked for or a cancellation asked (the order's events report the
 first), filters by link status, the link's address in the payload, and events for refunds.
+
+## ADR-286 Managing CRM pipelines through the public API (P5-08, P4-04) (2026-10-07)
+
+Context: since ADR-253 integrations read a company's pipelines, and since ADR-254 they create and
+move deals in them, but only members could add or change pipelines, in Settings → Pipelines. An
+integration that mirrors another CRM's pipelines, or sets up a new company's CRM, had a member copy
+each pipeline and stage by hand, and again whenever the other system changed. ADR-253 left changing
+pipelines through the API unbuilt.
+
+Decision:
+
+- **A new writing scope, `pipelines.manage`** ("Manage CRM pipelines"), granted with
+  `tenant.settings.manage`, the permission members manage pipelines with: only owners and
+  administrators hold it, and they create keys. Like every writing scope it is refused while the
+  company is suspended or restricted (423). Existing keys keep their scopes, and a plan version that
+  chose its scopes (ADR-092) leaves it out until a new version includes it. The CRM in the plan is
+  checked first in the transaction (403, reason `not_in_plan`), as for deals.
+- **`POST /api/v1/pipelines`** (`createPipeline`) takes a name, a currency and the stages in board
+  order, each with a chance of winning if wanted, and answers the pipeline as `GET /pipelines` gives
+  it (201). The rules are the Settings ones, through the same write (`writeCreatePipeline`): a name
+  unique among the active pipelines ignoring case (409), stage names unique in the pipeline (422),
+  at most 30 stages and 20 active pipelines (409 at the limit), the new pipeline placed after the
+  others. With an `Idempotency-Key` a retry answers the first response.
+- **`PATCH /api/v1/pipelines/{id}`** (`updatePipeline`) takes a new `name`, the `stages` as they
+  should be, or `archived`, through the Settings writes (`writeUpdatePipeline`,
+  `writeArchivePipeline`, `writeRestorePipeline`): a stage given with its id is kept with its deals,
+  renamed, moved or given another chance (left out, its chance stays); one without an id is added;
+  an active stage left out is archived, refused while it holds open deals (409), and an archived
+  stage cannot be listed (422). `archived` `true` archives the pipeline once it holds no open deals
+  and `false` restores it within the limit; either goes in a request of its own (422), and an
+  archived pipeline is restored before it changes (409). The currency never changes and pipelines
+  are never deleted, as in Settings.
+- **Versions and retries:** API pipelines now give `version`, which `expectedVersion` checks (409
+  naming the current version). A change that leaves the pipeline as it is (the same name and stages,
+  archiving an archived pipeline, restoring an active one) answers it with no new version or audit
+  entry, so a sync that sends the same state again writes nothing; members' saves in Settings still
+  move the version on every time. A request that adds stages is not safe to repeat without
+  `expectedVersion` or an `Idempotency-Key`: the retry does not name the stages the first one added,
+  so it would archive them and add them again.
+- **Recorded as the key's:** a pipeline names its creator, a member or a key
+  (`created_by_api_key_id`, migration 0206; a check holds exactly one, and 0207 validates it), shown
+  as "Added through the API" in Settings and as `createdBy` and `createdByApiKeyId` on API
+  pipelines. The audit log records `crm.pipeline_created`, `crm.pipeline_updated`,
+  `crm.pipeline_archived` and `crm.pipeline_restored` as the key, with `source: 'api'`. The company
+  data export carries the column.
+- **One write for members and keys:** the Settings operations now call the same functions
+  (`crm/pipelines.ts`), so the locks (the company's active pipelines counted under its advisory
+  lock, the pipeline's row locked for update) and the checks are the same; the API differs only in
+  its wording of a stale version, in keeping an unchanged pipeline as it is, and in letting the name
+  or the stages be left out. Settings also refuses a stage listed twice (422), which its form never
+  sends.
+
+Not built: deleting pipelines or stages (they are archived, as in Settings), bringing an archived
+stage back, changing a pipeline's currency or its place among the company's pipelines, and webhook
+events for pipeline changes.

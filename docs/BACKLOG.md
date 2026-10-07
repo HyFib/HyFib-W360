@@ -868,6 +868,11 @@ verification, app review, Embedded Signup configuration).
   `GET /deals/{id}/history` with `deals.read` gives the changes the deal events report, newest first
   on exact pages, each with who made it, a key by its id and never which member; never notes or
   tasks; no migration).
+  **[Managing CRM pipelines built; its database tests run only in CI]** (ADR-286, migrations 0206
+  and 0207: `POST /pipelines` and `PATCH /pipelines/{id}` with the new `pipelines.manage` scope,
+  granted with `tenant.settings.manage`, add pipelines with their stages and chances, rename them,
+  change their stages, and archive and restore them through the Settings writes, recorded as the
+  key's; pipelines carry `version`, `createdBy` and `createdByApiKeyId`).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact

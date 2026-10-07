@@ -627,14 +627,14 @@ Phase 5 rules (Public API, P5-08):
   ADR-070), `campaigns.send` for `messages.send_marketing`, `inbox.read_all` for
   `conversations.read` (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075),
   `automations.publish` for `automations.start` (ADR-077), `tenant.settings.manage` for
-  `contact_fields.manage` (ADR-115), `campaigns.read` and `campaigns.write` for the scopes of the
-  same names (ADR-125, ADR-186), `campaigns.send` for `campaigns.stop` (ADR-128) and
-  `campaigns.resume` (ADR-176), `commerce.read` for `orders.read` (ADR-167), `inbox.reply` for
-  `orders.write` (ADR-168) and `orders.request_payment` (ADR-283), `channels.read` for the scope of
-  the same name (ADR-171), `crm.read` for `deals.read` (ADR-253), `tasks.read` (ADR-258) and
-  `notes.read` (ADR-279), and `crm.write` for `deals.write` (ADR-254, ADR-255), `tasks.write`
-  (ADR-259) and `notes.write` (ADR-268). Nobody grants a key more than they hold, and rotating needs
-  the same. A key keeps the scopes it was created with.
+  `contact_fields.manage` (ADR-115) and `pipelines.manage` (ADR-286), `campaigns.read` and
+  `campaigns.write` for the scopes of the same names (ADR-125, ADR-186), `campaigns.send` for
+  `campaigns.stop` (ADR-128) and `campaigns.resume` (ADR-176), `commerce.read` for `orders.read`
+  (ADR-167), `inbox.reply` for `orders.write` (ADR-168) and `orders.request_payment` (ADR-283),
+  `channels.read` for the scope of the same name (ADR-171), `crm.read` for `deals.read` (ADR-253),
+  `tasks.read` (ADR-258) and `notes.read` (ADR-279), and `crm.write` for `deals.write` (ADR-254,
+  ADR-255), `tasks.write` (ADR-259) and `notes.write` (ADR-268). Nobody grants a key more than they
+  hold, and rotating needs the same. A key keeps the scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -1104,6 +1104,15 @@ Phase 5 rules (Public API, P5-08):
   to a pipeline of its currency, so a value is never read in another currency than the one it was
   given in. The move is on the timeline and in the audit log as the key's (unit tests; integration
   tests, run in CI only).
+- Managing CRM pipelines (ADR-286): `POST /pipelines` and `PATCH /pipelines/{id}` need
+  `pipelines.manage`, granted only with `tenant.settings.manage` (owners and administrators, who
+  manage pipelines in Settings), an active company and the CRM in the plan, all checked before
+  anything is written. They act on the key's company's pipelines only (row security and an explicit
+  company condition; another company's answers 404), through the writes Settings uses, so its limits
+  and checks hold: no stage holding open deals is removed, no pipeline holding open deals archived,
+  and pipelines and stages are never deleted. The pipeline names the key as its creator (a database
+  check holds exactly one creator, and the foreign key reaches only the company's keys), and each
+  change is audited as the key (unit tests; integration tests, run in CI only).
 - Reading a deal's history (ADR-281): `GET /deals/{id}/history` needs `deals.read` and the CRM in
   the plan, checked before anything is read; it reads the key's company's deal only (another
   company's answers 404, as an unknown one does; an id that is not a UUID is refused before any

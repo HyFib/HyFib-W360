@@ -47,8 +47,10 @@ async function refusal(promise: Promise<unknown>) {
 describe('CRM tasks through the API (ADR-258)', () => {
   it('are read with tasks.read, a reading scope the database accepts, granted with crm.read', () => {
     expect(API_SCOPES).toContain('tasks.read');
-    // Listed after the deal scopes, in the order the database's scope checks list them.
-    expect(API_SCOPE_KEYS.indexOf('tasks.read')).toBe(API_SCOPE_KEYS.indexOf('deals.write') + 1);
+    // Listed after the deal and pipeline scopes, in the order the database's scope checks list them.
+    expect(API_SCOPE_KEYS.indexOf('tasks.read')).toBe(
+      API_SCOPE_KEYS.indexOf('pipelines.manage') + 1,
+    );
     expect(API_SCOPE_INFO['tasks.read']).toMatchObject({
       label: 'Read CRM tasks',
       permission: 'crm.read',

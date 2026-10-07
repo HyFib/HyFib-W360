@@ -264,6 +264,9 @@ describe('CRM pipelines and deals through the API (ADR-253)', () => {
       'position',
       'archived',
       'stages',
+      'version',
+      'createdBy',
+      'createdByApiKeyId',
       'createdAt',
     ]);
     expect(pipeline.required).toEqual(Object.keys(pipeline.properties));

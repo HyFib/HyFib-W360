@@ -27,6 +27,7 @@ export const API_SCOPES = [
   'orders.request_payment',
   'deals.read',
   'deals.write',
+  'pipelines.manage',
   'tasks.read',
   'tasks.write',
   'notes.read',
