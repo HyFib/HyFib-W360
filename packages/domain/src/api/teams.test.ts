@@ -77,8 +77,8 @@ describe('managing teams through the API (ADR-287)', () => {
     expect(API_SCOPES).toContain('teams.manage');
     // After the CRM scopes and before webhooks.manage, in the order the database's checks list them.
     expect(API_SCOPE_KEYS.indexOf('teams.manage')).toBe(API_SCOPE_KEYS.indexOf('notes.write') + 1);
-    expect(API_SCOPE_KEYS.indexOf('webhooks.manage')).toBe(
-      API_SCOPE_KEYS.indexOf('teams.manage') + 1,
+    expect(API_SCOPE_KEYS.indexOf('webhooks.manage')).toBeGreaterThan(
+      API_SCOPE_KEYS.indexOf('teams.manage'),
     );
     expect(API_SCOPE_INFO['teams.manage']).toMatchObject({
       label: 'Manage teams',

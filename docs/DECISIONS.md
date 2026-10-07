@@ -10979,3 +10979,41 @@ Decision:
 
 Not built: forecasts by owner or of many pipelines in one call, months further ahead, the forecast
 as it was at a past date, and the forecast in webhooks.
+
+## ADR-289 Setting members' availability through the public API (P5-08) (2026-10-07)
+
+Context: round-robin teams give conversations only to members who said they are taking them (W-038):
+each member switches it in the inbox, and members who assign conversations switch anyone's in
+Settings → Teams. A company that plans shifts in a rota or workforce tool had someone switch members
+on and off by hand at every shift change, or members forgot, and conversations waited or went to
+someone whose shift had ended. `GET /members` reads the switch (ADR-093), and ADR-287 left setting
+it through the API unbuilt.
+
+Decision:
+
+- **A new writing scope, `availability.write`** ("Set members' availability"), granted with
+  `inbox.assign`, the permission members set others' availability with (owners, administrators and
+  supervisors; owners and administrators create keys). Like every writing scope it is refused while
+  the company is suspended or restricted (423). Existing keys keep their scopes, and a plan version
+  that chose its scopes (ADR-092) leaves it out until a new version includes it (migration 0209 adds
+  it to both scope checks).
+- **`PATCH /api/v1/members/{id}`** (`updateMember`) takes `available`, `true` or `false`, and
+  answers the member's `id`, `available` and `changedAt`, when the switch last changed. Only an
+  active member whose role answers conversations is made available (422 otherwise, as in Settings);
+  any of the company's members can be made unavailable; another company's member and an unknown one
+  answer 404. Members made unavailable keep the conversations they have; making one available routes
+  waiting conversations again (up to 20, as Settings does).
+- **One write for members and keys:** `writeMemberAvailability` (`inbox/teams.ts`) now serves the
+  switch in the inbox and Settings and the API. It locks the member's row for share, so a suspension
+  or a change of role at the same time either waits and then marks the member unavailable again, or
+  comes first and is refused here; Settings read the member without a lock, so a member suspended
+  while being switched on could be left marked available. It writes the switch and tells the inbox
+  (`member.availability`), and the caller audits the change and routes.
+- **Retries:** through the API a member already so is answered as they are, with the same
+  `changedAt`, no audit entry, no event and no routing, so a rota tool can send each shift's state
+  every time; Settings and the inbox write every time, as before.
+- **Recorded as the key's:** the audit log records `member.availability_changed` with `available`
+  and `source: 'api'` as the key; routing that follows is the system's, as always.
+
+Not built: shifts or schedules kept in HyFib, availability per team, and webhook events when a
+member's availability changes.

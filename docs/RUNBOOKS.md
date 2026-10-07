@@ -2140,6 +2140,17 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**`PATCH /api/v1/members/{id}` answers 403, 404, 422 or 423, or a member made available gets no
+conversations (ADR-289).** 403 `forbidden` names the scope the key lacks, `availability.write`
+(granted by members who assign conversations), or with reason `not_in_plan` the company's plan
+leaves the scope out. 404 means the member is not one of the key's company's. 422 says only active
+members whose role can reply in the inbox can take conversations: `GET /members` lists them (a
+marketer, analyst or billing manager, or a member suspended or removed, cannot). 423 means the
+company is suspended or its plan has ended. A member made available gets conversations only from the
+round-robin teams they belong to, within each team's limit of open conversations: waiting ones are
+routed again when they are made available, later ones as they arrive, and the minute sweep catches
+up. The audit log has each change with the key, and the inbox shows it at once.
+
 **`GET /api/v1/pipelines/{id}/forecast` answers 403 or 404, or differs from what an integration
 added up (ADR-288).** 403 `forbidden` names the scope the key lacks, `deals.read`, or with reason
 `not_in_plan` the company's plan leaves out the CRM or the scope. 404 means the pipeline is not one

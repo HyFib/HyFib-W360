@@ -335,6 +335,67 @@ export async function readTeamSettings(
   };
 }
 
+/**
+ * Sets whether a member takes the conversations routing gives out (Settings and the inbox, and keys
+ * since ADR-289). The member's row is locked for share, so a suspension or a change of role at the
+ * same time either waits and then marks them unavailable again, or comes first and is seen here:
+ * only a member who can answer conversations is made available. With `keepUnchanged`, a member
+ * already so is left as they are (`changed` false). The caller audits the change, then routes
+ * waiting conversations when it made the member available.
+ */
+export async function writeMemberAvailability(
+  tx: Tx,
+  tenantId: string,
+  membershipId: string,
+  available: boolean,
+  now: Date,
+  options: { keepUnchanged?: boolean } = {},
+): Promise<{ changed: boolean; changedAt: Date | null }> {
+  const [target] = await tx
+    .select({ status: memberships.status, roles: memberships.roles })
+    .from(memberships)
+    .where(and(eq(memberships.tenantId, tenantId), eq(memberships.id, membershipId)))
+    .for('share');
+  if (!target) throw notFound('Member');
+  if (
+    available &&
+    (target.status !== 'active' || !target.roles.some((r) => INBOX_WORKER_ROLES.includes(r)))
+  ) {
+    throw new AppError(
+      'validation_failed',
+      'Only active members whose role can reply in the inbox can take conversations.',
+    );
+  }
+  if (options.keepUnchanged) {
+    const [current] = await tx
+      .select({ available: memberAvailability.available, changedAt: memberAvailability.changedAt })
+      .from(memberAvailability)
+      .where(
+        and(
+          eq(memberAvailability.tenantId, tenantId),
+          eq(memberAvailability.membershipId, membershipId),
+        ),
+      )
+      .for('update');
+    // A member who never set it is unavailable.
+    if ((current?.available ?? false) === available) {
+      return { changed: false, changedAt: current?.changedAt ?? null };
+    }
+  }
+  await tx
+    .insert(memberAvailability)
+    .values({ id: uuidv7(), tenantId, membershipId, available, changedAt: now })
+    .onConflictDoUpdate({
+      target: [memberAvailability.tenantId, memberAvailability.membershipId],
+      set: { available, changedAt: now },
+    });
+  await emitTenantEvent(tx, tenantId, {
+    type: 'member.availability',
+    payload: { membershipId, available },
+  });
+  return { changed: true, changedAt: now };
+}
+
 export function createTeamsService(deps: { db: Database; clock: Clock }) {
   const { db, clock } = deps;
 
@@ -564,38 +625,7 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
       const self = membershipId === ctx.membership.id;
       assertCan(ctx, self ? 'inbox.reply' : 'inbox.assign');
       return db.run(ctx.scope, async (tx) => {
-        const [target] = await tx
-          .select({ id: memberships.id, status: memberships.status, roles: memberships.roles })
-          .from(memberships)
-          .where(and(eq(memberships.tenantId, ctx.tenant.id), eq(memberships.id, membershipId)));
-        if (!target) throw notFound('Member');
-        if (
-          data.available &&
-          (target.status !== 'active' || !target.roles.some((r) => INBOX_WORKER_ROLES.includes(r)))
-        ) {
-          throw new AppError(
-            'validation_failed',
-            'Only active members whose role can reply in the inbox can take conversations.',
-          );
-        }
-        const now = clock.now();
-        await tx
-          .insert(memberAvailability)
-          .values({
-            id: uuidv7(),
-            tenantId: ctx.tenant.id,
-            membershipId,
-            available: data.available,
-            changedAt: now,
-          })
-          .onConflictDoUpdate({
-            target: [memberAvailability.tenantId, memberAvailability.membershipId],
-            set: { available: data.available, changedAt: now },
-          });
-        await emitTenantEvent(tx, ctx.tenant.id, {
-          type: 'member.availability',
-          payload: { membershipId, available: data.available },
-        });
+        await writeMemberAvailability(tx, ctx.tenant.id, membershipId, data.available, clock.now());
         if (!self) {
           await recordAudit(
             tx,

@@ -131,6 +131,7 @@ import {
 import { API_NOTE_MAX_LENGTH, apiCreateNoteSchema } from './notes';
 import { apiCreatePipelineSchema, apiUpdatePipelineSchema } from './pipelines';
 import { apiCreateTeamSchema, apiUpdateTeamSchema } from './teams';
+import { apiUpdateMemberSchema } from './members';
 import { apiCreateTaskSchema, apiUpdateTaskSchema } from './tasks';
 import { apiUpdateOrderSchema } from './orders';
 import {
@@ -747,6 +748,16 @@ export const apiMemberSchema = z.object({
     .boolean()
     .describe('Whether the member takes new conversations now (round-robin teams give them some).'),
   teamIds: z.array(z.uuid()).describe('The teams the member belongs to.'),
+});
+
+/** A member's availability, as `PATCH /members/{id}` answers it (ADR-289). */
+export const apiMemberAvailabilitySchema = z.object({
+  id: z.uuid(),
+  available: z.boolean().describe('Whether the member takes the conversations routing gives out.'),
+  changedAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When the member’s availability last changed; null when it was never set.'),
 });
 
 /** A WhatsApp number of the company (ADR-171). */
@@ -2018,6 +2029,22 @@ export function buildOpenApiDocument(serverUrl: string) {
           responses: {
             '200': { description: 'A page of members.', content: pageOf('Member') },
             ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/members/{id}': {
+        patch: {
+          operationId: 'updateMember',
+          summary: 'Set whether a member takes conversations',
+          description: `${scopeNote('availability.write')} As members who assign conversations switch it in Settings → Teams: \`available\` \`true\` lets routing give the member conversations of their round-robin teams, and \`false\` stops it; the conversations they have stay with them. Only an active member whose role answers conversations is made available (422 otherwise; \`GET /members\` lists them); any of the company’s members can be made unavailable. Making a member available routes waiting conversations again, as Settings does. A member already so is answered as they are, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key and the inbox shows the change at once.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateMember')) },
+          responses: {
+            '200': {
+              description: 'The member’s availability now.',
+              content: json(dataOf(ref('MemberAvailability'))),
+            },
+            ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -3641,6 +3668,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         UpdateMatchingConversations: jsonSchema(apiUpdateMatchingConversationsSchema, 'input'),
         Channel: jsonSchema(apiChannelSchema),
         Member: jsonSchema(apiMemberSchema),
+        MemberAvailability: jsonSchema(apiMemberAvailabilitySchema),
+        UpdateMember: jsonSchema(apiUpdateMemberSchema, 'input'),
         Team: jsonSchema(apiTeamSchema),
         TeamSettings: jsonSchema(apiTeamSettingsSchema),
         CreateTeam: jsonSchema(apiCreateTeamSchema, 'input'),
@@ -3758,6 +3787,7 @@ export const API_ROUTES = [
   ['get', '/conversations/{id}/notes'],
   ['get', '/conversations/{id}/messages'],
   ['get', '/members'],
+  ['patch', '/members/{id}'],
   ['get', '/teams'],
   ['post', '/teams'],
   ['get', '/teams/{id}'],

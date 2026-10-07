@@ -1595,6 +1595,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   unchanged (members and numbers compared as sets). A team's members are those
   `answersConversations` finds (active, `INBOX_WORKER_ROLES`) in the check, in `readTeamSettings`
   and in Settings' `listTeams`.
+- **Members' availability through the API (ADR-289):** `PATCH /members/{id}` (`apiUpdateMember` in
+  `api/members.ts`, `availability.write`) calls `writeMemberAvailability` (`inbox/teams.ts`), which
+  the members' `setAvailability` now calls too: the member's row `FOR SHARE` (as
+  `lockAssignableMember` locks it), the check for making them available, then with `keepUnchanged`
+  the availability row `FOR UPDATE` and nothing written when it already holds the value, else the
+  upsert and the `member.availability` tenant event. The API audits a change as the key and, when it
+  made the member available, calls `routeWaitingConversations(tx, tenantId, 20)`, as Settings does.
 - **Many conversations at once (ADR-120):** `POST /conversations/update-many`
   (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
   transaction it locks the member first (as a suspension does before releasing its conversations),

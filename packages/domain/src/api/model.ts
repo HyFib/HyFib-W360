@@ -36,6 +36,7 @@ export const API_SCOPE_KEYS = [
   'notes.read',
   'notes.write',
   'teams.manage',
+  'availability.write',
   'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
 
@@ -233,6 +234,13 @@ export const API_SCOPE_INFO: Record<
     description:
       "Read the company's teams with their settings, members and numbers, add teams, change how they give out conversations, their routing keywords, members and numbers, and delete them, as members who supervise the inbox do in Settings → Teams, recorded in the audit log as done by the key. A deleted team's conversations leave it and keep their assignees.",
     permission: 'inbox.supervise',
+    writes: true,
+  },
+  'availability.write': {
+    label: "Set members' availability",
+    description:
+      "Set whether each of the company's members takes the conversations routing gives out, as members who assign conversations switch it in Settings → Teams, recorded in the audit log as done by the key. Only active members whose role answers conversations are made available, and making one available routes waiting conversations again.",
+    permission: 'inbox.assign',
     writes: true,
   },
   'webhooks.manage': {

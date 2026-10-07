@@ -59,6 +59,7 @@ import {
   apiUpdateTeam,
   apiUpdateTask,
   apiUpdateManyConversations,
+  apiUpdateMember,
   apiUpdateMatchingConversations,
   apiUpdateOrder,
   apiStartAutomationRun,
@@ -8697,6 +8698,105 @@ describe('assigning conversations (ADR-093)', () => {
       keys.create(narrower, { name: 'Teams', scopes: ['teams.manage'], expiresInDays: 30 }),
       'forbidden',
       /Manage teams/,
+    );
+  });
+
+  it('set whether members take conversations as Settings does, as the key (ADR-289)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const marketer = await fx.ctx(c, c.marketer);
+    const setter = await apiKey(c, ['availability.write']);
+    const reader = await apiKey(c, ['conversations.read']);
+    const set = (membershipId: string, available: boolean) =>
+      apiUpdateMember(deps(), setter.ctx, membershipId, { available });
+    const listed = async () =>
+      (await apiListMembers(deps(), reader.ctx, {})).data.find((m) => m.id === agent.membership.id)
+        ?.available;
+    const audits = () =>
+      fx.query<{ actor_type: string; actor_id: string; metadata: Record<string, unknown> }>(
+        `SELECT actor_type, actor_id, metadata FROM app.audit_events
+          WHERE tenant_id = $1 AND subject_id = $2 AND action = 'member.availability_changed'
+          ORDER BY occurred_at, id`,
+        [c.tenant.id, agent.membership.id],
+      );
+
+    // A round-robin team holds a waiting conversation while nobody takes conversations.
+    await teams().createTeam(owner, {
+      name: 'Support',
+      assignment: 'round_robin',
+      memberIds: [agent.membership.id],
+      channelIds: [c.channelAccountId],
+    });
+    const waiting = await conversationWith(c, '919811100541');
+    expect((await conversationRow(waiting.id)).assigned).toBeNull();
+    expect(await listed()).toBe(false);
+
+    // Made available, the agent is given it at once, as when they switch it on themselves.
+    const made = await set(agent.membership.id, true);
+    expect(made).toMatchObject({ id: agent.membership.id, available: true });
+    expect(made.changedAt).not.toBeNull();
+    expect((await conversationRow(waiting.id)).assigned).toBe(agent.membership.id);
+    expect(await listed()).toBe(true);
+    // The same again changes nothing and records nothing.
+    expect(await set(agent.membership.id, true)).toEqual(made);
+    // Made unavailable, they keep what they have.
+    const off = await set(agent.membership.id, false);
+    expect(off.available).toBe(false);
+    expect((await conversationRow(waiting.id)).assigned).toBe(agent.membership.id);
+    expect(await listed()).toBe(false);
+    expect((await audits()).map((a) => [a.actor_type, a.actor_id, a.metadata])).toEqual([
+      ['api_key', setter.id, { available: true, source: 'api' }],
+      ['api_key', setter.id, { available: false, source: 'api' }],
+    ]);
+
+    // A member who cannot answer conversations is not made available, but can be made unavailable;
+    // another company's member and an unknown one are not found.
+    await expectAppError(
+      set(marketer.membership.id, true),
+      'validation_failed',
+      /Only active members whose role can reply/,
+    );
+    expect(await set(marketer.membership.id, false)).toEqual({
+      id: marketer.membership.id,
+      available: false,
+      changedAt: null,
+    });
+    const theirs = await fx.ctx(other, other.agent);
+    for (const id of [theirs.membership.id, uuidv7()]) {
+      await expectAppError(set(id, false), 'not_found', /Member/);
+    }
+
+    // Only with the scope and while the company is active.
+    const assigner = await apiKey(c, ['conversations.write', 'teams.manage']);
+    await expectAppError(
+      apiUpdateMember(deps(), assigner.ctx, agent.membership.id, { available: true }),
+      'forbidden',
+      /availability\.write/,
+    );
+    const suspended = {
+      ...setter.ctx,
+      tenant: { ...setter.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(
+      apiUpdateMember(deps(), suspended, agent.membership.id, { available: true }),
+      'tenant_suspended',
+    );
+
+    // Granting the scope needs inbox.assign, which members set others' availability with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'inbox.assign')),
+    };
+    await expectAppError(
+      keys.create(narrower, {
+        name: 'Rota',
+        scopes: ['availability.write'],
+        expiresInDays: 30,
+      }),
+      'forbidden',
+      /Set members' availability/,
     );
   });
 });

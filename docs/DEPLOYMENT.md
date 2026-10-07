@@ -899,6 +899,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `GET /api/v1/pipelines/{id}/forecast` with 404; rolling web servers back does the same. Workers
    are not affected.
 
+   Migration 0209 (ADR-289) widens the API keys' and plan versions' scope checks again for
+   `availability.write`, with the same brief locks, validated at once; no other table changes. Until
+   the web rollout ends, an old web server answers Settings → API keys with an error for a company
+   with a key holding the new scope, and `PATCH /api/v1/members/{id}` with 405 or 404; rolling web
+   servers back does the same.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

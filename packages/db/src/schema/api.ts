@@ -33,6 +33,7 @@ export const API_SCOPES = [
   'notes.read',
   'notes.write',
   'teams.manage',
+  'availability.write',
   'webhooks.manage',
 ] as const;
 export type ApiScope = (typeof API_SCOPES)[number];

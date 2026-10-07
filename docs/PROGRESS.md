@@ -1,5 +1,38 @@
 # Progress
 
+## 2026-10-07 — Setting members' availability through the public API (P5-08, H-033, W-038, ADR-289)
+
+Status: **Implemented; its database tests run in CI only.** Keys read whether members take
+conversations, but only members could switch it. The local PostgreSQL is unavailable, so the
+migration and the integration test below were written but not run here; migration 0209 passed the
+pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0209 (the `availability.write` scope in the key and plan checks).
+- **Domain:** `writeMemberAvailability` in `inbox/teams.ts`, now shared by the members'
+  `setAvailability`, with the member's row locked for share; `apiUpdateMember` (`api/members.ts`);
+  the scope; the OpenAPI entry.
+- **Web:** `PATCH /api/v1/members/{id}`.
+- **Tests:** unit (`api/member-availability.test.ts`: the scope, the request, refusals before any
+  query, the shared write's lock, checks and unchanged members, the OpenAPI entry; the scope lists
+  updated); integration (1 new in `api.test.ts`). Written for CI; the integration test was not run
+  here. No e2e test.
+- **Docs:** ADR-289; ARCHITECTURE; SECURITY; THREAT-MODEL T257; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-038.
+- **Mutation checks:** 17/17 deliberate regressions caught (one after a test was added)
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 127 files, 1208 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0209                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — A CRM pipeline's weighted forecast through the public API (P5-08, P4-04, H-033, ADR-288)
 
 Status: **Implemented; its database test runs in CI only.** Members saw the weighted forecast on the
