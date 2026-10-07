@@ -2788,7 +2788,11 @@ and tasks with (`GET /webhook-endpoints` answers an endpoint it added with its k
 servers from before the release that added it (during its rollout, deliveries an older worker built
 have no `changedBy` at all), and events captured before it; treat those as someone else's. A change
 is never named after the maker of an earlier one: the database clears a changer another transaction
-recorded.
+recorded. To see who made a deal's or task's latest change, read `changedBy` and `changedByApiKeyId`
+from `GET /deals/{id}` or `GET /tasks/{id}` (ADR-278), or `changed_by` and `changed_by_api_key_id`
+on `app.crm_deals` and `app.crm_tasks`; only the latest change is kept there, and a member's save of
+a task that changes nothing keeps it. Both are null while a deal or task is as it was added;
+`deal.created` and `task.created` say who added it.
 
 **A receiver misses the conversations of a tagged customer (ADR-267).** An endpoint can take the
 message and conversation events of the conversations whose contact has chosen tags only. The

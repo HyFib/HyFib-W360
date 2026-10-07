@@ -11,6 +11,7 @@ import {
   sql,
   TASK_STATUSES,
   type CrmActivityKind,
+  type CrmChanger,
   type ReminderState,
   type TaskStatus,
 } from '@w360/db';
@@ -166,6 +167,12 @@ export interface ApiTask {
   updatedAt: string;
   /** Moves on with every change; `PATCH /tasks/{id}` takes it as `expectedVersion` (ADR-260). */
   version: number;
+  /**
+   * Who made the latest change the task events report (ADR-278), with the key for `api`; null
+   * while the task is as it was added and when the change did not record its maker (ADR-277).
+   */
+  changedBy: CrmChanger | null;
+  changedByApiKeyId: string | null;
 }
 
 const taskColumns = {
@@ -185,6 +192,8 @@ const taskColumns = {
   createdAt: crmTasks.createdAt,
   updatedAt: crmTasks.updatedAt,
   version: crmTasks.version,
+  changedBy: crmTasks.changedBy,
+  changedByApiKeyId: crmTasks.changedByApiKeyId,
   cursorAt: exactTimestamp(crmTasks.createdAt),
 };
 
@@ -205,6 +214,8 @@ interface TaskRow {
   createdAt: Date;
   updatedAt: Date;
   version: number;
+  changedBy: CrmChanger | null;
+  changedByApiKeyId: string | null;
 }
 
 const toApiTask = (row: TaskRow): ApiTask => ({
@@ -224,6 +235,8 @@ const toApiTask = (row: TaskRow): ApiTask => ({
   createdAt: row.createdAt.toISOString(),
   updatedAt: row.updatedAt.toISOString(),
   version: row.version,
+  changedBy: row.changedBy,
+  changedByApiKeyId: row.changedByApiKeyId,
 });
 
 /**

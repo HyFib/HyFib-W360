@@ -733,6 +733,10 @@ verification, app review, Embedded Signup configuration).
   `GET /contact-tags` with `contacts.read` and `GET /conversation-tags` with `conversations.read`
   list the company's tags alphabetically with how many contacts or conversations have each, on pages
   that continue after the last tag, narrowed by a prefix).
+  **[Who last changed a deal or task, through the API, built; its database tests run only in CI]**
+  (ADR-278, no migration: `GET /deals`, `GET /tasks`, their single reads and the answers of their
+  writes name who made a deal's or task's latest change, a member, an automation or a key by its id,
+  as the deal and task events do since ADR-277).
   **[Reading WhatsApp numbers built; its database tests run only in CI]** (ADR-171: `GET /channels`
   with the new `channels.read` scope, granted with the permission of the same name: every number of
   the company oldest first on exact pages, filtered by status, with its number, verified name and

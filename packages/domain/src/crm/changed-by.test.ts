@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { CRM_CHANGERS } from '@w360/db';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { crmChangedBy } from './common';
+import { taskDetailsChanged } from './tasks';
 
 describe('who changed a deal or a task (ADR-277)', () => {
   it('records a member, an automation or a key it names, marked as this transaction’s', () => {
@@ -19,5 +20,43 @@ describe('who changed a deal or a task (ADR-277)', () => {
     });
     const apiKeyId = '0192a1b2-0000-7000-8000-00000000000b';
     expect(recorded({ apiKeyId })).toEqual({ changedBy: 'api', changedByApiKeyId: apiKeyId, xact });
+  });
+});
+
+describe('who last changed a task, as the API reads it (ADR-278)', () => {
+  it('is recorded by a member’s save only when it changes something the task events report', () => {
+    const member = '0192a1b2-0000-7000-8000-00000000000c';
+    const task = {
+      title: 'Call Asha',
+      notes: 'About the renewal',
+      dueAt: new Date('2026-10-09T10:00:00.000Z'),
+      remindAt: new Date('2026-10-08T10:00:00.000Z'),
+      assigneeMembershipId: member,
+    };
+    // The same details, the times as new dates, change nothing.
+    const same = {
+      ...task,
+      dueAt: new Date(task.dueAt.getTime()),
+      remindAt: new Date(task.remindAt.getTime()),
+    };
+    expect(taskDetailsChanged(task, same)).toBe(false);
+    expect(
+      taskDetailsChanged(
+        { ...task, dueAt: null, remindAt: null },
+        { ...same, dueAt: null, remindAt: null },
+      ),
+    ).toBe(false);
+    for (const change of [
+      { title: 'Call Asha back' },
+      { notes: null },
+      { dueAt: new Date('2026-10-10T10:00:00.000Z') },
+      { dueAt: null },
+      { remindAt: new Date('2026-10-08T11:00:00.000Z') },
+      { remindAt: null },
+      { assigneeMembershipId: '0192a1b2-0000-7000-8000-00000000000d' },
+    ]) {
+      expect(taskDetailsChanged(task, { ...same, ...change }), JSON.stringify(change)).toBe(true);
+    }
+    expect(taskDetailsChanged({ ...task, dueAt: null }, same)).toBe(true);
   });
 });

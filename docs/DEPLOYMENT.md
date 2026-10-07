@@ -816,6 +816,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    nobody (`changedBy` null), and a delivery an older worker builds has no `changedBy` or `apiKeyId`
    at all; rolling back leaves the columns, which older code neither reads nor writes.
 
+   ADR-278 has no migration. Until the web rollout ends, an old web server answers deals and tasks
+   without `changedBy` and `changedByApiKeyId`, and for 24 hours after it a retried `POST /deals` or
+   `POST /tasks` whose first answer an old server stored replays that answer, without them; rolling
+   web servers back does the same. Workers are not affected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

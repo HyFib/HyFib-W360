@@ -5,7 +5,7 @@ import { ROLE_PERMISSIONS } from '../authz/permissions';
 import type { ApiContext } from './context';
 import { taskTimeIssue } from '../crm/tasks';
 import { API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
-import { API_ROUTES, buildOpenApiDocument } from './openapi';
+import { API_ROUTES, apiTaskSchema, buildOpenApiDocument } from './openapi';
 import {
   apiCreateTask,
   apiCreateTaskSchema,
@@ -218,8 +218,25 @@ describe('CRM tasks through the API (ADR-258)', () => {
       'createdAt',
       'updatedAt',
       'version',
+      'changedBy',
+      'changedByApiKeyId',
     ]);
     expect(task.required).toEqual(Object.keys(task.properties));
+    // Who made the latest change, with the key for a key's (ADR-278).
+    const changer = apiTaskSchema.shape.changedBy;
+    expect(changer.unwrap().options).toEqual(['member', 'automation', 'api']);
+    for (const words of [
+      'never which member',
+      'automations only add tasks',
+      'Null while the task is as it was added',
+      'never the maker of an earlier change',
+    ]) {
+      expect(changer.description).toContain(words);
+    }
+    expect(apiTaskSchema.shape.changedByApiKeyId.description).toContain('when changedBy is api');
+    expect(list.description).toContain(
+      '`changedBy` says who made a task’s latest change of what task events report, with the key for one made through the API (`changedByApiKeyId`), so an integration can tell the tasks it changed last',
+    );
     expect(task.properties.reminderState?.enum).toEqual([...REMINDER_STATES]);
     // Every reason a reminder is skipped for (crm/tasks.ts and crm/reminders.ts) is named.
     for (const reason of ['task_closed', 'too_late', 'assignee_inactive']) {

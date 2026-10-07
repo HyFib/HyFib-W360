@@ -4215,6 +4215,8 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       createdAt: stored!.created_at.toISOString(),
       updatedAt: expect.any(String),
       version: 1,
+      changedBy: null,
+      changedByApiKeyId: null,
     });
     expect(await apiGetDeal(deps(), reader.ctx, first.id)).toEqual(last.data[0]);
     expect((await apiGetDeal(deps(), reader.ctx, third.id)).currency).toBe('USD');
@@ -4656,6 +4658,15 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       ['api_key', writer.id, ['status', 'stage']],
       ['api_key', writer.id, ['value', 'status']],
     ]);
+
+    // Who made the latest change, as the API answers and reads it (ADR-278): the key's, then a
+    // member's.
+    expect([edited.changedBy, edited.changedByApiKeyId]).toEqual(['api', writer.id]);
+    expect([won.changedBy, won.changedByApiKeyId]).toEqual(['api', writer.id]);
+    const reader = await apiKey(c, ['deals.read']);
+    await crm().reopenDeal(owner, { id, expectedVersion: 6 });
+    const read = await apiGetDeal(deps(), reader.ctx, id);
+    expect([read.changedBy, read.changedByApiKeyId]).toEqual(['member', null]);
   });
 
   it('refuse changes members are refused, and need the scope, an active company and the CRM (ADR-255)', async () => {
@@ -5009,6 +5020,8 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       createdAt: stored!.created_at.toISOString(),
       updatedAt: stored!.updated_at.toISOString(),
       version: 1,
+      changedBy: null,
+      changedByApiKeyId: null,
     });
     expect(await apiGetTask(deps(), reader.ctx, first.id)).toEqual(last.data[0]);
     // A task about a deal is about its contact too; one about nobody names neither.
@@ -5523,6 +5536,31 @@ describe('CRM pipelines and deals (ADR-253)', () => {
     expect(
       await fx.query('SELECT id FROM app.crm_activities WHERE task_id = $1', [solo.id]),
     ).toEqual([]);
+
+    // Who made the latest change, as the API reads it (ADR-278): the key's, then a member's.
+    const reader = await apiKey(c, ['tasks.read']);
+    const read = async (taskId: string) => {
+      const { changedBy, changedByApiKeyId } = await apiGetTask(deps(), reader.ctx, taskId);
+      return [changedBy, changedByApiKeyId];
+    };
+    expect(await read(id)).toEqual(['api', writer.id]);
+    expect(await read(solo.id)).toEqual(['api', writer.id]);
+    await crm().reopenTask(owner, { id: solo.id, expectedVersion: 2 });
+    expect(await read(solo.id)).toEqual(['member', null]);
+    // A member saving the task unchanged moves its version on but changes nobody: the key's change
+    // stays the latest.
+    await apiUpdateTask(deps(), writer.ctx, solo.id, { title: 'Order flyers' });
+    const unchanged = {
+      id: solo.id,
+      expectedVersion: 4,
+      title: 'Order flyers',
+      notes: null,
+      dueAt: null,
+      remindAt: null,
+      assigneeMembershipId: owner.membership.id,
+    };
+    expect(await crm().updateTask(owner, unchanged)).toEqual({ version: 5 });
+    expect(await read(solo.id)).toEqual(['api', writer.id]);
   });
 
   it('refuse task changes members are refused, and need the scope, an active company and the CRM (ADR-260)', async () => {

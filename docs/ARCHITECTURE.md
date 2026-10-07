@@ -1449,7 +1449,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   snapshot. Deals are read in the company joined to their pipeline (its currency), newest first by
   `created_at` on exact keyset cursors (`crm_deals_list_idx`), the filters as plain equalities
   (`ownerId` `none` as a null owner) and `updated_at >= updatedSince`; `toApiDeal` gives ids in
-  place of the contact, conversation and owner.
+  place of the contact, conversation and owner, and since ADR-278 who made its latest change
+  (`changedBy`, `changedByApiKeyId`, read from the columns of ADR-277).
 - **Creating CRM deals through the API (ADR-254):** `POST /deals` (`apiCreateDeal`, `deals.write`)
   claims the `Idempotency-Key` in the deal's transaction, checks the CRM in the plan, locks the
   contact (key share; `apiContactNotFound` for a missing or erased one), shares the pipeline and
@@ -1478,7 +1479,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   Tasks are read in the company newest first by `created_at` on exact keyset cursors
   (`crm_tasks_list_idx`), the filters as plain equalities and `updated_at >= updatedSince`;
   `toApiTask` gives ids in place of the assignee, contact and deal, and `reminder_detail` as
-  `reminderSkipReason`. The creator and the member who closed a task are never selected.
+  `reminderSkipReason`. The creator and the member who closed a task are never selected. Since
+  ADR-278 `toApiTask` gives who made its latest change (`changedBy`, `changedByApiKeyId`, read from
+  the columns of ADR-277), a member never by name.
 - **Creating CRM tasks through the API (ADR-259):** `POST /tasks` (`apiCreateTask`, `tasks.write`)
   claims the `Idempotency-Key` in the task's transaction, then checks the times with `taskTimeIssue`
   (the members' rule, naming the field), the CRM in the plan and the assignee with `memberRefs`; a
@@ -1782,7 +1785,9 @@ true`); the same key with another request (method, path and body hashed) answers
   trigger before each change the events report, clears a changer another transaction recorded. The
   deal and task capture functions put the changer and the key in the `detail` of every event an
   update captures, and the payloads (`dealOf`, `taskOf`) give `changedBy` and `apiKeyId` as
-  captured, an addition's from its creator.
+  captured, an addition's from its creator. `GET /deals` and `GET /tasks` read the latest changer
+  (ADR-278); a member's save of a task that changes nothing the events report records no changer
+  (`taskDetailsChanged`, `crm/tasks.ts`).
 - **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
   notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
   SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same

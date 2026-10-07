@@ -10555,3 +10555,38 @@ Decision:
 
 Not built: which member made a change, who last changed a deal or task through `GET /deals` and
 `GET /tasks`, and naming erasure as the maker of its retitling.
+
+## ADR-278 Reading who last changed a CRM deal or task through the public API (P5-08) (2026-10-07)
+
+Context: ADR-277 recorded who makes each change of a deal or task and sent it in the deal and task
+events, but an integration that polls `GET /deals` or `GET /tasks` with `updatedSince` instead of
+taking webhooks (or that catches up after its receiver was down) still could not tell the deals and
+tasks it changed last from those members or automations did, as order systems can since ADR-271;
+ADR-277 left reading it through the API unbuilt. A member saving a task's details unchanged also
+recorded the member as its changer, though nothing the task events report had changed.
+
+Decision:
+
+- **`changedBy` and `changedByApiKeyId`** on the API's deal (`GET /deals`, `GET /deals/{id}` and the
+  answers of `POST /deals` and `PATCH /deals/{id}`) and task (`GET /tasks`, `GET /tasks/{id}` and
+  the answers of `POST /tasks` and `PATCH /tasks/{id}`): who made the latest change of what the deal
+  or task events report, `member` (never which member), `automation` (deals only: automations only
+  add tasks) or `api` with the key's id, read from the columns ADR-277 added. Null while the deal or
+  task is as it was added (`deal.created` and `task.created` say who added it), and when HyFib did
+  not record who made the latest change (erasure retitling a deal, or a server from before ADR-277);
+  never the maker of an earlier change, since the database clears a changer another transaction
+  recorded.
+- **A save that changes nothing names nobody new:** a member's save of a task's details records the
+  member only when it changes something the task events report (`taskDetailsChanged`: the title,
+  notes, due time, reminder time or assignee); a save changing nothing still moves the version on,
+  as before, and keeps the latest changer. Members' deal saves already wrote nothing when nothing
+  changed, and keys' changes and the runner's deal steps write only with a change.
+- **The same as the events:** a deal or task and its events agree, the events giving each change's
+  maker as captured and the deal or task the latest one's; `GET /deals` and `GET /tasks` describe
+  the fields and why an integration reads them.
+- **No migration, no new scope and no new filter:** the columns are read as the deal's or task's
+  other columns are, in the key's company scope, with `deals.read` or `tasks.read`; listing deals or
+  tasks by who changed them is not offered (an integration skips its own key's as it pages).
+
+Not built: which member made a change, filtering deals or tasks by who changed them, who added a
+deal or task through the API, and the history of a deal's or task's changes through the API.

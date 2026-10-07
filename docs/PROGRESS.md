@@ -1,5 +1,38 @@
 # Progress
 
+## 2026-10-07 — Who last changed a CRM deal or task, through the public API (P5-08, H-033, ADR-278)
+
+Status: **Implemented; its database tests run in CI only.** An integration polling `GET /deals` or
+`GET /tasks` could not tell the deals and tasks it changed last from those members or automations
+did, which ADR-277 sent only in webhooks. No migration. The local PostgreSQL is unavailable, so the
+integration tests below were written but not run here.
+
+### Completed
+
+- **Domain:** `changedBy` and `changedByApiKeyId` on the API's deal and task (`toApiDeal`,
+  `toApiTask`, read from the columns of ADR-277), and the OpenAPI deal, task, `GET /deals` and
+  `GET /tasks` descriptions; a member's save of a task records the member only when it changes
+  something the task events report (`taskDetailsChanged`).
+- **Web:** no change.
+- **Tests:** unit (`api/deals.test.ts` and `api/tasks.test.ts`: the fields, their descriptions, the
+  lists' descriptions; `crm/changed-by.test.ts`: which saves of a task record a changer);
+  integration (the deal and task tests of `api.test.ts`: a deal and a task as added, a key's changes
+  in its answers and as read, a member's change, a member's unchanged save). Written for CI; the
+  integration tests were not run here. No e2e test: the e2e suite is near its time limit.
+- **Docs:** ADR-278; ARCHITECTURE; SECURITY; THREAT-MODEL T246; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033.
+- **Mutation checks:** 21/21 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 121 files, 1143 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Who changed a CRM deal or task, in its webhook events (P5-09, P4-04, H-014, ADR-277)
 
 Status: **Implemented; its database tests run in CI only.** Deal and task events said what changed

@@ -15,6 +15,7 @@ import {
   isNull,
   sql,
   type CrmActivityKind,
+  type CrmChanger,
   type DealStatus,
   type Tx,
 } from '@w360/db';
@@ -204,6 +205,12 @@ export interface ApiDeal {
   updatedAt: string;
   /** Moves on with every change; `PATCH /deals/{id}` takes it as `expectedVersion` (ADR-255). */
   version: number;
+  /**
+   * Who made the latest change the deal events report (ADR-278), with the key for `api`; null
+   * while the deal is as it was added and when the change did not record its maker (ADR-277).
+   */
+  changedBy: CrmChanger | null;
+  changedByApiKeyId: string | null;
 }
 
 /** Pipelines, deals and tasks are the CRM's: a plan without it reads none through the API. */
@@ -326,6 +333,8 @@ const dealColumns = {
   createdAt: crmDeals.createdAt,
   updatedAt: crmDeals.updatedAt,
   version: crmDeals.version,
+  changedBy: crmDeals.changedBy,
+  changedByApiKeyId: crmDeals.changedByApiKeyId,
   cursorAt: exactTimestamp(crmDeals.createdAt),
 };
 
@@ -347,6 +356,8 @@ interface DealRow {
   createdAt: Date;
   updatedAt: Date;
   version: number;
+  changedBy: CrmChanger | null;
+  changedByApiKeyId: string | null;
 }
 
 const toApiDeal = (row: DealRow): ApiDeal => ({
@@ -367,6 +378,8 @@ const toApiDeal = (row: DealRow): ApiDeal => ({
   createdAt: row.createdAt.toISOString(),
   updatedAt: row.updatedAt.toISOString(),
   version: row.version,
+  changedBy: row.changedBy,
+  changedByApiKeyId: row.changedByApiKeyId,
 });
 
 /** A deal's pipeline, which gives its currency (a deal's pipeline is the company's). */

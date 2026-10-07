@@ -16,7 +16,7 @@ import {
   apiUpdateDealSchema,
 } from './deals';
 import { API_SCOPE_INFO } from './model';
-import { API_ROUTES, buildOpenApiDocument } from './openapi';
+import { API_ROUTES, apiDealSchema, buildOpenApiDocument } from './openapi';
 
 const TENANT = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
 const OTHER = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';
@@ -286,10 +286,26 @@ describe('CRM pipelines and deals through the API (ADR-253)', () => {
       'createdAt',
       'updatedAt',
       'version',
+      'changedBy',
+      'changedByApiKeyId',
     ]);
     expect(deal.required).toEqual(Object.keys(deal.properties));
     // Ids only: no contact details, notes, tasks or timeline anywhere in it.
     expect(JSON.stringify(deal)).not.toMatch(/"(phone|contactName|notes?|tasks?|timeline)"/);
+    // Who made the latest change, with the key for a key's (ADR-278).
+    const changer = apiDealSchema.shape.changedBy;
+    expect(changer.unwrap().options).toEqual(['member', 'automation', 'api']);
+    for (const words of [
+      'never which member',
+      'Null while the deal is as it was added',
+      'such as erasure retitling the deal; never the maker of an earlier change',
+    ]) {
+      expect(changer.description).toContain(words);
+    }
+    expect(apiDealSchema.shape.changedByApiKeyId.description).toContain('when changedBy is api');
+    expect(list.description).toContain(
+      '`changedBy` says who made a deal’s latest change of what deal events report, with the key for one made through the API (`changedByApiKeyId`), so an integration can tell the deals it changed last',
+    );
   });
 });
 
