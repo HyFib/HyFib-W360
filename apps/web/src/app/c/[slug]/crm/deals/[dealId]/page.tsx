@@ -247,7 +247,9 @@ export default async function DealPage({
                   ? ` by ${deal.createdBy.name}`
                   : deal.createdByAutomation
                     ? ' by an automation'
-                    : ''}
+                    : deal.createdThroughApi
+                      ? ' through the API'
+                      : ''}
                 {deal.owner ? ` · owner ${deal.owner.name}` : ' · no owner'}
                 {deal.expectedCloseOn ? ` · expected to close ${deal.expectedCloseOn}` : ''}
               </span>

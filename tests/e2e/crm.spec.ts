@@ -61,6 +61,7 @@ async function createPipeline(
 
 test('a deal moves through a pipeline with tasks, an emailed reminder, notes and reports', async ({
   page,
+  request,
 }) => {
   test.setTimeout(180_000);
   const { email, slug } = await createCompany(page, 'crm', 'Chandra');
@@ -105,6 +106,13 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   await page.goto(`/c/${slug}/crm`);
   await expect(page.getByText('50% chance · weighted ₹13,000.00')).toBeVisible();
   await expect(page.getByText('Weighted pipeline')).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  // Reports forecast it by its expected close date, here none, weighed the same way (ADR-252).
+  await page.goto(`/c/${slug}/reports`);
+  await expect(page.getByRole('heading', { name: 'Weighted forecast: Sales' })).toBeVisible();
+  const undated = page.getByRole('row').filter({ hasText: 'No expected date' });
+  await expect(undated).toContainText('₹26,000.00');
+  await expect(undated).toContainText('₹13,000.00');
   await expectNoHorizontalOverflow(page);
   await page.goto(editedUrl);
 
@@ -185,6 +193,136 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   await expect(stat(page, 'Deals won')).toContainText('1');
   await expect(stat(page, 'Deals won')).toContainText('₹26,000.00');
   await expect(stat(page, 'Win rate')).toContainText('100%');
+  await expectNoHorizontalOverflow(page);
+
+  // A key that reads deals finds the won deal and its pipelines through the API (ADR-253): the
+  // value in paise, the pipeline it moved to and the stage it was won in, by id.
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Deal sync');
+  await page.getByRole('checkbox', { name: /Read CRM deals/ }).check();
+  await page.getByRole('checkbox', { name: /Create and change CRM deals/ }).check();
+  await page.getByRole('checkbox', { name: /Read CRM tasks/ }).check();
+  await page.getByRole('checkbox', { name: /Create and change CRM tasks/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const tokenField = page.getByLabel('API key', { exact: true });
+  await expect(tokenField).toBeVisible();
+  const auth = { Authorization: `Bearer ${await tokenField.inputValue()}` };
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const pipelinesRes = await request.get('/api/v1/pipelines', { headers: auth });
+  expect(pipelinesRes.status()).toBe(200);
+  const pipelines = (
+    (await pipelinesRes.json()) as {
+      data: {
+        id: string;
+        name: string;
+        stages: { id: string; name: string; winPercent: number | null }[];
+      }[];
+    }
+  ).data;
+  expect(pipelines.map((p) => p.name)).toEqual(['Sales', 'Renewals']);
+  expect(pipelines[0]!.stages.find((s) => s.name === 'Qualified')?.winPercent).toBe(50);
+  const wonRes = await request.get('/api/v1/deals?status=won', { headers: auth });
+  expect(wonRes.status()).toBe(200);
+  const won = (
+    (await wonRes.json()) as {
+      data: { id: string; title: string; pipelineId: string; stageId: string; contactId: string }[];
+      nextCursor: string | null;
+    }
+  ).data;
+  expect(won).toHaveLength(1);
+  expect(won[0]).toMatchObject({
+    title: 'Annual plan',
+    status: 'won',
+    valueMinor: 2_600_000,
+    currency: 'INR',
+    pipelineId: pipelines[1]!.id,
+    stageId: pipelines[1]!.stages.find((s) => s.name === 'New')!.id,
+    closedAt: expect.any(String),
+  });
+  const one = await request.get(`/api/v1/deals/${won[0]!.id}`, { headers: auth });
+  expect(((await one.json()) as { data: unknown }).data).toEqual(won[0]);
+
+  // The same key reads the deal's task (ADR-258): done, its reminder emailed, about the deal and
+  // its contact by id.
+  const tasksRes = await request.get(`/api/v1/tasks?dealId=${won[0]!.id}`, { headers: auth });
+  expect(tasksRes.status()).toBe(200);
+  const dealTasks = ((await tasksRes.json()) as { data: { assigneeId: string }[] }).data;
+  expect(dealTasks).toEqual([
+    expect.objectContaining({
+      title: 'Send the proposal',
+      status: 'done',
+      reminderState: 'sent',
+      remindedAt: expect.any(String),
+      dealId: won[0]!.id,
+      contactId: won[0]!.contactId,
+      completedAt: expect.any(String),
+    }),
+  ]);
+
+  // It adds a follow-up task to the deal for the same member (ADR-259), which the deal's timeline
+  // shows as added through the API.
+  const followUpRes = await request.post('/api/v1/tasks', {
+    headers: { ...auth, 'Idempotency-Key': `crm-task-e2e-${Date.now()}` },
+    data: { title: 'Ask for a review', assigneeId: dealTasks[0]!.assigneeId, dealId: won[0]!.id },
+  });
+  expect(followUpRes.status()).toBe(201);
+  const followUp = ((await followUpRes.json()) as { data: { id: string; version: number } }).data;
+  expect(followUp).toMatchObject({
+    title: 'Ask for a review',
+    status: 'open',
+    dealId: won[0]!.id,
+    contactId: won[0]!.contactId,
+  });
+  // Then it marks the task done (ADR-260), from the version it read.
+  const doneRes = await request.patch(`/api/v1/tasks/${followUp.id}`, {
+    headers: auth,
+    data: { status: 'done', expectedVersion: followUp.version },
+  });
+  expect(doneRes.status()).toBe(200);
+  expect(((await doneRes.json()) as { data: unknown }).data).toMatchObject({
+    status: 'done',
+    version: followUp.version + 1,
+  });
+  await page.goto(`/c/${slug}/crm/deals/${won[0]!.id}`);
+  await expect(page.getByRole('heading', { name: 'Annual plan', level: 1 })).toBeVisible();
+  const entries = page
+    .getByRole('list', { name: 'Timeline' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Ask for a review' });
+  await expect(entries.filter({ hasText: 'Task added' })).toContainText('through the API');
+  await expect(entries.filter({ hasText: 'Task done' })).toContainText('through the API');
+
+  // The key also creates a deal for the customer (ADR-254), in the pipeline's first stage, then
+  // changes it as members do (ADR-255): a new value and the next stage. Its page says it came
+  // through the API.
+  const createdRes = await request.post('/api/v1/deals', {
+    headers: { ...auth, 'Idempotency-Key': `crm-e2e-${Date.now()}` },
+    data: {
+      contactId: won[0]!.contactId,
+      pipelineId: pipelines[0]!.id,
+      title: 'Second order',
+      valueMinor: 120_000,
+    },
+  });
+  expect(createdRes.status()).toBe(201);
+  const created = (
+    (await createdRes.json()) as { data: { id: string; stageId: string; version: number } }
+  ).data;
+  expect(created.stageId).toBe(pipelines[0]!.stages[0]!.id);
+  const qualified = pipelines[0]!.stages.find((s) => s.name === 'Qualified')!.id;
+  const changedRes = await request.patch(`/api/v1/deals/${created.id}`, {
+    headers: auth,
+    data: { stageId: qualified, valueMinor: 150_000, expectedVersion: created.version },
+  });
+  expect(changedRes.status()).toBe(200);
+  expect(
+    ((await changedRes.json()) as { data: { stageId: string; version: number } }).data,
+  ).toMatchObject({ stageId: qualified, version: created.version + 1 });
+  await page.goto(`/c/${slug}/crm/deals/${created.id}`);
+  await expect(page.getByRole('heading', { name: 'Second order', level: 1 })).toBeVisible();
+  await expect(page.getByText('Sales · ₹1,500.00')).toBeVisible();
+  await expect(page.getByLabel('Stage of Second order')).toHaveValue(qualified);
+  await expect(page.getByText(/through the API/).first()).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
 

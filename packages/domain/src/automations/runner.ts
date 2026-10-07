@@ -990,6 +990,153 @@ async function applyDealEffect(
   return { skipped: false, notes };
 }
 
+/**
+ * Moves the run's contact's open deal in the step's pipeline to the step's stage (ADR-250), as the
+ * automation, and puts the move on the deal's timeline as a member's move is. Nothing moves (a note
+ * for the step log, which says `skipped`) when the plan leaves out the CRM, the contact was erased,
+ * the stage or its pipeline is archived or gone, the contact has no open deal in the pipeline or more
+ * than one (which one is meant is not known), or the deal is already in the stage. Locks are taken
+ * in the CRM's order: the contact (against erasure), the pipeline (against archiving), the deals.
+ */
+async function applyMoveDealEffect(
+  tx: Tx,
+  run: AutomationRun,
+  effect: Extract<RunEffect, { kind: 'move_deal' }>,
+  now: Date,
+): Promise<string | null> {
+  const held = await holdForDealChange(tx, run, effect.pipelineId);
+  if (typeof held === 'string') return held;
+  const [stage] = await tx
+    .select({ archivedAt: crmStages.archivedAt })
+    .from(crmStages)
+    .where(
+      and(
+        eq(crmStages.tenantId, run.tenantId),
+        eq(crmStages.id, effect.stageId),
+        eq(crmStages.pipelineId, effect.pipelineId),
+      ),
+    );
+  if (!stage || stage.archivedAt) return 'deal_stage_unavailable';
+  const deal = await onlyOpenDeal(tx, run, effect.pipelineId);
+  if (typeof deal === 'string') return deal;
+  if (deal.stageId === effect.stageId) return 'deal_in_stage';
+  await tx
+    .update(crmDeals)
+    .set({ stageId: effect.stageId, stageEnteredAt: now, version: deal.version + 1 })
+    .where(and(eq(crmDeals.tenantId, run.tenantId), eq(crmDeals.id, deal.id)));
+  await addActivity(tx, {
+    tenantId: run.tenantId,
+    contactId: run.contactId,
+    dealId: deal.id,
+    actorMembershipId: null,
+    kind: 'stage_changed',
+    data: {
+      fromStageId: deal.stageId,
+      toStageId: effect.stageId,
+      automationId: run.automationId,
+      runId: run.id,
+    },
+    at: now,
+  });
+  return null;
+}
+
+/**
+ * The first checks and locks of a step that changes the contact's deal (ADR-250, ADR-251), in the
+ * CRM's order: the plan, the contact (held against erasure), the pipeline (shared against
+ * archiving). A string is the note of a step that changes nothing.
+ */
+async function holdForDealChange(
+  tx: Tx,
+  run: AutomationRun,
+  pipelineId: string,
+): Promise<string | null> {
+  if (!(await loadEntitlements(tx, run.tenantId)).modules.has('crm')) return 'crm_not_in_plan';
+  const [contact] = await tx
+    .select({ erasedAt: contacts.erasedAt })
+    .from(contacts)
+    .where(and(eq(contacts.tenantId, run.tenantId), eq(contacts.id, run.contactId)))
+    .for('key share');
+  if (!contact || contact.erasedAt) return 'contact_erased';
+  const [pipeline] = await tx
+    .select({ archivedAt: crmPipelines.archivedAt })
+    .from(crmPipelines)
+    .where(and(eq(crmPipelines.tenantId, run.tenantId), eq(crmPipelines.id, pipelineId)))
+    .for('share');
+  if (!pipeline || pipeline.archivedAt) return 'deal_stage_unavailable';
+  return null;
+}
+
+/**
+ * The contact's only open deal in the pipeline, locked; a note when it has none or more than one
+ * (which one is meant is not known).
+ */
+async function onlyOpenDeal(tx: Tx, run: AutomationRun, pipelineId: string) {
+  const open = await tx
+    .select({
+      id: crmDeals.id,
+      stageId: crmDeals.stageId,
+      valueMinor: crmDeals.valueMinor,
+      version: crmDeals.version,
+    })
+    .from(crmDeals)
+    .where(
+      and(
+        eq(crmDeals.tenantId, run.tenantId),
+        eq(crmDeals.contactId, run.contactId),
+        eq(crmDeals.pipelineId, pipelineId),
+        eq(crmDeals.status, 'open'),
+      ),
+    )
+    .orderBy(asc(crmDeals.id))
+    .limit(2)
+    .for('update');
+  const [deal] = open;
+  if (!deal) return 'deal_not_open';
+  if (open.length > 1) return 'deal_ambiguous';
+  return deal;
+}
+
+/**
+ * Closes the run's contact's open deal in the step's pipeline as won or lost (ADR-251), as the
+ * automation, as a member closes it but with no member as its closer, and puts the outcome on the
+ * deal's timeline. Nothing closes, as for a move, when the plan leaves out the CRM, the contact was
+ * erased, the pipeline is archived or gone, or the contact has no open deal in the pipeline or more
+ * than one.
+ */
+async function applyCloseDealEffect(
+  tx: Tx,
+  run: AutomationRun,
+  effect: Extract<RunEffect, { kind: 'close_deal' }>,
+  now: Date,
+): Promise<string | null> {
+  const held = await holdForDealChange(tx, run, effect.pipelineId);
+  if (typeof held === 'string') return held;
+  const deal = await onlyOpenDeal(tx, run, effect.pipelineId);
+  if (typeof deal === 'string') return deal;
+  await tx
+    .update(crmDeals)
+    .set({
+      status: effect.outcome,
+      closedAt: now,
+      closedByMembershipId: null,
+      lostReason: effect.outcome === 'lost' ? effect.lostReason : null,
+      version: deal.version + 1,
+    })
+    .where(and(eq(crmDeals.tenantId, run.tenantId), eq(crmDeals.id, deal.id)));
+  const by = { automationId: run.automationId, runId: run.id };
+  await addActivity(tx, {
+    tenantId: run.tenantId,
+    contactId: run.contactId,
+    dealId: deal.id,
+    actorMembershipId: null,
+    kind: effect.outcome === 'won' ? 'deal_won' : 'deal_lost',
+    data: effect.outcome === 'won' ? { valueMinor: deal.valueMinor, ...by } : by,
+    at: now,
+  });
+  return null;
+}
+
 type StepOutcome =
   | { kind: 'progress' }
   | { kind: 'waiting' }
@@ -1271,6 +1418,18 @@ async function runStep(
         const deal = await applyDealEffect(tx, run, effect, now);
         notes.push(...deal.notes);
         skipped = deal.skipped;
+      } else if (effect.kind === 'move_deal') {
+        const note = await applyMoveDealEffect(tx, run, effect, now);
+        if (note) {
+          notes.push(note);
+          skipped = true;
+        }
+      } else if (effect.kind === 'close_deal') {
+        const note = await applyCloseDealEffect(tx, run, effect, now);
+        if (note) {
+          notes.push(note);
+          skipped = true;
+        }
       } else {
         const note = await applyContactEffect(tx, run, effect);
         if (note) notes.push(note);

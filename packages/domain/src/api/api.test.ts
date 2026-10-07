@@ -157,6 +157,11 @@ import {
   WEBHOOK_ASSIGNEES_NEED_THE_EVENTS,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS,
+  WEBHOOK_PIPELINES_NEED_THE_EVENTS,
+  WEBHOOK_STAGES_NEED_THE_EVENTS,
+  WEBHOOK_OWNERS_NEED_THE_EVENTS,
+  WEBHOOK_TASK_ASSIGNEES_NEED_THE_EVENTS,
+  WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
   WEBHOOK_CHANNELS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
@@ -169,6 +174,8 @@ import {
 } from '../webhooks/service';
 import {
   WEBHOOK_CAMPAIGN_EVENTS,
+  WEBHOOK_PIPELINE_EVENTS,
+  WEBHOOK_TASK_EVENTS,
   WEBHOOK_CHANNEL_EVENTS,
   WEBHOOK_TEAM_EVENTS,
   WEBHOOK_TEMPLATE_EVENTS,
@@ -249,6 +256,9 @@ describe('API scopes', () => {
       'campaigns.resume',
       'automations.start',
       'orders.write',
+      'deals.write',
+      'tasks.write',
+      'notes.write',
       'webhooks.manage',
     ]);
     expect([...API_SEND_SCOPES]).toEqual(API_SCOPE_KEYS.filter((s) => s.startsWith('messages.')));
@@ -1428,6 +1438,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'contactFieldKeys',
       'contactParts',
       'contactSources',
+      'contactTags',
       'conversationStatuses',
       'description',
       'enabled',
@@ -1438,9 +1449,13 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'messageTypes',
       'oauth',
       'orderStatuses',
+      'ownerIds',
+      'pipelineIds',
       'runEndReasons',
       'runEndStatuses',
       'runTriggers',
+      'stageIds',
+      'taskAssigneeIds',
       'teamIds',
       'templateIds',
       'templateStatuses',
@@ -1755,6 +1770,342 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     ).toContain('campaignIds');
     expect(doc.info.description).toContain(
       'or campaigns (its `campaignIds`): then the statuses of the messages they sent and their changes only.',
+    );
+  });
+
+  it('take pipelines only with a deal event, each once, and a list of them alone is a change (ADR-263)', () => {
+    const sales = '0190e9a1-0000-7000-8000-00000000004a';
+    const renewals = '0190e9a1-0000-7000-8000-00000000004b';
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    for (const event of WEBHOOK_PIPELINE_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          pipelineIds: [renewals, sales.toUpperCase(), renewals],
+        }).pipelineIds,
+        event,
+      ).toEqual([renewals, sales]);
+    }
+    // Task events, even of a deal's tasks, are not a pipeline's.
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['task.created', 'task.status_changed'],
+      pipelineIds: [sales],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['pipelineIds', WEBHOOK_PIPELINES_NEED_THE_EVENTS],
+    ]);
+    const deals = { ...base, events: ['deal.stage_changed'] };
+    for (const body of [
+      { ...deals, pipelineIds: [] },
+      { ...deals, pipelineIds: ['Sales'] },
+      {
+        ...deals,
+        pipelineIds: Array.from(
+          { length: WEBHOOK_LIMITS.pipelines + 1 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiCreateWebhookEndpointSchema.parse({ ...deals, pipelineIds: null }).pipelineIds).toBe(
+      null,
+    );
+    expect(apiUpdateWebhookEndpointSchema.parse({ pipelineIds: null })).toEqual({
+      pipelineIds: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ pipelineIds: [sales] })).toEqual({
+      pipelineIds: [sales],
+    });
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'the campaigns, the pipelines, the stages, the deal owners',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[]; description?: string }>;
+      required?: string[];
+    };
+    expect(answered.properties.pipelineIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('pipelineIds');
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(Object.keys(given)).toContain('pipelineIds');
+    expect(JSON.stringify(given.pipelineIds)).toContain(
+      'deal.stage_changed reaches the endpoints of the pipeline a move to another pipeline left',
+    );
+    expect(doc.info.description).toContain(
+      "And it can name CRM pipelines (its `pipelineIds`): then it receives the events of those pipelines' deals only",
+    );
+  });
+
+  it('take stages only with a deal event, each once, and a list of them alone is a change (ADR-264)', () => {
+    const proposal = '0190e9a1-0000-7000-8000-00000000005a';
+    const signed = '0190e9a1-0000-7000-8000-00000000005b';
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    for (const event of WEBHOOK_PIPELINE_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          stageIds: [signed, proposal.toUpperCase(), signed],
+        }).stageIds,
+        event,
+      ).toEqual([signed, proposal]);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['task.created'],
+      stageIds: [proposal],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['stageIds', WEBHOOK_STAGES_NEED_THE_EVENTS],
+    ]);
+    const deals = { ...base, events: ['deal.created'] };
+    for (const body of [
+      { ...deals, stageIds: [] },
+      { ...deals, stageIds: ['Proposal'] },
+      {
+        ...deals,
+        stageIds: Array.from(
+          { length: WEBHOOK_LIMITS.stages + 1 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiCreateWebhookEndpointSchema.parse({ ...deals, stageIds: null }).stageIds).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ stageIds: null })).toEqual({ stageIds: null });
+    expect(apiUpdateWebhookEndpointSchema.parse({ stageIds: [signed] })).toEqual({
+      stageIds: [signed],
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.stageIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('stageIds');
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.stageIds)).toContain(
+      'deal.stage_changed reaches the endpoints of the stage the deal left',
+    );
+    expect(JSON.stringify(given.stageIds)).toContain('With pipelines too');
+    expect(doc.info.description).toContain(
+      'or stages (its `stageIds`): then those of the deals in those stages only',
+    );
+  });
+
+  it('take deal owners only with a deal event, each once, and a list of them alone is a change (ADR-265)', () => {
+    const asha = '0190e9a1-0000-7000-8000-00000000006a';
+    const dev = '0190e9a1-0000-7000-8000-00000000006b';
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    for (const event of WEBHOOK_PIPELINE_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          ownerIds: [dev, asha.toUpperCase(), dev],
+        }).ownerIds,
+        event,
+      ).toEqual([dev, asha]);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['task.created', 'message.received'],
+      ownerIds: [asha],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['ownerIds', WEBHOOK_OWNERS_NEED_THE_EVENTS],
+    ]);
+    const deals = { ...base, events: ['deal.status_changed'] };
+    for (const body of [
+      { ...deals, ownerIds: [] },
+      { ...deals, ownerIds: ['asha@example.com'] },
+      {
+        ...deals,
+        ownerIds: Array.from(
+          { length: WEBHOOK_LIMITS.owners + 1 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiCreateWebhookEndpointSchema.parse({ ...deals, ownerIds: null }).ownerIds).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ ownerIds: null })).toEqual({ ownerIds: null });
+    expect(apiUpdateWebhookEndpointSchema.parse({ ownerIds: [dev] })).toEqual({ ownerIds: [dev] });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.ownerIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('ownerIds');
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.ownerIds)).toContain(
+      "A deal's event belongs to the member who owns the deal when the event happens",
+    );
+    // A change of owner is a deal event, and reaches both owners (ADR-269).
+    expect(JSON.stringify(given.ownerIds)).toContain(
+      'deal.owner_changed reaches the endpoints of the owner the deal left as well as of the one it was given to',
+    );
+    for (const field of ['pipelineIds', 'stageIds', 'ownerIds'] as const) {
+      expect(JSON.stringify(given[field]), field).toContain(
+        'deal.created, deal.stage_changed, deal.owner_changed or deal.status_changed',
+      );
+    }
+    expect(JSON.stringify(answered.properties.ownerIds)).toContain(
+      'deal.owner_changed also by the owner it left',
+    );
+    expect(doc.info.description).toContain(
+      'a change of owner reaching the endpoints of the owner it left as well',
+    );
+    expect(doc.info.description).toContain(
+      "or the deals' owners (its `ownerIds`): then those of the deals the members own when the event happens only",
+    );
+  });
+
+  it('take task assignees only with a task event, each once, and a list of them alone is a change (ADR-266)', () => {
+    const asha = '0190e9a1-0000-7000-8000-00000000006a';
+    const dev = '0190e9a1-0000-7000-8000-00000000006b';
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    for (const event of WEBHOOK_TASK_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          taskAssigneeIds: [dev, asha.toUpperCase(), dev],
+        }).taskAssigneeIds,
+        event,
+      ).toEqual([dev, asha]);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['deal.created', 'message.received'],
+      taskAssigneeIds: [asha],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['taskAssigneeIds', WEBHOOK_TASK_ASSIGNEES_NEED_THE_EVENTS],
+    ]);
+    const tasks = { ...base, events: ['task.status_changed'] };
+    for (const body of [
+      { ...tasks, taskAssigneeIds: [] },
+      { ...tasks, taskAssigneeIds: ['asha@example.com'] },
+      {
+        ...tasks,
+        taskAssigneeIds: Array.from(
+          { length: WEBHOOK_LIMITS.taskAssignees + 1 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...tasks, taskAssigneeIds: null }).taskAssigneeIds,
+    ).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ taskAssigneeIds: null })).toEqual({
+      taskAssigneeIds: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ taskAssigneeIds: [dev] })).toEqual({
+      taskAssigneeIds: [dev],
+    });
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'the deal owners, the task assignees, the members, the contact tags, the OAuth client',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.taskAssigneeIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('taskAssigneeIds');
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.taskAssigneeIds)).toContain(
+      "A task's event belongs to the member it is assigned to when the event happens",
+    );
+    expect(doc.info.description).toContain(
+      'then it receives the events of the tasks assigned to them when the event happens only',
+    );
+  });
+
+  it('take contact tags only with an event of a conversation, as contacts carry them, and a list of them alone is a change (ADR-267)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    for (const event of WEBHOOK_TEAM_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          contactTags: ['VIP', 'vip ', 'Wholesale'],
+        }).contactTags,
+        event,
+      ).toEqual(['vip', 'wholesale']);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['deal.created', 'task.created'],
+      contactTags: ['vip'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['contactTags', WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS],
+    ]);
+    const messages = { ...base, events: ['message.received'] };
+    for (const body of [
+      { ...messages, contactTags: [] },
+      { ...messages, contactTags: ['a,b'] },
+      { ...messages, contactTags: Array.from({ length: 51 }, (_, i) => `tag ${i}`) },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...messages, contactTags: null }).contactTags,
+    ).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ contactTags: null })).toEqual({
+      contactTags: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ contactTags: ['Gold'] })).toEqual({
+      contactTags: ['gold'],
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.contactTags?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('contactTags');
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.contactTags)).toContain(
+      'counts when the contact has any of the tags when the event happens',
+    );
+    expect(doc.info.description).toContain(
+      'or contact tags (its `contactTags`): then those of the conversations whose contact has any of the tags when the event happens only',
     );
   });
 
@@ -2163,7 +2514,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     };
     expect(created.properties.assigneeIds?.description).toContain('as GET /members lists them');
     expect(doc.info.description).toContain(
-      'or members (its `assigneeIds`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens.',
+      'or members (its `assigneeIds`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens',
     );
   });
 
@@ -2242,7 +2593,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         event,
       ).toEqual([b, a]);
     }
-    // Consent, contact and template events happen on no number.
+    // Consent, contact, template, deal and task events happen on no number.
     expect(WEBHOOK_EVENT_KEYS.filter((e) => !WEBHOOK_CHANNEL_EVENTS.some((c) => c === e))).toEqual([
       'consent.changed',
       'template.status_changed',
@@ -2250,6 +2601,12 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'contact.updated',
       'contact.erased',
       'contact.merged',
+      'deal.created',
+      'deal.stage_changed',
+      'deal.owner_changed',
+      'deal.status_changed',
+      'task.created',
+      'task.status_changed',
     ]);
     const refused = apiCreateWebhookEndpointSchema.safeParse({
       ...base,

@@ -36,6 +36,7 @@ import { STATUS_RANK } from '../messaging/status';
 import { wabaCredential } from '../templates/service';
 import { chunks } from '../validation';
 import { COMMERCE_LIMITS, paymentAccountAad, paymentRequestText } from './model';
+import { orderStatusChangedBy } from './orders';
 
 /**
  * Worker side of commerce. Catalog reads only read from Meta. Payment Links are advanced one step at
@@ -626,7 +627,10 @@ async function lockLinkOrder(tx: Tx, tenantId: string, orderId: string) {
     .for('update');
 }
 
-/** An order waiting for payment goes back to confirmed when its link ends unpaid. */
+/**
+ * An order waiting for payment goes back to confirmed when its link ends unpaid, a change HyFib
+ * makes from the link (ADR-270).
+ */
 async function releaseOrder(tx: Tx, deps: { clock: Clock }, tenantId: string, orderId: string) {
   await tx
     .update(commerceOrders)
@@ -634,6 +638,7 @@ async function releaseOrder(tx: Tx, deps: { clock: Clock }, tenantId: string, or
       status: 'confirmed',
       statusChangedAt: deps.clock.now(),
       version: sql`${commerceOrders.version} + 1`,
+      ...orderStatusChangedBy('payment_link'),
     })
     .where(
       and(
@@ -721,6 +726,7 @@ async function adoptRemote(
           paidAt: now,
           statusChangedAt: now,
           version: sql`${commerceOrders.version} + 1`,
+          ...orderStatusChangedBy('payment_link'),
         })
         .where(
           and(

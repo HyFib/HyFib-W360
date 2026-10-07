@@ -2085,6 +2085,125 @@ status asked for answers 200, so a retry is safe. 403 `forbidden` names the scop
 plan leaves out Commerce or the scope. 423 means the company is suspended or its plan has ended;
 reading orders still works.
 
+**`GET /api/v1/deals` or `GET /api/v1/pipelines` answers 403 or 404, or a deal seems missing
+(ADR-253).** 403 `forbidden` names the scope the key lacks, `deals.read` (keys keep the scopes they
+were created with: create a key with it); reason `not_in_plan` means the company's plan leaves out
+the CRM or the scope (ADR-092). 404 means the id is not one of the key's company's deals. Deals are
+listed newest first by when they were created, closed ones too, and filters narrow them: a deal
+missing from a pass with `updatedSince` changed while the pass ran, so ask from a little before the
+previous pass began. A deal titled "Deal (contact erased)" without a lost reason belongs to an
+erased contact. Archived pipelines are listed with `archived: true`; their deals are closed ones.
+
+**Migration 0168 failed.** It builds `app.crm_deals_list_idx` concurrently. If it failed, an INVALID
+index can remain: run `DROP INDEX CONCURRENTLY app.crm_deals_list_idx;` and run the migrations
+again.
+
+**`POST /api/v1/deals` answers 403, 404, 409, 422 or 423 (ADR-254).** 403 `forbidden` names the
+scope the key lacks, `deals.write` (granted by members with `crm.write`), or with reason
+`not_in_plan` the company's plan leaves out the CRM or the scope. 404 means the contact is not one
+of the company's or was erased (reason `contact_merged` and `mergedInto` name the contact a merged
+one belongs to now). 409 means members archived the pipeline or removed the stage: read GET
+/pipelines again. 422 names the field: a pipeline, stage or owner the company does not have, a stage
+of another pipeline, or an owner who cannot use the CRM (GET /members). 423 means the company is
+suspended or its plan has ended; reading deals still works. A deal created through the API says so
+on its page and timeline; the audit log has `crm.deal_created` with the key.
+
+**`PATCH /api/v1/deals/{id}` answers 409, 422 or 404 (ADR-255).** 409 `conflict` says why: the deal
+changed since the `expectedVersion` given (read it again and decide), it is closed (reopen it with
+`status` `open` before moving it or closing it the other way), its pipeline is archived (members
+restore it in the app), its stage was removed, its contact was erased (its details no longer
+change), or a merge moved it to another contact while the call ran (try again). 422 names the field:
+a stage of another pipeline, an owner who cannot use the CRM, or a lost reason without `status`
+`lost` or for an erased contact. 404 means the deal is not one of the key's company's. A call that
+asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
+"through the API"; the audit log has `crm.deal_updated` with the key and what changed.
+
+**An integration misses a deal change, or hears two at once (ADR-256).** Endpoints that take
+`deal.created`, `deal.stage_changed` or `deal.status_changed` are sent one event per deal added and
+per change of a deal's stage or status, whoever made it; edits of its title, value or expected date
+send nothing (read the deal with GET /deals/{id}), and neither do erasure and merges; a change of
+its owner sends `deal.owner_changed` to the endpoints that take it (ADR-269). Changes made while no
+endpoint took the type were not recorded and are not sent later. A deal reopened in another stage
+(its own was removed), or moved and closed by one API request, sends two events, in the order the
+steps happened and possibly with the same `createdAt`; each gives the stage and status its step
+left. An erased contact's deal is sent titled "Deal (contact erased)", without its contact's number
+or name or a lost reason.
+
+**An integration misses a task change, or a task event fails as gone (ADR-261).** Endpoints that
+take `task.created` or `task.status_changed` are sent one event per task added and per completion,
+cancellation or reopening, whoever made it; edits of its title, notes, due time, assignee or
+reminder send nothing (read the task with GET /tasks/{id}), and neither do reminders being sent,
+merges and erasure. Changes made while no endpoint took the type were not recorded and are not sent
+later. A delivery that failed with `event_gone` belonged to a task that no longer exists: erasing a
+contact deletes its tasks. Payloads never carry a task's notes.
+
+**A deal does not move to another pipeline through the API (ADR-257).** 409 with "This pipeline uses
+…; clear the deal's value (in …) before moving it" means the deal has a value in another currency:
+send `valueMinor` `null` in a request of its own, then move it (with a new value in the pipeline's
+currency if needed). 422 names `pipelineId` for a pipeline the company does not have, or `stageId`
+for a stage of another pipeline (GET /pipelines). 409 also means the pipeline is archived, the stage
+was removed, or the deal is closed (reopen it with `status` `open`, in the same request if wanted).
+The pipeline the deal is in, without a stage, changes nothing.
+
+**`GET /api/v1/tasks` answers 403 or 404, or a task seems missing (ADR-258).** 403 `forbidden` names
+the scope the key lacks, `tasks.read` (keys keep the scopes they were created with: create a key
+with it); reason `not_in_plan` means the company's plan leaves out the CRM or the scope (ADR-092).
+404 means the id is not one of the key's company's tasks: erasing a contact deletes its tasks. Tasks
+are listed newest first by when they were created, closed ones too, and filters narrow them: a task
+missing from a pass with `updatedSince` changed while the pass ran, so ask from a little before the
+previous pass began. A task merged from another contact names the contact kept. `reminderSkipReason`
+says why a reminder was not sent: the task was closed first (`task_closed`), it came due more than a
+day before it could be sent (`too_late`), or the assignee could no longer use the CRM
+(`assignee_inactive`).
+
+**Migration 0174 failed.** It builds `app.crm_tasks_list_idx` concurrently. If it failed, an INVALID
+index can remain: run `DROP INDEX CONCURRENTLY app.crm_tasks_list_idx;` and run the migrations
+again.
+
+**`POST /api/v1/tasks` answers 403, 404, 409, 422 or 423 (ADR-259).** 403 `forbidden` names the
+scope the key lacks, `tasks.write` (granted by members with `crm.write`), or with reason
+`not_in_plan` the company's plan leaves out the CRM or the scope. 422 names the field: `assigneeId`
+for someone who is not an active member able to use the CRM (GET /members lists who can be),
+`dealId` for a deal the company does not have, `contactId` for a contact other than the deal's
+(leave it out with a deal), `dueAt` beyond five years, and `remindAt` in the past or over a year
+ahead. 404 means the contact is not one of the company's or was erased (reason `contact_merged` and
+`mergedInto` name the contact a merged one belongs to now). 409 means the deal's contact was erased,
+or a merge moved the deal while the task was being created (try again). 423 means the company is
+suspended or its plan has ended. A retry with the same `Idempotency-Key` answers the first task,
+even after its reminder time.
+
+**`PATCH /api/v1/tasks/{id}` answers 404, 409 or 422 (ADR-260).** 404 means the task is not one of
+the company's, or its contact was erased (erasure deletes a contact's tasks). 409 names the
+conflict: the task is closed (reopen it with `status` `open`, in the same request if wanted), it is
+already done or cancelled the other way, it changed since the `expectedVersion` given (read it
+again), or a merge moved it while it was being changed (try again). 422 names the field: an
+`assigneeId` who is not an active member able to use the CRM, a `dueAt` beyond five years, or a
+`remindAt` in the past or over a year ahead. A task's contact and deal cannot be changed: create a
+new task. A retry changes nothing.
+
+**`POST /api/v1/notes` answers 403, 404, 409, 422 or 423 (ADR-268).** 403 `forbidden` names the
+scope the key lacks, `notes.write` (granted by members with `crm.write`; keys keep the scopes they
+were created with), or with reason `not_in_plan` the company's plan leaves out the CRM or the scope.
+422 names the field: `body` empty or over 4,000 characters, `dealId` for a deal the company does not
+have, `contactId` for a contact other than the deal's (leave it out with a deal), or neither given.
+404 means the contact is not one of the company's or was erased (reason `contact_merged` and
+`mergedInto` name the contact a merged one belongs to now). 409 means the deal's contact was erased,
+or a merge moved the deal while the note was being added (try again). 423 means the company is
+suspended or its plan has ended. A note added cannot be read, changed or deleted through the API;
+members see it on the timeline as written through the API. A retry with the same `Idempotency-Key`
+answers the first note.
+
+**`GET /api/v1/contact-tags` or `/conversation-tags` answers 403 or 422, or leaves out a tag
+(ADR-272).** 403 `forbidden` names the scope the key lacks: `contacts.read` for contact tags,
+`conversations.read` for conversation tags (keys keep the scopes they were created with). 422 names
+the parameter: `limit` beyond 1 to 100, `prefix` with a comma or nothing but spaces, `cursor` that
+does not decode to a tag as tags are written (give the `nextCursor` a page answered), or one it does
+not take. A tag is listed only while a contact or conversation has it: one removed from its last
+contact or conversation, or only on erased contacts, is gone, and a tag first used before the cursor
+while a reader pages appears on the next pass. Counts are read with each page, so two pages can add
+up to more or fewer than the total. Tags are listed as they are written (lower case, single spaces);
+a `prefix` is compared the same way.
+
 **`GET /api/v1/channels` answers 403, or a number shows no phone or name (ADR-171).** 403
 `forbidden` names the scope the key lacks, `channels.read` (keys keep the scopes they were created
 with: create a key with it); reason `not_in_plan` means the company's plan leaves the scope out
@@ -2560,6 +2679,80 @@ statuses and every campaign’s changes", or `PATCH /webhook-endpoints/{id}` wit
 for every campaign). Removing both Message status and Campaign status clears the list. Each status
 names its campaign as `message.campaignId`, null for a message no campaign sent.
 
+**A receiver misses a deal's events (ADR-263).** An endpoint can take the deal events of chosen
+pipelines only. The endpoints list shows them ("Pipelines whose deals’ events are sent: …"), and the
+API answers `pipelineIds` (null takes every pipeline's). A deal's events go by the pipeline each
+event gives (`deal.pipelineId`): those of a deal in another pipeline are never queued for the
+endpoint, and when no endpoint of the company takes an event, it is not recorded at all, so there is
+nothing to replay. A move to another pipeline reaches the endpoints of both pipelines; the deal's
+later events go by its new pipeline only. An archived pipeline stays on a list and sends nothing
+until it is restored. To take more, tick the pipelines under "Pipelines" on the endpoint's page or
+choose "Every deal’s events", or `PATCH /webhook-endpoints/{id}` with `pipelineIds` (null for every
+pipeline). Removing every deal event clears the list. Task events are never narrowed by pipelines.
+
+**A receiver misses a deal's moves or hears too many (ADR-264).** An endpoint can take the deal
+events of chosen stages only. The endpoints list shows them ("Stages whose deals’ events are sent:
+…"), and the API answers `stageIds` (null takes every stage's). A deal's events go by the stage each
+event gives (`deal.stageId`), and a move also by the stage it left, so an endpoint that names
+Proposal hears deals arriving in Proposal and leaving it: compare `deal.stageId` to act on arrivals
+only. With pipelines chosen too, an event must pass both lists. Events no endpoint takes are not
+recorded, so there is nothing to replay. A removed stage, or one of an archived pipeline, stays on a
+list and sends nothing. To take more, tick the stages under "Stages" on the endpoint's page or
+choose "Every stage’s deals", or `PATCH /webhook-endpoints/{id}` with `stageIds` (null for every
+stage). Removing every deal event clears the list.
+
+**A receiver misses the deals of a member it follows (ADR-265).** An endpoint can take the events of
+the deals chosen members own only. The endpoints list shows them ("Members whose deals’ events are
+sent: …"), and the API answers `ownerIds` (null takes every deal's). A deal's events go by its owner
+when each happens: a deal without an owner, or owned by someone else at the time, is not queued for
+the endpoint, and events no endpoint takes are not recorded, so there is nothing to replay. Changing
+a deal's owner sends `deal.owner_changed` to the endpoints of the owner it left as well as of the
+new one, if they take it (ADR-269); the deal's later events go by its new owner. The payload's
+`deal.ownerId` is the owner when it is delivered (for `deal.owner_changed`, the owner the change
+gave), so a deal given away meanwhile can name someone else. With pipelines or stages chosen too, an
+event must pass every list. A member who left stays on a list, "(no longer uses the CRM)", matching
+the deals they still own; give those deals another owner. To take more, tick members under "Deal
+owners" on the endpoint's page or choose "Every deal’s events", or `PATCH /webhook-endpoints/{id}`
+with `ownerIds` (null for every deal). Removing every deal event clears the list.
+
+**A receiver misses a deal's change of owner, or doubts one (ADR-269).** Endpoints that take
+`deal.owner_changed` ("Deal owner") are sent one event each time a member gives a deal to another
+member or leaves it without an owner on the deal page, or a key changes its `ownerId`. Automations
+set an owner only on the deals they add (`deal.created`), and erasure and merges keep the owner, so
+they send nothing; changes made while no endpoint took the type were not recorded and are not sent
+later. `deal.ownerId` and `deal.previousOwnerId` are the change (null for no owner): compare them,
+not the owner the deal has now (GET /deals/{id}). An endpoint with owners chosen hears it for the
+owner the deal left as well as for the one it was given to, and with pipelines or stages chosen too,
+the deal's pipeline and stage must pass them. One API request that gives the deal to another owner
+and closes it sends the owner change first, with status `open`, then the close; one that reopens or
+moves it sends those first. Who made the change is not sent: the deal's timeline records it.
+
+**A receiver misses the tasks of a member it follows (ADR-266).** An endpoint can take the events of
+the tasks assigned to chosen members only. The endpoints list shows them ("Members whose tasks’
+events are sent: …"), and the API answers `taskAssigneeIds` (null takes every task's). A task's
+events go by its assignee when each happens: a task assigned to someone else at the time is not
+queued for the endpoint, and events no endpoint takes are not recorded, so there is nothing to
+replay. Reassigning a task sends nothing; the task's next event goes by its new assignee. The
+payload's `task.assigneeId` is the assignee when it is delivered, so a task given away meanwhile can
+name someone else. A member who left stays on a list, "(no longer uses the CRM)", matching the tasks
+still assigned to them; assign those tasks to someone else. To take more, tick members under "Task
+assignees" on the endpoint's page or choose "Every task’s events", or `PATCH
+/webhook-endpoints/{id}` with `taskAssigneeIds` (null for every task). Removing both task events
+clears the list.
+
+**A receiver misses the conversations of a tagged customer (ADR-267).** An endpoint can take the
+message and conversation events of the conversations whose contact has chosen tags only. The
+endpoints list shows them ("Contact tags whose conversations’ events are sent: …"), and the API
+answers `contactTags` (null takes every conversation's). An event goes by the tags the contact has
+when it happens: a message that arrived before the tag was put on (by a member, an import or an
+automation reacting to that very message) was not queued for the endpoint, and events no endpoint
+takes are not recorded, so there is nothing to replay; the contact's next event counts. Tags are
+compared as contacts carry them (lower case, trimmed), and a tag no contact has matches nothing.
+With numbers, teams or members chosen too, an event must pass every list. To take more, change the
+tags under "Contact tags" on the endpoint's page or choose "Every conversation’s events", or `PATCH
+/webhook-endpoints/{id}` with `contactTags` (null for every conversation). Removing every event of a
+conversation clears the list.
+
 **A receiver misses a run's events (ADR-183).** An endpoint can take the run events of the runs
 started by chosen triggers only. The endpoints list shows them ("Automation runs started by: …"),
 and the API answers `runTriggers` (null takes every run). A run's events go by what started it, as
@@ -2666,13 +2859,31 @@ it again.
 **Order events (ADR-085).** An endpoint that takes `order.received` or `order.status_changed` hears
 of WhatsApp orders only: store orders (Shopify, WooCommerce) send nothing, since the store reports
 them itself. Every status change is sent whoever makes it: a member (confirm, fulfil, cancel, ask
-for payment) or the worker applying a Payment Link's outcome (paid, or back to confirmed when the
-link ends unpaid). A receiver that sees `paidAt` on an early event is reading the order as it was
-when that event was delivered; `order.status` and `order.previousStatus` are the change itself, and
-the latest change has the latest `createdAt`. A receiver that asks for the Payment Link address or
-Razorpay's payment id: payloads never carry them; the order page shows the link. A missing note on
-an order whose contact was erased is expected: erasure clears it (and sends no order event). The
-event keeps the order id and the status before a change in `app.webhook_events.detail`.
+for payment), an API key (confirm, fulfil, cancel; ADR-168) or the worker applying a Payment Link's
+outcome (paid, or back to confirmed when the link ends unpaid). A receiver that sees `paidAt` on an
+early event is reading the order as it was when that event was delivered; `order.status` and
+`order.previousStatus` are the change itself, and the latest change has the latest `createdAt`. A
+receiver that asks for the Payment Link address or Razorpay's payment id: payloads never carry them;
+the order page shows the link. A missing note on an order whose contact was erased is expected:
+erasure clears it (and sends no order event). The event keeps the order id, the status before a
+change and who made it (ADR-270) in `app.webhook_events.detail`.
+
+**A receiver cannot tell who changed an order, or ignores a member's change (ADR-270).**
+`order.changedBy` says who made the change an `order.status_changed` event reports: `member` (the
+order page; never which member: the audit log names them, `commerce.order_status_changed`, or
+`commerce.payment_requested` for a payment request), `api` with `order.apiKeyId` (the key; an
+endpoint it adds through the API answers its id as `apiKeyId`, and so do the messages it sends when
+read back with `GET /conversations/{id}/messages`) or `payment_link` (HyFib applying what Razorpay
+reported for the order's Payment Link: paid, or back to confirmed when the link expired, was
+cancelled or failed). An integration that changes orders through the API should ignore the events
+whose `apiKeyId` is its own, not every `api` event. Null means HyFib did not record who: an event
+captured before migration 0187, or a change made by a server from before it during a rollout; it is
+never the maker of an earlier change, since the database clears a changer an earlier transaction
+recorded (`commerce_orders_status_changer`). `order.received` names nobody. To see who made an
+order's latest change, read `statusChangedBy` and `statusChangedByApiKeyId` from `GET /orders/{id}`
+(ADR-271), or `status_changed_by` and `status_changed_by_api_key_id` on `app.commerce_orders`; only
+the latest change is kept there; the audit log records members' and keys' changes
+(`commerce.order_status_changed`, `commerce.payment_requested`), not the Payment Link's.
 
 **Migration 0063 or 0064 failed.** 0063 runs in one transaction, so a failure applies nothing: it
 widens the event type checks (the one on `app.webhook_events` `NOT VALID`) and adds the capture

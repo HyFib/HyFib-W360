@@ -333,4 +333,18 @@ test('a key changes several contacts in one call, all of them or none, a number 
   await expect(page.getByLabel('Plan', { exact: true })).toHaveValue('gold');
   await expect(page.getByRole('list', { name: 'Tags' })).toContainText('webinar');
   await expectNoHorizontalOverflow(page);
+
+  // Renamed in Settings (ADR-262), the field keeps its key: the API still names the value `plan`,
+  // and the contact page shows it under the new label.
+  await page.goto(`/c/${slug}/settings/messaging`);
+  await page.getByRole('button', { name: 'Rename the field “Plan”' }).click();
+  await page.getByLabel('New label').fill('Membership plan');
+  await page.getByRole('button', { name: 'Save label' }).click();
+  await expect(page.getByText('Renamed. Its key stays plan')).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'Membership plan', exact: true })).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'plan', exact: true })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  expect((await read(bina.id)).fields).toEqual({ plan: 'gold' });
+  await page.goto(`/c/${slug}/contacts/${bina.id}`);
+  await expect(page.getByLabel('Membership plan', { exact: true })).toHaveValue('gold');
 });

@@ -85,7 +85,10 @@ verification, app review, Embedded Signup configuration).
   for `POST /contacts/{id}/merge`). **[Bulk field edits built; their database and browser tests run
   only in CI]** (ADR-238: one custom field set to one value, or cleared, on up to 10,000 contacts
   the page's filters match, after a confirmation, with the checks of a member's edit and of bulk tag
-  edits; no migration). **Remaining:** joining conversations.
+  edits; no migration). **[Renaming custom fields in Settings built; its browser test runs only in
+  CI]** (ADR-262: owners and administrators rename a field's label in Settings → Messaging, audited,
+  its key and so every value, CSV column and API name kept; no migration). **Remaining:** joining
+  conversations.
 - **P3-02 Consent & suppression** — _implemented (2026-09-26)_: consent events with provenance,
   opt-out/opt-in keywords, Meta 131050 opt-outs, suppression list, send-time enforcement (race test
   with a queued template, and with campaigns). **Remaining:** review Meta's
@@ -191,10 +194,12 @@ verification, app review, Embedded Signup configuration).
   in short words or numbers, ranked below every match without typos; no migration). **[Form steps
   built; their database and browser tests run only in CI]** (ADR-248: a published form sent in the
   conversation with a token of its own, as a member sends it, while the plan includes WhatsApp
-  Flows; no migration). **Remaining:** catalog steps (sending products from a run), starting runs
-  from the public API or campaigns, enrolling contacts or segments in a sequence without a customer
-  message or order event, a drag-and-drop canvas (ADR-034), usage billing for automation steps, a
-  real sandbox run (release checklist).
+  Flows; no migration). Steps that create, move and close CRM tasks and deals are recorded under
+  P4-04 (ADR-244 to ADR-247, ADR-249 to ADR-251), and runs started through the public API under
+  P5-08 (ADR-077). **Remaining:** catalog steps (sending products from a run), starting runs from
+  campaigns, enrolling contacts or segments in a sequence without a customer message or order event,
+  a drag-and-drop canvas (ADR-034), usage billing for automation steps, a real sandbox run (release
+  checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
   local target server only_: "Call a web address" steps (method, address with URL-encoded
   placeholders, headers, JSON body, values saved from the response, success and failure branches);
@@ -258,10 +263,39 @@ verification, app review, Embedded Signup configuration).
   their database and browser tests run only in CI]** (ADR-247: a number of days after the step runs,
   on the company's calendar; no migration). **[CRM steps that follow the plan built; their database
   test runs only in CI]** (ADR-249: without the CRM in the plan, task and deal steps create nothing
-  and say why, and cannot be published; no migration). **Remaining:** custom deal fields, products
-  on deals, deal import, forecasts in Reports, automation steps that move deals, CRM connectors
-  (HubSpot, Salesforce, Zoho: integrations), reminder emails through the production SMTP provider
-  (release checklist).
+  and say why, and cannot be published; no migration). **[Automation steps that move deals built;
+  their database and browser tests run only in CI]** (ADR-250, migrations 0162 and 0163: the
+  contact's single open deal in a pipeline moved to an active stage, as the automation; nothing
+  moves when it is unclear which deal). **[Automation steps that close deals built; their database
+  test runs only in CI]** (ADR-251, migrations 0164 and 0165: the contact's single open deal in a
+  pipeline closed as won or lost, with an optional reason, as the automation). **[A weighted
+  forecast in Reports built; its database and browser tests run only in CI]** (ADR-252, migration
+  0166: open deals by expected close month, weighed by each stage's chance as on the board).
+  **[Reading pipelines and deals through the public API built; its database and browser tests run
+  only in CI]** (ADR-253, migrations 0167 and 0168; recorded under P5-08). **[Creating deals through
+  the public API built; its database and browser tests run only in CI]** (ADR-254, migrations 0169
+  and 0170; recorded under P5-08). **[Changing deals through the public API built; its database and
+  browser tests run only in CI]** (ADR-255, no migration; recorded under P5-08). **[Deal webhook
+  events built; their database tests run only in CI]** (ADR-256, migrations 0171 and 0172; recorded
+  under P5-09). **[Moving deals to another pipeline through the public API built; its database tests
+  run only in CI]** (ADR-257, no migration; recorded under P5-08). **[Reading tasks through the
+  public API built; its database tests run only in CI]** (ADR-258, migrations 0173 and 0174;
+  recorded under P5-08). **[Creating tasks through the public API built; its database tests run only
+  in CI]** (ADR-259, migrations 0175 and 0176; recorded under P5-08). **[Changing tasks through the
+  public API built; its database tests run only in CI]** (ADR-260, no migration; recorded under
+  P5-08). **[Notes through the public API built; their database tests run only in CI]** (ADR-268,
+  migration 0184; recorded under P5-08). **[Task webhook events built; their database tests run only
+  in CI]** (ADR-261, migrations 0177 and 0178; recorded under P5-09). **[Pipeline filters for deal
+  webhook events built; their database and browser tests run only in CI]** (ADR-263, migration 0179;
+  recorded under P5-09). **[Stage filters for deal webhook events built; their database and browser
+  tests run only in CI]** (ADR-264, migration 0180; recorded under P5-09). **[Owner filters for deal
+  webhook events built; their database tests run only in CI]** (ADR-265, migration 0181; recorded
+  under P5-09). **[Assignee filters for task webhook events built; their database tests run only in
+  CI]** (ADR-266, migration 0182; recorded under P5-09). **[Deal owner webhook events built; their
+  database tests run only in CI]** (ADR-269, migrations 0185 and 0186; recorded under P5-09).
+  **Remaining:** custom deal fields, products on deals, deal import, CRM connectors (HubSpot,
+  Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
+  checklist).
 - **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad
   traffic yet_: click-to-chat links (a short link that counts clicks per link and company day
   without any visitor data and redirects to wa.me with a pre-filled message and an optional
@@ -691,6 +725,14 @@ verification, app review, Embedded Signup configuration).
   in the plan: an order confirmed, fulfilled or cancelled as members move it, from an expected
   status when one is given, payment statuses left to Razorpay; a retry changes nothing; migration
   0116).
+  **[Who last changed an order, through the API, built; its database and browser tests run only in
+  CI]** (ADR-271, no migration: `GET /orders`, `GET /orders/{id}` and the answer of
+  `PATCH /orders/{id}` name who made an order's latest status change, a member, a key by its id or
+  the Payment Link, as `order.status_changed` does since ADR-270).
+  **[Listing the tags in use built; its database tests run only in CI]** (ADR-272, no migration:
+  `GET /contact-tags` with `contacts.read` and `GET /conversation-tags` with `conversations.read`
+  list the company's tags alphabetically with how many contacts or conversations have each, on pages
+  that continue after the last tag, narrowed by a prefix).
   **[Reading WhatsApp numbers built; its database tests run only in CI]** (ADR-171: `GET /channels`
   with the new `channels.read` scope, granted with the permission of the same name: every number of
   the company oldest first on exact pages, filtered by status, with its number, verified name and
@@ -778,6 +820,36 @@ verification, app review, Embedded Signup configuration).
   send gives in `variables.buttons`; a send gives the end of each link in `variables.buttons`).
   **[Campaign drafts take the ends of links; their database tests run only in CI]** (ADR-229:
   `variables.buttons`, one source per link, as members choose them).
+  **[Reading CRM pipelines and deals built; its database and browser tests run only in CI]**
+  (ADR-253, migrations 0167 and 0168: `GET /pipelines`, `GET /deals` and `GET /deals/{id}` with the
+  new `deals.read` scope, granted with `crm.read`, and the CRM in the plan: pipelines with their
+  stages and chances, deals newest first on exact pages, filtered by pipeline, stage, status,
+  contact, owner or time of change, values in minor units and ids only).
+  **[Creating CRM deals built; its database and browser tests run only in CI]** (ADR-254, migrations
+  0169 and 0170: `POST /deals` with the new `deals.write` scope, granted with `crm.write`, and the
+  CRM in the plan: a deal for a contact in an active stage, as members create one, recorded as
+  created through the API, with an optional `Idempotency-Key`).
+  **[Changing CRM deals built; its database and browser tests run only in CI]** (ADR-255:
+  `PATCH /deals/{id}` with `deals.write` reopens, moves, edits and closes a deal as members do, from
+  an `expectedVersion` when given, recorded as done through the API; deals carry `version`; no
+  migration).
+  **[Moving CRM deals to another pipeline built; its database tests run only in CI]** (ADR-257:
+  `pipelineId` on `PATCH /deals/{id}` moves an open deal to another active pipeline, to `stageId` or
+  its first active stage, a deal with a value only to a pipeline of its currency, as members move
+  deals; no migration).
+  **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
+  0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
+  assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact
+  and deal by id; needs the CRM in the plan).
+  **[Creating CRM tasks built; its database tests run only in CI]** (ADR-259, migrations 0175 and
+  0176: `tasks.write` creates tasks as members do, about a contact, a deal or nobody, with an
+  assignee, notes, a due time and an emailed reminder, recorded as created through the API).
+  **[Changing CRM tasks built; its database tests run only in CI]** (ADR-260: `PATCH /tasks/{id}`
+  edits an open task's details, completes, cancels and reopens tasks as members do, from an expected
+  version, recorded as done through the API; no migration).
+  **[Adding CRM notes built; its database tests run only in CI]** (ADR-268, migration 0184:
+  `notes.write` adds a note to a contact's or a deal's timeline as members do, recorded as written
+  through the API; notes are not read through the API).
   Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,
@@ -917,11 +989,51 @@ verification, app review, Embedded Signup configuration).
   database tests run only in CI]** (ADR-225: `contact.merged` names the merged contact and gives the
   contact it belongs to now; the API answers a merged contact's id with 404, reason
   `contact_merged`, naming that contact, and `GET /contact-changes` lists the contacts merged into
-  each contact it reads). Remaining: filters for other event types and on a message's or contact's
-  values (such as by tag or a field's value, or the key that started a run), other authentication
-  (headers computed per delivery, other OAuth grants), mutual TLS, fixed egress addresses, events
-  for store orders, Payment Links and each step of a run, `createdAt` finer than the millisecond,
-  load tests.
+  each contact it reads). **[CRM deal events built; their database tests run only in CI]** (ADR-256,
+  migrations 0171 and 0172: `deal.created`, `deal.stage_changed` and `deal.status_changed` for every
+  deal added, moved, won, lost or reopened, by members, automations or API keys; one change of both
+  the stage and the status sends both, in the order the steps happen, each with the deal as its step
+  left it; erasure, merges and edits of a deal's title, value or expected date send nothing; no
+  filter narrows them).
+  **[CRM task events built; their database tests run only in CI]** (ADR-261, migrations 0177 and
+  0178: `task.created` for every task added, by members, automations or API keys, and
+  `task.status_changed` for every completion, cancellation and reopening; never a task's notes;
+  edits, reminders, merges and erasure send nothing; no filter narrows them).
+  **[Pipeline filters for deal events built; their database and browser tests run only in CI]**
+  (ADR-263, migration 0179: an endpoint takes the deal events of 1 to 50 of the company's pipelines,
+  archived ones included, in Settings → Webhooks or through the API's `pipelineIds`; a move to
+  another pipeline reaches the endpoints of both; task and other events are not narrowed).
+  **[Stage filters for deal events built; their database and browser tests run only in CI]**
+  (ADR-264, migration 0180: an endpoint takes the deal events of 1 to 50 of the company's stages,
+  removed ones included; a move reaches the endpoints of the stage it left as well; with pipelines
+  too, an event must pass both).
+  **[Owner filters for deal events built; their database tests run only in CI]** (ADR-265, migration
+  0181: an endpoint takes the events of the deals 1 to 50 chosen members own when the events happen;
+  a list adds only members who can own deals and keeps those who left; with pipelines or stages too,
+  an event must pass every list).
+  **[Assignee filters for task events built; their database tests run only in CI]** (ADR-266,
+  migration 0182: an endpoint takes the events of the tasks assigned to 1 to 50 chosen members when
+  the events happen; a list adds only members who can be assigned tasks and keeps those who left;
+  deal and other events are not narrowed).
+  **[Contact tag filters for message and conversation events built; their database tests run only in
+  CI]** (ADR-267, migration 0183: an endpoint takes the events of the conversations whose contact
+  has any of 1 to 50 tags when the events happen; tags are compared as contacts carry them, and one
+  no contact has yet may be named; with numbers, teams or members too, an event must pass every
+  list).
+  **[Deal owner events built; their database tests run only in CI]** (ADR-269, migrations 0185 and
+  0186: `deal.owner_changed` for every deal given to another member or left without an owner, by
+  members or API keys, with both owners; an endpoint naming owners hears it for the owner the deal
+  left as well; one change that also moves or closes the deal sends each event in the order the
+  steps happen; automations, erasure and merges send none).
+  **[Who changed an order built; its database tests run only in CI]** (ADR-270, migrations 0187 and
+  0188: `order.status_changed` names who made each change, a member, an API key by its id or the
+  Payment Link, recorded with the status; a change that does not record its maker names nobody,
+  never the one before).
+  Remaining: filters for other event types (task events by their deal's pipeline, stage or owner,
+  among them) and on a message's or contact's values (such as a field's value, contact events by
+  tag, or the key that started a run), other authentication (headers computed per delivery, other
+  OAuth grants), mutual TLS, fixed egress addresses, events for store orders, Payment Links and each
+  step of a run, `createdAt` finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

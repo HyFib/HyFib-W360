@@ -64,8 +64,18 @@ export async function createWebhookEndpointAction(
     templateIds: string[] | null;
     /** The campaigns whose messages' statuses and changes it takes (ADR-185); null: every one's. */
     campaignIds: string[] | null;
+    /** The CRM pipelines whose deals' events it takes (ADR-263); null takes every one's. */
+    pipelineIds: string[] | null;
+    /** The CRM stages whose deals' events it takes (ADR-264); null takes every one's. */
+    stageIds: string[] | null;
+    /** The members whose deals' events it takes (ADR-265); null takes every deal's. */
+    ownerIds: string[] | null;
+    /** The members whose tasks' events it takes (ADR-266); null takes every task's. */
+    taskAssigneeIds: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
+    /** The contact tags whose conversations' events it takes (ADR-267); null: every one's. */
+    contactTags: string[] | null;
     /** Its OAuth client (ADR-173); null: none. */
     oauth: WebhookOAuthActionInput | null;
   },
@@ -126,8 +136,18 @@ export async function updateWebhookEndpointAction(
     templateIds: string[] | null;
     /** The campaigns whose messages' statuses and changes it takes (ADR-185); null: every one's. */
     campaignIds: string[] | null;
+    /** The CRM pipelines whose deals' events it takes (ADR-263); null takes every one's. */
+    pipelineIds: string[] | null;
+    /** The CRM stages whose deals' events it takes (ADR-264); null takes every one's. */
+    stageIds: string[] | null;
+    /** The members whose deals' events it takes (ADR-265); null takes every deal's. */
+    ownerIds: string[] | null;
+    /** The members whose tasks' events it takes (ADR-266); null takes every task's. */
+    taskAssigneeIds: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
+    /** The contact tags whose conversations' events it takes (ADR-267); null: every one's. */
+    contactTags: string[] | null;
     /**
      * Given, its OAuth client (null removes it, ADR-173): a secret left out keeps the stored one
      * while the token URL stays the same. Left out, it stays.

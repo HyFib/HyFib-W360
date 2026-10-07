@@ -20,6 +20,7 @@ import {
   createFieldAction,
   deleteFieldAction,
   removeSuppressionAction,
+  renameFieldAction,
   updateMessagingSettingsAction,
 } from '@/app/actions/contacts';
 import { ClientButton, ClientForm } from '@/components/client-form';
@@ -149,21 +150,45 @@ export function ContactFieldsManager({
   const [label, setLabel] = useState('');
   const [type, setType] = useState('text');
   const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The field being renamed (ADR-262) and its new label.
+  const [renaming, setRenaming] = useState<{ id: string; key: string } | null>(null);
+  const [newLabel, setNewLabel] = useState('');
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError(null);
+    setSaved(null);
     const result = await createFieldAction(slug, { label, type });
     setBusy(false);
     if (!result.ok) setError(result.message);
     else setLabel('');
   }
 
+  async function rename(event: React.FormEvent) {
+    event.preventDefault();
+    if (!renaming) return;
+    setBusy(true);
+    setError(null);
+    setSaved(null);
+    const result = await renameFieldAction(slug, renaming.id, newLabel);
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.message);
+      return;
+    }
+    setSaved(
+      `Renamed. Its key stays ${renaming.key}, so contacts keep their values and imports, exports and the API keep using it.`,
+    );
+    setRenaming(null);
+  }
+
   return (
     <div className="grid gap-4">
       <FormError message={error} />
+      <FormSuccess message={saved} />
       {fields.length === 0 ? (
         <p className="text-sm text-muted-foreground">No custom fields yet.</p>
       ) : (
@@ -183,11 +208,53 @@ export function ContactFieldsManager({
           <TBody>
             {fields.map((f) => (
               <TR key={f.id}>
-                <TD className="font-medium">{f.label}</TD>
+                <TD className="font-medium">
+                  {renaming?.id === f.id ? (
+                    <ClientForm onSubmit={rename} className="flex flex-wrap items-end gap-2">
+                      <Field id={`field-rename-${f.id}`} label="New label">
+                        {(aria) => (
+                          <Input
+                            {...aria}
+                            value={newLabel}
+                            maxLength={80}
+                            required
+                            onChange={(e) => setNewLabel(e.target.value)}
+                          />
+                        )}
+                      </Field>
+                      <Button type="submit" size="sm" disabled={busy || !newLabel.trim()}>
+                        Save label
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setRenaming(null)}
+                      >
+                        Cancel
+                      </Button>
+                    </ClientForm>
+                  ) : (
+                    f.label
+                  )}
+                </TD>
                 <TD className="font-mono text-xs">{f.key}</TD>
                 <TD className="text-sm">{f.type}</TD>
                 {canEdit ? (
                   <TD className="text-right">
+                    <ClientButton
+                      size="sm"
+                      variant="ghost"
+                      aria-label={`Rename the field “${f.label}”`}
+                      onClick={() => {
+                        setRenaming({ id: f.id, key: f.key });
+                        setNewLabel(f.label);
+                        setError(null);
+                        setSaved(null);
+                      }}
+                    >
+                      Rename
+                    </ClientButton>
                     <ConfirmDialog
                       destructive
                       title={`Delete the field “${f.label}”?`}

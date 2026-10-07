@@ -2506,6 +2506,14 @@ describe('automations that create CRM deals (ADR-245)', () => {
           stageId: pipeline!.stages[0]!.id,
           value: null,
           ownerMembershipId: null,
+          next: 'move',
+        },
+        // A step that moves the deal (ADR-250) follows the plan too.
+        {
+          id: 'move',
+          type: 'move_deal',
+          pipelineId,
+          stageId: pipeline!.stages[0]!.id,
           next: 'thanks',
         },
         { id: 'thanks', type: 'send_text', text: 'We will be in touch.', next: null },
@@ -2523,7 +2531,7 @@ describe('automations that create CRM deals (ADR-245)', () => {
     ).toEqual([]);
     expect(await dealsOf(c.tenant.id)).toEqual([]);
     const log = await stepLog(run.id);
-    for (const nodeId of ['task', 'deal']) {
+    for (const nodeId of ['task', 'deal', 'move']) {
       expect(
         log.find((st) => st.node_id === nodeId),
         nodeId,
@@ -2538,6 +2546,257 @@ describe('automations that create CRM deals (ADR-245)', () => {
       publish(await fx.ctx(c, c.owner), 'More leads', keyword('quote'), graph),
       'forbidden',
       /does not include CRM/,
+    );
+  });
+
+  it('moves the contact’s open deal as the automation, and nothing when it cannot tell which (ADR-250)', async () => {
+    const s = await setup();
+    const [pipeline] = (await crm().listPipelines(s.owner)).filter((p) => p.id === s.pipelineId);
+    const qualified = pipeline!.stages[1]!.id;
+    const { id: moverId } = await publish(s.owner, 'Payments', keyword('paid'), {
+      version: 1,
+      start: 'move',
+      nodes: [
+        {
+          id: 'move',
+          type: 'move_deal',
+          pipelineId: s.pipelineId,
+          stageId: qualified,
+          next: 'thanks',
+        },
+        { id: 'thanks', type: 'send_text', text: 'Thank you for paying.', next: null },
+      ],
+    });
+    const moveOf = async (runId: string) =>
+      (await stepLog(runId)).find((st) => st.node_id === 'move');
+    const runIn = async (conversationId: string) => {
+      const run = (await runsOf(conversationId)).at(-1)!;
+      expect((await drive(s.c, conversationId, run.id)).outcome).toBe('ended');
+      return run;
+    };
+
+    // A customer without a deal: nothing moves, and the run goes on.
+    const stranger = await runIn(await inbound(s.c, waId(), 'I paid'));
+    expect(await moveOf(stranger.id)).toMatchObject({
+      outcome: 'skipped',
+      detail: 'deal_not_open',
+    });
+    expect((await stepLog(stranger.id)).find((st) => st.node_id === 'thanks')?.outcome).toBe(
+      'sent',
+    );
+
+    // A customer asks the price (their deal is created), then pays: the deal moves.
+    const from = waId();
+    const conversationId = await inbound(s.c, from, 'what is the price?');
+    await runIn(conversationId);
+    const [deal] = await dealsOf(s.c.tenant.id);
+    const row = async (id: string) =>
+      (
+        await fx.query<{ stage_id: string; version: number; stage_entered_at: Date }>(
+          'SELECT stage_id, version, stage_entered_at FROM app.crm_deals WHERE id = $1',
+          [id],
+        )
+      )[0]!;
+    const before = await row(deal!.id);
+    await inbound(s.c, from, 'I have paid');
+    const mover = await runIn(conversationId);
+    expect(await moveOf(mover.id)).toMatchObject({ outcome: 'moved', detail: null });
+    const moved = await row(deal!.id);
+    expect(moved).toMatchObject({ stage_id: qualified, version: before.version + 1 });
+    expect(moved.stage_entered_at.getTime()).toBeGreaterThan(before.stage_entered_at.getTime());
+    // On the deal's timeline as a member's move is, by the automation.
+    expect(
+      await fx.query(
+        `SELECT actor_membership_id, data FROM app.crm_activities
+          WHERE deal_id = $1 AND kind = 'stage_changed'`,
+        [deal!.id],
+      ),
+    ).toEqual([
+      {
+        actor_membership_id: null,
+        data: {
+          fromStageId: s.stageId,
+          toStageId: qualified,
+          automationId: moverId,
+          runId: mover.id,
+        },
+      },
+    ]);
+
+    // Paying again: the deal is already there.
+    await inbound(s.c, from, 'paid again');
+    const again = await runIn(conversationId);
+    expect(await moveOf(again.id)).toMatchObject({ outcome: 'skipped', detail: 'deal_in_stage' });
+
+    // A member opens a second deal for the customer in the pipeline: which one is meant is not
+    // known, so nothing moves.
+    const { id: second } = await crm().createDeal(s.owner, {
+      contactId: deal!.contact_id,
+      pipelineId: s.pipelineId,
+      stageId: s.stageId,
+      title: 'Spare kettle',
+    });
+    await inbound(s.c, from, 'paid for both');
+    const both = await runIn(conversationId);
+    expect(await moveOf(both.id)).toMatchObject({ outcome: 'skipped', detail: 'deal_ambiguous' });
+    expect((await row(second)).stage_id).toBe(s.stageId);
+    expect((await row(deal!.id)).version).toBe(moved.version);
+  });
+
+  it('closes the contact’s open deal as the automation, won with its value or lost with a reason (ADR-251)', async () => {
+    const s = await setup();
+    const closer = (outcome: 'won' | 'lost', lostReason: string | null) => ({
+      version: 1,
+      start: 'close',
+      nodes: [
+        {
+          id: 'close',
+          type: 'close_deal',
+          pipelineId: s.pipelineId,
+          outcome,
+          lostReason,
+          next: 'thanks',
+        },
+        { id: 'thanks', type: 'send_text', text: 'Thank you.', next: null },
+      ],
+    });
+    const { id: winsId } = await publish(s.owner, 'Wins', keyword('paid'), closer('won', null));
+    const { id: lossesId } = await publish(
+      s.owner,
+      'Losses',
+      keyword('no thanks'),
+      closer('lost', 'Declined on WhatsApp'),
+    );
+    const runIn = async (conversationId: string) => {
+      const run = (await runsOf(conversationId)).at(-1)!;
+      expect((await drive(s.c, conversationId, run.id)).outcome).toBe('ended');
+      return run;
+    };
+    const closeOf = async (runId: string) =>
+      (await stepLog(runId)).find((st) => st.node_id === 'close');
+    const row = async (id: string) =>
+      (
+        await fx.query<{
+          status: string;
+          closed_at: Date | null;
+          closed_by_membership_id: string | null;
+          lost_reason: string | null;
+          version: number;
+        }>(
+          `SELECT status, closed_at, closed_by_membership_id, lost_reason, version
+             FROM app.crm_deals WHERE id = $1`,
+          [id],
+        )
+      )[0]!;
+    const activities = (dealId: string) =>
+      fx.query(
+        `SELECT kind, actor_membership_id, data FROM app.crm_activities
+          WHERE deal_id = $1 AND kind IN ('deal_won', 'deal_lost')`,
+        [dealId],
+      );
+
+    // A customer asks the price (their deal is created), then pays: the deal is won.
+    const buyer = waId();
+    const bought = await inbound(s.c, buyer, 'what is the price?');
+    await runIn(bought);
+    const [deal] = await dealsOf(s.c.tenant.id);
+    const before = await row(deal!.id);
+    await inbound(s.c, buyer, 'I paid');
+    const won = await runIn(bought);
+    expect(await closeOf(won.id)).toMatchObject({ outcome: 'closed', detail: null });
+    expect(await row(deal!.id)).toMatchObject({
+      status: 'won',
+      closed_by_membership_id: null,
+      lost_reason: null,
+      version: before.version + 1,
+    });
+    expect((await row(deal!.id)).closed_at).not.toBeNull();
+    expect(await activities(deal!.id)).toEqual([
+      {
+        kind: 'deal_won',
+        actor_membership_id: null,
+        data: { valueMinor: 250050, automationId: winsId, runId: won.id },
+      },
+    ]);
+    // Paying again: the deal is no longer open, so nothing closes.
+    await inbound(s.c, buyer, 'paid again');
+    expect(await closeOf((await runIn(bought)).id)).toMatchObject({
+      outcome: 'skipped',
+      detail: 'deal_not_open',
+    });
+
+    // Another customer declines: their deal is lost, with the step's reason.
+    const decliner = waId();
+    const declined = await inbound(s.c, decliner, 'the price please');
+    await runIn(declined);
+    const second = (await dealsOf(s.c.tenant.id)).find((d) => d.id !== deal!.id)!;
+    await inbound(s.c, decliner, 'no thanks');
+    const lost = await runIn(declined);
+    expect(await closeOf(lost.id)).toMatchObject({ outcome: 'closed' });
+    expect(await row(second.id)).toMatchObject({
+      status: 'lost',
+      closed_by_membership_id: null,
+      lost_reason: 'Declined on WhatsApp',
+    });
+    expect(await activities(second.id)).toEqual([
+      {
+        kind: 'deal_lost',
+        actor_membership_id: null,
+        data: { automationId: lossesId, runId: lost.id },
+      },
+    ]);
+    // A member can reopen a deal an automation closed, as any closed deal.
+    const reopened = await crm().reopenDeal(s.owner, {
+      id: second.id,
+      expectedVersion: (await row(second.id)).version,
+    });
+    expect(await row(second.id)).toMatchObject({
+      status: 'open',
+      closed_at: null,
+      lost_reason: null,
+      version: reopened.version,
+    });
+  });
+
+  it('is published only with an active stage, by a member who may edit the CRM (ADR-250)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { id: pipelineId } = await crm().createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New', 'Won'],
+    });
+    const [pipeline] = (await crm().listPipelines(owner)).filter((p) => p.id === pipelineId);
+    const graph = {
+      version: 1,
+      start: 'move',
+      nodes: [
+        {
+          id: 'move',
+          type: 'move_deal',
+          pipelineId,
+          stageId: pipeline!.stages[1]!.id,
+          next: null,
+        },
+      ],
+    };
+    const noCrm: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'crm.write')),
+    };
+    await expectAppError(
+      publish(noCrm, 'Payments', keyword('paid'), graph),
+      'forbidden',
+      /permission to edit the CRM/,
+    );
+    await fx.query(`UPDATE app.crm_stages SET archived_at = now() WHERE id = $1`, [
+      pipeline!.stages[1]!.id,
+    ]);
+    // (Each attempt creates its automation before publishing, so each has a name of its own.)
+    await expectAppError(
+      publish(owner, 'Archived payments', keyword('paid'), graph),
+      'precondition_failed',
+      /to move the deal to/,
     );
   });
 });

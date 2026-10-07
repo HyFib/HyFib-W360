@@ -13,6 +13,7 @@ import {
   createReportsService,
   findDueReminders,
   maskPhoneNumber,
+  forecastMonths,
   monthEndIn,
   sendTaskReminder,
   type TenantContext,
@@ -1189,6 +1190,66 @@ describe('crm erasure, reports and isolation', () => {
       'INR,2,1250.50,1,99.00',
       'USD,1,10.25,0,0.00',
     ]);
+  });
+
+  it('forecasts the open deals by expected close month in Reports, weighed as on the board (ADR-252)', async () => {
+    const { owner, pipeline, newStage, qualified, proposal } = await setup();
+    const svc = crm();
+    const contactId = await newContact(owner, 'Ira');
+    await svc.updatePipeline(owner, {
+      id: pipeline.id,
+      expectedVersion: pipeline.version,
+      name: 'Sales',
+      stages: [
+        { id: newStage.id, name: 'New', winPercent: 10 },
+        { id: qualified.id, name: 'Qualified', winPercent: 50 },
+        { id: proposal.id, name: 'Proposal' },
+      ],
+    });
+    const months = forecastMonths(new Date(), owner.tenant.timezone);
+    const monthEnd = monthEndIn(new Date(), owner.tenant.timezone);
+    const deal = (stageId: string, title: string, value: string, expectedCloseOn: string | null) =>
+      svc.createDeal(owner, {
+        contactId,
+        pipelineId: pipeline.id,
+        stageId,
+        title,
+        value,
+        expectedCloseOn,
+      });
+    // A date already past, this month, the next two months, much later and no date.
+    await deal(newStage.id, 'Overdue', '1,000', '2020-01-15');
+    await deal(qualified.id, 'This month', '500', monthEnd);
+    await deal(qualified.id, 'Next month', '300', `${months[1]}-15`);
+    await deal(newStage.id, 'Month after', '200', `${months[2]}-01`);
+    await deal(qualified.id, 'Much later', '100', '2099-06-30');
+    await deal(proposal.id, 'Undated', '2,000', null);
+    // A closed deal is not forecast.
+    const closed = await deal(qualified.id, 'Closed', '9,999', monthEnd);
+    await svc.closeDeal(owner, { id: closed.id, expectedVersion: 1, outcome: 'won' });
+
+    const reports = createReportsService({ db: fx.dbs.app, clock: systemClock });
+    const report = await reports.getReport(owner, { preset: 'last_7_days' });
+    const sales = report.deals.pipelines.find((p) => p.id === pipeline.id)!;
+    expect(sales.forecast).toEqual({
+      months,
+      buckets: [
+        { bucket: 'this_month', deals: 2, valueMinor: 150_000, weightedMinor: 10_000 + 25_000 },
+        { bucket: 'next_month', deals: 1, valueMinor: 30_000, weightedMinor: 15_000 },
+        { bucket: 'month_after', deals: 1, valueMinor: 20_000, weightedMinor: 2_000 },
+        { bucket: 'later', deals: 1, valueMinor: 10_000, weightedMinor: 5_000 },
+        { bucket: 'undated', deals: 1, valueMinor: 200_000, weightedMinor: 0 },
+      ],
+      hasChances: true,
+      dealsWithoutChance: 1,
+    });
+    // This month's weighted value is the board's.
+    const board = (await svc.board(owner, { pipelineId: pipeline.id }))!;
+    expect(board.forecast.weightedMonthMinor).toBe(35_000);
+    expect(report.definitions.find((d) => d.key === 'crm.forecast')).toMatchObject({
+      version: 1,
+      available: true,
+    });
   });
 
   it('keeps pipelines, deals and tasks inside their company', async () => {

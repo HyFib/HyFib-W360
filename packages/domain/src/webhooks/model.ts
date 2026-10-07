@@ -56,6 +56,12 @@ export const WEBHOOK_EVENT_KEYS = [
   'order.received',
   'order.status_changed',
   'campaign.status_changed',
+  'deal.created',
+  'deal.stage_changed',
+  'deal.owner_changed',
+  'deal.status_changed',
+  'task.created',
+  'task.status_changed',
 ] as const satisfies readonly WebhookEventType[];
 
 export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; description: string }> =
@@ -136,6 +142,33 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       label: 'Campaign status',
       description:
         'A campaign was submitted for approval, sent back to draft, scheduled, started, paused, resumed, completed or cancelled, by a member or as it ran.',
+    },
+    'deal.created': {
+      label: 'Deal added',
+      description: 'A CRM deal was added: by a member, an automation or an API key.',
+    },
+    'deal.stage_changed': {
+      label: 'Deal stage',
+      description:
+        'A CRM deal moved to another stage of its pipeline, or to another pipeline: by a member, an automation or an API key.',
+    },
+    'deal.owner_changed': {
+      label: 'Deal owner',
+      description:
+        'A CRM deal was given to another member, or left without an owner: by a member or an API key.',
+    },
+    'deal.status_changed': {
+      label: 'Deal won, lost or reopened',
+      description:
+        'A CRM deal was won, lost or reopened: by a member, an automation or an API key.',
+    },
+    'task.created': {
+      label: 'Task added',
+      description: 'A CRM task was added: by a member, an automation or an API key.',
+    },
+    'task.status_changed': {
+      label: 'Task done, cancelled or reopened',
+      description: 'A CRM task was completed, cancelled or reopened: by a member or an API key.',
     },
   };
 
@@ -586,6 +619,16 @@ export const WEBHOOK_LIMITS = {
   campaigns: 50,
   /** The newest campaigns Settings offers to choose from (ADR-185); the API takes any of them. */
   campaignChoices: 200,
+  /** The CRM pipelines an endpoint can choose to take the deals' events of (ADR-263). */
+  pipelines: 50,
+  /** The CRM stages an endpoint can choose to take the deals' events of (ADR-264). */
+  stages: 50,
+  /** The members an endpoint can choose to take the events of the deals they own (ADR-265). */
+  owners: 50,
+  /** The members an endpoint can choose to take the events of their assigned tasks (ADR-266). */
+  taskAssignees: 50,
+  /** The contact tags an endpoint can choose to take the conversations' events of (ADR-267). */
+  contactTags: 50,
   /**
    * An endpoint's OAuth client (ADR-173): its identifier, secret and scope, short enough that the
    * Basic header stays within what the egress client sends, and the longest token kept.
@@ -623,8 +666,8 @@ export function webhookTakesAutomationRuns(eventTypes: readonly WebhookEventType
 
 /**
  * The events that happen on a WhatsApp number, which an endpoint can take for chosen numbers
- * (ADR-170): a campaign's are on the number it sends from. Consent, contact and template events
- * belong to no number.
+ * (ADR-170): a campaign's are on the number it sends from. Consent, contact, template, deal and
+ * task events belong to no number.
  */
 export const WEBHOOK_CHANNEL_EVENTS = [
   'message.received',
@@ -787,6 +830,131 @@ export const webhookCampaignText = (campaign: WebhookEndpointCampaign): string =
 /** Whether an endpoint with these events takes events of campaigns, and can choose campaigns. */
 export function webhookTakesCampaignEvents(eventTypes: readonly WebhookEventType[]): boolean {
   return WEBHOOK_CAMPAIGN_EVENTS.some((type) => eventTypes.includes(type));
+}
+
+/**
+ * The events of a CRM deal, which an endpoint can take for chosen pipelines (ADR-263), stages
+ * (ADR-264) and owners (ADR-265): a deal's event belongs to the pipeline and stage it gives
+ * (`deal.pipelineId` and `deal.stageId`, as the event's step left the deal), and a move to the
+ * pipeline and stage it left as well; to the deal's owner when it happens, and a change of owner
+ * (ADR-269) to the owner it left as well.
+ */
+export const WEBHOOK_PIPELINE_EVENTS = [
+  'deal.created',
+  'deal.stage_changed',
+  'deal.owner_changed',
+  'deal.status_changed',
+] as const satisfies readonly WebhookEventType[];
+
+/**
+ * A CRM pipeline the company uses, which an endpoint can choose to take the deals' events of
+ * (ADR-263). The API also takes an archived one; Settings lists one only while an endpoint names
+ * it.
+ */
+export interface WebhookPipelineChoice {
+  id: string;
+  name: string;
+}
+
+/** A pipeline an endpoint takes the deals' events of (ADR-263), as stored. */
+export interface WebhookEndpointPipeline {
+  id: string;
+  name: string;
+  /**
+   * An archived pipeline has no open deal and takes none until it is restored, so it sends nothing
+   * meanwhile; it stays chosen. Pipelines are never deleted.
+   */
+  archived: boolean;
+}
+
+/** A pipeline as Settings → Webhooks names it. */
+export const webhookPipelineText = (pipeline: { name: string; archived?: boolean }): string =>
+  pipeline.archived ? `${pipeline.name} (archived)` : pipeline.name;
+
+/** Whether an endpoint with these events takes deal events, and can choose pipelines and stages. */
+export function webhookTakesPipelineEvents(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_PIPELINE_EVENTS.some((type) => eventTypes.includes(type));
+}
+
+/**
+ * A stage in use of a CRM pipeline the company uses, which an endpoint can choose to take the deals'
+ * events of (ADR-264). The API also takes a removed stage, or one of an archived pipeline; Settings
+ * lists one only while an endpoint names it.
+ */
+export interface WebhookStageChoice {
+  id: string;
+  name: string;
+  pipelineId: string;
+  pipelineName: string;
+}
+
+/** A stage an endpoint takes the deals' events of (ADR-264), as stored. */
+export interface WebhookEndpointStage {
+  id: string;
+  name: string;
+  pipelineName: string;
+  /**
+   * A removed stage holds no deal and takes none (stages are archived when removed and cannot be
+   * restored), so it sends nothing; it stays chosen. Stages are never deleted.
+   */
+  removed: boolean;
+  /** Its pipeline is archived: no open deal, none until the pipeline is restored. */
+  pipelineArchived: boolean;
+}
+
+/**
+ * A member who can own deals (active, with access to the CRM), whom an endpoint can choose to take
+ * the events of the deals they own (ADR-265). A deal's events belong to its owner when they happen.
+ */
+export interface WebhookOwnerChoice {
+  id: string;
+  name: string;
+}
+
+/** A member an endpoint takes the events of the deals they own (ADR-265), as stored. */
+export interface WebhookEndpointOwner {
+  id: string;
+  /** Null only for a membership the company no longer had, which cannot happen: they are kept. */
+  name: string | null;
+  /**
+   * Whether the member can own deals now. One who left, was suspended or removed, or lost access to
+   * the CRM stays chosen, and matches only the deals they still own.
+   */
+  active: boolean;
+}
+
+/** A deal owner as Settings → Webhooks lists them. */
+export const webhookOwnerText = (owner: WebhookEndpointOwner): string => {
+  const name = owner.name ?? 'Unknown member';
+  return owner.active ? name : `${name} (no longer uses the CRM)`;
+};
+
+/** A stage as Settings → Webhooks names it: its pipeline and name. */
+export const webhookStageText = (stage: {
+  name: string;
+  pipelineName: string;
+  removed?: boolean;
+  pipelineArchived?: boolean;
+}): string => {
+  const text = `${stage.pipelineName}: ${stage.name}`;
+  if (stage.removed) return `${text} (removed)`;
+  return stage.pipelineArchived ? `${text} (archived pipeline)` : text;
+};
+
+/**
+ * The events of a CRM task, which an endpoint can take for chosen assignees (ADR-266): a task's
+ * events belong to the member it is assigned to when they happen. Tasks are assigned to the members
+ * who can own deals, so an assignee is chosen and stored as a deal owner is (`WebhookOwnerChoice`,
+ * `WebhookEndpointOwner`, `webhookOwnerText`).
+ */
+export const WEBHOOK_TASK_EVENTS = [
+  'task.created',
+  'task.status_changed',
+] as const satisfies readonly WebhookEventType[];
+
+/** Whether an endpoint with these events takes task events, and can choose assignees. */
+export function webhookTakesTaskEvents(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_TASK_EVENTS.some((type) => eventTypes.includes(type));
 }
 
 /**

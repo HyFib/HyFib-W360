@@ -5,10 +5,14 @@ import {
   CAMPAIGN_STATUSES,
   CHANNEL_STATUSES,
   CONVERSATION_STATUSES,
+  DEAL_STATUSES,
   MESSAGE_STATUSES,
   TEAM_ASSIGNMENT_MODES,
   MESSAGE_TYPES,
   ORDER_STATUSES,
+  ORDER_STATUS_CHANGERS,
+  REMINDER_STATES,
+  TASK_STATUSES,
   WEBHOOK_DELIVERY_STATES,
   type MessageStatus,
 } from '@w360/db';
@@ -35,6 +39,12 @@ import {
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
   campaignStatusChangedPayloadSchema,
+  dealCreatedPayloadSchema,
+  dealStageChangedPayloadSchema,
+  dealOwnerChangedPayloadSchema,
+  dealStatusChangedPayloadSchema,
+  taskCreatedPayloadSchema,
+  taskStatusChangedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
@@ -101,6 +111,9 @@ import {
   apiUpdateMatchingConversationsSchema,
 } from './conversations';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
+import { apiCreateDealSchema, apiUpdateDealSchema } from './deals';
+import { API_NOTE_MAX_LENGTH, apiCreateNoteSchema } from './notes';
+import { apiCreateTaskSchema, apiUpdateTaskSchema } from './tasks';
 import { apiUpdateOrderSchema } from './orders';
 import {
   apiConsentSchema,
@@ -284,6 +297,18 @@ export const apiOrderSchema = z.object({
       'As the Orders page shows it: received as the customer sent it, then confirmed, awaiting_payment (a Payment Link was sent), paid, fulfilled or cancelled.',
     ),
   statusChangedAt: z.iso.datetime(),
+  statusChangedBy: z
+    .enum(ORDER_STATUS_CHANGERS)
+    .nullable()
+    .describe(
+      'Who made the latest status change: a member on the order page (member, never which member), an API key (api, named by statusChangedByApiKeyId) or HyFib applying what Razorpay reports for the order’s Payment Link (payment_link). Null while the order is as the customer sent it, and when HyFib did not record who made the latest change.',
+    ),
+  statusChangedByApiKeyId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The API key that made the latest status change, when statusChangedBy is api; null otherwise.',
+    ),
   conversationId: z.uuid().describe('The conversation the order was sent in.'),
   contactId: z
     .uuid()
@@ -338,6 +363,171 @@ export const apiOrderSchema = z.object({
   updatedAt: z.iso.datetime().describe('When anything about the order last changed.'),
 });
 
+/** A CRM pipeline with its stages (ADR-253). */
+export const apiPipelineSchema = z.object({
+  id: z.uuid().describe('The pipeline, as deals name it (`pipelineId`).'),
+  name: z.string(),
+  currency: z
+    .string()
+    .describe('ISO 4217, like INR: the currency of every deal’s value in the pipeline.'),
+  position: z
+    .number()
+    .int()
+    .describe('The pipeline’s place among the company’s pipelines in the app, the first lowest.'),
+  archived: z
+    .boolean()
+    .describe(
+      'An archived pipeline holds only closed deals and takes none until members restore it.',
+    ),
+  stages: z
+    .array(
+      z.object({
+        id: z.uuid().describe('The stage, as deals name it (`stageId`).'),
+        name: z.string(),
+        position: z.number().int().describe('The stage’s place on the board, the leftmost lowest.'),
+        archived: z
+          .boolean()
+          .describe(
+            'Removed from the board: an archived stage holds no open deals, and the closed deals closed in it keep it.',
+          ),
+        winPercent: z
+          .number()
+          .int()
+          .min(0)
+          .max(100)
+          .nullable()
+          .describe(
+            'The chance, in whole percent, that the stage’s open deals are won, which the board and Reports weigh them by; null when it is not set.',
+          ),
+      }),
+    )
+    .describe('In board order, archived stages last.'),
+  createdAt: z.iso.datetime(),
+});
+
+/** A CRM deal (ADR-253). */
+export const apiDealSchema = z.object({
+  id: z.uuid(),
+  title: z.string().describe('“Deal (contact erased)” once its contact is erased.'),
+  pipelineId: z.uuid().describe('The deal’s pipeline, as GET /pipelines lists it.'),
+  stageId: z
+    .uuid()
+    .describe('The deal’s stage in its pipeline; a closed deal keeps the stage it was closed in.'),
+  status: z.enum(DEAL_STATUSES).describe('`open`, or closed as `won` or `lost`.'),
+  valueMinor: z
+    .number()
+    .int()
+    .nullable()
+    .describe(
+      'The deal’s value in the pipeline currency’s minor units (paise for INR); null when it has none.',
+    ),
+  currency: z.string().describe('ISO 4217, like INR: the pipeline’s currency.'),
+  contactId: z
+    .uuid()
+    .describe('The customer, as GET /contacts/{id} reads them with `contacts.read`.'),
+  conversationId: z
+    .uuid()
+    .nullable()
+    .describe('The conversation the deal was created from, if any.'),
+  ownerId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The member who owns the deal, by the id GET /members gives them (it lists the members still active); null when it has no owner.',
+    ),
+  expectedCloseOn: z.iso.date().nullable().describe('The day the deal is expected to close.'),
+  stageEnteredAt: z.iso.datetime().describe('When the deal entered its stage.'),
+  lostReason: z
+    .string()
+    .nullable()
+    .describe(
+      'Why a lost deal was lost, as a member or an automation wrote it; null otherwise, and once its contact is erased.',
+    ),
+  closedAt: z.iso.datetime().nullable().describe('When the deal was won or lost; null while open.'),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime().describe('When anything about the deal last changed.'),
+  version: z
+    .number()
+    .int()
+    .describe(
+      'Moves on with every change of the deal, by members, automations or keys; PATCH /deals/{id} takes it as `expectedVersion`.',
+    ),
+});
+
+/** A CRM task (ADR-258). */
+/** A note on the CRM timeline, as `POST /notes` answers it (ADR-268). */
+export const apiNoteSchema = z.object({
+  id: z.uuid().describe('The note, on the CRM timeline.'),
+  body: z.string().describe('The note as kept: its text, spaces around it trimmed.'),
+  contactId: z
+    .uuid()
+    .describe('The contact whose timeline holds the note: the one given, or the deal’s.'),
+  dealId: z
+    .uuid()
+    .nullable()
+    .describe('The deal the note is about; null when it is about the contact only.'),
+  createdAt: z.iso.datetime().describe('When the note was added.'),
+});
+
+export const apiTaskSchema = z.object({
+  id: z.uuid(),
+  title: z.string(),
+  notes: z.string().nullable().describe('As members wrote them; null when the task has none.'),
+  status: z.enum(TASK_STATUSES).describe('`open`, or closed as `done` or `cancelled`.'),
+  dueAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When the task is due; null when it has no due time.'),
+  remindAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When the assignee is to be emailed a reminder; null when none is set.'),
+  reminderState: z
+    .enum(REMINDER_STATES)
+    .describe(
+      '`none` without a reminder, `pending` until it is due, then `sent` once the reminder email to the assignee was queued, or `skipped` when it was not sent (`reminderSkipReason` says why).',
+    ),
+  remindedAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When the reminder was sent or skipped; null before.'),
+  reminderSkipReason: z
+    .string()
+    .nullable()
+    .describe(
+      'Why a skipped reminder was not sent: `task_closed` (the task was closed first), `too_late` (it came due more than a day before it could be sent) or `assignee_inactive` (the assignee could no longer use the CRM); null otherwise.',
+    ),
+  assigneeId: z
+    .uuid()
+    .describe(
+      'The member the task is assigned to, by the id GET /members gives them (it lists the members still active).',
+    ),
+  contactId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The customer the task is about, as GET /contacts/{id} reads them with `contacts.read`; null when it is about none.',
+    ),
+  dealId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The deal the task is about, as GET /deals/{id} reads it with `deals.read`; null when it is about none. A task about a deal is about its contact too.',
+    ),
+  completedAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When the task was done or cancelled; null while open.'),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime().describe('When anything about the task last changed.'),
+  version: z
+    .number()
+    .int()
+    .describe(
+      'Moves on with every change of the task by members or keys; PATCH /tasks/{id} takes it as `expectedVersion`.',
+    ),
+});
+
 /** A member conversations can be assigned to (ADR-093). */
 export const apiMemberSchema = z.object({
   id: z.uuid().describe('The member, as `assigneeId` names them.'),
@@ -372,6 +562,26 @@ export const apiChannelSchema = z.object({
 });
 
 /** A team conversations can be moved to (ADR-093). */
+/** A tag on the company's contacts, with how many have it (ADR-272). */
+export const apiContactTagSchema = z.object({
+  tag: z.string().describe('As contacts carry it: lower case, single spaces, up to 40 characters.'),
+  contacts: z
+    .number()
+    .int()
+    .describe('The contacts that have the tag when the page is read; erased contacts have none.'),
+});
+
+/** A tag on the company's conversations, with how many have it (ADR-272). */
+export const apiConversationTagSchema = z.object({
+  tag: z
+    .string()
+    .describe('As conversations carry it: lower case, single spaces, up to 40 characters.'),
+  conversations: z
+    .number()
+    .int()
+    .describe('The conversations that have the tag when the page is read.'),
+});
+
 export const apiTeamSchema = z.object({
   id: z.uuid(),
   name: z.string(),
@@ -623,7 +833,7 @@ export const apiWebhookEndpointSchema = z.object({
     .array(z.uuid())
     .nullable()
     .describe(
-      "The WhatsApp numbers whose message, conversation, automation run, order and campaign events the endpoint receives; null receives every number's, including numbers connected later. Consent, contact and template events are not narrowed.",
+      "The WhatsApp numbers whose message, conversation, automation run, order and campaign events the endpoint receives; null receives every number's, including numbers connected later. Consent, contact, template, deal and task events are not narrowed.",
     ),
   teamIds: z
     .array(z.uuid())
@@ -643,11 +853,41 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       "The campaigns whose messages' statuses (message.status) and changes (campaign.status_changed) the endpoint receives; a message no campaign sent is on no list. null receives every campaign's. Other events are not narrowed.",
     ),
+  pipelineIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The CRM pipelines whose deals' events (deal.created, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the pipeline an event gives (deal.stage_changed also by the pipeline a move to another pipeline left); null receives every pipeline's. Other events are not narrowed.",
+    ),
+  stageIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The CRM stages whose deals' events (deal.created, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the stage an event gives (deal.stage_changed also by the stage the deal left); null receives every stage's. With pipelineIds too, an event must pass both. Other events are not narrowed.",
+    ),
+  ownerIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The members whose deals' events (deal.created, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the deal's owner when an event happens (deal.owner_changed also by the owner it left); a deal without an owner is on no list. null receives every deal's. With pipelineIds or stageIds too, an event must pass them all. Other events are not narrowed.",
+    ),
+  taskAssigneeIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The members whose tasks' events (task.created, task.status_changed) the endpoint receives, by the member a task is assigned to when an event happens. null receives every task's. Other events are not narrowed.",
+    ),
   assigneeIds: z
     .array(z.uuid())
     .nullable()
     .describe(
       "The members whose assigned conversations' message and conversation events the endpoint receives, by the member a conversation is assigned to when the event happens (conversation.assignment_changed also by the member it left); null receives every conversation's. Other events are not narrowed.",
+    ),
+  contactTags: z
+    .array(z.string())
+    .nullable()
+    .describe(
+      "The contact tags whose conversations' message and conversation events the endpoint receives, by the tags the conversation's contact has when the event happens (any of them); null receives every conversation's. Other events are not narrowed.",
     ),
   oauth: z
     .object({
@@ -774,7 +1014,7 @@ const errors = (...statuses: number[]) =>
           {
             400: 'The request is malformed (for example invalid JSON or a missing header).',
             401: 'No valid API key: missing, unknown, revoked or expired.',
-            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one or Commerce when sending products or reading or changing orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
+            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one, the CRM for pipelines, deals and tasks, or Commerce when sending products or reading or changing orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
             404: 'Not found in the company.',
             409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit). Pausing, resuming or cancelling a campaign: its status does not allow it, or, resuming, a member or HyFib paused it; the message names the status or the pause reason.',
             412: "A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it. Starting an automation: it is not published, archived or not started through the API (automation_unavailable), paused (automation_paused), its number is not active (channel_unavailable), or the plan's automation runs for the month are used up (automation_quota).",
@@ -788,6 +1028,19 @@ const errors = (...statuses: number[]) =>
       },
     ]),
   );
+
+/** Narrows a page of tags to those starting with a text (ADR-272). */
+const tagPrefixParam = {
+  name: 'prefix',
+  in: 'query',
+  schema: { type: 'string', maxLength: 100 },
+  description:
+    'Only the tags that start with this text, compared as tags are written (lower case, single spaces).',
+};
+
+/** How pages of tags are read, for both lists (ADR-272). */
+const tagPagesNote =
+  'Pages continue after the last tag of the page before, so paging never skips or repeats a tag that stays in use; a tag first used meanwhile before the cursor is listed on the next pass, and the counts are read with each page.';
 
 const pageParams = [
   {
@@ -853,7 +1106,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen, assign and tag conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, read and manage saved segments and list their contacts, create, edit, review and submit campaign drafts for a member’s approval, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen, assign and tag conversations or move them between teams, manage contacts and consent, list the tags in use on contacts and conversations, read campaigns, their results and their recipients, read and manage saved segments and list their contacts, create, edit, review and submit campaign drafts for a member’s approval, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -862,7 +1115,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         '',
         `POST /messages needs an \`Idempotency-Key\` header: a retry with the same key and body returns the first response (header \`Idempotent-Replayed: true\`) and never sends twice; responses are kept ${API_LIMITS.idempotencyHours} hours. Delivery itself follows WhatsApp: read the status with GET /messages/{id}.`,
         '',
-        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact and template event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens, or members (its \`assigneeIds\`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens. And it can name templates (its \`templateIds\`): then it receives the statuses of the messages sent with them and their changes only, or campaigns (its \`campaignIds\`): then the statuses of the messages they sent and their changes only.`,
+        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact, template, deal and task event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens, or members (its \`assigneeIds\`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens, or contact tags (its \`contactTags\`): then those of the conversations whose contact has any of the tags when the event happens only. And it can name templates (its \`templateIds\`): then it receives the statuses of the messages sent with them and their changes only, or campaigns (its \`campaignIds\`): then the statuses of the messages they sent and their changes only. And it can name CRM pipelines (its \`pipelineIds\`): then it receives the events of those pipelines' deals only, by the pipeline an event gives, a move to another pipeline reaching the endpoints of the pipeline it left as well, or stages (its \`stageIds\`): then those of the deals in those stages only, a move reaching the endpoints of the stage it left as well, or the deals' owners (its \`ownerIds\`): then those of the deals the members own when the event happens only, a change of owner reaching the endpoints of the owner it left as well; with more than one of these, an event must pass them all. And it can name the members whose tasks it takes (its \`taskAssigneeIds\`): then it receives the events of the tasks assigned to them when the event happens only.`,
       ].join('\n'),
     },
     servers: [{ url: serverUrl }],
@@ -1077,6 +1330,21 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: pageOf('Contact'),
             },
             ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/contact-tags': {
+        get: {
+          operationId: 'listContactTags',
+          summary: 'Tags on contacts, alphabetically',
+          description: [
+            `${scopeNote('contacts.read')} The tags on the company's contacts, alphabetically, each with how many contacts have it when the page is read: the tags contacts carry (\`tags\`), \`GET /contacts\` filters by (\`tag\`) and webhook endpoints name (\`contactTags\`). A tag no contact has any more is not listed.`,
+            tagPagesNote,
+          ].join('\n\n'),
+          parameters: [...pageParams, tagPrefixParam],
+          responses: {
+            '200': { description: 'A page of tags.', content: pageOf('ContactTag') },
+            ...errors(401, 403, 422, 429, 500),
           },
         },
       },
@@ -1510,6 +1778,21 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/conversation-tags': {
+        get: {
+          operationId: 'listConversationTags',
+          summary: 'Tags on conversations, alphabetically',
+          description: [
+            `${scopeNote('conversations.read')} The tags on the company's conversations, alphabetically, each with how many conversations have it when the page is read: the tags conversations carry (\`tags\`), \`GET /conversations\` filters by (\`tag\`) and changes add and remove (\`addTags\`, \`removeTags\`). A tag no conversation has any more is not listed.`,
+            tagPagesNote,
+          ].join('\n\n'),
+          parameters: [...pageParams, tagPrefixParam],
+          responses: {
+            '200': { description: 'A page of tags.', content: pageOf('ConversationTag') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
       '/teams': {
         get: {
           operationId: 'listTeams',
@@ -1918,6 +2201,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           description: [
             `${scopeNote('orders.read')} The carts customers send from the company’s WhatsApp catalog, as the Orders page lists them, newest first by when they were received; pages never skip or repeat an order. Each order has its items, total and note, with its conversation, contact and number by id. Needs Commerce in the company’s plan (403, reason not_in_plan).`,
             'Amounts are integers in the currency’s minor units (paise for INR). Payment Links and Razorpay’s payment ids are never read here: the company’s Razorpay account reports those. An erased contact’s orders are listed without the note, which erasure clears. To catch up on changes, ask for `updatedSince` a little before your previous pass began (a minute, say) and expect to see some orders again: a change carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
+            '`statusChangedBy` says who made an order’s latest status change, with the key for one made through the API (`statusChangedByApiKeyId`), so an integration can tell the orders it changed last from those members or payments did.',
           ].join('\n\n'),
           parameters: [
             ...pageParams,
@@ -1986,6 +2270,201 @@ export function buildOpenApiDocument(serverUrl: string) {
               description: 'The order, as it now is.',
               content: json(dataOf(ref('Order'))),
             },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/pipelines': {
+        get: {
+          operationId: 'listPipelines',
+          summary: 'CRM pipelines, oldest first',
+          description: `${scopeNote('deals.read')} The company’s CRM pipelines, archived ones too, each with its stages in board order and each stage’s chance of winning, read together; pages never skip or repeat a pipeline. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          parameters: [...pageParams],
+          responses: {
+            '200': { description: 'A page of pipelines.', content: pageOf('Pipeline') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/deals': {
+        get: {
+          operationId: 'listDeals',
+          summary: 'CRM deals, newest first',
+          description: [
+            `${scopeNote('deals.read')} The company’s CRM deals, open and closed, as the CRM board and the deal page show them, newest first by when they were created; pages never skip or repeat a deal. Filters combine: a deal matches all of them. Each deal has its pipeline, stage, status, value, expected close date and owner, with its contact and conversation by id. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+            'Values are integers in the pipeline currency’s minor units (paise for INR). Notes, tasks and the deal’s timeline are never read here, nor the contact’s name or number, which `contacts.read` reads. An erased contact’s deals are kept, renamed and without a lost reason, as erasure leaves them. To catch up on changes, ask for `updatedSince` a little before your previous pass began (a minute, say) and expect to see some deals again: a change carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
+          ].join('\n\n'),
+          parameters: [
+            ...pageParams,
+            {
+              name: 'pipelineId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the deals of this pipeline.',
+            },
+            {
+              name: 'stageId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the deals in this stage.',
+            },
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: [...DEAL_STATUSES] },
+              description: 'Only the deals with this status.',
+            },
+            {
+              name: 'contactId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the deals of this contact.',
+            },
+            {
+              name: 'ownerId',
+              in: 'query',
+              schema: { anyOf: [{ type: 'string', format: 'uuid' }, { const: 'none' }] },
+              description: 'Only the deals this member owns, or `none` for those without an owner.',
+            },
+            {
+              name: 'updatedSince',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description:
+                'Only deals changed at or after this time (created, edited, moved, closed or reopened, moved to another contact by a merge, or renamed when their contact was erased).',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of deals.', content: pageOf('Deal') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+        post: {
+          operationId: 'createDeal',
+          summary: 'Create a CRM deal',
+          description: `${scopeNote('deals.write')} As members create a deal on the board: for a contact (not erased) in an active stage of an active pipeline, its first when \`stageId\` is left out, with a title, a value in the pipeline currency’s minor units, an owner who is an active member able to use the CRM (GET /members) and an expected close date. The deal is recorded as created through the API: its timeline and page say so, and the audit log names the key. A pipeline or stage members archived is refused with 409; an unknown pipeline, stage or owner with 422 naming the field. Needs the CRM in the company’s plan (403, reason not_in_plan). With an \`Idempotency-Key\`, a retry answers the first response. ${MERGED_CONTACT_NOTE}`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateDeal')) },
+          responses: {
+            '201': { description: 'The deal created.', content: json(dataOf(ref('Deal'))) },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/deals/{id}': {
+        get: {
+          operationId: 'getDeal',
+          summary: 'A CRM deal',
+          description: `${scopeNote('deals.read')} As GET /deals gives it. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': { description: 'The deal.', content: json(dataOf(ref('Deal'))) },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+        patch: {
+          operationId: 'updateDeal',
+          summary: 'Change, move, close or reopen a CRM deal',
+          description: `${scopeNote('deals.write')} As members do on the deal page, in this order: \`status\` \`open\` reopens a closed deal (in its stage, or its pipeline’s first active stage when its stage was removed); \`stageId\` moves the open deal to another active stage of its pipeline, and \`pipelineId\` to another active pipeline, in \`stageId\` or that pipeline’s first active stage (a deal with a value moves only to a pipeline of its currency: clear the value in a request of its own first, 409 otherwise); the title, the value in the pipeline currency’s minor units, the owner (an active member able to use the CRM, or null) and the expected close date change, except once the deal’s contact is erased (409); \`status\` \`won\` or \`lost\` closes the open deal, with \`lostReason\` for a lost one. A deal already as asked is answered as it is, so a retry changes nothing; a closed deal is not moved, or closed the other way, until it is reopened (409), and a deal in an archived pipeline is not reopened (409). With \`expectedVersion\`, a deal changed since is refused with 409. Each change is on the deal’s timeline as done through the API, and the audit log names the key. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateDeal')) },
+          responses: {
+            '200': { description: 'The deal as it is now.', content: json(dataOf(ref('Deal'))) },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/tasks': {
+        get: {
+          operationId: 'listTasks',
+          summary: 'CRM tasks, newest first',
+          description: [
+            `${scopeNote('tasks.read')} The company’s CRM tasks, open and closed, as the Tasks page and the contact and deal pages show them, whoever created them (a member or an automation), newest first by when they were created; pages never skip or repeat a task. Filters combine: a task matches all of them. Each task has its title, notes, due time, reminder, status and assignee, with its contact and deal by id. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+            'The CRM timeline is never read here, nor the contact’s name or number, which `contacts.read` reads. Erasing a contact deletes its tasks, so they are no longer listed, and their ids answer 404; merging contacts moves the merged contact’s tasks to the one kept. To catch up on changes, ask for `updatedSince` a little before your previous pass began (a minute, say) and expect to see some tasks again: a change carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
+          ].join('\n\n'),
+          parameters: [
+            ...pageParams,
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: [...TASK_STATUSES] },
+              description: 'Only the tasks with this status.',
+            },
+            {
+              name: 'assigneeId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the tasks assigned to this member.',
+            },
+            {
+              name: 'contactId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the tasks about this contact.',
+            },
+            {
+              name: 'dealId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the tasks about this deal.',
+            },
+            {
+              name: 'updatedSince',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description:
+                'Only tasks changed at or after this time (created, edited, completed, cancelled or reopened, reminded, or moved to another contact by a merge).',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of tasks.', content: pageOf('Task') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+        post: {
+          operationId: 'createTask',
+          summary: 'Create a CRM task',
+          description: `${scopeNote('tasks.write')} As members create a task on the Tasks page and the contact and deal pages: about a contact (not erased), a deal and so its contact, or nobody, assigned to an active member who can use the CRM (GET /members), with notes, a due time within five years and a reminder emailed to the assignee, from now to a year ahead. The task is recorded as created through the API: the timeline of a task about a contact says so, and the audit log names the key. An unknown assignee or deal, a contact other than the deal’s, or a refused time is answered with 422 naming the field; an unknown or erased contact with 404, and a deal whose contact was erased with 409. Needs the CRM in the company’s plan (403, reason not_in_plan). With an \`Idempotency-Key\`, a retry answers the first response. ${MERGED_CONTACT_NOTE}`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateTask')) },
+          responses: {
+            '201': { description: 'The task created.', content: json(dataOf(ref('Task'))) },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/tasks/{id}': {
+        get: {
+          operationId: 'getTask',
+          summary: 'A CRM task',
+          description: `${scopeNote('tasks.read')} As GET /tasks gives it. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': { description: 'The task.', content: json(dataOf(ref('Task'))) },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+        patch: {
+          operationId: 'updateTask',
+          summary: 'Change, complete, cancel or reopen a CRM task',
+          description: `${scopeNote('tasks.write')} As members do on the Tasks page, in this order: \`status\` \`open\` reopens a closed task (a reminder skipped when it was closed is not brought back); the title, the notes, the assignee (an active member able to use the CRM), the due time (within five years) and the reminder time of the open task change (a new reminder time, from now to a year ahead, is emailed to the assignee then, and null removes it); \`status\` \`done\` completes and \`cancelled\` cancels the open task, skipping a pending reminder. A task’s contact and deal do not change. Only what differs is a change, so a retry changes nothing; a closed task is not changed, or closed the other way, until it is reopened (409). With \`expectedVersion\`, a task changed since is refused with 409. Reopening and closing a task about a contact are on its timeline as done through the API, and the audit log names the key. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateTask')) },
+          responses: {
+            '200': { description: 'The task as it is now.', content: json(dataOf(ref('Task'))) },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/notes': {
+        post: {
+          operationId: 'createNote',
+          summary: 'Add a note to the CRM timeline',
+          description: `${scopeNote('notes.write')} As members add a note on the contact and deal pages: to a contact (not erased), or to a deal and so to its contact, up to ${API_NOTE_MAX_LENGTH} characters. The note is recorded as written through the API: the timeline says so, and the audit log names the key, never the note’s text. Notes, like the rest of the timeline, are not read through the API. An unknown deal or a contact other than the deal’s is answered with 422 naming the field; an unknown or erased contact with 404, and a deal whose contact was erased with 409. Needs the CRM in the company’s plan (403, reason not_in_plan). With an \`Idempotency-Key\`, a retry answers the first response. ${MERGED_CONTACT_NOTE}`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateNote')) },
+          responses: {
+            '201': { description: 'The note added.', content: json(dataOf(ref('Note'))) },
             ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
           },
         },
@@ -2421,7 +2900,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'order.status_changed': webhook(
         'webhookOrderStatusChanged',
         WEBHOOK_EVENT_INFO['order.status_changed'].label,
-        `${WEBHOOK_EVENT_INFO['order.status_changed'].description} order.status and order.previousStatus are the change; the rest is the order when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt. An endpoint receives every status unless it names the statuses it takes (its \`orderStatuses\`, or the statuses ticked in Settings → Webhooks).`,
+        `${WEBHOOK_EVENT_INFO['order.status_changed'].description} order.status and order.previousStatus are the change, and order.changedBy who made it: a member, an API key (order.apiKeyId names it, so an integration can tell its own changes from others') or HyFib applying the order’s Payment Link; the rest is the order when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt. An endpoint receives every status unless it names the statuses it takes (its \`orderStatuses\`, or the statuses ticked in Settings → Webhooks).`,
         'WebhookOrderStatusChanged',
       ),
       'campaign.status_changed': webhook(
@@ -2429,6 +2908,42 @@ export function buildOpenApiDocument(serverUrl: string) {
         WEBHOOK_EVENT_INFO['campaign.status_changed'].label,
         `${WEBHOOK_EVENT_INFO['campaign.status_changed'].description} campaign.status and campaign.previousStatus are the change, with why it paused or completed; the rest is the campaign when the event is delivered. campaign.results are its results as GET /campaigns/{id} counts them, counted when the request is built, so a retry or a replay counts again; null while it is a draft. Deliveries are not ordered: the latest change is the one with the latest createdAt. An endpoint receives every status unless it names the statuses it takes (its \`campaignStatuses\`, or the statuses ticked in Settings → Webhooks).`,
         'WebhookCampaignStatusChanged',
+      ),
+      'deal.created': webhook(
+        'webhookDealCreated',
+        WEBHOOK_EVENT_INFO['deal.created'].label,
+        `${WEBHOOK_EVENT_INFO['deal.created'].description} deal.stageId, deal.pipelineId and deal.status are those it was added with; the rest is the deal when the event is delivered, so a deal whose contact was erased is sent as erasure left it, without the contact's number or name. Read deals with GET /deals/{id} (\`deals.read\`).`,
+        'WebhookDealCreated',
+      ),
+      'deal.stage_changed': webhook(
+        'webhookDealStageChanged',
+        WEBHOOK_EVENT_INFO['deal.stage_changed'].label,
+        `${WEBHOOK_EVENT_INFO['deal.stage_changed'].description} deal.stageId and deal.previousStageId are the move, with deal.previousPipelineId when it moved to another pipeline, and deal.status is its status as it moved; the rest is the deal when the event is delivered. One change can also reopen or close the deal, and then sends deal.status_changed as well, in the order the steps happen (a closed deal never moves): a deal reopened in another stage, because its stage was removed, is reopened and then moved; a deal one request moves and closes is moved and then closed. Each event gives the deal as its step left it; the two can have the same createdAt. Deliveries are not ordered: the latest move is the one with the latest createdAt.`,
+        'WebhookDealStageChanged',
+      ),
+      'deal.owner_changed': webhook(
+        'webhookDealOwnerChanged',
+        WEBHOOK_EVENT_INFO['deal.owner_changed'].label,
+        `${WEBHOOK_EVENT_INFO['deal.owner_changed'].description} deal.ownerId and deal.previousOwnerId are the change (null for no owner), with the stage, pipeline and status the deal had; the rest is the deal when the event is delivered. One change can also move, reopen or close the deal, and then sends deal.stage_changed and deal.status_changed as well, in the order the steps happen: reopened, moved, given to another owner, closed; each event gives the deal as its step left it, and they can have the same createdAt. An endpoint that names owners (its \`ownerIds\`) receives it for the owner the deal left as well as for the one it was given to. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        'WebhookDealOwnerChanged',
+      ),
+      'deal.status_changed': webhook(
+        'webhookDealStatusChanged',
+        WEBHOOK_EVENT_INFO['deal.status_changed'].label,
+        `${WEBHOOK_EVENT_INFO['deal.status_changed'].description} deal.status and deal.previousStatus are the change (open, won or lost), with the stage and pipeline it was in; the rest is the deal when the event is delivered, so deal.lostReason is its reason then. A change that also moves the deal sends deal.stage_changed as well (see it for their order). Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        'WebhookDealStatusChanged',
+      ),
+      'task.created': webhook(
+        'webhookTaskCreated',
+        WEBHOOK_EVENT_INFO['task.created'].label,
+        `${WEBHOOK_EVENT_INFO['task.created'].description} task.status is the one it was added with; the rest is the task when the event is delivered. A task’s notes are never sent: read the task with GET /tasks/{id} (\`tasks.read\`). Erasing a contact deletes its tasks, so the events of an erased contact’s task are no longer delivered.`,
+        'WebhookTaskCreated',
+      ),
+      'task.status_changed': webhook(
+        'webhookTaskStatusChanged',
+        WEBHOOK_EVENT_INFO['task.status_changed'].label,
+        `${WEBHOOK_EVENT_INFO['task.status_changed'].description} task.status and task.previousStatus are the change (open, done or cancelled); the rest is the task when the event is delivered. Editing a task’s details or its reminder sends nothing. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        'WebhookTaskStatusChanged',
       ),
       ping: webhook(
         'webhookPing',
@@ -2546,6 +3061,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         ContactSearch: jsonSchema(apiContactSearchSchema, 'input'),
         UpdateMatchingContacts: jsonSchema(apiUpdateMatchingContactsSchema, 'input'),
         ContactField: jsonSchema(apiContactFieldSchema),
+        ContactTag: jsonSchema(apiContactTagSchema),
+        ConversationTag: jsonSchema(apiConversationTagSchema),
         ContactFieldCreate: jsonSchema(apiContactFieldCreateSchema, 'input'),
         ContactFieldUpdate: jsonSchema(apiContactFieldUpdateSchema, 'input'),
         ContactChange: {
@@ -2618,6 +3135,15 @@ export function buildOpenApiDocument(serverUrl: string) {
         Campaign: jsonSchema(apiCampaignSchema),
         Order: jsonSchema(apiOrderSchema),
         UpdateOrder: jsonSchema(apiUpdateOrderSchema, 'input'),
+        Pipeline: jsonSchema(apiPipelineSchema),
+        Deal: jsonSchema(apiDealSchema),
+        CreateDeal: jsonSchema(apiCreateDealSchema, 'input'),
+        UpdateDeal: jsonSchema(apiUpdateDealSchema, 'input'),
+        Task: jsonSchema(apiTaskSchema),
+        CreateTask: jsonSchema(apiCreateTaskSchema, 'input'),
+        UpdateTask: jsonSchema(apiUpdateTaskSchema, 'input'),
+        Note: jsonSchema(apiNoteSchema),
+        CreateNote: jsonSchema(apiCreateNoteSchema, 'input'),
         CampaignWithResults: jsonSchema(apiCampaignDetailSchema),
         CampaignReview: jsonSchema(apiCampaignReviewSchema),
         CreateCampaign: jsonSchema(apiCreateCampaignSchema, 'input'),
@@ -2659,6 +3185,12 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookOrderReceived: jsonSchema(orderReceivedPayloadSchema),
         WebhookOrderStatusChanged: jsonSchema(orderStatusChangedPayloadSchema),
         WebhookCampaignStatusChanged: jsonSchema(campaignStatusChangedPayloadSchema),
+        WebhookDealCreated: jsonSchema(dealCreatedPayloadSchema),
+        WebhookDealStageChanged: jsonSchema(dealStageChangedPayloadSchema),
+        WebhookDealOwnerChanged: jsonSchema(dealOwnerChangedPayloadSchema),
+        WebhookDealStatusChanged: jsonSchema(dealStatusChangedPayloadSchema),
+        WebhookTaskCreated: jsonSchema(taskCreatedPayloadSchema),
+        WebhookTaskStatusChanged: jsonSchema(taskStatusChangedPayloadSchema),
         WebhookPing: jsonSchema(pingPayloadSchema),
       },
     },
@@ -2679,6 +3211,8 @@ export const API_ROUTES = [
   ['post', '/contacts/{id}/consent'],
   ['post', '/contacts/{id}/merge'],
   ['get', '/contact-fields'],
+  ['get', '/contact-tags'],
+  ['get', '/conversation-tags'],
   ['post', '/contact-fields'],
   ['patch', '/contact-fields/{key}'],
   ['delete', '/contact-fields/{key}'],
@@ -2726,6 +3260,16 @@ export const API_ROUTES = [
   ['get', '/orders'],
   ['get', '/orders/{id}'],
   ['patch', '/orders/{id}'],
+  ['get', '/pipelines'],
+  ['get', '/deals'],
+  ['post', '/deals'],
+  ['get', '/deals/{id}'],
+  ['patch', '/deals/{id}'],
+  ['get', '/tasks'],
+  ['post', '/tasks'],
+  ['get', '/tasks/{id}'],
+  ['patch', '/tasks/{id}'],
+  ['post', '/notes'],
   ['get', '/webhook-endpoints'],
   ['post', '/webhook-endpoints'],
   ['post', '/webhook-endpoints/replay-failed'],

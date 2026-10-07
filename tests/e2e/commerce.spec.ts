@@ -352,8 +352,11 @@ test('a catalog is read from Meta, products are sent in a chat and an order is p
   expect(listed.data).toHaveLength(1);
   const apiOrder = listed.data[0]!;
   expect(new URL(orderUrl).pathname.endsWith(`/commerce/orders/${apiOrder.id}`)).toBe(true);
+  // Razorpay's payment, applied by HyFib, made the latest change (ADR-271).
   expect(apiOrder).toMatchObject({
     status: 'paid',
+    statusChangedBy: 'payment_link',
+    statusChangedByApiKeyId: null,
     subtotalMinor: 32050,
     customerNote: 'Please deliver after 6 pm',
     paidAt: expect.any(String),
@@ -381,8 +384,17 @@ test('a catalog is read from Meta, products are sent in a chat and an order is p
   const fulfil = { status: 'fulfilled', expectedStatus: 'paid' };
   const fulfilled = await request.patch(orderPath, { headers: auth, data: fulfil });
   expect(fulfilled.status()).toBe(200);
-  const fulfilledOrder = ((await fulfilled.json()) as { data: { status: string } }).data;
-  expect(fulfilledOrder.status).toBe('fulfilled');
+  const fulfilledOrder = (
+    (await fulfilled.json()) as {
+      data: { status: string; statusChangedBy: string; statusChangedByApiKeyId: string };
+    }
+  ).data;
+  // The key made this change, and the order names it.
+  expect(fulfilledOrder).toMatchObject({
+    status: 'fulfilled',
+    statusChangedBy: 'api',
+    statusChangedByApiKeyId: expect.any(String),
+  });
   const again = await request.patch(orderPath, { headers: auth, data: fulfil });
   expect(((await again.json()) as { data: unknown }).data).toEqual(fulfilledOrder);
   await page.reload();

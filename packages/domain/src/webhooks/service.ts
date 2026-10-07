@@ -11,11 +11,14 @@ import {
   campaigns,
   channelAccounts,
   contactFields,
+  crmPipelines,
+  crmStages,
   desc,
   eq,
   gt,
   inArray,
   isNotNull,
+  isNull,
   memberships,
   messageTemplates,
   sql,
@@ -34,6 +37,8 @@ import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
+import { normalizeTag } from '../contacts/fields';
+import { crmMembers, memberRefs } from '../crm/common';
 import { INBOX_WORKER_ROLES } from '../inbox/routing';
 import { parseInput } from '../validation';
 import {
@@ -60,7 +65,9 @@ import {
   webhookTakesCampaignEvents,
   webhookTakesChannelEvents,
   webhookTakesFieldChanges,
+  webhookTakesPipelineEvents,
   webhookRunEndTakesReason,
+  webhookTakesTaskEvents,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   type WebhookAssigneeChoice,
@@ -77,6 +84,9 @@ import {
   type WebhookEndpointField,
   type WebhookFieldChoice,
   type WebhookEndpointOAuth,
+  type WebhookEndpointOwner,
+  type WebhookEndpointPipeline,
+  type WebhookEndpointStage,
   type WebhookEndpointTeam,
   type WebhookFailureKind,
   type WebhookMessageSender,
@@ -87,6 +97,9 @@ import {
   type WebhookConsentChange,
   type WebhookReceivedMessageType,
   type AutomationEndReason,
+  type WebhookOwnerChoice,
+  type WebhookPipelineChoice,
+  type WebhookStageChoice,
   type WebhookTeamChoice,
   type WebhookTemplateChoice,
   type WebhookTemplateStatus,
@@ -987,6 +1000,216 @@ export async function assertWebhookCampaigns(
 }
 
 /**
+ * The CRM pipelines whose deals' events an endpoint takes (ADR-263), each once; null takes every
+ * pipeline's, including pipelines added later.
+ */
+export const webhookPipelineIdsSchema = z
+  .array(z.uuid({ error: 'Choose pipelines from the list.' }))
+  .min(1, 'Choose at least one pipeline, or take every pipeline.')
+  .max(WEBHOOK_LIMITS.pipelines, `Choose at most ${WEBHOOK_LIMITS.pipelines} pipelines.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_PIPELINES_NEED_THE_EVENTS =
+  'Choose pipelines only for an endpoint that receives Deal added, Deal stage, Deal owner or Deal won, lost or reopened.';
+
+export const WEBHOOK_PIPELINES_NOT_FOUND = 'Choose pipelines of this company.';
+
+/**
+ * The pipelines an endpoint keeps after it is added or changed: every pipeline (null) unless it
+ * takes a deal event; then those given, or else the ones it had.
+ */
+export function webhookPipelineIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesPipelineEvents(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses pipelines given for an endpoint unless each is the company's (ADR-263), archived ones
+ * included. Pipelines are archived, never deleted, so a list never names one that is gone. `tx` is
+ * in the company's scope.
+ */
+export async function assertWebhookPipelines(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+): Promise<void> {
+  if (!ids || ids.length === 0) return;
+  const rows = await tx
+    .select({ id: crmPipelines.id })
+    .from(crmPipelines)
+    .where(and(eq(crmPipelines.tenantId, tenantId), inArray(crmPipelines.id, [...ids])));
+  const found = new Set(rows.map((r) => r.id));
+  const index = ids.findIndex((id) => !found.has(id));
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_PIPELINES_NOT_FOUND, {
+    issues: [{ path: `pipelineIds.${index}`, message: WEBHOOK_PIPELINES_NOT_FOUND }],
+  });
+}
+
+/**
+ * The CRM stages whose deals' events an endpoint takes (ADR-264), each once; null takes every
+ * stage's, including stages added later.
+ */
+export const webhookStageIdsSchema = z
+  .array(z.uuid({ error: 'Choose stages from the list.' }))
+  .min(1, 'Choose at least one stage, or take every stage.')
+  .max(WEBHOOK_LIMITS.stages, `Choose at most ${WEBHOOK_LIMITS.stages} stages.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_STAGES_NEED_THE_EVENTS =
+  'Choose stages only for an endpoint that receives Deal added, Deal stage, Deal owner or Deal won, lost or reopened.';
+
+export const WEBHOOK_STAGES_NOT_FOUND = 'Choose stages of this company.';
+
+/**
+ * The stages an endpoint keeps after it is added or changed: every stage (null) unless it takes a
+ * deal event; then those given, or else the ones it had.
+ */
+export function webhookStageIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesPipelineEvents(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses stages given for an endpoint unless each is the company's (ADR-264), removed ones and
+ * those of archived pipelines included. Stages are archived when removed, never deleted, so a list
+ * never names one that is gone. `tx` is in the company's scope.
+ */
+export async function assertWebhookStages(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+): Promise<void> {
+  if (!ids || ids.length === 0) return;
+  const rows = await tx
+    .select({ id: crmStages.id })
+    .from(crmStages)
+    .where(and(eq(crmStages.tenantId, tenantId), inArray(crmStages.id, [...ids])));
+  const found = new Set(rows.map((r) => r.id));
+  const index = ids.findIndex((id) => !found.has(id));
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_STAGES_NOT_FOUND, {
+    issues: [{ path: `stageIds.${index}`, message: WEBHOOK_STAGES_NOT_FOUND }],
+  });
+}
+
+/**
+ * The members whose deals' events an endpoint takes (ADR-265), each once; null takes every deal's,
+ * including those of members who join later and deals without an owner.
+ */
+export const webhookOwnerIdsSchema = z
+  .array(z.uuid({ error: 'Choose members from the list.' }))
+  .min(1, 'Choose at least one member, or take every deal.')
+  .max(WEBHOOK_LIMITS.owners, `Choose at most ${WEBHOOK_LIMITS.owners} members.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_OWNERS_NEED_THE_EVENTS =
+  'Choose deal owners only for an endpoint that receives Deal added, Deal stage, Deal owner or Deal won, lost or reopened.';
+
+/** Deal owners (ADR-265) and task assignees (ADR-266) are chosen from the same members. */
+export const WEBHOOK_CRM_MEMBERS_NOT_FOUND =
+  'Choose active members of this company who use the CRM.';
+
+/**
+ * The owners an endpoint keeps after it is added or changed: every deal (null) unless it takes a
+ * deal event; then those given, or else the ones it had.
+ */
+export function webhookOwnerIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesPipelineEvents(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses members a list (`field`) adds to an endpoint unless each can own deals and be assigned
+ * tasks now: a member of the company, active, with access to the CRM, as deal owners and task
+ * assignees are chosen. Members the list already held may have left or lost the access since, and
+ * stay: they match the deals they still own and the tasks still assigned to them. `tx` is in the
+ * company's scope.
+ */
+async function assertWebhookCrmMembers(
+  tx: Tx,
+  tenantId: string,
+  field: 'ownerIds' | 'taskAssigneeIds',
+  ids: readonly string[] | null | undefined,
+  held: readonly string[] | null,
+): Promise<void> {
+  const added = (ids ?? []).filter((id) => !held?.includes(id));
+  if (added.length === 0) return;
+  const refs = await memberRefs(tx, tenantId, added);
+  const index = (ids ?? []).findIndex((id) => added.includes(id) && !refs.get(id)?.active);
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_CRM_MEMBERS_NOT_FOUND, {
+    issues: [{ path: `${field}.${index}`, message: WEBHOOK_CRM_MEMBERS_NOT_FOUND }],
+  });
+}
+
+/** Refuses deal owners a list adds unless each can own deals now (ADR-265). */
+export async function assertWebhookOwners(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+  held: readonly string[] | null = null,
+): Promise<void> {
+  await assertWebhookCrmMembers(tx, tenantId, 'ownerIds', ids, held);
+}
+
+/**
+ * The members whose tasks' events an endpoint takes (ADR-266), each once; null takes every task's,
+ * including those of members who join later.
+ */
+export const webhookTaskAssigneeIdsSchema = z
+  .array(z.uuid({ error: 'Choose members from the list.' }))
+  .min(1, 'Choose at least one member, or take every task.')
+  .max(WEBHOOK_LIMITS.taskAssignees, `Choose at most ${WEBHOOK_LIMITS.taskAssignees} members.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_TASK_ASSIGNEES_NEED_THE_EVENTS =
+  'Choose task assignees only for an endpoint that receives Task added or Task done, cancelled or reopened.';
+
+/**
+ * The assignees an endpoint keeps after it is added or changed: every task (null) unless it takes a
+ * task event; then those given, or else the ones it had.
+ */
+export function webhookTaskAssigneeIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesTaskEvents(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/** Refuses task assignees a list adds unless tasks can be assigned to each now (ADR-266). */
+export async function assertWebhookTaskAssignees(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+  held: readonly string[] | null = null,
+): Promise<void> {
+  await assertWebhookCrmMembers(tx, tenantId, 'taskAssigneeIds', ids, held);
+}
+
+/**
  * The teams whose conversations' message and conversation events an endpoint takes (ADR-174), each
  * once; null takes every conversation's, including those of teams added later.
  */
@@ -1104,6 +1327,45 @@ export async function assertWebhookAssignees(
   });
 }
 
+/**
+ * The contact tags whose conversations' message and conversation events an endpoint takes
+ * (ADR-267), as contacts carry them (`normalizeTag`), each once; null takes every conversation's.
+ */
+export const webhookContactTagsSchema = z
+  .array(z.string({ error: 'Give tags as text.' }))
+  .min(1, 'Give at least one tag, or take every conversation.')
+  .max(WEBHOOK_LIMITS.contactTags, `Give at most ${WEBHOOK_LIMITS.contactTags} tags.`)
+  .transform((given, ctx) => {
+    const tags: string[] = [];
+    for (const [index, raw] of given.entries()) {
+      const tag = normalizeTag(raw);
+      if (!tag.ok) {
+        ctx.addIssue({ code: 'custom', message: tag.message, path: [index] });
+        return z.NEVER;
+      }
+      if (!tags.includes(tag.tag)) tags.push(tag.tag);
+    }
+    return tags;
+  })
+  .nullable();
+
+export const WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS =
+  'Choose contact tags only for an endpoint that receives message or conversation events.';
+
+/**
+ * The tags an endpoint keeps after it is added or changed: every conversation (null) unless it
+ * takes an event of a conversation; then those given, or else the ones it had.
+ */
+export function webhookContactTagsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesTeamEvents(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
 /** A new signing secret: `whsec_` and 32 random bytes. */
 export function generateWebhookSecret(): string {
   return `whsec_${randomBytes(32).toString('base64url')}`;
@@ -1201,10 +1463,35 @@ const endpointFields = z.object({
    */
   campaignIds: webhookCampaignIdsSchema.optional(),
   /**
+   * Given, the CRM pipelines whose deals' events it takes (null: every pipeline's, ADR-263); left
+   * out, they stay.
+   */
+  pipelineIds: webhookPipelineIdsSchema.optional(),
+  /**
+   * Given, the CRM stages whose deals' events it takes (null: every stage's, ADR-264); left out,
+   * they stay.
+   */
+  stageIds: webhookStageIdsSchema.optional(),
+  /**
+   * Given, the members whose deals' events it takes (null: every deal's, ADR-265); left out, they
+   * stay.
+   */
+  ownerIds: webhookOwnerIdsSchema.optional(),
+  /**
+   * Given, the members whose tasks' events it takes (null: every task's, ADR-266); left out, they
+   * stay.
+   */
+  taskAssigneeIds: webhookTaskAssigneeIdsSchema.optional(),
+  /**
    * Given, the members whose assigned conversations' events it takes (null: every conversation's,
    * ADR-181); left out, they stay.
    */
   assigneeIds: webhookAssigneeIdsSchema.optional(),
+  /**
+   * Given, the contact tags whose conversations' events it takes (null: every conversation's,
+   * ADR-267); left out, they stay.
+   */
+  contactTags: webhookContactTagsSchema.optional(),
   /** Given, its OAuth client (null: none, ADR-173); left out, it stays. */
   oauth: webhookOAuthSchema.nullable().optional(),
 });
@@ -1319,11 +1606,41 @@ const campaignsNeedTheEvents = {
     !data.campaignIds || webhookTakesCampaignEvents(data.eventTypes),
   options: { path: ['campaignIds'], message: WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS },
 };
+/** Pipelines are chosen only for an endpoint that takes deal events (ADR-263). */
+const pipelinesNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; pipelineIds?: unknown }) =>
+    !data.pipelineIds || webhookTakesPipelineEvents(data.eventTypes),
+  options: { path: ['pipelineIds'], message: WEBHOOK_PIPELINES_NEED_THE_EVENTS },
+};
+/** Stages are chosen only for an endpoint that takes deal events (ADR-264). */
+const stagesNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; stageIds?: unknown }) =>
+    !data.stageIds || webhookTakesPipelineEvents(data.eventTypes),
+  options: { path: ['stageIds'], message: WEBHOOK_STAGES_NEED_THE_EVENTS },
+};
+/** Deal owners are chosen only for an endpoint that takes deal events (ADR-265). */
+const ownersNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; ownerIds?: unknown }) =>
+    !data.ownerIds || webhookTakesPipelineEvents(data.eventTypes),
+  options: { path: ['ownerIds'], message: WEBHOOK_OWNERS_NEED_THE_EVENTS },
+};
+/** Task assignees are chosen only for an endpoint that takes task events (ADR-266). */
+const taskAssigneesNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; taskAssigneeIds?: unknown }) =>
+    !data.taskAssigneeIds || webhookTakesTaskEvents(data.eventTypes),
+  options: { path: ['taskAssigneeIds'], message: WEBHOOK_TASK_ASSIGNEES_NEED_THE_EVENTS },
+};
 /** Members are chosen only for an endpoint that takes events of conversations (ADR-181). */
 const assigneesNeedTheEvents = {
   check: (data: { eventTypes: WebhookEventType[]; assigneeIds?: unknown }) =>
     !data.assigneeIds || webhookTakesTeamEvents(data.eventTypes),
   options: { path: ['assigneeIds'], message: WEBHOOK_ASSIGNEES_NEED_THE_EVENTS },
+};
+/** Contact tags are chosen only for an endpoint that takes events of conversations (ADR-267). */
+const contactTagsNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; contactTags?: unknown }) =>
+    !data.contactTags || webhookTakesTeamEvents(data.eventTypes),
+  options: { path: ['contactTags'], message: WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS },
 };
 const endpointSchema = endpointFields
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
@@ -1344,7 +1661,12 @@ const endpointSchema = endpointFields
   .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
   .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options)
   .refine(campaignsNeedTheEvents.check, campaignsNeedTheEvents.options)
-  .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options);
+  .refine(pipelinesNeedTheEvents.check, pipelinesNeedTheEvents.options)
+  .refine(stagesNeedTheEvents.check, stagesNeedTheEvents.options)
+  .refine(ownersNeedTheEvents.check, ownersNeedTheEvents.options)
+  .refine(taskAssigneesNeedTheEvents.check, taskAssigneesNeedTheEvents.options)
+  .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options)
+  .refine(contactTagsNeedTheEvents.check, contactTagsNeedTheEvents.options);
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointFields
   .extend({ endpointId: z.uuid() })
@@ -1366,7 +1688,12 @@ const updateSchema = endpointFields
   .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
   .refine(templatesNeedTheEvents.check, templatesNeedTheEvents.options)
   .refine(campaignsNeedTheEvents.check, campaignsNeedTheEvents.options)
-  .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options);
+  .refine(pipelinesNeedTheEvents.check, pipelinesNeedTheEvents.options)
+  .refine(stagesNeedTheEvents.check, stagesNeedTheEvents.options)
+  .refine(ownersNeedTheEvents.check, ownersNeedTheEvents.options)
+  .refine(taskAssigneesNeedTheEvents.check, taskAssigneesNeedTheEvents.options)
+  .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options)
+  .refine(contactTagsNeedTheEvents.check, contactTagsNeedTheEvents.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
 const replayAllFailedSchema = z.object({
@@ -1449,10 +1776,35 @@ export interface WebhookEndpointView {
    */
   campaigns: WebhookEndpointCampaign[] | null;
   /**
+   * The CRM pipelines whose deals' events it takes (ADR-263), as stored, named, with whether they
+   * are archived; null takes every pipeline's.
+   */
+  pipelines: WebhookEndpointPipeline[] | null;
+  /**
+   * The CRM stages whose deals' events it takes (ADR-264), as stored, named with their pipelines,
+   * with whether they were removed or their pipelines archived; null takes every stage's.
+   */
+  stages: WebhookEndpointStage[] | null;
+  /**
+   * The members whose deals' events it takes (ADR-265), as stored, named, with whether they can own
+   * deals now; null takes every deal's.
+   */
+  owners: WebhookEndpointOwner[] | null;
+  /**
+   * The members whose tasks' events it takes (ADR-266), as stored, named, with whether tasks can be
+   * assigned to them now; null takes every task's.
+   */
+  taskAssignees: WebhookEndpointOwner[] | null;
+  /**
    * The members whose assigned conversations' events it takes (ADR-181), as stored, named, with
    * whether conversations can still be assigned to them; null takes every conversation's.
    */
   assignees: WebhookEndpointAssignee[] | null;
+  /**
+   * The contact tags whose conversations' events it takes (ADR-267), as stored; null takes every
+   * conversation's.
+   */
+  contactTags: string[] | null;
   /** Where it gets OAuth tokens and as which client (ADR-173); the secret is never shown. */
   oauth: WebhookEndpointOAuth | null;
   createdAt: Date;
@@ -1688,7 +2040,12 @@ export async function lockWebhookEndpoint(
       teamIds: webhookEndpoints.teamIds,
       templateIds: webhookEndpoints.templateIds,
       campaignIds: webhookEndpoints.campaignIds,
+      pipelineIds: webhookEndpoints.pipelineIds,
+      stageIds: webhookEndpoints.stageIds,
+      ownerIds: webhookEndpoints.ownerIds,
+      taskAssigneeIds: webhookEndpoints.taskAssigneeIds,
       assigneeIds: webhookEndpoints.assigneeIds,
+      contactTags: webhookEndpoints.contactTags,
       headerNames: webhookEndpoints.headerNames,
       oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
       oauthClientId: webhookEndpoints.oauthClientId,
@@ -1745,7 +2102,12 @@ export async function insertWebhookEndpoint(
     teamIds: string[] | null;
     templateIds: string[] | null;
     campaignIds: string[] | null;
+    pipelineIds: string[] | null;
+    stageIds: string[] | null;
+    ownerIds: string[] | null;
+    taskAssigneeIds: string[] | null;
     assigneeIds: string[] | null;
+    contactTags: string[] | null;
     /** Its OAuth client (ADR-173), checked by `checkedWebhookOAuth` with nothing stored. */
     oauth: CheckedWebhookOAuth | null;
     creator: WebhookEndpointCreator;
@@ -1791,7 +2153,12 @@ export async function insertWebhookEndpoint(
     teamIds: input.teamIds,
     templateIds: input.templateIds,
     campaignIds: input.campaignIds,
+    pipelineIds: input.pipelineIds,
+    stageIds: input.stageIds,
+    ownerIds: input.ownerIds,
+    taskAssigneeIds: input.taskAssigneeIds,
     assigneeIds: input.assigneeIds,
+    contactTags: input.contactTags,
     ...webhookOAuthColumns(keyring, tenantId, id, input.oauth, NO_WEBHOOK_OAUTH),
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
@@ -2186,7 +2553,12 @@ export function createWebhooksService(deps: {
               teamIds: webhookEndpoints.teamIds,
               templateIds: webhookEndpoints.templateIds,
               campaignIds: webhookEndpoints.campaignIds,
+              pipelineIds: webhookEndpoints.pipelineIds,
+              stageIds: webhookEndpoints.stageIds,
+              ownerIds: webhookEndpoints.ownerIds,
+              taskAssigneeIds: webhookEndpoints.taskAssigneeIds,
               assigneeIds: webhookEndpoints.assigneeIds,
+              contactTags: webhookEndpoints.contactTags,
               oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
               oauthClientId: webhookEndpoints.oauthClientId,
               oauthScope: webhookEndpoints.oauthScope,
@@ -2288,6 +2660,61 @@ export function createWebhooksService(deps: {
                     and(eq(campaigns.tenantId, ctx.tenant.id), inArray(campaigns.id, campaignIds)),
                   );
           const campaignById = new Map(namedCampaigns.map((c) => [c.id, c]));
+          // The pipelines endpoints chose (ADR-263), and whether they are archived.
+          const pipelineIds = [...new Set(rows.flatMap((r) => r.pipelineIds ?? []))];
+          const namedPipelines =
+            pipelineIds.length === 0
+              ? []
+              : await tx
+                  .select({
+                    id: crmPipelines.id,
+                    name: crmPipelines.name,
+                    archivedAt: crmPipelines.archivedAt,
+                  })
+                  .from(crmPipelines)
+                  .where(
+                    and(
+                      eq(crmPipelines.tenantId, ctx.tenant.id),
+                      inArray(crmPipelines.id, pipelineIds),
+                    ),
+                  );
+          const pipelineById = new Map(namedPipelines.map((p) => [p.id, p]));
+          // The stages endpoints chose (ADR-264), with their pipelines.
+          const stageIds = [...new Set(rows.flatMap((r) => r.stageIds ?? []))];
+          const namedStages =
+            stageIds.length === 0
+              ? []
+              : await tx
+                  .select({
+                    id: crmStages.id,
+                    name: crmStages.name,
+                    archivedAt: crmStages.archivedAt,
+                    pipelineName: crmPipelines.name,
+                    pipelineArchivedAt: crmPipelines.archivedAt,
+                  })
+                  .from(crmStages)
+                  .innerJoin(
+                    crmPipelines,
+                    and(
+                      eq(crmPipelines.tenantId, crmStages.tenantId),
+                      eq(crmPipelines.id, crmStages.pipelineId),
+                    ),
+                  )
+                  .where(
+                    and(eq(crmStages.tenantId, ctx.tenant.id), inArray(crmStages.id, stageIds)),
+                  );
+          const stageById = new Map(namedStages.map((st) => [st.id, st]));
+          // The deal owners (ADR-265) and task assignees (ADR-266) endpoints chose, and whether
+          // they can own deals and be assigned tasks now.
+          const crmMemberById = await memberRefs(
+            tx,
+            ctx.tenant.id,
+            rows.flatMap((r) => [...(r.ownerIds ?? []), ...(r.taskAssigneeIds ?? [])]),
+          );
+          const crmMember = (id: string): WebhookEndpointOwner => {
+            const member = crmMemberById.get(id);
+            return { id, name: member?.name ?? null, active: member?.active ?? false };
+          };
           // The members endpoints chose (ADR-181), and whether they still take conversations.
           const assigneeIds = [...new Set(rows.flatMap((r) => r.assigneeIds ?? []))];
           const namedAssignees =
@@ -2340,6 +2767,10 @@ export function createWebhooksService(deps: {
               teamIds: chosenTeams,
               templateIds: chosenTemplates,
               campaignIds: chosenCampaigns,
+              pipelineIds: chosenPipelines,
+              stageIds: chosenStages,
+              ownerIds: chosenOwners,
+              taskAssigneeIds: chosenTaskAssignees,
               assigneeIds: chosenAssignees,
               contactFieldKeys: chosenFields,
               oauthTokenUrl,
@@ -2375,6 +2806,38 @@ export function createWebhooksService(deps: {
                       campaignById.get(id) ?? { id, name: 'Unknown campaign', status: null },
                   )
                 : null,
+              pipelines: chosenPipelines
+                ? chosenPipelines.map((id): WebhookEndpointPipeline => {
+                    const pipeline = pipelineById.get(id);
+                    return {
+                      id,
+                      name: pipeline?.name ?? 'Unknown pipeline',
+                      archived: pipeline ? pipeline.archivedAt !== null : false,
+                    };
+                  })
+                : null,
+              stages: chosenStages
+                ? chosenStages.map((id): WebhookEndpointStage => {
+                    const stage = stageById.get(id);
+                    return stage
+                      ? {
+                          id,
+                          name: stage.name,
+                          pipelineName: stage.pipelineName,
+                          removed: stage.archivedAt !== null,
+                          pipelineArchived: stage.pipelineArchivedAt !== null,
+                        }
+                      : {
+                          id,
+                          name: 'Unknown stage',
+                          pipelineName: 'Unknown pipeline',
+                          removed: false,
+                          pipelineArchived: false,
+                        };
+                  })
+                : null,
+              owners: chosenOwners ? chosenOwners.map(crmMember) : null,
+              taskAssignees: chosenTaskAssignees ? chosenTaskAssignees.map(crmMember) : null,
               contactFields: chosenFields
                 ? chosenFields.map((key): WebhookEndpointField => ({
                     key,
@@ -2511,6 +2974,87 @@ export function createWebhooksService(deps: {
     },
 
     /**
+     * The CRM pipelines an endpoint can choose to take the deals' events of (ADR-263): those the
+     * company uses (at most `CRM_LIMITS.pipelines`), in board order. An archived one has no open
+     * deal and takes none until restored, so it is not offered; the API takes it, and Settings keeps
+     * showing one an endpoint names.
+     */
+    async pipelineChoices(ctx: TenantContext): Promise<WebhookPipelineChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      return db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({ id: crmPipelines.id, name: crmPipelines.name })
+            .from(crmPipelines)
+            .where(and(eq(crmPipelines.tenantId, ctx.tenant.id), isNull(crmPipelines.archivedAt)))
+            .orderBy(
+              asc(crmPipelines.position),
+              asc(sql`lower(${crmPipelines.name})`),
+              asc(crmPipelines.id),
+            ),
+        { accessMode: 'read only' },
+      );
+    },
+
+    /**
+     * The CRM stages an endpoint can choose to take the deals' events of (ADR-264): the stages in
+     * use of the pipelines the company uses, in board order. A removed stage holds no deal and a
+     * stage of an archived pipeline none open, so they are not offered; the API takes them, and
+     * Settings keeps showing one an endpoint names.
+     */
+    async stageChoices(ctx: TenantContext): Promise<WebhookStageChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      return db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({
+              id: crmStages.id,
+              name: crmStages.name,
+              pipelineId: crmPipelines.id,
+              pipelineName: crmPipelines.name,
+            })
+            .from(crmStages)
+            .innerJoin(
+              crmPipelines,
+              and(
+                eq(crmPipelines.tenantId, crmStages.tenantId),
+                eq(crmPipelines.id, crmStages.pipelineId),
+              ),
+            )
+            .where(
+              and(
+                eq(crmStages.tenantId, ctx.tenant.id),
+                isNull(crmStages.archivedAt),
+                isNull(crmPipelines.archivedAt),
+              ),
+            )
+            .orderBy(
+              asc(crmPipelines.position),
+              asc(sql`lower(${crmPipelines.name})`),
+              asc(crmPipelines.id),
+              asc(crmStages.position),
+              asc(crmStages.createdAt),
+            ),
+        { accessMode: 'read only' },
+      );
+    },
+
+    /**
+     * The members an endpoint can choose to take the events of the deals they own (ADR-265) or of the
+     * tasks assigned to them (ADR-266): those who can own deals and be assigned tasks (active, with
+     * access to the CRM), by name.
+     */
+    async ownerChoices(ctx: TenantContext): Promise<WebhookOwnerChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      const members = await db.run(ctx.scope, (tx) => crmMembers(tx, ctx.tenant.id), {
+        accessMode: 'read only',
+      });
+      return members.map((m) => ({ id: m.membershipId, name: m.name }));
+    },
+
+    /**
      * The teams an endpoint can choose to take the conversations' events of (ADR-174): every team
      * of the company, by name.
      */
@@ -2635,8 +3179,21 @@ export function createWebhooksService(deps: {
         await assertWebhookTemplates(tx, ctx.tenant.id, templateIds);
         const campaignIds = webhookCampaignIdsFor(data.eventTypes, data.campaignIds, null);
         await assertWebhookCampaigns(tx, ctx.tenant.id, campaignIds);
+        const pipelineIds = webhookPipelineIdsFor(data.eventTypes, data.pipelineIds, null);
+        await assertWebhookPipelines(tx, ctx.tenant.id, pipelineIds);
+        const stageIds = webhookStageIdsFor(data.eventTypes, data.stageIds, null);
+        await assertWebhookStages(tx, ctx.tenant.id, stageIds);
+        const ownerIds = webhookOwnerIdsFor(data.eventTypes, data.ownerIds, null);
+        await assertWebhookOwners(tx, ctx.tenant.id, ownerIds);
+        const taskAssigneeIds = webhookTaskAssigneeIdsFor(
+          data.eventTypes,
+          data.taskAssigneeIds,
+          null,
+        );
+        await assertWebhookTaskAssignees(tx, ctx.tenant.id, taskAssigneeIds);
         const assigneeIds = webhookAssigneeIdsFor(data.eventTypes, data.assigneeIds, null);
         await assertWebhookAssignees(tx, ctx.tenant.id, assigneeIds);
+        const contactTags = webhookContactTagsFor(data.eventTypes, data.contactTags, null);
         const oauth = data.oauth
           ? checkedWebhookOAuth(data.oauth, NO_WEBHOOK_OAUTH, deps.egressPolicy)
           : null;
@@ -2669,7 +3226,12 @@ export function createWebhooksService(deps: {
           teamIds,
           templateIds,
           campaignIds,
+          pipelineIds,
+          stageIds,
+          ownerIds,
+          taskAssigneeIds,
           assigneeIds,
+          contactTags,
           oauth,
           creator: { userId: ctx.user.id },
         });
@@ -2703,7 +3265,12 @@ export function createWebhooksService(deps: {
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),
               ...(campaignIds ? { campaignIds } : {}),
+              ...(pipelineIds ? { pipelineIds } : {}),
+              ...(stageIds ? { stageIds } : {}),
+              ...(ownerIds ? { ownerIds } : {}),
+              ...(taskAssigneeIds ? { taskAssigneeIds } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
+              ...(contactTags ? { contactTags } : {}),
               ...(oauth ? { oauthTokenHost: oauth.host } : {}),
             },
           },
@@ -2852,6 +3419,39 @@ export function createWebhooksService(deps: {
         if (data.campaignIds !== undefined) {
           await assertWebhookCampaigns(tx, ctx.tenant.id, campaignIds);
         }
+        const pipelineIds = webhookPipelineIdsFor(
+          data.eventTypes,
+          data.pipelineIds,
+          endpoint.pipelineIds,
+        );
+        // And the pipelines (ADR-263).
+        if (data.pipelineIds !== undefined) {
+          await assertWebhookPipelines(tx, ctx.tenant.id, pipelineIds);
+        }
+        const stageIds = webhookStageIdsFor(data.eventTypes, data.stageIds, endpoint.stageIds);
+        // And the stages (ADR-264).
+        if (data.stageIds !== undefined) {
+          await assertWebhookStages(tx, ctx.tenant.id, stageIds);
+        }
+        const ownerIds = webhookOwnerIdsFor(data.eventTypes, data.ownerIds, endpoint.ownerIds);
+        // And the owners it adds: those it held may have left since (ADR-265).
+        if (data.ownerIds !== undefined) {
+          await assertWebhookOwners(tx, ctx.tenant.id, ownerIds, endpoint.ownerIds);
+        }
+        const taskAssigneeIds = webhookTaskAssigneeIdsFor(
+          data.eventTypes,
+          data.taskAssigneeIds,
+          endpoint.taskAssigneeIds,
+        );
+        // And the assignees it adds: those it held may have left since (ADR-266).
+        if (data.taskAssigneeIds !== undefined) {
+          await assertWebhookTaskAssignees(
+            tx,
+            ctx.tenant.id,
+            taskAssigneeIds,
+            endpoint.taskAssigneeIds,
+          );
+        }
         const assigneeIds = webhookAssigneeIdsFor(
           data.eventTypes,
           data.assigneeIds,
@@ -2861,6 +3461,12 @@ export function createWebhooksService(deps: {
         if (data.assigneeIds !== undefined) {
           await assertWebhookAssignees(tx, ctx.tenant.id, assigneeIds, endpoint.assigneeIds);
         }
+        // Tags are labels: any tag may be named, one no contact has yet included (ADR-267).
+        const contactTags = webhookContactTagsFor(
+          data.eventTypes,
+          data.contactTags,
+          endpoint.contactTags,
+        );
         // Left out, the OAuth client stays as it is (ADR-173).
         const oauth = data.oauth
           ? checkedWebhookOAuth(data.oauth, endpoint, deps.egressPolicy)
@@ -2895,7 +3501,12 @@ export function createWebhooksService(deps: {
             teamIds,
             templateIds,
             campaignIds,
+            pipelineIds,
+            stageIds,
+            ownerIds,
+            taskAssigneeIds,
             assigneeIds,
+            contactTags,
             ...(data.headers
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
               : {}),
@@ -2940,7 +3551,12 @@ export function createWebhooksService(deps: {
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),
               ...(campaignIds ? { campaignIds } : {}),
+              ...(pipelineIds ? { pipelineIds } : {}),
+              ...(stageIds ? { stageIds } : {}),
+              ...(ownerIds ? { ownerIds } : {}),
+              ...(taskAssigneeIds ? { taskAssigneeIds } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
+              ...(contactTags ? { contactTags } : {}),
               ...webhookOAuthAudit(oauth, endpoint),
             },
           },

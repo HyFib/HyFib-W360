@@ -13,12 +13,17 @@ import {
   advanceAutomationRun,
   apiAddConversationNote,
   apiCreateContact,
+  apiCreateDeal,
+  apiCreateNote,
+  apiCreateTask,
   apiErrorResponse,
   apiGetAutomationRun,
   apiGetContact,
   apiGetConversation,
+  apiGetDeal,
   apiGetOrder,
   apiGetMessage,
+  apiGetTask,
   apiKeyReminderNotice,
   apiListAutomations,
   apiListChannels,
@@ -26,10 +31,13 @@ import {
   apiListConversationMessages,
   apiListConversationNotes,
   apiListConversations,
+  apiListDeals,
   apiListMembers,
   apiListMessages,
   apiMessageChanges,
   apiListOrders,
+  apiListPipelines,
+  apiListTasks,
   apiListTeams,
   apiListTemplates,
   apiRecordConsent,
@@ -37,6 +45,8 @@ import {
   apiSendMessage,
   apiSendTemplate,
   apiUpdateConversation,
+  apiUpdateDeal,
+  apiUpdateTask,
   apiUpdateManyConversations,
   apiUpdateMatchingConversations,
   apiUpdateOrder,
@@ -52,7 +62,9 @@ import {
   createCampaignsService,
   createCommerceService,
   createConsentService,
+  createContactMergeService,
   createContactsService,
+  createCrmService,
   createCsatService,
   createInboxService,
   createPlanAdminService,
@@ -78,6 +90,8 @@ import {
   type ApiAutomationRunStart,
   type ApiContext,
   type ApiConversation,
+  type ApiDeal,
+  type ApiTask,
   type ApiKeyReminderDeps,
   type ApiKeysService,
   type ApiScope,
@@ -3618,6 +3632,8 @@ describe('WhatsApp orders (ADR-167)', () => {
       reference: first.reference,
       status: 'received',
       statusChangedAt: expect.any(String),
+      statusChangedBy: null,
+      statusChangedByApiKeyId: null,
       conversationId: first.conversation_id,
       contactId: first.contact_id,
       channelId: c.channelAccountId,
@@ -3660,6 +3676,11 @@ describe('WhatsApp orders (ADR-167)', () => {
     expect((await list({ status: 'confirmed' })).data.map((o) => [o.id, o.status])).toEqual([
       [first.id, 'confirmed'],
     ]);
+    // The order names who made its latest change: a member, never which (ADR-271).
+    expect(await apiGetOrder(deps(), reader.ctx, first.id)).toMatchObject({
+      statusChangedBy: 'member',
+      statusChangedByApiKeyId: null,
+    });
     expect((await list({ status: 'received' })).data.map((o) => o.id)).toEqual([
       third.id,
       second.id,
@@ -3753,6 +3774,8 @@ describe('WhatsApp orders (ADR-167)', () => {
       id: order.id,
       reference: order.reference,
       status: 'confirmed',
+      statusChangedBy: 'api',
+      statusChangedByApiKeyId: writer.id,
       subtotalMinor: 3_000,
       customerNote: 'Ring twice',
     });
@@ -3774,15 +3797,30 @@ describe('WhatsApp orders (ADR-167)', () => {
         metadata: { reference: order.reference, from: 'received', to: 'confirmed', source: 'api' },
       },
     ]);
+    // Each event names the key that made the change (ADR-270).
     const events = async () =>
       (
-        await fx.query<{ status: string; detail: { orderId: string; previousStatus: string } }>(
+        await fx.query<{
+          status: string;
+          detail: {
+            orderId: string;
+            previousStatus: string;
+            changedBy: string | null;
+            apiKeyId: string | null;
+          };
+        }>(
           `SELECT status, detail FROM app.webhook_events
             WHERE tenant_id = $1 AND type = 'order.status_changed' ORDER BY created_at, id`,
           [c.tenant.id],
         )
-      ).map((e) => [e.detail.orderId, e.detail.previousStatus, e.status]);
-    expect(await events()).toEqual([[order.id, 'received', 'confirmed']]);
+      ).map((e) => [
+        e.detail.orderId,
+        e.detail.previousStatus,
+        e.status,
+        e.detail.changedBy,
+        e.detail.apiKeyId,
+      ]);
+    expect(await events()).toEqual([[order.id, 'received', 'confirmed', 'api', writer.id]]);
 
     // A retry, even with the status it expected the first time, changes nothing.
     expect(await change(order.id, { status: 'confirmed', expectedStatus: 'received' })).toEqual(
@@ -3861,13 +3899,96 @@ describe('WhatsApp orders (ADR-167)', () => {
     await expectAppError(change(paid.id, { status: 'cancelled' }), 'conflict', /status is paid\.$/);
     const fulfilled = await change(paid.id, { status: 'fulfilled', expectedStatus: 'paid' });
     expect([fulfilled.status, fulfilled.paidAt]).toEqual(['fulfilled', expect.any(String)]);
+    // The statuses this test wrote directly record nobody.
     expect(await events()).toEqual([
-      [order.id, 'received', 'confirmed'],
-      [order.id, 'confirmed', 'fulfilled'],
-      [other.id, 'received', 'cancelled'],
-      [waiting.id, 'received', 'awaiting_payment'],
-      [paid.id, 'received', 'paid'],
-      [paid.id, 'paid', 'fulfilled'],
+      [order.id, 'received', 'confirmed', 'api', writer.id],
+      [order.id, 'confirmed', 'fulfilled', 'api', writer.id],
+      [other.id, 'received', 'cancelled', 'api', writer.id],
+      [waiting.id, 'received', 'awaiting_payment', null, null],
+      [paid.id, 'received', 'paid', null, null],
+      [paid.id, 'paid', 'fulfilled', 'api', writer.id],
+    ]);
+  });
+
+  it('record who changed an order: a member, a key of the company or the Payment Link, never the changer of an earlier transaction (ADR-270)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const writer = await apiKey(c, ['orders.write'], 'Order system');
+    const theirs = await apiKey(other, ['orders.write']);
+    const order = await sendCart(c, '919811100741', [
+      { retailerId: 'sku-1', quantity: 1, price: 12 },
+    ]);
+    const changerOf = async (orderId: string) =>
+      (
+        await fx.query<{ by: string | null; key: string | null }>(
+          `SELECT status_changed_by AS by, status_changed_by_api_key_id AS key
+             FROM app.commerce_orders WHERE id = $1`,
+          [orderId],
+        )
+      )[0];
+    const set = (assignments: string) =>
+      fx.query(`UPDATE app.commerce_orders SET ${assignments} WHERE id = $1`, [order.id]);
+
+    // A key's change records the key, as the runtime role writes it.
+    await apiUpdateOrder(deps(), writer.ctx, order.id, { status: 'confirmed' });
+    expect(await changerOf(order.id)).toEqual({ by: 'api', key: writer.id });
+
+    // A later change of status that does not record its maker clears the key: the event of that
+    // change names nobody, and so does the order, as the API reads it (ADR-271).
+    const reader = await apiKey(c, ['orders.read']);
+    const read = async () => {
+      const { statusChangedBy, statusChangedByApiKeyId } = await apiGetOrder(
+        deps(),
+        reader.ctx,
+        order.id,
+      );
+      return [statusChangedBy, statusChangedByApiKeyId];
+    };
+    expect(await read()).toEqual(['api', writer.id]);
+    await set(`status = 'fulfilled'`);
+    expect(await changerOf(order.id)).toEqual({ by: null, key: null });
+    expect(await read()).toEqual([null, null]);
+    // Recorded with a transaction other than its own, a changer is cleared too; recorded by its
+    // own, it stays.
+    await set(
+      `status = 'cancelled', status_changed_by = 'member', status_changed_xact = '1'::xid8`,
+    );
+    expect(await changerOf(order.id)).toEqual({ by: null, key: null });
+    await set(
+      `status = 'confirmed', status_changed_by = 'payment_link',
+       status_changed_xact = pg_catalog.pg_current_xact_id()`,
+    );
+    expect(await changerOf(order.id)).toEqual({ by: 'payment_link', key: null });
+    expect(await read()).toEqual(['payment_link', null]);
+    // A write that leaves the status alone leaves its changer.
+    await set(`paid_at = NULL`);
+    expect(await changerOf(order.id)).toEqual({ by: 'payment_link', key: null });
+
+    // The database keeps the changer to a member, a key of the order's company named only for a
+    // key's change, or the Payment Link.
+    for (const bad of [
+      `status_changed_by = 'api', status_changed_by_api_key_id = NULL`,
+      `status_changed_by = 'member', status_changed_by_api_key_id = '${writer.id}'`,
+      `status_changed_by = NULL, status_changed_by_api_key_id = '${writer.id}'`,
+      `status_changed_by = 'automation', status_changed_by_api_key_id = NULL`,
+    ]) {
+      await expect(set(bad), bad).rejects.toThrow(/commerce_orders_status_changed_by"/);
+    }
+    await expect(
+      set(`status_changed_by = 'api', status_changed_by_api_key_id = '${theirs.id}'`),
+    ).rejects.toThrow(/commerce_orders_status_changed_by_api_key_fk/);
+    await set(`status_changed_by = 'api', status_changed_by_api_key_id = '${writer.id}'`);
+    expect(await changerOf(order.id)).toEqual({ by: 'api', key: writer.id });
+    const grants = await fx.query<{ name: string; can_update: boolean }>(
+      `SELECT c AS name, has_column_privilege('w360_app', 'app.commerce_orders', c, 'UPDATE')
+                AS can_update
+         FROM unnest(ARRAY['status_changed_by', 'status_changed_by_api_key_id',
+                           'status_changed_xact']) AS c`,
+    );
+    expect(grants.map((g) => [g.name, g.can_update]).sort()).toEqual([
+      ['status_changed_by', true],
+      ['status_changed_by_api_key_id', true],
+      ['status_changed_xact', true],
     ]);
   });
 
@@ -3929,6 +4050,1760 @@ describe('WhatsApp orders (ADR-167)', () => {
       keys.create(narrower, { name: 'Orders', scopes: ['orders.write'], expiresInDays: 30 }),
       'forbidden',
       /Confirm, fulfil and cancel WhatsApp orders/,
+    );
+  });
+});
+
+describe('CRM pipelines and deals (ADR-253)', () => {
+  const crm = () =>
+    createCrmService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
+  const contacts = () => createContactsService({ db: fx.dbs.app, clock: systemClock });
+  let phones = 0;
+  /** A contact with a number of its own (98 and eight digits: the clock and a counter). */
+  const contactOf = async (owner: TenantContext, name: string) => {
+    phones += 1;
+    const digits = `${String(Date.now() % 1_000_000).padStart(6, '0')}${String(phones % 100).padStart(2, '0')}`;
+    return (await contacts().createContact(owner, { displayName: name, phone: `+9198${digits}` }))
+      .id;
+  };
+  /** A customer who wrote by WhatsApp user id, without a number: a contact members cannot add. */
+  async function contactByUserId(c: Company) {
+    const bsuid = `IN.${nextExternalId()}`;
+    const body = fx.messagesBody(c, { messages: [{ text: 'Hello' }] }) as {
+      entry: {
+        changes: {
+          value: { messages: Record<string, unknown>[]; contacts: Record<string, unknown>[] };
+        }[];
+      }[];
+    };
+    const value = body.entry[0]!.changes[0]!.value;
+    value.messages[0]!.from = bsuid;
+    value.contacts[0]!.user_id = bsuid;
+    await fx.deliver(body);
+    const [identity] = await fx.query<{ contact_id: string }>(
+      'SELECT contact_id FROM app.contact_identities WHERE tenant_id = $1 AND bsuid = $2',
+      [c.tenant.id, bsuid],
+    );
+    return identity!.contact_id;
+  }
+  /** A pipeline of the company and its active stages, as the CRM settings list them. */
+  async function pipelineOf(
+    owner: TenantContext,
+    name: string,
+    currency: string,
+    stages: unknown[],
+  ) {
+    const { id } = await crm().createPipeline(owner, { name, currency, stages });
+    const [pipeline] = (await crm().listPipelines(owner)).filter((p) => p.id === id);
+    return { id, stages: pipeline!.stages.map((s) => s.id) };
+  }
+
+  it('list pipelines with their stages and deals newest first on exact pages, filtered, and one by id', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const theirOwner = await fx.ctx(other, other.owner);
+    const reader = await apiKey(c, ['deals.read'], 'Deal sync');
+    const sales = await pipelineOf(owner, 'Sales', 'INR', [
+      'New',
+      { name: 'Qualified', winPercent: 40 },
+      'Proposal',
+    ]);
+    const renewals = await pipelineOf(owner, 'Renewals', 'USD', ['Due']);
+    const theirs = await pipelineOf(theirOwner, 'Theirs', 'INR', ['Open']);
+    const asha = await contactOf(owner, 'Asha');
+    const ravi = await contactOf(owner, 'Ravi');
+    const first = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan',
+      value: '1500.50',
+      ownerMembershipId: agent.membership.id,
+      expectedCloseOn: '2026-12-15',
+    });
+    const second = await crm().createDeal(owner, {
+      contactId: ravi,
+      pipelineId: sales.id,
+      stageId: sales.stages[1],
+      title: 'Pilot',
+    });
+    const third = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: renewals.id,
+      stageId: renewals.stages[0],
+      title: 'Renewal',
+      value: '200',
+    });
+    const theirDeal = await crm().createDeal(theirOwner, {
+      contactId: await contactOf(theirOwner, 'Mira'),
+      pipelineId: theirs.id,
+      stageId: theirs.stages[0],
+      title: 'Theirs',
+    });
+
+    // Pipelines oldest first, a page at a time, each with its stages in board order; never
+    // another company's.
+    const page = await apiListPipelines(deps(), reader.ctx, { limit: '1' });
+    expect(page.data.map((p) => p.id)).toEqual([sales.id]);
+    expect(page.nextCursor).toEqual(expect.any(String));
+    const rest = await apiListPipelines(deps(), reader.ctx, { cursor: page.nextCursor });
+    expect(rest.data.map((p) => p.id)).toEqual([renewals.id]);
+    expect(rest.nextCursor).toBeNull();
+    expect(page.data[0]).toEqual({
+      id: sales.id,
+      name: 'Sales',
+      currency: 'INR',
+      position: expect.any(Number),
+      archived: false,
+      stages: [
+        {
+          id: sales.stages[0],
+          name: 'New',
+          position: expect.any(Number),
+          archived: false,
+          winPercent: null,
+        },
+        {
+          id: sales.stages[1],
+          name: 'Qualified',
+          position: expect.any(Number),
+          archived: false,
+          winPercent: 40,
+        },
+        {
+          id: sales.stages[2],
+          name: 'Proposal',
+          position: expect.any(Number),
+          archived: false,
+          winPercent: null,
+        },
+      ],
+      createdAt: expect.any(String),
+    });
+
+    // Deals newest first, two to a page and the last on the next; another company's never.
+    const list = (query: Record<string, string | null | undefined>) =>
+      apiListDeals(deps(), reader.ctx, query);
+    const deals = await list({ limit: '2' });
+    expect(deals.data.map((d) => d.id)).toEqual([third.id, second.id]);
+    const last = await list({ limit: '2', cursor: deals.nextCursor });
+    expect(last.data.map((d) => d.id)).toEqual([first.id]);
+    expect(last.nextCursor).toBeNull();
+
+    // The deal as the board shows it: the value in minor units of the pipeline's currency, ids only.
+    const [stored] = await fx.query<{ created_at: Date; stage_entered_at: Date }>(
+      'SELECT created_at, stage_entered_at FROM app.crm_deals WHERE id = $1',
+      [first.id],
+    );
+    expect(last.data[0]).toEqual({
+      id: first.id,
+      title: 'Annual plan',
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      status: 'open',
+      valueMinor: 150_050,
+      currency: 'INR',
+      contactId: asha,
+      conversationId: null,
+      ownerId: agent.membership.id,
+      expectedCloseOn: '2026-12-15',
+      stageEnteredAt: stored!.stage_entered_at.toISOString(),
+      lostReason: null,
+      closedAt: null,
+      createdAt: stored!.created_at.toISOString(),
+      updatedAt: expect.any(String),
+      version: 1,
+    });
+    expect(await apiGetDeal(deps(), reader.ctx, first.id)).toEqual(last.data[0]);
+    expect((await apiGetDeal(deps(), reader.ctx, third.id)).currency).toBe('USD');
+    expect(deals.data[1]).toMatchObject({ valueMinor: null, ownerId: null, expectedCloseOn: null });
+
+    // Filters, alone and together.
+    const ids = async (query: Record<string, string>) => (await list(query)).data.map((d) => d.id);
+    expect(await ids({ pipelineId: sales.id })).toEqual([second.id, first.id]);
+    expect(await ids({ stageId: sales.stages[1]! })).toEqual([second.id]);
+    expect(await ids({ contactId: asha })).toEqual([third.id, first.id]);
+    expect(await ids({ contactId: asha, pipelineId: sales.id })).toEqual([first.id]);
+    expect(await ids({ ownerId: agent.membership.id })).toEqual([first.id]);
+    expect(await ids({ ownerId: 'none' })).toEqual([third.id, second.id]);
+
+    // A member closes the second deal as lost: it is found by its status, with its reason, and
+    // as changed since; a closed deal keeps its stage.
+    const before = new Date(Date.now() - 1_000).toISOString();
+    await crm().closeDeal(owner, {
+      id: second.id,
+      expectedVersion: 1,
+      outcome: 'lost',
+      lostReason: 'Chose another supplier',
+    });
+    const lost = await list({ status: 'lost' });
+    expect(lost.data.map((d) => [d.id, d.stageId, d.lostReason])).toEqual([
+      [second.id, sales.stages[1], 'Chose another supplier'],
+    ]);
+    expect(lost.data[0]?.closedAt).toEqual(expect.any(String));
+    expect(await ids({ status: 'open' })).toEqual([third.id, first.id]);
+    expect(await ids({ updatedSince: before })).toContain(second.id);
+    expect(await ids({ updatedSince: new Date(Date.now() + 60_000).toISOString() })).toEqual([]);
+
+    // An archived pipeline is still listed, and its closed deals still read.
+    await crm().closeDeal(owner, { id: third.id, expectedVersion: 1, outcome: 'won' });
+    const [renewal] = (await crm().listPipelines(owner)).filter((p) => p.id === renewals.id);
+    await crm().archivePipeline(owner, { id: renewals.id, expectedVersion: renewal!.version });
+    const all = await apiListPipelines(deps(), reader.ctx, {});
+    expect(all.data.map((p) => [p.id, p.archived])).toEqual([
+      [sales.id, false],
+      [renewals.id, true],
+    ]);
+    expect((await apiGetDeal(deps(), reader.ctx, third.id)).status).toBe('won');
+
+    // Another company's deal is not found by its id; nor is one that does not exist.
+    await expectAppError(apiGetDeal(deps(), reader.ctx, theirDeal.id), 'not_found');
+    await expectAppError(apiGetDeal(deps(), reader.ctx, uuidv7()), 'not_found');
+  });
+
+  it('keep an erased contact’s deals as erasure leaves them, and need the scope and the CRM in the plan', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['deals.read']);
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New']);
+    const contactId = await contactOf(owner, 'Asha');
+    const deal = await crm().createDeal(owner, {
+      contactId,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan for Asha',
+    });
+    await crm().closeDeal(owner, {
+      id: deal.id,
+      expectedVersion: 1,
+      outcome: 'lost',
+      lostReason: 'Asha moved abroad',
+    });
+    const changedAt = async () =>
+      (
+        await fx.query<{ at: string }>(
+          'SELECT updated_at::text AS at FROM app.crm_deals WHERE id = $1',
+          [deal.id],
+        )
+      )[0]!.at;
+    const closedAt = await changedAt();
+    const before = await apiGetDeal(deps(), reader.ctx, deal.id);
+    await contacts().eraseContact(owner, { contactId, suppress: false });
+    const kept = await apiGetDeal(deps(), reader.ctx, deal.id);
+    expect([kept.title, kept.lostReason, kept.status, kept.contactId]).toEqual([
+      'Deal (contact erased)',
+      null,
+      'lost',
+      contactId,
+    ]);
+    // Erasure changes the deal, so a pass asking for changes since then sees it again.
+    expect(await changedAt()).not.toBe(closedAt);
+    expect(
+      (await apiListDeals(deps(), reader.ctx, { updatedSince: before.updatedAt })).data,
+    ).toEqual([kept]);
+
+    // A key without the scope is refused before anything is read; reading is allowed while the
+    // company is suspended, as every read is.
+    const others = await apiKey(c, ['contacts.read', 'orders.read']);
+    for (const read of [
+      () => apiListPipelines(deps(), others.ctx, {}),
+      () => apiListDeals(deps(), others.ctx, {}),
+      () => apiGetDeal(deps(), others.ctx, deal.id),
+    ]) {
+      await expectAppError(read(), 'forbidden', /deals\.read/);
+    }
+    const suspended = {
+      ...reader.ctx,
+      tenant: { ...reader.ctx.tenant, status: 'suspended' as const },
+    };
+    expect((await apiListDeals(deps(), suspended, {})).data).toHaveLength(1);
+
+    // A plan without the CRM reads no pipelines or deals; with it again, it does.
+    await onPlan(c, []);
+    for (const read of [
+      () => apiListPipelines(deps(), reader.ctx, {}),
+      () => apiListDeals(deps(), reader.ctx, {}),
+      () => apiGetDeal(deps(), reader.ctx, deal.id),
+    ]) {
+      const error = await expectAppError(read(), 'forbidden', /does not include the CRM/);
+      expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    }
+    await onPlan(c, ['crm']);
+    expect((await apiGetDeal(deps(), reader.ctx, deal.id)).id).toBe(deal.id);
+    expect((await apiListPipelines(deps(), reader.ctx, {})).data.map((p) => p.id)).toEqual([
+      sales.id,
+    ]);
+
+    // Granting the scope needs crm.read, which members read the CRM with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'crm.read')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Deals', scopes: ['deals.read'], expiresInDays: 30 }),
+      'forbidden',
+      /Read CRM deals/,
+    );
+  });
+
+  it('are created as members create them, as the key, and a retry answers the first (ADR-254)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const writer = await apiKey(c, ['deals.write'], 'Web shop');
+    const reader = await apiKey(c, ['deals.read']);
+    const sales = await pipelineOf(owner, 'Sales', 'INR', [
+      'New',
+      { name: 'Qualified', winPercent: 40 },
+    ]);
+    const asha = await contactOf(owner, 'Asha');
+    const created = await apiCreateDeal(
+      deps(),
+      writer.ctx,
+      {
+        contactId: asha,
+        pipelineId: sales.id,
+        title: '  Website order  ',
+        valueMinor: 49_900,
+        ownerId: agent.membership.id,
+        expectedCloseOn: '2026-11-30',
+      },
+      null,
+    );
+    expect([created.status, created.replayed]).toEqual([201, false]);
+    const deal = (created.body as { data: ApiDeal }).data;
+    // In the pipeline's first stage, as GET /deals/{id} reads it.
+    expect(deal).toMatchObject({
+      title: 'Website order',
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      status: 'open',
+      valueMinor: 49_900,
+      currency: 'INR',
+      contactId: asha,
+      conversationId: null,
+      ownerId: agent.membership.id,
+      expectedCloseOn: '2026-11-30',
+      lostReason: null,
+      closedAt: null,
+    });
+    expect(await apiGetDeal(deps(), reader.ctx, deal.id)).toEqual(deal);
+
+    // Recorded as the key's: its creator, its page and timeline, and the audit log.
+    const [row] = await fx.query<{
+      created_by_api_key_id: string | null;
+      created_by_membership_id: string | null;
+    }>('SELECT created_by_api_key_id, created_by_membership_id FROM app.crm_deals WHERE id = $1', [
+      deal.id,
+    ]);
+    expect(row).toEqual({ created_by_api_key_id: writer.id, created_by_membership_id: null });
+    const shown = await crm().getDeal(owner, deal.id);
+    expect([shown.createdBy, shown.createdByAutomation, shown.createdThroughApi]).toEqual([
+      null,
+      false,
+      true,
+    ]);
+    expect(shown.timeline.map((a) => [a.kind, a.actor, a.data.apiKeyId])).toEqual([
+      ['deal_created', null, writer.id],
+    ]);
+    const [audit] = await fx.query<{
+      actor_type: string;
+      actor_id: string;
+      metadata: Record<string, unknown>;
+    }>(
+      `SELECT actor_type, actor_id, metadata FROM app.audit_events
+        WHERE action = 'crm.deal_created' AND subject_id = $1`,
+      [deal.id],
+    );
+    expect(audit).toMatchObject({
+      actor_type: 'api_key',
+      actor_id: writer.id,
+      metadata: { pipelineId: sales.id, stageId: sales.stages[0], source: 'api' },
+    });
+
+    // A stage of the pipeline; a retry with the same Idempotency-Key answers the first, once.
+    const request = {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[1],
+      title: 'Renewal',
+    };
+    const key = idem('deal-renewal-1', JSON.stringify(request));
+    const first = await apiCreateDeal(deps(), writer.ctx, request, key);
+    const again = await apiCreateDeal(deps(), writer.ctx, request, key);
+    expect([first.replayed, again.replayed]).toEqual([false, true]);
+    expect(again.body).toEqual(first.body);
+    expect((first.body as { data: ApiDeal }).data.stageId).toBe(sales.stages[1]);
+    expect(
+      await fx.query('SELECT id FROM app.crm_deals WHERE tenant_id = $1 AND title = $2', [
+        c.tenant.id,
+        'Renewal',
+      ]),
+    ).toHaveLength(1);
+  });
+
+  it('refuse what members are refused, and need the scope, an active company and the CRM (ADR-254)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const marketer = await fx.ctx(c, c.marketer);
+    const writer = await apiKey(c, ['deals.write']);
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New', 'Qualified', 'Proposal']);
+    const renewals = await pipelineOf(owner, 'Renewals', 'INR', ['Due']);
+    const theirs = await pipelineOf(await fx.ctx(other, other.owner), 'Theirs', 'INR', ['Open']);
+    const asha = await contactOf(owner, 'Asha');
+    const body = (input: Record<string, unknown> = {}) => ({
+      contactId: asha,
+      pipelineId: sales.id,
+      title: 'Annual plan',
+      ...input,
+    });
+    const create = (input: Record<string, unknown> = {}) =>
+      apiCreateDeal(deps(), writer.ctx, body(input), null);
+    const paths = (error: unknown) =>
+      isAppError(error) ? (error.issues ?? []).map((i) => i.path) : [];
+
+    // Another company's pipeline, another pipeline's stage, and owners who cannot use the CRM are
+    // named; another company's or an unknown contact is not found.
+    for (const [input, path] of [
+      [{ pipelineId: theirs.id }, 'pipelineId'],
+      [{ stageId: renewals.stages[0] }, 'stageId'],
+      [{ ownerId: marketer.membership.id }, 'ownerId'],
+      [{ ownerId: uuidv7() }, 'ownerId'],
+    ] as const) {
+      expect(paths(await expectAppError(create(input), 'validation_failed'))).toEqual([path]);
+    }
+    await expectAppError(create({ contactId: uuidv7() }), 'not_found', /Contact/);
+
+    // A stage members removed and an archived pipeline are conflicts; an erased contact is gone.
+    await crm().updatePipeline(owner, {
+      id: sales.id,
+      expectedVersion: 1,
+      name: 'Sales',
+      stages: [
+        { id: sales.stages[0], name: 'New' },
+        { id: sales.stages[1], name: 'Qualified' },
+      ],
+    });
+    await expectAppError(create({ stageId: sales.stages[2] }), 'conflict', /removed/);
+    await crm().archivePipeline(owner, { id: renewals.id, expectedVersion: 1 });
+    await expectAppError(create({ pipelineId: renewals.id }), 'conflict', /archived/);
+    const erased = await contactOf(owner, 'Ravi');
+    await contacts().eraseContact(owner, { contactId: erased, suppress: false });
+    await expectAppError(create({ contactId: erased }), 'not_found', /Contact/);
+    const [none] = await fx.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM app.crm_deals WHERE tenant_id = $1',
+      [c.tenant.id],
+    );
+    expect(none?.n).toBe(0);
+
+    // A key that only reads deals, or one of a suspended company, creates none.
+    const reader = await apiKey(c, ['deals.read']);
+    await expectAppError(
+      apiCreateDeal(deps(), reader.ctx, body(), null),
+      'forbidden',
+      /deals\.write/,
+    );
+    const suspended = {
+      ...writer.ctx,
+      tenant: { ...writer.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(apiCreateDeal(deps(), suspended, body(), null), 'tenant_suspended');
+
+    // A plan without the CRM creates none; with it again, the deal is created.
+    await onPlan(c, []);
+    const error = await expectAppError(create(), 'forbidden', /does not include the CRM/);
+    expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    await onPlan(c, ['crm']);
+    expect((await create()).status).toBe(201);
+
+    // Granting the scope needs crm.write, which members create deals with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'crm.write')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Deals', scopes: ['deals.write'], expiresInDays: 30 }),
+      'forbidden',
+      /Create and change CRM deals/,
+    );
+  });
+
+  it('are changed, moved, closed and reopened as members do, as the key (ADR-255)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const writer = await apiKey(c, ['deals.write'], 'Order system');
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New', 'Qualified', 'Proposal']);
+    const asha = await contactOf(owner, 'Asha');
+    const { id } = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan',
+      value: '100',
+    });
+    const change = (input: Record<string, unknown>) => apiUpdateDeal(deps(), writer.ctx, id, input);
+    const entries = async (kind: string) =>
+      (await crm().getDeal(owner, id)).timeline.filter((a) => a.kind === kind);
+
+    // Details: one new version, an entry per kind of change, each without a member and naming the key.
+    const edited = await change({
+      title: 'Bigger plan',
+      valueMinor: 25_000,
+      ownerId: agent.membership.id,
+      expectedCloseOn: '2026-12-01',
+    });
+    expect(edited).toMatchObject({
+      title: 'Bigger plan',
+      valueMinor: 25_000,
+      ownerId: agent.membership.id,
+      expectedCloseOn: '2026-12-01',
+      status: 'open',
+      version: 2,
+    });
+    expect((await entries('deal_updated')).map((a) => [a.actor, a.data])).toEqual([
+      [
+        null,
+        {
+          fields: ['title', 'value', 'expected_close_on'],
+          valueFrom: 10_000,
+          valueTo: 25_000,
+          apiKeyId: writer.id,
+        },
+      ],
+    ]);
+    expect((await entries('owner_changed')).map((a) => [a.actor, a.data])).toEqual([
+      [null, { from: null, to: agent.membership.id, apiKeyId: writer.id }],
+    ]);
+
+    // Moved to another stage of its pipeline, entering it now.
+    const moved = await change({ stageId: sales.stages[1] });
+    expect([moved.stageId, moved.version]).toEqual([sales.stages[1], 3]);
+    expect(moved.stageEnteredAt).not.toBe(edited.stageEnteredAt);
+
+    // Lost with a reason, closed by no member; a retry changes nothing.
+    const lost = await change({ status: 'lost', lostReason: 'Budget cut' });
+    expect(lost).toMatchObject({
+      status: 'lost',
+      lostReason: 'Budget cut',
+      closedAt: expect.any(String),
+      version: 4,
+    });
+    expect(await change({ status: 'lost', lostReason: 'Budget cut' })).toEqual(lost);
+    const [closer] = await fx.query<{ closed_by_membership_id: string | null }>(
+      'SELECT closed_by_membership_id FROM app.crm_deals WHERE id = $1',
+      [id],
+    );
+    expect(closer?.closed_by_membership_id).toBeNull();
+
+    // A closed deal is not moved, or closed the other way, until it is reopened.
+    await expectAppError(change({ status: 'won' }), 'conflict', /already lost/);
+    await expectAppError(change({ stageId: sales.stages[2] }), 'conflict', /Reopen/);
+    const reopened = await change({ status: 'open', stageId: sales.stages[2] });
+    expect(reopened).toMatchObject({
+      status: 'open',
+      stageId: sales.stages[2],
+      lostReason: null,
+      closedAt: null,
+      version: 5,
+    });
+
+    // From the version expected only: a stale one is refused; the current one closes it as won
+    // with its new value.
+    await expectAppError(change({ expectedVersion: 4, title: 'Late' }), 'conflict', /version 4/);
+    const won = await change({ expectedVersion: 5, valueMinor: 30_000, status: 'won' });
+    expect(won).toMatchObject({ status: 'won', valueMinor: 30_000, version: 6 });
+    expect((await entries('deal_won')).map((a) => a.data)).toEqual([
+      { valueMinor: 30_000, apiKeyId: writer.id },
+    ]);
+    expect((await entries('deal_reopened')).map((a) => a.data)).toEqual([{ apiKeyId: writer.id }]);
+    expect((await entries('stage_changed')).map((a) => a.data.toStageId)).toEqual([
+      sales.stages[2],
+      sales.stages[1],
+    ]);
+
+    // A member saving what they read before the key's change is told it changed.
+    await expectAppError(
+      crm().updateDeal(owner, {
+        id,
+        expectedVersion: 5,
+        title: 'Old title',
+        value: '',
+        ownerMembershipId: null,
+        expectedCloseOn: null,
+      }),
+      'conflict',
+      /changed/,
+    );
+
+    // Each call that changed something is audited as the key, with what it changed.
+    const audits = await fx.query<{
+      actor_type: string;
+      actor_id: string;
+      metadata: { changes: string[] };
+    }>(
+      `SELECT actor_type, actor_id, metadata FROM app.audit_events
+        WHERE action = 'crm.deal_updated' AND subject_id = $1 ORDER BY occurred_at, id`,
+      [id],
+    );
+    expect(audits.map((a) => [a.actor_type, a.actor_id, a.metadata.changes])).toEqual([
+      ['api_key', writer.id, ['title', 'value', 'expected_close_on', 'owner']],
+      ['api_key', writer.id, ['stage']],
+      ['api_key', writer.id, ['status']],
+      ['api_key', writer.id, ['status', 'stage']],
+      ['api_key', writer.id, ['value', 'status']],
+    ]);
+  });
+
+  it('refuse changes members are refused, and need the scope, an active company and the CRM (ADR-255)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const theirOwner = await fx.ctx(other, other.owner);
+    const marketer = await fx.ctx(c, c.marketer);
+    const writer = await apiKey(c, ['deals.write']);
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New', 'Qualified', 'Proposal']);
+    const renewals = await pipelineOf(owner, 'Renewals', 'INR', ['Due']);
+    const theirs = await pipelineOf(theirOwner, 'Theirs', 'INR', ['Open']);
+    const dealOf = async (
+      ctx: TenantContext,
+      pipeline: { id: string; stages: string[] },
+      name: string,
+    ) =>
+      (
+        await crm().createDeal(ctx, {
+          contactId: await contactOf(ctx, name),
+          pipelineId: pipeline.id,
+          stageId: pipeline.stages[0],
+          title: `${name}’s plan`,
+        })
+      ).id;
+    const deal = await dealOf(owner, sales, 'Asha');
+    const theirDeal = await dealOf(theirOwner, theirs, 'Mira');
+    const change = (dealId: string, input: Record<string, unknown>) =>
+      apiUpdateDeal(deps(), writer.ctx, dealId, input);
+    const paths = (error: unknown) =>
+      isAppError(error) ? (error.issues ?? []).map((i) => i.path) : [];
+    const versionOf = async (dealId: string) =>
+      (
+        await fx.query<{ version: number }>('SELECT version FROM app.crm_deals WHERE id = $1', [
+          dealId,
+        ])
+      )[0]?.version;
+
+    // Another company's deal and an unknown one are not found.
+    await expectAppError(change(theirDeal, { title: 'Mine now' }), 'not_found', /Deal/);
+    await expectAppError(change(uuidv7(), { title: 'Mine now' }), 'not_found', /Deal/);
+
+    // Another pipeline's stage and an owner who cannot use the CRM are named; a stage members
+    // removed is a conflict; none of them changes the deal.
+    expect(
+      paths(
+        await expectAppError(change(deal, { stageId: renewals.stages[0] }), 'validation_failed'),
+      ),
+    ).toEqual(['stageId']);
+    expect(
+      paths(
+        await expectAppError(
+          change(deal, { ownerId: marketer.membership.id }),
+          'validation_failed',
+        ),
+      ),
+    ).toEqual(['ownerId']);
+    await crm().updatePipeline(owner, {
+      id: sales.id,
+      expectedVersion: 1,
+      name: 'Sales',
+      stages: [
+        { id: sales.stages[0], name: 'New' },
+        { id: sales.stages[1], name: 'Qualified' },
+      ],
+    });
+    await expectAppError(change(deal, { stageId: sales.stages[2] }), 'conflict', /removed/);
+    expect(await versionOf(deal)).toBe(1);
+
+    // A closed deal in an archived pipeline is not reopened.
+    const renewal = await dealOf(owner, renewals, 'Ravi');
+    expect((await change(renewal, { status: 'won' })).status).toBe('won');
+    const [pipeline] = (await crm().listPipelines(owner)).filter((p) => p.id === renewals.id);
+    await crm().archivePipeline(owner, { id: renewals.id, expectedVersion: pipeline!.version });
+    await expectAppError(change(renewal, { status: 'open' }), 'conflict', /archived/);
+
+    // An erased contact's deal keeps its details, and is closed only without a reason.
+    const erasedDeal = await dealOf(owner, sales, 'Kiran');
+    const [erasedRow] = await fx.query<{ contact_id: string }>(
+      'SELECT contact_id FROM app.crm_deals WHERE id = $1',
+      [erasedDeal],
+    );
+    await contacts().eraseContact(owner, { contactId: erasedRow!.contact_id, suppress: false });
+    await expectAppError(change(erasedDeal, { title: 'Renamed' }), 'conflict', /erased/);
+    expect(
+      paths(
+        await expectAppError(
+          change(erasedDeal, { status: 'lost', lostReason: 'Moved away' }),
+          'validation_failed',
+        ),
+      ),
+    ).toEqual(['lostReason']);
+    expect((await change(erasedDeal, { status: 'lost' })).status).toBe('lost');
+
+    // A key that only reads deals, or one of a suspended company, changes none.
+    const reader = await apiKey(c, ['deals.read']);
+    await expectAppError(
+      apiUpdateDeal(deps(), reader.ctx, deal, { title: 'Renamed' }),
+      'forbidden',
+      /deals\.write/,
+    );
+    const suspended = {
+      ...writer.ctx,
+      tenant: { ...writer.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(
+      apiUpdateDeal(deps(), suspended, deal, { title: 'Renamed' }),
+      'tenant_suspended',
+    );
+
+    // A plan without the CRM changes none; with it again, the change is made.
+    await onPlan(c, []);
+    const error = await expectAppError(
+      change(deal, { title: 'Renamed' }),
+      'forbidden',
+      /does not include the CRM/,
+    );
+    expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    await onPlan(c, ['crm']);
+    expect((await change(deal, { title: 'Renamed' })).title).toBe('Renamed');
+  });
+
+  it('are moved to another pipeline as members move them, as the key (ADR-257)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const writer = await apiKey(c, ['deals.write'], 'Order system');
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New', 'Qualified']);
+    const renewals = await pipelineOf(owner, 'Renewals', 'INR', ['Due', 'Signed', 'Lapsed']);
+    const exports = await pipelineOf(owner, 'Exports', 'USD', ['Lead', 'Shipped']);
+    const theirs = await pipelineOf(await fx.ctx(other, other.owner), 'Theirs', 'INR', ['Open']);
+    const { id } = await crm().createDeal(owner, {
+      contactId: await contactOf(owner, 'Asha'),
+      pipelineId: sales.id,
+      stageId: sales.stages[1],
+      title: 'Annual plan',
+      value: '100',
+    });
+    const change = (input: Record<string, unknown>) => apiUpdateDeal(deps(), writer.ctx, id, input);
+    const paths = (error: unknown) =>
+      isAppError(error) ? (error.issues ?? []).map((i) => i.path) : [];
+    const versionOf = async () =>
+      (
+        await fx.query<{ version: number }>('SELECT version FROM app.crm_deals WHERE id = $1', [id])
+      )[0]?.version;
+    const versionOfPipeline = async (pipelineId: string) =>
+      (await crm().listPipelines(owner)).find((p) => p.id === pipelineId)!.version;
+
+    // To another pipeline of its currency: its first active stage when no stage is given, or the
+    // stage given. The pipeline it is in, without a stage, changes nothing.
+    expect(await change({ pipelineId: renewals.id })).toMatchObject({
+      pipelineId: renewals.id,
+      stageId: renewals.stages[0],
+      valueMinor: 10_000,
+      currency: 'INR',
+      version: 2,
+    });
+    expect(
+      await change({ pipelineId: sales.id, stageId: sales.stages[0], expectedVersion: 2 }),
+    ).toMatchObject({ pipelineId: sales.id, stageId: sales.stages[0], version: 3 });
+    expect((await change({ pipelineId: sales.id })).version).toBe(3);
+    // Recorded as members' moves are, naming both pipelines and the key, and audited.
+    const moves = async () =>
+      (await crm().getDeal(owner, id)).timeline
+        .filter((a) => a.kind === 'stage_changed')
+        .map((a) => [a.actor, a.data]);
+    expect(await moves()).toEqual([
+      [
+        null,
+        {
+          fromStageId: renewals.stages[0],
+          toStageId: sales.stages[0],
+          fromPipelineId: renewals.id,
+          toPipelineId: sales.id,
+          apiKeyId: writer.id,
+        },
+      ],
+      [
+        null,
+        {
+          fromStageId: sales.stages[1],
+          toStageId: renewals.stages[0],
+          fromPipelineId: sales.id,
+          toPipelineId: renewals.id,
+          apiKeyId: writer.id,
+        },
+      ],
+    ]);
+    const audits = await fx.query<{ actor_id: string; metadata: { changes: string[] } }>(
+      `SELECT actor_id, metadata FROM app.audit_events
+        WHERE action = 'crm.deal_updated' AND subject_id = $1 ORDER BY occurred_at, id`,
+      [id],
+    );
+    expect(audits.map((a) => [a.actor_id, a.metadata.changes])).toEqual([
+      [writer.id, ['pipeline', 'stage']],
+      [writer.id, ['pipeline', 'stage']],
+    ]);
+
+    // A deal with a value moves only to a pipeline of its currency, even with its value cleared in
+    // the same request (the move comes first).
+    for (const input of [
+      { pipelineId: exports.id },
+      { pipelineId: exports.id, valueMinor: null },
+    ]) {
+      await expectAppError(
+        change(input),
+        'conflict',
+        /^This pipeline uses USD; clear the deal's value \(in INR\) before moving it/,
+      );
+    }
+    expect(await versionOf()).toBe(3);
+
+    // A closed deal is reopened before it moves; reopened and moved in one request, it is reopened
+    // in its stage, then moved.
+    await change({ status: 'lost' });
+    await expectAppError(change({ pipelineId: renewals.id }), 'conflict', /Reopen the deal/);
+    expect(
+      await change({ status: 'open', pipelineId: renewals.id, stageId: renewals.stages[1] }),
+    ).toMatchObject({ status: 'open', pipelineId: renewals.id, stageId: renewals.stages[1] });
+    expect(
+      (await crm().getDeal(owner, id)).timeline.slice(0, 2).map((a) => [a.kind, a.data]),
+    ).toEqual([
+      [
+        'stage_changed',
+        {
+          fromStageId: sales.stages[0],
+          toStageId: renewals.stages[1],
+          fromPipelineId: sales.id,
+          toPipelineId: renewals.id,
+          apiKeyId: writer.id,
+        },
+      ],
+      ['deal_reopened', { apiKeyId: writer.id }],
+    ]);
+    // Cleared in a request of its own, it moves to the other currency's pipeline with a value in it.
+    await change({ valueMinor: null });
+    expect(
+      await change({ pipelineId: exports.id, stageId: exports.stages[1], valueMinor: 2_500 }),
+    ).toMatchObject({
+      pipelineId: exports.id,
+      stageId: exports.stages[1],
+      valueMinor: 2_500,
+      currency: 'USD',
+    });
+    const moved = await versionOf();
+
+    // An unknown pipeline, another company's and a stage of another pipeline are named; a stage
+    // members removed and an archived pipeline are conflicts; none changes the deal.
+    for (const pipelineId of [uuidv7(), theirs.id]) {
+      expect(
+        paths(await expectAppError(change({ pipelineId }), 'validation_failed', /pipelines/)),
+      ).toEqual(['pipelineId']);
+    }
+    expect(
+      paths(
+        await expectAppError(
+          change({ pipelineId: renewals.id, stageId: sales.stages[0] }),
+          'validation_failed',
+        ),
+      ),
+    ).toEqual(['stageId']);
+    await crm().updatePipeline(owner, {
+      id: renewals.id,
+      expectedVersion: await versionOfPipeline(renewals.id),
+      name: 'Renewals',
+      stages: [
+        { id: renewals.stages[0], name: 'Due' },
+        { id: renewals.stages[1], name: 'Signed' },
+      ],
+    });
+    await expectAppError(
+      change({ pipelineId: renewals.id, stageId: renewals.stages[2] }),
+      'conflict',
+      /removed/,
+    );
+    await crm().archivePipeline(owner, {
+      id: sales.id,
+      expectedVersion: await versionOfPipeline(sales.id),
+    });
+    await expectAppError(change({ pipelineId: sales.id }), 'conflict', /archived/);
+    expect(await versionOf()).toBe(moved);
+  });
+
+  it('list tasks newest first on exact pages, filtered, and one by id (ADR-258)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const theirOwner = await fx.ctx(other, other.owner);
+    const reader = await apiKey(c, ['tasks.read'], 'Task sync');
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New']);
+    const asha = await contactOf(owner, 'Asha');
+    const deal = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan',
+    });
+    const dueAt = new Date(Date.now() + 2 * 86_400_000).toISOString();
+    const remindAt = new Date(Date.now() + 86_400_000).toISOString();
+    const first = await crm().createTask(owner, {
+      title: 'Call Asha',
+      notes: 'About the renewal',
+      assigneeMembershipId: agent.membership.id,
+      contactId: asha,
+      dueAt,
+      remindAt,
+    });
+    const second = await crm().createTask(owner, {
+      title: 'Send the proposal',
+      assigneeMembershipId: owner.membership.id,
+      dealId: deal.id,
+    });
+    const third = await crm().createTask(owner, {
+      title: 'Order brochures',
+      assigneeMembershipId: owner.membership.id,
+    });
+    const theirTask = await crm().createTask(theirOwner, {
+      title: 'Theirs',
+      assigneeMembershipId: theirOwner.membership.id,
+    });
+
+    // Newest first, two to a page and the last on the next; another company's never.
+    const list = (query: Record<string, string | null | undefined>) =>
+      apiListTasks(deps(), reader.ctx, query);
+    const tasks = await list({ limit: '2' });
+    expect(tasks.data.map((t) => t.id)).toEqual([third.id, second.id]);
+    const last = await list({ limit: '2', cursor: tasks.nextCursor });
+    expect(last.data.map((t) => t.id)).toEqual([first.id]);
+    expect(last.nextCursor).toBeNull();
+
+    // The task as the Tasks page shows it, with the assignee, the contact and the deal by id.
+    const [stored] = await fx.query<{ created_at: Date; updated_at: Date }>(
+      'SELECT created_at, updated_at FROM app.crm_tasks WHERE id = $1',
+      [first.id],
+    );
+    expect(last.data[0]).toEqual({
+      id: first.id,
+      title: 'Call Asha',
+      notes: 'About the renewal',
+      status: 'open',
+      dueAt,
+      remindAt,
+      reminderState: 'pending',
+      remindedAt: null,
+      reminderSkipReason: null,
+      assigneeId: agent.membership.id,
+      contactId: asha,
+      dealId: null,
+      completedAt: null,
+      createdAt: stored!.created_at.toISOString(),
+      updatedAt: stored!.updated_at.toISOString(),
+      version: 1,
+    });
+    expect(await apiGetTask(deps(), reader.ctx, first.id)).toEqual(last.data[0]);
+    // A task about a deal is about its contact too; one about nobody names neither.
+    expect(tasks.data.map((t) => [t.contactId, t.dealId, t.notes, t.reminderState])).toEqual([
+      [null, null, null, 'none'],
+      [asha, deal.id, null, 'none'],
+    ]);
+
+    // Filters, alone and together.
+    const ids = async (query: Record<string, string>) => (await list(query)).data.map((t) => t.id);
+    expect(await ids({ assigneeId: agent.membership.id })).toEqual([first.id]);
+    expect(await ids({ contactId: asha })).toEqual([second.id, first.id]);
+    expect(await ids({ dealId: deal.id })).toEqual([second.id]);
+    expect(await ids({ contactId: asha, assigneeId: owner.membership.id })).toEqual([second.id]);
+    expect(await ids({ status: 'open' })).toEqual([third.id, second.id, first.id]);
+
+    // A member completes the second task and cancels the first, whose pending reminder is then
+    // skipped: they are found by their status and as changed since.
+    const before = new Date(Date.now() - 1_000).toISOString();
+    await crm().completeTask(owner, { id: second.id, expectedVersion: 1 });
+    await crm().cancelTask(owner, { id: first.id, expectedVersion: 1 });
+    expect(await apiGetTask(deps(), reader.ctx, second.id)).toMatchObject({
+      status: 'done',
+      completedAt: expect.any(String),
+      version: 2,
+    });
+    const cancelled = await apiGetTask(deps(), reader.ctx, first.id);
+    expect(cancelled).toMatchObject({
+      status: 'cancelled',
+      reminderState: 'skipped',
+      reminderSkipReason: 'task_closed',
+      version: 2,
+    });
+    expect(cancelled.remindedAt).toEqual(expect.any(String));
+    expect(cancelled.remindedAt).toBe(cancelled.completedAt);
+    expect(await ids({ status: 'done' })).toEqual([second.id]);
+    expect(await ids({ status: 'cancelled' })).toEqual([first.id]);
+    expect(await ids({ status: 'open' })).toEqual([third.id]);
+    expect(await ids({ updatedSince: before })).toEqual(
+      expect.arrayContaining([second.id, first.id]),
+    );
+    expect(await ids({ updatedSince: new Date(Date.now() + 60_000).toISOString() })).toEqual([]);
+
+    // Another company's task is not found by its id; nor is one that does not exist.
+    await expectAppError(apiGetTask(deps(), reader.ctx, theirTask.id), 'not_found');
+    await expectAppError(apiGetTask(deps(), reader.ctx, uuidv7()), 'not_found');
+  });
+
+  it('drop an erased contact’s tasks, follow a merge, and need the scope and the CRM (ADR-258)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['tasks.read']);
+    const asha = await contactOf(owner, 'Asha');
+    const ravi = await contactOf(owner, 'Ravi');
+    const erased = await crm().createTask(owner, {
+      title: 'Call Asha back',
+      assigneeMembershipId: owner.membership.id,
+      contactId: asha,
+    });
+    const kept = await crm().createTask(owner, {
+      title: 'Order brochures',
+      assigneeMembershipId: owner.membership.id,
+    });
+
+    // Erasing a contact deletes its tasks: they are no longer listed or found.
+    await contacts().eraseContact(owner, { contactId: asha, suppress: false });
+    await expectAppError(apiGetTask(deps(), reader.ctx, erased.id), 'not_found');
+    expect((await apiListTasks(deps(), reader.ctx, {})).data.map((t) => t.id)).toEqual([kept.id]);
+
+    // A customer who wrote by WhatsApp user id, without a number, has a task; merging them into
+    // a contact moves it there and changes it, so a pass catching up on changes sees it again.
+    const byUserId = await contactByUserId(c);
+    const moved = await crm().createTask(owner, {
+      title: 'Send the catalogue',
+      assigneeMembershipId: owner.membership.id,
+      contactId: byUserId,
+    });
+    const before = await apiGetTask(deps(), reader.ctx, moved.id);
+    await createContactMergeService({ db: fx.dbs.app, clock: systemClock }).mergeContacts(owner, {
+      keepContactId: ravi,
+      mergeContactId: byUserId,
+    });
+    const after = await apiGetTask(deps(), reader.ctx, moved.id);
+    expect(after).toEqual({ ...before, contactId: ravi, updatedAt: expect.any(String) });
+    expect(Date.parse(after.updatedAt)).toBeGreaterThan(Date.parse(before.updatedAt));
+    expect(
+      (await apiListTasks(deps(), reader.ctx, { updatedSince: after.updatedAt })).data.map(
+        (t) => t.id,
+      ),
+    ).toEqual([moved.id]);
+
+    // A key without the scope is refused before anything is read; reading is allowed while the
+    // company is suspended, as every read is.
+    const others = await apiKey(c, ['deals.read', 'contacts.read']);
+    for (const read of [
+      () => apiListTasks(deps(), others.ctx, {}),
+      () => apiGetTask(deps(), others.ctx, kept.id),
+    ]) {
+      await expectAppError(read(), 'forbidden', /tasks\.read/);
+    }
+    const suspended = {
+      ...reader.ctx,
+      tenant: { ...reader.ctx.tenant, status: 'suspended' as const },
+    };
+    expect((await apiGetTask(deps(), suspended, kept.id)).id).toBe(kept.id);
+
+    // A plan without the CRM reads no tasks; with it again, it does.
+    await onPlan(c, []);
+    for (const read of [
+      () => apiListTasks(deps(), reader.ctx, {}),
+      () => apiGetTask(deps(), reader.ctx, kept.id),
+    ]) {
+      const error = await expectAppError(read(), 'forbidden', /does not include the CRM/);
+      expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    }
+    await onPlan(c, ['crm']);
+    expect((await apiListTasks(deps(), reader.ctx, {})).data.map((t) => t.id)).toEqual([
+      moved.id,
+      kept.id,
+    ]);
+
+    // Granting the scope needs crm.read, which members read the CRM with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'crm.read')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Tasks', scopes: ['tasks.read'], expiresInDays: 30 }),
+      'forbidden',
+      /Read CRM tasks/,
+    );
+  });
+
+  it('create tasks as members create them, as the key, and a retry answers the first (ADR-259)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const writer = await apiKey(c, ['tasks.write'], 'Order system');
+    const reader = await apiKey(c, ['tasks.read']);
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New']);
+    const asha = await contactOf(owner, 'Asha');
+    const deal = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan',
+    });
+
+    // A task about the deal, and so its contact, with a due time and a reminder.
+    const dueAt = new Date(Date.now() + 86_400_000);
+    const remindAt = new Date(Date.now() + 3_600_000);
+    const created = await apiCreateTask(
+      deps(),
+      writer.ctx,
+      {
+        title: '  Send the proposal  ',
+        notes: 'With the renewal price',
+        assigneeId: agent.membership.id,
+        dealId: deal.id,
+        dueAt: dueAt.toISOString(),
+        remindAt: remindAt.toISOString(),
+      },
+      null,
+    );
+    expect([created.status, created.replayed]).toEqual([201, false]);
+    const task = (created.body as { data: ApiTask }).data;
+    expect(task).toMatchObject({
+      title: 'Send the proposal',
+      notes: 'With the renewal price',
+      status: 'open',
+      dueAt: dueAt.toISOString(),
+      remindAt: remindAt.toISOString(),
+      reminderState: 'pending',
+      remindedAt: null,
+      reminderSkipReason: null,
+      assigneeId: agent.membership.id,
+      contactId: asha,
+      dealId: deal.id,
+      completedAt: null,
+      version: 1,
+    });
+    expect(await apiGetTask(deps(), reader.ctx, task.id)).toEqual(task);
+    // Its reminder is scheduled for the time given, as members' reminders are.
+    const [job] = await fx.query<{ start_after: Date }>(
+      `SELECT start_after FROM pgboss.job WHERE name = $1 AND singleton_key = $2`,
+      [QUEUES.crmReminder.name, `${task.id}:${remindAt.getTime()}`],
+    );
+    expect(job?.start_after.getTime()).toBe(remindAt.getTime());
+
+    // Recorded as the key's: its creator, the deal's timeline, the contact's tasks and the audit log.
+    const [row] = await fx.query<{
+      created_by_api_key_id: string | null;
+      created_by_membership_id: string | null;
+      created_by_automation_id: string | null;
+    }>(
+      `SELECT created_by_api_key_id, created_by_membership_id, created_by_automation_id
+         FROM app.crm_tasks WHERE id = $1`,
+      [task.id],
+    );
+    expect(row).toEqual({
+      created_by_api_key_id: writer.id,
+      created_by_membership_id: null,
+      created_by_automation_id: null,
+    });
+    const shown = await crm().getDeal(owner, deal.id);
+    expect(
+      shown.timeline
+        .filter((a) => a.kind === 'task_created')
+        .map((a) => [a.actor, a.data.apiKeyId, a.taskTitle]),
+    ).toEqual([[null, writer.id, 'Send the proposal']]);
+    expect((await crm().contactCrm(owner, asha)).tasks.map((t) => t.id)).toEqual([task.id]);
+    const [audit] = await fx.query<{
+      actor_type: string;
+      actor_id: string;
+      metadata: Record<string, unknown>;
+    }>(
+      `SELECT actor_type, actor_id, metadata FROM app.audit_events
+        WHERE action = 'crm.task_created' AND subject_id = $1`,
+      [task.id],
+    );
+    expect(audit).toEqual({
+      actor_type: 'api_key',
+      actor_id: writer.id,
+      metadata: { assigneeId: agent.membership.id, source: 'api' },
+    });
+
+    // A task about the contact alone, and one about nobody, which no timeline shows; blank notes
+    // are none, as members' are.
+    const made = async (body: Record<string, unknown>) =>
+      ((await apiCreateTask(deps(), writer.ctx, body, null)).body as { data: ApiTask }).data;
+    const call = await made({
+      title: 'Call Asha',
+      assigneeId: owner.membership.id,
+      contactId: asha,
+    });
+    expect([call.contactId, call.dealId, call.reminderState, call.dueAt, call.notes]).toEqual([
+      asha,
+      null,
+      'none',
+      null,
+      null,
+    ]);
+    const solo = await made({
+      title: 'Order brochures',
+      assigneeId: owner.membership.id,
+      notes: '',
+    });
+    expect([solo.contactId, solo.dealId, solo.notes]).toEqual([null, null, null]);
+    const activities = await fx.query<{ task_id: string; actor_membership_id: string | null }>(
+      `SELECT task_id, actor_membership_id FROM app.crm_activities
+        WHERE tenant_id = $1 AND kind = 'task_created' ORDER BY created_at`,
+      [c.tenant.id],
+    );
+    expect(activities).toEqual([
+      { task_id: task.id, actor_membership_id: null },
+      { task_id: call.id, actor_membership_id: null },
+    ]);
+
+    // A retry with the same Idempotency-Key answers the first, once, even after the reminder time
+    // it gave has passed; the same request without one is then refused for that time.
+    const soon = new Date(Date.now() + 30_000);
+    const request = {
+      title: 'Confirm the delivery',
+      assigneeId: agent.membership.id,
+      contactId: asha,
+      remindAt: soon.toISOString(),
+    };
+    const key = idem('task-delivery-1', JSON.stringify(request));
+    const first = await apiCreateTask(deps(), writer.ctx, request, key);
+    const later = deps(at(new Date(soon.getTime() + 600_000)));
+    const again = await apiCreateTask(later, writer.ctx, request, key);
+    expect([first.replayed, again.replayed]).toEqual([false, true]);
+    expect(again.body).toEqual(first.body);
+    const late = await expectAppError(
+      apiCreateTask(later, writer.ctx, request, null),
+      'validation_failed',
+    );
+    expect(isAppError(late) && (late.issues ?? []).map((i) => i.path)).toEqual(['remindAt']);
+    expect(
+      await fx.query('SELECT id FROM app.crm_tasks WHERE tenant_id = $1 AND title = $2', [
+        c.tenant.id,
+        'Confirm the delivery',
+      ]),
+    ).toHaveLength(1);
+  });
+
+  it('refuse tasks members are refused, and need the scope, an active company and the CRM (ADR-259)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const marketer = await fx.ctx(c, c.marketer);
+    const theirOwner = await fx.ctx(other, other.owner);
+    const writer = await apiKey(c, ['tasks.write']);
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New']);
+    const theirSales = await pipelineOf(theirOwner, 'Theirs', 'INR', ['Open']);
+    const asha = await contactOf(owner, 'Asha');
+    const ravi = await contactOf(owner, 'Ravi');
+    const theirContact = await contactOf(theirOwner, 'Mira');
+    const deal = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan',
+    });
+    const theirDeal = await crm().createDeal(theirOwner, {
+      contactId: theirContact,
+      pipelineId: theirSales.id,
+      stageId: theirSales.stages[0],
+      title: 'Theirs',
+    });
+    const body = (input: Record<string, unknown> = {}) => ({
+      title: 'Call back',
+      assigneeId: owner.membership.id,
+      ...input,
+    });
+    const create = (input: Record<string, unknown> = {}) =>
+      apiCreateTask(deps(), writer.ctx, body(input), null);
+    const paths = (error: unknown) =>
+      isAppError(error) ? (error.issues ?? []).map((i) => i.path) : [];
+    const days = (n: number) => new Date(Date.now() + n * 86_400_000).toISOString();
+
+    // Assignees who cannot use the CRM, another company's or an unknown deal, a contact other than
+    // the deal's, and times members are refused are named.
+    for (const [input, path] of [
+      [{ assigneeId: marketer.membership.id }, 'assigneeId'],
+      [{ assigneeId: theirOwner.membership.id }, 'assigneeId'],
+      [{ assigneeId: uuidv7() }, 'assigneeId'],
+      [{ dealId: theirDeal.id }, 'dealId'],
+      [{ dealId: uuidv7() }, 'dealId'],
+      [{ dealId: deal.id, contactId: ravi }, 'contactId'],
+      [{ dueAt: days(6 * 365) }, 'dueAt'],
+      [{ remindAt: days(-1) }, 'remindAt'],
+      [{ remindAt: days(400) }, 'remindAt'],
+    ] as const) {
+      expect(paths(await expectAppError(create(input), 'validation_failed'))).toEqual([path]);
+    }
+
+    // Another company's or an unknown contact is not found, nor is an erased one, and a contact
+    // merged into another names the one it belongs to now; a deal whose contact was erased takes
+    // no new tasks.
+    await expectAppError(create({ contactId: theirContact }), 'not_found', /Contact/);
+    await expectAppError(create({ contactId: uuidv7() }), 'not_found', /Contact/);
+    const merged = await contactByUserId(c);
+    await createContactMergeService({ db: fx.dbs.app, clock: systemClock }).mergeContacts(owner, {
+      keepContactId: ravi,
+      mergeContactId: merged,
+    });
+    const gone = await expectAppError(create({ contactId: merged }), 'not_found', /merged/);
+    expect(isAppError(gone) && gone.details).toEqual({
+      apiReason: 'contact_merged',
+      mergedInto: ravi,
+    });
+    await contacts().eraseContact(owner, { contactId: asha, suppress: false });
+    await expectAppError(create({ contactId: asha }), 'not_found', /Contact/);
+    await expectAppError(create({ dealId: deal.id }), 'conflict', /erased/);
+    const [none] = await fx.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM app.crm_tasks WHERE tenant_id = $1',
+      [c.tenant.id],
+    );
+    expect(none?.n).toBe(0);
+
+    // A key that only reads tasks, or one of a suspended company, creates none.
+    const reader = await apiKey(c, ['tasks.read', 'deals.write']);
+    await expectAppError(
+      apiCreateTask(deps(), reader.ctx, body(), null),
+      'forbidden',
+      /tasks\.write/,
+    );
+    const suspended = {
+      ...writer.ctx,
+      tenant: { ...writer.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(apiCreateTask(deps(), suspended, body(), null), 'tenant_suspended');
+
+    // A plan without the CRM creates none; with it again, the task is created.
+    await onPlan(c, []);
+    const error = await expectAppError(create(), 'forbidden', /does not include the CRM/);
+    expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    await onPlan(c, ['crm']);
+    expect((await create({ contactId: ravi })).status).toBe(201);
+
+    // Granting the scope needs crm.write, which members create tasks with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'crm.write')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Tasks', scopes: ['tasks.write'], expiresInDays: 30 }),
+      'forbidden',
+      /Create and change CRM tasks/,
+    );
+  });
+
+  it('change, complete, cancel and reopen tasks as members do, as the key (ADR-260)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const writer = await apiKey(c, ['tasks.write'], 'Order system');
+    const asha = await contactOf(owner, 'Asha');
+    const hours = (n: number) => new Date(Date.now() + n * 3_600_000);
+    const { id } = await crm().createTask(owner, {
+      title: 'Call Asha',
+      assigneeMembershipId: owner.membership.id,
+      contactId: asha,
+      dueAt: hours(48).toISOString(),
+      remindAt: hours(24).toISOString(),
+    });
+    const change = async (body: Record<string, unknown>) =>
+      apiUpdateTask(deps(), writer.ctx, id, body);
+    const jobAt = async (at: Date) =>
+      (
+        await fx.query<{ start_after: Date }>(
+          `SELECT start_after FROM pgboss.job WHERE name = $1 AND singleton_key = $2`,
+          [QUEUES.crmReminder.name, `${id}:${at.getTime()}`],
+        )
+      ).map((j) => j.start_after.getTime());
+
+    // Details from the version expected: a new reminder is pending and scheduled for its time.
+    const due = hours(72);
+    const remind = hours(36);
+    const edit = {
+      title: '  Call Asha back  ',
+      notes: 'About the renewal',
+      assigneeId: agent.membership.id,
+      dueAt: due.toISOString(),
+      remindAt: remind.toISOString(),
+    };
+    const edited = await change({ ...edit, expectedVersion: 1 });
+    expect(edited).toMatchObject({
+      title: 'Call Asha back',
+      notes: 'About the renewal',
+      assigneeId: agent.membership.id,
+      dueAt: due.toISOString(),
+      remindAt: remind.toISOString(),
+      reminderState: 'pending',
+      status: 'open',
+      version: 2,
+    });
+    expect(await jobAt(remind)).toEqual([remind.getTime()]);
+    // A retry changes nothing; one from the version it started at is refused.
+    expect(await change(edit)).toEqual(edited);
+    await expectAppError(change({ ...edit, expectedVersion: 1 }), 'conflict', /since version 1/);
+    // Blank notes are none, and a null reminder removes it.
+    expect(await change({ notes: '', remindAt: null })).toMatchObject({
+      notes: null,
+      remindAt: null,
+      reminderState: 'none',
+      version: 3,
+    });
+
+    // Done, then not cancelled or changed until reopened; a retry and unchanged details pass.
+    const done = await change({ status: 'done' });
+    expect(done).toMatchObject({ status: 'done', completedAt: expect.any(String), version: 4 });
+    expect(await change({ status: 'done', title: 'Call Asha back' })).toEqual(done);
+    await expectAppError(change({ status: 'cancelled' }), 'conflict', /already done/);
+    await expectAppError(change({ title: 'Call Asha again' }), 'conflict', /Reopen the task/);
+    // Reopened and changed in one request.
+    expect(await change({ status: 'open', title: 'Call Asha again' })).toMatchObject({
+      status: 'open',
+      title: 'Call Asha again',
+      completedAt: null,
+      version: 5,
+    });
+    // A reminder set and the task cancelled in one request: the reminder is skipped, unscheduled.
+    const soon = hours(2);
+    expect(await change({ remindAt: soon.toISOString(), status: 'cancelled' })).toMatchObject({
+      status: 'cancelled',
+      remindAt: soon.toISOString(),
+      reminderState: 'skipped',
+      reminderSkipReason: 'task_closed',
+      version: 6,
+    });
+    expect(await jobAt(soon)).toEqual([]);
+
+    // The member's creation and the key's reopening and closing are on the contact's timeline;
+    // every change is in the audit log as the key's, retries none.
+    const activities = await fx.query<{ kind: string; actor: string | null; key: string | null }>(
+      `SELECT kind, actor_membership_id AS actor, data->>'apiKeyId' AS key
+         FROM app.crm_activities WHERE task_id = $1 ORDER BY created_at`,
+      [id],
+    );
+    expect(activities).toEqual([
+      { kind: 'task_created', actor: owner.membership.id, key: null },
+      { kind: 'task_completed', actor: null, key: writer.id },
+      { kind: 'task_reopened', actor: null, key: writer.id },
+      { kind: 'task_cancelled', actor: null, key: writer.id },
+    ]);
+    const audits = await fx.query<{ actor_type: string; actor_id: string; changes: string[] }>(
+      `SELECT actor_type, actor_id, metadata->'changes' AS changes FROM app.audit_events
+        WHERE action = 'crm.task_updated' AND subject_id = $1 ORDER BY occurred_at, id`,
+      [id],
+    );
+    expect(audits.map((a) => a.changes)).toEqual([
+      ['title', 'notes', 'assignee', 'due', 'reminder'],
+      ['notes', 'reminder'],
+      ['status'],
+      ['status', 'title'],
+      ['reminder', 'status'],
+    ]);
+    expect(new Set(audits.map((a) => `${a.actor_type}:${a.actor_id}`))).toEqual(
+      new Set([`api_key:${writer.id}`]),
+    );
+
+    // A task about nobody is closed with no timeline entry, as members' are.
+    const solo = await crm().createTask(owner, {
+      title: 'Order brochures',
+      assigneeMembershipId: owner.membership.id,
+    });
+    expect((await apiUpdateTask(deps(), writer.ctx, solo.id, { status: 'done' })).status).toBe(
+      'done',
+    );
+    expect(
+      await fx.query('SELECT id FROM app.crm_activities WHERE task_id = $1', [solo.id]),
+    ).toEqual([]);
+  });
+
+  it('refuse task changes members are refused, and need the scope, an active company and the CRM (ADR-260)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const marketer = await fx.ctx(c, c.marketer);
+    const theirOwner = await fx.ctx(other, other.owner);
+    const writer = await apiKey(c, ['tasks.write']);
+    const asha = await contactOf(owner, 'Asha');
+    const { id } = await crm().createTask(owner, {
+      title: 'Call back',
+      assigneeMembershipId: owner.membership.id,
+    });
+    const theirs = await crm().createTask(theirOwner, {
+      title: 'Theirs',
+      assigneeMembershipId: theirOwner.membership.id,
+    });
+    const change = (body: Record<string, unknown>, task = id) =>
+      apiUpdateTask(deps(), writer.ctx, task, body);
+    const paths = (error: unknown) =>
+      isAppError(error) ? (error.issues ?? []).map((i) => i.path) : [];
+    const days = (n: number) => new Date(Date.now() + n * 86_400_000).toISOString();
+    const versionOf = async () =>
+      (
+        await fx.query<{ version: number }>('SELECT version FROM app.crm_tasks WHERE id = $1', [id])
+      )[0]!.version;
+
+    // Another company's task and an unknown one are not found.
+    await expectAppError(change({ status: 'done' }, theirs.id), 'not_found', /Task/);
+    await expectAppError(change({ status: 'done' }, uuidv7()), 'not_found', /Task/);
+    // Assignees who cannot use the CRM and times members are refused are named.
+    for (const [input, path] of [
+      [{ assigneeId: marketer.membership.id }, 'assigneeId'],
+      [{ assigneeId: theirOwner.membership.id }, 'assigneeId'],
+      [{ dueAt: days(6 * 365) }, 'dueAt'],
+      [{ remindAt: days(-1) }, 'remindAt'],
+      [{ remindAt: days(400) }, 'remindAt'],
+    ] as const) {
+      expect(paths(await expectAppError(change(input), 'validation_failed'))).toEqual([path]);
+    }
+    await expectAppError(change({ title: 'New', expectedVersion: 2 }), 'conflict', /version is 1/);
+    expect(await versionOf()).toBe(1);
+
+    // Erasing a contact deletes its tasks, so a key no longer finds them.
+    const ashas = await crm().createTask(owner, {
+      title: 'Call Asha',
+      assigneeMembershipId: owner.membership.id,
+      contactId: asha,
+    });
+    await contacts().eraseContact(owner, { contactId: asha, suppress: false });
+    await expectAppError(change({ status: 'done' }, ashas.id), 'not_found', /Task/);
+
+    // A key that only reads tasks, or one of a suspended company, changes none.
+    const reader = await apiKey(c, ['tasks.read', 'deals.write']);
+    await expectAppError(
+      apiUpdateTask(deps(), reader.ctx, id, { status: 'done' }),
+      'forbidden',
+      /tasks\.write/,
+    );
+    const suspended = {
+      ...writer.ctx,
+      tenant: { ...writer.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(
+      apiUpdateTask(deps(), suspended, id, { status: 'done' }),
+      'tenant_suspended',
+    );
+
+    // A plan without the CRM changes none; with it again, the task is completed.
+    await onPlan(c, []);
+    const error = await expectAppError(
+      change({ status: 'done' }),
+      'forbidden',
+      /does not include the CRM/,
+    );
+    expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    expect(await versionOf()).toBe(1);
+    await onPlan(c, ['crm']);
+    expect((await change({ status: 'done' })).status).toBe('done');
+  });
+
+  it('add notes as members add them, as the key, and a retry answers the first (ADR-268)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const writer = await apiKey(c, ['notes.write'], 'Call centre');
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New']);
+    const asha = await contactOf(owner, 'Asha');
+    const deal = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan',
+    });
+    type Note = { id: string; body: string; contactId: string; dealId: string | null };
+
+    // A note on the deal, and so on its contact's timeline, trimmed as members' notes are.
+    const created = await apiCreateNote(
+      deps(),
+      writer.ctx,
+      { body: '  Called: will renew in March  ', dealId: deal.id },
+      null,
+    );
+    expect([created.status, created.replayed]).toEqual([201, false]);
+    const note = (created.body as { data: Note }).data;
+    expect(note).toEqual({
+      id: expect.any(String),
+      body: 'Called: will renew in March',
+      contactId: asha,
+      dealId: deal.id,
+      createdAt: expect.any(String),
+    });
+    const onDeal = (await crm().getDeal(owner, deal.id)).timeline.filter((a) => a.kind === 'note');
+    expect(onDeal.map((a) => [a.id, a.body, a.actor, a.data.apiKeyId])).toEqual([
+      [note.id, 'Called: will renew in March', null, writer.id],
+    ]);
+    // One on the contact alone, with the deal's contact given too for the first.
+    const plain = (
+      (await apiCreateNote(deps(), writer.ctx, { body: 'Prefers WhatsApp', contactId: asha }, null))
+        .body as { data: Note }
+    ).data;
+    expect([plain.contactId, plain.dealId]).toEqual([asha, null]);
+    const both = (
+      (
+        await apiCreateNote(
+          deps(),
+          writer.ctx,
+          { body: 'Sent the quote', contactId: asha, dealId: deal.id },
+          null,
+        )
+      ).body as { data: Note }
+    ).data;
+    expect([both.contactId, both.dealId]).toEqual([asha, deal.id]);
+    const onContact = (await crm().contactCrm(owner, asha)).timeline.filter(
+      (a) => a.kind === 'note',
+    );
+    expect(onContact.map((a) => a.id).sort()).toEqual([note.id, plain.id, both.id].sort());
+
+    // The audit log names the key and the contact, never the note's text.
+    const audits = await fx.query<{
+      actor_type: string;
+      actor_id: string;
+      subject_id: string;
+      metadata: Record<string, unknown>;
+    }>(
+      `SELECT actor_type, actor_id, subject_id, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'crm.note_added' ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(audits).toEqual([
+      {
+        actor_type: 'api_key',
+        actor_id: writer.id,
+        subject_id: note.id,
+        metadata: { contactId: asha, dealId: deal.id, source: 'api' },
+      },
+      {
+        actor_type: 'api_key',
+        actor_id: writer.id,
+        subject_id: plain.id,
+        metadata: { contactId: asha, source: 'api' },
+      },
+      {
+        actor_type: 'api_key',
+        actor_id: writer.id,
+        subject_id: both.id,
+        metadata: { contactId: asha, dealId: deal.id, source: 'api' },
+      },
+    ]);
+
+    // A retry with the same Idempotency-Key answers the first, once.
+    const request = { body: 'Wants a call on Monday', contactId: asha };
+    const key = idem('note-monday-1', JSON.stringify(request));
+    const first = await apiCreateNote(deps(), writer.ctx, request, key);
+    const again = await apiCreateNote(deps(), writer.ctx, request, key);
+    expect([first.replayed, again.replayed]).toEqual([false, true]);
+    expect(again.body).toEqual(first.body);
+    expect(
+      await fx.query('SELECT id FROM app.crm_activities WHERE tenant_id = $1 AND body = $2', [
+        c.tenant.id,
+        'Wants a call on Monday',
+      ]),
+    ).toHaveLength(1);
+  });
+
+  it('refuse notes members are refused, and need the scope, an active company and the CRM (ADR-268)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const theirOwner = await fx.ctx(other, other.owner);
+    const writer = await apiKey(c, ['notes.write']);
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New']);
+    const theirSales = await pipelineOf(theirOwner, 'Theirs', 'INR', ['Open']);
+    const asha = await contactOf(owner, 'Asha');
+    const ravi = await contactOf(owner, 'Ravi');
+    const theirContact = await contactOf(theirOwner, 'Mira');
+    const deal = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan',
+    });
+    const theirDeal = await crm().createDeal(theirOwner, {
+      contactId: theirContact,
+      pipelineId: theirSales.id,
+      stageId: theirSales.stages[0],
+      title: 'Theirs',
+    });
+    const create = (input: Record<string, unknown>) =>
+      apiCreateNote(deps(), writer.ctx, { body: 'Called back', ...input }, null);
+    const paths = (error: unknown) =>
+      isAppError(error) ? (error.issues ?? []).map((i) => i.path) : [];
+
+    // Another company's or an unknown deal, and a contact other than the deal's, are named.
+    for (const [input, path] of [
+      [{ dealId: theirDeal.id }, 'dealId'],
+      [{ dealId: uuidv7() }, 'dealId'],
+      [{ dealId: deal.id, contactId: ravi }, 'contactId'],
+    ] as const) {
+      expect(paths(await expectAppError(create(input), 'validation_failed'))).toEqual([path]);
+    }
+    // Another company's or an unknown contact is not found, nor is an erased one, and a contact
+    // merged into another names the one it belongs to now; a deal whose contact was erased takes
+    // no new notes.
+    await expectAppError(create({ contactId: theirContact }), 'not_found', /Contact/);
+    await expectAppError(create({ contactId: uuidv7() }), 'not_found', /Contact/);
+    const merged = await contactByUserId(c);
+    await createContactMergeService({ db: fx.dbs.app, clock: systemClock }).mergeContacts(owner, {
+      keepContactId: ravi,
+      mergeContactId: merged,
+    });
+    const gone = await expectAppError(create({ contactId: merged }), 'not_found', /merged/);
+    expect(isAppError(gone) && gone.details).toEqual({
+      apiReason: 'contact_merged',
+      mergedInto: ravi,
+    });
+    await contacts().eraseContact(owner, { contactId: asha, suppress: false });
+    await expectAppError(create({ contactId: asha }), 'not_found', /Contact/);
+    await expectAppError(create({ dealId: deal.id }), 'conflict', /erased/);
+    const [none] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM app.crm_activities WHERE tenant_id = $1 AND kind = 'note'`,
+      [c.tenant.id],
+    );
+    expect(none?.n).toBe(0);
+
+    // A key without the scope, or one of a suspended company, adds none.
+    const unscoped = await apiKey(c, ['tasks.write', 'deals.write']);
+    await expectAppError(
+      apiCreateNote(deps(), unscoped.ctx, { body: 'x', contactId: ravi }, null),
+      'forbidden',
+      /notes\.write/,
+    );
+    const suspended = {
+      ...writer.ctx,
+      tenant: { ...writer.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(
+      apiCreateNote(deps(), suspended, { body: 'x', contactId: ravi }, null),
+      'tenant_suspended',
+    );
+
+    // A plan without the CRM adds none; with it again, the note is added.
+    await onPlan(c, []);
+    const error = await expectAppError(
+      create({ contactId: ravi }),
+      'forbidden',
+      /does not include the CRM/,
+    );
+    expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    await onPlan(c, ['crm']);
+    expect((await create({ contactId: ravi })).status).toBe(201);
+
+    // Granting the scope needs crm.write, which members add notes with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'crm.write')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Notes', scopes: ['notes.write'], expiresInDays: 30 }),
+      'forbidden',
+      /Add notes to the CRM timeline/,
     );
   });
 });

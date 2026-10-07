@@ -196,6 +196,14 @@ export interface AutomationDetail {
   };
 }
 
+/** Steps that write to the CRM (ADR-244, ADR-245, ADR-250, ADR-251). */
+const CRM_NODE_TYPES: ReadonlySet<string> = new Set([
+  'create_task',
+  'create_deal',
+  'move_deal',
+  'close_deal',
+]);
+
 /** A form a form step may send (ADR-248): only one published at Meta can be sent. */
 export interface AutomationFlowOption {
   id: string;
@@ -570,19 +578,20 @@ export function createAutomationService(deps: AutomationServiceDeps) {
   }
 
   /**
-   * Publishing or testing a graph that creates CRM tasks or deals needs the CRM in the company's
-   * plan (ADR-249) and `crm.write`, as creating them in the CRM does (ADR-244, ADR-245).
+   * Publishing or testing a graph that creates CRM tasks or deals, or moves or closes deals, needs
+   * the CRM in the company's plan (ADR-249) and `crm.write`, as doing so in the CRM does (ADR-244,
+   * ADR-245, ADR-250, ADR-251).
    */
   function assertMayChangeCrm(
     ctx: TenantContext,
     graph: AutomationGraph,
     action: 'publish' | 'test',
   ) {
-    if (!graph.nodes.some((n) => n.type === 'create_task' || n.type === 'create_deal')) return;
+    if (!graph.nodes.some((n) => CRM_NODE_TYPES.has(n.type))) return;
     assertModule(ctx.plan, 'crm');
     if (can(ctx, 'crm.write')) return;
     throw forbidden(
-      `${action === 'publish' ? 'Publishing' : 'Testing'} an automation that creates CRM tasks or deals needs the permission to edit the CRM.`,
+      `${action === 'publish' ? 'Publishing' : 'Testing'} an automation that changes the CRM needs the permission to edit the CRM.`,
     );
   }
 

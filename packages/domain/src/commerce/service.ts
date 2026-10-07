@@ -62,6 +62,7 @@ import {
 import { assertModule } from '../plans/entitlements';
 import { CSV_BOM, csvLine } from '../contacts/csv';
 import { shownNumber } from '../contacts/number-masking';
+import { orderStatusChangedBy, type OrderStatusChange } from './orders';
 import { ORDER_CSV_COLUMNS, orderCsvLine, type OrderCsvRow } from './orders-csv';
 
 /** Orders one batch of an export reads (ADR-235). */
@@ -153,7 +154,7 @@ export interface OrderListItem {
  * page and API keys through `PATCH /orders/{id}` (ADR-168): the time of the change and the next
  * version, so a page opened before either change is refused as stale. Each caller checks the move
  * against MEMBER_ORDER_TRANSITIONS and writes its own audit row; the table's trigger captures the
- * `order.status_changed` webhook event.
+ * `order.status_changed` webhook event, naming who made the change (`by`, ADR-270).
  */
 export async function writeLockedOrderStatus(
   tx: Tx,
@@ -161,11 +162,12 @@ export async function writeLockedOrderStatus(
   order: { id: string; version: number },
   status: OrderStatus,
   now: Date,
+  by: OrderStatusChange,
 ): Promise<number> {
   const version = order.version + 1;
   await tx
     .update(commerceOrders)
-    .set({ status, statusChangedAt: now, version })
+    .set({ status, statusChangedAt: now, version, ...orderStatusChangedBy(by) })
     .where(and(eq(commerceOrders.tenantId, tenantId), eq(commerceOrders.id, order.id)));
   return version;
 }
@@ -1063,6 +1065,7 @@ export function createCommerceService(deps: CommerceDeps) {
           order,
           data.status,
           deps.clock.now(),
+          'member',
         );
         await recordAudit(
           tx,
@@ -1150,7 +1153,12 @@ export function createCommerceService(deps: CommerceDeps) {
         const version = order.version + 1;
         await tx
           .update(commerceOrders)
-          .set({ status: 'awaiting_payment', statusChangedAt: now, version })
+          .set({
+            status: 'awaiting_payment',
+            statusChangedAt: now,
+            version,
+            ...orderStatusChangedBy('member'),
+          })
           .where(and(eq(commerceOrders.tenantId, ctx.tenant.id), eq(commerceOrders.id, order.id)));
         await enqueue(tx, ctx, 'commerceLink', 'commerce.link', linkId, `${linkId}:create`);
         await recordAudit(

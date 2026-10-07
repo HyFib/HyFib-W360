@@ -70,7 +70,9 @@ export function Timeline({
               ? ` · ${a.actor.name}`
               : typeof a.data.automationId === 'string'
                 ? ' · by an automation'
-                : ''}
+                : typeof a.data.apiKeyId === 'string'
+                  ? ' · through the API'
+                  : ''}
             {showDeal && a.dealId && a.dealTitle ? (
               <>
                 {' · '}

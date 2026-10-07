@@ -8,6 +8,7 @@ import {
   RATE_CATEGORY_LABELS,
   can,
   formatMicros,
+  type CloseBucket,
   type MetricDefinition,
   type Report,
   type TenantContext,
@@ -36,7 +37,13 @@ import {
 import { PageHeader } from '@/components/page-header';
 import { CAMPAIGN_STATUS, failureLabel, percent } from '@/lib/campaign-labels';
 import { formatDateTime } from '@/lib/format';
-import { formatCount, formatDay, formatDayLong, formatDuration } from '@/lib/report-format';
+import {
+  formatCount,
+  formatDay,
+  formatDayLong,
+  formatDuration,
+  formatMonth,
+} from '@/lib/report-format';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
 
@@ -818,6 +825,22 @@ function AutomationSection({
   );
 }
 
+/** A forecast row's heading (ADR-252): past expected dates count in this month, as on the board. */
+function bucketLabel(bucket: CloseBucket, months: readonly [string, string, string]): string {
+  switch (bucket) {
+    case 'this_month':
+      return `${formatMonth(months[0])} (and dates already past)`;
+    case 'next_month':
+      return formatMonth(months[1]);
+    case 'month_after':
+      return formatMonth(months[2]);
+    case 'later':
+      return 'Later';
+    case 'undated':
+      return 'No expected date';
+  }
+}
+
 /** Amounts per pipeline currency, never added across currencies. */
 function amounts(list: { currency: string; valueMinor: number }[]): string {
   return list.length === 0
@@ -889,6 +912,46 @@ function DealSection({
                   </TBody>
                 </Table>
               </div>
+              <h3 className="mt-2 text-sm font-semibold">
+                {label('crm.forecast')}: {p.name}
+              </h3>
+              {p.forecast.hasChances ? null : (
+                <p className="text-sm text-muted-foreground">
+                  No stage of this pipeline has a chance of winning, so nothing is weighed. Set the
+                  chances in Settings → Pipelines.
+                </p>
+              )}
+              <div className="overflow-x-auto">
+                <Table>
+                  <THead>
+                    <TR>
+                      <TH>Expected to close</TH>
+                      <TH className="text-right">Open deals</TH>
+                      <TH className="text-right">Value ({p.currency})</TH>
+                      <TH className="text-right">Weighted ({p.currency})</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {p.forecast.buckets.map((b) => (
+                      <TR key={b.bucket}>
+                        <RowHeader>{bucketLabel(b.bucket, p.forecast.months)}</RowHeader>
+                        <TD className="text-right">{formatCount(b.deals)}</TD>
+                        <TD className="text-right">{formatMinor(b.valueMinor, p.currency)}</TD>
+                        <TD className="text-right">
+                          {p.forecast.hasChances ? formatMinor(b.weightedMinor, p.currency) : '—'}
+                        </TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+              </div>
+              {p.forecast.hasChances && p.forecast.dealsWithoutChance > 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {formatCount(p.forecast.dealsWithoutChance)}{' '}
+                  {p.forecast.dealsWithoutChance === 1 ? 'open deal is' : 'open deals are'} in
+                  stages without a chance of winning: counted, but not weighed.
+                </p>
+              ) : null}
             </div>
           ))
         )}

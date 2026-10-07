@@ -60,6 +60,8 @@ export const AUTOMATION_LIMITS = {
   dealValueLength: 24,
   /** How far ahead a deal step's expected close date may be, in days. */
   dealCloseDays: 365,
+  /** A lost deal's reason, as the CRM limits it (ADR-251). */
+  dealLostReasonLength: 200,
 } as const;
 
 /**
@@ -541,6 +543,40 @@ const createDealNode = z.object({
 });
 
 /**
+ * Moves the run's contact's open deal in a pipeline to a stage of it (ADR-250), as the automation.
+ * Nothing moves when the contact has no open deal there, or more than one (which one is meant is
+ * not known).
+ */
+const moveDealNode = z.object({
+  id: nodeIdSchema,
+  type: z.literal('move_deal'),
+  label: labelSchema,
+  pipelineId: z.uuid('Choose a pipeline.'),
+  stageId: z.uuid('Choose a stage.'),
+  next: nextSchema,
+});
+
+/**
+ * Closes the run's contact's open deal in a pipeline as won or lost (ADR-251), as the automation,
+ * on the same terms as moving it: nothing closes when the contact has no open deal there, or more
+ * than one. A lost deal may get a reason, kept as written.
+ */
+const closeDealNode = z.object({
+  id: nodeIdSchema,
+  type: z.literal('close_deal'),
+  label: labelSchema,
+  pipelineId: z.uuid('Choose a pipeline.'),
+  outcome: z.enum(['won', 'lost'], { error: 'Choose won or lost.' }),
+  lostReason: z
+    .string()
+    .trim()
+    .max(AUTOMATION_LIMITS.dealLostReasonLength, 'The reason is limited to 200 characters.')
+    .nullable()
+    .transform((v) => (v ? v : null)),
+  next: nextSchema,
+});
+
+/**
  * A deal step's value in minor units of the pipeline's currency: null without a value, undefined
  * when the text is not an amount in that currency or is more than a deal can hold.
  */
@@ -562,6 +598,8 @@ export const nodeSchema = z.discriminatedUnion('type', [
   httpRequestNode,
   createTaskNode,
   createDealNode,
+  moveDealNode,
+  closeDealNode,
   waitNode,
   handoffNode,
   endNode,
@@ -583,6 +621,8 @@ export const NODE_TYPES: readonly NodeType[] = [
   'http_request',
   'create_task',
   'create_deal',
+  'move_deal',
+  'close_deal',
   'wait',
   'handoff',
   'end',
@@ -601,6 +641,8 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   http_request: 'Call a web address',
   create_task: 'Create a CRM task',
   create_deal: 'Create a CRM deal',
+  move_deal: 'Move the CRM deal',
+  close_deal: 'Close the CRM deal',
   wait: 'Wait',
   handoff: 'Hand off to people',
   end: 'End',
@@ -1161,6 +1203,8 @@ export function edgesOf(node: AutomationNode): { label: string; target: string |
     case 'update_conversation':
     case 'create_task':
     case 'create_deal':
+    case 'move_deal':
+    case 'close_deal':
     case 'wait':
       return [{ label: 'next', target: node.next }];
     case 'ask_template':
@@ -1252,7 +1296,8 @@ export interface GraphReferences {
   crmMemberIds?: ReadonlySet<string>;
   /**
    * Active pipelines by id, with their currency and active stages; when given, deal steps must use
-   * an active stage of an active pipeline and a value in its currency (ADR-245).
+   * an active stage of an active pipeline and a value in its currency (ADR-245), and steps that move
+   * deals an active stage of an active pipeline (ADR-250).
    */
   crmPipelines?: ReadonlyMap<string, { currency: string; stageIds: ReadonlySet<string> }>;
   /** Contact field keys of the company; when given, fields must be among them. */
@@ -1572,6 +1617,27 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
             : null;
       if (message) issues.push({ level: 'error', nodeId: node.id, message });
     }
+    if (node.type === 'move_deal' && refs.crmPipelines) {
+      const pipeline = refs.crmPipelines.get(node.pipelineId);
+      if (!pipeline || !pipeline.stageIds.has(node.stageId)) {
+        issues.push({
+          level: 'error',
+          nodeId: node.id,
+          message: 'Choose an active stage of an active pipeline to move the deal to.',
+        });
+      }
+    }
+    if (
+      node.type === 'close_deal' &&
+      refs.crmPipelines &&
+      !refs.crmPipelines.has(node.pipelineId)
+    ) {
+      issues.push({
+        level: 'error',
+        nodeId: node.id,
+        message: 'Choose an active pipeline for the deal to close.',
+      });
+    }
     if (node.type === 'create_deal') {
       for (const message of dealStepIssues(node, refs)) {
         issues.push({ level: 'error', nodeId: node.id, message });
@@ -1748,7 +1814,6 @@ function templateStepIssues(
   return out;
 }
 
-/** Steps the first step leads to, directly or not (the first step included). */
 /** What is wrong with a deal step in this company (ADR-245). */
 function dealStepIssues(node: NodeOf<'create_deal'>, refs: GraphReferences): string[] {
   const issues: string[] = [];
@@ -1769,6 +1834,7 @@ function dealStepIssues(node: NodeOf<'create_deal'>, refs: GraphReferences): str
   return issues;
 }
 
+/** Steps the first step leads to, directly or not (the first step included). */
 function reachableFrom(start: string, byId: ReadonlyMap<string, AutomationNode>): Set<string> {
   const reachable = new Set<string>();
   const stack = byId.has(start) ? [start] : [];

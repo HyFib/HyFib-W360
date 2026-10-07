@@ -27,6 +27,11 @@ export const API_SCOPE_KEYS = [
   'automations.start',
   'orders.read',
   'orders.write',
+  'deals.read',
+  'deals.write',
+  'tasks.read',
+  'tasks.write',
+  'notes.write',
   'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
 
@@ -161,6 +166,41 @@ export const API_SCOPE_INFO: Record<
     description:
       "Move the company's WhatsApp orders on as members do: confirm or cancel a received order, fulfil or cancel a confirmed one, fulfil a paid one. Never payments: members ask for and cancel Payment Links in the app. Needs Commerce in the company's plan.",
     permission: 'inbox.reply',
+    writes: true,
+  },
+  'deals.read': {
+    label: 'Read CRM deals',
+    description:
+      "List the company's CRM pipelines with their stages and each stage's chance of winning, and its deals with their pipeline, stage, status, value, expected close date and owner, and their contact and conversation ids. Never notes, tasks or the timeline. Needs the CRM in the company's plan.",
+    permission: 'crm.read',
+    writes: false,
+  },
+  'deals.write': {
+    label: 'Create and change CRM deals',
+    description:
+      "Create deals for the company's contacts in its active pipelines and change them as members do on the board: their title, value, owner and expected close date, their stage or pipeline, and closing them as won or lost or reopening them, recorded as done through the API. Needs the CRM in the company's plan.",
+    permission: 'crm.write',
+    writes: true,
+  },
+  'tasks.read': {
+    label: 'Read CRM tasks',
+    description:
+      "List the company's CRM tasks with their title, notes, due time, reminder, status and assignee, and their contact and deal ids, and read each one. Never the CRM timeline. Needs the CRM in the company's plan.",
+    permission: 'crm.read',
+    writes: false,
+  },
+  'tasks.write': {
+    label: 'Create and change CRM tasks',
+    description:
+      "Create tasks as members do on the Tasks page and the contact and deal pages: for one of the company's contacts or deals or for nobody, assigned to an active member who can use the CRM, with notes, a due time and a reminder emailed to the assignee; and change, complete, cancel and reopen them as members do, recorded as done through the API. Needs the CRM in the company's plan.",
+    permission: 'crm.write',
+    writes: true,
+  },
+  'notes.write': {
+    label: 'Add notes to the CRM timeline',
+    description:
+      "Add notes to the timeline of one of the company's contacts, or of one of its deals and so the deal's contact, as members do on the contact and deal pages, recorded as written through the API. Never read the timeline. Needs the CRM in the company's plan.",
+    permission: 'crm.write',
     writes: true,
   },
   'webhooks.manage': {

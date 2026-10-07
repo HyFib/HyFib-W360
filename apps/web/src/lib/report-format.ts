@@ -28,6 +28,16 @@ export function formatDay(day: string, locale = 'en-IN'): string {
   }).format(new Date(Date.UTC(y, m - 1, d)));
 }
 
+/** A calendar month ('YYYY-MM', already in the company's time zone) as "October 2026". */
+export function formatMonth(month: string, locale = 'en-IN'): string {
+  const [y, m] = month.split('-').map(Number) as [number, number];
+  return new Intl.DateTimeFormat(locale, {
+    timeZone: 'UTC',
+    month: 'long',
+    year: 'numeric',
+  }).format(new Date(Date.UTC(y, m - 1, 1)));
+}
+
 /** A calendar day with the year, for period headings. */
 export function formatDayLong(day: string, locale = 'en-IN'): string {
   const [y, m, d] = day.split('-').map(Number) as [number, number, number];

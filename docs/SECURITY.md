@@ -148,6 +148,28 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   contact's id. The trigger runs as the merge (the definer role) and captures for the merging
   company alone; the API reads `app.contact_merges` in the key's company scope, so another company's
   merged contact is plainly not found.
+- Integrations hear of CRM deals (ADR-256) through the company's own endpoints only: `deal.created`,
+  `deal.stage_changed` and `deal.status_changed` give the deal (its title, value, owner id, expected
+  date and lost reason as they are when delivered), its stage and pipeline ids, the conversation id
+  and the contact as the API describes it; an erased contact's deal is sent titled "Deal (contact
+  erased)", without a reason, and its contact without number or name. The triggers run as whoever
+  changes the deal (the runtime role in the company's scope), so an event is captured for that
+  company alone, and only when one of its active endpoints takes it. No number, team or member
+  filter narrows deal events, which Settings and the OpenAPI document say, so a filter cannot be
+  mistaken for keeping them from an endpoint; an endpoint's lists of pipelines, stages and owners do
+  (ADR-263 to ADR-265). A change of owner (`deal.owner_changed`, ADR-269) gives the ids of the
+  member the deal left and of the one it was given to, both the company's own members (the owner's
+  foreign key goes through the company's id), never who made the change, and reaches the endpoints
+  naming either member, so an endpoint following a member hears a deal leave them; automations,
+  erasure and merges never change an owner, so they send none.
+- Integrations hear of CRM tasks (ADR-261) through the company's own endpoints only: `task.created`
+  and `task.status_changed` give the task's title, statuses, due time, assignee and deal ids, its
+  creator and its contact as the API describes it, never its notes (free text members write;
+  `tasks.read` reads them). The triggers run as whoever changes the task, so an event is captured
+  for that company alone, and only when one of its active endpoints takes it; erasing a contact
+  deletes its tasks, so their pending events are not delivered (`event_gone`). No number, team,
+  member or deal filter narrows task events, which Settings and the OpenAPI document say; an
+  endpoint's list of assignees does (ADR-266).
 - Customers' numbers (ADR-226): a company's owners and administrators choose the roles (supervisor,
   agent, marketer, analyst) whose members see them masked; the context leaves out
   `contacts.view_numbers` for a member whose every role that grants it is masked, and the services
@@ -289,6 +311,12 @@ Phase 4 rules (automations, P4-01):
 - Task and deal steps need the CRM in the company's plan (ADR-249), as members' CRM writes do:
   publishing or testing such an automation is refused without it, and a run skips the step
   (`crm_not_in_plan`) and goes on.
+- Steps that move deals (ADR-250): the same permission and plan rules; only the run's contact's
+  single open deal in the chosen pipeline moves, to an active stage checked when publishing and
+  again when the step runs, recorded on the deal's timeline as the automation's. With none or
+  several open deals, nothing moves.
+- Steps that close deals (ADR-251): the same rules, for an active pipeline; the deal is closed with
+  no member as its closer, and the timeline records the automation and the run.
 
 Phase 4 rules (automation web requests, P4-02):
 
@@ -577,9 +605,10 @@ Phase 5 rules (Public API, P5-08):
   `contact_fields.manage` (ADR-115), `campaigns.read` and `campaigns.write` for the scopes of the
   same names (ADR-125, ADR-186), `campaigns.send` for `campaigns.stop` (ADR-128) and
   `campaigns.resume` (ADR-176), `commerce.read` for `orders.read` (ADR-167), `inbox.reply` for
-  `orders.write` (ADR-168), and `channels.read` for the scope of the same name (ADR-171). Nobody
-  grants a key more than they hold, and rotating needs the same. A key keeps the scopes it was
-  created with.
+  `orders.write` (ADR-168), `channels.read` for the scope of the same name (ADR-171), `crm.read` for
+  `deals.read` (ADR-253) and `tasks.read` (ADR-258), and `crm.write` for `deals.write` (ADR-254,
+  ADR-255), `tasks.write` (ADR-259) and `notes.write` (ADR-268). Nobody grants a key more than they
+  hold, and rotating needs the same. A key keeps the scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -762,6 +791,9 @@ Phase 5 rules (Public API, P5-08):
   pattern, an ISO time). Orders name the contact, conversation and number by id only, never the
   customer's number or name, the Payment Link or Razorpay's payment ids; an erased contact's orders
   are read without the note erasure clears (unit tests; integration and e2e tests, run in CI only).
+  An order names who made its latest status change (ADR-271) as `order.status_changed` does: a
+  member never by name, a key by its id, HyFib's Payment Link, or nobody when nothing was recorded,
+  never an earlier change's maker (the database clears it, ADR-270).
 - Changing orders (ADR-168): `PATCH /orders/{id}` needs `orders.write`, granted only with
   `inbox.reply`, checked before anything is read and refused while the company is suspended or
   restricted, and Commerce in the company's plan. It changes an order of the key's company only (row
@@ -993,6 +1025,72 @@ Phase 5 rules (Public API, P5-08):
   while the company is suspended or restricted) and can be left out by the plan. The merge runs
   `app.merge_contacts` in the key's company scope, so another company's contact is not found; the
   audit log names the key.
+- Reading CRM deals (ADR-253): `GET /pipelines`, `GET /deals` and `GET /deals/{id}` need
+  `deals.read`, granted only with `crm.read`, and the CRM in the company's plan, both checked before
+  a pipeline or deal is read. They read in the key's company only (row security and an explicit
+  company condition): another company's deal answers 404 as an unknown one does, an id that is not a
+  UUID is refused before any query, and every filter is typed (a status from the list, UUIDs or
+  `none`, an ISO time). Deals name the contact, conversation and owner by id only, never the
+  customer's number or name, notes, tasks or the timeline; an erased contact's deals are read
+  renamed and without the lost reason, as erasure leaves them (unit tests; integration and e2e
+  tests, run in CI only).
+- Creating CRM deals (ADR-254): `POST /deals` needs `deals.write`, granted only with `crm.write`, an
+  active company and the CRM in the plan, all checked before a deal is written. The contact,
+  pipeline, stage and owner must be the key's company's (row security and explicit company
+  conditions; another company's are refused as unknown), the contact not erased, the pipeline and
+  stage active and the owner an active member who can use the CRM, as for members. The deal names
+  the key as its creator, its timeline entry names the key, and the audit log records
+  `crm.deal_created` as the key (unit tests; integration and e2e tests, run in CI only).
+- Changing CRM deals (ADR-255): `PATCH /deals/{id}` needs `deals.write`, an active company and the
+  CRM in the plan, checked before anything is written; it changes only the key's company's deals
+  (another company's answers 404), locks the contact before the deal as erasure does, keeps an
+  erased contact's details, takes stages of the deal's own pipeline and owners who can use the CRM
+  only, and follows the members' rules for closed and archived deals. `expectedVersion` stops a key
+  overwriting a change it did not see, and members' versions stop them overwriting a key's. Every
+  change is on the timeline naming the key, and the audit log records it as the key (unit tests;
+  integration and e2e tests, run in CI only).
+- Moving CRM deals to another pipeline (ADR-257): `pipelineId` reaches only the key's company's
+  active pipelines (another company's is not found, as an unknown one is, 422), with the stage
+  checked against that pipeline; a closed deal is reopened first, and a deal with a value moves only
+  to a pipeline of its currency, so a value is never read in another currency than the one it was
+  given in. The move is on the timeline and in the audit log as the key's (unit tests; integration
+  tests, run in CI only).
+- Reading CRM tasks (ADR-258): `GET /tasks` and `GET /tasks/{id}` need `tasks.read`, granted only
+  with `crm.read`, and the CRM in the company's plan, both checked before a task is read. They read
+  in the key's company only (row security and an explicit company condition): another company's task
+  answers 404 as an unknown one does, an id that is not a UUID is refused before any query, and
+  every filter is typed (a status from the list, UUIDs, an ISO time). Tasks name the assignee,
+  contact and deal by id only, never the customer's number or name, the timeline, or who created or
+  closed them; erasing a contact deletes its tasks, so they are no longer read (unit tests;
+  integration and e2e tests, run in CI only).
+- Creating CRM tasks (ADR-259): `POST /tasks` needs `tasks.write`, granted only with `crm.write`, an
+  active company and the CRM in the company's plan. The assignee must be an active member of the
+  key's company able to use the CRM; a deal or contact is found in the key's company only (another
+  company's is named or not found, as an unknown one is), and a task for a deal is always about the
+  deal's contact, locked against erasure and merges until the task is in, so a task never lands on
+  an erased contact or the wrong one. The task is recorded as created by the key (its creator
+  column, the timeline and the audit log), and times follow the members' rule (unit tests;
+  integration and e2e tests, run in CI only).
+- Changing CRM tasks (ADR-260): `PATCH /tasks/{id}` needs `tasks.write`, an active company and the
+  CRM in the company's plan; it reaches only the key's company's tasks (another company's answers
+  404 as an unknown one does) and never moves a task to another contact or deal. A new assignee must
+  be an active member of the key's company able to use the CRM, times follow the members' rule, a
+  closed task is reopened before it changes, and `expectedVersion` refuses a change to a task
+  changed since. Reopening and closing are on the timeline naming the key, and every change is in
+  the audit log as the key's (unit tests; integration and e2e tests, run in CI only).
+- Adding CRM notes (ADR-268): `POST /notes` needs `notes.write`, granted only with `crm.write`, an
+  active company and the CRM in the company's plan. A deal or contact is found in the key's company
+  only (another company's is named or not found, as an unknown one is), and a note on a deal is
+  always on the deal's contact, locked against erasure and merges until the note is in, so a note
+  never lands on an erased contact or the wrong one. The note is recorded as the key's (the timeline
+  and the audit log, which never holds its text), and notes are never read through the API (unit
+  tests; integration tests, run in CI only).
+- Listing the tags in use (ADR-272): `GET /contact-tags` needs `contacts.read` and
+  `GET /conversation-tags` `conversations.read`, both checked before anything is read. They group
+  the tags of the key's company only (row security and an explicit company condition), in read-only
+  transactions, giving each tag and a count, never which contacts or conversations carry it; erased
+  contacts have no tags left to count. The cursor and the prefix are checked as tags are written
+  before any query (unit tests; integration tests, run in CI only).
 - Defining contact fields (ADR-115): adding, renaming and deleting the company's custom fields needs
   `contact_fields.manage`, which only members holding `tenant.settings.manage` (owners and
   administrators, who define fields in Settings) grant, and an active company. Fields are named by
@@ -1272,6 +1370,43 @@ Phase 5 rules (outgoing webhooks, P5-09):
   trigger stores: it narrows what one endpoint receives and never adds an event or a delivery for
   another endpoint or company. Audited with the list (unit tests; integration and e2e tests, run in
   CI only).
+- An endpoint can take the deal events of chosen CRM pipelines only (ADR-263), chosen the same way.
+  A list given may hold only pipelines of the endpoint's company (checked in its scope, archived
+  ones included), is kept only while the endpoint takes a deal event (a database check too, which
+  also refuses a null entry), and is applied in `app.capture_webhook_event` to the pipeline the deal
+  trigger stores, and for a move to the one it left: it narrows what one endpoint receives and never
+  adds an event or a delivery for another endpoint or company. Audited with the list (unit tests;
+  integration and e2e tests, run in CI only).
+- An endpoint can take the deal events of chosen CRM stages only (ADR-264), chosen the same way. A
+  list given may hold only stages of the endpoint's company (checked in its scope, removed ones
+  included), is kept only while the endpoint takes a deal event (a database check too, which also
+  refuses a null entry), and is applied in `app.capture_webhook_event` to the stage the deal trigger
+  stores, and for a move to the one it left, after the pipeline filter: it narrows what one endpoint
+  receives and never adds an event or a delivery for another endpoint or company. Audited with the
+  list (unit tests; integration and e2e tests, run in CI only).
+- An endpoint can take the events of the deals chosen members own only (ADR-265), chosen the same
+  way. A list may add only members of the endpoint's company who can own deals (active, with access
+  to the CRM, checked in its scope), is kept only while the endpoint takes a deal event (a database
+  check too, which also refuses a null entry), and is applied in `app.capture_webhook_event` to the
+  owner it reads from the deal in the company's scope, after the pipeline and stage filters: it
+  narrows what one endpoint receives and never adds an event or a delivery for another endpoint or
+  company. The choices name members who can own deals to members with `developer.manage` only.
+  Audited with the list (unit tests; integration tests, run in CI only).
+- An endpoint can take the events of the tasks assigned to chosen members only (ADR-266), chosen the
+  same way. A list may add only members of the endpoint's company who can be assigned tasks (active,
+  with access to the CRM, checked in its scope, as deal owners are), is kept only while the endpoint
+  takes a task event (a database check too, which also refuses a null entry), and is applied in
+  `app.capture_webhook_event` to the assignee it reads from the task in the company's scope: it
+  narrows what one endpoint receives and never adds an event or a delivery for another endpoint or
+  company. Audited with the list (unit tests; integration tests, run in CI only).
+- An endpoint can take the message and conversation events of the conversations whose contact has
+  chosen tags only (ADR-267), chosen the same way. A list holds tags in the form contacts carry them
+  (the services normalise them; a database check holds the form, the count and the events, and
+  refuses a null entry), is kept only while the endpoint takes such an event, and is applied in
+  `app.capture_webhook_event` to the tags of the conversation's contact, read in the company's
+  scope: it narrows what one endpoint receives and never adds an event or a delivery for another
+  endpoint or company. Tags name no rows, so naming one reveals nothing about the company's
+  contacts. Audited with the list (unit tests; integration tests, run in CI only).
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or
@@ -1306,10 +1441,15 @@ Phase 5 rules (outgoing webhooks, P5-09):
   run's answers or API inputs, which can hold personal data.
 - Order events (ADR-085) follow the same rules. Triggers on WhatsApp orders run as the role that
   adds the order or changes its status (only the runtime role, in the company's scope), so each
-  event stays in the order's company and holds the order id and statuses only. Payloads are built
-  when delivered: the customer's note, number and name are gone once the contact is erased (erasure
-  clears the note without a status change, so it sends nothing), amounts are integers in minor
-  units, and no Payment Link address or Razorpay payment id is sent.
+  event stays in the order's company and holds the order id, the statuses and who changed it only.
+  Payloads are built when delivered: the customer's note, number and name are gone once the contact
+  is erased (erasure clears the note without a status change, so it sends nothing), amounts are
+  integers in minor units, and no Payment Link address or Razorpay payment id is sent. A status
+  change names who made it (ADR-270): a member (never which), the API key by its id, or HyFib
+  applying the Payment Link. The changer is written with the status and the key's foreign key goes
+  through the company's id, and a trigger clears a changer an earlier transaction recorded, so a
+  change that does not record its maker (a server from before it) names nobody rather than the
+  previous changer, and an integration that ignores its own key's changes never ignores a member's.
 - Campaign events (ADR-087) follow the same rules. The trigger on campaigns runs as the role that
   changes a campaign's status (only the runtime role, in the company's scope), so each event stays
   in the campaign's company and holds the campaign id, the statuses and a pause or completion reason

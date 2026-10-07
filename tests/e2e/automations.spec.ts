@@ -205,7 +205,7 @@ test('an automation tags the conversation it answers, and the inbox shows the ta
   await expect(item).toHaveCount(1);
 });
 
-test('an automation creates a CRM task and a deal about the customer (ADR-244, ADR-245)', async ({
+test('an automation creates a CRM task and a deal about the customer, and moves the deal (ADR-244, ADR-245, ADR-250)', async ({
   page,
   request,
 }) => {
@@ -252,6 +252,11 @@ test('an automation creates a CRM task and a deal about the customer (ADR-244, A
   await page.locator('#step-create-deal-1-owner').selectOption({ label: 'Tomas Tasks' });
   await page.locator('#step-create-deal-1-close').fill('30');
   await page.locator('#step-create-task-1-next').selectOption('create-deal-1');
+  // Then the deal moves on to Qualified (ADR-250).
+  await page.getByLabel('Add a step').selectOption('move_deal');
+  await page.getByRole('button', { name: 'Add step' }).click();
+  await page.locator('#step-move-deal-1-stage').selectOption({ label: 'Qualified' });
+  await page.locator('#step-create-deal-1-next').selectOption('move-deal-1');
   await expect(page.getByText(/to fix before publishing/)).toBeHidden();
 
   // The simulator says what the steps would do, and creates nothing.
@@ -264,6 +269,11 @@ test('an automation creates a CRM task and a deal about the customer (ADR-244, A
   await expect(
     page.getByText(
       'CRM deal “Kettles for Asha” created in Sales (New), worth ₹2,500.50, owned by Tomas Tasks, expected to close in 30 days, unless the contact already has an open deal there.',
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      'The contact’s open deal in Sales moved to Qualified, if the contact has exactly one there.',
     ),
   ).toBeVisible();
 
@@ -302,5 +312,15 @@ test('an automation creates a CRM task and a deal about the customer (ADR-244, A
   await expect(
     page.getByText(/by an automation · owner Tomas Tasks · expected to close \d{4}-\d{2}-\d{2}/),
   ).toBeVisible();
+  // The step after it moved the deal on, as the automation (a step of its own, so it may land
+  // just after the deal appears).
+  await expect(async () => {
+    await page.reload();
+    const moved = page
+      .getByRole('list', { name: 'Timeline' })
+      .getByRole('listitem')
+      .filter({ hasText: 'New → Qualified' });
+    await expect(moved).toContainText('by an automation', { timeout: 2_000 });
+  }).toPass({ timeout: 30_000 });
   await expectNoHorizontalOverflow(page);
 });

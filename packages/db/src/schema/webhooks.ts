@@ -7,8 +7,8 @@ import { appSchema } from './tenancy';
 const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
 
 /**
- * Event types an endpoint can receive (ADR-053, ADR-074, ADR-078, ADR-085, ADR-225); `ping` is only
- * sent as a test.
+ * Event types an endpoint can receive (ADR-053, ADR-074, ADR-078, ADR-085, ADR-225, ADR-256,
+ * ADR-261); `ping` is only sent as a test.
  */
 export const WEBHOOK_EVENT_TYPES = [
   'message.received',
@@ -27,6 +27,12 @@ export const WEBHOOK_EVENT_TYPES = [
   'order.received',
   'order.status_changed',
   'campaign.status_changed',
+  'deal.created',
+  'deal.stage_changed',
+  'deal.owner_changed',
+  'deal.status_changed',
+  'task.created',
+  'task.status_changed',
 ] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
 
@@ -206,10 +212,40 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   assigneeIds: uuid('assignee_ids').array(),
   /**
+   * The contact tags whose conversations' message and conversation events it takes (migration 0183,
+   * ADR-267), by the tags the conversation's contact has when the event happens; null takes every
+   * conversation's. Set only while one of those events is among its events.
+   */
+  contactTags: text('contact_tags').array(),
+  /**
    * The campaigns whose messages' statuses and changes it takes (ADR-185); null takes every
    * campaign's. Set only while `message.status` or `campaign.status_changed` is among its events.
    */
   campaignIds: uuid('campaign_ids').array(),
+  /**
+   * The CRM pipelines whose deals' events it takes (migration 0179, ADR-263), by the pipeline the
+   * event gives (and for a move, the one it left); null takes every pipeline's. Set only while a
+   * deal event is among its events.
+   */
+  pipelineIds: uuid('pipeline_ids').array(),
+  /**
+   * The CRM stages whose deals' events it takes (migration 0180, ADR-264), by the stage the event
+   * gives (and for a move, the one it left); null takes every stage's. Set only while a deal event
+   * is among its events.
+   */
+  stageIds: uuid('stage_ids').array(),
+  /**
+   * The members (memberships) whose deals' events it takes (migration 0181, ADR-265), by the deal's
+   * owner when the event happens; null takes every deal's. Set only while a deal event is among its
+   * events.
+   */
+  ownerIds: uuid('owner_ids').array(),
+  /**
+   * The members (memberships) whose tasks' events it takes (migration 0182, ADR-266), by the task's
+   * assignee when the event happens; null takes every task's. Set only while a task event is among
+   * its events.
+   */
+  taskAssigneeIds: uuid('task_assignee_ids').array(),
   /**
    * The consent changes it takes as `consent.changed` (ADR-189), by purpose and action; null takes
    * every change. Set only while `consent.changed` is among its events.
