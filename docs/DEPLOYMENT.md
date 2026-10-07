@@ -939,6 +939,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `GET /api/v1/message-templates` and `GET /api/v1/message-templates/{id}` with 404; rolling web
    servers back does the same.
 
+   Migration 0215 (review fix of ADR-275 and ADR-276) replaces the deal and task capture trigger
+   functions and `app.capture_webhook_event` in place, with the same signatures (0213's capture), so
+   endpoints naming owners or assignees are matched against the owner or assignee at each event's
+   step. Only the database changes: workers and web servers of any version keep working, and stored
+   events and payloads are unchanged.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

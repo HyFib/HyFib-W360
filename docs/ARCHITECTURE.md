@@ -2143,24 +2143,29 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   allowed; a change that drops every deal event clears it.
 - **Owner filters** (migration 0181, ADR-265): `owner_ids` on an endpoint lists the members whose
   deals' events it takes, null for every deal's; a check keeps it to 1 to 50 ids and to endpoints
-  taking a deal event. `app.capture_webhook_event` (replaced with the same signature) reads the
-  deal's `owner_membership_id` by the detail's `dealId` only when an active endpoint of the company
-  taking the event names owners, and matches it against the list after the pipeline and stage
-  filters. Settings (radio buttons and checkboxes under "Deal owners", the members who can own
-  deals) and the API (`ownerIds`) set it; the services check the members a list adds (active, with
-  CRM access), and members it held stay; a change that drops every deal event clears it. For
-  `deal.owner_changed` (ADR-269) it also matches the `previousOwnerId` the trigger stores, so the
-  endpoints of the owner a deal left hear the change too.
+  taking a deal event. `app.capture_webhook_event` (replaced with the same signature) matches the
+  list, after the pipeline and stage filters, against the owner the deal trigger passes for the
+  event's step (`stepOwnerId`, migration 0215: the owner before a change of owner for the steps of
+  one update that come before it, the new one after), left out of the stored detail; for an event
+  without it, it reads the deal's `owner_membership_id` by the detail's `dealId` only when an active
+  endpoint of the company taking the event names owners. Settings (radio buttons and checkboxes
+  under "Deal owners", the members who can own deals) and the API (`ownerIds`) set it; the services
+  check the members a list adds (active, with CRM access), and members it held stay; a change that
+  drops every deal event clears it. For `deal.owner_changed` (ADR-269) it also matches the
+  `previousOwnerId` the trigger stores, so the endpoints of the owner a deal left hear the change
+  too.
 - **Task assignee filters** (migration 0182, ADR-266): `task_assignee_ids` on an endpoint lists the
   members whose tasks' events it takes, null for every task's; a check keeps it to 1 to 50 ids and
   to endpoints taking a task event. `app.capture_webhook_event` (replaced with the same signature)
+  matches the list against the assignee the task trigger passes for the event's step
+  (`stepAssigneeId`, migration 0215), left out of the stored detail; for an event without it, it
   reads the task's `assignee_membership_id` by the detail's `taskId` only when an active endpoint of
-  the company taking the event names assignees, and matches it against the list. Settings (radio
-  buttons and checkboxes under "Task assignees", the members who can own deals, who are those tasks
-  are assigned to) and the API (`taskAssigneeIds`) set it; the services check the members a list
-  adds as they check deal owners, and members it held stay; a change that drops every task event
-  clears it. For `task.assignee_changed` (ADR-274) it also matches the `previousAssigneeId` the
-  trigger stores, so the endpoints of the member a task left hear the change too.
+  the company taking the event names assignees. Settings (radio buttons and checkboxes under "Task
+  assignees", the members who can own deals, who are those tasks are assigned to) and the API
+  (`taskAssigneeIds`) set it; the services check the members a list adds as they check deal owners,
+  and members it held stay; a change that drops every task event clears it. For
+  `task.assignee_changed` (ADR-274) it also matches the `previousAssigneeId` the trigger stores, so
+  the endpoints of the member a task left hear the change too.
 - **Contact tag filters** (migration 0183, ADR-267): `contact_tags` on an endpoint lists the contact
   tags whose conversations' message and conversation events it takes, null for every conversation's;
   a check keeps it to 1 to 50 tags in `app.contact_tags`' form and to endpoints taking such an

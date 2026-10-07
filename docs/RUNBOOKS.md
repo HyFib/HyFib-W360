@@ -2851,13 +2851,15 @@ sent: …"), and the API answers `ownerIds` (null takes every deal's). A deal's 
 when each happens: a deal without an owner, or owned by someone else at the time, is not queued for
 the endpoint, and events no endpoint takes are not recorded, so there is nothing to replay. Changing
 a deal's owner sends `deal.owner_changed` to the endpoints of the owner it left as well as of the
-new one, if they take it (ADR-269); the deal's later events go by its new owner. The payload's
-`deal.ownerId` is the owner when it is delivered (for `deal.owner_changed`, the owner the change
-gave), so a deal given away meanwhile can name someone else. With pipelines or stages chosen too, an
-event must pass every list. A member who left stays on a list, "(no longer uses the CRM)", matching
-the deals they still own; give those deals another owner. To take more, tick members under "Deal
-owners" on the endpoint's page or choose "Every deal’s events", or `PATCH /webhook-endpoints/{id}`
-with `ownerIds` (null for every deal). Removing every deal event clears the list.
+new one, if they take it (ADR-269); the deal's later events go by its new owner. In one change, the
+steps before a change of owner (reopened, moved, details changed) go by the owner the deal had, and
+the close after it by the new one (since migration 0215). The payload's `deal.ownerId` is the owner
+when it is delivered (for `deal.owner_changed`, the owner the change gave), so a deal given away
+meanwhile can name someone else. With pipelines or stages chosen too, an event must pass every list.
+A member who left stays on a list, "(no longer uses the CRM)", matching the deals they still own;
+give those deals another owner. To take more, tick members under "Deal owners" on the endpoint's
+page or choose "Every deal’s events", or `PATCH /webhook-endpoints/{id}` with `ownerIds` (null for
+every deal). Removing every deal event clears the list.
 
 **A receiver misses a deal's change of owner, or doubts one (ADR-269).** Endpoints that take
 `deal.owner_changed` ("Deal owner") are sent one event each time a member gives a deal to another
@@ -2878,12 +2880,14 @@ events go by its assignee when each happens: a task assigned to someone else at 
 queued for the endpoint, and events no endpoint takes are not recorded, so there is nothing to
 replay. Reassigning a task sends `task.assignee_changed` to the endpoints of the member it left as
 well as of the new one, if they take it (ADR-274); the task's later events go by its new assignee.
-The payload's `task.assigneeId` is the assignee when it is delivered (for `task.assignee_changed`,
-the assignee the change gave), so a task given away meanwhile can name someone else. A member who
-left stays on a list, "(no longer uses the CRM)", matching the tasks still assigned to them; assign
-those tasks to someone else. To take more, tick members under "Task assignees" on the endpoint's
-page or choose "Every task’s events", or `PATCH /webhook-endpoints/{id}` with `taskAssigneeIds`
-(null for every task). Removing every task event clears the list.
+In one change, the reopening and a change of details go by the assignee the task had before it was
+given away, and the completion after by the new one (since migration 0215). The payload's
+`task.assigneeId` is the assignee when it is delivered (for `task.assignee_changed`, the assignee
+the change gave), so a task given away meanwhile can name someone else. A member who left stays on a
+list, "(no longer uses the CRM)", matching the tasks still assigned to them; assign those tasks to
+someone else. To take more, tick members under "Task assignees" on the endpoint's page or choose
+"Every task’s events", or `PATCH /webhook-endpoints/{id}` with `taskAssigneeIds` (null for every
+task). Removing every task event clears the list.
 
 **A receiver misses a task's change of assignee, or doubts one (ADR-274).** Endpoints that take
 `task.assignee_changed` ("Task assignee") are sent one event each time a member gives a task to

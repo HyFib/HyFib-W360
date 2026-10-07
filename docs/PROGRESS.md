@@ -1,5 +1,40 @@
 # Progress
 
+## 2026-10-07 — Review fix: deal and task events matched against the owner and assignee at their step (P5-09, P4-04, H-014, ADR-275, ADR-276)
+
+Status: **Implemented; its database tests run in CI only.** The Codex review of PR #39 found that
+the owner and assignee lists matched every event of one update against the member the update left,
+so an update that changed a deal's details and its owner sent `deal.updated` to the endpoints of the
+new owner, not of the owner it had when its details changed (and likewise a task's details and its
+assignee, and their reopenings and moves). Migration 0215 passed the pglast parse check (syntax
+only); the local PostgreSQL is unavailable, so the integration tests below were updated but not run
+here.
+
+### Completed
+
+- **Database:** migration 0215: the deal and task triggers pass each step's owner or assignee in the
+  event's detail (`stepOwnerId`, `stepAssigneeId`); `app.capture_webhook_event` matches the owner
+  and assignee lists against it and leaves it out of the stored detail, reading the row only for an
+  event without it.
+- **Tests:** integration (`webhook-events.test.ts`): the ADR-275 test's change of details made with
+  a change of owner reaches the endpoint of the owner the deal had; the ADR-276 test's details and
+  the ADR-274 test's reopening go by the assignee before the change, the details made after a
+  reopening by the owner they were made under. Updated for CI; not run here. No unit-tested code
+  changed, so no mutation checks.
+- **Docs:** ADR-275 and ADR-276 (amended); ARCHITECTURE (owner and task assignee filters); RUNBOOKS
+  (missed deals and tasks of a member); DEPLOYMENT.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 131 files, 1247 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0215                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Message templates of every status through the public API (P5-08, H-033, W-059, ADR-294)
 
 Status: **Implemented; its database test runs in CI only.** Keys could list only the approved

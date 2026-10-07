@@ -4855,12 +4855,12 @@ describe('deal events (ADR-256)', () => {
     await change(3, 'Annual plan, renewed', '1,200', '2026-12-31', owner.membership.id);
     const changesOf = (e: EventRow) => (e.detail.changes as string[] | undefined) ?? null;
     // Captured with what changed; the agent's endpoint hears the changes made while the deal was
-    // the agent's, and not the one made with the change of owner, which goes by the new owner;
-    // Renewals hears none.
+    // the agent's, the one made with the change of owner included: its details change before its
+    // owner among the request's steps (Codex review of PR #39). Renewals hears none.
     expect((await dealEventsOf(c)).map((e) => [e.type, changesOf(e), e.deliveries])).toEqual([
       ['deal.updated', ['title'], 2],
       ['deal.updated', ['valueMinor', 'expectedCloseOn'], 2],
-      ['deal.updated', ['title'], 1],
+      ['deal.updated', ['title'], 2],
       ['deal.owner_changed', null, 1],
     ]);
 
@@ -4902,7 +4902,7 @@ describe('deal events (ADR-256)', () => {
       expect((body?.data as { changes?: unknown }).changes, event.id).toEqual(changesOf(event));
       expect(dealIn(body)).toMatchObject({ title: 'Deal (contact erased)', valueMinor: null });
     }
-    expect(bodiesAt(agents.path).map((b) => b.type)).toEqual(Array<string>(3).fill('deal.updated'));
+    expect(bodiesAt(agents.path).map((b) => b.type)).toEqual(Array<string>(4).fill('deal.updated'));
     expect(bodiesAt(renewals.path)).toEqual([]);
   });
 
@@ -5516,8 +5516,9 @@ describe('task events (ADR-261)', () => {
       ['task.assignee_changed', 'open', owner.membership.id, agent.membership.id, 2],
       // The owner's endpoint takes the completion: the task is the owner's when it happens.
       ['task.status_changed', 'done', null, null, 2],
-      // Reopened, the task is the agent's again as the request leaves it.
-      ['task.status_changed', 'open', null, null, 1],
+      // And the reopening, which comes before the task is given back among the request's steps
+      // (Codex review of PR #39).
+      ['task.status_changed', 'open', null, null, 2],
       ['task.assignee_changed', 'open', agent.membership.id, owner.membership.id, 2],
     ]);
 
@@ -5540,8 +5541,13 @@ describe('task events (ADR-261)', () => {
     expect(bodiesAt(agents.path).map((b) => b.type)).toEqual(
       Array<string>(4).fill('task.assignee_changed'),
     );
-    expect(bodiesAt(owners.path).map((b) => [b.type, taskIn(b).status])).toEqual([
+    expect(
+      bodiesAt(owners.path)
+        .map((b) => [b.type, taskIn(b).status])
+        .sort(),
+    ).toEqual([
       ['task.status_changed', 'done'],
+      ['task.status_changed', 'open'],
     ]);
   });
 
@@ -5609,9 +5615,9 @@ describe('task events (ADR-261)', () => {
       ['task.updated', 'open', ['title', 'dueAt'], 2],
       ['task.updated', 'open', ['notes'], 2],
       ['task.updated', 'open', ['remindAt'], 2],
-      // The details changed before the assignee: the task is the owner's as the edit leaves it, so
-      // the agent's endpoint does not take the change of title.
-      ['task.updated', 'open', ['title'], 1],
+      // The details change before the assignee among the edit's steps: the task is still the
+      // agent's, so the agent's endpoint takes the change of title (Codex review of PR #39).
+      ['task.updated', 'open', ['title'], 2],
       ['task.assignee_changed', 'open', null, 1],
     ]);
 
@@ -5636,8 +5642,8 @@ describe('task events (ADR-261)', () => {
       ['task.updated', 'open', ['dueAt'], 1],
       ['task.status_changed', 'done', null, 2],
       ['task.status_changed', 'open', null, 2],
-      // The agent's again as the request leaves it.
-      ['task.updated', 'open', ['title'], 2],
+      // Still the owner's when its details change: given back to the agent after.
+      ['task.updated', 'open', ['title'], 1],
       ['task.assignee_changed', 'open', null, 1],
     ]);
 

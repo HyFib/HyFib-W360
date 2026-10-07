@@ -10477,6 +10477,16 @@ Decision:
 Not built: the values before a change, edits of a lost reason, a deal's notes or its contact's
 details as deal events, and who made a change in the payload.
 
+Amended (2026-10-07, found in review of PR #39): the owner list matched every event of one update
+against the owner the update left, so an update that changed a deal's details and its owner sent
+`deal.updated` to the endpoints of the new owner rather than of the owner it had when its details
+changed, and likewise its reopening and its move. Each event is now matched against the owner the
+deal had at its step, as its pipeline and stage already were: the steps before the change of owner
+(reopened, moved, details changed) against the owner before it, the close after it against the new
+one, and `deal.owner_changed` against both. The trigger passes the step's owner in the event's
+detail, and `app.capture_webhook_event` matches it and leaves it out of the stored detail, so
+payloads are unchanged (migration 0215).
+
 ## ADR-276 A webhook event when a CRM task's details change (P5-09, P4-04) (2026-10-07)
 
 Context: task events (ADR-261, ADR-274) told integrations of tasks added, given to another member,
@@ -10519,6 +10529,15 @@ Decision:
 
 Not built: the values before a change, the notes or the reminder in the payload, who made a change,
 and task events by their deal's pipeline, stage or owner.
+
+Amended (2026-10-07, found in review of PR #39): the assignee list matched every event of one update
+against the assignee the update left, so an edit that changed a task's details and its assignee sent
+`task.updated` to the endpoints of the new assignee rather than of the one it had when its details
+changed, and likewise its reopening. Each event is now matched against the assignee the task had at
+its step: reopened and details changed against the assignee before the change, the close after it
+against the new one, and `task.assignee_changed` against both. The trigger passes the step's
+assignee in the event's detail, kept out of the stored detail, so payloads are unchanged (migration
+0215).
 
 ## ADR-277 Saying who changed a CRM deal or task in its webhook events (P5-09, P4-04) (2026-10-07)
 
