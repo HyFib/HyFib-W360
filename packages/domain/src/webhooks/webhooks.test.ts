@@ -1,5 +1,6 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { isAppError, Keyring } from '@w360/core';
 import {
   ACTIVE_RUN_STATUSES,
@@ -15,6 +16,7 @@ import {
   DEAL_STATUSES,
   MESSAGE_TYPES,
   ORDER_STATUSES,
+  PAYMENT_LINK_STATUSES,
   TASK_STATUSES,
   TEMPLATE_STATUSES,
   WEBHOOK_EVENT_TYPES,
@@ -98,6 +100,7 @@ import {
 } from './model';
 import {
   noteCreatedPayloadSchema,
+  paymentLinkStatusChangedPayloadSchema,
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
   buildWebhookPayload,
@@ -1683,6 +1686,7 @@ describe('the OpenAPI document', () => {
       'automation.run_ended',
       'order.received',
       'order.status_changed',
+      'payment_link.status_changed',
       'campaign.status_changed',
       'deal.created',
       'deal.updated',
@@ -2601,6 +2605,7 @@ describe('number filters (ADR-170)', () => {
       'automation.run_ended',
       'order.received',
       'order.status_changed',
+      'payment_link.status_changed',
       'campaign.status_changed',
     ]);
     const payloads = {
@@ -2619,6 +2624,7 @@ describe('number filters (ADR-170)', () => {
       'automation.run_ended': automationRunEndedPayloadSchema,
       'order.received': orderReceivedPayloadSchema,
       'order.status_changed': orderStatusChangedPayloadSchema,
+      'payment_link.status_changed': paymentLinkStatusChangedPayloadSchema,
       'campaign.status_changed': campaignStatusChangedPayloadSchema,
       'deal.created': dealCreatedPayloadSchema,
       'deal.updated': dealUpdatedPayloadSchema,
@@ -4127,6 +4133,125 @@ describe('the event of a CRM note (ADR-280)', () => {
       'Notes are never changed, so no other note event is sent',
       'erasing a contact deletes its notes, so the events of an erased contact’s notes are no longer delivered',
       'No endpoint filter narrows it.',
+    ]) {
+      expect(described).toContain(words);
+    }
+  });
+});
+
+describe('the event of a Payment Link (ADR-285)', () => {
+  it('is one event on the order’s number, labelled as Settings lists it', () => {
+    expect(WEBHOOK_EVENT_INFO['payment_link.status_changed']).toEqual({
+      label: 'Payment Link status',
+      description:
+        'A Payment Link for a WhatsApp order was created at Razorpay (sent in the chat or not), partly paid, paid, expired or cancelled, or Razorpay could not create it.',
+    });
+    expect(webhookTakesChannelEvents(['payment_link.status_changed'])).toBe(true);
+    for (const takes of [
+      webhookTakesTaskEvents,
+      webhookTakesPipelineEvents,
+      webhookTakesTeamEvents,
+    ]) {
+      expect(takes(['payment_link.status_changed']), takes.name).toBe(false);
+    }
+  });
+
+  it('gives the link as the API reads it, with the change, its order, conversation, contact and number', () => {
+    const data = paymentLinkStatusChangedPayloadSchema.shape.data.shape;
+    expect(Object.keys(data)).toEqual([
+      'paymentLink',
+      'order',
+      'conversation',
+      'contact',
+      'channel',
+    ]);
+    const link = data.paymentLink.shape;
+    expect(Object.keys(link)).toEqual([
+      'id',
+      'orderId',
+      'status',
+      'amountMinor',
+      'amountPaidMinor',
+      'currency',
+      'expiresAt',
+      'paidAt',
+      'cancelRequestedAt',
+      'messageId',
+      'notSentReason',
+      'error',
+      'requestedBy',
+      'requestedByApiKeyId',
+      'createdAt',
+      'checkedAt',
+      'previousStatus',
+    ]);
+    expect(link.status.description).toContain(
+      'The status this event reports, as the worker wrote it',
+    );
+    expect(link.previousStatus.options).toEqual([...PAYMENT_LINK_STATUSES]);
+    expect(Object.keys(data.order.shape)).toEqual(['id', 'reference', 'status']);
+    expect(data.order.shape.status.description).toContain(
+      'order.status_changed reports its changes',
+    );
+    // Never the link's address or Razorpay's ids.
+    expect(JSON.stringify(z.toJSONSchema(paymentLinkStatusChangedPayloadSchema))).not.toMatch(
+      /"(url|shortUrl|reference_id|providerLinkId|paymentId)"/,
+    );
+    const id = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
+    const at = '2026-10-07T10:00:00.000Z';
+    const body = (status: string, previousStatus: string) => ({
+      id,
+      type: 'payment_link.status_changed',
+      createdAt: at,
+      data: {
+        paymentLink: {
+          id,
+          orderId: id,
+          status,
+          amountMinor: 3000,
+          amountPaidMinor: 0,
+          currency: 'INR',
+          expiresAt: at,
+          paidAt: null,
+          cancelRequestedAt: null,
+          messageId: null,
+          notSentReason: 'The link was created but not sent: the WhatsApp number is not active.',
+          error: null,
+          requestedBy: 'api',
+          requestedByApiKeyId: id,
+          createdAt: at,
+          checkedAt: at,
+          previousStatus,
+        },
+        order: { id, reference: 'K7M2QX9P', status: 'awaiting_payment' },
+        conversation: { id },
+        contact: { id, phone: '+919845012345', name: 'Asha' },
+        channel: { id, phone: '+91 80 4567 8901' },
+      },
+    });
+    expect(
+      paymentLinkStatusChangedPayloadSchema.safeParse(body('created', 'creating')).success,
+    ).toBe(true);
+    expect(
+      paymentLinkStatusChangedPayloadSchema.safeParse(body('paid', 'partially_paid')).success,
+    ).toBe(true);
+    expect(paymentLinkStatusChangedPayloadSchema.safeParse(body('refunded', 'paid')).success).toBe(
+      false,
+    );
+  });
+
+  it('is described: the change as written, the link as the API reads it, never its address', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const described = doc.webhooks['payment_link.status_changed'].post.description;
+    for (const words of [
+      'A Payment Link for a WhatsApp order was created at Razorpay (sent in the chat or not), partly paid, paid, expired or cancelled, or Razorpay could not create it.',
+      'paymentLink.status and paymentLink.previousStatus are the change, as the worker wrote it',
+      'the rest is the link as GET /orders/{id}/payment-links reads it when the event is delivered',
+      'why it was not sent (notSentReason)',
+      'who asked for it (a member, never which, or an API key by its id)',
+      'Never the link’s address or Razorpay’s ids.',
+      'Only a link Razorpay reports paid marks the order paid, which order.status_changed reports.',
+      'an endpoint that names numbers receives it for those numbers only',
     ]) {
       expect(described).toContain(words);
     }

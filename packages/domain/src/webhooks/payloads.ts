@@ -13,6 +13,7 @@ import {
   channelAccounts,
   commerceOrderItems,
   commerceOrders,
+  commercePaymentLinks,
   contactMerges,
   contacts,
   CONVERSATION_STATUSES,
@@ -28,6 +29,7 @@ import {
   messages,
   ORDER_STATUSES,
   ORDER_STATUS_CHANGERS,
+  PAYMENT_LINK_STATUSES,
   sql,
   TASK_STATUSES,
   type OrderStatusChanger,
@@ -35,6 +37,11 @@ import {
   type WebhookEventType,
 } from '@w360/db';
 import { apiContactColumns, apiContactSchema, toApiContact } from '../api/contact-view';
+import {
+  apiPaymentLinkSchema,
+  paymentLinkColumns,
+  toApiPaymentLink,
+} from '../api/payment-link-view';
 import { campaignAnalytics, campaignResultsSchema, toCampaignResults } from '../campaigns/results';
 import { COMMERCE_LIMITS } from '../commerce/model';
 import { crmCreatedBy, noteWriter } from '../crm/common';
@@ -518,6 +525,38 @@ export const orderReceivedPayloadSchema = envelope('order.received', webhookOrde
 export const orderStatusChangedPayloadSchema = envelope(
   'order.status_changed',
   webhookOrderDataSchema,
+);
+
+/**
+ * A Payment Link's change of status (ADR-285): the link as GET /orders/{id}/payment-links reads it
+ * when the event is delivered (ADR-284), with the status and the one before it as captured; never
+ * its address or Razorpay's ids.
+ */
+const webhookPaymentLinkSchema = apiPaymentLinkSchema.extend({
+  status: z
+    .enum(PAYMENT_LINK_STATUSES)
+    .describe(
+      'The status this event reports, as the worker wrote it: created (open: sent in the chat, or notSentReason says why not), partially_paid, paid (which marks the order paid), expired, cancelled, or failed (Razorpay could not create it: error says why).',
+    ),
+  previousStatus: z.enum(PAYMENT_LINK_STATUSES).describe('The status before it.'),
+});
+export const paymentLinkStatusChangedPayloadSchema = envelope(
+  'payment_link.status_changed',
+  z.object({
+    paymentLink: webhookPaymentLinkSchema,
+    order: z.object({
+      id: z.uuid().describe('The order, as GET /orders/{id} reads it.'),
+      reference: z.string().describe('The short reference members and the customer quote.'),
+      status: z
+        .enum(ORDER_STATUSES)
+        .describe(
+          'The order’s status when the event is delivered: order.status_changed reports its changes.',
+        ),
+    }),
+    conversation: z.object({ id: z.uuid() }),
+    contact: contactSchema,
+    channel: channelSchema,
+  }),
 );
 
 const campaignStatusSchema = z.enum(CAMPAIGN_STATUSES);
@@ -1232,6 +1271,41 @@ async function noteOf(tx: Tx, tenantId: string, noteId: string | null) {
   return row ?? null;
 }
 
+/**
+ * A Payment Link with its order's reference, status, conversation, contact and number, in the
+ * company, read as the API reads it (ADR-284, ADR-285); null if there is none.
+ */
+async function paymentLinkOf(tx: Tx, tenantId: string, linkId: string | null) {
+  if (!linkId || !z.uuid().safeParse(linkId).success) return null;
+  const [row] = await tx
+    .select({
+      ...paymentLinkColumns,
+      orderReference: commerceOrders.reference,
+      orderStatus: commerceOrders.status,
+      conversationId: commerceOrders.conversationId,
+      contactId: commerceOrders.contactId,
+      channelId: commerceOrders.channelAccountId,
+      channelPhone: channelAccounts.displayPhoneNumber,
+    })
+    .from(commercePaymentLinks)
+    .innerJoin(
+      commerceOrders,
+      and(
+        eq(commerceOrders.tenantId, commercePaymentLinks.tenantId),
+        eq(commerceOrders.id, commercePaymentLinks.orderId),
+      ),
+    )
+    .leftJoin(
+      channelAccounts,
+      and(
+        eq(channelAccounts.tenantId, commerceOrders.tenantId),
+        eq(channelAccounts.id, commerceOrders.channelAccountId),
+      ),
+    )
+    .where(and(eq(commercePaymentLinks.tenantId, tenantId), eq(commercePaymentLinks.id, linkId)));
+  return row ?? null;
+}
+
 /** A WhatsApp order with its items in cart order and its number, in the company. */
 async function orderOf(tx: Tx, tenantId: string, orderId: string | null) {
   if (!orderId || !z.uuid().safeParse(orderId).success) return null;
@@ -1514,6 +1588,27 @@ export async function buildWebhookPayload(
           conversation: { id: order.conversationId },
           contact: await contactOf(tx, tenantId, order.contactId),
           channel: { id: order.channelId, phone: order.channelPhone ?? null },
+        },
+      };
+    }
+    case 'payment_link.status_changed': {
+      // The status and the one before it as captured; the rest as the link and its order are now.
+      // Links are kept until the company is deleted, so a link that is gone was never one of the
+      // company's.
+      const link = await paymentLinkOf(tx, tenantId, str(event.detail.paymentLinkId));
+      if (!link) throw new WebhookEventGoneError();
+      return {
+        ...base,
+        data: {
+          paymentLink: {
+            ...toApiPaymentLink(link),
+            status: event.status ?? link.status,
+            previousStatus: str(event.detail.previousStatus),
+          },
+          order: { id: link.orderId, reference: link.orderReference, status: link.orderStatus },
+          conversation: { id: link.conversationId },
+          contact: await contactOf(tx, tenantId, link.contactId),
+          channel: { id: link.channelId, phone: link.channelPhone ?? null },
         },
       };
     }

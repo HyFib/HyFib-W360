@@ -1,5 +1,43 @@
 # Progress
 
+## 2026-10-07 — A webhook event when an order's Payment Link changes status (P5-09, P4-06a, H-014, ADR-285)
+
+Status: **Implemented; its database tests run in CI only.** Integrations heard of orders waiting for
+payment and paid, but not of what happened to a Payment Link in between. The local PostgreSQL is
+unavailable, so the migrations and the integration test below were written but not run here;
+migrations 0204 and 0205 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migrations 0204 (the endpoints' event and number checks and the events' type check
+  with `payment_link.status_changed`, the last NOT VALID; the `AFTER UPDATE OF status` trigger on
+  `app.commerce_payment_links` and its function; `app.capture_webhook_event` with the event among
+  those of a number) and 0205 (validating the events' type check).
+- **Domain:** the event in the lists and among the events of a number; its payload (`paymentLinkOf`,
+  `paymentLinkStatusChangedPayloadSchema`) with the link as the API reads it, through
+  `api/payment-link-view.ts`, now shared with `GET /orders/{id}/payment-links`; the OpenAPI webhook
+  entry.
+- **Web:** no change of its own: Settings → Webhooks lists the event and offers numbers for it, as
+  for every event of a number.
+- **Tests:** unit (`webhooks.test.ts`: the event's label and number, the payload schema without the
+  address, the OpenAPI wording; the event lists updated); integration (1 new in
+  `webhook-events.test.ts`, against the Razorpay stand-in). Written for CI; the integration test was
+  not run here. No e2e test.
+- **Docs:** ADR-285; ARCHITECTURE; SECURITY; THREAT-MODEL T253; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix H-014.
+- **Mutation checks:** 12/12 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 122 files, 1172 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migrations 0204 and 0205         | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — An order's Payment Links through the public API (P5-08, P4-06a, H-033, W-114, ADR-284)
 
 Status: **Implemented; its database tests run in CI only.** Keys asked for payment but could follow

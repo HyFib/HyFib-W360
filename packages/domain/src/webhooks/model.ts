@@ -55,6 +55,7 @@ export const WEBHOOK_EVENT_KEYS = [
   'automation.run_ended',
   'order.received',
   'order.status_changed',
+  'payment_link.status_changed',
   'campaign.status_changed',
   'deal.created',
   'deal.updated',
@@ -141,6 +142,11 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       label: 'Order status',
       description:
         'A WhatsApp order was confirmed, fulfilled or cancelled, is waiting for payment, was paid through its Payment Link, or went back to confirmed when the link ended unpaid.',
+    },
+    'payment_link.status_changed': {
+      label: 'Payment Link status',
+      description:
+        'A Payment Link for a WhatsApp order was created at Razorpay (sent in the chat or not), partly paid, paid, expired or cancelled, or Razorpay could not create it.',
     },
     'campaign.status_changed': {
       label: 'Campaign status',
@@ -691,8 +697,8 @@ export function webhookTakesAutomationRuns(eventTypes: readonly WebhookEventType
 
 /**
  * The events that happen on a WhatsApp number, which an endpoint can take for chosen numbers
- * (ADR-170): a campaign's are on the number it sends from. Consent, contact, template, deal and
- * task events belong to no number.
+ * (ADR-170): a campaign's are on the number it sends from, a Payment Link's on its order's (ADR-285).
+ * Consent, contact, template, deal, task and note events belong to no number.
  */
 export const WEBHOOK_CHANNEL_EVENTS = [
   'message.received',
@@ -704,6 +710,7 @@ export const WEBHOOK_CHANNEL_EVENTS = [
   'automation.run_ended',
   'order.received',
   'order.status_changed',
+  'payment_link.status_changed',
   'campaign.status_changed',
 ] as const satisfies readonly WebhookEventType[];
 

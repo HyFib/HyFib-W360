@@ -190,7 +190,11 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   who wrote it (a member, never which, or a key by its id) with its contact as the API describes it,
   never its text: endpoints take events without scopes, so a note's text is read only with
   `notes.read`. Members and keys capture it as the runtime role in the company's scope; erasing a
-  contact deletes its notes, so their pending events are not delivered (`event_gone`).
+  contact deletes its notes, so their pending events are not delivered (`event_gone`). A Payment
+  Link's event (`payment_link.status_changed`, ADR-285) gives the link as
+  `GET /orders/{id}/payment-links` reads it (who asked: a member never by name, or a key by its id),
+  never its address or Razorpay's ids; the commerce worker captures it as the runtime role in the
+  company's scope, and an endpoint that names numbers hears it only for its order's number.
 - Customers' numbers (ADR-226): a company's owners and administrators choose the roles (supervisor,
   agent, marketer, analyst) whose members see them masked; the context leaves out
   `contacts.view_numbers` for a member whose every role that grants it is masked, and the services

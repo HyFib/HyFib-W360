@@ -1088,11 +1088,15 @@ verification, app review, Embedded Signup configuration).
   `note.created` for every note a member or a key adds, with who wrote it (a key by its id, never
   which member), the deal and the contact, never the text, which `notes.read` reads; merges and
   erasure send none).
+  **[Payment Link events built; their database tests run only in CI]** (ADR-285, migrations 0204 and
+  0205: `payment_link.status_changed` for every status the commerce worker writes, with the link as
+  `GET /orders/{id}/payment-links` reads it, never its address or Razorpay's ids, narrowed by the
+  order's number like the order events).
   Remaining: filters for other event types (task events by their deal's pipeline, stage or owner,
   among them) and on a message's or contact's values (such as a field's value, contact events by
   tag, or the key that started a run), other authentication (headers computed per delivery, other
-  OAuth grants), mutual TLS, fixed egress addresses, events for store orders, Payment Links and each
-  step of a run, `createdAt` finer than the millisecond, load tests.
+  OAuth grants), mutual TLS, fixed egress addresses, events for store orders and each step of a run,
+  `createdAt` finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

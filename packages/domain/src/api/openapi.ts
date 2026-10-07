@@ -12,7 +12,6 @@ import {
   MESSAGE_TYPES,
   ORDER_STATUSES,
   ORDER_STATUS_CHANGERS,
-  PAYMENT_LINK_STATUSES,
   REMINDER_STATES,
   TASK_STATUSES,
   WEBHOOK_DELIVERY_STATES,
@@ -51,6 +50,7 @@ import {
   taskAssigneeChangedPayloadSchema,
   taskStatusChangedPayloadSchema,
   noteCreatedPayloadSchema,
+  paymentLinkStatusChangedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
@@ -117,6 +117,7 @@ import {
   apiUpdateMatchingConversationsSchema,
 } from './conversations';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
+import { apiPaymentLinkSchema } from './payment-link-view';
 import {
   API_DEAL_HISTORY_DETAILS,
   API_DEAL_HISTORY_TYPES,
@@ -374,58 +375,6 @@ export const apiOrderSchema = z.object({
   receivedAt: z.iso.datetime(),
   paidAt: z.iso.datetime().nullable().describe('When Razorpay reported its Payment Link paid.'),
   updatedAt: z.iso.datetime().describe('When anything about the order last changed.'),
-});
-
-/** A Payment Link of an order, as `GET /orders/{id}/payment-links` gives it (ADR-284). */
-export const apiPaymentLinkSchema = z.object({
-  id: z.uuid(),
-  orderId: z.uuid(),
-  status: z
-    .enum(PAYMENT_LINK_STATUSES)
-    .describe(
-      'As the order page shows it: creating (HyFib is creating it at Razorpay), created (open, unpaid), partially_paid (open, part paid), paid (the whole amount paid, which marks the order paid), expired, cancelled, or failed (Razorpay could not create it: error says why).',
-    ),
-  amountMinor: z.number().int().describe('The amount asked for, in the currency’s minor units.'),
-  amountPaidMinor: z
-    .number()
-    .int()
-    .describe('What Razorpay reports paid so far, in the currency’s minor units.'),
-  currency: z.enum(['INR']),
-  expiresAt: z.iso.datetime().describe('When the link expires if it is not paid first.'),
-  paidAt: z.iso.datetime().nullable().describe('When Razorpay reported it paid.'),
-  cancelRequestedAt: z.iso
-    .datetime()
-    .nullable()
-    .describe(
-      'When its cancellation was asked for (by a member, a key, or HyFib when the contact was erased); it stays open until Razorpay reports it cancelled.',
-    ),
-  messageId: z
-    .uuid()
-    .nullable()
-    .describe(
-      'The message that sent it in the order’s conversation (GET /messages/{id}); null while it was not sent.',
-    ),
-  notSentReason: z
-    .string()
-    .nullable()
-    .describe(
-      'Why it was not sent in the chat (the customer service window had closed, the number is inactive…), as the order page says it; null once it was sent, and while nothing stopped it.',
-    ),
-  error: z
-    .string()
-    .nullable()
-    .describe('What went wrong at Razorpay with it, as the order page says it; null otherwise.'),
-  requestedBy: z
-    .enum(['member', 'api'])
-    .describe(
-      'Who asked for the payment: a member on the order page (member, never which member) or an API key (api, named by requestedByApiKeyId).',
-    ),
-  requestedByApiKeyId: z
-    .uuid()
-    .nullable()
-    .describe('The API key that asked for it, when requestedBy is api; null otherwise.'),
-  createdAt: z.iso.datetime(),
-  checkedAt: z.iso.datetime().nullable().describe('When HyFib last read it from Razorpay.'),
 });
 
 /** A CRM pipeline with its stages (ADR-253). */
@@ -3228,6 +3177,12 @@ export function buildOpenApiDocument(serverUrl: string) {
         `${WEBHOOK_EVENT_INFO['order.status_changed'].description} order.status and order.previousStatus are the change, and order.changedBy who made it: a member, an API key (order.apiKeyId names it, so an integration can tell its own changes from others') or HyFib applying the order’s Payment Link; the rest is the order when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt. An endpoint receives every status unless it names the statuses it takes (its \`orderStatuses\`, or the statuses ticked in Settings → Webhooks).`,
         'WebhookOrderStatusChanged',
       ),
+      'payment_link.status_changed': webhook(
+        'webhookPaymentLinkStatusChanged',
+        WEBHOOK_EVENT_INFO['payment_link.status_changed'].label,
+        `${WEBHOOK_EVENT_INFO['payment_link.status_changed'].description} paymentLink.status and paymentLink.previousStatus are the change, as the worker wrote it from what it did at Razorpay or what Razorpay reported; the rest is the link as GET /orders/{id}/payment-links reads it when the event is delivered: its amounts, expiry, the message that sent it in the chat or why it was not sent (notSentReason), what went wrong at Razorpay, and who asked for it (a member, never which, or an API key by its id). Never the link’s address or Razorpay’s ids. Only a link Razorpay reports paid marks the order paid, which order.status_changed reports. Asking for payment and asking to cancel a link send no event of their own here: the link is \`creating\` until the worker creates it, and cancelled when Razorpay reports it. It happens on the order’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        'WebhookPaymentLinkStatusChanged',
+      ),
       'campaign.status_changed': webhook(
         'webhookCampaignStatusChanged',
         WEBHOOK_EVENT_INFO['campaign.status_changed'].label,
@@ -3535,6 +3490,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookAutomationRunEnded: jsonSchema(automationRunEndedPayloadSchema),
         WebhookOrderReceived: jsonSchema(orderReceivedPayloadSchema),
         WebhookOrderStatusChanged: jsonSchema(orderStatusChangedPayloadSchema),
+        WebhookPaymentLinkStatusChanged: jsonSchema(paymentLinkStatusChangedPayloadSchema),
         WebhookCampaignStatusChanged: jsonSchema(campaignStatusChangedPayloadSchema),
         WebhookDealCreated: jsonSchema(dealCreatedPayloadSchema),
         WebhookDealUpdated: jsonSchema(dealUpdatedPayloadSchema),

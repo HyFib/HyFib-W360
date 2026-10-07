@@ -10796,3 +10796,37 @@ Decision:
 
 Not built: a link's address through the API, the links of many orders in one call, filters by
 status, and Payment Link webhook events.
+
+## ADR-285 A webhook event when an order's Payment Link changes status (P5-09, P4-06a) (2026-10-07)
+
+Context: `order.status_changed` reports an order waiting for payment, paid, or back to confirmed,
+but not what happened to its Payment Link in between: whether it reached the customer (the customer
+service window may have closed), a part payment, or why Razorpay could not create it. Since ADR-284
+an integration could read that from `GET /orders/{id}/payment-links`, but only by polling. P5-09
+left Payment Link events unbuilt, and ADR-284 listed them as not built.
+
+Decision:
+
+- **`payment_link.status_changed`** ("Payment Link status") whenever the commerce worker writes a
+  link's new status from what it did at Razorpay or what Razorpay reported: `created` (open, sent in
+  the chat or not), `partially_paid`, `paid`, `expired`, `cancelled`, or `failed` when Razorpay
+  could not create it. Asking for payment writes a `creating` link and asking to cancel only marks
+  it, so neither sends an event of its own here (`order.status_changed` reports the order waiting
+  for payment).
+- **Captured as the order events are:** an `AFTER UPDATE OF status` trigger on
+  `app.commerce_payment_links` (the worker, as the runtime role in the company's scope, is the only
+  writer of a link's status) calls `app.capture_webhook_event` with the link, its order and the
+  status before it in `detail`, the order's conversation and contact, stamped when captured, and
+  only when an active endpoint of the company takes the type (migration 0204; 0205 validates the
+  events' type check).
+- **On the order's number:** like the order events, it happens on the order's WhatsApp number, so an
+  endpoint that names numbers (ADR-170) hears it for those numbers only: the trigger passes the
+  order's number, and the capture function and the endpoints' number check now list the event.
+- **Payload built when delivered:** the link as `GET /orders/{id}/payment-links` reads it
+  (`toApiPaymentLink`, now in `api/payment-link-view.ts`, shared by both), with `status` and
+  `previousStatus` as captured; the order's id, reference and status now; the conversation, the
+  contact as the API describes it, and the number. Never the link's address or Razorpay's ids. Links
+  are kept until the company is deleted, so a delivery always finds its link.
+
+Not built: an event when payment is asked for or a cancellation asked (the order's events report the
+first), filters by link status, the link's address in the payload, and events for refunds.

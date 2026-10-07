@@ -2992,6 +2992,18 @@ payloads never carry them; the order page shows the link. A missing note on an o
 was erased is expected: erasure clears it (and sends no order event). The event keeps the order id,
 the status before a change and who made it (ADR-270) in `app.webhook_events.detail`.
 
+**A receiver misses a Payment Link's change, or doubts one (ADR-285).** Endpoints that take
+`payment_link.status_changed` ("Payment Link status") are sent one event per status the commerce
+worker writes: `created` when the link is ready at Razorpay (sent in the chat, or `notSentReason`
+says why not), `partially_paid`, `paid`, `expired`, `cancelled`, and `failed` when Razorpay could
+not create it. Asking for payment and asking to cancel send none of their own (the order's
+`awaiting_payment` is an `order.status_changed`), and an endpoint that names numbers hears only the
+links of its numbers' orders. `paymentLink.status` and `previousStatus` are the change as captured;
+the rest is the link when the event is delivered, so an early event may already show a later
+payment. The payload never carries the link's address: members copy it from the order page. Changes
+made while no endpoint took the type were not recorded and are not sent later: read them with
+`GET /orders/{id}/payment-links`.
+
 **A receiver cannot tell who changed an order, or ignores a member's change (ADR-270).**
 `order.changedBy` says who made the change an `order.status_changed` event reports: `member` (the
 order page; never which member: the audit log names them, `commerce.order_status_changed`, or

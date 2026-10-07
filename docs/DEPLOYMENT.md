@@ -867,6 +867,17 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `GET /api/v1/orders/{id}/payment-links` with 404; rolling web servers back does the same. Workers
    are not affected.
 
+   Migration 0204 (ADR-285) replaces the endpoints' event and number checks (validated at once: at
+   most 10 endpoints per company) and the events' type check (NOT VALID; 0205 validates it while
+   captures go on), adds the trigger on `app.commerce_payment_links` and its function, and replaces
+   `app.capture_webhook_event` with the same signature (0194's, with the event among those of a
+   number). Workers roll out before web servers, so no endpoint takes the event before every worker
+   can describe it. A worker from before it fails each delivery of the event without an attempt
+   (`payload_failed`; replay it once newer workers run), so before rolling workers back to such an
+   image, turn the event off on the endpoints that take it. Until the web rollout ends, an old web
+   server answers Settings → Webhooks with an error for a company with an endpoint taking it: add it
+   to endpoints once the rollout ends, and turn it off before rolling web servers back.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

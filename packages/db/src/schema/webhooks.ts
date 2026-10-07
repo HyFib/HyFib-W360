@@ -26,6 +26,7 @@ export const WEBHOOK_EVENT_TYPES = [
   'automation.run_ended',
   'order.received',
   'order.status_changed',
+  'payment_link.status_changed',
   'campaign.status_changed',
   'deal.created',
   'deal.updated',

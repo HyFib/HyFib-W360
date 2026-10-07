@@ -1827,6 +1827,14 @@ true`); the same key with another request (method, path and body hashed) answers
   and keys' `apiCreateNote` are the only writers. Its payload (`noteOf`) gives the note without its
   body, who wrote it through `noteWriter` (`crm/common.ts`, shared with `GET /notes`) and its
   contact as it is now; a note gone (erasure) fails the delivery as `event_gone`.
+- **Payment Link events** (migrations 0204–0205, ADR-285): `commerce_payment_links_webhook_status`,
+  an `AFTER UPDATE OF status` trigger on `app.commerce_payment_links`, captures
+  `payment_link.status_changed` (`app.webhook_capture_payment_link()`) with the link, its order and
+  the status before it in `detail`, the order's conversation and contact, and the order's number for
+  the number filter, which `app.capture_webhook_event` now applies to the event. Its payload
+  (`paymentLinkOf`) reads the link with `paymentLinkColumns` and gives it through `toApiPaymentLink`
+  (`api/payment-link-view.ts`, shared with `GET /orders/{id}/payment-links`), with the order's
+  reference and status now, never `short_url`, `provider_link_id` or `reference`.
 - **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
   notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
   SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same

@@ -59,6 +59,7 @@ import {
   noteCreatedPayloadSchema,
   orderReceivedPayloadSchema,
   orderStatusChangedPayloadSchema,
+  paymentLinkStatusChangedPayloadSchema,
   processCommerceSync,
   processPaymentAccountCheck,
   processPaymentLink,
@@ -245,7 +246,7 @@ interface EventRow extends Record<string, unknown> {
 /** The company's captured events of the given types, oldest first, with their delivery counts. */
 const eventsOf = (
   c: Company,
-  prefix: 'conversation.' | 'contact.' | 'automation.' | 'order.' | 'campaign.',
+  prefix: 'conversation.' | 'contact.' | 'automation.' | 'order.' | 'payment_link.' | 'campaign.',
 ) =>
   fx.query<EventRow>(
     `SELECT e.id, e.type, e.status, e.detail, e.conversation_id, e.contact_id, e.contact_changes,
@@ -2896,6 +2897,145 @@ describe('order events (ADR-085)', () => {
         ['order.status_changed', first.id, 'confirmed'],
         ['order.status_changed', first.id, 'fulfilled'],
       ].sort(),
+    );
+  });
+
+  it('sends each Payment Link status the worker writes, with the link as the API reads it, to the endpoints of its order’s number (ADR-285)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const outlet = await fx.addNumber(c, { phone: '+91 90000 54322' });
+    await syncedCatalog(c, '5558580');
+    const links = await addEndpoint(c, ['payment_link.status_changed']);
+    const onOutlet = await addNumberEndpoint(
+      c,
+      ['payment_link.status_changed'],
+      [outlet.channelAccountId],
+    );
+    const ordersOnly = await addEndpoint(c, ['order.status_changed']);
+
+    // The company's Razorpay account, checked.
+    const keyId = `rzp_test_orderevents${String((merchants += 1)).padStart(2, '0')}`;
+    rzp.addMerchant(keyId, 'order-events-secret');
+    await commerce().savePaymentAccount(owner, {
+      keyId,
+      keySecret: 'order-events-secret',
+      webhookSecret: 'order-events-hook',
+    });
+    const [account] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.commerce_payment_accounts WHERE tenant_id = $1',
+      [c.tenant.id],
+    );
+    expect(await processPaymentAccountCheck(commerceWorker(), scopeOf(c), account!.id)).toBe(
+      'done',
+    );
+
+    // A member asks for payment of a ₹30 cart: the worker creates the link and sends it in the
+    // chat; the customer pays.
+    const order = await sendCart(c, waId(), '5558580', [
+      { retailerId: 'sku-1', quantity: 3, price: 10 },
+    ]);
+    const { linkId } = await commerce().requestPayment(agent, {
+      id: order.id,
+      expectedVersion: await orderVersion(order.id),
+    });
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), linkId)).toBe('done');
+    const [created] = await fx.query<{
+      provider_link_id: string;
+      message_id: string;
+      short_url: string;
+      reference: string;
+    }>(
+      'SELECT provider_link_id, message_id, short_url, reference FROM app.commerce_payment_links WHERE id = $1',
+      [linkId],
+    );
+    rzp.payLink(created!.provider_link_id);
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), linkId)).toBe('done');
+
+    // A second cart's link is cancelled at the member's request.
+    const second = await sendCart(c, waId(), '5558580', [
+      { retailerId: 'sku-2', quantity: 1, price: 20 },
+    ]);
+    const { linkId: cancelledId } = await commerce().requestPayment(agent, {
+      id: second.id,
+      expectedVersion: await orderVersion(second.id),
+    });
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), cancelledId)).toBe('done');
+    await commerce().cancelPaymentLink(agent, { orderId: second.id });
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), cancelledId)).toBe('done');
+
+    // One event per status the worker wrote, on the order's conversation and contact: asking for
+    // payment and asking to cancel send none of their own.
+    const events = await eventsOf(c, 'payment_link.');
+    const change = (paymentLinkId: string, orderId: string, previousStatus: string) => ({
+      paymentLinkId,
+      orderId,
+      previousStatus,
+    });
+    expect(events.map((e) => [e.status, e.detail, e.deliveries])).toEqual([
+      ['created', change(linkId, order.id, 'creating'), 1],
+      ['paid', change(linkId, order.id, 'created'), 1],
+      ['created', change(cancelledId, second.id, 'creating'), 1],
+      ['cancelled', change(cancelledId, second.id, 'created'), 1],
+    ]);
+    expect(events.map((e) => [e.conversation_id, e.contact_id])).toEqual([
+      [order.conversation_id, order.contact_id],
+      [order.conversation_id, order.contact_id],
+      [second.conversation_id, second.contact_id],
+      [second.conversation_id, second.contact_id],
+    ]);
+
+    await deliverDue(c);
+    const bodies = bodiesAt(links.path);
+    expect(bodies.map((b) => b.id)).toEqual(events.map((e) => e.id));
+    for (const body of bodies) {
+      expect(paymentLinkStatusChangedPayloadSchema.safeParse(body).success).toBe(true);
+    }
+    // The status and the one before it as captured; the rest as the link is when delivered.
+    expect(
+      bodies.map((b) => {
+        const link = b.data.paymentLink as Record<string, unknown>;
+        return [link.id, link.status, link.previousStatus, link.cancelRequestedAt !== null];
+      }),
+    ).toEqual([
+      [linkId, 'created', 'creating', false],
+      [linkId, 'paid', 'created', false],
+      [cancelledId, 'created', 'creating', true],
+      [cancelledId, 'cancelled', 'created', true],
+    ]);
+    expect(bodies[0]!.data).toMatchObject({
+      paymentLink: {
+        orderId: order.id,
+        amountMinor: 3000,
+        amountPaidMinor: 3000,
+        currency: 'INR',
+        paidAt: expect.any(String),
+        messageId: created!.message_id,
+        notSentReason: null,
+        error: null,
+        requestedBy: 'member',
+        requestedByApiKeyId: null,
+      },
+      order: { id: order.id, reference: order.reference, status: 'paid' },
+      conversation: { id: order.conversation_id },
+      contact: { id: order.contact_id },
+      channel: { id: c.channelAccountId },
+    });
+    expect(bodies[2]!.data.order).toEqual({
+      id: second.id,
+      reference: second.reference,
+      status: 'confirmed',
+    });
+    // Never the link's address or Razorpay's ids.
+    const sent = JSON.stringify(bodies);
+    for (const hidden of [created!.short_url, created!.provider_link_id, created!.reference]) {
+      expect(sent).not.toContain(hidden);
+    }
+    // The outlet's endpoint hears none of the first number's links, and an endpoint for orders
+    // hears their statuses only.
+    expect(bodiesAt(onOutlet.path)).toEqual([]);
+    expect(new Set(bodiesAt(ordersOnly.path).map((b) => b.type))).toEqual(
+      new Set(['order.status_changed']),
     );
   });
 

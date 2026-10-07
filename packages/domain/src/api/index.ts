@@ -19,6 +19,7 @@ export * from './key-usage-notices';
 export * from './rate-limits';
 export * from './conversations';
 export * from './orders';
+export * from './payment-link-view';
 export * from './deals';
 export * from './notes';
 export * from './tasks';

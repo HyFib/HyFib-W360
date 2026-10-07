@@ -14,7 +14,6 @@ import {
   sql,
   type OrderStatus,
   type OrderStatusChanger,
-  type PaymentLinkStatus,
   type Tx,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
@@ -39,6 +38,7 @@ import {
   type IdempotencyInput,
 } from './idempotency';
 import { API_LIMITS } from './model';
+import { paymentLinkColumns, toApiPaymentLink, type ApiPaymentLink } from './payment-link-view';
 
 /**
  * WhatsApp orders through the public API (ADR-167): the carts customers send from the company's
@@ -531,69 +531,6 @@ export async function apiCancelOrderPayment(
 }
 
 /**
- * A Payment Link as the API gives it (ADR-284): as the order page lists it, with who asked (a key by
- * its id, never which member), never its address or Razorpay's ids for the link and its payments.
- */
-export interface ApiPaymentLink {
-  id: string;
-  orderId: string;
-  status: PaymentLinkStatus;
-  amountMinor: number;
-  amountPaidMinor: number;
-  currency: 'INR';
-  expiresAt: string;
-  paidAt: string | null;
-  cancelRequestedAt: string | null;
-  messageId: string | null;
-  /** Why it was not sent in the chat, while it was not. */
-  notSentReason: string | null;
-  error: string | null;
-  requestedBy: 'member' | 'api';
-  requestedByApiKeyId: string | null;
-  createdAt: string;
-  checkedAt: string | null;
-}
-
-/** A Payment Link's row as the API reads it. */
-export interface PaymentLinkRow {
-  id: string;
-  orderId: string;
-  status: PaymentLinkStatus;
-  amountMinor: number;
-  amountPaidMinor: number;
-  currency: 'INR';
-  expiresAt: Date;
-  paidAt: Date | null;
-  cancelRequestedAt: Date | null;
-  messageId: string | null;
-  sendError: string | null;
-  error: string | null;
-  apiKeyId: string | null;
-  createdAt: Date;
-  checkedAt: Date | null;
-}
-
-/** A link as the API gives it: a reason it was not sent only while it was not (ADR-284). */
-export const toApiPaymentLink = (row: PaymentLinkRow): ApiPaymentLink => ({
-  id: row.id,
-  orderId: row.orderId,
-  status: row.status,
-  amountMinor: row.amountMinor,
-  amountPaidMinor: row.amountPaidMinor,
-  currency: row.currency,
-  expiresAt: row.expiresAt.toISOString(),
-  paidAt: row.paidAt?.toISOString() ?? null,
-  cancelRequestedAt: row.cancelRequestedAt?.toISOString() ?? null,
-  messageId: row.messageId,
-  notSentReason: row.messageId ? null : row.sendError,
-  error: row.error,
-  requestedBy: row.apiKeyId ? 'api' : 'member',
-  requestedByApiKeyId: row.apiKeyId,
-  createdAt: row.createdAt.toISOString(),
-  checkedAt: row.checkedAt?.toISOString() ?? null,
-});
-
-/**
  * The Payment Links of one of the company's orders, newest first by when they were asked for, on
  * exact keyset pages (ADR-284), read-only: an order of another company, or none, is not found.
  */
@@ -618,21 +555,7 @@ export async function apiListOrderPaymentLinks(
       if (!order) return null;
       const rows = await tx
         .select({
-          id: commercePaymentLinks.id,
-          orderId: commercePaymentLinks.orderId,
-          status: commercePaymentLinks.status,
-          amountMinor: commercePaymentLinks.amountMinor,
-          amountPaidMinor: commercePaymentLinks.amountPaidMinor,
-          currency: commercePaymentLinks.currency,
-          expiresAt: commercePaymentLinks.expiresAt,
-          paidAt: commercePaymentLinks.paidAt,
-          cancelRequestedAt: commercePaymentLinks.cancelRequestedAt,
-          messageId: commercePaymentLinks.messageId,
-          sendError: commercePaymentLinks.sendError,
-          error: commercePaymentLinks.error,
-          apiKeyId: commercePaymentLinks.createdByApiKeyId,
-          createdAt: commercePaymentLinks.createdAt,
-          checkedAt: commercePaymentLinks.checkedAt,
+          ...paymentLinkColumns,
           cursorAt: exactTimestamp(commercePaymentLinks.createdAt),
         })
         .from(commercePaymentLinks)

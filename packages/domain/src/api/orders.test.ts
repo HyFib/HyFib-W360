@@ -5,7 +5,7 @@ import { ROLE_PERMISSIONS } from '../authz/permissions';
 import { ORDER_REFERENCE_RE } from '../commerce/model';
 import type { ApiContext } from './context';
 import { API_SCOPE_INFO } from './model';
-import { API_ROUTES, apiOrderSchema, apiPaymentLinkSchema, buildOpenApiDocument } from './openapi';
+import { API_ROUTES, apiOrderSchema, buildOpenApiDocument } from './openapi';
 import {
   apiCancelOrderPayment,
   apiGetOrder,
@@ -16,9 +16,8 @@ import {
   apiRequestOrderPayment,
   apiUpdateOrder,
   apiUpdateOrderSchema,
-  toApiPaymentLink,
-  type PaymentLinkRow,
 } from './orders';
+import { apiPaymentLinkSchema, toApiPaymentLink, type PaymentLinkRow } from './payment-link-view';
 
 const TENANT = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
 const OTHER = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';
