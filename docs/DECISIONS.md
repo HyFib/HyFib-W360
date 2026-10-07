@@ -10272,3 +10272,30 @@ Decision:
 
 Not built: which member changed an order, who changed it in `GET /orders`, a reason or note with a
 change, and who created or cancelled a Payment Link.
+
+## ADR-271 Reading who last changed a WhatsApp order through the public API (P5-08) (2026-10-07)
+
+Context: ADR-270 recorded who changes an order's status and sent it in `order.status_changed`, but
+an order system that polls `GET /orders` with `updatedSince` instead of taking webhooks (or that
+catches up after its receiver was down) still could not tell the orders it changed last from those
+members or payments did; ADR-270 left reading it through the API unbuilt.
+
+Decision:
+
+- **`statusChangedBy` and `statusChangedByApiKeyId`** on the API's order (`GET /orders`,
+  `GET /orders/{id}` and the answer of `PATCH /orders/{id}`): who made the latest status change,
+  `member` (never which member), `api` with the key's id, or `payment_link` (HyFib applying the
+  order's Payment Link), read from the columns ADR-270 added. Null while the order is as the
+  customer sent it, and when HyFib did not record who made the latest change (before migration 0187,
+  or by a server from before it); never the maker of an earlier change, since the database clears a
+  changer an earlier transaction recorded.
+- **The same as the event:** the order and `order.status_changed` agree, the event giving each
+  change's maker as captured and the order the latest one's; `GET /orders` describes the fields and
+  why an integration reads them.
+- **No migration and no new filter:** the columns are read as the order's other columns are, in the
+  key's company scope; listing orders by who changed them is not offered (an integration skips its
+  own key's orders as it pages).
+
+Not built: filtering orders by who changed them, the history of an order's changes through the API
+(the audit log keeps members' and keys' changes), and who changed an order on the order page and in
+the members' CSV export.

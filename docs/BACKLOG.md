@@ -725,6 +725,10 @@ verification, app review, Embedded Signup configuration).
   in the plan: an order confirmed, fulfilled or cancelled as members move it, from an expected
   status when one is given, payment statuses left to Razorpay; a retry changes nothing; migration
   0116).
+  **[Who last changed an order, through the API, built; its database and browser tests run only in
+  CI]** (ADR-271, no migration: `GET /orders`, `GET /orders/{id}` and the answer of
+  `PATCH /orders/{id}` name who made an order's latest status change, a member, a key by its id or
+  the Payment Link, as `order.status_changed` does since ADR-270).
   **[Reading WhatsApp numbers built; its database tests run only in CI]** (ADR-171: `GET /channels`
   with the new `channels.read` scope, granted with the permission of the same name: every number of
   the company oldest first on exact pages, filtered by status, with its number, verified name and

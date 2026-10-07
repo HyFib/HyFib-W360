@@ -10,6 +10,7 @@ import {
   TEAM_ASSIGNMENT_MODES,
   MESSAGE_TYPES,
   ORDER_STATUSES,
+  ORDER_STATUS_CHANGERS,
   REMINDER_STATES,
   TASK_STATUSES,
   WEBHOOK_DELIVERY_STATES,
@@ -296,6 +297,18 @@ export const apiOrderSchema = z.object({
       'As the Orders page shows it: received as the customer sent it, then confirmed, awaiting_payment (a Payment Link was sent), paid, fulfilled or cancelled.',
     ),
   statusChangedAt: z.iso.datetime(),
+  statusChangedBy: z
+    .enum(ORDER_STATUS_CHANGERS)
+    .nullable()
+    .describe(
+      'Who made the latest status change: a member on the order page (member, never which member), an API key (api, named by statusChangedByApiKeyId) or HyFib applying what Razorpay reports for the order’s Payment Link (payment_link). Null while the order is as the customer sent it, and when HyFib did not record who made the latest change.',
+    ),
+  statusChangedByApiKeyId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The API key that made the latest status change, when statusChangedBy is api; null otherwise.',
+    ),
   conversationId: z.uuid().describe('The conversation the order was sent in.'),
   contactId: z
     .uuid()
@@ -2125,6 +2138,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           description: [
             `${scopeNote('orders.read')} The carts customers send from the company’s WhatsApp catalog, as the Orders page lists them, newest first by when they were received; pages never skip or repeat an order. Each order has its items, total and note, with its conversation, contact and number by id. Needs Commerce in the company’s plan (403, reason not_in_plan).`,
             'Amounts are integers in the currency’s minor units (paise for INR). Payment Links and Razorpay’s payment ids are never read here: the company’s Razorpay account reports those. An erased contact’s orders are listed without the note, which erasure clears. To catch up on changes, ask for `updatedSince` a little before your previous pass began (a minute, say) and expect to see some orders again: a change carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
+            '`statusChangedBy` says who made an order’s latest status change, with the key for one made through the API (`statusChangedByApiKeyId`), so an integration can tell the orders it changed last from those members or payments did.',
           ].join('\n\n'),
           parameters: [
             ...pageParams,

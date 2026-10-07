@@ -1427,7 +1427,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   read `commerce_orders` in the company, newest first by `received_at` on exact keyset cursors
   (`commerce_orders_list_idx`), the filters as plain equalities and `updated_at >= updatedSince`,
   and the page's items in one query (`itemsOf`, by order and position). `toApiOrder` gives the order
-  the `order.*` webhooks describe (ADR-085), with ids in place of the contact and number objects.
+  the `order.*` webhooks describe (ADR-085), with ids in place of the contact and number objects,
+  and since ADR-271 who made its latest status change (`statusChangedBy`, `statusChangedByApiKeyId`,
+  read from the columns of ADR-270).
 - **Changing orders through the API (ADR-168):** `PATCH /orders/{id}` (`apiUpdateOrder`,
   `orders.write`) checks Commerce in the plan, locks the order's row and checks the move against
   `MEMBER_ORDER_TRANSITIONS` (and `expectedStatus`) under the lock; `writeLockedOrderStatus`

@@ -5,7 +5,7 @@ import { ROLE_PERMISSIONS } from '../authz/permissions';
 import { ORDER_REFERENCE_RE } from '../commerce/model';
 import type { ApiContext } from './context';
 import { API_SCOPE_INFO } from './model';
-import { API_ROUTES, buildOpenApiDocument } from './openapi';
+import { API_ROUTES, apiOrderSchema, buildOpenApiDocument } from './openapi';
 import {
   apiGetOrder,
   apiListOrders,
@@ -172,6 +172,9 @@ describe('WhatsApp orders through the API (ADR-167)', () => {
       'Payment Links and Razorpay’s payment ids are never read here',
       'without the note',
       '`updatedSince` a little before your previous pass began',
+      // Who made each order's latest change (ADR-271).
+      '`statusChangedBy` says who made an order’s latest status change',
+      'so an integration can tell the orders it changed last from those members or payments did',
     ]) {
       expect(list.description).toContain(words);
     }
@@ -197,6 +200,8 @@ describe('WhatsApp orders through the API (ADR-167)', () => {
       'reference',
       'status',
       'statusChangedAt',
+      'statusChangedBy',
+      'statusChangedByApiKeyId',
       'conversationId',
       'contactId',
       'channelId',
@@ -213,6 +218,16 @@ describe('WhatsApp orders through the API (ADR-167)', () => {
       'updatedAt',
     ]);
     expect(schema.required).toEqual(Object.keys(schema.properties));
+    // Who made the latest change: a member (never which), a key by its id, or the Payment Link.
+    const changer = apiOrderSchema.shape.statusChangedBy;
+    expect(changer.unwrap().options).toEqual(['member', 'api', 'payment_link']);
+    expect(changer.safeParse(null).success).toBe(true);
+    expect(changer.description).toContain('never which member');
+    expect(changer.description).toContain('Null while the order is as the customer sent it');
+    const key = apiOrderSchema.shape.statusChangedByApiKeyId;
+    expect(key.safeParse(null).success).toBe(true);
+    expect(key.safeParse('key-1').success).toBe(false);
+    expect(key.description).toContain('when statusChangedBy is api');
     // Ids only: no number or payment details anywhere in it.
     expect(JSON.stringify(schema)).not.toMatch(
       /"(phone|contactName|paymentLink\w*|shortUrl|paymentId)"/,

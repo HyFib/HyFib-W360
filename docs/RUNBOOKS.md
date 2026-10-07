@@ -2868,9 +2868,11 @@ cancelled or failed). An integration that changes orders through the API should 
 whose `apiKeyId` is its own, not every `api` event. Null means HyFib did not record who: an event
 captured before migration 0187, or a change made by a server from before it during a rollout; it is
 never the maker of an earlier change, since the database clears a changer an earlier transaction
-recorded (`commerce_orders_status_changer`). `order.received` names nobody. To see what an order
-recorded, read `status_changed_by` and `status_changed_by_api_key_id` on `app.commerce_orders`; only
-the latest change is kept there.
+recorded (`commerce_orders_status_changer`). `order.received` names nobody. To see who made an
+order's latest change, read `statusChangedBy` and `statusChangedByApiKeyId` from `GET /orders/{id}`
+(ADR-271), or `status_changed_by` and `status_changed_by_api_key_id` on `app.commerce_orders`; only
+the latest change is kept there; the audit log records members' and keys' changes
+(`commerce.order_status_changed`, `commerce.payment_requested`), not the Payment Link's.
 
 **Migration 0063 or 0064 failed.** 0063 runs in one transaction, so a failure applies nothing: it
 widens the event type checks (the one on `app.webhook_events` `NOT VALID`) and adds the capture

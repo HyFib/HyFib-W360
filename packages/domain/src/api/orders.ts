@@ -12,6 +12,7 @@ import {
   ORDER_STATUSES,
   sql,
   type OrderStatus,
+  type OrderStatusChanger,
   type Tx,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
@@ -84,6 +85,9 @@ export interface ApiOrder {
   reference: string;
   status: OrderStatus;
   statusChangedAt: string;
+  /** Who made the latest status change (ADR-271); null when none was recorded. */
+  statusChangedBy: OrderStatusChanger | null;
+  statusChangedByApiKeyId: string | null;
   conversationId: string;
   contactId: string;
   channelId: string;
@@ -105,6 +109,8 @@ const orderColumns = {
   reference: commerceOrders.reference,
   status: commerceOrders.status,
   statusChangedAt: commerceOrders.statusChangedAt,
+  statusChangedBy: commerceOrders.statusChangedBy,
+  statusChangedByApiKeyId: commerceOrders.statusChangedByApiKeyId,
   conversationId: commerceOrders.conversationId,
   contactId: commerceOrders.contactId,
   channelId: commerceOrders.channelAccountId,
@@ -126,6 +132,8 @@ interface OrderRow {
   reference: string;
   status: OrderStatus;
   statusChangedAt: Date;
+  statusChangedBy: OrderStatusChanger | null;
+  statusChangedByApiKeyId: string | null;
   conversationId: string;
   contactId: string;
   channelId: string;
@@ -146,6 +154,8 @@ const toApiOrder = (row: OrderRow, items: ApiOrderItem[]): ApiOrder => ({
   reference: row.reference,
   status: row.status,
   statusChangedAt: row.statusChangedAt.toISOString(),
+  statusChangedBy: row.statusChangedBy,
+  statusChangedByApiKeyId: row.statusChangedByApiKeyId,
   conversationId: row.conversationId,
   contactId: row.contactId,
   channelId: row.channelId,

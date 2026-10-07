@@ -3632,6 +3632,8 @@ describe('WhatsApp orders (ADR-167)', () => {
       reference: first.reference,
       status: 'received',
       statusChangedAt: expect.any(String),
+      statusChangedBy: null,
+      statusChangedByApiKeyId: null,
       conversationId: first.conversation_id,
       contactId: first.contact_id,
       channelId: c.channelAccountId,
@@ -3674,6 +3676,11 @@ describe('WhatsApp orders (ADR-167)', () => {
     expect((await list({ status: 'confirmed' })).data.map((o) => [o.id, o.status])).toEqual([
       [first.id, 'confirmed'],
     ]);
+    // The order names who made its latest change: a member, never which (ADR-271).
+    expect(await apiGetOrder(deps(), reader.ctx, first.id)).toMatchObject({
+      statusChangedBy: 'member',
+      statusChangedByApiKeyId: null,
+    });
     expect((await list({ status: 'received' })).data.map((o) => o.id)).toEqual([
       third.id,
       second.id,
@@ -3767,6 +3774,8 @@ describe('WhatsApp orders (ADR-167)', () => {
       id: order.id,
       reference: order.reference,
       status: 'confirmed',
+      statusChangedBy: 'api',
+      statusChangedByApiKeyId: writer.id,
       subtotalMinor: 3_000,
       customerNote: 'Ring twice',
     });
@@ -3925,9 +3934,20 @@ describe('WhatsApp orders (ADR-167)', () => {
     expect(await changerOf(order.id)).toEqual({ by: 'api', key: writer.id });
 
     // A later change of status that does not record its maker clears the key: the event of that
-    // change names nobody, and so does the order.
+    // change names nobody, and so does the order, as the API reads it (ADR-271).
+    const reader = await apiKey(c, ['orders.read']);
+    const read = async () => {
+      const { statusChangedBy, statusChangedByApiKeyId } = await apiGetOrder(
+        deps(),
+        reader.ctx,
+        order.id,
+      );
+      return [statusChangedBy, statusChangedByApiKeyId];
+    };
+    expect(await read()).toEqual(['api', writer.id]);
     await set(`status = 'fulfilled'`);
     expect(await changerOf(order.id)).toEqual({ by: null, key: null });
+    expect(await read()).toEqual([null, null]);
     // Recorded with a transaction other than its own, a changer is cleared too; recorded by its
     // own, it stays.
     await set(
@@ -3939,6 +3959,7 @@ describe('WhatsApp orders (ADR-167)', () => {
        status_changed_xact = pg_catalog.pg_current_xact_id()`,
     );
     expect(await changerOf(order.id)).toEqual({ by: 'payment_link', key: null });
+    expect(await read()).toEqual(['payment_link', null]);
     // A write that leaves the status alone leaves its changer.
     await set(`paid_at = NULL`);
     expect(await changerOf(order.id)).toEqual({ by: 'payment_link', key: null });

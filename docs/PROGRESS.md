@@ -1,5 +1,35 @@
 # Progress
 
+## 2026-10-07 — Who last changed an order, through the public API (P5-08, H-033, ADR-271)
+
+Status: **Implemented; its database and browser tests run in CI only.** An order system polling
+`GET /orders` could not tell the orders it changed last from those members or payments did, which
+ADR-270 sent only in webhooks. No migration. The local PostgreSQL is unavailable, so the integration
+tests below were written but not run here, nor was the e2e test.
+
+### Completed
+
+- **Domain:** `statusChangedBy` and `statusChangedByApiKeyId` on the API's order (`toApiOrder`, read
+  from the columns of ADR-270), and the OpenAPI order and `GET /orders` description.
+- **Tests:** unit (`api/orders.test.ts`: the fields, their descriptions, the list's description);
+  integration (the order tests of `api.test.ts`: an order as received, a member's change, a key's
+  change in its answer, a change that recorded nobody, the Payment Link's); e2e (`commerce.spec.ts`:
+  the paid order read as the Payment Link's change, then fulfilled as the key's). Written for CI;
+  the integration and e2e tests were not run here.
+- **Docs:** ADR-271; ARCHITECTURE; SECURITY; THREAT-MODEL T239; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033.
+- **Mutation checks:** 9/9 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 119 files, 1131 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
 ## 2026-10-07 — Who changed an order, in `order.status_changed` (P5-09, P5-08, H-014, ADR-270)
 
 Status: **Implemented; its database tests run in CI only.** An order system changing orders through

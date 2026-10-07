@@ -791,6 +791,9 @@ Phase 5 rules (Public API, P5-08):
   pattern, an ISO time). Orders name the contact, conversation and number by id only, never the
   customer's number or name, the Payment Link or Razorpay's payment ids; an erased contact's orders
   are read without the note erasure clears (unit tests; integration and e2e tests, run in CI only).
+  An order names who made its latest status change (ADR-271) as `order.status_changed` does: a
+  member never by name, a key by its id, HyFib's Payment Link, or nobody when nothing was recorded,
+  never an earlier change's maker (the database clears it, ADR-270).
 - Changing orders (ADR-168): `PATCH /orders/{id}` needs `orders.write`, granted only with
   `inbox.reply`, checked before anything is read and refused while the company is suspended or
   restricted, and Commerce in the company's plan. It changes an order of the key's company only (row
