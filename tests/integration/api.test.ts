@@ -6175,8 +6175,11 @@ describe('CRM pipelines and deals (ADR-253)', () => {
 
     // A plan without the CRM reads none; with it again, the note is read.
     await onPlan(c, []);
-    for (const read of [apiListNotes(deps(), reader.ctx, {}), apiGetNote(deps(), reader.ctx, id)]) {
-      const error = await expectAppError(read, 'forbidden', /does not include the CRM/);
+    for (const read of [
+      () => apiListNotes(deps(), reader.ctx, {}),
+      () => apiGetNote(deps(), reader.ctx, id),
+    ]) {
+      const error = await expectAppError(read(), 'forbidden', /does not include the CRM/);
       expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
     }
     await onPlan(c, ['crm']);
