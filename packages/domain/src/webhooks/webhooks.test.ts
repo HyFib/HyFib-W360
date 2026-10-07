@@ -956,6 +956,8 @@ describe('webhook payload schemas', () => {
       reference: 'K7M2QX9P',
       status: 'received',
       previousStatus: null,
+      changedBy: null,
+      apiKeyId: null,
       messageId: '0192a1b2-0000-7000-8000-000000000007',
       catalogId: '5550001',
       currency: 'INR',
@@ -995,6 +997,46 @@ describe('webhook payload schemas', () => {
         }).success,
         status,
       ).toBe(true);
+    }
+    // Who made a change (ADR-270): a member, a key it names, the Payment Link, or not recorded.
+    for (const [changedBy, apiKeyId] of [
+      ['member', null],
+      ['api', base.id],
+      ['payment_link', null],
+      [null, null],
+    ]) {
+      expect(
+        orderStatusChangedPayloadSchema.safeParse({
+          ...received,
+          type: 'order.status_changed',
+          data: {
+            ...received.data,
+            order: {
+              ...order,
+              status: 'confirmed',
+              previousStatus: 'received',
+              changedBy,
+              apiKeyId,
+            },
+          },
+        }).success,
+        String(changedBy),
+      ).toBe(true);
+    }
+    for (const change of [
+      { changedBy: 'automation' },
+      { changedBy: undefined },
+      { apiKeyId: 'key-1' },
+      { apiKeyId: undefined },
+    ]) {
+      expect(
+        orderStatusChangedPayloadSchema.safeParse({
+          ...received,
+          type: 'order.status_changed',
+          data: { ...received.data, order: { ...order, status: 'confirmed', ...change } },
+        }).success,
+        JSON.stringify(change),
+      ).toBe(false);
     }
     // An order without a total (an unreadable price, mixed currencies) or a note is described too.
     expect(
@@ -1577,6 +1619,26 @@ describe('the OpenAPI document', () => {
     ]) {
       expect(owned).toContain(words);
     }
+  });
+
+  it('describes who changed an order: a member, a key it names or the Payment Link (ADR-270)', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const description = doc.webhooks['order.status_changed'].post.description;
+    for (const words of [
+      'order.changedBy who made it',
+      'an API key (order.apiKeyId names it, so an integration can tell its own changes',
+      'HyFib applying the order’s Payment Link',
+    ]) {
+      expect(description).toContain(words);
+    }
+    const order = orderStatusChangedPayloadSchema.shape.data.shape.order.shape;
+    expect(order.changedBy.unwrap().options).toEqual(['member', 'api', 'payment_link']);
+    expect(order.changedBy.description).toContain('never which member');
+    expect(order.apiKeyId.description).toContain('when changedBy is api');
+    // order.received names nobody: the customer sent the order.
+    expect(orderReceivedPayloadSchema.shape.data.shape.order.shape.changedBy.description).toContain(
+      'Null for order.received',
+    );
   });
 
   it('describes the task events: the change, what is never sent and what sends nothing (ADR-261)', () => {

@@ -2848,13 +2848,29 @@ it again.
 **Order events (ADR-085).** An endpoint that takes `order.received` or `order.status_changed` hears
 of WhatsApp orders only: store orders (Shopify, WooCommerce) send nothing, since the store reports
 them itself. Every status change is sent whoever makes it: a member (confirm, fulfil, cancel, ask
-for payment) or the worker applying a Payment Link's outcome (paid, or back to confirmed when the
-link ends unpaid). A receiver that sees `paidAt` on an early event is reading the order as it was
-when that event was delivered; `order.status` and `order.previousStatus` are the change itself, and
-the latest change has the latest `createdAt`. A receiver that asks for the Payment Link address or
-Razorpay's payment id: payloads never carry them; the order page shows the link. A missing note on
-an order whose contact was erased is expected: erasure clears it (and sends no order event). The
-event keeps the order id and the status before a change in `app.webhook_events.detail`.
+for payment), an API key (confirm, fulfil, cancel; ADR-168) or the worker applying a Payment Link's
+outcome (paid, or back to confirmed when the link ends unpaid). A receiver that sees `paidAt` on an
+early event is reading the order as it was when that event was delivered; `order.status` and
+`order.previousStatus` are the change itself, and the latest change has the latest `createdAt`. A
+receiver that asks for the Payment Link address or Razorpay's payment id: payloads never carry them;
+the order page shows the link. A missing note on an order whose contact was erased is expected:
+erasure clears it (and sends no order event). The event keeps the order id, the status before a
+change and who made it (ADR-270) in `app.webhook_events.detail`.
+
+**A receiver cannot tell who changed an order, or ignores a member's change (ADR-270).**
+`order.changedBy` says who made the change an `order.status_changed` event reports: `member` (the
+order page; never which member: the audit log names them, `commerce.order_status_changed`, or
+`commerce.payment_requested` for a payment request), `api` with `order.apiKeyId` (the key; an
+endpoint it adds through the API answers its id as `apiKeyId`, and so do the messages it sends when
+read back with `GET /conversations/{id}/messages`) or `payment_link` (HyFib applying what Razorpay
+reported for the order's Payment Link: paid, or back to confirmed when the link expired, was
+cancelled or failed). An integration that changes orders through the API should ignore the events
+whose `apiKeyId` is its own, not every `api` event. Null means HyFib did not record who: an event
+captured before migration 0187, or a change made by a server from before it during a rollout; it is
+never the maker of an earlier change, since the database clears a changer an earlier transaction
+recorded (`commerce_orders_status_changer`). `order.received` names nobody. To see what an order
+recorded, read `status_changed_by` and `status_changed_by_api_key_id` on `app.commerce_orders`; only
+the latest change is kept there.
 
 **Migration 0063 or 0064 failed.** 0063 runs in one transaction, so a failure applies nothing: it
 widens the event type checks (the one on `app.webhook_events` `NOT VALID`) and adds the capture

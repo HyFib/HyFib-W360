@@ -25,7 +25,9 @@ import {
   messageTemplates,
   messages,
   ORDER_STATUSES,
+  ORDER_STATUS_CHANGERS,
   TASK_STATUSES,
+  type OrderStatusChanger,
   type Tx,
   type WebhookEventType,
 } from '@w360/db';
@@ -443,6 +445,16 @@ const webhookOrderSchema = z.object({
   previousStatus: orderStatusSchema
     .nullable()
     .describe('The status before it; null for order.received.'),
+  changedBy: z
+    .enum(ORDER_STATUS_CHANGERS)
+    .nullable()
+    .describe(
+      'Who made the change order.status_changed reports: a member on the order page (member, never which member), an API key (api, named by apiKeyId) or HyFib applying what Razorpay reports for the order’s Payment Link (payment_link: paid, or back to confirmed when the link ended unpaid). Null for order.received, and for a change HyFib did not record the maker of.',
+    ),
+  apiKeyId: z
+    .uuid()
+    .nullable()
+    .describe('The API key that made the change, when changedBy is api; null otherwise.'),
   messageId: z.uuid().describe('The order message, as message.received names it.'),
   catalogId: z.string().describe('The Meta catalog the cart came from.'),
   currency: z
@@ -717,6 +729,12 @@ export interface StoredWebhookEvent {
 }
 
 const str = (value: unknown): string | null => (typeof value === 'string' ? value : null);
+
+/** Who changed an order's status, as its event captured it (ADR-270); null when not recorded. */
+const orderChanger = (detail: Record<string, unknown>): OrderStatusChanger | null => {
+  const by = detail.changedBy;
+  return ORDER_STATUS_CHANGERS.find((changer) => changer === by) ?? null;
+};
 
 /** Meta's `interactive.type` of a tap (M-158), as `reply.type` names it. */
 const INTERACTIVE_REPLY_TYPES: Record<string, 'button' | 'list'> = {
@@ -1331,6 +1349,12 @@ export async function buildWebhookPayload(
             status: event.status,
             previousStatus:
               event.type === 'order.status_changed' ? str(event.detail.previousStatus) : null,
+            // Who made the change, as captured (ADR-270); absent from earlier events.
+            changedBy: event.type === 'order.status_changed' ? orderChanger(event.detail) : null,
+            apiKeyId:
+              event.type === 'order.status_changed' && orderChanger(event.detail) === 'api'
+                ? str(event.detail.apiKeyId)
+                : null,
             messageId: order.messageId,
             catalogId: order.catalogId,
             currency: order.currency,

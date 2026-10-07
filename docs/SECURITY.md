@@ -1432,10 +1432,15 @@ Phase 5 rules (outgoing webhooks, P5-09):
   run's answers or API inputs, which can hold personal data.
 - Order events (ADR-085) follow the same rules. Triggers on WhatsApp orders run as the role that
   adds the order or changes its status (only the runtime role, in the company's scope), so each
-  event stays in the order's company and holds the order id and statuses only. Payloads are built
-  when delivered: the customer's note, number and name are gone once the contact is erased (erasure
-  clears the note without a status change, so it sends nothing), amounts are integers in minor
-  units, and no Payment Link address or Razorpay payment id is sent.
+  event stays in the order's company and holds the order id, the statuses and who changed it only.
+  Payloads are built when delivered: the customer's note, number and name are gone once the contact
+  is erased (erasure clears the note without a status change, so it sends nothing), amounts are
+  integers in minor units, and no Payment Link address or Razorpay payment id is sent. A status
+  change names who made it (ADR-270): a member (never which), the API key by its id, or HyFib
+  applying the Payment Link. The changer is written with the status and the key's foreign key goes
+  through the company's id, and a trigger clears a changer an earlier transaction recorded, so a
+  change that does not record its maker (a server from before it) names nobody rather than the
+  previous changer, and an integration that ignores its own key's changes never ignores a member's.
 - Campaign events (ADR-087) follow the same rules. The trigger on campaigns runs as the role that
   changes a campaign's status (only the runtime role, in the company's scope), so each event stays
   in the campaign's company and holds the campaign id, the statuses and a pause or completion reason

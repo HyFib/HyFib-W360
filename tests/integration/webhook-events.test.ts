@@ -2726,24 +2726,21 @@ describe('order events (ADR-085)', () => {
     expect(await processPaymentLink(commerceWorker(), scopeOf(c), linkId)).toBe('done');
     await setOrderStatus(agent, order.id, 'fulfilled');
 
-    // One event per change, each to the endpoints that take its type.
+    // One event per change, each to the endpoints that take its type, naming who made the change
+    // (ADR-270): the member, then Razorpay's payment through the link, then the member again.
     const events = await eventsOf(c, 'order.');
+    const change = (previousStatus: string, changedBy: string) => ({
+      orderId: order.id,
+      previousStatus,
+      changedBy,
+      apiKeyId: null,
+    });
     expect(events.map((e) => [e.type, e.status, e.detail, e.deliveries])).toEqual([
       ['order.received', 'received', { orderId: order.id }, 1],
-      ['order.status_changed', 'confirmed', { orderId: order.id, previousStatus: 'received' }, 2],
-      [
-        'order.status_changed',
-        'awaiting_payment',
-        { orderId: order.id, previousStatus: 'confirmed' },
-        2,
-      ],
-      [
-        'order.status_changed',
-        'paid',
-        { orderId: order.id, previousStatus: 'awaiting_payment' },
-        2,
-      ],
-      ['order.status_changed', 'fulfilled', { orderId: order.id, previousStatus: 'paid' }, 2],
+      ['order.status_changed', 'confirmed', change('received', 'member'), 2],
+      ['order.status_changed', 'awaiting_payment', change('confirmed', 'member'), 2],
+      ['order.status_changed', 'paid', change('awaiting_payment', 'payment_link'), 2],
+      ['order.status_changed', 'fulfilled', change('paid', 'member'), 2],
     ]);
     expect(events.every((e) => e.conversation_id === order.conversation_id)).toBe(true);
     expect(events.every((e) => e.contact_id === order.contact_id)).toBe(true);
@@ -2795,15 +2792,19 @@ describe('order events (ADR-085)', () => {
     ]);
     expect(
       bodies.slice(1).map((b) => {
-        const { status, previousStatus } = b.data.order as Record<string, unknown>;
-        return [status, previousStatus];
+        const { status, previousStatus, changedBy, apiKeyId } = b.data.order as Record<
+          string,
+          unknown
+        >;
+        return [status, previousStatus, changedBy, apiKeyId];
       }),
     ).toEqual([
-      ['confirmed', 'received'],
-      ['awaiting_payment', 'confirmed'],
-      ['paid', 'awaiting_payment'],
-      ['fulfilled', 'paid'],
+      ['confirmed', 'received', 'member', null],
+      ['awaiting_payment', 'confirmed', 'member', null],
+      ['paid', 'awaiting_payment', 'payment_link', null],
+      ['fulfilled', 'paid', 'member', null],
     ]);
+    expect(bodies[0]!.data.order).toMatchObject({ changedBy: null, apiKeyId: null });
     // An endpoint for status changes hears only those; one for messages hears the order message
     // and nothing of the order.
     expect(bodiesAt(changes.path).map((b) => b.id)).toEqual(events.slice(1).map((e) => e.id));

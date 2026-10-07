@@ -422,12 +422,18 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'customer_note',
       'status',
       'status_changed_at',
+      'status_changed_by',
+      'status_changed_by_api_key_id',
       'paid_at',
       'received_at',
       'version',
       'created_at',
       'updated_at',
     ],
+    omitted: {
+      status_changed_xact:
+        'The database transaction that recorded who changed the status (ADR-270), meaningless outside the database.',
+    },
   },
   {
     table: 'app.commerce_payment_accounts',

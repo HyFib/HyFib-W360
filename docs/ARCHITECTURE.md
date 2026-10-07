@@ -1432,8 +1432,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `orders.write`) checks Commerce in the plan, locks the order's row and checks the move against
   `MEMBER_ORDER_TRANSITIONS` (and `expectedStatus`) under the lock; `writeLockedOrderStatus`
   (`commerce/service.ts`), shared with members' `setOrderStatus`, writes the status, its time and
-  the next version, and the trigger of 0063 captures `order.status_changed`. The answer is read as
-  `GET /orders/{id}` reads it (`readApiOrder`).
+  the next version, and the trigger of 0063 captures `order.status_changed`, naming the key
+  (ADR-270). The answer is read as `GET /orders/{id}` reads it (`readApiOrder`).
 - **CRM pipelines and deals through the API (ADR-253):** `GET /pipelines`, `GET /deals` and
   `GET /deals/{id}` (`api/deals.ts`, `deals.read`) check the CRM in the plan first
   (`loadEntitlements`, reason `not_in_plan`). Pipelines are read oldest first on exact keyset
@@ -1700,6 +1700,13 @@ true`); the same key with another request (method, path and body hashed) answers
   when delivered: the order with its items in cart order and amounts in minor units (the statuses
   as captured, the note null once erased), the conversation id, the contact and the number; never
   Payment Link or Razorpay payment details. Store orders send nothing.
+- **Who changed an order** (migrations 0187–0188, ADR-270): every status write records its changer
+  in the same statement (`orderStatusChangedBy`, `commerce/orders.ts`): `member` (`setOrderStatus`,
+  `requestPayment`), `api` with the key (`apiUpdateOrder` through `writeLockedOrderStatus`) or
+  `payment_link` (the worker's paid and released orders), with
+  `status_changed_xact = pg_current_xact_id()`. The trigger `commerce_orders_status_changer`, before
+  each status change, clears a changer an earlier transaction recorded; `app.webhook_capture_order`
+  puts `changedBy` and `apiKeyId` in the event's `detail`, and the payload gives them as captured.
 - **Campaign events** (migrations 0065–0066, ADR-087): a trigger on `app.campaigns` captures
   `campaign.status_changed` when an update changes a campaign's status (a member submitting,
   withdrawing, rejecting, approving, pausing, resuming or cancelling it, or the runner starting,

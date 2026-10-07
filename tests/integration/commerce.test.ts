@@ -822,7 +822,12 @@ describe('payment links', () => {
     );
     let link = await linkRow(order.id as string);
     expect(link).toMatchObject({ status: 'creating', amount_minor: '28998', currency: 'INR' });
-    expect((await orderOf(conv.id)).status).toBe('awaiting_payment');
+    // Each status records who changed it (ADR-270): here the member who asked for payment.
+    expect(await orderOf(conv.id)).toMatchObject({
+      status: 'awaiting_payment',
+      status_changed_by: 'member',
+      status_changed_by_api_key_id: null,
+    });
 
     // The create response is lost: the next attempt finds the link by its reference instead of
     // creating a second one (research R-106, R-107).
@@ -955,6 +960,7 @@ describe('payment links', () => {
     order = await orderOf(conv.id);
     expect(order.status).toBe('paid');
     expect(order.paid_at).not.toBeNull();
+    expect(order.status_changed_by).toBe('payment_link');
     expect(await linkRow(order.id as string)).toMatchObject({
       status: 'paid',
       amount_paid_minor: '28998',
@@ -990,6 +996,7 @@ describe('payment links', () => {
     );
     second = await orderOf(convRavi.id);
     expect(second.status).toBe('confirmed');
+    expect(second.status_changed_by).toBe('payment_link');
 
     // A cancellation that loses the race with the payment records the payment.
     await svc.requestPayment(agent, { id: second.id, expectedVersion: second.version });
@@ -1034,7 +1041,10 @@ describe('payment links', () => {
       error: null,
       send_error: expect.stringMatching(/window had closed/),
     });
-    expect((await orderOf(convMeera.id)).status).toBe('confirmed');
+    expect(await orderOf(convMeera.id)).toMatchObject({
+      status: 'confirmed',
+      status_changed_by: 'payment_link',
+    });
 
     // Keys revoked at Razorpay: a new link fails with a clear message and the account shows it.
     rzp.state.merchants.set(account.keyId, 'rotated-elsewhere');

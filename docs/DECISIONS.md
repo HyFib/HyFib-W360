@@ -10229,3 +10229,46 @@ Decision:
 
 Not built: events for other edits of a deal (its title, value or expected date), who made a change
 in the payload, and task events by their deal's owner.
+
+## ADR-270 Saying who changed a WhatsApp order in `order.status_changed` (P5-09, P5-08) (2026-10-07)
+
+Context: since ADR-168 an order system confirms, fulfils and cancels orders through the API, and it
+hears every status change through `order.status_changed` (ADR-085), its own included: it could not
+tell a change it made from a member's on the order page or from a payment Razorpay reported, so it
+either acted on its own echoes or ignored changes it needed. ADR-168 left `order.status_changed`
+naming who changed the order unbuilt.
+
+Decision:
+
+- **`order.changedBy`** on `order.status_changed`: `member` (the order page: confirming, fulfilling,
+  cancelling or asking for payment; never which member, as `sentBy` and `writtenBy` name members
+  elsewhere), `api` with **`order.apiKeyId`** naming the key (`PATCH /orders/{id}`, ADR-168), or
+  `payment_link` (HyFib applying what Razorpay reports for the order's Payment Link: paid, or back
+  to confirmed when the link expired, was cancelled or failed unpaid). Null for `order.received`,
+  which the customer's cart creates, and for a change HyFib did not record the maker of (events
+  captured before this, or changes made by servers from before it). An integration ignores the
+  events whose `apiKeyId` is its own key's id, which an endpoint it adds through the API answers
+  (`apiKeyId`) and the messages it sends carry when read back (`GET /conversations/{id}/messages`).
+- **Recorded with the status:** `app.commerce_orders` gains `status_changed_by`,
+  `status_changed_by_api_key_id` (a foreign key to the company's keys through the company's id) and
+  `status_changed_xact`, written in the same statement as the status by every writer (members'
+  `setOrderStatus` and payment requests, keys' `apiUpdateOrder` through the shared
+  `writeLockedOrderStatus`, the worker's paid and released orders), through one helper
+  (`orderStatusChangedBy`). A check keeps the changer to the three values and the key to `api`.
+- **Never the previous changer:** a status written without the changer would keep the one before it,
+  so a key's change could be followed by a member's on a server from before this release and still
+  name the key, and an integration ignoring its own changes would ignore the member's. A trigger
+  before each status change clears the changer unless `status_changed_xact` is the transaction
+  making the change (`pg_current_xact_id()`, as ADR-121 marks a transaction's own events), so a
+  change that does not record its maker names nobody.
+- **In the event, as captured:** the order trigger (0063, 0118) puts the changer and the key in the
+  event's `detail`; the payload gives them as captured, whoever changes the order later. Who changed
+  an order is not read through the API, and the order page and audit log are unchanged (the audit
+  log names the member or key already).
+- **Migrations 0187 and 0188:** 0187 adds the three columns (nullable, so the table is not
+  rewritten), the foreign key and the check NOT VALID, the runtime role's grant to update them, the
+  trigger and its function, and `app.webhook_capture_order` with the same signature; 0188 validates
+  the foreign key and the check while the table stays writable.
+
+Not built: which member changed an order, who changed it in `GET /orders`, a reason or note with a
+change, and who created or cancelled a Payment Link.

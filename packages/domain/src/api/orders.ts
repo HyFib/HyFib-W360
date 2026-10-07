@@ -343,7 +343,9 @@ export async function apiUpdateOrder(
           current.status,
         );
       }
-      await writeLockedOrderStatus(tx, ctx.tenant.id, current, data.status, deps.clock.now());
+      await writeLockedOrderStatus(tx, ctx.tenant.id, current, data.status, deps.clock.now(), {
+        apiKeyId: ctx.key.id,
+      });
       await recordSystemAudit(
         tx,
         ctx.tenant.id,

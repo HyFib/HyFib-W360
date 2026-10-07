@@ -2823,7 +2823,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'order.status_changed': webhook(
         'webhookOrderStatusChanged',
         WEBHOOK_EVENT_INFO['order.status_changed'].label,
-        `${WEBHOOK_EVENT_INFO['order.status_changed'].description} order.status and order.previousStatus are the change; the rest is the order when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt. An endpoint receives every status unless it names the statuses it takes (its \`orderStatuses\`, or the statuses ticked in Settings → Webhooks).`,
+        `${WEBHOOK_EVENT_INFO['order.status_changed'].description} order.status and order.previousStatus are the change, and order.changedBy who made it: a member, an API key (order.apiKeyId names it, so an integration can tell its own changes from others') or HyFib applying the order’s Payment Link; the rest is the order when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt. An endpoint receives every status unless it names the statuses it takes (its \`orderStatuses\`, or the statuses ticked in Settings → Webhooks).`,
         'WebhookOrderStatusChanged',
       ),
       'campaign.status_changed': webhook(

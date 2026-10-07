@@ -1017,6 +1017,10 @@ verification, app review, Embedded Signup configuration).
   members or API keys, with both owners; an endpoint naming owners hears it for the owner the deal
   left as well; one change that also moves or closes the deal sends each event in the order the
   steps happen; automations, erasure and merges send none).
+  **[Who changed an order built; its database tests run only in CI]** (ADR-270, migrations 0187 and
+  0188: `order.status_changed` names who made each change, a member, an API key by its id or the
+  Payment Link, recorded with the status; a change that does not record its maker names nobody,
+  never the one before).
   Remaining: filters for other event types (task events by their deal's pipeline, stage or owner,
   among them) and on a message's or contact's values (such as a field's value, contact events by
   tag, or the key that started a run), other authentication (headers computed per delivery, other

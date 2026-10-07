@@ -1,4 +1,13 @@
-import { bigint, boolean, integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import {
+  bigint,
+  boolean,
+  customType,
+  integer,
+  smallint,
+  text,
+  timestamp,
+  uuid,
+} from 'drizzle-orm/pg-core';
 import { appSchema } from './tenancy';
 
 /**
@@ -8,6 +17,11 @@ import { appSchema } from './tenancy';
  */
 const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
 const money = (name: string) => bigint(name, { mode: 'number' });
+
+/** PostgreSQL xid8, carried as a decimal string (values exceed Number.MAX_SAFE_INTEGER). */
+const xid8 = customType<{ data: string; driverData: string }>({
+  dataType: () => 'xid8',
+});
 
 export const COMMERCE_SYNC_STATES = ['idle', 'queued', 'running', 'failed'] as const;
 export type CommerceSyncState = (typeof COMMERCE_SYNC_STATES)[number];
@@ -68,6 +82,13 @@ export const ORDER_STATUSES = [
 ] as const;
 export type OrderStatus = (typeof ORDER_STATUSES)[number];
 
+/**
+ * Who changed an order's status (ADR-270): a member on the order page, an API key (ADR-168) or
+ * HyFib applying what Razorpay reports for the order's Payment Link.
+ */
+export const ORDER_STATUS_CHANGERS = ['member', 'api', 'payment_link'] as const;
+export type OrderStatusChanger = (typeof ORDER_STATUS_CHANGERS)[number];
+
 export const commerceOrders = appSchema.table('commerce_orders', {
   id: uuid('id').primaryKey(),
   tenantId: uuid('tenant_id').notNull(),
@@ -87,6 +108,14 @@ export const commerceOrders = appSchema.table('commerce_orders', {
   customerNote: text('customer_note'),
   status: text('status', { enum: ORDER_STATUSES }).notNull().default('received'),
   statusChangedAt: tz('status_changed_at').notNull().defaultNow(),
+  /**
+   * Who made the latest status change, with the key for `api` (migration 0187); null when the
+   * change did not record it. The database clears a changer an earlier transaction recorded
+   * (`statusChangedXact`), so a change that does not say who made it never names the one before.
+   */
+  statusChangedBy: text('status_changed_by', { enum: ORDER_STATUS_CHANGERS }),
+  statusChangedByApiKeyId: uuid('status_changed_by_api_key_id'),
+  statusChangedXact: xid8('status_changed_xact'),
   paidAt: tz('paid_at'),
   receivedAt: tz('received_at').notNull(),
   version: integer('version').notNull().default(1),

@@ -740,6 +740,16 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    endpoints once the rollout ends, and turn it off before rolling web servers back to such an
    image.
 
+   Migration 0187 (ADR-270) adds `status_changed_by`, `status_changed_by_api_key_id` and
+   `status_changed_xact` to `app.commerce_orders` (nullable, so the table is not rewritten), a
+   foreign key and a check NOT VALID (0188 validates both while the table stays writable), the
+   runtime role's grant to update the columns, a trigger that clears a changer an earlier
+   transaction recorded, and `app.webhook_capture_order` with the same signature. Servers from
+   before it change statuses without recording who: until the rollout ends, the events of their
+   changes say `changedBy` null, never the previous changer, and workers from before it deliver
+   order events without `changedBy` and `apiKeyId`. Rolling back does the same. Nothing needs
+   turning off first.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

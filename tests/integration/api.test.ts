@@ -3788,15 +3788,30 @@ describe('WhatsApp orders (ADR-167)', () => {
         metadata: { reference: order.reference, from: 'received', to: 'confirmed', source: 'api' },
       },
     ]);
+    // Each event names the key that made the change (ADR-270).
     const events = async () =>
       (
-        await fx.query<{ status: string; detail: { orderId: string; previousStatus: string } }>(
+        await fx.query<{
+          status: string;
+          detail: {
+            orderId: string;
+            previousStatus: string;
+            changedBy: string | null;
+            apiKeyId: string | null;
+          };
+        }>(
           `SELECT status, detail FROM app.webhook_events
             WHERE tenant_id = $1 AND type = 'order.status_changed' ORDER BY created_at, id`,
           [c.tenant.id],
         )
-      ).map((e) => [e.detail.orderId, e.detail.previousStatus, e.status]);
-    expect(await events()).toEqual([[order.id, 'received', 'confirmed']]);
+      ).map((e) => [
+        e.detail.orderId,
+        e.detail.previousStatus,
+        e.status,
+        e.detail.changedBy,
+        e.detail.apiKeyId,
+      ]);
+    expect(await events()).toEqual([[order.id, 'received', 'confirmed', 'api', writer.id]]);
 
     // A retry, even with the status it expected the first time, changes nothing.
     expect(await change(order.id, { status: 'confirmed', expectedStatus: 'received' })).toEqual(
@@ -3875,13 +3890,84 @@ describe('WhatsApp orders (ADR-167)', () => {
     await expectAppError(change(paid.id, { status: 'cancelled' }), 'conflict', /status is paid\.$/);
     const fulfilled = await change(paid.id, { status: 'fulfilled', expectedStatus: 'paid' });
     expect([fulfilled.status, fulfilled.paidAt]).toEqual(['fulfilled', expect.any(String)]);
+    // The statuses this test wrote directly record nobody.
     expect(await events()).toEqual([
-      [order.id, 'received', 'confirmed'],
-      [order.id, 'confirmed', 'fulfilled'],
-      [other.id, 'received', 'cancelled'],
-      [waiting.id, 'received', 'awaiting_payment'],
-      [paid.id, 'received', 'paid'],
-      [paid.id, 'paid', 'fulfilled'],
+      [order.id, 'received', 'confirmed', 'api', writer.id],
+      [order.id, 'confirmed', 'fulfilled', 'api', writer.id],
+      [other.id, 'received', 'cancelled', 'api', writer.id],
+      [waiting.id, 'received', 'awaiting_payment', null, null],
+      [paid.id, 'received', 'paid', null, null],
+      [paid.id, 'paid', 'fulfilled', 'api', writer.id],
+    ]);
+  });
+
+  it('record who changed an order: a member, a key of the company or the Payment Link, never the changer of an earlier transaction (ADR-270)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const writer = await apiKey(c, ['orders.write'], 'Order system');
+    const theirs = await apiKey(other, ['orders.write']);
+    const order = await sendCart(c, '919811100741', [
+      { retailerId: 'sku-1', quantity: 1, price: 12 },
+    ]);
+    const changerOf = async (orderId: string) =>
+      (
+        await fx.query<{ by: string | null; key: string | null }>(
+          `SELECT status_changed_by AS by, status_changed_by_api_key_id AS key
+             FROM app.commerce_orders WHERE id = $1`,
+          [orderId],
+        )
+      )[0];
+    const set = (assignments: string) =>
+      fx.query(`UPDATE app.commerce_orders SET ${assignments} WHERE id = $1`, [order.id]);
+
+    // A key's change records the key, as the runtime role writes it.
+    await apiUpdateOrder(deps(), writer.ctx, order.id, { status: 'confirmed' });
+    expect(await changerOf(order.id)).toEqual({ by: 'api', key: writer.id });
+
+    // A later change of status that does not record its maker clears the key: the event of that
+    // change names nobody, and so does the order.
+    await set(`status = 'fulfilled'`);
+    expect(await changerOf(order.id)).toEqual({ by: null, key: null });
+    // Recorded with a transaction other than its own, a changer is cleared too; recorded by its
+    // own, it stays.
+    await set(
+      `status = 'cancelled', status_changed_by = 'member', status_changed_xact = '1'::xid8`,
+    );
+    expect(await changerOf(order.id)).toEqual({ by: null, key: null });
+    await set(
+      `status = 'confirmed', status_changed_by = 'payment_link',
+       status_changed_xact = pg_catalog.pg_current_xact_id()`,
+    );
+    expect(await changerOf(order.id)).toEqual({ by: 'payment_link', key: null });
+    // A write that leaves the status alone leaves its changer.
+    await set(`paid_at = NULL`);
+    expect(await changerOf(order.id)).toEqual({ by: 'payment_link', key: null });
+
+    // The database keeps the changer to a member, a key of the order's company named only for a
+    // key's change, or the Payment Link.
+    for (const bad of [
+      `status_changed_by = 'api', status_changed_by_api_key_id = NULL`,
+      `status_changed_by = 'member', status_changed_by_api_key_id = '${writer.id}'`,
+      `status_changed_by = NULL, status_changed_by_api_key_id = '${writer.id}'`,
+      `status_changed_by = 'automation', status_changed_by_api_key_id = NULL`,
+    ]) {
+      await expect(set(bad), bad).rejects.toThrow(/commerce_orders_status_changed_by"/);
+    }
+    await expect(
+      set(`status_changed_by = 'api', status_changed_by_api_key_id = '${theirs.id}'`),
+    ).rejects.toThrow(/commerce_orders_status_changed_by_api_key_fk/);
+    await set(`status_changed_by = 'api', status_changed_by_api_key_id = '${writer.id}'`);
+    expect(await changerOf(order.id)).toEqual({ by: 'api', key: writer.id });
+    const grants = await fx.query<{ name: string; can_update: boolean }>(
+      `SELECT c AS name, has_column_privilege('w360_app', 'app.commerce_orders', c, 'UPDATE')
+                AS can_update
+         FROM unnest(ARRAY['status_changed_by', 'status_changed_by_api_key_id',
+                           'status_changed_xact']) AS c`,
+    );
+    expect(grants.map((g) => [g.name, g.can_update]).sort()).toEqual([
+      ['status_changed_by', true],
+      ['status_changed_by_api_key_id', true],
+      ['status_changed_xact', true],
     ]);
   });
 

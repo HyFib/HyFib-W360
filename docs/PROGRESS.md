@@ -1,5 +1,41 @@
 # Progress
 
+## 2026-10-07 — Who changed an order, in `order.status_changed` (P5-09, P5-08, H-014, ADR-270)
+
+Status: **Implemented; its database tests run in CI only.** An order system changing orders through
+the API heard its own changes back as `order.status_changed` and could not tell them from members'
+or payments'. The local PostgreSQL is unavailable, so the migrations and the integration tests below
+were written but not run here; both migrations were parsed with libpg_query (pglast), which checks
+their syntax only.
+
+### Completed
+
+- **Database:** migration 0187 (the order's changer, its key and the transaction that recorded them,
+  a foreign key and a check NOT VALID, the runtime role's grant, the trigger clearing a changer an
+  earlier transaction recorded, `app.webhook_capture_order` with the changer in the event) and 0188
+  (validates the foreign key and the check).
+- **Domain:** `ORDER_STATUS_CHANGERS` and the columns, `orderStatusChangedBy` used by every status
+  write (members, keys, the worker), the payload's `changedBy` and `apiKeyId`, and the OpenAPI
+  description of `order.status_changed`; the owners' export lists the changer and its key and leaves
+  out the transaction id.
+- **Tests:** unit (`commerce/orders.test.ts` new; the order payload and OpenAPI tests in
+  `webhooks.test.ts`); integration (a new test in `api.test.ts`, and the order tests of
+  `api.test.ts`, `commerce.test.ts` and `webhook-events.test.ts` extended). Written for CI; the
+  integration tests were not run here. No e2e test: nothing a member sees changed.
+- **Docs:** ADR-270; ARCHITECTURE; SECURITY; THREAT-MODEL T238; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix H-014 and H-033.
+- **Mutation checks:** 12/12 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 119 files, 1131 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — A webhook event when a CRM deal's owner changes (P5-09, P4-04, H-014, ADR-269)
 
 Status: **Implemented; its database tests run in CI only.** Giving a deal to another member sent

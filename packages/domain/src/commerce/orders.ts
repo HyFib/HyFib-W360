@@ -8,9 +8,28 @@ import {
   eq,
   inArray,
   isNull,
+  sql,
+  type OrderStatusChanger,
   type Tx,
 } from '@w360/db';
 import { newOrderReference, type ParsedOrder } from './model';
+
+/** Who changes an order's status: a member, an API key (named) or HyFib applying its Payment Link. */
+export type OrderStatusChange = Exclude<OrderStatusChanger, 'api'> | { apiKeyId: string };
+
+/**
+ * The columns that record who changes an order's status (ADR-270), written with the status in the
+ * same statement. The transaction id marks the record as this change's: the database clears a
+ * changer an earlier transaction recorded, so a status written without these columns never names
+ * the one before, and `order.status_changed` says nobody.
+ */
+export function orderStatusChangedBy(by: OrderStatusChange) {
+  return {
+    statusChangedBy: typeof by === 'string' ? by : ('api' as const),
+    statusChangedByApiKeyId: typeof by === 'string' ? null : by.apiKeyId,
+    statusChangedXact: sql`pg_catalog.pg_current_xact_id()`,
+  };
+}
 
 /**
  * Records an order a customer sent from their WhatsApp cart (research M-170), in the ingest
