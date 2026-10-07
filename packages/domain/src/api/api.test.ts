@@ -158,6 +158,7 @@ import {
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS,
   WEBHOOK_PIPELINES_NEED_THE_EVENTS,
+  WEBHOOK_STAGES_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
   WEBHOOK_CHANNELS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
@@ -1446,6 +1447,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'runEndReasons',
       'runEndStatuses',
       'runTriggers',
+      'stageIds',
       'teamIds',
       'templateIds',
       'templateStatuses',
@@ -1812,7 +1814,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       pipelineIds: [sales],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the campaigns, the pipelines, the members',
+      'the campaigns, the pipelines, the stages, the members',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -1831,6 +1833,69 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     );
     expect(doc.info.description).toContain(
       "And it can name CRM pipelines (its `pipelineIds`): then it receives the events of those pipelines' deals only",
+    );
+  });
+
+  it('take stages only with a deal event, each once, and a list of them alone is a change (ADR-264)', () => {
+    const proposal = '0190e9a1-0000-7000-8000-00000000005a';
+    const signed = '0190e9a1-0000-7000-8000-00000000005b';
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    for (const event of WEBHOOK_PIPELINE_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          stageIds: [signed, proposal.toUpperCase(), signed],
+        }).stageIds,
+        event,
+      ).toEqual([signed, proposal]);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['task.created'],
+      stageIds: [proposal],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['stageIds', WEBHOOK_STAGES_NEED_THE_EVENTS],
+    ]);
+    const deals = { ...base, events: ['deal.created'] };
+    for (const body of [
+      { ...deals, stageIds: [] },
+      { ...deals, stageIds: ['Proposal'] },
+      {
+        ...deals,
+        stageIds: Array.from(
+          { length: WEBHOOK_LIMITS.stages + 1 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiCreateWebhookEndpointSchema.parse({ ...deals, stageIds: null }).stageIds).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ stageIds: null })).toEqual({ stageIds: null });
+    expect(apiUpdateWebhookEndpointSchema.parse({ stageIds: [signed] })).toEqual({
+      stageIds: [signed],
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.stageIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('stageIds');
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.stageIds)).toContain(
+      'deal.stage_changed reaches the endpoints of the stage the deal left',
+    );
+    expect(JSON.stringify(given.stageIds)).toContain('With pipelines too');
+    expect(doc.info.description).toContain(
+      'or stages (its `stageIds`): then those of the deals in those stages only',
     );
   });
 

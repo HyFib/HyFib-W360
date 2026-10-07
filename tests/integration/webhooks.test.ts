@@ -3765,6 +3765,190 @@ describe('pipeline filters (ADR-263)', () => {
   });
 });
 
+describe('stage filters (ADR-264)', () => {
+  const crm = () =>
+    createCrmService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
+  /**
+   * The company's pipelines Sales (New, Proposal; Lost removed) and Renewals (Due, Signed) in that
+   * board order, and Old leads (Open) archived; their stages' ids.
+   */
+  async function stagesOf(c: Company) {
+    const owner = await fx.ctx(c, c.owner);
+    const svc = crm();
+    const pipeline = async (name: string, stages: string[]) =>
+      (await svc.createPipeline(owner, { name, currency: 'INR', stages })).id;
+    const salesId = await pipeline('Sales', ['New', 'Proposal', 'Lost']);
+    const renewalsId = await pipeline('Renewals', ['Due', 'Signed']);
+    const oldId = await pipeline('Old leads', ['Open']);
+    const before = await svc.listPipelines(owner);
+    const sales = before.find((p) => p.id === salesId)!;
+    await svc.updatePipeline(owner, {
+      id: salesId,
+      expectedVersion: sales.version,
+      name: 'Sales',
+      stages: sales.stages.slice(0, 2).map((st) => ({ id: st.id, name: st.name })),
+    });
+    const old = before.find((p) => p.id === oldId)!;
+    await svc.archivePipeline(owner, { id: oldId, expectedVersion: old.version });
+    const after = await svc.listPipelines(owner, { includeArchived: true });
+    const stage = (pipelineId: string, name: string) =>
+      after.find((p) => p.id === pipelineId)!.stages.find((st) => st.name === name)!.id;
+    return {
+      owner,
+      salesId,
+      renewalsId,
+      fresh: stage(salesId, 'New'),
+      proposal: stage(salesId, 'Proposal'),
+      lost: stage(salesId, 'Lost'),
+      due: stage(renewalsId, 'Due'),
+      signed: stage(renewalsId, 'Signed'),
+      open: stage(oldId, 'Open'),
+    };
+  }
+
+  it("are refused without a deal event, empty, over 50 or naming another company's stage; named in Settings with their pipelines, removed ones and those of archived pipelines too; kept by a change that leaves them out and cleared with the events; the database keeps them to those events", async () => {
+    const c = await fx.company();
+    const { owner, proposal, lost, signed, open } = await stagesOf(c);
+    const elsewhere = (await stagesOf(await fx.company())).proposal;
+    const url = 'https://hooks.example.com/in';
+    const refused = async (
+      eventTypes: string[],
+      stageIds: unknown,
+      message: RegExp,
+      path = 'stageIds',
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes, stageIds }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(stageIds)).toBe(path);
+    };
+    const needsTheEvents =
+      /only for an endpoint that receives Deal added, Deal stage or Deal won, lost or reopened/;
+    await refused(['task.created', 'contact.created'], [proposal], needsTheEvents);
+    await refused(['deal.created'], [], /at least one stage/);
+    await refused(['deal.created'], ['Proposal'], /from the list/, 'stageIds.0');
+    await refused(
+      ['deal.created'],
+      Array.from({ length: 51 }, () => uuidv7()),
+      /at most 50/,
+    );
+    await refused(['deal.stage_changed'], [proposal, elsewhere], /of this company/, 'stageIds.1');
+    await refused(['deal.status_changed'], [uuidv7()], /of this company/, 'stageIds.0');
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    // A removed stage and one of an archived pipeline can be named: stages are kept.
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['deal.stage_changed', 'contact.created'],
+      stageIds: [signed, proposal.toUpperCase(), signed, lost, open],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { stageIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => a.metadata.stageIds);
+    expect(await audits('webhook.endpoint_created')).toEqual([[signed, proposal, lost, open]]);
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.stages;
+    const named = (
+      id: string,
+      name: string,
+      pipelineName: string,
+      removed = false,
+      pipelineArchived = false,
+    ) => ({ id, name, pipelineName, removed, pipelineArchived });
+    expect(await current()).toEqual([
+      named(signed, 'Signed', 'Renewals'),
+      named(proposal, 'Proposal', 'Sales'),
+      named(lost, 'Lost', 'Sales', true),
+      named(open, 'Open', 'Old leads', false, true),
+    ]);
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['deal.stage_changed', 'contact.created'],
+        ...fields,
+      });
+    await change({ description: 'kept' });
+    expect((await current())?.map((st) => st.id)).toEqual([signed, proposal, lost, open]);
+    await change({ stageIds: [proposal] });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [signed, proposal, lost, open],
+      [proposal],
+    ]);
+    // A list given again is checked again, changing nothing when it is refused.
+    await expectAppError(
+      change({ stageIds: [proposal, elsewhere] }),
+      'validation_failed',
+      /of this company/,
+    );
+    expect((await current())?.map((st) => st.id)).toEqual([proposal]);
+    await change({ stageIds: null });
+    expect(await current()).toBeNull();
+    await change({ stageIds: [signed] });
+    // Any deal event keeps the list.
+    await change({ eventTypes: ['deal.created', 'task.created'] });
+    expect((await current())?.map((st) => st.id)).toEqual([signed]);
+    // The database refuses an empty list, more than 50, a missing id or a list of lists from an
+    // endpoint taking a deal event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET stage_ids = ${value} WHERE id = $1`, [created.id]);
+    const many = `ARRAY[${Array.from({ length: 51 }, () => `'${uuidv7()}'`).join(',')}]::uuid[]`;
+    for (const bad of [
+      `'{}'`,
+      many,
+      `ARRAY['${signed}', NULL]::uuid[]`,
+      `ARRAY[ARRAY['${signed}'::uuid], ARRAY['${proposal}'::uuid]]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_stage_ids/);
+    }
+    await change({ eventTypes: ['task.created', 'task.status_changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['task.created'], stageIds: [signed] }),
+      'validation_failed',
+      needsTheEvents,
+    );
+    // …and any list for an endpoint that takes none.
+    await expect(setInDatabase(`ARRAY['${signed}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_stage_ids/,
+    );
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'stage_ids', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('offer the stages in use of the pipelines the company uses, in board order, to developers only', async () => {
+    const c = await fx.company();
+    const { owner, salesId, renewalsId, fresh, proposal, due, signed } = await stagesOf(c);
+    await stagesOf(await fx.company());
+    const choice = (id: string, name: string, pipelineId: string, pipelineName: string) => ({
+      id,
+      name,
+      pipelineId,
+      pipelineName,
+    });
+    expect(await webhooks().stageChoices(owner)).toEqual([
+      choice(fresh, 'New', salesId, 'Sales'),
+      choice(proposal, 'Proposal', salesId, 'Sales'),
+      choice(due, 'Due', renewalsId, 'Renewals'),
+      choice(signed, 'Signed', renewalsId, 'Renewals'),
+    ]);
+    for (const user of [c.agent, c.marketer]) {
+      await expectAppError(webhooks().stageChoices(await fx.ctx(c, user)), 'forbidden');
+    }
+  });
+});
+
 describe('consent change filters (ADR-189)', () => {
   it('are refused without consent.changed, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to the event', async () => {
     const c = await fx.company();

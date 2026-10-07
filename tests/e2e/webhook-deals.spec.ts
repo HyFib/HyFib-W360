@@ -40,10 +40,10 @@ test.afterAll(() => {
 /** A delivered deal event, as far as this test reads it. */
 interface DealEventBody {
   type: string;
-  data: { deal: { id: string; pipelineId: string } };
+  data: { deal: { id: string; pipelineId: string; stageId: string } };
 }
 
-test('an endpoint receives the deal events of the pipelines it names only, chosen in settings and changed on its page (ADR-263)', async ({
+test('an endpoint receives the deal events of the pipelines (ADR-263) and stages (ADR-264) it names only, chosen in settings and changed on its page', async ({
   page,
   request,
 }) => {
@@ -103,8 +103,14 @@ test('an endpoint receives the deal events of the pipelines it names only, chose
   await page.getByRole('button', { name: 'I have stored the key' }).click();
   const pipelinesRes = await request.get('/api/v1/pipelines', { headers: auth });
   expect(pipelinesRes.status()).toBe(200);
-  const pipelines = ((await pipelinesRes.json()) as { data: { id: string; name: string }[] }).data;
+  const pipelines = (
+    (await pipelinesRes.json()) as {
+      data: { id: string; name: string; stages: { id: string; name: string }[] }[];
+    }
+  ).data;
   const pipelineId = (name: string) => pipelines.find((p) => p.name === name)!.id;
+  const stageId = (pipeline: string, name: string) =>
+    pipelines.find((p) => p.name === pipeline)!.stages.find((st) => st.name === name)!.id;
   const contactRes = await request.post('/api/v1/contacts', {
     headers: auth,
     data: { phone: `+9198${String(Date.now()).slice(-8)}`, name: 'Hari' },
@@ -150,5 +156,36 @@ test('an endpoint receives the deal events of the pipelines it names only, chose
   await page.goto(`/c/${slug}/settings/webhooks`);
   await expect(
     page.getByText('Pipelines whose deals’ events are sent: Sales, Renewals', { exact: true }),
+  ).toBeVisible();
+
+  // On its page again: moves too, of deals in Sales' Qualified stage only (ADR-264). A deal the key
+  // adds in New is not sent; moved to Qualified, it is.
+  await page.getByRole('link', { name: `Deliveries and settings for ${HOST}` }).click();
+  await expect(page.getByRole('heading', { name: `Deliveries to ${HOST}` })).toBeVisible();
+  await page.getByRole('checkbox', { name: /Deal stage/ }).check();
+  await page.getByRole('radio', { name: /Only those of the deals in the stages ticked/ }).check();
+  await page.getByRole('checkbox', { name: 'Sales: Qualified', exact: true }).check();
+  await expectNoHorizontalOverflow(page);
+  await page.getByRole('button', { name: 'Save endpoint' }).click();
+  await expect(page.getByText('Endpoint saved.')).toBeVisible();
+  const lead = await addDeal('Sales', 'Second order');
+  const qualified = stageId('Sales', 'Qualified');
+  const moved = await request.patch(`/api/v1/deals/${lead}`, {
+    headers: auth,
+    data: { stageId: qualified },
+  });
+  expect(moved.status()).toBe(200);
+  await expect
+    .poll(() =>
+      forUs()
+        .filter((b) => b.data.deal.id === lead)
+        .map((b) => [b.type, b.data.deal.stageId]),
+    )
+    .toEqual([['deal.stage_changed', qualified]]);
+  await page.reload();
+  await expect(page.getByRole('list', { name: 'Deliveries' }).getByRole('listitem')).toHaveCount(3);
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await expect(
+    page.getByText('Stages whose deals’ events are sent: Sales: Qualified', { exact: true }),
   ).toBeVisible();
 });

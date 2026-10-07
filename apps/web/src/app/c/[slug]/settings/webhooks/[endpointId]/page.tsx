@@ -50,6 +50,7 @@ export default async function WebhookEndpointPage({
     templateChoices,
     campaignChoices,
     pipelineChoices,
+    stageChoices,
     assigneeChoices,
     contactFieldChoices,
   ] = await Promise.all([
@@ -60,6 +61,7 @@ export default async function WebhookEndpointPage({
     webhooks.templateChoices(ctx),
     webhooks.campaignChoices(ctx),
     webhooks.pipelineChoices(ctx),
+    webhooks.stageChoices(ctx),
     webhooks.assigneeChoices(ctx),
     webhooks.contactFieldChoices(ctx),
   ]);
@@ -218,6 +220,7 @@ export default async function WebhookEndpointPage({
               templateIds: endpoint.templates?.map((t) => t.id) ?? null,
               campaigns: endpoint.campaigns,
               pipelines: endpoint.pipelines,
+              stages: endpoint.stages,
               assignees: endpoint.assignees,
               oauth: endpoint.oauth,
             }}
@@ -227,6 +230,7 @@ export default async function WebhookEndpointPage({
             templateChoices={templateChoices}
             campaignChoices={campaignChoices}
             pipelineChoices={pipelineChoices}
+            stageChoices={stageChoices}
             assigneeChoices={assigneeChoices}
             contactFieldChoices={contactFieldChoices}
           />

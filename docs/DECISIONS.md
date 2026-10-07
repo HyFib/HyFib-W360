@@ -9959,3 +9959,51 @@ Decision:
 
 Not built: deal events by stage or owner, task events by their deal's pipeline, and pipelines chosen
 per event type (one list serves the three events).
+
+## ADR-264 Choosing the CRM stages whose deal events a webhook endpoint receives (P5-09, P4-04) (2026-10-07)
+
+Context: an endpoint can take the deal events of chosen pipelines (ADR-263), but a receiver that
+acts when deals reach some stages (send the contract when a deal reaches Proposal, say) was sent
+every move of those pipelines' deals and had to read `deal.stageId` to drop the rest; a no-code
+receiver often cannot. ADR-263 left filters by stage unbuilt.
+
+Decision:
+
+- **A list of stages per endpoint,** for the three deal events: null receives every stage's deals,
+  as before; a list holds 1 to 50 of the company's stages, of any of its pipelines, by id, in the
+  order given with repeats merged. A deal's event counts when the stage it gives is listed
+  (`deal.stageId`: the deal's stage as the event's step left it, so a deal added in a listed stage,
+  moved into one, or won, lost or reopened in one), and `deal.stage_changed` also when the stage it
+  left is (`deal.previousStageId`), as with pipelines (ADR-263): a receiver learns that a deal left
+  a stage it follows; one that acts on arrivals compares `deal.stageId`. With a list of pipelines
+  too, an event must pass both. Task events and every other event are not narrowed. Chosen in
+  Settings → Webhooks ("Stages": every stage's deals, or only those of the deals in the stages
+  ticked, named with their pipeline, as "Sales: Proposal"), shown on the endpoint as "Stages whose
+  deals’ events are sent: …", and through the API as `stageIds` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only while a deal event is taken:** a list given for an endpoint that takes none is refused
+  (`stageIds`; 422 through the API). A change that drops all three clears it, and a `PATCH` that
+  leaves it out keeps it; Settings always sends it. A check in the database holds the same rule
+  (null, or 1 to 50 ids in one dimension without a null, with a deal event).
+- **Applied at capture:** `app.capture_webhook_event` matches the stage the deal trigger stores in
+  the event's detail (0171), and for a move the one it left, against each endpoint's list, after the
+  pipeline filter. No event is written when no endpoint takes it, and stored events are unchanged.
+- **The company's stages, removed ones too:** a list given now may hold only stages of the company,
+  checked in its scope; a removed stage is archived (it cannot be restored) and a pipeline is
+  archived, never deleted, so a list never names a stage that is gone. A removed stage holds no
+  deal, and an archived pipeline no open one, so they send nothing, and a list keeps them. Settings
+  offers the stages in use of the pipelines the company uses, in board order, and keeps listing a
+  removed one, or one of an archived pipeline, the endpoint already names, marked as such; the API
+  takes any of the company's, as `GET /pipelines` lists them.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `stageIds` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The choices list the company's stages and pipelines by name to
+  members with `developer.manage`.
+- **Migration 0180:** `stage_ids uuid[]` on `app.webhook_endpoints` with the check, validated at
+  once (a company has at most 10 endpoints), an update grant on the column for the runtime role, and
+  `app.capture_webhook_event` replaced with the same signature (0179's, with the stages), so its
+  owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: deal events by owner, task events by their deal's pipeline or stage, and stages chosen
+per event type (one list serves the three events).

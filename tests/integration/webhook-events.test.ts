@@ -4368,6 +4368,95 @@ describe('deal events (ADR-256)', () => {
     });
     expect((await dealEventsOf(c)).map((e) => e.deliveries).slice(6)).toEqual([1]);
   });
+
+  it("sends an endpoint that names stages only their deals' events, a move to the endpoints of the stage it left as well, and with pipelines too only what passes both (ADR-264)", async () => {
+    const s = await crmCompany();
+    const { c, owner } = s;
+    const svc = crm();
+    const [, qualified, proposal] = s.sales;
+    const [due] = s.renewals;
+    /** An endpoint of the company taking the deal events of the stages and pipelines given. */
+    const add = async (stageIds: string[] | null, pipelineIds: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: [...DEAL_EVENTS, 'contact.created'],
+        stageIds,
+        pipelineIds,
+      });
+      return { ...created, path };
+    };
+    const proposals = await add([proposal!], null);
+    const proposalsToRenewals = await add([proposal!], [s.renewalsId]);
+    const jaya = await newContact(owner, 'Jaya');
+
+    // A sale moves New → Qualified → Proposal, then to Renewals' Due, where it is lost.
+    const { id: sale } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: s.salesId,
+      stageId: s.sales[0],
+      title: 'Annual plan',
+    });
+    await svc.moveDeal(owner, { id: sale, expectedVersion: 1, stageId: qualified });
+    await svc.moveDeal(owner, { id: sale, expectedVersion: 2, stageId: proposal });
+    await svc.moveDeal(owner, {
+      id: sale,
+      expectedVersion: 3,
+      stageId: due,
+      pipelineId: s.renewalsId,
+    });
+    await svc.closeDeal(owner, { id: sale, expectedVersion: 4, outcome: 'lost' });
+    // Another is added straight in Proposal and won there.
+    const { id: quick } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: s.salesId,
+      stageId: proposal,
+      title: 'Quick order',
+    });
+    await svc.closeDeal(owner, { id: quick, expectedVersion: 1, outcome: 'won' });
+
+    // Only what reaches an endpoint is captured: nothing for New → Qualified or the loss in Due.
+    expect(
+      (await dealEventsOf(c)).map((e) => [
+        e.type,
+        e.detail.dealId,
+        e.detail.stageId,
+        e.detail.previousStageId ?? null,
+        e.deliveries,
+      ]),
+    ).toEqual([
+      ['deal.stage_changed', sale, proposal, qualified, 1],
+      ['deal.stage_changed', sale, due, proposal, 2],
+      ['deal.created', quick, proposal, null, 1],
+      ['deal.status_changed', quick, proposal, null, 1],
+    ]);
+    await deliverDue(c);
+    /** The deal events an endpoint received: type, deal, its stage and the stage it left. */
+    const dealsAt = (path: string) =>
+      bodiesAt(path)
+        .filter((b) => b.type.startsWith('deal.'))
+        .map((b) => {
+          const deal = dealIn(b);
+          return [b.type, deal.id, deal.stageId, deal.previousStageId].join(' ');
+        })
+        .sort();
+    const line = (type: string, deal: string, stage: string, left: string | null) =>
+      [type, deal, stage, left].join(' ');
+    expect(dealsAt(proposals.path)).toEqual(
+      [
+        line('deal.stage_changed', sale, proposal!, qualified!),
+        line('deal.stage_changed', sale, due!, proposal!),
+        line('deal.created', quick, proposal!, null),
+        line('deal.status_changed', quick, proposal!, null),
+      ].sort(),
+    );
+    // Proposal's stage and Renewals' pipeline: only the move from one to the other passes both.
+    expect(dealsAt(proposalsToRenewals.path)).toEqual([
+      line('deal.stage_changed', sale, due!, proposal!),
+    ]);
+    // Contact events are not narrowed by stages.
+    expect(bodiesAt(proposals.path).filter((b) => b.type === 'contact.created')).toHaveLength(1);
+  });
 });
 
 describe('task events (ADR-261)', () => {

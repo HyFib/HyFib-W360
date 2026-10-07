@@ -90,6 +90,7 @@ import {
   webhookRunEndReasonsChosen,
   webhookRunEndReasonsTicked,
   webhookRunEndTakesReason,
+  webhookStageText,
 } from './model';
 import {
   automationRunEndedPayloadSchema,
@@ -184,6 +185,9 @@ import {
   webhookPipelineIdsFor,
   webhookPipelineIdsSchema,
   WEBHOOK_PIPELINES_NEED_THE_EVENTS,
+  webhookStageIdsFor,
+  webhookStageIdsSchema,
+  WEBHOOK_STAGES_NEED_THE_EVENTS,
   webhookTemplateStatusesFor,
   webhookTemplateStatusesSchema,
 } from './service';
@@ -2890,6 +2894,71 @@ describe('pipeline filters (ADR-263)', () => {
     expect(webhookPipelineText({ name: 'Sales' })).toBe('Sales');
     expect(webhookPipelineText({ name: 'Sales', archived: false })).toBe('Sales');
     expect(webhookPipelineText({ name: 'Renewals', archived: true })).toBe('Renewals (archived)');
+  });
+});
+
+describe('stage filters (ADR-264)', () => {
+  const proposal = 'c4d5e6f7-a8b9-4a2b-8c3d-4e5f6a7b8c9d';
+  const signed = 'd5e6f7a8-b9c0-4b3c-9d4e-5f6a7b8c9d0e';
+
+  it('take 1 to 50 stages, once each and in lower case, in the order given; null takes every stage', () => {
+    expect(webhookStageIdsSchema.parse([signed, proposal.toUpperCase(), signed, proposal])).toEqual(
+      [signed, proposal],
+    );
+    expect(webhookStageIdsSchema.parse(null)).toBeNull();
+    const ids = Array.from(
+      { length: WEBHOOK_LIMITS.stages + 1 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(WEBHOOK_LIMITS.stages).toBe(50);
+    expect(webhookStageIdsSchema.parse(ids.slice(1))).toEqual(ids.slice(1));
+    for (const refused of [[], ids, ['Proposal'], [proposal, null], proposal, [42]]) {
+      expect(webhookStageIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(false);
+    }
+    expect(webhookStageIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one stage, or take every stage.',
+    );
+    expect(webhookStageIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 50 stages.',
+    );
+    expect(webhookStageIdsSchema.safeParse(['Proposal']).error?.issues[0]?.message).toBe(
+      'Choose stages from the list.',
+    );
+  });
+
+  it('apply to the deal events, whose payloads give the stage and the one a move left, and are kept only while one is taken', () => {
+    for (const schema of [
+      dealCreatedPayloadSchema,
+      dealStageChangedPayloadSchema,
+      dealStatusChangedPayloadSchema,
+    ]) {
+      const deal = schema.shape.data.shape.deal.shape;
+      expect('stageId' in deal && 'previousStageId' in deal).toBe(true);
+    }
+    for (const type of WEBHOOK_PIPELINE_EVENTS) {
+      expect(WEBHOOK_STAGES_NEED_THE_EVENTS).toContain(WEBHOOK_EVENT_INFO[type].label);
+    }
+    expect(webhookStageIdsFor(['deal.stage_changed'], [proposal], null)).toEqual([proposal]);
+    expect(webhookStageIdsFor(['deal.created'], undefined, [signed])).toEqual([signed]);
+    expect(webhookStageIdsFor(['deal.status_changed'], null, [signed])).toBeNull();
+    expect(webhookStageIdsFor(['deal.created'], undefined, null)).toBeNull();
+    expect(webhookStageIdsFor(['task.created', 'task.status_changed'], [proposal], [signed])).toBe(
+      null,
+    );
+  });
+
+  it('name a stage by its pipeline and name, a removed one and one of an archived pipeline as such', () => {
+    const stage = { name: 'Proposal', pipelineName: 'Sales' };
+    expect(webhookStageText(stage)).toBe('Sales: Proposal');
+    expect(webhookStageText({ ...stage, removed: false, pipelineArchived: false })).toBe(
+      'Sales: Proposal',
+    );
+    expect(webhookStageText({ ...stage, removed: true, pipelineArchived: true })).toBe(
+      'Sales: Proposal (removed)',
+    );
+    expect(webhookStageText({ ...stage, pipelineArchived: true })).toBe(
+      'Sales: Proposal (archived pipeline)',
+    );
   });
 });
 

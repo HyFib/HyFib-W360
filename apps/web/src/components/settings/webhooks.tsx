@@ -46,6 +46,7 @@ import {
   webhookReplaySummary,
   webhookRunEndReasonsChosen,
   webhookRunEndReasonsTicked,
+  webhookStageText,
   webhookTakesAutomationRuns,
   webhookTakesCampaignEvents,
   webhookTakesChannelEvents,
@@ -68,6 +69,7 @@ import {
   type WebhookEndpointField,
   type WebhookEndpointOAuth,
   type WebhookEndpointPipeline,
+  type WebhookEndpointStage,
   type WebhookEndpointTeam,
   type WebhookEventType,
   type WebhookFailureKind,
@@ -77,6 +79,7 @@ import {
   type WebhookOrderStatus,
   type WebhookPipelineChoice,
   type WebhookReplayPeriod,
+  type WebhookStageChoice,
   type WebhookRunEndStatus,
   type WebhookRunTrigger,
   type WebhookConsentChange,
@@ -1335,6 +1338,110 @@ function PipelineChoices({
   );
 }
 
+/**
+ * The CRM stages whose deals' events an endpoint takes (ADR-264): every stage's, or those of the
+ * stages ticked, named with their pipelines. The stages in use of the pipelines the company uses are
+ * offered; a removed one, or one of an archived pipeline, the endpoint already names stays listed,
+ * ticked, until it is unticked.
+ */
+function StageChoices({
+  prefix,
+  choices,
+  stored,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  choices: WebhookStageChoice[];
+  /** The stages the endpoint names now, so a removed one stays listed until saved without. */
+  stored: readonly WebhookEndpointStage[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const listed: WebhookEndpointStage[] = [
+    ...choices.map((c) => ({
+      id: c.id,
+      name: c.name,
+      pipelineName: c.pipelineName,
+      removed: false,
+      pipelineArchived: false,
+    })),
+    ...stored.filter((s) => !choices.some((c) => c.id === s.id)),
+  ];
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Stages</legend>
+      <p className="text-xs text-muted-foreground">
+        A deal’s events belong to its stage; a deal moved to another stage belongs to both for that
+        move. With pipelines chosen too, an event must pass both. Task and other events are sent
+        whichever stages are chosen.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-stages`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every stage’s deals
+          <span className="block text-xs text-muted-foreground">Including stages added later.</span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-stages`}
+          className="mt-1"
+          checked={!every}
+          disabled={listed.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only those of the deals in the stages ticked
+          {listed.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">
+              The company has no pipeline yet.
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid max-h-64 gap-1 overflow-y-auto">
+          {listed.map((st) => {
+            const id = `${prefix}-stage-${st.id}`;
+            return (
+              <div key={st.id} className="flex items-center gap-2">
+                <Checkbox
+                  id={id}
+                  checked={chosen.includes(st.id)}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? listed
+                            .filter((l) => l.id === st.id || chosen.includes(l.id))
+                            .map((l) => l.id)
+                        : chosen.filter((x) => x !== st.id),
+                    )
+                  }
+                />
+                <Label htmlFor={id} className="font-normal break-all">
+                  {webhookStageText(st)}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
 function EventChoices({
   prefix,
   chosen,
@@ -1754,6 +1861,7 @@ export function WebhookEndpointForm({
   templateChoices,
   campaignChoices,
   pipelineChoices,
+  stageChoices,
   assigneeChoices,
   contactFieldChoices,
   atLimit = false,
@@ -1795,6 +1903,8 @@ export function WebhookEndpointForm({
     campaigns: WebhookEndpointCampaign[] | null;
     /** The CRM pipelines it names (ADR-263), with whether they are archived; null for every one. */
     pipelines: WebhookEndpointPipeline[] | null;
+    /** The CRM stages it names (ADR-264), with their pipelines; null for every one. */
+    stages: WebhookEndpointStage[] | null;
     /** The members it names (ADR-181), with whether they still take conversations; null: all. */
     assignees: WebhookEndpointAssignee[] | null;
     oauth: WebhookEndpointOAuth | null;
@@ -1811,6 +1921,8 @@ export function WebhookEndpointForm({
   campaignChoices: { campaigns: WebhookCampaignChoice[]; more: boolean };
   /** The CRM pipelines the company uses, which an endpoint can choose (ADR-263). */
   pipelineChoices: WebhookPipelineChoice[];
+  /** The stages in use of the pipelines the company uses, which an endpoint can choose (ADR-264). */
+  stageChoices: WebhookStageChoice[];
   /** The company's members who take conversations, whom an endpoint can choose (ADR-181). */
   assigneeChoices: WebhookAssigneeChoice[];
   /** The company's custom fields, which an endpoint can choose (ADR-184). */
@@ -1876,6 +1988,8 @@ export function WebhookEndpointForm({
   const [pipelineIds, setPipelineIds] = useState<string[]>(
     endpoint?.pipelines?.map((p) => p.id) ?? [],
   );
+  const [everyStage, setEveryStage] = useState(!endpoint?.stages);
+  const [stageIds, setStageIds] = useState<string[]>(endpoint?.stages?.map((st) => st.id) ?? []);
   const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
   const [everyField, setEveryField] = useState(!endpoint?.contactFields);
   const [fieldKeys, setFieldKeys] = useState<string[]>(
@@ -2006,6 +2120,9 @@ export function WebhookEndpointForm({
         // Every deal's events unless the pipelines ticked are chosen (ADR-263).
         const chosenPipelines =
           webhookTakesPipelineEvents(eventTypes) && !everyPipeline ? pipelineIds : null;
+        // Every stage's deals unless the stages ticked are chosen (ADR-264).
+        const chosenStages =
+          webhookTakesPipelineEvents(eventTypes) && !everyStage ? stageIds : null;
         // Every conversation's events unless the members ticked are chosen (ADR-181).
         const chosenAssignees =
           webhookTakesTeamEvents(eventTypes) && !everyAssignee ? assigneeIds : null;
@@ -2033,6 +2150,7 @@ export function WebhookEndpointForm({
           templateIds: chosenTemplates,
           campaignIds: chosenCampaigns,
           pipelineIds: chosenPipelines,
+          stageIds: chosenStages,
           assigneeIds: chosenAssignees,
         };
         const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
@@ -2103,6 +2221,8 @@ export function WebhookEndpointForm({
               setCampaignIds([]);
               setEveryPipeline(true);
               setPipelineIds([]);
+              setEveryStage(true);
+              setStageIds([]);
               setEveryAssignee(true);
               setAssigneeIds([]);
               setEveryField(true);
@@ -2270,6 +2390,17 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryPipeline}
           chosen={pipelineIds}
           onChange={setPipelineIds}
+        />
+      ) : null}
+      {webhookTakesPipelineEvents(eventTypes) ? (
+        <StageChoices
+          prefix={prefix}
+          choices={stageChoices}
+          stored={endpoint?.stages ?? []}
+          every={everyStage}
+          onEveryChange={setEveryStage}
+          chosen={stageIds}
+          onChange={setStageIds}
         />
       ) : null}
       <fieldset className="grid gap-2">

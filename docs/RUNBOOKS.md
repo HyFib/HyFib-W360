@@ -2666,6 +2666,17 @@ until it is restored. To take more, tick the pipelines under "Pipelines" on the 
 choose "Every deal’s events", or `PATCH /webhook-endpoints/{id}` with `pipelineIds` (null for every
 pipeline). Removing every deal event clears the list. Task events are never narrowed by pipelines.
 
+**A receiver misses a deal's moves or hears too many (ADR-264).** An endpoint can take the deal
+events of chosen stages only. The endpoints list shows them ("Stages whose deals’ events are sent:
+…"), and the API answers `stageIds` (null takes every stage's). A deal's events go by the stage each
+event gives (`deal.stageId`), and a move also by the stage it left, so an endpoint that names
+Proposal hears deals arriving in Proposal and leaving it: compare `deal.stageId` to act on arrivals
+only. With pipelines chosen too, an event must pass both lists. Events no endpoint takes are not
+recorded, so there is nothing to replay. A removed stage, or one of an archived pipeline, stays on a
+list and sends nothing. To take more, tick the stages under "Stages" on the endpoint's page or
+choose "Every stage’s deals", or `PATCH /webhook-endpoints/{id}` with `stageIds` (null for every
+stage). Removing every deal event clears the list.
+
 **A receiver misses a run's events (ADR-183).** An endpoint can take the run events of the runs
 started by chosen triggers only. The endpoints list shows them ("Automation runs started by: …"),
 and the API answers `runTriggers` (null takes every run). A run's events go by what started it, as

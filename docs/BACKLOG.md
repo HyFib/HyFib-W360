@@ -286,6 +286,8 @@ verification, app review, Embedded Signup configuration).
   P5-08). **[Task webhook events built; their database tests run only in CI]** (ADR-261, migrations
   0177 and 0178; recorded under P5-09). **[Pipeline filters for deal webhook events built; their
   database and browser tests run only in CI]** (ADR-263, migration 0179; recorded under P5-09).
+  **[Stage filters for deal webhook events built; their database and browser tests run only in
+  CI]** (ADR-264, migration 0180; recorded under P5-09).
   **Remaining:** custom deal fields, products on deals, deal import, CRM connectors (HubSpot,
   Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
   checklist).
@@ -984,8 +986,12 @@ verification, app review, Embedded Signup configuration).
   (ADR-263, migration 0179: an endpoint takes the deal events of 1 to 50 of the company's pipelines,
   archived ones included, in Settings → Webhooks or through the API's `pipelineIds`; a move to
   another pipeline reaches the endpoints of both; task and other events are not narrowed).
-  Remaining: filters for other event types (deal events by stage or owner, task events by their
-  deal's pipeline, among them) and on a message's or contact's values (such as by tag or a field's
+  **[Stage filters for deal events built; their database and browser tests run only in CI]**
+  (ADR-264, migration 0180: an endpoint takes the deal events of 1 to 50 of the company's stages,
+  removed ones included; a move reaches the endpoints of the stage it left as well; with pipelines
+  too, an event must pass both).
+  Remaining: filters for other event types (deal events by owner, task events by their deal's
+  pipeline or stage, among them) and on a message's or contact's values (such as by tag or a field's
   value, or the key that started a run), other authentication (headers computed per delivery, other
   OAuth grants), mutual TLS, fixed egress addresses, events for store orders, Payment Links and each
   step of a run, `createdAt` finer than the millisecond, load tests.

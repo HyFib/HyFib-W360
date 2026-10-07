@@ -274,6 +274,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       templateIds: null,
       campaignIds: null,
       pipelineIds: null,
+      stageIds: null,
       assigneeIds: null,
       oauth: null,
       apiKeyId: key.id,
@@ -2500,6 +2501,123 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { pipelineIds: [] }))).toMatchObject({
       path: 'pipelineIds',
+    });
+  });
+
+  it("choose the stages whose deals' events an endpoint receives, removed ones too, kept by changes that leave them out and cleared with the events (ADR-264)", async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const crm = createCrmService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    const stagesOf = async (company: Company) => {
+      const owner = await fx.ctx(company, company.owner);
+      const { id } = await crm.createPipeline(owner, {
+        name: 'Sales',
+        currency: 'INR',
+        stages: ['New', 'Proposal', 'Lost'],
+      });
+      const [pipeline] = (await crm.listPipelines(owner)).filter((p) => p.id === id);
+      return { owner, id, pipeline: pipeline!, stages: pipeline!.stages.map((st) => st.id) };
+    };
+    const sales = await stagesOf(c);
+    const [fresh, proposal, lost] = sales.stages as [string, string, string];
+    const elsewhere = (await stagesOf(await fx.company())).stages[0]!;
+    // Lost is removed: it stays, archived.
+    await crm.updatePipeline(sales.owner, {
+      id: sales.id,
+      expectedVersion: sales.pipeline.version,
+      name: 'Sales',
+      stages: [
+        { id: fresh, name: 'New' },
+        { id: proposal, name: 'Proposal' },
+      ],
+    });
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    const refusals = [
+      [['task.created'], [proposal], 'stageIds'],
+      [['deal.created'], [], 'stageIds'],
+      [['deal.created'], [proposal, 'Proposal'], 'stageIds.1'],
+      [['deal.stage_changed'], [proposal, elsewhere], 'stageIds.1'],
+      [['deal.status_changed'], [uuidv7()], 'stageIds.0'],
+    ] as const;
+    for (const [index, [events, stageIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, stageIds },
+            idem(`stages-bad-${index}`, JSON.stringify(stageIds)),
+          ),
+        ),
+        JSON.stringify(stageIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'stages-1', {
+      url: receiverUrl(),
+      events: ['deal.stage_changed', 'contact.created'],
+      stageIds: [lost, proposal.toUpperCase(), lost],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.stageIds).toEqual([lost, proposal]);
+    expect((await api().get(key.ctx, id)).stageIds).toEqual([lost, proposal]);
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { stageIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => a.metadata.stageIds);
+    expect(await audits('webhook.endpoint_created')).toEqual([[lost, proposal]]);
+    // Settings names them with their pipeline, the removed one as removed.
+    expect((await settings().list(sales.owner)).find((e) => e.id === id)?.stages).toEqual([
+      { id: lost, name: 'Lost', pipelineName: 'Sales', removed: true, pipelineArchived: false },
+      {
+        id: proposal,
+        name: 'Proposal',
+        pipelineName: 'Sales',
+        removed: false,
+        pipelineArchived: false,
+      },
+    ]);
+    expect(await api().update(key.ctx, id, { description: 'Proposals' })).toMatchObject({
+      stageIds: [lost, proposal],
+    });
+    expect(await api().update(key.ctx, id, { stageIds: [proposal] })).toMatchObject({
+      stageIds: [proposal],
+    });
+    expect(await audits('webhook.endpoint_updated')).toEqual([[lost, proposal], [proposal]]);
+    // Any deal event keeps the list; events without one clear it.
+    expect(await api().update(key.ctx, id, { events: ['deal.created'] })).toMatchObject({
+      stageIds: [proposal],
+    });
+    expect(await api().update(key.ctx, id, { events: ['contact.created'] })).toMatchObject({
+      events: ['contact.created'],
+      stageIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { stageIds: [proposal] }))).toMatchObject({
+      path: 'stageIds',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['deal.status_changed'], stageIds: [fresh] }),
+    ).toMatchObject({ stageIds: [fresh] });
+    // A list given again is checked again, changing nothing when it is refused.
+    expect(await issueOf(api().update(key.ctx, id, { stageIds: [elsewhere] }))).toMatchObject({
+      path: 'stageIds.0',
+    });
+    expect((await api().get(key.ctx, id)).stageIds).toEqual([fresh]);
+    expect(await api().update(key.ctx, id, { stageIds: null })).toMatchObject({ stageIds: null });
+    expect(await issueOf(api().update(key.ctx, id, { stageIds: [] }))).toMatchObject({
+      path: 'stageIds',
     });
   });
 

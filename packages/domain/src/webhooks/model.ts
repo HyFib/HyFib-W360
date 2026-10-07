@@ -615,6 +615,8 @@ export const WEBHOOK_LIMITS = {
   campaignChoices: 200,
   /** The CRM pipelines an endpoint can choose to take the deals' events of (ADR-263). */
   pipelines: 50,
+  /** The CRM stages an endpoint can choose to take the deals' events of (ADR-264). */
+  stages: 50,
   /**
    * An endpoint's OAuth client (ADR-173): its identifier, secret and scope, short enough that the
    * Basic header stays within what the egress client sends, and the longest token kept.
@@ -819,9 +821,10 @@ export function webhookTakesCampaignEvents(eventTypes: readonly WebhookEventType
 }
 
 /**
- * The events of a CRM deal, which an endpoint can take for chosen pipelines (ADR-263): a deal's
- * event belongs to the pipeline it gives (`deal.pipelineId`, as the event's step left the deal), and
- * a move to another pipeline to the pipeline it left as well.
+ * The events of a CRM deal, which an endpoint can take for chosen pipelines (ADR-263) and stages
+ * (ADR-264): a deal's event belongs to the pipeline and stage it gives (`deal.pipelineId` and
+ * `deal.stageId`, as the event's step left the deal), and a move to the pipeline and stage it left
+ * as well.
  */
 export const WEBHOOK_PIPELINE_EVENTS = [
   'deal.created',
@@ -854,10 +857,48 @@ export interface WebhookEndpointPipeline {
 export const webhookPipelineText = (pipeline: { name: string; archived?: boolean }): string =>
   pipeline.archived ? `${pipeline.name} (archived)` : pipeline.name;
 
-/** Whether an endpoint with these events takes deal events, and can choose pipelines. */
+/** Whether an endpoint with these events takes deal events, and can choose pipelines and stages. */
 export function webhookTakesPipelineEvents(eventTypes: readonly WebhookEventType[]): boolean {
   return WEBHOOK_PIPELINE_EVENTS.some((type) => eventTypes.includes(type));
 }
+
+/**
+ * A stage in use of a CRM pipeline the company uses, which an endpoint can choose to take the deals'
+ * events of (ADR-264). The API also takes a removed stage, or one of an archived pipeline; Settings
+ * lists one only while an endpoint names it.
+ */
+export interface WebhookStageChoice {
+  id: string;
+  name: string;
+  pipelineId: string;
+  pipelineName: string;
+}
+
+/** A stage an endpoint takes the deals' events of (ADR-264), as stored. */
+export interface WebhookEndpointStage {
+  id: string;
+  name: string;
+  pipelineName: string;
+  /**
+   * A removed stage holds no deal and takes none (stages are archived when removed and cannot be
+   * restored), so it sends nothing; it stays chosen. Stages are never deleted.
+   */
+  removed: boolean;
+  /** Its pipeline is archived: no open deal, none until the pipeline is restored. */
+  pipelineArchived: boolean;
+}
+
+/** A stage as Settings → Webhooks names it: its pipeline and name. */
+export const webhookStageText = (stage: {
+  name: string;
+  pipelineName: string;
+  removed?: boolean;
+  pipelineArchived?: boolean;
+}): string => {
+  const text = `${stage.pipelineName}: ${stage.name}`;
+  if (stage.removed) return `${text} (removed)`;
+  return stage.pipelineArchived ? `${text} (archived pipeline)` : text;
+};
 
 /**
  * Where an endpoint gets OAuth access tokens and as which client (ADR-173); its secret is never

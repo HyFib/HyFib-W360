@@ -1,5 +1,41 @@
 # Progress
 
+## 2026-10-07 — Choosing the CRM stages whose deal events an endpoint receives (P5-09, P4-04, H-014, ADR-264)
+
+Status: **Implemented; its database and browser tests run in CI only.** Endpoints could choose
+pipelines but received every move of their deals. The local PostgreSQL is unavailable, so the
+migration and the integration tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0180 (`stage_ids` on `app.webhook_endpoints` with its check and column
+  grant, and `app.capture_webhook_event` with the stage filter after the pipeline filter).
+- **Domain:** the list's schema, rules and company check (`webhookStageIdsSchema`,
+  `webhookStageIdsFor`, `assertWebhookStages`), the choices (`stageChoices`), the named list in
+  Settings' view (with the pipeline, and whether the stage was removed or its pipeline archived),
+  create and update in Settings and the API (`stageIds`), the audits, the OpenAPI entries and the
+  export.
+- **Web:** "Stages" in the endpoint form (every stage's deals, or the stages ticked, named with
+  their pipeline, a removed one kept while named) and the endpoints list naming them.
+- **Tests:** unit (3 new in `webhooks.test.ts`, 1 in `api.test.ts`); integration (1 in
+  `webhook-events.test.ts`, 2 in `webhooks.test.ts`, 1 in `api-webhook-endpoints.test.ts`, and the
+  API's endpoint shape); e2e (`webhook-deals.spec.ts` extended). Written for CI; the integration and
+  e2e tests were not run here.
+- **Docs:** ADR-264; ARCHITECTURE; SECURITY; THREAT-MODEL T232; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09
+  and P4-04; feature matrix W-138 and H-014.
+- **Mutation checks:** 24/24 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 1114 passed (117 files)                                       |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm test:e2e`                                    | not run here; CI runs it                                      |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Choosing the CRM pipelines whose deal events an endpoint receives (P5-09, P4-04, H-014, ADR-263)
 
 Status: **Implemented; its database and browser tests run in CI only.** Endpoints received every
