@@ -4239,6 +4239,135 @@ describe('deal events (ADR-256)', () => {
       ]),
     ).toEqual([{ event_types: [...WEBHOOK_EVENT_KEYS] }]);
   });
+
+  it("sends an endpoint that names pipelines only their deals' events, a move between pipelines to the endpoints of both, and other events whatever it names (ADR-263)", async () => {
+    const s = await crmCompany();
+    const { c, owner } = s;
+    const svc = crm();
+    /** An endpoint of the company taking `eventTypes` of the pipelines given only. */
+    const add = async (eventTypes: WebhookEventType[], pipelineIds: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        pipelineIds,
+      });
+      return { ...created, path };
+    };
+    const salesOnly = await add([...DEAL_EVENTS, 'task.created', 'contact.created'], [s.salesId]);
+    const renewalsOnly = await add(DEAL_EVENTS, [s.renewalsId]);
+    const every = await add(DEAL_EVENTS, null);
+    const jaya = await newContact(owner, 'Jaya');
+
+    // A renewal is added, moved in Renewals and won: Renewals' alone.
+    const { id: renewal } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: s.renewalsId,
+      stageId: s.renewals[0],
+      title: 'Renewal 2027',
+    });
+    await svc.moveDeal(owner, { id: renewal, expectedVersion: 1, stageId: s.renewals[1] });
+    await svc.closeDeal(owner, { id: renewal, expectedVersion: 2, outcome: 'won' });
+    // A sale is added in Sales, moved to Renewals (the move is both pipelines') and lost there.
+    const { id: sale } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: s.salesId,
+      stageId: s.sales[0],
+      title: 'Annual plan',
+    });
+    await svc.moveDeal(owner, {
+      id: sale,
+      expectedVersion: 1,
+      stageId: s.renewals[0],
+      pipelineId: s.renewalsId,
+    });
+    await svc.closeDeal(owner, { id: sale, expectedVersion: 2, outcome: 'lost' });
+    // A task about the renewal and a contact added are no pipeline's: the Sales endpoint gets them.
+    await svc.createTask(owner, {
+      title: 'Send the renewal invoice',
+      assigneeMembershipId: owner.membership.id,
+      dealId: renewal,
+    });
+    await newContact(owner, 'Ravi');
+
+    // Each deal event is captured once, with a delivery to each endpoint its pipelines reach.
+    expect(
+      (await dealEventsOf(c)).map((e) => [
+        e.type,
+        e.detail.dealId,
+        e.detail.pipelineId,
+        e.detail.previousPipelineId ?? null,
+        e.deliveries,
+      ]),
+    ).toEqual([
+      ['deal.created', renewal, s.renewalsId, null, 2],
+      ['deal.stage_changed', renewal, s.renewalsId, null, 2],
+      ['deal.status_changed', renewal, s.renewalsId, null, 2],
+      ['deal.created', sale, s.salesId, null, 2],
+      ['deal.stage_changed', sale, s.renewalsId, s.salesId, 3],
+      ['deal.status_changed', sale, s.renewalsId, null, 2],
+    ]);
+    await deliverDue(c);
+    /** The deal events an endpoint received: type, deal, its pipeline and the one a move left. */
+    const dealsAt = (path: string) =>
+      bodiesAt(path)
+        .filter((b) => b.type.startsWith('deal.'))
+        .map((b) => {
+          const deal = dealIn(b);
+          return [b.type, deal.id, deal.pipelineId, deal.previousPipelineId].join(' ');
+        })
+        .sort();
+    const line = (type: string, deal: string, pipeline: string, left: string | null) =>
+      [type, deal, pipeline, left].join(' ');
+    expect(dealsAt(salesOnly.path)).toEqual(
+      [
+        line('deal.created', sale, s.salesId, null),
+        line('deal.stage_changed', sale, s.renewalsId, s.salesId),
+      ].sort(),
+    );
+    expect(dealsAt(renewalsOnly.path)).toEqual(
+      [
+        line('deal.created', renewal, s.renewalsId, null),
+        line('deal.stage_changed', renewal, s.renewalsId, null),
+        line('deal.status_changed', renewal, s.renewalsId, null),
+        line('deal.stage_changed', sale, s.renewalsId, s.salesId),
+        line('deal.status_changed', sale, s.renewalsId, null),
+      ].sort(),
+    );
+    expect(dealsAt(every.path)).toHaveLength(6);
+    expect(
+      bodiesAt(salesOnly.path)
+        .map((b) => b.type)
+        .filter((type) => !type.startsWith('deal.'))
+        .sort(),
+    ).toEqual(['contact.created', 'contact.created', 'task.created']);
+
+    // With the other endpoints off, a renewal's events reach no endpoint and are not captured.
+    for (const endpoint of [renewalsOnly, every]) {
+      await webhooks().setEnabled(owner, { endpointId: endpoint.id, enabled: false });
+    }
+    await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: s.renewalsId,
+      stageId: s.renewals[0],
+      title: 'Renewal 2028',
+    });
+    expect(await dealEventsOf(c)).toHaveLength(6);
+    // A list holding both pipelines takes both, as every pipeline's would.
+    await webhooks().update(owner, {
+      endpointId: salesOnly.id,
+      url: `http://${HOST}:${port}${salesOnly.path}`,
+      eventTypes: DEAL_EVENTS,
+      pipelineIds: [s.salesId, s.renewalsId],
+    });
+    await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: s.renewalsId,
+      stageId: s.renewals[0],
+      title: 'Renewal 2029',
+    });
+    expect((await dealEventsOf(c)).map((e) => e.deliveries).slice(6)).toEqual([1]);
+  });
 });
 
 describe('task events (ADR-261)', () => {

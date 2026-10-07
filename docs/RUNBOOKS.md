@@ -2655,6 +2655,17 @@ statuses and every campaign’s changes", or `PATCH /webhook-endpoints/{id}` wit
 for every campaign). Removing both Message status and Campaign status clears the list. Each status
 names its campaign as `message.campaignId`, null for a message no campaign sent.
 
+**A receiver misses a deal's events (ADR-263).** An endpoint can take the deal events of chosen
+pipelines only. The endpoints list shows them ("Pipelines whose deals’ events are sent: …"), and the
+API answers `pipelineIds` (null takes every pipeline's). A deal's events go by the pipeline each
+event gives (`deal.pipelineId`): those of a deal in another pipeline are never queued for the
+endpoint, and when no endpoint of the company takes an event, it is not recorded at all, so there is
+nothing to replay. A move to another pipeline reaches the endpoints of both pipelines; the deal's
+later events go by its new pipeline only. An archived pipeline stays on a list and sends nothing
+until it is restored. To take more, tick the pipelines under "Pipelines" on the endpoint's page or
+choose "Every deal’s events", or `PATCH /webhook-endpoints/{id}` with `pipelineIds` (null for every
+pipeline). Removing every deal event clears the list. Task events are never narrowed by pipelines.
+
 **A receiver misses a run's events (ADR-183).** An endpoint can take the run events of the runs
 started by chosen triggers only. The endpoints list shows them ("Automation runs started by: …"),
 and the API answers `runTriggers` (null takes every run). A run's events go by what started it, as

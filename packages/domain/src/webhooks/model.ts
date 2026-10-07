@@ -613,6 +613,8 @@ export const WEBHOOK_LIMITS = {
   campaigns: 50,
   /** The newest campaigns Settings offers to choose from (ADR-185); the API takes any of them. */
   campaignChoices: 200,
+  /** The CRM pipelines an endpoint can choose to take the deals' events of (ADR-263). */
+  pipelines: 50,
   /**
    * An endpoint's OAuth client (ADR-173): its identifier, secret and scope, short enough that the
    * Basic header stays within what the egress client sends, and the longest token kept.
@@ -814,6 +816,47 @@ export const webhookCampaignText = (campaign: WebhookEndpointCampaign): string =
 /** Whether an endpoint with these events takes events of campaigns, and can choose campaigns. */
 export function webhookTakesCampaignEvents(eventTypes: readonly WebhookEventType[]): boolean {
   return WEBHOOK_CAMPAIGN_EVENTS.some((type) => eventTypes.includes(type));
+}
+
+/**
+ * The events of a CRM deal, which an endpoint can take for chosen pipelines (ADR-263): a deal's
+ * event belongs to the pipeline it gives (`deal.pipelineId`, as the event's step left the deal), and
+ * a move to another pipeline to the pipeline it left as well.
+ */
+export const WEBHOOK_PIPELINE_EVENTS = [
+  'deal.created',
+  'deal.stage_changed',
+  'deal.status_changed',
+] as const satisfies readonly WebhookEventType[];
+
+/**
+ * A CRM pipeline the company uses, which an endpoint can choose to take the deals' events of
+ * (ADR-263). The API also takes an archived one; Settings lists one only while an endpoint names
+ * it.
+ */
+export interface WebhookPipelineChoice {
+  id: string;
+  name: string;
+}
+
+/** A pipeline an endpoint takes the deals' events of (ADR-263), as stored. */
+export interface WebhookEndpointPipeline {
+  id: string;
+  name: string;
+  /**
+   * An archived pipeline has no open deal and takes none until it is restored, so it sends nothing
+   * meanwhile; it stays chosen. Pipelines are never deleted.
+   */
+  archived: boolean;
+}
+
+/** A pipeline as Settings → Webhooks names it. */
+export const webhookPipelineText = (pipeline: { name: string; archived?: boolean }): string =>
+  pipeline.archived ? `${pipeline.name} (archived)` : pipeline.name;
+
+/** Whether an endpoint with these events takes deal events, and can choose pipelines. */
+export function webhookTakesPipelineEvents(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_PIPELINE_EVENTS.some((type) => eventTypes.includes(type));
 }
 
 /**

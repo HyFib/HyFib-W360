@@ -51,6 +51,7 @@ import {
   WEBHOOK_RUN_END_REASONS,
   WEBHOOK_RUN_END_REASONS_BY_END,
   WEBHOOK_CAMPAIGN_EVENTS,
+  WEBHOOK_PIPELINE_EVENTS,
   WEBHOOK_TEAM_EVENTS,
   WEBHOOK_TEMPLATE_EVENTS,
   WEBHOOK_EVENT_INFO,
@@ -76,10 +77,12 @@ import {
   webhookReplaySummary,
   webhookChannelText,
   webhookOAuthText,
+  webhookPipelineText,
   webhookRetryDelaySeconds,
   webhookTakesAutomationRuns,
   webhookTakesCampaignEvents,
   webhookTakesChannelEvents,
+  webhookTakesPipelineEvents,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   webhookTeamText,
@@ -178,6 +181,9 @@ import {
   webhookTemplateIdsSchema,
   webhookCampaignIdsFor,
   webhookCampaignIdsSchema,
+  webhookPipelineIdsFor,
+  webhookPipelineIdsSchema,
+  WEBHOOK_PIPELINES_NEED_THE_EVENTS,
   webhookTemplateStatusesFor,
   webhookTemplateStatusesSchema,
 } from './service';
@@ -1501,7 +1507,8 @@ describe('the OpenAPI document', () => {
     expect(text('deal.stage_changed')).toContain('is moved and then closed');
     expect(text('deal.stage_changed')).toContain('the two can have the same createdAt');
     expect(text('deal.status_changed')).toContain('with the stage and pipeline it was in');
-    // No filter narrows them: an endpoint that names numbers still receives every one it takes.
+    // No number filter narrows them: an endpoint that names numbers still receives every one it
+    // takes (pipelines can, ADR-263).
     expect(doc.info.description).toContain(
       'still every consent, contact, template, deal and task event it takes',
     );
@@ -2807,6 +2814,82 @@ describe('campaign filters (ADR-185)', () => {
     expect(webhookCampaignText({ id: autumn, name: 'Autumn launch', status: null })).toBe(
       'Autumn launch',
     );
+  });
+});
+
+describe('pipeline filters (ADR-263)', () => {
+  const sales = 'a2b3c4d5-e6f7-4809-9a1b-2c3d4e5f6a7b';
+  const renewals = 'b3c4d5e6-f7a8-491a-ab2c-3d4e5f6a7b8c';
+
+  it('take 1 to 50 pipelines, once each and in lower case, in the order given; null takes every pipeline', () => {
+    expect(
+      webhookPipelineIdsSchema.parse([renewals, sales.toUpperCase(), renewals, sales]),
+    ).toEqual([renewals, sales]);
+    expect(webhookPipelineIdsSchema.parse(null)).toBeNull();
+    const ids = Array.from(
+      { length: WEBHOOK_LIMITS.pipelines + 1 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(WEBHOOK_LIMITS.pipelines).toBe(50);
+    expect(webhookPipelineIdsSchema.parse(ids.slice(1))).toEqual(ids.slice(1));
+    for (const refused of [[], ids, ['Sales'], [sales, null], sales, [42]]) {
+      expect(webhookPipelineIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookPipelineIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one pipeline, or take every pipeline.',
+    );
+    expect(webhookPipelineIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 50 pipelines.',
+    );
+    expect(webhookPipelineIdsSchema.safeParse(['Sales']).error?.issues[0]?.message).toBe(
+      'Choose pipelines from the list.',
+    );
+  });
+
+  it('apply to the three deal events, whose payloads give the pipeline and the one a move left, and to no other event', () => {
+    expect(WEBHOOK_PIPELINE_EVENTS).toEqual([
+      'deal.created',
+      'deal.stage_changed',
+      'deal.status_changed',
+    ]);
+    for (const type of WEBHOOK_EVENT_KEYS) {
+      expect(webhookTakesPipelineEvents([type]), type).toBe(type.startsWith('deal.'));
+    }
+    // Task events are not a pipeline's, even a task about a deal.
+    expect(webhookTakesPipelineEvents(['task.created', 'task.status_changed'])).toBe(false);
+    expect(webhookTakesPipelineEvents(['task.created', 'deal.status_changed'])).toBe(true);
+    for (const schema of [
+      dealCreatedPayloadSchema,
+      dealStageChangedPayloadSchema,
+      dealStatusChangedPayloadSchema,
+    ]) {
+      const deal = schema.shape.data.shape.deal.shape;
+      expect('pipelineId' in deal && 'previousPipelineId' in deal).toBe(true);
+    }
+    // The refusal names the events as Settings lists them.
+    for (const type of WEBHOOK_PIPELINE_EVENTS) {
+      expect(WEBHOOK_PIPELINES_NEED_THE_EVENTS).toContain(WEBHOOK_EVENT_INFO[type].label);
+    }
+  });
+
+  it('are kept only while the endpoint takes a deal event: given, kept, or cleared', () => {
+    expect(webhookPipelineIdsFor(['deal.created'], [sales], null)).toEqual([sales]);
+    expect(webhookPipelineIdsFor(['deal.stage_changed'], undefined, [renewals])).toEqual([
+      renewals,
+    ]);
+    expect(webhookPipelineIdsFor(['deal.status_changed'], null, [renewals])).toBeNull();
+    expect(webhookPipelineIdsFor(['deal.created'], undefined, null)).toBeNull();
+    expect(webhookPipelineIdsFor(['task.created', 'contact.created'], [sales], [renewals])).toBe(
+      null,
+    );
+  });
+
+  it('name a pipeline by its name, an archived one as archived', () => {
+    expect(webhookPipelineText({ name: 'Sales' })).toBe('Sales');
+    expect(webhookPipelineText({ name: 'Sales', archived: false })).toBe('Sales');
+    expect(webhookPipelineText({ name: 'Renewals', archived: true })).toBe('Renewals (archived)');
   });
 });
 

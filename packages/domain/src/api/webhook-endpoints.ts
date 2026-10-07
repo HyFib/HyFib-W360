@@ -45,6 +45,7 @@ import {
   webhookTakesCampaignEvents,
   webhookTakesChannelEvents,
   webhookTakesFieldChanges,
+  webhookTakesPipelineEvents,
   webhookRunEndTakesReason,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
@@ -56,6 +57,7 @@ import {
   assertWebhookAutomations,
   assertWebhookCampaigns,
   assertWebhookChannels,
+  assertWebhookPipelines,
   assertWebhookTeams,
   assertWebhookTemplates,
   checkedWebhookOAuth,
@@ -87,6 +89,7 @@ import {
   WEBHOOK_TEAMS_NEED_THE_EVENTS,
   WEBHOOK_TEMPLATES_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS,
+  WEBHOOK_PIPELINES_NEED_THE_EVENTS,
   WEBHOOK_ASSIGNEES_NEED_THE_EVENTS,
   WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
   webhookAutomationIdsFor,
@@ -122,6 +125,8 @@ import {
   webhookTemplateIdsSchema,
   webhookCampaignIdsFor,
   webhookCampaignIdsSchema,
+  webhookPipelineIdsFor,
+  webhookPipelineIdsSchema,
   webhookAssigneeIdsFor,
   webhookAssigneeIdsSchema,
   webhookContactPartsSchema,
@@ -353,6 +358,16 @@ const invalidCampaigns = () =>
     issues: [{ path: 'campaignIds', message: WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS }],
   });
 
+const pipelineIdsField = webhookPipelineIdsSchema.describe(
+  `The CRM pipelines whose deals' events the endpoint receives: 1 to ${WEBHOOK_LIMITS.pipelines} ids of the company's pipelines (as GET /pipelines lists them, archived ones included, and as deal events give them in \`deal.pipelineId\`), only with a deal event: deal.created, deal.stage_changed or deal.status_changed. A deal's event belongs to the pipeline it gives, as the event's step left the deal; deal.stage_changed reaches the endpoints of the pipeline a move to another pipeline left (\`deal.previousPipelineId\`) as well as of the one it went to. Task and other events are not narrowed. null receives every pipeline's deal events, including those of pipelines added later.`,
+);
+
+/** Pipelines are chosen only for an endpoint that receives deal events (ADR-263). */
+const invalidPipelines = () =>
+  new AppError('validation_failed', WEBHOOK_PIPELINES_NEED_THE_EVENTS, {
+    issues: [{ path: 'pipelineIds', message: WEBHOOK_PIPELINES_NEED_THE_EVENTS }],
+  });
+
 const assigneeIdsField = webhookAssigneeIdsSchema.describe(
   `The members whose assigned conversations' events the endpoint receives: 1 to ${WEBHOOK_LIMITS.assignees} member ids (as GET /members lists them: active members who take conversations), only with an event of a conversation: message.received, message.status, conversation.status_changed, conversation.assignment_changed or conversation.team_changed. A conversation's member is the one it is assigned to when the event happens, so an unassigned conversation is on no list; conversation.assignment_changed reaches the endpoints of the member the conversation left as well as of the member it went to. A member who later stops taking conversations stays on the list: their conversations are released then. Other events are not narrowed. null receives every conversation's events.`,
 );
@@ -399,6 +414,7 @@ export const apiCreateWebhookEndpointSchema = z
     teamIds: teamIdsField.optional(),
     templateIds: templateIdsField.optional(),
     campaignIds: campaignIdsField.optional(),
+    pipelineIds: pipelineIdsField.optional(),
     assigneeIds: assigneeIdsField.optional(),
     oauth: oauthField.nullable().optional(),
   })
@@ -487,6 +503,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.campaignIds || webhookTakesCampaignEvents(data.events), {
     path: ['campaignIds'],
     message: WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS,
+  })
+  .refine((data) => !data.pipelineIds || webhookTakesPipelineEvents(data.events), {
+    path: ['pipelineIds'],
+    message: WEBHOOK_PIPELINES_NEED_THE_EVENTS,
   })
   .refine((data) => !data.assigneeIds || webhookTakesTeamEvents(data.events), {
     path: ['assigneeIds'],
@@ -605,6 +625,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         "The campaigns whose messages' statuses and changes the endpoint receives (the company's campaigns); null receives every campaign's. Left out, they stay, unless the events no longer include message.status or campaign.status_changed, which clears them.",
       ),
+    pipelineIds: pipelineIdsField
+      .optional()
+      .describe(
+        "The CRM pipelines whose deals' events the endpoint receives (the company's pipelines, archived ones included); null receives every pipeline's. Left out, they stay, unless the events no longer include a deal event, which clears them.",
+      ),
     assigneeIds: assigneeIdsField
       .optional()
       .describe(
@@ -643,9 +668,10 @@ export const apiUpdateWebhookEndpointSchema = z
       data.teamIds !== undefined ||
       data.templateIds !== undefined ||
       data.campaignIds !== undefined ||
+      data.pipelineIds !== undefined ||
       data.assigneeIds !== undefined ||
       data.oauth !== undefined,
-    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the custom fields, the automations, the campaign statuses, the order statuses, the template statuses, the conversation statuses, the run end statuses, what started the runs, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the members, the OAuth client or whether the endpoint is enabled',
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the custom fields, the automations, the campaign statuses, the order statuses, the template statuses, the conversation statuses, the run end statuses, what started the runs, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the members, the OAuth client or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -702,6 +728,8 @@ export interface ApiWebhookEndpoint {
   templateIds: string[] | null;
   /** The campaigns whose statuses and changes it receives (ADR-185); null receives every one's. */
   campaignIds: string[] | null;
+  /** The CRM pipelines whose deals' events it receives (ADR-263); null receives every one's. */
+  pipelineIds: string[] | null;
   /** The members whose assigned conversations' events it receives (ADR-181); null: every one's. */
   assigneeIds: string[] | null;
   /** Where it gets OAuth tokens and as which client (ADR-173); the secret is never shown. */
@@ -816,6 +844,7 @@ const columns = {
   teamIds: webhookEndpoints.teamIds,
   templateIds: webhookEndpoints.templateIds,
   campaignIds: webhookEndpoints.campaignIds,
+  pipelineIds: webhookEndpoints.pipelineIds,
   assigneeIds: webhookEndpoints.assigneeIds,
   oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
   oauthClientId: webhookEndpoints.oauthClientId,
@@ -858,6 +887,7 @@ type EndpointRow = Pick<
   | 'teamIds'
   | 'templateIds'
   | 'campaignIds'
+  | 'pipelineIds'
   | 'assigneeIds'
   | 'oauthTokenUrl'
   | 'oauthClientId'
@@ -905,6 +935,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     teamIds: row.teamIds,
     templateIds: row.templateIds,
     campaignIds: row.campaignIds,
+    pipelineIds: row.pipelineIds,
     assigneeIds: row.assigneeIds,
     oauth:
       row.oauthTokenUrl && row.oauthClientId
@@ -1161,6 +1192,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             await assertWebhookTemplates(tx, ctx.tenant.id, templateIds);
             const campaignIds = webhookCampaignIdsFor(data.events, data.campaignIds, null);
             await assertWebhookCampaigns(tx, ctx.tenant.id, campaignIds);
+            const pipelineIds = webhookPipelineIdsFor(data.events, data.pipelineIds, null);
+            await assertWebhookPipelines(tx, ctx.tenant.id, pipelineIds);
             const assigneeIds = webhookAssigneeIdsFor(data.events, data.assigneeIds, null);
             await assertWebhookAssignees(tx, ctx.tenant.id, assigneeIds);
             const { id, secret } = await insertWebhookEndpoint(tx, deps.keyring, ctx.tenant.id, {
@@ -1187,6 +1220,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               teamIds,
               templateIds,
               campaignIds,
+              pipelineIds,
               assigneeIds,
               oauth,
               creator: { apiKeyId: ctx.key.id },
@@ -1214,6 +1248,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(teamIds ? { teamIds } : {}),
               ...(templateIds ? { templateIds } : {}),
               ...(campaignIds ? { campaignIds } : {}),
+              ...(pipelineIds ? { pipelineIds } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
               ...(oauth ? { oauthTokenHost: oauth.host } : {}),
             });
@@ -1287,6 +1322,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         if (data.teamIds && !webhookTakesTeamEvents(events)) throw invalidTeams();
         if (data.templateIds && !webhookTakesTemplateEvents(events)) throw invalidTemplates();
         if (data.campaignIds && !webhookTakesCampaignEvents(events)) throw invalidCampaigns();
+        if (data.pipelineIds && !webhookTakesPipelineEvents(events)) throw invalidPipelines();
         if (data.assigneeIds && !webhookTakesTeamEvents(events)) throw invalidAssignees();
         // Only a list given now is checked: the automations kept were checked when chosen.
         if (data.automationIds !== undefined) {
@@ -1316,6 +1352,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         // And the campaigns given now (ADR-185).
         if (data.campaignIds !== undefined) {
           await assertWebhookCampaigns(tx, ctx.tenant.id, data.campaignIds);
+        }
+        // And the pipelines given now (ADR-263).
+        if (data.pipelineIds !== undefined) {
+          await assertWebhookPipelines(tx, ctx.tenant.id, data.pipelineIds);
         }
         // And the members it adds: those it held may no longer take conversations (ADR-181).
         if (data.assigneeIds !== undefined) {
@@ -1353,6 +1393,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.teamIds !== undefined ||
           data.templateIds !== undefined ||
           data.campaignIds !== undefined ||
+          data.pipelineIds !== undefined ||
           data.assigneeIds !== undefined ||
           oauth !== undefined
         ) {
@@ -1440,6 +1481,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               teamIds: webhookTeamIdsFor(events, data.teamIds, endpoint.teamIds),
               templateIds: webhookTemplateIdsFor(events, data.templateIds, endpoint.templateIds),
               campaignIds: webhookCampaignIdsFor(events, data.campaignIds, endpoint.campaignIds),
+              pipelineIds: webhookPipelineIdsFor(events, data.pipelineIds, endpoint.pipelineIds),
               assigneeIds: webhookAssigneeIdsFor(events, data.assigneeIds, endpoint.assigneeIds),
               updatedAt: now,
             })
@@ -1465,6 +1507,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               teamIds: webhookEndpoints.teamIds,
               templateIds: webhookEndpoints.templateIds,
               campaignIds: webhookEndpoints.campaignIds,
+              pipelineIds: webhookEndpoints.pipelineIds,
               assigneeIds: webhookEndpoints.assigneeIds,
             });
           if (!changed) throw new Error('A locked endpoint was not updated');
@@ -1493,6 +1536,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(changed.teamIds ? { teamIds: changed.teamIds } : {}),
             ...(changed.templateIds ? { templateIds: changed.templateIds } : {}),
             ...(changed.campaignIds ? { campaignIds: changed.campaignIds } : {}),
+            ...(changed.pipelineIds ? { pipelineIds: changed.pipelineIds } : {}),
             ...(changed.assigneeIds ? { assigneeIds: changed.assigneeIds } : {}),
             ...webhookOAuthAudit(oauth, endpoint),
           });

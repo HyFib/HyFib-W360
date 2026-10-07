@@ -284,9 +284,11 @@ verification, app review, Embedded Signup configuration).
   in CI]** (ADR-259, migrations 0175 and 0176; recorded under P5-08). **[Changing tasks through the
   public API built; its database tests run only in CI]** (ADR-260, no migration; recorded under
   P5-08). **[Task webhook events built; their database tests run only in CI]** (ADR-261, migrations
-  0177 and 0178; recorded under P5-09). **Remaining:** custom deal fields, products on deals, deal
-  import, CRM connectors (HubSpot, Salesforce, Zoho: integrations), reminder emails through the
-  production SMTP provider (release checklist).
+  0177 and 0178; recorded under P5-09). **[Pipeline filters for deal webhook events built; their
+  database and browser tests run only in CI]** (ADR-263, migration 0179; recorded under P5-09).
+  **Remaining:** custom deal fields, products on deals, deal import, CRM connectors (HubSpot,
+  Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
+  checklist).
 - **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad
   traffic yet_: click-to-chat links (a short link that counts clicks per link and company day
   without any visitor data and redirects to wa.me with a pre-filled message and an optional
@@ -978,11 +980,15 @@ verification, app review, Embedded Signup configuration).
   0178: `task.created` for every task added, by members, automations or API keys, and
   `task.status_changed` for every completion, cancellation and reopening; never a task's notes;
   edits, reminders, merges and erasure send nothing; no filter narrows them).
-  Remaining: filters for other event types (deal events by pipeline, stage or owner among them) and
-  on a message's or contact's values (such as by tag or a field's value, or the key that started a
-  run), other authentication (headers computed per delivery, other OAuth grants), mutual TLS, fixed
-  egress addresses, events for store orders, Payment Links and each step of a run, `createdAt` finer
-  than the millisecond, load tests.
+  **[Pipeline filters for deal events built; their database and browser tests run only in CI]**
+  (ADR-263, migration 0179: an endpoint takes the deal events of 1 to 50 of the company's pipelines,
+  archived ones included, in Settings → Webhooks or through the API's `pipelineIds`; a move to
+  another pipeline reaches the endpoints of both; task and other events are not narrowed).
+  Remaining: filters for other event types (deal events by stage or owner, task events by their
+  deal's pipeline, among them) and on a message's or contact's values (such as by tag or a field's
+  value, or the key that started a run), other authentication (headers computed per delivery, other
+  OAuth grants), mutual TLS, fixed egress addresses, events for store orders, Payment Links and each
+  step of a run, `createdAt` finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

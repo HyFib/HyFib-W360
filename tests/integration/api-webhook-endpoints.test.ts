@@ -11,6 +11,7 @@ import {
   createApiKeysService,
   createApiWebhookEndpoints,
   createAutomationService,
+  createCrmService,
   createWebhooksService,
   outboxAad,
   processWebhookDeliveries,
@@ -272,6 +273,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       teamIds: null,
       templateIds: null,
       campaignIds: null,
+      pipelineIds: null,
       assigneeIds: null,
       oauth: null,
       apiKeyId: key.id,
@@ -2396,6 +2398,108 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { campaignIds: [] }))).toMatchObject({
       path: 'campaignIds',
+    });
+  });
+
+  it("choose the pipelines whose deals' events an endpoint receives, archived ones too, kept by changes that leave them out and cleared with the events (ADR-263)", async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const crm = createCrmService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    const pipelineOf = async (company: Company, name: string) => {
+      const owner = await fx.ctx(company, company.owner);
+      return (await crm.createPipeline(owner, { name, currency: 'INR', stages: ['New'] })).id;
+    };
+    const sales = await pipelineOf(c, 'Sales');
+    const renewals = await pipelineOf(c, 'Renewals');
+    const elsewhere = await pipelineOf(await fx.company(), 'Sales');
+    const owner = await fx.ctx(c, c.owner);
+    const [listed] = (await crm.listPipelines(owner)).filter((p) => p.id === renewals);
+    await crm.archivePipeline(owner, { id: renewals, expectedVersion: listed!.version });
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Pipelines need a deal event, at least one, each an id of the company's pipelines (named by
+    // place).
+    const refusals = [
+      [['task.created', 'task.status_changed'], [sales], 'pipelineIds'],
+      [['deal.created'], [], 'pipelineIds'],
+      [['deal.created'], [sales, 'Renewals'], 'pipelineIds.1'],
+      [['deal.stage_changed'], [sales, elsewhere], 'pipelineIds.1'],
+      [['deal.status_changed'], [uuidv7()], 'pipelineIds.0'],
+    ] as const;
+    for (const [index, [events, pipelineIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, pipelineIds },
+            idem(`pipelines-bad-${index}`, JSON.stringify(pipelineIds)),
+          ),
+        ),
+        JSON.stringify(pipelineIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'pipelines-1', {
+      url: receiverUrl(),
+      events: ['deal.created', 'contact.created'],
+      pipelineIds: [renewals, sales.toUpperCase(), renewals],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.pipelineIds).toEqual([renewals, sales]);
+    expect((await api().get(key.ctx, id)).pipelineIds).toEqual([renewals, sales]);
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { pipelineIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => a.metadata.pipelineIds);
+    expect(await audits('webhook.endpoint_created')).toEqual([[renewals, sales]]);
+    // Settings names them, the archived one as archived.
+    expect((await settings().list(owner)).find((e) => e.id === id)?.pipelines).toEqual([
+      { id: renewals, name: 'Renewals', archived: true },
+      { id: sales, name: 'Sales', archived: false },
+    ]);
+    expect(await api().update(key.ctx, id, { description: 'Deals sync' })).toMatchObject({
+      pipelineIds: [renewals, sales],
+    });
+    expect(await api().update(key.ctx, id, { pipelineIds: [sales] })).toMatchObject({
+      pipelineIds: [sales],
+    });
+    expect(await audits('webhook.endpoint_updated')).toEqual([[renewals, sales], [sales]]);
+    // Any deal event keeps the list; events without one clear it.
+    expect(await api().update(key.ctx, id, { events: ['deal.status_changed'] })).toMatchObject({
+      pipelineIds: [sales],
+    });
+    expect(await api().update(key.ctx, id, { events: ['task.created'] })).toMatchObject({
+      events: ['task.created'],
+      pipelineIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { pipelineIds: [sales] }))).toMatchObject({
+      path: 'pipelineIds',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['deal.stage_changed'], pipelineIds: [renewals] }),
+    ).toMatchObject({ pipelineIds: [renewals] });
+    // A list given again is checked again, changing nothing when it is refused.
+    expect(await issueOf(api().update(key.ctx, id, { pipelineIds: [elsewhere] }))).toMatchObject({
+      path: 'pipelineIds.0',
+    });
+    expect((await api().get(key.ctx, id)).pipelineIds).toEqual([renewals]);
+    expect(await api().update(key.ctx, id, { pipelineIds: null })).toMatchObject({
+      pipelineIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { pipelineIds: [] }))).toMatchObject({
+      path: 'pipelineIds',
     });
   });
 

@@ -1710,13 +1710,13 @@ true`); the same key with another request (method, path and body hashed) answers
   update changes its stage or status (members through the CRM service, the runner's deal steps, keys
   through `apiUpdateDeal`), through `app.capture_webhook_event`: the deal, stage and pipeline ids,
   and the stage, pipeline or status before a change, in `detail`, with the contact and no
-  conversation, so no filter narrows them. One update that changes both captures both in the order
-  the rules allow (reopened then moved, or moved then closed), each with the deal as its step left
-  it, stamped with `clock_timestamp()`. Erasure and merges change neither column, so they capture
-  nothing. Their payloads are built when delivered (`dealOf`): the stage, pipeline and statuses as
-  captured; the title, value in minor units, pipeline currency, owner id, expected date, lost reason
-  and creator (member, automation or key) as they are then; the conversation the deal was created
-  from and the contact.
+  conversation, so no number, team or member filter narrows them (pipelines do, ADR-263). One update
+  that changes both captures both in the order the rules allow (reopened then moved, or moved then
+  closed), each with the deal as its step left it, stamped with `clock_timestamp()`. Erasure and
+  merges change neither column, so they capture nothing. Their payloads are built when delivered
+  (`dealOf`): the stage, pipeline and statuses as captured; the title, value in minor units,
+  pipeline currency, owner id, expected date, lost reason and creator (member, automation or key) as
+  they are then; the conversation the deal was created from and the contact.
 - **Task events** (migrations 0177–0178, ADR-261): triggers on `app.crm_tasks` capture
   `task.created` when a task is inserted (members, the runner's task steps, keys) and
   `task.status_changed` when an update changes its status (members, keys through `apiUpdateTask`),
@@ -1943,6 +1943,14 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   paired with its reasons in the function); the runs of other ends pass on the end filter alone.
   Settings (reasons by status under "Automation ended") and the API (`runEndReasons`) set it; a
   change of the ends keeps the reasons of the ends kept, and one that drops the event clears it.
+- **Pipeline filters** (migration 0179, ADR-263): `pipeline_ids` on an endpoint lists the CRM
+  pipelines whose deals' events it takes, null for every pipeline's; a check keeps it to 1 to 50 ids
+  and to endpoints taking a deal event. `app.capture_webhook_event` (replaced with the same
+  signature) matches the `pipelineId` the deal trigger stores in the detail, and for
+  `deal.stage_changed` the `previousPipelineId` it stores when a move changes the pipeline, against
+  the list. Settings (radio buttons and checkboxes under "Pipelines", the pipelines in use) and the
+  API (`pipelineIds`) set it; the services check the pipelines of a list given, archived ones
+  allowed; a change that drops every deal event clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and

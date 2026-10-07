@@ -9909,3 +9909,53 @@ Decision:
   migration.
 
 Not built: changing a field's type (ADR-115 keeps it fixed), choices for a field, and field order.
+
+## ADR-263 Choosing the CRM pipelines whose deal events a webhook endpoint receives (P5-09, P4-04) (2026-10-07)
+
+Context: endpoints receive `deal.created`, `deal.stage_changed` and `deal.status_changed` for every
+deal of the company (ADR-256), and no filter narrowed them. A company that runs a pipeline per team
+(sales and renewals, say) and connects each to its own system had every pipeline's deals sent to
+every receiver, which had to read `deal.pipelineId` and drop the rest. ADR-256 and P5-09 left
+filters for deal events unbuilt.
+
+Decision:
+
+- **A list of pipelines per endpoint,** for the three deal events: null receives every pipeline's
+  deals, as before; a list holds 1 to 50 of the company's pipelines, by id, in the order given with
+  repeats merged. A deal's event counts when the pipeline it gives is listed (`deal.pipelineId`: the
+  deal's pipeline as the event's step left it), and `deal.stage_changed` also when the pipeline a
+  move to another pipeline left is (`deal.previousPipelineId`), as `conversation.team_changed`
+  reaches the team a conversation left (ADR-174): a receiver learns that a deal left its pipeline,
+  and the deal's later events go by its new pipeline. Task events, even of a deal's tasks, and every
+  other event are not narrowed. Chosen in Settings → Webhooks ("Pipelines": every deal's events, or
+  only those of the deals in the pipelines ticked), shown on the endpoint as "Pipelines whose deals’
+  events are sent: …", and through the API as `pipelineIds` on `POST /webhook-endpoints` and `PATCH
+/webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only while a deal event is taken:** a list given for an endpoint that takes none is refused
+  (`pipelineIds`; 422 through the API). A change that drops all three clears it, and a `PATCH` that
+  leaves it out keeps it; Settings always sends it. A check in the database holds the same rule
+  (null, or 1 to 50 ids in one dimension without a null, with a deal event).
+- **Applied at capture:** `app.capture_webhook_event` matches the pipeline the deal trigger stores
+  in the event's detail (0171), and for a move the one it left, against each endpoint's list. With
+  the other filters an event reaches an endpoint only when it passes them all, no event is written
+  when no endpoint takes it, and stored events are unchanged.
+- **The company's pipelines, archived ones too:** a list given now may hold only pipelines of the
+  company, checked in its scope; pipelines are archived, never deleted, so a list never names one
+  that is gone. An archived pipeline has no open deal and takes none until it is restored, so it
+  sends nothing meanwhile, and a list keeps it. Settings offers the pipelines the company uses, in
+  board order, and keeps listing an archived one the endpoint already names, marked as archived; the
+  API takes any of the company's, as `GET /pipelines` lists them.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `pipelineIds` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The choices list the company's pipelines by name to members
+  with `developer.manage`.
+- **The Settings page names CRM deal and task events** among what endpoints can receive, which
+  ADR-256 and ADR-261 left out of its description.
+- **Migration 0179:** `pipeline_ids uuid[]` on `app.webhook_endpoints` with the check, validated at
+  once (a company has at most 10 endpoints), an update grant on the column for the runtime role, and
+  `app.capture_webhook_event` replaced with the same signature (0138's, with the pipelines), so its
+  owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: deal events by stage or owner, task events by their deal's pipeline, and pipelines chosen
+per event type (one list serves the three events).

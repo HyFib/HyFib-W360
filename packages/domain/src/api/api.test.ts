@@ -157,6 +157,7 @@ import {
   WEBHOOK_ASSIGNEES_NEED_THE_EVENTS,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS,
+  WEBHOOK_PIPELINES_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
   WEBHOOK_CHANNELS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
@@ -169,6 +170,7 @@ import {
 } from '../webhooks/service';
 import {
   WEBHOOK_CAMPAIGN_EVENTS,
+  WEBHOOK_PIPELINE_EVENTS,
   WEBHOOK_CHANNEL_EVENTS,
   WEBHOOK_TEAM_EVENTS,
   WEBHOOK_TEMPLATE_EVENTS,
@@ -1440,6 +1442,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'messageTypes',
       'oauth',
       'orderStatuses',
+      'pipelineIds',
       'runEndReasons',
       'runEndStatuses',
       'runTriggers',
@@ -1757,6 +1760,77 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     ).toContain('campaignIds');
     expect(doc.info.description).toContain(
       'or campaigns (its `campaignIds`): then the statuses of the messages they sent and their changes only.',
+    );
+  });
+
+  it('take pipelines only with a deal event, each once, and a list of them alone is a change (ADR-263)', () => {
+    const sales = '0190e9a1-0000-7000-8000-00000000004a';
+    const renewals = '0190e9a1-0000-7000-8000-00000000004b';
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    for (const event of WEBHOOK_PIPELINE_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          pipelineIds: [renewals, sales.toUpperCase(), renewals],
+        }).pipelineIds,
+        event,
+      ).toEqual([renewals, sales]);
+    }
+    // Task events, even of a deal's tasks, are not a pipeline's.
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['task.created', 'task.status_changed'],
+      pipelineIds: [sales],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['pipelineIds', WEBHOOK_PIPELINES_NEED_THE_EVENTS],
+    ]);
+    const deals = { ...base, events: ['deal.stage_changed'] };
+    for (const body of [
+      { ...deals, pipelineIds: [] },
+      { ...deals, pipelineIds: ['Sales'] },
+      {
+        ...deals,
+        pipelineIds: Array.from(
+          { length: WEBHOOK_LIMITS.pipelines + 1 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiCreateWebhookEndpointSchema.parse({ ...deals, pipelineIds: null }).pipelineIds).toBe(
+      null,
+    );
+    expect(apiUpdateWebhookEndpointSchema.parse({ pipelineIds: null })).toEqual({
+      pipelineIds: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ pipelineIds: [sales] })).toEqual({
+      pipelineIds: [sales],
+    });
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'the campaigns, the pipelines, the members',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[]; description?: string }>;
+      required?: string[];
+    };
+    expect(answered.properties.pipelineIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('pipelineIds');
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(Object.keys(given)).toContain('pipelineIds');
+    expect(JSON.stringify(given.pipelineIds)).toContain(
+      'deal.stage_changed reaches the endpoints of the pipeline a move to another pipeline left',
+    );
+    expect(doc.info.description).toContain(
+      "And it can name CRM pipelines (its `pipelineIds`): then it receives the events of those pipelines' deals only",
     );
   });
 

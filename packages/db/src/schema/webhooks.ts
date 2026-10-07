@@ -216,6 +216,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   campaignIds: uuid('campaign_ids').array(),
   /**
+   * The CRM pipelines whose deals' events it takes (migration 0179, ADR-263), by the pipeline the
+   * event gives (and for a move, the one it left); null takes every pipeline's. Set only while a
+   * deal event is among its events.
+   */
+  pipelineIds: uuid('pipeline_ids').array(),
+  /**
    * The consent changes it takes as `consent.changed` (ADR-189), by purpose and action; null takes
    * every change. Set only while `consent.changed` is among its events.
    */

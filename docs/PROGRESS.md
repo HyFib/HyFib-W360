@@ -1,5 +1,41 @@
 # Progress
 
+## 2026-10-07 — Choosing the CRM pipelines whose deal events an endpoint receives (P5-09, P4-04, H-014, ADR-263)
+
+Status: **Implemented; its database and browser tests run in CI only.** Endpoints received every
+pipeline's deal events. The local PostgreSQL is unavailable, so the migration and the integration
+tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0179 (`pipeline_ids` on `app.webhook_endpoints` with its check and column
+  grant, and `app.capture_webhook_event` with the pipeline filter).
+- **Domain:** the list's schema, rules and company check (`webhookPipelineIdsSchema`,
+  `webhookPipelineIdsFor`, `assertWebhookPipelines`), the choices (`pipelineChoices`), the named
+  list in Settings' view, create and update in Settings and the API (`pipelineIds`), the audits, the
+  OpenAPI entries and the export.
+- **Web:** "Pipelines" in the endpoint form (every deal's events, or the pipelines ticked, an
+  archived one kept while named), the endpoints list naming them, and the page's description naming
+  deal and task events.
+- **Tests:** unit (4 new in `webhooks.test.ts`, 1 in `api.test.ts`); integration (1 in
+  `webhook-events.test.ts`, 2 in `webhooks.test.ts`, 1 in `api-webhook-endpoints.test.ts`, and the
+  API's endpoint shape); e2e (`webhook-deals.spec.ts`). Written for CI; the integration and e2e
+  tests were not run here.
+- **Docs:** ADR-263; ARCHITECTURE; SECURITY; THREAT-MODEL T231; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09
+  and P4-04; feature matrix W-138 and H-014.
+- **Mutation checks:** 23/23 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 1110 passed (117 files)                                       |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm test:e2e`                                    | not run here; CI runs it                                      |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Renaming contact fields in Settings (P3-01, W-048, ADR-262)
 
 Status: **Implemented; its browser test runs in CI only.** The service could rename fields (ADR-115)

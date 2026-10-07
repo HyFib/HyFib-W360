@@ -25,6 +25,7 @@ import {
   webhookFieldText,
   webhookOAuthText,
   webhookHost,
+  webhookPipelineText,
   webhookTeamText,
   webhookTemplateText,
   type WebhookEndpointView,
@@ -63,6 +64,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
     teamChoices,
     templateChoices,
     campaignChoices,
+    pipelineChoices,
     assigneeChoices,
     contactFieldChoices,
   ] = await Promise.all([
@@ -72,6 +74,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
     webhooks.teamChoices(ctx),
     webhooks.templateChoices(ctx),
     webhooks.campaignChoices(ctx),
+    webhooks.pipelineChoices(ctx),
     webhooks.assigneeChoices(ctx),
     webhooks.contactFieldChoices(ctx),
   ]);
@@ -89,8 +92,9 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
             Your systems can receive what happens in HyFib W360 as it happens: messages and their
             status, consent changes, template status, conversations resolved, reopened or assigned,
             contacts added, changed or erased, automations starting and ending, orders customers
-            send from your WhatsApp catalog and their status, and campaigns changing status. Each
-            event is a signed JSON POST to your endpoint.
+            send from your WhatsApp catalog and their status, campaigns changing status, CRM deals
+            added, moved, won, lost or reopened, and CRM tasks added, completed, cancelled or
+            reopened. Each event is a signed JSON POST to your endpoint.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-2 text-sm">
@@ -267,6 +271,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.campaigns.map(webhookCampaignText).join(', ')}
                       </p>
                     ) : null}
+                    {e.pipelines ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Pipelines whose deals’ events are sent:{' '}
+                        {e.pipelines.map(webhookPipelineText).join(', ')}
+                      </p>
+                    ) : null}
                     {e.teams ? (
                       <p className="text-xs text-muted-foreground">
                         Teams whose conversations’ events are sent:{' '}
@@ -402,6 +412,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
             teamChoices={teamChoices}
             templateChoices={templateChoices}
             campaignChoices={campaignChoices}
+            pipelineChoices={pipelineChoices}
             assigneeChoices={assigneeChoices}
             contactFieldChoices={contactFieldChoices}
             atLimit={endpoints.length >= WEBHOOK_LIMITS.endpoints}
