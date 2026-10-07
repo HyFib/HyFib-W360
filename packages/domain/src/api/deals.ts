@@ -181,6 +181,11 @@ export interface ApiPipeline {
   archived: boolean;
   /** The stages in board order, archived ones last. */
   stages: ApiPipelineStage[];
+  /** Moves on with every change; `PATCH /pipelines/{id}` takes it as `expectedVersion` (ADR-286). */
+  version: number;
+  /** Who added the pipeline (ADR-286): a member (never which) or a key, by its id. */
+  createdBy: 'member' | 'api';
+  createdByApiKeyId: string | null;
   createdAt: string;
 }
 
@@ -227,6 +232,101 @@ export async function assertCrmInPlan(tx: Tx, tenantId: string): Promise<void> {
   }
 }
 
+const pipelineColumns = {
+  id: crmPipelines.id,
+  name: crmPipelines.name,
+  currency: crmPipelines.currency,
+  position: crmPipelines.position,
+  archivedAt: crmPipelines.archivedAt,
+  version: crmPipelines.version,
+  createdByApiKeyId: crmPipelines.createdByApiKeyId,
+  createdAt: crmPipelines.createdAt,
+};
+
+export interface PipelineRow {
+  id: string;
+  name: string;
+  currency: string;
+  position: number;
+  archivedAt: Date | null;
+  version: number;
+  createdByApiKeyId: string | null;
+  createdAt: Date;
+}
+
+/** A pipeline row and its stages as the API gives them. */
+export function toApiPipeline(p: PipelineRow, stages: ApiPipelineStage[]): ApiPipeline {
+  return {
+    id: p.id,
+    name: p.name,
+    currency: p.currency,
+    position: p.position,
+    archived: p.archivedAt !== null,
+    stages,
+    version: p.version,
+    createdBy: p.createdByApiKeyId ? 'api' : 'member',
+    createdByApiKeyId: p.createdByApiKeyId,
+    createdAt: p.createdAt.toISOString(),
+  };
+}
+
+/** Pipelines as the API gives them, with their stages read in the caller's transaction. */
+async function withStages(
+  tx: Tx,
+  tenantId: string,
+  rows: readonly PipelineRow[],
+): Promise<ApiPipeline[]> {
+  const stages = new Map<string, ApiPipelineStage[]>();
+  if (rows.length > 0) {
+    const stageRows = await tx
+      .select({
+        id: crmStages.id,
+        pipelineId: crmStages.pipelineId,
+        name: crmStages.name,
+        position: crmStages.position,
+        archivedAt: crmStages.archivedAt,
+        winPercent: crmStages.winPercent,
+      })
+      .from(crmStages)
+      .where(
+        and(
+          eq(crmStages.tenantId, tenantId),
+          inArray(
+            crmStages.pipelineId,
+            rows.map((p) => p.id),
+          ),
+        ),
+      )
+      .orderBy(
+        asc(sql`${crmStages.archivedAt} is not null`),
+        asc(crmStages.position),
+        asc(crmStages.createdAt),
+        asc(crmStages.id),
+      );
+    for (const { pipelineId, archivedAt, ...stage } of stageRows) {
+      const item = { ...stage, archived: archivedAt !== null };
+      const list = stages.get(pipelineId);
+      if (list) list.push(item);
+      else stages.set(pipelineId, [item]);
+    }
+  }
+  return rows.map((p) => toApiPipeline(p, stages.get(p.id) ?? []));
+}
+
+/** One of the company's pipelines as the API gives it (ADR-286), or null. */
+export async function readApiPipeline(
+  tx: Tx,
+  tenantId: string,
+  id: string,
+): Promise<ApiPipeline | null> {
+  const rows = await tx
+    .select(pipelineColumns)
+    .from(crmPipelines)
+    .where(and(eq(crmPipelines.tenantId, tenantId), eq(crmPipelines.id, id)));
+  const [pipeline] = await withStages(tx, tenantId, rows);
+  return pipeline ?? null;
+}
+
 /**
  * The company's pipelines, archived ones too, oldest first on exact keyset pages, each with its
  * stages. The pipelines and their stages are read in one snapshot, so a page never shows a pipeline
@@ -245,15 +345,7 @@ export async function apiListPipelines(
     async (tx) => {
       await assertCrmInPlan(tx, ctx.tenant.id);
       const rows = await tx
-        .select({
-          id: crmPipelines.id,
-          name: crmPipelines.name,
-          currency: crmPipelines.currency,
-          position: crmPipelines.position,
-          archivedAt: crmPipelines.archivedAt,
-          createdAt: crmPipelines.createdAt,
-          cursorAt: exactTimestamp(crmPipelines.createdAt),
-        })
+        .select({ ...pipelineColumns, cursorAt: exactTimestamp(crmPipelines.createdAt) })
         .from(crmPipelines)
         .where(
           and(
@@ -267,50 +359,8 @@ export async function apiListPipelines(
         .limit(q.limit + 1);
       const shown = rows.slice(0, q.limit);
       const last = shown.at(-1);
-      const stages = new Map<string, ApiPipelineStage[]>();
-      if (shown.length > 0) {
-        const stageRows = await tx
-          .select({
-            id: crmStages.id,
-            pipelineId: crmStages.pipelineId,
-            name: crmStages.name,
-            position: crmStages.position,
-            archivedAt: crmStages.archivedAt,
-            winPercent: crmStages.winPercent,
-          })
-          .from(crmStages)
-          .where(
-            and(
-              eq(crmStages.tenantId, ctx.tenant.id),
-              inArray(
-                crmStages.pipelineId,
-                shown.map((p) => p.id),
-              ),
-            ),
-          )
-          .orderBy(
-            asc(sql`${crmStages.archivedAt} is not null`),
-            asc(crmStages.position),
-            asc(crmStages.createdAt),
-            asc(crmStages.id),
-          );
-        for (const { pipelineId, archivedAt, ...stage } of stageRows) {
-          const item = { ...stage, archived: archivedAt !== null };
-          const list = stages.get(pipelineId);
-          if (list) list.push(item);
-          else stages.set(pipelineId, [item]);
-        }
-      }
       return {
-        data: shown.map((p) => ({
-          id: p.id,
-          name: p.name,
-          currency: p.currency,
-          position: p.position,
-          archived: p.archivedAt !== null,
-          stages: stages.get(p.id) ?? [],
-          createdAt: p.createdAt.toISOString(),
-        })),
+        data: await withStages(tx, ctx.tenant.id, shown),
         nextCursor:
           rows.length > q.limit && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
       };

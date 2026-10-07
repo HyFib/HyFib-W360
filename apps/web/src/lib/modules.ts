@@ -91,7 +91,7 @@ export const MODULES: ModuleDefinition[] = [
     permission: 'crm.read',
     status: 'available',
     reason:
-      'Pipelines with ordered stages, deals linked to contacts and conversations, won and lost outcomes, tasks with emailed reminders, notes and a contact timeline. Custom deal fields, deal import and forecasting are not available yet.',
+      'Pipelines with ordered stages and chances of winning, deals linked to contacts and conversations, won and lost outcomes, weighted forecasts, tasks with emailed reminders, notes and a contact timeline. Custom deal fields and deal import are not available yet.',
   },
   {
     key: 'commerce',

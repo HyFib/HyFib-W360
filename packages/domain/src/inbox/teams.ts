@@ -103,90 +103,307 @@ export interface TeamView {
   unassignedConversations: number;
 }
 
+/** A team's settings, members and numbers, as Settings and the API give them (ADR-287). */
+export type TeamSettings = z.output<typeof teamSchema>;
+
+/** A team name another team of the company has, as a conflict; any other error as it is. */
+export function teamNameError(error: unknown): unknown {
+  return isUniqueViolation(error, 'teams_name_uq')
+    ? new AppError('conflict', 'Another team already has this name. Choose a different name.')
+    : error;
+}
+
+/**
+ * The members a team has and routing gives conversations to: active, with a role that can read and
+ * answer conversations. A member suspended or given another role stays in `team_members` but is no
+ * team's member until they can answer conversations again.
+ */
+const answersConversations = () =>
+  and(
+    eq(memberships.status, 'active'),
+    sql`${memberships.roles} && ${sql.param([...INBOX_WORKER_ROLES])}::text[]`,
+  );
+
+/** Members who may join a team: those who answer conversations. */
+async function checkMembers(tx: Tx, tenantId: string, memberIds: string[]) {
+  if (memberIds.length === 0) return;
+  const rows = await tx
+    .select({ id: memberships.id })
+    .from(memberships)
+    .where(
+      and(
+        eq(memberships.tenantId, tenantId),
+        inArray(memberships.id, memberIds),
+        answersConversations(),
+      ),
+    );
+  if (rows.length !== new Set(memberIds).size) {
+    const message = 'Choose active members whose role can reply in the inbox.';
+    throw new AppError('validation_failed', message, { issues: [{ path: 'memberIds', message }] });
+  }
+}
+
+async function checkChannels(tx: Tx, tenantId: string, channelIds: string[]) {
+  if (channelIds.length === 0) return;
+  const rows = await tx
+    .select({ id: channelAccounts.id })
+    .from(channelAccounts)
+    .where(and(eq(channelAccounts.tenantId, tenantId), inArray(channelAccounts.id, channelIds)));
+  if (rows.length !== new Set(channelIds).size) {
+    const message = 'Choose WhatsApp numbers of this company.';
+    throw new AppError('validation_failed', message, { issues: [{ path: 'channelIds', message }] });
+  }
+}
+
+async function syncMembersAndChannels(
+  tx: Tx,
+  tenantId: string,
+  teamId: string,
+  data: { memberIds: string[]; channelIds: string[] },
+) {
+  const memberIds = [...new Set(data.memberIds)];
+  const channelIds = [...new Set(data.channelIds)];
+  await tx
+    .delete(teamMembers)
+    .where(
+      and(
+        eq(teamMembers.tenantId, tenantId),
+        eq(teamMembers.teamId, teamId),
+        ...(memberIds.length ? [notInArray(teamMembers.membershipId, memberIds)] : []),
+      ),
+    );
+  if (memberIds.length) {
+    await tx
+      .insert(teamMembers)
+      .values(memberIds.map((membershipId) => ({ id: uuidv7(), tenantId, teamId, membershipId })))
+      .onConflictDoNothing();
+  }
+  await tx
+    .update(channelAccounts)
+    .set({ defaultTeamId: null })
+    .where(
+      and(
+        eq(channelAccounts.tenantId, tenantId),
+        eq(channelAccounts.defaultTeamId, teamId),
+        ...(channelIds.length ? [notInArray(channelAccounts.id, channelIds)] : []),
+      ),
+    );
+  if (channelIds.length) {
+    await tx
+      .update(channelAccounts)
+      .set({ defaultTeamId: teamId })
+      .where(and(eq(channelAccounts.tenantId, tenantId), inArray(channelAccounts.id, channelIds)));
+  }
+}
+
+/**
+ * Adds a team with its members and numbers within the plan's limit (Settings, and keys since
+ * ADR-287). The caller audits it, then routes waiting conversations, and maps a name in use with
+ * `teamNameError`.
+ */
+export async function writeCreateTeam(
+  tx: Tx,
+  tenantId: string,
+  data: TeamSettings,
+): Promise<{ teamId: string }> {
+  const teamId = uuidv7();
+  await assertTeamAvailable(tx, tenantId);
+  await checkMembers(tx, tenantId, data.memberIds);
+  await checkChannels(tx, tenantId, data.channelIds);
+  await tx.insert(teams).values({
+    id: teamId,
+    tenantId,
+    name: data.name,
+    description: data.description,
+    assignment: data.assignment,
+    maxOpenPerMember: data.maxOpenPerMember,
+    routingKeywords: data.routingKeywords,
+  });
+  await syncMembersAndChannels(tx, tenantId, teamId, data);
+  return { teamId };
+}
+
+/**
+ * Sets a team's settings, members and numbers, its row locked (Settings, and keys since ADR-287).
+ * The caller audits it, then routes waiting conversations, and maps a name in use with
+ * `teamNameError`.
+ */
+export async function writeUpdateTeam(
+  tx: Tx,
+  tenantId: string,
+  teamId: string,
+  data: TeamSettings,
+): Promise<{ previousAssignment: TeamAssignmentMode }> {
+  const [current] = await tx
+    .select({ id: teams.id, assignment: teams.assignment })
+    .from(teams)
+    .where(and(eq(teams.tenantId, tenantId), eq(teams.id, teamId)))
+    .for('update');
+  if (!current) throw notFound('Team');
+  await checkMembers(tx, tenantId, data.memberIds);
+  await checkChannels(tx, tenantId, data.channelIds);
+  await tx
+    .update(teams)
+    .set({
+      name: data.name,
+      description: data.description,
+      assignment: data.assignment,
+      maxOpenPerMember: data.maxOpenPerMember,
+      routingKeywords: data.routingKeywords,
+    })
+    .where(and(eq(teams.tenantId, tenantId), eq(teams.id, teamId)));
+  await syncMembersAndChannels(tx, tenantId, teamId, data);
+  return { previousAssignment: current.assignment };
+}
+
+/**
+ * Deletes a team (Settings, and keys since ADR-287): its conversations leave the team first, their
+ * assignees kept, in routing's lock order (conversation, team). Null when the company has no such
+ * team. The caller audits it.
+ */
+export async function writeDeleteTeam(
+  tx: Tx,
+  tenantId: string,
+  teamId: string,
+): Promise<{ name: string; conversations: number } | null> {
+  // Conversations first, then the team: the same lock order as routing (conversation, team).
+  const moved = await tx
+    .update(conversations)
+    .set({ teamId: null })
+    .where(and(eq(conversations.tenantId, tenantId), eq(conversations.teamId, teamId)))
+    .returning({ id: conversations.id });
+  const [deleted] = await tx
+    .delete(teams)
+    .where(and(eq(teams.tenantId, tenantId), eq(teams.id, teamId)))
+    .returning({ name: teams.name });
+  return deleted ? { name: deleted.name, conversations: moved.length } : null;
+}
+
+/**
+ * One team's settings with its members (those who answer conversations) and its numbers by id
+ * (ADR-287), or null; with `lock`, its row is locked for update first, so a change read from it is
+ * not lost.
+ */
+export async function readTeamSettings(
+  tx: Tx,
+  tenantId: string,
+  teamId: string,
+  options: { lock?: boolean } = {},
+): Promise<(TeamSettings & { id: string; createdAt: Date; updatedAt: Date }) | null> {
+  const query = tx
+    .select({
+      id: teams.id,
+      name: teams.name,
+      description: teams.description,
+      assignment: teams.assignment,
+      maxOpenPerMember: teams.maxOpenPerMember,
+      routingKeywords: teams.routingKeywords,
+      createdAt: teams.createdAt,
+      updatedAt: teams.updatedAt,
+    })
+    .from(teams)
+    .where(and(eq(teams.tenantId, tenantId), eq(teams.id, teamId)));
+  const [team] = options.lock ? await query.for('update') : await query;
+  if (!team) return null;
+  const members = await tx
+    .select({ membershipId: teamMembers.membershipId })
+    .from(teamMembers)
+    .innerJoin(
+      memberships,
+      and(
+        eq(memberships.tenantId, teamMembers.tenantId),
+        eq(memberships.id, teamMembers.membershipId),
+      ),
+    )
+    .where(
+      and(
+        eq(teamMembers.tenantId, tenantId),
+        eq(teamMembers.teamId, teamId),
+        answersConversations(),
+      ),
+    )
+    .orderBy(asc(teamMembers.createdAt), asc(teamMembers.membershipId));
+  const channels = await tx
+    .select({ id: channelAccounts.id })
+    .from(channelAccounts)
+    .where(and(eq(channelAccounts.tenantId, tenantId), eq(channelAccounts.defaultTeamId, teamId)))
+    .orderBy(asc(channelAccounts.id));
+  return {
+    ...team,
+    memberIds: members.map((m) => m.membershipId),
+    channelIds: channels.map((c) => c.id),
+  };
+}
+
+/**
+ * Sets whether a member takes the conversations routing gives out (Settings and the inbox, and keys
+ * since ADR-289). The member's row is locked for share, so a suspension or a change of role at the
+ * same time either waits and then marks them unavailable again, or comes first and is seen here:
+ * only a member who can answer conversations is made available. With `keepUnchanged`, a member
+ * already so is left as they are (`changed` false). The caller audits the change, then routes
+ * waiting conversations when it made the member available.
+ */
+export async function writeMemberAvailability(
+  tx: Tx,
+  tenantId: string,
+  membershipId: string,
+  available: boolean,
+  now: Date,
+  options: { keepUnchanged?: boolean } = {},
+): Promise<{ changed: boolean; changedAt: Date | null }> {
+  const [target] = await tx
+    .select({ status: memberships.status, roles: memberships.roles })
+    .from(memberships)
+    .where(and(eq(memberships.tenantId, tenantId), eq(memberships.id, membershipId)))
+    .for('share');
+  if (!target) throw notFound('Member');
+  if (
+    available &&
+    (target.status !== 'active' || !target.roles.some((r) => INBOX_WORKER_ROLES.includes(r)))
+  ) {
+    throw new AppError(
+      'validation_failed',
+      'Only active members whose role can reply in the inbox can take conversations.',
+    );
+  }
+  if (options.keepUnchanged) {
+    const [current] = await tx
+      .select({ available: memberAvailability.available, changedAt: memberAvailability.changedAt })
+      .from(memberAvailability)
+      .where(
+        and(
+          eq(memberAvailability.tenantId, tenantId),
+          eq(memberAvailability.membershipId, membershipId),
+        ),
+      )
+      .for('update');
+    // A member who never set it is unavailable.
+    if ((current?.available ?? false) === available) {
+      return { changed: false, changedAt: current?.changedAt ?? null };
+    }
+  }
+  await tx
+    .insert(memberAvailability)
+    .values({ id: uuidv7(), tenantId, membershipId, available, changedAt: now })
+    .onConflictDoUpdate({
+      target: [memberAvailability.tenantId, memberAvailability.membershipId],
+      set: { available, changedAt: now },
+    });
+  await emitTenantEvent(tx, tenantId, {
+    type: 'member.availability',
+    payload: { membershipId, available },
+  });
+  return { changed: true, changedAt: now };
+}
+
 export function createTeamsService(deps: { db: Database; clock: Clock }) {
   const { db, clock } = deps;
 
-  /** Members who may join a team: active, with a role that can read and answer conversations. */
-  async function checkMembers(tx: Tx, tenantId: string, memberIds: string[]) {
-    if (memberIds.length === 0) return;
-    const rows = await tx
-      .select({ id: memberships.id })
-      .from(memberships)
-      .where(
-        and(
-          eq(memberships.tenantId, tenantId),
-          inArray(memberships.id, memberIds),
-          eq(memberships.status, 'active'),
-          sql`${memberships.roles} && ${sql.param([...INBOX_WORKER_ROLES])}::text[]`,
-        ),
-      );
-    if (rows.length !== new Set(memberIds).size) {
-      throw new AppError(
-        'validation_failed',
-        'Choose active members whose role can reply in the inbox.',
-      );
-    }
-  }
-
-  async function checkChannels(tx: Tx, tenantId: string, channelIds: string[]) {
-    if (channelIds.length === 0) return;
-    const rows = await tx
-      .select({ id: channelAccounts.id })
-      .from(channelAccounts)
-      .where(and(eq(channelAccounts.tenantId, tenantId), inArray(channelAccounts.id, channelIds)));
-    if (rows.length !== new Set(channelIds).size) {
-      throw new AppError('validation_failed', 'Choose WhatsApp numbers of this company.');
-    }
-  }
-
-  async function syncMembersAndChannels(
-    tx: Tx,
-    tenantId: string,
-    teamId: string,
-    data: { memberIds: string[]; channelIds: string[] },
-  ) {
-    const memberIds = [...new Set(data.memberIds)];
-    const channelIds = [...new Set(data.channelIds)];
-    await tx
-      .delete(teamMembers)
-      .where(
-        and(
-          eq(teamMembers.tenantId, tenantId),
-          eq(teamMembers.teamId, teamId),
-          ...(memberIds.length ? [notInArray(teamMembers.membershipId, memberIds)] : []),
-        ),
-      );
-    if (memberIds.length) {
-      await tx
-        .insert(teamMembers)
-        .values(memberIds.map((membershipId) => ({ id: uuidv7(), tenantId, teamId, membershipId })))
-        .onConflictDoNothing();
-    }
-    await tx
-      .update(channelAccounts)
-      .set({ defaultTeamId: null })
-      .where(
-        and(
-          eq(channelAccounts.tenantId, tenantId),
-          eq(channelAccounts.defaultTeamId, teamId),
-          ...(channelIds.length ? [notInArray(channelAccounts.id, channelIds)] : []),
-        ),
-      );
-    if (channelIds.length) {
-      await tx
-        .update(channelAccounts)
-        .set({ defaultTeamId: teamId })
-        .where(
-          and(eq(channelAccounts.tenantId, tenantId), inArray(channelAccounts.id, channelIds)),
-        );
-    }
-  }
-
-  const duplicateName = () =>
-    new AppError('conflict', 'Another team already has this name. Choose a different name.');
-
   return {
-    /** Teams with members, numbers and queue sizes (names and ids only; any inbox member). */
+    /**
+     * Teams with their members (those who answer conversations), numbers and queue sizes (names and
+     * ids only; any inbox member).
+     */
     async listTeams(ctx: TenantContext): Promise<TeamView[]> {
       assertCan(ctx, 'tenant.read');
       return db.run(
@@ -211,7 +428,6 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
               teamId: teamMembers.teamId,
               membershipId: teamMembers.membershipId,
               name: users.name,
-              status: memberships.status,
               available: memberAvailability.available,
             })
             .from(teamMembers)
@@ -230,7 +446,13 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
                 eq(memberAvailability.membershipId, teamMembers.membershipId),
               ),
             )
-            .where(and(eq(teamMembers.tenantId, ctx.tenant.id), inArray(teamMembers.teamId, ids)))
+            .where(
+              and(
+                eq(teamMembers.tenantId, ctx.tenant.id),
+                inArray(teamMembers.teamId, ids),
+                answersConversations(),
+              ),
+            )
             .orderBy(asc(users.name));
           const channels = await tx
             .select({ id: channelAccounts.id, teamId: channelAccounts.defaultTeamId })
@@ -261,7 +483,7 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
             return {
               ...t,
               members: members
-                .filter((m) => m.teamId === t.id && m.status === 'active')
+                .filter((m) => m.teamId === t.id)
                 .map((m) => ({
                   membershipId: m.membershipId,
                   name: m.name,
@@ -284,22 +506,9 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
     ): Promise<{ teamId: string; routed: number }> {
       assertCan(ctx, 'inbox.supervise');
       const data = parseInput(teamSchema, input);
-      const teamId = uuidv7();
       try {
         return await db.run(ctx.scope, async (tx) => {
-          await assertTeamAvailable(tx, ctx.tenant.id);
-          await checkMembers(tx, ctx.tenant.id, data.memberIds);
-          await checkChannels(tx, ctx.tenant.id, data.channelIds);
-          await tx.insert(teams).values({
-            id: teamId,
-            tenantId: ctx.tenant.id,
-            name: data.name,
-            description: data.description,
-            assignment: data.assignment,
-            maxOpenPerMember: data.maxOpenPerMember,
-            routingKeywords: data.routingKeywords,
-          });
-          await syncMembersAndChannels(tx, ctx.tenant.id, teamId, data);
+          const { teamId } = await writeCreateTeam(tx, ctx.tenant.id, data);
           await recordAudit(
             tx,
             ctx,
@@ -321,8 +530,7 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
           return { teamId, routed };
         });
       } catch (error) {
-        if (isUniqueViolation(error, 'teams_name_uq')) throw duplicateName();
-        throw error;
+        throw teamNameError(error);
       }
     },
 
@@ -337,25 +545,7 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
       const data = parseInput(teamSchema, input);
       try {
         return await db.run(ctx.scope, async (tx) => {
-          const [current] = await tx
-            .select({ id: teams.id, assignment: teams.assignment })
-            .from(teams)
-            .where(and(eq(teams.tenantId, ctx.tenant.id), eq(teams.id, teamId)))
-            .for('update');
-          if (!current) throw notFound('Team');
-          await checkMembers(tx, ctx.tenant.id, data.memberIds);
-          await checkChannels(tx, ctx.tenant.id, data.channelIds);
-          await tx
-            .update(teams)
-            .set({
-              name: data.name,
-              description: data.description,
-              assignment: data.assignment,
-              maxOpenPerMember: data.maxOpenPerMember,
-              routingKeywords: data.routingKeywords,
-            })
-            .where(and(eq(teams.tenantId, ctx.tenant.id), eq(teams.id, teamId)));
-          await syncMembersAndChannels(tx, ctx.tenant.id, teamId, data);
+          const { previousAssignment } = await writeUpdateTeam(tx, ctx.tenant.id, teamId, data);
           await recordAudit(
             tx,
             ctx,
@@ -364,7 +554,7 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
               subjectType: 'team',
               subjectId: teamId,
               metadata: {
-                assignment: { from: current.assignment, to: data.assignment },
+                assignment: { from: previousAssignment, to: data.assignment },
                 maxOpenPerMember: data.maxOpenPerMember,
                 members: data.memberIds.length,
                 channels: data.channelIds.length,
@@ -377,8 +567,7 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
           return { routed };
         });
       } catch (error) {
-        if (isUniqueViolation(error, 'teams_name_uq')) throw duplicateName();
-        throw error;
+        throw teamNameError(error);
       }
     },
 
@@ -387,16 +576,7 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
       assertCan(ctx, 'inbox.supervise');
       if (!z.uuid().safeParse(teamId).success) throw notFound('Team');
       await db.run(ctx.scope, async (tx) => {
-        // Conversations first, then the team: the same lock order as routing (conversation, team).
-        const moved = await tx
-          .update(conversations)
-          .set({ teamId: null })
-          .where(and(eq(conversations.tenantId, ctx.tenant.id), eq(conversations.teamId, teamId)))
-          .returning({ id: conversations.id });
-        const [deleted] = await tx
-          .delete(teams)
-          .where(and(eq(teams.tenantId, ctx.tenant.id), eq(teams.id, teamId)))
-          .returning({ name: teams.name });
+        const deleted = await writeDeleteTeam(tx, ctx.tenant.id, teamId);
         if (!deleted) throw notFound('Team');
         await recordAudit(
           tx,
@@ -405,7 +585,7 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
             action: 'team.deleted',
             subjectType: 'team',
             subjectId: teamId,
-            metadata: { conversations: moved.length },
+            metadata: { conversations: deleted.conversations },
           },
           meta,
         );
@@ -445,38 +625,7 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
       const self = membershipId === ctx.membership.id;
       assertCan(ctx, self ? 'inbox.reply' : 'inbox.assign');
       return db.run(ctx.scope, async (tx) => {
-        const [target] = await tx
-          .select({ id: memberships.id, status: memberships.status, roles: memberships.roles })
-          .from(memberships)
-          .where(and(eq(memberships.tenantId, ctx.tenant.id), eq(memberships.id, membershipId)));
-        if (!target) throw notFound('Member');
-        if (
-          data.available &&
-          (target.status !== 'active' || !target.roles.some((r) => INBOX_WORKER_ROLES.includes(r)))
-        ) {
-          throw new AppError(
-            'validation_failed',
-            'Only active members whose role can reply in the inbox can take conversations.',
-          );
-        }
-        const now = clock.now();
-        await tx
-          .insert(memberAvailability)
-          .values({
-            id: uuidv7(),
-            tenantId: ctx.tenant.id,
-            membershipId,
-            available: data.available,
-            changedAt: now,
-          })
-          .onConflictDoUpdate({
-            target: [memberAvailability.tenantId, memberAvailability.membershipId],
-            set: { available: data.available, changedAt: now },
-          });
-        await emitTenantEvent(tx, ctx.tenant.id, {
-          type: 'member.availability',
-          payload: { membershipId, available: data.available },
-        });
+        await writeMemberAvailability(tx, ctx.tenant.id, membershipId, data.available, clock.now());
         if (!self) {
           await recordAudit(
             tx,

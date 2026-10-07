@@ -9,25 +9,40 @@ import {
   API_MESSAGE_FEED_WINDOW,
   API_SCOPE_KEYS,
   API_TOKEN_RE,
+  MAX_SAVED_REPLIES,
+  CRM_LIMITS,
   RUN_BUDGETS,
   advanceAutomationRun,
   apiAddConversationNote,
+  apiCreateClosedDay,
+  apiCreateSavedReply,
   apiCreateContact,
   apiCreateDeal,
   apiCreateNote,
+  apiCreatePipeline,
   apiCreateTask,
+  apiCreateTeam,
+  apiDeleteTeam,
+  apiDeleteClosedDay,
+  apiDeleteSavedReply,
   apiErrorResponse,
   apiGetAutomationRun,
+  apiGetBusinessHours,
   apiGetContact,
   apiGetConversation,
   apiGetDeal,
   apiGetOrder,
+  apiGetPipelineForecast,
   apiGetMessage,
+  apiGetMessageTemplate,
   apiGetNote,
   apiGetTask,
+  apiGetTeam,
   apiKeyReminderNotice,
   apiListAutomations,
   apiListChannels,
+  apiListClosedDays,
+  apiListSavedReplies,
   apiListContacts,
   apiListConversationMessages,
   apiListConversationNotes,
@@ -36,6 +51,7 @@ import {
   apiListDeals,
   apiListMembers,
   apiListMessages,
+  apiListMessageTemplates,
   apiListNotes,
   apiMessageChanges,
   apiListOrders,
@@ -48,9 +64,14 @@ import {
   apiSendMessage,
   apiSendTemplate,
   apiUpdateConversation,
+  apiUpdateBusinessHours,
+  apiUpdateSavedReply,
   apiUpdateDeal,
+  apiUpdatePipeline,
+  apiUpdateTeam,
   apiUpdateTask,
   apiUpdateManyConversations,
+  apiUpdateMember,
   apiUpdateMatchingConversations,
   apiUpdateOrder,
   apiStartAutomationRun,
@@ -62,6 +83,7 @@ import {
   botButtonId,
   createApiKeysService,
   createAutomationService,
+  createBusinessHoursService,
   createCampaignsService,
   createCommerceService,
   createConsentService,
@@ -71,13 +93,17 @@ import {
   createCsatService,
   createInboxService,
   createPlanAdminService,
+  createReportsService,
+  createSavedRepliesService,
   createTeamsService,
   createTemplatesService,
   createTenancyService,
   createWebhooksService,
   credentialAad,
   dayOf,
+  forecastMonths,
   generateApiToken,
+  monthEndIn,
   outboxAad,
   processCommerceSync,
   processSendIntent,
@@ -95,7 +121,9 @@ import {
   type ApiConversation,
   type ApiDeal,
   type ApiNote,
+  type ApiPipeline,
   type ApiTask,
+  type ApiTeamSettings,
   type ApiKeyReminderDeps,
   type ApiKeysService,
   type ApiScope,
@@ -4184,6 +4212,10 @@ describe('CRM pipelines and deals (ADR-253)', () => {
           winPercent: null,
         },
       ],
+      // Added in Settings, at its first version (ADR-286).
+      version: 1,
+      createdBy: 'member',
+      createdByApiKeyId: null,
       createdAt: expect.any(String),
     });
 
@@ -6203,6 +6235,376 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       /Read CRM notes/,
     );
   });
+
+  it('add, change, archive and restore pipelines as Settings does, as the key (ADR-286)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const manager = await apiKey(c, ['pipelines.manage', 'deals.write']);
+    const dataOf = (response: { body: unknown }) => (response.body as { data: ApiPipeline }).data;
+    await pipelineOf(owner, 'Sales', 'INR', ['New']);
+
+    // Added with its stages and chances after the company's other pipelines, as the key's, once
+    // per Idempotency-Key.
+    const request = {
+      name: ' Renewals ',
+      currency: 'inr',
+      stages: [
+        { name: 'Due' },
+        { name: 'Quoted', winPercent: 60 },
+        { name: 'Signed', winPercent: null },
+      ],
+    };
+    const key = idem('pipeline-renewals-1', JSON.stringify(request));
+    const created = await apiCreatePipeline(deps(), manager.ctx, request, key);
+    const again = await apiCreatePipeline(deps(), manager.ctx, request, key);
+    expect([created.status, created.replayed, again.replayed]).toEqual([201, false, true]);
+    expect(again.body).toEqual(created.body);
+    const renewals = dataOf(created);
+    expect(renewals).toMatchObject({
+      name: 'Renewals',
+      currency: 'INR',
+      position: 1,
+      archived: false,
+      version: 1,
+      createdBy: 'api',
+      createdByApiKeyId: manager.id,
+    });
+    expect(renewals.stages.map((s) => [s.name, s.position, s.archived, s.winPercent])).toEqual([
+      ['Due', 0, false, null],
+      ['Quoted', 1, false, 60],
+      ['Signed', 2, false, null],
+    ]);
+    const settings = await crm().listPipelines(owner);
+    expect(settings.map((p) => [p.name, p.addedThroughApi])).toEqual([
+      ['Sales', false],
+      ['Renewals', true],
+    ]);
+    const [row] = await fx.query<{
+      created_by_api_key_id: string | null;
+      created_by_membership_id: string | null;
+    }>(
+      'SELECT created_by_api_key_id, created_by_membership_id FROM app.crm_pipelines WHERE id = $1',
+      [renewals.id],
+    );
+    expect(row).toEqual({ created_by_api_key_id: manager.id, created_by_membership_id: null });
+    const listed = await apiListPipelines(
+      deps(),
+      await apiKey(c, ['deals.read']).then((k) => k.ctx),
+      {},
+    );
+    expect(listed.data.find((p) => p.id === renewals.id)).toEqual(renewals);
+
+    // Renamed; stages kept, renamed, reordered and given chances, one added and one removed, in
+    // one change.
+    const [due, quoted, signed] = renewals.stages;
+    const update = (input: Record<string, unknown>) =>
+      apiUpdatePipeline(deps(), manager.ctx, renewals.id, input, null);
+    const changed = dataOf(
+      await update({
+        name: 'Renewals 2026',
+        stages: [
+          { id: quoted!.id, name: 'Quote sent', winPercent: 70 },
+          { id: due!.id, name: 'Due' },
+          { name: 'Negotiating', winPercent: 85 },
+        ],
+        expectedVersion: 1,
+      }),
+    );
+    const which = (id: string) =>
+      ({ [due!.id]: 'due', [quoted!.id]: 'quoted', [signed!.id]: 'signed' })[id] ?? 'new';
+    expect([changed.name, changed.version]).toEqual(['Renewals 2026', 2]);
+    expect(changed.stages.map((s) => [which(s.id), s.name, s.archived, s.winPercent])).toEqual([
+      ['quoted', 'Quote sent', false, 70],
+      ['due', 'Due', false, null],
+      ['new', 'Negotiating', false, 85],
+      ['signed', 'Signed', true, null],
+    ]);
+
+    // The same name and stages again change nothing: no new version or audit entry.
+    const active = changed.stages
+      .filter((s) => !s.archived)
+      .map((s) => ({ id: s.id, name: s.name, winPercent: s.winPercent }));
+    expect(dataOf(await update({ name: 'Renewals 2026', stages: active })).version).toBe(2);
+    expect(dataOf(await update({ name: 'Renewals 2026' })).version).toBe(2);
+
+    // A version moved on, a name in use, a stage no longer in the pipeline, and removing a stage
+    // that holds an open deal are refused.
+    await expectAppError(
+      update({ name: 'Renewals', expectedVersion: 1 }),
+      'conflict',
+      /changed since version 1; its version is 2\. Read it again\.$/,
+    );
+    await expectAppError(update({ name: 'sales' }), 'conflict', /Another pipeline already has/);
+    await expectAppError(
+      update({ stages: [{ id: signed!.id, name: 'Signed' }] }),
+      'validation_failed',
+      /“Signed” is not in this pipeline/,
+    );
+    const asha = await contactOf(owner, 'Asha');
+    const deal = (
+      (
+        await apiCreateDeal(
+          deps(),
+          manager.ctx,
+          { contactId: asha, pipelineId: renewals.id, stageId: due!.id, title: 'Annual renewal' },
+          null,
+        )
+      ).body as { data: ApiDeal }
+    ).data;
+    await expectAppError(
+      update({ stages: [{ id: quoted!.id, name: 'Quote sent' }] }),
+      'conflict',
+      /Move the 1 open deal out of “Due” before removing it\./,
+    );
+
+    // Archived once it holds no open deal, as it is when archived again, and changed only once
+    // restored.
+    await expectAppError(update({ archived: true }), 'conflict', /Close or move the 1 open deal/);
+    await apiUpdateDeal(deps(), manager.ctx, deal.id, { status: 'won' });
+    const archived = dataOf(await update({ archived: true }));
+    expect([archived.archived, archived.version]).toEqual([true, 3]);
+    expect(dataOf(await update({ archived: true })).version).toBe(3);
+    await expectAppError(
+      update({ name: 'Old renewals' }),
+      'conflict',
+      /Restore the pipeline first/,
+    );
+    const restored = dataOf(await update({ archived: false, expectedVersion: 3 }));
+    expect([restored.archived, restored.version]).toEqual([false, 4]);
+    expect(dataOf(await update({ archived: false })).version).toBe(4);
+
+    // The audit log names the key for each change, and only for changes.
+    const audits = await fx.query<{
+      action: string;
+      actor_type: string;
+      actor_id: string;
+      metadata: Record<string, unknown>;
+    }>(
+      `SELECT action, actor_type, actor_id, metadata FROM app.audit_events
+        WHERE subject_id = $1 ORDER BY id`,
+      [renewals.id],
+    );
+    expect(audits.map((a) => [a.action, a.actor_type, a.actor_id, a.metadata])).toEqual([
+      [
+        'crm.pipeline_created',
+        'api_key',
+        manager.id,
+        { currency: 'INR', stages: 3, source: 'api' },
+      ],
+      [
+        'crm.pipeline_updated',
+        'api_key',
+        manager.id,
+        { stages: 3, added: 1, removed: 1, source: 'api' },
+      ],
+      ['crm.pipeline_archived', 'api_key', manager.id, { source: 'api' }],
+      ['crm.pipeline_restored', 'api_key', manager.id, { source: 'api' }],
+    ]);
+  });
+
+  it('refuse what Settings refuses, and need the scope, an active company and the CRM (ADR-286)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const manager = await apiKey(c, ['pipelines.manage']);
+    const body = (input: Record<string, unknown> = {}) => ({
+      name: 'Partners',
+      currency: 'INR',
+      stages: [{ name: 'Open' }],
+      ...input,
+    });
+    const create = (input: Record<string, unknown> = {}) =>
+      apiCreatePipeline(deps(), manager.ctx, body(input), null);
+
+    // Another company's pipeline and an unknown one are not found.
+    const theirs = await pipelineOf(await fx.ctx(other, other.owner), 'Theirs', 'INR', ['Open']);
+    for (const id of [theirs.id, uuidv7()]) {
+      await expectAppError(
+        apiUpdatePipeline(deps(), manager.ctx, id, { name: 'Mine' }, null),
+        'not_found',
+        /Pipeline/,
+      );
+    }
+
+    // A key without the scope, or of a suspended company, changes nothing.
+    const writer = await apiKey(c, ['deals.read', 'deals.write']);
+    await expectAppError(
+      apiCreatePipeline(deps(), writer.ctx, body(), null),
+      'forbidden',
+      /pipelines\.manage/,
+    );
+    const suspended = {
+      ...manager.ctx,
+      tenant: { ...manager.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(apiCreatePipeline(deps(), suspended, body(), null), 'tenant_suspended');
+
+    // A plan without the CRM changes none; with it again, the pipeline is added, once by name.
+    await onPlan(c, []);
+    const error = await expectAppError(create(), 'forbidden', /does not include the CRM/);
+    expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    await onPlan(c, ['crm']);
+    const added = await create();
+    expect(added.status).toBe(201);
+    await expectAppError(create({ name: 'partners' }), 'conflict', /Another pipeline already has/);
+
+    // At most CRM_LIMITS.pipelines active pipelines, as in Settings.
+    const [count] = await fx.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM app.crm_pipelines WHERE tenant_id = $1 AND archived_at IS NULL',
+      [c.tenant.id],
+    );
+    for (let i = count!.n; i < CRM_LIMITS.pipelines; i += 1) {
+      expect((await create({ name: `Pipeline ${i}` })).status).toBe(201);
+    }
+    await expectAppError(
+      create({ name: 'One too many' }),
+      'conflict',
+      new RegExp(`at most ${CRM_LIMITS.pipelines} pipelines`),
+    );
+
+    // The database keeps exactly one creator, a key of the pipeline's company.
+    const made = (added.body as { data: ApiPipeline }).data;
+    for (const bad of [
+      `created_by_membership_id = '${owner.membership.id}'`,
+      'created_by_api_key_id = NULL',
+    ]) {
+      await expect(
+        fx.query(`UPDATE app.crm_pipelines SET ${bad} WHERE id = $1`, [made.id]),
+        bad,
+      ).rejects.toThrow(/crm_pipelines_creator/);
+    }
+    const elsewhere = await apiKey(other, ['deals.read']);
+    await expect(
+      fx.query('UPDATE app.crm_pipelines SET created_by_api_key_id = $2 WHERE id = $1', [
+        made.id,
+        elsewhere.id,
+      ]),
+    ).rejects.toThrow(/crm_pipelines_created_by_api_key_fk/);
+
+    // Granting the scope needs tenant.settings.manage, which members manage pipelines with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'tenant.settings.manage')),
+    };
+    await expectAppError(
+      keys.create(narrower, {
+        name: 'Pipelines',
+        scopes: ['pipelines.manage'],
+        expiresInDays: 30,
+      }),
+      'forbidden',
+      /Manage CRM pipelines/,
+    );
+  });
+
+  it('read a pipeline’s weighted forecast as Reports and the board weigh it (ADR-288)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['deals.read']);
+    const sales = await pipelineOf(owner, 'Sales', 'INR', [
+      { name: 'New', winPercent: 10 },
+      { name: 'Qualified', winPercent: 50 },
+      'Proposal',
+    ]);
+    const [fresh, qualified, proposal] = sales.stages as [string, string, string];
+    const contactId = await contactOf(owner, 'Ira');
+    const months = forecastMonths(new Date(), owner.tenant.timezone);
+    const monthEnd = monthEndIn(new Date(), owner.tenant.timezone);
+    const deal = (stageId: string, title: string, value: string, expectedCloseOn: string | null) =>
+      crm().createDeal(owner, {
+        contactId,
+        pipelineId: sales.id,
+        stageId,
+        title,
+        value,
+        expectedCloseOn,
+      });
+    // A date already past, this month, the next two months, much later and no date; a closed deal
+    // is not forecast.
+    await deal(fresh, 'Overdue', '1,000', '2020-01-15');
+    await deal(qualified, 'This month', '500', monthEnd);
+    await deal(qualified, 'Next month', '300', `${months[1]}-15`);
+    await deal(fresh, 'Month after', '200', `${months[2]}-01`);
+    await deal(qualified, 'Much later', '100', '2099-06-30');
+    await deal(proposal, 'Undated', '2,000', null);
+    const closed = await deal(qualified, 'Closed', '9,999', monthEnd);
+    await crm().closeDeal(owner, { id: closed.id, expectedVersion: 1, outcome: 'won' });
+
+    const forecast = await apiGetPipelineForecast(deps(), reader.ctx, sales.id);
+    expect(forecast).toMatchObject({
+      pipelineId: sales.id,
+      currency: 'INR',
+      timeZone: owner.tenant.timezone,
+      months,
+      hasChances: true,
+      dealsWithoutChance: 1,
+      buckets: [
+        { bucket: 'this_month', deals: 2, valueMinor: 150_000, weightedMinor: 35_000 },
+        { bucket: 'next_month', deals: 1, valueMinor: 30_000, weightedMinor: 15_000 },
+        { bucket: 'month_after', deals: 1, valueMinor: 20_000, weightedMinor: 2_000 },
+        { bucket: 'later', deals: 1, valueMinor: 10_000, weightedMinor: 5_000 },
+        { bucket: 'undated', deals: 1, valueMinor: 200_000, weightedMinor: 0 },
+      ],
+    });
+    // Reports gives the same buckets, and this month's weighted value is the board's.
+    const report = await createReportsService({ db: fx.dbs.app, clock: systemClock }).getReport(
+      owner,
+      { preset: 'last_7_days' },
+    );
+    const inReports = report.deals.pipelines.find((p) => p.id === sales.id)!.forecast;
+    expect([forecast.months, forecast.buckets]).toEqual([inReports.months, inReports.buckets]);
+    expect((await crm().board(owner, { pipelineId: sales.id }))!.forecast.weightedMonthMinor).toBe(
+      35_000,
+    );
+
+    // A pipeline without any chance has values but nothing weighed.
+    const plain = await pipelineOf(owner, 'Plain', 'USD', ['Open']);
+    await crm().createDeal(owner, {
+      contactId,
+      pipelineId: plain.id,
+      stageId: plain.stages[0]!,
+      title: 'Plain',
+      value: '10',
+      expectedCloseOn: null,
+    });
+    const unweighed = await apiGetPipelineForecast(deps(), reader.ctx, plain.id);
+    expect(unweighed).toMatchObject({ currency: 'USD', hasChances: false, dealsWithoutChance: 1 });
+    expect(unweighed.buckets.map((b) => [b.valueMinor, b.weightedMinor])).toEqual([
+      [0, null],
+      [0, null],
+      [0, null],
+      [0, null],
+      [1_000, null],
+    ]);
+
+    // Another company's pipeline and an unknown one are not found; the scope reads it, while the
+    // company is suspended too, and only with the CRM in the plan.
+    const theirs = await pipelineOf(await fx.ctx(other, other.owner), 'Theirs', 'INR', ['Open']);
+    for (const id of [theirs.id, uuidv7()]) {
+      await expectAppError(apiGetPipelineForecast(deps(), reader.ctx, id), 'not_found', /Pipeline/);
+    }
+    const writer = await apiKey(c, ['deals.write']);
+    await expectAppError(
+      apiGetPipelineForecast(deps(), writer.ctx, sales.id),
+      'forbidden',
+      /deals\.read/,
+    );
+    const suspended = {
+      ...reader.ctx,
+      tenant: { ...reader.ctx.tenant, status: 'suspended' as const },
+    };
+    expect((await apiGetPipelineForecast(deps(), suspended, sales.id)).buckets[0]?.deals).toBe(2);
+    await onPlan(c, []);
+    const error = await expectAppError(
+      apiGetPipelineForecast(deps(), reader.ctx, sales.id),
+      'forbidden',
+      /does not include the CRM/,
+    );
+    expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    await onPlan(c, ['crm']);
+    expect((await apiGetPipelineForecast(deps(), reader.ctx, sales.id)).pipelineId).toBe(sales.id);
+  });
 });
 
 describe('conversation reads (ADR-072)', () => {
@@ -7109,6 +7511,9 @@ describe('assigning conversations (ADR-093)', () => {
         ORDER BY occurred_at, id`,
       [c.tenant.id, id],
     );
+
+  const settingsOfBody = (response: { body: unknown }) =>
+    (response.body as { data: ApiTeamSettings }).data;
 
   /** The conversation of a customer who wrote once. */
   async function conversationWith(c: Company, waId: string) {
@@ -8136,6 +8541,839 @@ describe('assigning conversations (ADR-093)', () => {
       expect((await changes(c, id)).map((a) => a.action)).toEqual(['conversation.status_changed']);
     }
     expect(await call()).toEqual({ data: [], nextCursor: null });
+  });
+
+  it('add, read, change and delete teams as Settings does, as the key (ADR-287)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const supervisor = await joined(c, 'supervisor', 'Sam Supervisor');
+    const manager = await apiKey(c, ['teams.manage']);
+
+    // Added with its settings, members and number, as the key's, once per Idempotency-Key.
+    const request = {
+      name: ' Support ',
+      description: 'Orders and returns',
+      assignment: 'round_robin',
+      maxOpenPerMember: 5,
+      routingKeywords: ['Refund', 'refund ', 'Order status'],
+      memberIds: [agent.membership.id, supervisor.membership.id],
+      channelIds: [c.channelAccountId],
+    };
+    const key = idem('team-support-1', JSON.stringify(request));
+    const created = await apiCreateTeam(deps(), manager.ctx, request, key);
+    const again = await apiCreateTeam(deps(), manager.ctx, request, key);
+    expect([created.status, created.replayed, again.replayed]).toEqual([201, false, true]);
+    expect(again.body).toEqual(created.body);
+    const support = settingsOfBody(created);
+    expect(support).toMatchObject({
+      name: 'Support',
+      description: 'Orders and returns',
+      assignment: 'round_robin',
+      maxOpenPerMember: 5,
+      routingKeywords: ['refund', 'order status'],
+      channelIds: [c.channelAccountId],
+    });
+    expect([...support.memberIds].sort()).toEqual(
+      [agent.membership.id, supervisor.membership.id].sort(),
+    );
+    expect(await apiGetTeam(deps(), manager.ctx, support.id)).toEqual(support);
+    const [inSettings] = (await teams().listTeams(owner)).filter((t) => t.id === support.id);
+    expect(inSettings?.channelIds).toEqual([c.channelAccountId]);
+    expect((await apiListTeams(deps(), manager.ctx, {})).data.map((t) => t.id)).toEqual([
+      support.id,
+    ]);
+
+    // A change of some settings keeps the rest; the same change again writes nothing.
+    const update = (input: Record<string, unknown>) =>
+      apiUpdateTeam(deps(), manager.ctx, support.id, input);
+    const renamed = await update({ name: 'Customer care', memberIds: [agent.membership.id] });
+    expect(renamed).toMatchObject({
+      name: 'Customer care',
+      assignment: 'round_robin',
+      maxOpenPerMember: 5,
+      routingKeywords: ['refund', 'order status'],
+      memberIds: [agent.membership.id],
+      channelIds: [c.channelAccountId],
+    });
+    expect(await update({ name: 'Customer care', description: 'Orders and returns' })).toEqual(
+      renamed,
+    );
+
+    // Members who cannot answer conversations, another company's number and a name in use are
+    // refused, naming the field; nothing changes.
+    const other = await fx.company();
+    const paths = (error: unknown) =>
+      isAppError(error) ? (error.issues ?? []).map((i) => i.path) : [];
+    const marketer = await fx.ctx(c, c.marketer);
+    expect(
+      paths(
+        await expectAppError(update({ memberIds: [marketer.membership.id] }), 'validation_failed'),
+      ),
+    ).toEqual(['memberIds']);
+    expect(
+      paths(
+        await expectAppError(update({ channelIds: [other.channelAccountId] }), 'validation_failed'),
+      ),
+    ).toEqual(['channelIds']);
+    await apiCreateTeam(deps(), manager.ctx, { name: 'Sales' }, null);
+    await expectAppError(update({ name: 'sales' }), 'conflict', /Another team already has/);
+    expect(await apiGetTeam(deps(), manager.ctx, support.id)).toEqual(renamed);
+
+    // A member given a role that cannot answer conversations is no longer the team's, here and in
+    // Settings, and a change that leaves the members out keeps the team's others.
+    await update({ memberIds: [agent.membership.id, supervisor.membership.id] });
+    await fx.query(`UPDATE app.memberships SET roles = ARRAY['marketer']::text[] WHERE id = $1`, [
+      supervisor.membership.id,
+    ]);
+    expect((await apiGetTeam(deps(), manager.ctx, support.id)).memberIds).toEqual([
+      agent.membership.id,
+    ]);
+    const [shown] = (await teams().listTeams(owner)).filter((t) => t.id === support.id);
+    expect(shown?.members.map((m) => m.membershipId)).toEqual([agent.membership.id]);
+    expect((await update({ description: 'Orders, returns and refunds' })).memberIds).toEqual([
+      agent.membership.id,
+    ]);
+
+    // Deleted with its conversations leaving it; deleting it again is not found.
+    const conversation = await conversationWith(c, '919811100531');
+    await fx.query('UPDATE app.conversations SET team_id = $2 WHERE id = $1', [
+      conversation.id,
+      support.id,
+    ]);
+    expect(await apiDeleteTeam(deps(), manager.ctx, support.id)).toEqual({
+      id: support.id,
+      deleted: true,
+      conversations: 1,
+    });
+    expect((await conversationRow(conversation.id)).team_id).toBeNull();
+    await expectAppError(apiDeleteTeam(deps(), manager.ctx, support.id), 'not_found', /Team/);
+    await expectAppError(apiGetTeam(deps(), manager.ctx, support.id), 'not_found', /Team/);
+
+    // The audit log names the key for each change, and only for changes.
+    const audits = await fx.query<{ action: string; actor_type: string; actor_id: string }>(
+      `SELECT action, actor_type, actor_id FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 ORDER BY occurred_at, id`,
+      [c.tenant.id, support.id],
+    );
+    expect(audits.map((a) => [a.action, a.actor_type, a.actor_id])).toEqual([
+      ['team.created', 'api_key', manager.id],
+      ['team.updated', 'api_key', manager.id],
+      ['team.updated', 'api_key', manager.id],
+      ['team.updated', 'api_key', manager.id],
+      ['team.deleted', 'api_key', manager.id],
+    ]);
+  });
+
+  it('manage teams with the scope and an active company only, granted with inbox.supervise (ADR-287)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const manager = await apiKey(c, ['teams.manage']);
+    const reader = await apiKey(c, ['conversations.read']);
+    const { teamId: theirs } = await teams().createTeam(await fx.ctx(other, other.owner), {
+      name: 'Theirs',
+    });
+
+    // Another company's team and an unknown one are not found.
+    for (const id of [theirs, uuidv7()]) {
+      await expectAppError(apiGetTeam(deps(), manager.ctx, id), 'not_found');
+      await expectAppError(apiUpdateTeam(deps(), manager.ctx, id, { name: 'Mine' }), 'not_found');
+      await expectAppError(apiDeleteTeam(deps(), manager.ctx, id), 'not_found');
+    }
+
+    // A key that reads conversations lists teams but manages none.
+    for (const call of [
+      () => apiCreateTeam(deps(), reader.ctx, { name: 'Support' }, null),
+      () => apiGetTeam(deps(), reader.ctx, theirs),
+    ]) {
+      await expectAppError(call(), 'forbidden', /teams\.manage/);
+    }
+
+    // A suspended company's key changes nothing, but reads.
+    const { id } = settingsOfBody(
+      await apiCreateTeam(deps(), manager.ctx, { name: 'Support' }, null),
+    );
+    expect((await apiListTeams(deps(), reader.ctx, {})).data.map((t) => t.id)).toEqual([id]);
+    const suspended = {
+      ...manager.ctx,
+      tenant: { ...manager.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(
+      apiCreateTeam(deps(), suspended, { name: 'Sales' }, null),
+      'tenant_suspended',
+    );
+    await expectAppError(apiUpdateTeam(deps(), suspended, id, { name: 'X' }), 'tenant_suspended');
+    await expectAppError(apiDeleteTeam(deps(), suspended, id), 'tenant_suspended');
+    expect((await apiGetTeam(deps(), suspended, id)).name).toBe('Support');
+
+    // Granting the scope needs inbox.supervise, which members manage teams with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'inbox.supervise')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Teams', scopes: ['teams.manage'], expiresInDays: 30 }),
+      'forbidden',
+      /Manage teams/,
+    );
+  });
+
+  it('set whether members take conversations as Settings does, as the key (ADR-289)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const marketer = await fx.ctx(c, c.marketer);
+    const setter = await apiKey(c, ['availability.write']);
+    const reader = await apiKey(c, ['conversations.read']);
+    const set = (membershipId: string, available: boolean) =>
+      apiUpdateMember(deps(), setter.ctx, membershipId, { available });
+    const listed = async () =>
+      (await apiListMembers(deps(), reader.ctx, {})).data.find((m) => m.id === agent.membership.id)
+        ?.available;
+    const audits = () =>
+      fx.query<{ actor_type: string; actor_id: string; metadata: Record<string, unknown> }>(
+        `SELECT actor_type, actor_id, metadata FROM app.audit_events
+          WHERE tenant_id = $1 AND subject_id = $2 AND action = 'member.availability_changed'
+          ORDER BY occurred_at, id`,
+        [c.tenant.id, agent.membership.id],
+      );
+
+    // A round-robin team holds a waiting conversation while nobody takes conversations.
+    await teams().createTeam(owner, {
+      name: 'Support',
+      assignment: 'round_robin',
+      memberIds: [agent.membership.id],
+      channelIds: [c.channelAccountId],
+    });
+    const waiting = await conversationWith(c, '919811100541');
+    expect((await conversationRow(waiting.id)).assigned).toBeNull();
+    expect(await listed()).toBe(false);
+
+    // Made available, the agent is given it at once, as when they switch it on themselves.
+    const made = await set(agent.membership.id, true);
+    expect(made).toMatchObject({ id: agent.membership.id, available: true });
+    expect(made.changedAt).not.toBeNull();
+    expect((await conversationRow(waiting.id)).assigned).toBe(agent.membership.id);
+    expect(await listed()).toBe(true);
+    // The same again changes nothing and records nothing.
+    expect(await set(agent.membership.id, true)).toEqual(made);
+    // Made unavailable, they keep what they have.
+    const off = await set(agent.membership.id, false);
+    expect(off.available).toBe(false);
+    expect((await conversationRow(waiting.id)).assigned).toBe(agent.membership.id);
+    expect(await listed()).toBe(false);
+    expect((await audits()).map((a) => [a.actor_type, a.actor_id, a.metadata])).toEqual([
+      ['api_key', setter.id, { available: true, source: 'api' }],
+      ['api_key', setter.id, { available: false, source: 'api' }],
+    ]);
+
+    // A member who cannot answer conversations is not made available, but can be made unavailable;
+    // another company's member and an unknown one are not found.
+    await expectAppError(
+      set(marketer.membership.id, true),
+      'validation_failed',
+      /Only active members whose role can reply/,
+    );
+    expect(await set(marketer.membership.id, false)).toEqual({
+      id: marketer.membership.id,
+      available: false,
+      changedAt: null,
+    });
+    const theirs = await fx.ctx(other, other.agent);
+    for (const id of [theirs.membership.id, uuidv7()]) {
+      await expectAppError(set(id, false), 'not_found', /Member/);
+    }
+
+    // Only with the scope and while the company is active.
+    const assigner = await apiKey(c, ['conversations.write', 'teams.manage']);
+    await expectAppError(
+      apiUpdateMember(deps(), assigner.ctx, agent.membership.id, { available: true }),
+      'forbidden',
+      /availability\.write/,
+    );
+    const suspended = {
+      ...setter.ctx,
+      tenant: { ...setter.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(
+      apiUpdateMember(deps(), suspended, agent.membership.id, { available: true }),
+      'tenant_suspended',
+    );
+
+    // Granting the scope needs inbox.assign, which members set others' availability with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'inbox.assign')),
+    };
+    await expectAppError(
+      keys.create(narrower, {
+        name: 'Rota',
+        scopes: ['availability.write'],
+        expiresInDays: 30,
+      }),
+      'forbidden',
+      /Set members' availability/,
+    );
+  });
+});
+
+describe('business hours (ADR-290)', () => {
+  const hours = () => createBusinessHoursService({ db: fx.dbs.app, clock: systemClock });
+  /** A day in a time zone, `offset` days from today, as YYYY-MM-DD. */
+  const localDay = (timeZone: string, offset: number) =>
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date(Date.now() + offset * 86_400_000));
+  const allDay = Array.from({ length: 7 }, () => [{ opens: '00:00', closes: '24:00' }]);
+
+  it('read and set business hours and closed days as Settings does, as the key (ADR-290)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['business_hours.read']);
+    const manager = await apiKey(c, ['business_hours.manage']);
+
+    // Nothing set: off, so the company counts as always open.
+    expect(await apiGetBusinessHours(deps(), reader.ctx)).toMatchObject({
+      enabled: false,
+      timeZone: owner.tenant.timezone,
+      days: [[], [], [], [], [], [], []],
+      open: true,
+      opensAt: null,
+      closesAt: null,
+    });
+
+    // Open all day every day: open now, with no closing within 14 days; Settings shows the week.
+    const set = await apiUpdateBusinessHours(deps(), manager.ctx, { enabled: true, days: allDay });
+    expect(set).toMatchObject({ enabled: true, days: allDay, open: true, closesAt: null });
+    expect((await hours().getBusinessHours(owner)).days).toEqual(Array(7).fill('00:00-24:00'));
+    // The same week again writes nothing.
+    expect(
+      await apiUpdateBusinessHours(deps(), manager.ctx, { enabled: true, days: allDay }),
+    ).toMatchObject({ enabled: true, days: allDay });
+
+    // Today closed, in the company's time zone: closed now, until midnight; once per key.
+    const today = localDay(owner.tenant.timezone, 0);
+    const request = { day: today, name: 'Stocktaking' };
+    const key = idem('closed-day-1', JSON.stringify(request));
+    const created = await apiCreateClosedDay(deps(), manager.ctx, request, key);
+    const again = await apiCreateClosedDay(deps(), manager.ctx, request, key);
+    expect([created.status, created.replayed, again.replayed]).toEqual([201, false, true]);
+    const closed = (created.body as { data: { id: string; day: string; name: string } }).data;
+    expect(closed).toMatchObject({ day: today, name: 'Stocktaking' });
+    const shut = await apiGetBusinessHours(deps(), reader.ctx);
+    expect([shut.open, shut.opensAt === null, shut.closesAt]).toEqual([false, false, null]);
+    await expectAppError(
+      apiCreateClosedDay(deps(), manager.ctx, { day: today, name: 'Again' }, null),
+      'conflict',
+      /already marked closed/,
+    );
+    expect((await apiListClosedDays(deps(), reader.ctx, {})).data).toEqual([closed]);
+    expect((await hours().getBusinessHours(owner)).holidays.map((h) => h.id)).toEqual([closed.id]);
+    expect(
+      await apiListClosedDays(deps(), reader.ctx, { from: '2020-01-01', to: '2020-12-31' }),
+    ).toEqual({ data: [], from: '2020-01-01', to: '2020-12-31' });
+
+    // Opened again: open now; opening it again is not found.
+    expect(await apiDeleteClosedDay(deps(), manager.ctx, closed.id)).toEqual({
+      id: closed.id,
+      deleted: true,
+      day: today,
+    });
+    expect((await apiGetBusinessHours(deps(), reader.ctx)).open).toBe(true);
+    await expectAppError(
+      apiDeleteClosedDay(deps(), manager.ctx, closed.id),
+      'not_found',
+      /Closed day/,
+    );
+
+    // Turned off: always open, the week kept.
+    expect(
+      await apiUpdateBusinessHours(deps(), manager.ctx, { enabled: false, days: allDay }),
+    ).toMatchObject({ enabled: false, open: true, days: allDay });
+
+    // The audit log names the key for each change, and only for changes.
+    const audits = await fx.query<{
+      action: string;
+      actor_type: string;
+      actor_id: string;
+      metadata: { source?: string };
+    }>(
+      `SELECT action, actor_type, actor_id, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action IN ('inbox.business_hours_updated',
+              'inbox.closed_day_added', 'inbox.closed_day_removed')
+        ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(audits.map((a) => [a.action, a.actor_type, a.actor_id, a.metadata.source])).toEqual([
+      ['inbox.business_hours_updated', 'api_key', manager.id, 'api'],
+      ['inbox.closed_day_added', 'api_key', manager.id, 'api'],
+      ['inbox.closed_day_removed', 'api_key', manager.id, 'api'],
+      ['inbox.business_hours_updated', 'api_key', manager.id, 'api'],
+    ]);
+  });
+
+  it('read with either scope, change only with business_hours.manage and an active company, granted as in Settings (ADR-290)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['business_hours.read']);
+    const manager = await apiKey(c, ['business_hours.manage']);
+    const theirOwner = await fx.ctx(other, other.owner);
+    await hours().addHoliday(theirOwner, {
+      day: localDay(theirOwner.tenant.timezone, 3),
+      name: 'Theirs',
+    });
+    const [theirs] = (await hours().getBusinessHours(theirOwner)).holidays;
+
+    // Another company's closed day is neither listed nor opened; an unknown one is not found.
+    expect((await apiListClosedDays(deps(), manager.ctx, {})).data).toEqual([]);
+    for (const id of [theirs!.id, uuidv7()]) {
+      await expectAppError(apiDeleteClosedDay(deps(), manager.ctx, id), 'not_found');
+    }
+
+    // A reading key changes nothing.
+    for (const write of [
+      () => apiUpdateBusinessHours(deps(), reader.ctx, { enabled: false, days: allDay }),
+      () => apiCreateClosedDay(deps(), reader.ctx, { day: localDay('UTC', 10), name: 'X' }, null),
+      () => apiDeleteClosedDay(deps(), reader.ctx, theirs!.id),
+    ]) {
+      await expectAppError(write(), 'forbidden', /business_hours\.manage/);
+    }
+
+    // A suspended company's keys read, and change nothing.
+    const suspended = (ctx: ApiContext): ApiContext => ({
+      ...ctx,
+      tenant: { ...ctx.tenant, status: 'suspended' as const },
+    });
+    expect((await apiGetBusinessHours(deps(), suspended(reader.ctx))).enabled).toBe(false);
+    expect((await apiListClosedDays(deps(), suspended(manager.ctx), {})).data).toEqual([]);
+    await expectAppError(
+      apiUpdateBusinessHours(deps(), suspended(manager.ctx), { enabled: true, days: allDay }),
+      'tenant_suspended',
+    );
+
+    // Granting needs the permissions members read and change business hours with.
+    for (const [scope, permission, label] of [
+      ['business_hours.read', 'tenant.read', /Read business hours/],
+      ['business_hours.manage', 'tenant.settings.manage', /Manage business hours/],
+    ] as const) {
+      const narrower: TenantContext = {
+        ...owner,
+        permissions: new Set([...owner.permissions].filter((p) => p !== permission)),
+      };
+      await expectAppError(
+        keys.create(narrower, { name: 'Hours', scopes: [scope], expiresInDays: 30 }),
+        'forbidden',
+        label,
+      );
+    }
+  });
+});
+
+describe('saved replies (ADR-291)', () => {
+  const replies = () => createSavedRepliesService({ db: fx.dbs.app, clock: systemClock });
+  type Reply = {
+    id: string;
+    shortcut: string;
+    title: string;
+    body: string;
+    createdBy: string;
+    createdByApiKeyId: string | null;
+    updatedBy: string;
+    updatedByApiKeyId: string | null;
+    updatedAt: string;
+  };
+
+  it('add, change and delete saved replies as Settings does, as the key (ADR-291)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const manager = await apiKey(c, ['saved_replies.manage']);
+    const replier = await apiKey(c, ['messages.reply']);
+
+    // Added once per key, by the key; Settings shows it as changed through the API.
+    const request = {
+      shortcut: ' Hours ',
+      title: 'Opening hours',
+      body: 'Hi {{name}}, we are open 9 to 5.',
+    };
+    const key = idem('saved-reply-1', JSON.stringify(request));
+    const created = await apiCreateSavedReply(deps(), manager.ctx, request, key);
+    const again = await apiCreateSavedReply(deps(), manager.ctx, request, key);
+    expect([created.status, created.replayed, again.replayed]).toEqual([201, false, true]);
+    const hours = (created.body as { data: Reply }).data;
+    expect(hours).toMatchObject({
+      shortcut: 'hours',
+      title: 'Opening hours',
+      body: 'Hi {{name}}, we are open 9 to 5.',
+      createdBy: 'api',
+      createdByApiKeyId: manager.id,
+      updatedBy: 'api',
+      updatedByApiKeyId: manager.id,
+    });
+    expect(await replies().listSavedReplies(owner)).toEqual([
+      expect.objectContaining({
+        id: hours.id,
+        shortcut: 'hours',
+        updatedByName: null,
+        updatedThroughApi: true,
+      }),
+    ]);
+    await expectAppError(
+      apiCreateSavedReply(deps(), manager.ctx, { ...request, title: 'Again' }, null),
+      'conflict',
+      /already uses this shortcut/,
+    );
+
+    // A member's reply, read by a key that replies, by shortcut.
+    const { id: thanksId } = await replies().createSavedReply(owner, {
+      shortcut: 'thanks',
+      title: 'Thank you',
+      body: 'Thanks, {{name}}!',
+    });
+    const listed = (await apiListSavedReplies(deps(), replier.ctx)).data;
+    expect(listed.map((r) => [r.shortcut, r.createdBy, r.createdByApiKeyId])).toEqual([
+      ['hours', 'api', manager.id],
+      ['thanks', 'member', null],
+    ]);
+
+    // Changed by the key: only what is given; the same change again writes nothing.
+    const changed = await apiUpdateSavedReply(deps(), manager.ctx, thanksId, { title: 'Thanks!' });
+    expect(changed).toMatchObject({
+      shortcut: 'thanks',
+      title: 'Thanks!',
+      body: 'Thanks, {{name}}!',
+      createdBy: 'member',
+      updatedBy: 'api',
+      updatedByApiKeyId: manager.id,
+    });
+    const unchanged = await apiUpdateSavedReply(deps(), manager.ctx, thanksId, {
+      title: ' Thanks! ',
+    });
+    expect(unchanged).toEqual(changed);
+    await expectAppError(
+      apiUpdateSavedReply(deps(), manager.ctx, thanksId, { shortcut: 'HOURS' }),
+      'conflict',
+      /already uses this shortcut/,
+    );
+    await expectAppError(
+      apiUpdateSavedReply(deps(), manager.ctx, thanksId, { body: 'Hi {{surname}}' }),
+      'validation_failed',
+      /Unknown placeholder/,
+    );
+    expect(
+      (await replies().listSavedReplies(owner)).find((r) => r.id === thanksId)?.updatedThroughApi,
+    ).toBe(true);
+
+    // A member's change from a web server of an earlier release names the member and leaves the
+    // key's column as it was: still valid, and the member changed it last.
+    await fx.query(
+      `UPDATE app.saved_replies SET title = 'Thanks from before', updated_by_membership_id = $3
+        WHERE tenant_id = $1 AND id = $2`,
+      [c.tenant.id, thanksId, owner.membership.id],
+    );
+    expect(
+      (await apiListSavedReplies(deps(), manager.ctx)).data.find((r) => r.id === thanksId),
+    ).toMatchObject({ title: 'Thanks from before', updatedBy: 'member', updatedByApiKeyId: null });
+    expect(
+      (await replies().listSavedReplies(owner)).find((r) => r.id === thanksId)?.updatedThroughApi,
+    ).toBe(false);
+
+    // Changed again by a member in Settings: the member is named, the key no longer.
+    await replies().updateSavedReply(owner, thanksId, {
+      shortcut: 'thanks',
+      title: 'Thank you',
+      body: 'Thanks, {{name}}!',
+    });
+    expect((await replies().listSavedReplies(owner)).find((r) => r.id === thanksId)).toMatchObject({
+      updatedByName: owner.user.name,
+      updatedThroughApi: false,
+    });
+    expect(
+      await fx.query(
+        `SELECT updated_by_membership_id, updated_by_api_key_id FROM app.saved_replies WHERE id = $1`,
+        [thanksId],
+      ),
+    ).toEqual([{ updated_by_membership_id: owner.membership.id, updated_by_api_key_id: null }]);
+    expect(
+      (await apiListSavedReplies(deps(), manager.ctx)).data.find((r) => r.id === thanksId),
+    ).toMatchObject({ updatedBy: 'member', updatedByApiKeyId: null });
+
+    // Deleted by the key; deleting it again is not found.
+    expect(await apiDeleteSavedReply(deps(), manager.ctx, hours.id)).toEqual({
+      id: hours.id,
+      deleted: true,
+    });
+    await expectAppError(
+      apiDeleteSavedReply(deps(), manager.ctx, hours.id),
+      'not_found',
+      /Saved reply/,
+    );
+    expect((await apiListSavedReplies(deps(), replier.ctx)).data.map((r) => r.id)).toEqual([
+      thanksId,
+    ]);
+
+    // The audit log names the key for each of its changes, and only for changes.
+    const audits = await fx.query<{
+      action: string;
+      actor_type: string;
+      actor_id: string | null;
+      metadata: { shortcut?: string; source?: string };
+    }>(
+      `SELECT action, actor_type, actor_id, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action LIKE 'saved_reply.%'
+        ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(
+      audits.map((a) => [a.action, a.actor_type, a.metadata.shortcut, a.metadata.source]),
+    ).toEqual([
+      ['saved_reply.created', 'api_key', 'hours', 'api'],
+      ['saved_reply.created', 'user', 'thanks', undefined],
+      ['saved_reply.updated', 'api_key', 'thanks', 'api'],
+      ['saved_reply.updated', 'user', 'thanks', undefined],
+      ['saved_reply.deleted', 'api_key', 'hours', 'api'],
+    ]);
+    expect(audits.filter((a) => a.actor_type === 'api_key').map((a) => a.actor_id)).toEqual([
+      manager.id,
+      manager.id,
+      manager.id,
+    ]);
+  });
+
+  it(`keep at most ${MAX_SAVED_REPLIES} saved replies a company, added by keys or in Settings (ADR-291)`, async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const manager = await apiKey(c, ['saved_replies.manage']);
+    await fx.query(
+      `INSERT INTO app.saved_replies
+         (id, tenant_id, shortcut, title, body, created_by_membership_id, updated_by_membership_id)
+       SELECT gen_random_uuid(), $1, 'r' || g, 'Reply ' || g, 'Text ' || g, $2, $2
+         FROM generate_series(1, $3::int) g`,
+      [c.tenant.id, owner.membership.id, MAX_SAVED_REPLIES - 1],
+    );
+    const last = await apiCreateSavedReply(
+      deps(),
+      manager.ctx,
+      { shortcut: 'last', title: 'Last', body: 'The last one.' },
+      null,
+    );
+    expect(last.status).toBe(201);
+    const limit = new RegExp(`already has ${MAX_SAVED_REPLIES} saved replies`);
+    await expectAppError(
+      apiCreateSavedReply(deps(), manager.ctx, { shortcut: 'one', title: 'One', body: 'x' }, null),
+      'conflict',
+      limit,
+    );
+    await expectAppError(
+      replies().createSavedReply(owner, { shortcut: 'one', title: 'One', body: 'x' }),
+      'conflict',
+      limit,
+    );
+    // All of them are listed, in Settings and to keys.
+    expect((await apiListSavedReplies(deps(), manager.ctx)).data).toHaveLength(MAX_SAVED_REPLIES);
+    expect(await replies().listSavedReplies(owner)).toHaveLength(MAX_SAVED_REPLIES);
+    // One deleted makes room for one.
+    await apiDeleteSavedReply(deps(), manager.ctx, (last.body as { data: Reply }).data.id);
+    expect(
+      (await replies().createSavedReply(owner, { shortcut: 'one', title: 'One', body: 'x' })).id,
+    ).toEqual(expect.any(String));
+  });
+
+  it('read with either scope, change only with saved_replies.manage and an active company, granted as in Settings (ADR-291)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const manager = await apiKey(c, ['saved_replies.manage']);
+    const replier = await apiKey(c, ['messages.reply']);
+    const reader = await apiKey(c, ['conversations.read']);
+    const theirs = await replies().createSavedReply(await fx.ctx(other, other.owner), {
+      shortcut: 'theirs',
+      title: 'Theirs',
+      body: 'Not yours.',
+    });
+
+    // Another company's reply is neither listed, changed nor deleted; an unknown one is not found.
+    expect((await apiListSavedReplies(deps(), manager.ctx)).data).toEqual([]);
+    for (const id of [theirs.id, uuidv7()]) {
+      await expectAppError(
+        apiUpdateSavedReply(deps(), manager.ctx, id, { title: 'Mine' }),
+        'not_found',
+      );
+      await expectAppError(apiDeleteSavedReply(deps(), manager.ctx, id), 'not_found');
+    }
+
+    // A key that replies changes nothing; a key that does neither reads nothing.
+    for (const write of [
+      () =>
+        apiCreateSavedReply(deps(), replier.ctx, { shortcut: 'x', title: 'X', body: 'x' }, null),
+      () => apiUpdateSavedReply(deps(), replier.ctx, theirs.id, { title: 'X' }),
+      () => apiDeleteSavedReply(deps(), replier.ctx, theirs.id),
+    ]) {
+      await expectAppError(write(), 'forbidden', /saved_replies\.manage/);
+    }
+    await expectAppError(apiListSavedReplies(deps(), reader.ctx), 'forbidden', /messages\.reply/);
+
+    // A suspended company's keys read, and change nothing.
+    const suspended = (ctx: ApiContext): ApiContext => ({
+      ...ctx,
+      tenant: { ...ctx.tenant, status: 'suspended' as const },
+    });
+    expect((await apiListSavedReplies(deps(), suspended(replier.ctx))).data).toEqual([]);
+    expect((await apiListSavedReplies(deps(), suspended(manager.ctx))).data).toEqual([]);
+    await expectAppError(
+      apiCreateSavedReply(
+        deps(),
+        suspended(manager.ctx),
+        { shortcut: 'x', title: 'X', body: 'x' },
+        null,
+      ),
+      'tenant_suspended',
+    );
+
+    // Granting needs the permission members manage saved replies with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'inbox.supervise')),
+    };
+    await expectAppError(
+      keys.create(narrower, {
+        name: 'Replies',
+        scopes: ['saved_replies.manage'],
+        expiresInDays: 30,
+      }),
+      'forbidden',
+      /Manage saved replies/,
+    );
+  });
+});
+
+describe('message templates of every status (ADR-294)', () => {
+  const shipped: TemplateDefinition = {
+    category: 'UTILITY',
+    header: { type: 'none' },
+    body: { text: 'Hi {{1}}, your order has shipped.', examples: ['Asha'] },
+    footer: null,
+    buttons: [],
+  };
+
+  it('read drafts, approved, rejected and deleted templates with their review and history, as templates.read (ADR-294)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['templates.read']);
+    const templateDeps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock: systemClock };
+    const templates = createTemplatesService(templateDeps);
+    const graphDeps = { ...templateDeps, keyring: fx.keyring, graph: fx.graph };
+    const scope = authorizedTenantScope(c.tenant.id, null);
+    const stamp = Date.now().toString(36);
+
+    // A draft, an approved template, and one Meta rejects.
+    const { id: draftId } = await templates.createDraft(owner, {
+      whatsappAccountId: c.whatsappAccountId,
+      name: `mt_draft_${stamp}`,
+      language: 'en',
+      definition: shipped,
+    });
+    const approved = await approvedTemplate(c, shipped);
+    const { id: rejectedId } = await templates.createDraft(owner, {
+      whatsappAccountId: c.whatsappAccountId,
+      name: `mt_rejected_${stamp}`,
+      language: 'en',
+      definition: shipped,
+    });
+    await templates.submitTemplate(owner, rejectedId);
+    expect(await processTemplateSubmit(graphDeps, scope, rejectedId)).toBe('done');
+    const atMeta = fx.standIn.state.templates
+      .get(c.wabaId)
+      ?.find((t) => t.name === `mt_rejected_${stamp}`);
+    atMeta!.status = 'REJECTED';
+    atMeta!.rejected_reason = 'INVALID_FORMAT';
+    await syncTemplates(graphDeps, scope, c.whatsappAccountId);
+
+    // Newest first, each with its review, whether a send can use it, its content and number.
+    const listed = (await apiListMessageTemplates(deps(), reader.ctx, {})).data;
+    expect(listed.map((t) => [t.id, t.status, t.sendable])).toEqual([
+      [rejectedId, 'rejected', false],
+      [approved.id, 'approved', true],
+      [draftId, 'draft', false],
+    ]);
+    expect(listed[0]).toMatchObject({
+      rejectionReason: 'INVALID_FORMAT',
+      origin: 'local',
+      definition: shipped,
+      channels: [expect.objectContaining({ id: c.channelAccountId })],
+    });
+    expect(listed[2]).toMatchObject({ submittedAt: null, rejectionReason: null });
+
+    // Filters, exact pages.
+    expect(
+      (await apiListMessageTemplates(deps(), reader.ctx, { status: 'draft' })).data.map(
+        (t) => t.id,
+      ),
+    ).toEqual([draftId]);
+    expect(
+      (await apiListMessageTemplates(deps(), reader.ctx, { name: approved.name })).data.map(
+        (t) => t.id,
+      ),
+    ).toEqual([approved.id]);
+    expect(
+      (
+        await apiListMessageTemplates(deps(), reader.ctx, { channelId: c.channelAccountId })
+      ).data.map((t) => t.id),
+    ).toEqual([rejectedId, approved.id, draftId]);
+    expect(
+      (await apiListMessageTemplates(deps(), reader.ctx, { channelId: other.channelAccountId }))
+        .data,
+    ).toEqual([]);
+    const first = await apiListMessageTemplates(deps(), reader.ctx, { limit: '2' });
+    const second = await apiListMessageTemplates(deps(), reader.ctx, {
+      limit: '2',
+      cursor: first.nextCursor!,
+    });
+    expect([...first.data, ...second.data].map((t) => t.id)).toEqual([
+      rejectedId,
+      approved.id,
+      draftId,
+    ]);
+    expect(second.nextCursor).toBeNull();
+
+    // One template with its history; a deleted draft is read, and listed only when asked for.
+    const one = await apiGetMessageTemplate(deps(), reader.ctx, approved.id);
+    expect(one.history.map((h) => [h.status, h.source])).toEqual(
+      expect.arrayContaining([
+        ['submitting', 'submit'],
+        ['approved', 'sync'],
+      ]),
+    );
+    await templates.deleteTemplate(owner, draftId);
+    expect((await apiGetMessageTemplate(deps(), reader.ctx, draftId)).history[0]).toMatchObject({
+      status: 'deleted',
+      source: 'delete',
+    });
+    expect((await apiListMessageTemplates(deps(), reader.ctx, {})).data.map((t) => t.id)).toEqual([
+      rejectedId,
+      approved.id,
+    ]);
+    expect(
+      (await apiListMessageTemplates(deps(), reader.ctx, { status: 'deleted' })).data.map(
+        (t) => t.id,
+      ),
+    ).toEqual([draftId]);
+
+    // Another company's template is not found; a key that does not read templates reads nothing.
+    const theirs = await approvedTemplate(other, shipped);
+    await expectAppError(apiGetMessageTemplate(deps(), reader.ctx, theirs.id), 'not_found');
+    const sender = await apiKey(c, ['messages.send']);
+    await expectAppError(
+      apiListMessageTemplates(deps(), sender.ctx, {}),
+      'forbidden',
+      /templates\.read/,
+    );
   });
 });
 

@@ -2140,6 +2140,105 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**A template request answers 403, 404 or 422, or a template is not listed (ADR-294).** 403: the key
+lacks `templates.read` (its creator needed that permission). 404: another company's template, or an
+id that is none. 422: an unknown parameter or status, or a page size over 100. Deleted templates are
+listed only with `status=deleted`; `channelId` lists the templates of that number's WhatsApp
+Business account, and nothing for another company's number or an unknown one. A template added in
+WhatsApp Manager appears once HyFib reads the account's templates from Meta (Templates → Refresh
+from Meta). An approved template with `sendable` false has content HyFib cannot send
+(`unsupportedReason`).
+
+**An endpoint gets no `satisfaction_survey.answered` (ADR-293).** The event is sent only when a
+customer taps a button of a survey that was sent, the first time: a second tap, a skipped survey
+(Settings → Inbox's surveys off, the 24-hour window closed, the customer opted out) or a
+conversation resolved through the API sends nothing. An endpoint that names numbers gets it only for
+those numbers; the team, member and tag filters do not narrow it. A tap on an old survey message
+that is not the conversation's survey records nothing. The webhook deliveries page shows each
+attempt; `GET /satisfaction-surveys?status=answered` lists the answers to compare.
+
+**A satisfaction survey request answers 403 or 422, or a survey is not listed (ADR-292).** 403
+`forbidden` names `conversations.read`, the scope the key lacks (granted by owners and
+administrators, who read every conversation). 422 names the parameter: `status` (`skipped`, `asked`
+or `answered`), `conversationId`, `createdSince` or `limit` (1 to 100), or says the cursor is
+invalid. A conversation resolved while surveys were off (Settings → Inbox) or through the API has no
+survey; the surveys of erased contacts' conversations are left out. An answer comes after its
+survey: a survey listed as `asked` may be answered since, so read the `asked` ones again. A survey
+whose `messageStatus` is `failed` was not delivered: the conversation's messages give the error.
+
+**A saved reply request answers 403, 404, 409, 422 or 423 (ADR-291).** 403 `forbidden` names the
+scope the key lacks: `messages.reply` or `saved_replies.manage` to read, `saved_replies.manage` to
+add, change or delete (granted by owners and administrators, who supervise the inbox). 404 means the
+saved reply is not one of the key's company's, or was deleted. 409: another saved reply already uses
+the shortcut (shortcuts are kept in lower case), or the company already has 500 saved replies;
+delete one first. 422 names what is wrong: the shortcut (1 to 32 lower-case letters, digits, hyphens
+or underscores), the title (1 to 80 characters), the text (1 to 4096 characters, with no placeholder
+but {{name}}, {{agent}} and {{company}}), or a change that gives none of the three. 423 means the
+company is suspended or its plan has ended; reads still work. The audit log has each change with the
+key, naming the shortcut, and Settings → Saved replies shows a reply a key changed last as changed
+through the API.
+
+**A business hours request answers 403, 404, 409, 422 or 423, or `open` is not what a team expects
+(ADR-290).** 403 `forbidden` names the scope the key lacks: `business_hours.read` or
+`business_hours.manage` to read, `business_hours.manage` to change (granted by owners and
+administrators). 404 means the closed day is not one of the key's company's, or was opened again.
+409: the day is already marked closed. 422 names what is wrong: `days.<n>` for a day whose ranges
+overlap, end before they start or number more than 4, an opening time missing before the hours are
+turned on, or `to` before `from` or more than a year after it. 423 means the company is suspended or
+its plan has ended; reads still work. `open` follows the company's time zone (`timeZone`) and its
+closed days; while the hours are off, or have no opening time, it is always `true`, as automations'
+off-hours branches take it. The audit log has each change with the key, and Settings → Inbox shows
+it.
+
+**`PATCH /api/v1/members/{id}` answers 403, 404, 422 or 423, or a member made available gets no
+conversations (ADR-289).** 403 `forbidden` names the scope the key lacks, `availability.write`
+(granted by members who assign conversations), or with reason `not_in_plan` the company's plan
+leaves the scope out. 404 means the member is not one of the key's company's. 422 says only active
+members whose role can reply in the inbox can take conversations: `GET /members` lists them (a
+marketer, analyst or billing manager, or a member suspended or removed, cannot). 423 means the
+company is suspended or its plan has ended. A member made available gets conversations only from the
+round-robin teams they belong to, within each team's limit of open conversations: waiting ones are
+routed again when they are made available, later ones as they arrive, and the minute sweep catches
+up. The audit log has each change with the key, and the inbox shows it at once.
+
+**`GET /api/v1/pipelines/{id}/forecast` answers 403 or 404, or differs from what an integration
+added up (ADR-288).** 403 `forbidden` names the scope the key lacks, `deals.read`, or with reason
+`not_in_plan` the company's plan leaves out the CRM or the scope. 404 means the pipeline is not one
+of the key's company's. The buckets are months in the company's time zone (`timeZone`), this month
+including deals whose expected close date has passed; only open deals in active stages count, and
+each stage's value in a bucket is weighed by its chance and rounded once, so deals weighed one by
+one can add up to a minor unit or two more or less. `weightedMinor` is null while no active stage of
+the pipeline has a chance (set them in Settings → Pipelines), and `dealsWithoutChance` counts the
+deals left unweighed. Reports shows the same figures, and the board this month's.
+
+**`POST /api/v1/teams`, or `PATCH` or `DELETE /api/v1/teams/{id}`, answers 403, 404, 409, 412, 422
+or 423 (ADR-287).** 403 `forbidden` names the scope the key lacks, `teams.manage` (granted by
+members who supervise the inbox), or with reason `not_in_plan` the company's plan leaves the scope
+out. 404 means the team is not one of the key's company's, or was deleted. 409 `conflict`: another
+team has the name, ignoring case. 412 `precondition_failed`: the company has as many teams as its
+plan allows (delete one first). 422 names the field: `memberIds` for a member who cannot answer
+conversations (a marketer, analyst or billing manager, or a member suspended or removed;
+`GET /members` lists those who can), `channelIds` for a number that is not the company's
+(`GET /channels` lists them), or `routingKeywords` for a keyword over 40 characters or more than 20.
+423 means the company is suspended or its plan has ended; `GET /teams/{id}` still reads. A member
+left out of a team's `memberIds` after their role changed cannot answer conversations; the team's
+next change drops them. The audit log has each change with the key, and deleting a team sends
+`conversation.team_changed` for each of its conversations.
+
+**`POST /api/v1/pipelines` or `PATCH /api/v1/pipelines/{id}` answers 403, 404, 409, 422 or 423
+(ADR-286).** 403 `forbidden` names the scope the key lacks, `pipelines.manage` (granted by owners
+and administrators, who manage pipelines in Settings), or with reason `not_in_plan` the company's
+plan leaves out the CRM or the scope. 404 means the pipeline is not one of the key's company's. 409
+`conflict` says why: another active pipeline has the name, the company already uses 20 pipelines
+(archive one first), the pipeline changed since the `expectedVersion` given (read it again), a stage
+left out still holds open deals (move them first), the pipeline holds open deals (close or move them
+before archiving), or it is archived (restore it with `archived: false` first). 422 names what is
+wrong: two stages of one name, a stage id that is not an active stage of the pipeline, or `archived`
+sent with other changes. 423 means the company is suspended or its plan has ended. Settings →
+Pipelines marks the pipelines a key added, and the audit log has each change with the key. A request
+that adds stages, retried without `expectedVersion` or an `Idempotency-Key`, archives the stages the
+first one added and adds them again: send one of them.
+
 **`GET /api/v1/deals/{id}/history` answers 403, 404 or 422, or leaves a change out (ADR-281).** 403
 `forbidden` names the scope the key lacks, `deals.read`, or with reason `not_in_plan` the company's
 plan leaves out the CRM or the scope. 404 means the id is not one of the company's deals. 422 names
@@ -2752,13 +2851,15 @@ sent: …"), and the API answers `ownerIds` (null takes every deal's). A deal's 
 when each happens: a deal without an owner, or owned by someone else at the time, is not queued for
 the endpoint, and events no endpoint takes are not recorded, so there is nothing to replay. Changing
 a deal's owner sends `deal.owner_changed` to the endpoints of the owner it left as well as of the
-new one, if they take it (ADR-269); the deal's later events go by its new owner. The payload's
-`deal.ownerId` is the owner when it is delivered (for `deal.owner_changed`, the owner the change
-gave), so a deal given away meanwhile can name someone else. With pipelines or stages chosen too, an
-event must pass every list. A member who left stays on a list, "(no longer uses the CRM)", matching
-the deals they still own; give those deals another owner. To take more, tick members under "Deal
-owners" on the endpoint's page or choose "Every deal’s events", or `PATCH /webhook-endpoints/{id}`
-with `ownerIds` (null for every deal). Removing every deal event clears the list.
+new one, if they take it (ADR-269); the deal's later events go by its new owner. In one change, the
+steps before a change of owner (reopened, moved, details changed) go by the owner the deal had, and
+the close after it by the new one (since migration 0215). The payload's `deal.ownerId` is the owner
+when it is delivered (for `deal.owner_changed`, the owner the change gave), so a deal given away
+meanwhile can name someone else. With pipelines or stages chosen too, an event must pass every list.
+A member who left stays on a list, "(no longer uses the CRM)", matching the deals they still own;
+give those deals another owner. To take more, tick members under "Deal owners" on the endpoint's
+page or choose "Every deal’s events", or `PATCH /webhook-endpoints/{id}` with `ownerIds` (null for
+every deal). Removing every deal event clears the list.
 
 **A receiver misses a deal's change of owner, or doubts one (ADR-269).** Endpoints that take
 `deal.owner_changed` ("Deal owner") are sent one event each time a member gives a deal to another
@@ -2779,12 +2880,14 @@ events go by its assignee when each happens: a task assigned to someone else at 
 queued for the endpoint, and events no endpoint takes are not recorded, so there is nothing to
 replay. Reassigning a task sends `task.assignee_changed` to the endpoints of the member it left as
 well as of the new one, if they take it (ADR-274); the task's later events go by its new assignee.
-The payload's `task.assigneeId` is the assignee when it is delivered (for `task.assignee_changed`,
-the assignee the change gave), so a task given away meanwhile can name someone else. A member who
-left stays on a list, "(no longer uses the CRM)", matching the tasks still assigned to them; assign
-those tasks to someone else. To take more, tick members under "Task assignees" on the endpoint's
-page or choose "Every task’s events", or `PATCH /webhook-endpoints/{id}` with `taskAssigneeIds`
-(null for every task). Removing every task event clears the list.
+In one change, the reopening and a change of details go by the assignee the task had before it was
+given away, and the completion after by the new one (since migration 0215). The payload's
+`task.assigneeId` is the assignee when it is delivered (for `task.assignee_changed`, the assignee
+the change gave), so a task given away meanwhile can name someone else. A member who left stays on a
+list, "(no longer uses the CRM)", matching the tasks still assigned to them; assign those tasks to
+someone else. To take more, tick members under "Task assignees" on the endpoint's page or choose
+"Every task’s events", or `PATCH /webhook-endpoints/{id}` with `taskAssigneeIds` (null for every
+task). Removing every task event clears the list.
 
 **A receiver misses a task's change of assignee, or doubts one (ADR-274).** Endpoints that take
 `task.assignee_changed` ("Task assignee") are sent one event each time a member gives a task to

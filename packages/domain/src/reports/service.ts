@@ -33,7 +33,12 @@ import { openPeriods } from '../inbox/business-hours';
 import { loadReplyTarget, type ReplyTarget } from '../inbox/sla';
 import { parseInput } from '../validation';
 import { METRIC_DEFINITIONS, type MetricDefinition } from './definitions';
-import { forecastByMonth, forecastMonths, type MonthForecast } from '../crm/forecast';
+import {
+  forecastByMonth,
+  forecastMonths,
+  readForecastGroups,
+  type MonthForecast,
+} from '../crm/forecast';
 import { resolvePeriod, type ReportPeriod } from './period';
 
 /**
@@ -912,22 +917,7 @@ async function dealReport(
      group by p.id, p.name, p.currency, p.position, s.id, s.name, s.win_percent, s.position
      order by p.position, lower(p.name), s.position`);
   // The forecast (ADR-252): open deals in active stages by stage and expected close month.
-  const byMonth = await tx.execute<{
-    pipeline_id: string;
-    stage_id: string;
-    win_percent: number | null;
-    close_month: string | null;
-    deals: number;
-    value: string;
-  }>(sql`
-    select s.pipeline_id, s.id as stage_id, s.win_percent,
-           to_char(d.expected_close_on, 'YYYY-MM') as close_month, count(*)::int as deals,
-           coalesce(sum(d.value_minor), 0)::text as value
-      from app.crm_deals d
-      join app.crm_stages s on s.tenant_id = d.tenant_id and s.id = d.stage_id and s.archived_at is null
-      join app.crm_pipelines p on p.tenant_id = s.tenant_id and p.id = s.pipeline_id and p.archived_at is null
-     where d.tenant_id = ${tenantId} and d.status = 'open'
-     group by s.pipeline_id, s.id, s.win_percent, close_month`);
+  const byMonth = await readForecastGroups(tx, tenantId);
   const months = forecastMonths(now, period.timezone);
 
   const totals = (status: 'won' | 'lost'): DealAmount[] => {
@@ -955,15 +945,7 @@ async function dealReport(
         currency: r.currency,
         stages: [],
         forecast: forecastByMonth(
-          byMonth.rows
-            .filter((m) => m.pipeline_id === r.pipeline_id)
-            .map((m) => ({
-              stageId: m.stage_id,
-              winPercent: m.win_percent,
-              closeMonth: m.close_month,
-              deals: m.deals,
-              valueMinor: num(m.value),
-            })),
+          byMonth.filter((m) => m.pipelineId === r.pipeline_id),
           months,
           // Every active stage's chance, with open deals or not, as the board reads them.
           open.rows.filter((s) => s.pipeline_id === r.pipeline_id).map((s) => s.win_percent),

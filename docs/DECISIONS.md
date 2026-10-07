@@ -10477,6 +10477,16 @@ Decision:
 Not built: the values before a change, edits of a lost reason, a deal's notes or its contact's
 details as deal events, and who made a change in the payload.
 
+Amended (2026-10-07, found in review of PR #39): the owner list matched every event of one update
+against the owner the update left, so an update that changed a deal's details and its owner sent
+`deal.updated` to the endpoints of the new owner rather than of the owner it had when its details
+changed, and likewise its reopening and its move. Each event is now matched against the owner the
+deal had at its step, as its pipeline and stage already were: the steps before the change of owner
+(reopened, moved, details changed) against the owner before it, the close after it against the new
+one, and `deal.owner_changed` against both. The trigger passes the step's owner in the event's
+detail, and `app.capture_webhook_event` matches it and leaves it out of the stored detail, so
+payloads are unchanged (migration 0215).
+
 ## ADR-276 A webhook event when a CRM task's details change (P5-09, P4-04) (2026-10-07)
 
 Context: task events (ADR-261, ADR-274) told integrations of tasks added, given to another member,
@@ -10519,6 +10529,15 @@ Decision:
 
 Not built: the values before a change, the notes or the reminder in the payload, who made a change,
 and task events by their deal's pipeline, stage or owner.
+
+Amended (2026-10-07, found in review of PR #39): the assignee list matched every event of one update
+against the assignee the update left, so an edit that changed a task's details and its assignee sent
+`task.updated` to the endpoints of the new assignee rather than of the one it had when its details
+changed, and likewise its reopening. Each event is now matched against the assignee the task had at
+its step: reopened and details changed against the assignee before the change, the close after it
+against the new one, and `task.assignee_changed` against both. The trigger passes the step's
+assignee in the event's detail, kept out of the stored detail, so payloads are unchanged (migration
+0215).
 
 ## ADR-277 Saying who changed a CRM deal or task in its webhook events (P5-09, P4-04) (2026-10-07)
 
@@ -10837,3 +10856,361 @@ Decision:
 
 Not built: an event when payment is asked for or a cancellation asked (the order's events report the
 first), filters by link status, the link's address in the payload, and events for refunds.
+
+## ADR-286 Managing CRM pipelines through the public API (P5-08, P4-04) (2026-10-07)
+
+Context: since ADR-253 integrations read a company's pipelines, and since ADR-254 they create and
+move deals in them, but only members could add or change pipelines, in Settings → Pipelines. An
+integration that mirrors another CRM's pipelines, or sets up a new company's CRM, had a member copy
+each pipeline and stage by hand, and again whenever the other system changed. ADR-253 left changing
+pipelines through the API unbuilt.
+
+Decision:
+
+- **A new writing scope, `pipelines.manage`** ("Manage CRM pipelines"), granted with
+  `tenant.settings.manage`, the permission members manage pipelines with: only owners and
+  administrators hold it, and they create keys. Like every writing scope it is refused while the
+  company is suspended or restricted (423). Existing keys keep their scopes, and a plan version that
+  chose its scopes (ADR-092) leaves it out until a new version includes it. The CRM in the plan is
+  checked first in the transaction (403, reason `not_in_plan`), as for deals.
+- **`POST /api/v1/pipelines`** (`createPipeline`) takes a name, a currency and the stages in board
+  order, each with a chance of winning if wanted, and answers the pipeline as `GET /pipelines` gives
+  it (201). The rules are the Settings ones, through the same write (`writeCreatePipeline`): a name
+  unique among the active pipelines ignoring case (409), stage names unique in the pipeline (422),
+  at most 30 stages and 20 active pipelines (409 at the limit), the new pipeline placed after the
+  others. With an `Idempotency-Key` a retry answers the first response.
+- **`PATCH /api/v1/pipelines/{id}`** (`updatePipeline`) takes a new `name`, the `stages` as they
+  should be, or `archived`, through the Settings writes (`writeUpdatePipeline`,
+  `writeArchivePipeline`, `writeRestorePipeline`): a stage given with its id is kept with its deals,
+  renamed, moved or given another chance (left out, its chance stays); one without an id is added;
+  an active stage left out is archived, refused while it holds open deals (409), and an archived
+  stage cannot be listed (422). `archived` `true` archives the pipeline once it holds no open deals
+  and `false` restores it within the limit; either goes in a request of its own (422), and an
+  archived pipeline is restored before it changes (409). The currency never changes and pipelines
+  are never deleted, as in Settings.
+- **Versions and retries:** API pipelines now give `version`, which `expectedVersion` checks (409
+  naming the current version). A change that leaves the pipeline as it is (the same name and stages,
+  archiving an archived pipeline, restoring an active one) answers it with no new version or audit
+  entry, so a sync that sends the same state again writes nothing; members' saves in Settings still
+  move the version on every time. A request that adds stages is not safe to repeat without
+  `expectedVersion` or an `Idempotency-Key`: the retry does not name the stages the first one added,
+  so it would archive them and add them again.
+- **Recorded as the key's:** a pipeline names its creator, a member or a key
+  (`created_by_api_key_id`, migration 0206; a check holds exactly one, and 0207 validates it), shown
+  as "Added through the API" in Settings and as `createdBy` and `createdByApiKeyId` on API
+  pipelines. The audit log records `crm.pipeline_created`, `crm.pipeline_updated`,
+  `crm.pipeline_archived` and `crm.pipeline_restored` as the key, with `source: 'api'`. The company
+  data export carries the column.
+- **One write for members and keys:** the Settings operations now call the same functions
+  (`crm/pipelines.ts`), so the locks (the company's active pipelines counted under its advisory
+  lock, the pipeline's row locked for update) and the checks are the same; the API differs only in
+  its wording of a stale version, in keeping an unchanged pipeline as it is, and in letting the name
+  or the stages be left out. Settings also refuses a stage listed twice (422), which its form never
+  sends.
+
+Not built: deleting pipelines or stages (they are archived, as in Settings), bringing an archived
+stage back, changing a pipeline's currency or its place among the company's pipelines, and webhook
+events for pipeline changes.
+
+## ADR-287 Managing teams through the public API (P5-08) (2026-10-07)
+
+Context: since ADR-093 integrations list a company's teams with `conversations.read` and move
+conversations between them with `conversations.write`, but only members who supervise the inbox
+could add teams or change them, in Settings → Teams: who is in a team, which numbers feed it, its
+routing keywords and how it gives out conversations. An integration that keeps teams in step with a
+rota or a staff directory (people joining and leaving shifts, a new branch's number), or sets up a
+new company, had a supervisor change each team by hand. ADR-093 left team settings through the API
+unbuilt.
+
+Decision:
+
+- **A new writing scope, `teams.manage`** ("Manage teams"), granted with `inbox.supervise`, the
+  permission members manage teams with (owners, administrators and supervisors; owners and
+  administrators create keys). Like every writing scope it is refused while the company is suspended
+  or restricted (423), while reading a team works then, as reading scopes do. Existing keys keep
+  their scopes, and a plan version that chose its scopes (ADR-092) leaves it out until a new version
+  includes it (migration 0208 adds it to both scope checks).
+- **`GET /api/v1/teams/{id}`** (`getTeam`) gives a team's settings: name, description, `assignment`,
+  `maxOpenPerMember`, `routingKeywords`, `memberIds` (its members as `GET /members` lists them, in
+  the order they joined) and `channelIds` (the numbers whose new conversations go to it), with
+  `createdAt` and `updatedAt`. `GET /teams` takes `teams.manage` as well as `conversations.read`,
+  and still gives ids, names and how each team gives out conversations.
+- **`POST /api/v1/teams`** (`createTeam`) adds a team from a name and any of those settings, and
+  **`PATCH /api/v1/teams/{id}`** (`updateTeam`) changes the settings given, the rest kept as the
+  team has them; `memberIds` and `channelIds` replace the team's lists. Both go through the writes
+  Settings uses (`writeCreateTeam`, `writeUpdateTeam`), so the rules are the same: a name unique
+  among the company's teams ignoring case (409), keywords lowercased without repeats (at most 20, of
+  up to 40 characters), members who answer conversations (422 naming `memberIds`), the company's
+  numbers (422 naming `channelIds`; a number named here leaves the team it was in), and the plan's
+  limit of teams counted under its lock (412). Waiting conversations are routed again after the
+  change, as after a save in Settings. With an `Idempotency-Key` a retried addition answers the
+  first response; a change that leaves the team as it is answers it with no write or audit entry, so
+  a retried change needs no key.
+- **`DELETE /api/v1/teams/{id}`** (`deleteTeam`) deletes a team as Settings does
+  (`writeDeleteTeam`): its conversations leave it and keep their assignees, each sending
+  `conversation.team_changed`, and its numbers no longer route to it; the answer counts the
+  conversations that left it. A team already deleted answers 404.
+- **Recorded as the key's:** the audit log records `team.created`, `team.updated` and `team.deleted`
+  as the key, with `source: 'api'` and the request id; routing that follows is the system's, as
+  always. Teams name no creator, so no table changes beyond the scope checks.
+- **A team's members are those who answer conversations:** Settings listed every active member of a
+  team whatever their role, so a team with a member given a role that cannot answer conversations (a
+  marketer, analyst or billing manager) could no longer be saved: its form sent the member, which
+  the check refuses. Settings and the API now give as a team's members only its active members whose
+  role answers conversations, the members routing gives conversations to. Such a member stays in
+  `team_members`, listed again if their role changes back before the team is next saved, which
+  leaves them out.
+
+Not built: webhook events for changes to teams, setting members' availability through the API
+(members set their own, and supervisors theirs in Settings), the round robin's place, and a version
+check on teams (a change applies to the team as it is when the request runs, its row locked).
+
+## ADR-288 A CRM pipeline's weighted forecast through the public API (P5-08, P4-04) (2026-10-07)
+
+Context: members see a pipeline's open deals weighed by each stage's chance of winning on the board
+(ADR-242) and by expected close month in Reports (ADR-252), but integrations had only the deals and
+the stages' chances (ADR-253) to rebuild it, with the company's months, past dates counted in this
+month and the rounding per stage left for each integration to get right, so a sales dashboard could
+show figures that disagree with Reports. ADR-242 left the forecast through the API unbuilt.
+
+Decision:
+
+- **`GET /api/v1/pipelines/{id}/forecast`** (`getPipelineForecast`), with `deals.read` and the CRM
+  in the plan (403, reason `not_in_plan`), gives one pipeline's forecast now: its open deals in
+  active stages by the month they are expected to close in the company's time zone (this month with
+  dates already past, the next two months, later, and without a date), each bucket with its deals,
+  their value and that value weighed by each stage's chance, rounded once per stage. `months`,
+  `timeZone`, `currency` and `asOf` say what the buckets are; `dealsWithoutChance` counts the deals
+  in stages without a chance, which add nothing to the weighted values; and when no active stage of
+  the pipeline has a chance every `weightedMinor` is null, where Reports says where to set them.
+  Another company's pipeline and an unknown one answer 404; an archived pipeline holds no open
+  deals, so its buckets are empty.
+- **Reports' reader and arithmetic:** `readForecastGroups` (`crm/forecast.ts`) now reads the deals
+  for Reports and for the API, for every active pipeline or for one, and `forecastByMonth` weighs
+  them, so the API's buckets are Reports' and this month's weighted value is the board's (an
+  integration test compares the three). The forecast is read in one repeatable-read, read-only
+  snapshot, so the deals and the chances are of one moment; nothing is stored, and it reads while
+  the company is suspended, as every read does.
+- **The scope:** `deals.read` keys read it, since it adds up what the deals and the stages' chances
+  they already read say; the scope's description now names it. No migration.
+- **Also corrected:** the CRM module's description, shown to administrators, still said forecasting
+  was not available, though the board and Reports have shown it since ADR-242 and ADR-252.
+
+Not built: forecasts by owner or of many pipelines in one call, months further ahead, the forecast
+as it was at a past date, and the forecast in webhooks.
+
+## ADR-289 Setting members' availability through the public API (P5-08) (2026-10-07)
+
+Context: round-robin teams give conversations only to members who said they are taking them (W-038):
+each member switches it in the inbox, and members who assign conversations switch anyone's in
+Settings → Teams. A company that plans shifts in a rota or workforce tool had someone switch members
+on and off by hand at every shift change, or members forgot, and conversations waited or went to
+someone whose shift had ended. `GET /members` reads the switch (ADR-093), and ADR-287 left setting
+it through the API unbuilt.
+
+Decision:
+
+- **A new writing scope, `availability.write`** ("Set members' availability"), granted with
+  `inbox.assign`, the permission members set others' availability with (owners, administrators and
+  supervisors; owners and administrators create keys). Like every writing scope it is refused while
+  the company is suspended or restricted (423). Existing keys keep their scopes, and a plan version
+  that chose its scopes (ADR-092) leaves it out until a new version includes it (migration 0209 adds
+  it to both scope checks).
+- **`PATCH /api/v1/members/{id}`** (`updateMember`) takes `available`, `true` or `false`, and
+  answers the member's `id`, `available` and `changedAt`, when the switch last changed. Only an
+  active member whose role answers conversations is made available (422 otherwise, as in Settings);
+  any of the company's members can be made unavailable; another company's member and an unknown one
+  answer 404. Members made unavailable keep the conversations they have; making one available routes
+  waiting conversations again (up to 20, as Settings does).
+- **One write for members and keys:** `writeMemberAvailability` (`inbox/teams.ts`) now serves the
+  switch in the inbox and Settings and the API. It locks the member's row for share, so a suspension
+  or a change of role at the same time either waits and then marks the member unavailable again, or
+  comes first and is refused here; Settings read the member without a lock, so a member suspended
+  while being switched on could be left marked available. It writes the switch and tells the inbox
+  (`member.availability`), and the caller audits the change and routes.
+- **Retries:** through the API a member already so is answered as they are, with the same
+  `changedAt`, no audit entry, no event and no routing, so a rota tool can send each shift's state
+  every time; Settings and the inbox write every time, as before.
+- **Recorded as the key's:** the audit log records `member.availability_changed` with `available`
+  and `source: 'api'` as the key; routing that follows is the system's, as always.
+
+Not built: shifts or schedules kept in HyFib, availability per team, and webhook events when a
+member's availability changes.
+
+## ADR-290 Business hours and closed days through the public API (P5-08) (2026-10-07)
+
+Context: a company's business hours and closed days decide when reply-due timers run and which
+branch an automation's off-hours step takes, but only owners and administrators set them, in
+Settings → Inbox, and nothing outside the app could read them. A website chat or a chatbot that says
+whether someone will answer, a workforce tool that keeps the opening hours, or a company that loads
+each year's public holidays, had to copy them by hand and keep them in step.
+
+Decision:
+
+- **Two scopes:** `business_hours.read` ("Read business hours"), granted with `tenant.read`, the
+  permission members see the hours with, and `business_hours.manage` ("Manage business hours"), a
+  writing scope granted with `tenant.settings.manage`, the permission owners and administrators set
+  them with, which reads them too. Writes are refused while the company is suspended or restricted
+  (423); reads work then. Existing keys keep their scopes, and a plan version that chose its scopes
+  (ADR-092) leaves them out until a new version includes them (migration 0210 adds both to the scope
+  checks).
+- **`GET /api/v1/business-hours`** (`getBusinessHours`) gives the week in the company's time zone,
+  seven days Monday first, each with its opening ranges as `HH:MM` (24:00 is midnight), whether the
+  hours are turned on, and `open` now: within the hours and not on a closed day, or always while the
+  hours are off or have no opening time, as automations' off-hours branches take it; with `opensAt`
+  while closed (within a year) and `closesAt` while open (within 14 days).
+- **`PUT /api/v1/business-hours`** (`updateBusinessHours`) replaces the week and the switch, checked
+  as Settings checks them through the same rules (`checkDayRanges`, now shared with the text
+  Settings parses): at most 4 ranges a day, each ending after it starts and none overlapping (422
+  naming `days.<n>`), and an opening time before the hours are turned on (422). It writes through
+  `writeBusinessHours`, which Settings now uses too; the settings row's last editor is null for a
+  key, as for other key writes. A week and switch the company already has are answered as they are,
+  with no audit entry.
+- **Closed days:** `GET /api/v1/business-hours/closed-days` (`listClosedDays`) gives the closed days
+  from `from` to `to`, a year at most and from today in the company's time zone by default, in
+  order, so a read stays bounded however many past days a company kept; `POST` (`createClosedDay`)
+  marks a day closed (409 when it already is; once per `Idempotency-Key` when one is given) and
+  `DELETE /business-hours/closed-days/{id}` (`deleteClosedDay`) opens it again (404 when it is not
+  closed), through `writeAddClosedDay` and `writeRemoveClosedDay`, which Settings now uses too.
+- **Recorded as the key's:** the audit log records `inbox.business_hours_updated`,
+  `inbox.closed_day_added` and `inbox.closed_day_removed` as the key, with `source: 'api'`.
+  Reply-due timers and off-hours branches follow a change at once, as after one in Settings: timers
+  are worked out from the hours whenever they are read.
+
+Not built: hours per team or per WhatsApp number, holiday calendars imported from a feed, and
+webhook events when the hours or closed days change.
+
+## ADR-291 Saved replies through the public API (P5-08) (2026-10-07)
+
+Context: saved replies, the answers members put in the reply box with {{name}}, {{agent}} and
+{{company}} filled in, were kept only in Settings → Saved replies by members who supervise the
+inbox, and nothing outside the app could read them. A company that keeps its answers in a help
+centre or a knowledge base had to copy each one by hand and keep them in step, and a chatbot or a
+tool replying through the API (`messages.reply`) could not use the answers members use.
+
+Decision:
+
+- **One new scope:** `saved_replies.manage` ("Manage saved replies"), a writing scope granted with
+  `inbox.supervise`, the permission members manage saved replies with, which reads them too; keys
+  with `messages.reply` read them, as members who reply do. Writes are refused while the company is
+  suspended or restricted (423); reads work then. Existing keys keep their scopes, and a plan
+  version that chose its scopes (ADR-092) leaves it out until a new version includes it (migration
+  0211 adds it to the scope checks).
+- **`GET /api/v1/saved-replies`** (`listSavedReplies`) gives all of the company's saved replies by
+  shortcut, their placeholders as written, with who added and last changed each: a member (never
+  which) or a key, by its id.
+- **`POST /api/v1/saved-replies`** (`createSavedReply`) adds one, checked as Settings checks it: a
+  shortcut of 1 to 32 lower-case letters, digits, hyphens or underscores, unique in the company (409
+  otherwise); a title of at most 80 characters; and a text of at most 4096 characters with no
+  placeholder but the three (422 otherwise); once per `Idempotency-Key` when one is given.
+  **`PATCH /api/v1/saved-replies/{id}`** (`updateSavedReply`) changes what is given and keeps the
+  rest, with the same checks; a change that leaves the reply as it is is answered as it is, with no
+  audit entry. **`DELETE /api/v1/saved-replies/{id}`** (`deleteSavedReply`) deletes one (404 when
+  the company has no such reply).
+- **At most 500 a company:** Settings and the reply box list the first 500 by shortcut, so a reply
+  past them was never seen. Adding one more, from a key or in Settings, is refused (409), counted
+  under a lock per company so two additions at once never pass the limit; a company that already has
+  more keeps them.
+- **Recorded as the key's:** a saved reply now names the key that added or last changed it
+  (`created_by_api_key_id` and `updated_by_api_key_id`, migrations 0211 and 0212), and Settings
+  shows a reply a key changed last as changed through the API. The last editor is the member when
+  one is named, otherwise the key, so a change from a web server of an earlier release, which names
+  its member and leaves the key's column as it is, stays valid and is shown as the member's. The
+  writes are shared with Settings (`writeCreateSavedReply`, `writeUpdateSavedReply` and
+  `writeDeleteSavedReply`), and the audit log records `saved_reply.created`, `saved_reply.updated`
+  and `saved_reply.deleted` as the key, with `source: 'api'`, naming the shortcut, never the text.
+
+Not built: saved replies per team or for one member only, files or templates in a saved reply,
+filling the placeholders through the API, and webhook events when saved replies change.
+
+## ADR-292 Satisfaction surveys through the public API (P5-08) (2026-10-07)
+
+Context: when a member resolves a conversation while satisfaction surveys are on, HyFib asks the
+customer to rate the help with three buttons, or records why it did not ask (ADR-032, turned on in
+Settings → Inbox). The answers were seen only in Reports, as counts, and in each conversation; a
+company that tracks satisfaction in its own warehouse or CRM, or follows up a poor rating, could not
+read them, except by finding the survey messages and the taps among every conversation's messages.
+
+Decision:
+
+- **`GET /api/v1/satisfaction-surveys`** (`listSatisfactionSurveys`) lists the company's surveys
+  newest first by when they were sent or skipped, on exact keyset pages, with filters that combine:
+  a conversation, a status, and a time they were created at or after. Each survey gives its
+  conversation, its status (`skipped` with the reason, `asked`, or `answered`), its message and that
+  message's delivery status, the score (3 for the first and best button, 1 for the third) and the
+  customer's tap once answered, and the member it was assigned to when resolved (credited with the
+  answer) and the member who resolved it, by id.
+- **No new scope:** keys with `conversations.read`, granted with `inbox.read_all`, read them. Those
+  keys already read the survey messages and the customers' taps among the conversations' messages,
+  and the members by id; members who read every conversation see each conversation's survey in the
+  inbox. The surveys of erased contacts' conversations are left out, as the conversations are. Reads
+  work while the company is suspended.
+- **Catching up:** an answer comes after its survey, so a reader reads the surveys it last saw
+  `asked` again, or reads from a little before its previous pass. Conversations resolved through the
+  API are never surveyed (ADR-075), and the question and labels are the company's settings at the
+  time, in the survey message.
+
+Not built: a webhook event when a customer answers, survey settings through the API, and surveys
+sent through the API.
+
+## ADR-293 A webhook event when a customer answers a satisfaction survey (P5-09) (2026-10-07)
+
+Context: ADR-292 lets keys read satisfaction surveys, but an integration that follows up a poor
+rating, or keeps a live satisfaction score, had to read the surveys again and again to see answers
+arrive, which come minutes or hours after the survey.
+
+Decision:
+
+- **`satisfaction_survey.answered`** ("Satisfaction survey answered"), captured by a trigger on
+  `app.csat_surveys` when a survey records its answer: the customer's first tap on one of its
+  buttons, which the ingestion of the customer's message writes; the guard of 0009 lets a survey
+  record one answer, once, so each survey sends the event once at most, and surveys skipped or never
+  answered send nothing (migrations 0213 and 0214).
+- **The payload** gives the survey as `GET /satisfaction-surveys` reads it when the event is
+  delivered (`toApiSatisfactionSurvey`, now in `api/satisfaction-survey-view.ts`, which the API and
+  the event share), with its conversation, its contact (as erasure left it) and its WhatsApp number.
+- **Filters:** it happens on the conversation's number, so the number filter narrows it, as it does
+  the conversation's other events (0213 replaces 0204's capture with the event among the number's
+  events, and the endpoints' number check). The team, member and tag filters of the conversation
+  events do not narrow it.
+- **Who receives it:** endpoints, which owners and administrators add in Settings → Webhooks or keys
+  add with `webhooks.manage` (granted only with `developer.manage`), as for every other event.
+
+Not built: the team, member and tag filters for this event, an event when a survey is sent or
+skipped, and a filter by score.
+
+## ADR-294 Message templates of every status through the public API (P5-08) (2026-10-07)
+
+Context: `GET /templates` lists the approved templates a send can use, with their variables
+(ADR-052). An integration that manages a company's templates, to learn whether Meta approved the one
+it waits for, why Meta rejected one or which were paused or disabled, could not read drafts,
+templates Meta was reviewing, rejected, paused or disabled ones, or their status changes: only the
+Templates page showed them.
+
+Decision:
+
+- **`GET /api/v1/message-templates`** (`listMessageTemplates`) lists the company's templates of
+  every status but deleted, as the Templates page lists them, newest first by when HyFib added them,
+  on exact keyset pages, with filters that combine: a status (`deleted` lists only the deleted
+  ones), a number (the templates of its WhatsApp Business account; another company's number, or an
+  unknown one, lists nothing) and a name.
+- **`GET /api/v1/message-templates/{id}`** (`getMessageTemplate`) reads one template of any status,
+  deleted included, with its latest 50 status changes newest first, as the template's page shows
+  them: each status with Meta's reason or HyFib's and where it came from (`submit`, `sync`, `send`
+  or `delete`), without the member who made it. Another company's template answers 404, as an
+  unknown one does.
+- **Each template** gives its status, Meta's rejection reason and quality rating as Meta gave them,
+  why HyFib could not submit it, whether it was added in HyFib or found at Meta, its version,
+  whether a send can use it now (approved, with content HyFib can send, as `GET /templates` decides:
+  a photo, video or document header counts, since a send gives its file), its content as the
+  template editor represents it, or null with the reason when HyFib cannot represent it
+  (authentication templates, named variables, other headers and buttons), the file its header takes,
+  and the active numbers of its WhatsApp Business account. Never Meta's template id or the raw
+  components Meta returned.
+- **No new scope:** keys with `templates.read`, granted with the members' `templates.read`, read
+  them; members with that permission see every template on the Templates page. `GET /templates`
+  keeps its meaning and shape, so integrations that send from that list never pick a template they
+  cannot send. Reads run in read-only transactions and work while the company is suspended.
+
+Not built: creating, changing, submitting and deleting templates through the API, template content
+HyFib cannot represent given raw, and the members who made each change.

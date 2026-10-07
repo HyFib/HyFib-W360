@@ -878,6 +878,73 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    server answers Settings → Webhooks with an error for a company with an endpoint taking it: add it
    to endpoints once the rollout ends, and turn it off before rolling web servers back.
 
+   Migration 0206 (ADR-286) widens the API keys' and plan versions' scope checks again for
+   `pipelines.manage`, with the same brief locks, validated at once, and adds
+   `crm_pipelines.created_by_api_key_id` with its foreign key and the creator check NOT VALID, so
+   the table is not read under the lock, letting a pipeline have no member; 0207 validates both,
+   reading the table without blocking its writes. Older servers keep adding pipelines as members,
+   which the check accepts, and workers do not read the column. Until the web rollout ends, an old
+   web server answers Settings → API keys with an error for a company with a key holding the new
+   scope, the new requests with 405 or 404, and API pipelines without `version`, `createdBy` and
+   `createdByApiKeyId`; rolling web servers back does the same.
+
+   Migration 0208 (ADR-287) widens the API keys' and plan versions' scope checks again for
+   `teams.manage`, with the same brief locks, validated at once; no other table changes. Until the
+   web rollout ends, an old web server answers Settings → API keys with an error for a company with
+   a key holding the new scope and the new requests with 405 or 404, and still lists in Settings →
+   Teams a team's members whose role cannot answer conversations; rolling web servers back does the
+   same.
+
+   ADR-288 has no migration. Until the web rollout ends, an old web server answers
+   `GET /api/v1/pipelines/{id}/forecast` with 404; rolling web servers back does the same. Workers
+   are not affected.
+
+   Migration 0209 (ADR-289) widens the API keys' and plan versions' scope checks again for
+   `availability.write`, with the same brief locks, validated at once; no other table changes. Until
+   the web rollout ends, an old web server answers Settings → API keys with an error for a company
+   with a key holding the new scope, and `PATCH /api/v1/members/{id}` with 405 or 404; rolling web
+   servers back does the same.
+
+   Migration 0210 (ADR-290) widens the API keys' and plan versions' scope checks again for
+   `business_hours.read` and `business_hours.manage`, with the same brief locks, validated at once;
+   no other table changes. Until the web rollout ends, an old web server answers Settings → API keys
+   with an error for a company with a key holding a new scope, and the business hours requests with
+   405 or 404; rolling web servers back does the same.
+
+   Migrations 0211 and 0212 (ADR-291) widen the API keys' and plan versions' scope checks again for
+   `saved_replies.manage`, with the same brief locks, validated at once, and give
+   `app.saved_replies` the columns naming the key that added or last changed a reply: 0211 adds
+   them, with their foreign keys and checks NOT VALID, under a brief lock (the member columns become
+   nullable), and 0212 validates them, reading the table without blocking its writes. Until the web
+   rollout ends, an old web server answers Settings → API keys with an error for a company with a
+   key holding the new scope, and the saved reply requests with 405 or 404; it shows a reply a key
+   added or changed without an editor's name, and its changes name its member, which the editor
+   check accepts. Rolling web servers back does the same.
+
+   ADR-292 has no migration. Until the web rollout ends, an old web server answers
+   `GET /api/v1/satisfaction-surveys` with 404; rolling web servers back does the same.
+
+   Migration 0213 (ADR-293) replaces the endpoints' event and number checks (validated at once: at
+   most 10 endpoints per company) and the events' type check (NOT VALID; 0214 validates it while
+   captures go on), adds the trigger on `app.csat_surveys` and its function, and replaces
+   `app.capture_webhook_event` with the same signature (0204's, with the event among those of a
+   number). Workers roll out before web servers, so no endpoint takes the event before every worker
+   can describe it. A worker from before it fails each delivery of the event without an attempt
+   (`payload_failed`; replay it once newer workers run), so before rolling workers back to such an
+   image, turn the event off on the endpoints that take it. Until the web rollout ends, an old web
+   server answers Settings → Webhooks with an error for a company with an endpoint taking it: add it
+   to endpoints once the rollout ends, and turn it off before rolling web servers back.
+
+   ADR-294 has no migration. Until the web rollout ends, an old web server answers
+   `GET /api/v1/message-templates` and `GET /api/v1/message-templates/{id}` with 404; rolling web
+   servers back does the same.
+
+   Migration 0215 (review fix of ADR-275 and ADR-276) replaces the deal and task capture trigger
+   functions and `app.capture_webhook_event` in place, with the same signatures (0213's capture), so
+   endpoints naming owners or assignees are matched against the owner or assignee at each event's
+   step. Only the database changes: workers and web servers of any version keep working, and stored
+   events and payloads are unchanged.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

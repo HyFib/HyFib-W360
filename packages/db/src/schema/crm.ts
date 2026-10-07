@@ -35,7 +35,9 @@ export const crmPipelines = appSchema.table('crm_pipelines', {
   position: integer('position').notNull().default(0),
   archivedAt: tz('archived_at'),
   version: integer('version').notNull().default(1),
-  createdByMembershipId: uuid('created_by_membership_id').notNull(),
+  /** Who added the pipeline: exactly one of a member and a key (ADR-286, migration 0206). */
+  createdByMembershipId: uuid('created_by_membership_id'),
+  createdByApiKeyId: uuid('created_by_api_key_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });

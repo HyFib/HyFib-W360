@@ -18,6 +18,7 @@ export const WEBHOOK_EVENT_TYPES = [
   'conversation.status_changed',
   'conversation.assignment_changed',
   'conversation.team_changed',
+  'satisfaction_survey.answered',
   'contact.created',
   'contact.updated',
   'contact.erased',

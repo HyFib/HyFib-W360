@@ -185,11 +185,35 @@ export const WEEKDAY_NAMES = [
   'Sunday',
 ] as const;
 
-function parseTime(text: string): number | null {
+/** Minutes after midnight of a time written as HH:MM (24:00 for midnight at the end), or null. */
+export function parseTime(text: string): number | null {
   const m = TIME_RE.exec(text.trim());
   if (!m) return null;
   const minutes = Number(m[1]) * 60 + Number(m[2]);
   return minutes > 1440 ? null : minutes;
+}
+
+/**
+ * Checks one day's ranges as Settings and the API (ADR-290) take them: at most
+ * MAX_RANGES_PER_DAY, each ending after it starts, and none overlapping. Answers them in order.
+ */
+export function checkDayRanges(
+  input: readonly { opens: number; closes: number }[],
+): { ok: true; ranges: { opens: number; closes: number }[] } | { ok: false; message: string } {
+  if (input.length > MAX_RANGES_PER_DAY)
+    return { ok: false, message: `Use at most ${MAX_RANGES_PER_DAY} time ranges a day.` };
+  if (input.some((r) => r.opens >= 1440)) {
+    return { ok: false, message: 'A range must start before midnight.' };
+  }
+  if (input.some((r) => r.closes <= r.opens)) {
+    return { ok: false, message: 'A range must end after it starts; use 24:00 for midnight.' };
+  }
+  const ranges = [...input].sort((x, y) => x.opens - y.opens);
+  for (let i = 1; i < ranges.length; i += 1) {
+    if ((ranges[i] as { opens: number }).opens < (ranges[i - 1] as { closes: number }).closes)
+      return { ok: false, message: 'Time ranges on the same day must not overlap.' };
+  }
+  return { ok: true, ranges };
 }
 
 /**
@@ -221,12 +245,28 @@ export function parseDayRanges(
     }
     ranges.push({ opens, closes });
   }
-  ranges.sort((x, y) => x.opens - y.opens);
-  for (let i = 1; i < ranges.length; i += 1) {
-    if ((ranges[i] as { opens: number }).opens < (ranges[i - 1] as { closes: number }).closes)
-      return { ok: false, message: 'Time ranges on the same day must not overlap.' };
+  return checkDayRanges(ranges);
+}
+
+/**
+ * The weekly intervals of seven days' checked ranges, Monday first (Settings, and keys since
+ * ADR-290). Business hours are not turned on without an opening time.
+ */
+export function scheduleIntervals(
+  enabled: boolean,
+  days: readonly (readonly { opens: number; closes: number }[])[],
+): BusinessInterval[] {
+  const intervals: BusinessInterval[] = [];
+  days.forEach((ranges, i) => {
+    for (const r of ranges) intervals.push({ weekday: i + 1, opens: r.opens, closes: r.closes });
+  });
+  if (enabled && intervals.length === 0) {
+    throw new AppError(
+      'validation_failed',
+      'Add at least one opening time before turning business hours on.',
+    );
   }
-  return { ok: true, ranges };
+  return intervals;
 }
 
 export function formatMinutes(minutes: number): string {
@@ -259,12 +299,15 @@ export interface BusinessHoursView {
   holidays: { id: string; day: string; name: string }[];
 }
 
-/** Loads a company's calendar; `enabled` is false when business hours are off. */
+/**
+ * Loads a company's calendar; `enabled` is false when business hours are off or have no opening
+ * time, and `turnedOn` is the switch itself.
+ */
 export async function loadBusinessCalendar(
   tx: Tx,
   tenantId: string,
   timezone: string,
-): Promise<{ enabled: boolean; calendar: BusinessCalendar }> {
+): Promise<{ enabled: boolean; turnedOn: boolean; calendar: BusinessCalendar }> {
   const [settings] = await tx
     .select({ enabled: messagingSettings.businessHoursEnabled })
     .from(messagingSettings)
@@ -288,6 +331,7 @@ export async function loadBusinessCalendar(
   };
   return {
     enabled: settings?.enabled === true && rows.length > 0,
+    turnedOn: settings?.enabled === true,
     calendar: {
       timezone,
       intervals: rows.map((r) => ({
@@ -298,6 +342,82 @@ export async function loadBusinessCalendar(
       closedDays: new Set(closed.map((c) => c.day)),
     },
   };
+}
+
+/**
+ * Replaces the company's weekly schedule and turns business hours on or off (Settings, and keys
+ * since ADR-290). `updatedByUserId` is the member's, or null for a key. The caller audits it.
+ */
+export async function writeBusinessHours(
+  tx: Tx,
+  tenantId: string,
+  enabled: boolean,
+  intervals: readonly BusinessInterval[],
+  updatedByUserId: string | null,
+  now: Date,
+): Promise<void> {
+  await tx
+    .insert(messagingSettings)
+    .values({
+      tenantId,
+      optOutKeywords: [...DEFAULT_MESSAGING_SETTINGS.optOutKeywords],
+      marketingOptOutKeywords: [...DEFAULT_MESSAGING_SETTINGS.marketingOptOutKeywords],
+      optInKeywords: [...DEFAULT_MESSAGING_SETTINGS.optInKeywords],
+      requireMarketingOptIn: DEFAULT_MESSAGING_SETTINGS.requireMarketingOptIn,
+      businessHoursEnabled: enabled,
+      updatedByUserId,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: messagingSettings.tenantId,
+      set: { businessHoursEnabled: enabled, updatedByUserId, updatedAt: now },
+    });
+  await tx.delete(businessHours).where(eq(businessHours.tenantId, tenantId));
+  if (intervals.length) {
+    await tx.insert(businessHours).values(
+      intervals.map((iv) => ({
+        id: uuidv7(),
+        tenantId,
+        weekday: iv.weekday,
+        opensAt: formatMinutes(iv.opens),
+        closesAt: formatMinutes(iv.closes),
+      })),
+    );
+  }
+}
+
+/** A day already marked closed, as a conflict; any other error as it is. */
+export function closedDayError(error: unknown): unknown {
+  return isUniqueViolation(error, 'business_holidays_day_uq')
+    ? new AppError('conflict', 'That day is already marked closed.')
+    : error;
+}
+
+/**
+ * Marks a day closed (Settings, and keys since ADR-290), answering its id. The caller audits it and
+ * maps a day already closed with `closedDayError`.
+ */
+export async function writeAddClosedDay(
+  tx: Tx,
+  tenantId: string,
+  data: { day: string; name: string },
+): Promise<string> {
+  const id = uuidv7();
+  await tx.insert(businessHolidays).values({ id, tenantId, day: data.day, name: data.name });
+  return id;
+}
+
+/** Opens a closed day again (Settings, and keys since ADR-290); null when there is no such day. */
+export async function writeRemoveClosedDay(
+  tx: Tx,
+  tenantId: string,
+  id: string,
+): Promise<{ day: string; name: string } | null> {
+  const [deleted] = await tx
+    .delete(businessHolidays)
+    .where(and(eq(businessHolidays.tenantId, tenantId), eq(businessHolidays.id, id)))
+    .returning({ day: businessHolidays.day, name: businessHolidays.name });
+  return deleted ?? null;
 }
 
 export function createBusinessHoursService(deps: { db: Database; clock: Clock }) {
@@ -348,56 +468,25 @@ export function createBusinessHoursService(deps: { db: Database; clock: Clock })
     async updateBusinessHours(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'tenant.settings.manage');
       const data = parseInput(businessHoursSchema, input);
-      const intervals: BusinessInterval[] = [];
-      data.days.forEach((text, i) => {
+      const days = data.days.map((text, i) => {
         const parsed = parseDayRanges(text);
         if (!parsed.ok) {
           throw new AppError('validation_failed', `${WEEKDAY_NAMES[i]}: ${parsed.message}`, {
             issues: [{ path: `days.${i}`, message: parsed.message }],
           });
         }
-        for (const r of parsed.ranges) intervals.push({ weekday: i + 1, ...r });
+        return parsed.ranges;
       });
-      if (data.enabled && intervals.length === 0) {
-        throw new AppError(
-          'validation_failed',
-          'Add at least one opening time before turning business hours on.',
-        );
-      }
+      const intervals = scheduleIntervals(data.enabled, days);
       await db.run(ctx.scope, async (tx) => {
-        const now = clock.now();
-        await tx
-          .insert(messagingSettings)
-          .values({
-            tenantId: ctx.tenant.id,
-            optOutKeywords: [...DEFAULT_MESSAGING_SETTINGS.optOutKeywords],
-            marketingOptOutKeywords: [...DEFAULT_MESSAGING_SETTINGS.marketingOptOutKeywords],
-            optInKeywords: [...DEFAULT_MESSAGING_SETTINGS.optInKeywords],
-            requireMarketingOptIn: DEFAULT_MESSAGING_SETTINGS.requireMarketingOptIn,
-            businessHoursEnabled: data.enabled,
-            updatedByUserId: ctx.user.id,
-            updatedAt: now,
-          })
-          .onConflictDoUpdate({
-            target: messagingSettings.tenantId,
-            set: {
-              businessHoursEnabled: data.enabled,
-              updatedByUserId: ctx.user.id,
-              updatedAt: now,
-            },
-          });
-        await tx.delete(businessHours).where(eq(businessHours.tenantId, ctx.tenant.id));
-        if (intervals.length) {
-          await tx.insert(businessHours).values(
-            intervals.map((iv) => ({
-              id: uuidv7(),
-              tenantId: ctx.tenant.id,
-              weekday: iv.weekday,
-              opensAt: formatMinutes(iv.opens),
-              closesAt: formatMinutes(iv.closes),
-            })),
-          );
-        }
+        await writeBusinessHours(
+          tx,
+          ctx.tenant.id,
+          data.enabled,
+          intervals,
+          ctx.user.id,
+          clock.now(),
+        );
         await recordAudit(
           tx,
           ctx,
@@ -417,10 +506,7 @@ export function createBusinessHoursService(deps: { db: Database; clock: Clock })
       const data = parseInput(holidaySchema, input);
       try {
         await db.run(ctx.scope, async (tx) => {
-          const id = uuidv7();
-          await tx
-            .insert(businessHolidays)
-            .values({ id, tenantId: ctx.tenant.id, day: data.day, name: data.name });
+          const id = await writeAddClosedDay(tx, ctx.tenant.id, data);
           await recordAudit(
             tx,
             ctx,
@@ -434,9 +520,7 @@ export function createBusinessHoursService(deps: { db: Database; clock: Clock })
           );
         });
       } catch (error) {
-        if (isUniqueViolation(error, 'business_holidays_day_uq'))
-          throw new AppError('conflict', 'That day is already marked closed.');
-        throw error;
+        throw closedDayError(error);
       }
     },
 
@@ -444,12 +528,7 @@ export function createBusinessHoursService(deps: { db: Database; clock: Clock })
       assertCan(ctx, 'tenant.settings.manage');
       if (!z.uuid().safeParse(holidayId).success) throw notFound('Closed day');
       await db.run(ctx.scope, async (tx) => {
-        const [deleted] = await tx
-          .delete(businessHolidays)
-          .where(
-            and(eq(businessHolidays.tenantId, ctx.tenant.id), eq(businessHolidays.id, holidayId)),
-          )
-          .returning({ day: businessHolidays.day });
+        const deleted = await writeRemoveClosedDay(tx, ctx.tenant.id, holidayId);
         if (!deleted) throw notFound('Closed day');
         await recordAudit(
           tx,

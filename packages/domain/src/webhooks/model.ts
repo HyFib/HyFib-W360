@@ -47,6 +47,7 @@ export const WEBHOOK_EVENT_KEYS = [
   'conversation.status_changed',
   'conversation.assignment_changed',
   'conversation.team_changed',
+  'satisfaction_survey.answered',
   'contact.created',
   'contact.updated',
   'contact.erased',
@@ -102,6 +103,11 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       label: 'Conversation team',
       description:
         'A conversation was placed in a team, moved to another or taken out of one: by routing, a member, an automation, an API key or the team being deleted.',
+    },
+    'satisfaction_survey.answered': {
+      label: 'Satisfaction survey answered',
+      description:
+        'A customer answered the satisfaction survey sent when a member resolved their conversation, by tapping one of its three buttons.',
     },
     'contact.created': {
       label: 'Contact added',
@@ -697,8 +703,9 @@ export function webhookTakesAutomationRuns(eventTypes: readonly WebhookEventType
 
 /**
  * The events that happen on a WhatsApp number, which an endpoint can take for chosen numbers
- * (ADR-170): a campaign's are on the number it sends from, a Payment Link's on its order's (ADR-285).
- * Consent, contact, template, deal, task and note events belong to no number.
+ * (ADR-170): a campaign's are on the number it sends from, a Payment Link's on its order's (ADR-285),
+ * a survey's answer on its conversation's (ADR-293). Consent, contact, template, deal, task and note
+ * events belong to no number.
  */
 export const WEBHOOK_CHANNEL_EVENTS = [
   'message.received',
@@ -706,6 +713,7 @@ export const WEBHOOK_CHANNEL_EVENTS = [
   'conversation.status_changed',
   'conversation.assignment_changed',
   'conversation.team_changed',
+  'satisfaction_survey.answered',
   'automation.run_started',
   'automation.run_ended',
   'order.received',

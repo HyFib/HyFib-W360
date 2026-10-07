@@ -42,7 +42,11 @@ export default async function SavedRepliesPage({ params }: { params: Promise<{ s
                   <p className="whitespace-pre-wrap break-words text-sm">{r.body}</p>
                   <p className="text-xs text-muted-foreground">
                     Updated {formatDateTime(r.updatedAt, tz)}
-                    {r.updatedByName ? ` by ${r.updatedByName}` : ''}
+                    {r.updatedThroughApi
+                      ? ' through the API'
+                      : r.updatedByName
+                        ? ` by ${r.updatedByName}`
+                        : ''}
                   </p>
                   {manage ? (
                     <details>

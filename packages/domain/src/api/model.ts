@@ -30,10 +30,16 @@ export const API_SCOPE_KEYS = [
   'orders.request_payment',
   'deals.read',
   'deals.write',
+  'pipelines.manage',
   'tasks.read',
   'tasks.write',
   'notes.read',
   'notes.write',
+  'teams.manage',
+  'availability.write',
+  'business_hours.read',
+  'business_hours.manage',
+  'saved_replies.manage',
   'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
 
@@ -54,7 +60,8 @@ export const API_SCOPE_INFO: Record<
   },
   'templates.read': {
     label: 'Read templates',
-    description: 'List approved templates and their variables.',
+    description:
+      "List approved templates and their variables, and read every template of the company, drafts and those Meta reviews included, with Meta's review and each template's latest status changes.",
     permission: 'templates.read',
     writes: false,
   },
@@ -110,7 +117,7 @@ export const API_SCOPE_INFO: Record<
   'conversations.read': {
     label: 'Read conversations',
     description:
-      "List the company's conversations and read their messages, one conversation or all of them, including what contacts wrote and the files they sent, follow the messages as they change, and read the conversations' internal notes, with the teams and the members conversations can be assigned to (names only).",
+      "List the company's conversations and read their messages, one conversation or all of them, including what contacts wrote and the files they sent, follow the messages as they change, and read the conversations' internal notes and the satisfaction surveys sent when members resolve them, with the teams and the members conversations can be assigned to (names only).",
     permission: 'inbox.read_all',
     writes: false,
   },
@@ -180,7 +187,7 @@ export const API_SCOPE_INFO: Record<
   'deals.read': {
     label: 'Read CRM deals',
     description:
-      "List the company's CRM pipelines with their stages and each stage's chance of winning, and its deals with their pipeline, stage, status, value, expected close date and owner, and their contact and conversation ids. Never notes, tasks or the timeline. Needs the CRM in the company's plan.",
+      "List the company's CRM pipelines with their stages and each stage's chance of winning, and its deals with their pipeline, stage, status, value, expected close date and owner, and their contact and conversation ids, and read each pipeline's weighted forecast as Reports shows it. Never notes, tasks or the timeline. Needs the CRM in the company's plan.",
     permission: 'crm.read',
     writes: false,
   },
@@ -189,6 +196,13 @@ export const API_SCOPE_INFO: Record<
     description:
       "Create deals for the company's contacts in its active pipelines and change them as members do on the board: their title, value, owner and expected close date, their stage or pipeline, and closing them as won or lost or reopening them, recorded as done through the API. Needs the CRM in the company's plan.",
     permission: 'crm.write',
+    writes: true,
+  },
+  'pipelines.manage': {
+    label: 'Manage CRM pipelines',
+    description:
+      "Add CRM pipelines with their stages and each stage's chance of winning, rename them, add, rename, reorder and remove their stages and change the chances, and archive and restore them, as owners and administrators do in Settings → Pipelines, recorded in the audit log as done by the key. Never deletes a pipeline or its deals. Needs the CRM in the company's plan.",
+    permission: 'tenant.settings.manage',
     writes: true,
   },
   'tasks.read': {
@@ -217,6 +231,41 @@ export const API_SCOPE_INFO: Record<
     description:
       "Add notes to the timeline of one of the company's contacts, or of one of its deals and so the deal's contact, as members do on the contact and deal pages, recorded as written through the API. Never read the timeline. Needs the CRM in the company's plan.",
     permission: 'crm.write',
+    writes: true,
+  },
+  'teams.manage': {
+    label: 'Manage teams',
+    description:
+      "Read the company's teams with their settings, members and numbers, add teams, change how they give out conversations, their routing keywords, members and numbers, and delete them, as members who supervise the inbox do in Settings → Teams, recorded in the audit log as done by the key. A deleted team's conversations leave it and keep their assignees.",
+    permission: 'inbox.supervise',
+    writes: true,
+  },
+  'availability.write': {
+    label: "Set members' availability",
+    description:
+      "Set whether each of the company's members takes the conversations routing gives out, as members who assign conversations switch it in Settings → Teams, recorded in the audit log as done by the key. Only active members whose role answers conversations are made available, and making one available routes waiting conversations again.",
+    permission: 'inbox.assign',
+    writes: true,
+  },
+  'business_hours.read': {
+    label: 'Read business hours',
+    description:
+      "Read the company's business hours, whether it is open now and when it next opens or closes, and its closed days, as members see them in Settings → Inbox.",
+    permission: 'tenant.read',
+    writes: false,
+  },
+  'business_hours.manage': {
+    label: 'Manage business hours',
+    description:
+      "Read and set the company's weekly business hours, turn them on or off, and add and remove closed days, as owners and administrators do in Settings → Inbox, recorded in the audit log as done by the key. Reply-due timers and automations' off-hours branches follow them.",
+    permission: 'tenant.settings.manage',
+    writes: true,
+  },
+  'saved_replies.manage': {
+    label: 'Manage saved replies',
+    description:
+      "Read, add, change and delete the company's saved replies, the answers members put in the reply box, as members who supervise the inbox do in Settings → Saved replies, recorded as changed through the API and in the audit log as done by the key. Keys that send replies read them too.",
+    permission: 'inbox.supervise',
     writes: true,
   },
   'webhooks.manage': {

@@ -1486,6 +1486,23 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   working copy, collecting the members' activity kinds; when anything changed it writes the row once
   with the next version, adds the activities without an actor naming the key and a
   `crm.deal_updated` audit row, and answers the deal as `readApiDeal` reads it.
+- **Managing CRM pipelines through the API (ADR-286):** `POST /pipelines` (`apiCreatePipeline`) and
+  `PATCH /pipelines/{id}` (`apiUpdatePipeline`), both `pipelines.manage` in `api/pipelines.ts`,
+  claim the `Idempotency-Key` in the request's transaction, check the CRM in the plan, and call the
+  writes of `crm/pipelines.ts` that the Settings operations now call too: `writeCreatePipeline` (the
+  company's active pipelines counted under its advisory lock, then the pipeline with
+  `created_by_api_key_id` and its stages), `writeUpdatePipeline` (the pipeline's row locked,
+  `expectedVersion` checked in the API's words, and with `keepUnchanged` the name and the active
+  stages' order, names and chances compared before anything is written), `writeArchivePipeline` and
+  `writeRestorePipeline`. Each change is audited as the key, and the answer is read by
+  `readApiPipeline`, which shares `withStages` with `GET /pipelines`.
+- **A pipeline's forecast through the API (ADR-288):** `GET /pipelines/{id}/forecast`
+  (`apiGetPipelineForecast` in `api/pipeline-forecast.ts`, `deals.read`) reads, in one
+  repeatable-read, read-only transaction after the CRM check, the pipeline, the company's time zone,
+  the chances of the pipeline's active stages, and its open deals through
+  `readForecastGroups(tx, tenantId, pipelineId)`, the reader `dealReport` uses for every active
+  pipeline; it then weighs them with `forecastMonths` and `forecastByMonth` as Reports does, and
+  `toApiPipelineForecast` gives null weighted values when no stage has a chance.
 - **Moving CRM deals to another pipeline through the API (ADR-257):** `pipelineId` on
   `PATCH /deals/{id}` takes the move path for another pipeline: after any reopen, `entryStage`
   (shared with `apiCreateDeal`) shares the target pipeline and finds the stage given or its first
@@ -1566,6 +1583,60 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   inbox's `assign` and `setTeam` use too; a team move without a member ends with `routeConversation`.
   `GET /members` and `GET /teams` (`api/members.ts`, `conversations.read`) page the members routing
   would take (active, `INBOX_WORKER_ROLES`) and the teams, oldest first on exact keyset cursors.
+- **Managing teams through the API (ADR-287):** `GET /teams/{id}`, `POST /teams`,
+  `PATCH /teams/{id}` and `DELETE /teams/{id}` (`api/teams.ts`, `teams.manage`) call the writes the
+  Settings operations now call too (`inbox/teams.ts`): `writeCreateTeam` (the plan's limit of teams
+  under its lock, the members and numbers checked, then the team with its members and numbers),
+  `writeUpdateTeam` (the team's row locked, the same checks, then the lists replaced) and
+  `writeDeleteTeam` (the conversations leave the team first, in routing's lock order); each caller
+  audits, then routes waiting conversations (`routeWaitingConversations`). `PATCH` reads the team
+  with `readTeamSettings` under its row lock, merges the settings given, normalizes them with the
+  Settings schema (`teamSettingsOf`), and writes nothing when `sameTeamSettings` finds the team
+  unchanged (members and numbers compared as sets). A team's members are those
+  `answersConversations` finds (active, `INBOX_WORKER_ROLES`) in the check, in `readTeamSettings`
+  and in Settings' `listTeams`.
+- **Members' availability through the API (ADR-289):** `PATCH /members/{id}` (`apiUpdateMember` in
+  `api/members.ts`, `availability.write`) calls `writeMemberAvailability` (`inbox/teams.ts`), which
+  the members' `setAvailability` now calls too: the member's row `FOR SHARE` (as
+  `lockAssignableMember` locks it), the check for making them available, then with `keepUnchanged`
+  the availability row `FOR UPDATE` and nothing written when it already holds the value, else the
+  upsert and the `member.availability` tenant event. The API audits a change as the key and, when it
+  made the member available, calls `routeWaitingConversations(tx, tenantId, 20)`, as Settings does.
+- **Business hours through the API (ADR-290):** `api/business-hours.ts` reads the week with
+  `loadBusinessCalendar` (which now also gives the switch, `turnedOn`) and works out `open`,
+  `opensAt` and `closesAt` with `businessHoursStatus` (`businessStatusAt` and `openPeriods`), in a
+  repeatable-read, read-only transaction. `PUT /business-hours` checks each day with
+  `checkDayRanges` and the week with `scheduleIntervals` (both shared with Settings' text parsing),
+  compares it with the stored week (`sameIntervals`), and writes through `writeBusinessHours`;
+  closed days go through `writeAddClosedDay` and `writeRemoveClosedDay`, with `closedDayError` for a
+  day already closed, all now shared with the members' `createBusinessHoursService`. `closedDaySpan`
+  bounds a read of closed days to a year.
+- **Saved replies through the API (ADR-291):** `api/saved-replies.ts` lists the replies in a
+  read-only transaction; adds one with `writeCreateSavedReply`, which counts the company's replies
+  against `MAX_SAVED_REPLIES` under the advisory lock `saved-replies:<company>`; changes one by
+  merging the change into the row it locks and writing with `writeUpdateSavedReply` only when
+  something differs; and deletes one with `writeDeleteSavedReply`. `savedReplyShortcutError` turns a
+  shortcut in use into 409. The writes take the author (`SavedReplyAuthor`: a member or a key) and
+  are shared with the members' `createSavedRepliesService`; `toApiSavedReply` and Settings take the
+  member as the last editor when one is named.
+- **Satisfaction surveys through the API (ADR-292):** `api/satisfaction-surveys.ts` reads
+  `app.csat_surveys` joined to the conversation, its contact unless erased, and the survey message
+  for its status, in a read-only transaction, newest first on `(created_at, id)` keyset pages (the
+  `csat_surveys_created_idx` and `csat_surveys_conversation_idx` indexes); `toApiSatisfactionSurvey`
+  gives each survey's status from its skip reason and answer. Nothing is written.
+- **Satisfaction survey answers as webhook events (ADR-293):** `csat_surveys_webhook_answer`, an
+  `AFTER UPDATE OF answered_at` trigger that fires only when `answered_at` is first set, calls
+  `app.capture_webhook_event` with the survey, the conversation, its contact and its number (0213);
+  `buildWebhookPayload` reads the survey with `satisfactionSurveyOf` (the conversation's contact and
+  number joined) and gives it with `toApiSatisfactionSurvey` from `api/satisfaction-survey-view.ts`,
+  shared with `GET /satisfaction-surveys`.
+- **Templates of every status through the API (ADR-294):** `api/message-templates.ts` reads
+  `app.message_templates` in the key's company scope, in read-only transactions:
+  `apiListMessageTemplates` (keyset pages on `(created_at, id)` descending, deleted templates only
+  when asked for, a number's WhatsApp Business account, a name) and `apiGetMessageTemplate` (with
+  the latest 50 rows of `app.template_status_events`); `toApiMessageTemplate` gives the content
+  through `sendSpecFor` with media headers, as `GET /templates` reads it, and the account's active
+  numbers.
 - **Many conversations at once (ADR-120):** `POST /conversations/update-many`
   (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
   transaction it locks the member first (as a suspension does before releasing its conversations),
@@ -2072,24 +2143,29 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   allowed; a change that drops every deal event clears it.
 - **Owner filters** (migration 0181, ADR-265): `owner_ids` on an endpoint lists the members whose
   deals' events it takes, null for every deal's; a check keeps it to 1 to 50 ids and to endpoints
-  taking a deal event. `app.capture_webhook_event` (replaced with the same signature) reads the
-  deal's `owner_membership_id` by the detail's `dealId` only when an active endpoint of the company
-  taking the event names owners, and matches it against the list after the pipeline and stage
-  filters. Settings (radio buttons and checkboxes under "Deal owners", the members who can own
-  deals) and the API (`ownerIds`) set it; the services check the members a list adds (active, with
-  CRM access), and members it held stay; a change that drops every deal event clears it. For
-  `deal.owner_changed` (ADR-269) it also matches the `previousOwnerId` the trigger stores, so the
-  endpoints of the owner a deal left hear the change too.
+  taking a deal event. `app.capture_webhook_event` (replaced with the same signature) matches the
+  list, after the pipeline and stage filters, against the owner the deal trigger passes for the
+  event's step (`stepOwnerId`, migration 0215: the owner before a change of owner for the steps of
+  one update that come before it, the new one after), left out of the stored detail; for an event
+  without it, it reads the deal's `owner_membership_id` by the detail's `dealId` only when an active
+  endpoint of the company taking the event names owners. Settings (radio buttons and checkboxes
+  under "Deal owners", the members who can own deals) and the API (`ownerIds`) set it; the services
+  check the members a list adds (active, with CRM access), and members it held stay; a change that
+  drops every deal event clears it. For `deal.owner_changed` (ADR-269) it also matches the
+  `previousOwnerId` the trigger stores, so the endpoints of the owner a deal left hear the change
+  too.
 - **Task assignee filters** (migration 0182, ADR-266): `task_assignee_ids` on an endpoint lists the
   members whose tasks' events it takes, null for every task's; a check keeps it to 1 to 50 ids and
   to endpoints taking a task event. `app.capture_webhook_event` (replaced with the same signature)
+  matches the list against the assignee the task trigger passes for the event's step
+  (`stepAssigneeId`, migration 0215), left out of the stored detail; for an event without it, it
   reads the task's `assignee_membership_id` by the detail's `taskId` only when an active endpoint of
-  the company taking the event names assignees, and matches it against the list. Settings (radio
-  buttons and checkboxes under "Task assignees", the members who can own deals, who are those tasks
-  are assigned to) and the API (`taskAssigneeIds`) set it; the services check the members a list
-  adds as they check deal owners, and members it held stay; a change that drops every task event
-  clears it. For `task.assignee_changed` (ADR-274) it also matches the `previousAssigneeId` the
-  trigger stores, so the endpoints of the member a task left hear the change too.
+  the company taking the event names assignees. Settings (radio buttons and checkboxes under "Task
+  assignees", the members who can own deals, who are those tasks are assigned to) and the API
+  (`taskAssigneeIds`) set it; the services check the members a list adds as they check deal owners,
+  and members it held stay; a change that drops every task event clears it. For
+  `task.assignee_changed` (ADR-274) it also matches the `previousAssigneeId` the trigger stores, so
+  the endpoints of the member a task left hear the change too.
 - **Contact tag filters** (migration 0183, ADR-267): `contact_tags` on an endpoint lists the contact
   tags whose conversations' message and conversation events it takes, null for every conversation's;
   a check keeps it to 1 to 50 tags in `app.contact_tags`' form and to endpoints taking such an

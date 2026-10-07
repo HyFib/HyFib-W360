@@ -14,6 +14,7 @@ import {
   ORDER_STATUS_CHANGERS,
   REMINDER_STATES,
   TASK_STATUSES,
+  TEMPLATE_STATUSES,
   WEBHOOK_DELIVERY_STATES,
   type MessageStatus,
 } from '@w360/db';
@@ -50,6 +51,7 @@ import {
   taskAssigneeChangedPayloadSchema,
   taskStatusChangedPayloadSchema,
   noteCreatedPayloadSchema,
+  satisfactionSurveyAnsweredPayloadSchema,
   paymentLinkStatusChangedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
@@ -73,10 +75,13 @@ import {
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import { SEGMENT_LIMITS } from '../campaigns/segments';
 import { ORDER_REFERENCE_RE } from '../commerce/model';
+import { CRM_LIMITS } from '../crm/common';
+import { CLOSE_BUCKETS } from '../crm/forecast';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
 import { MAX_TAGS_PER_CONVERSATION } from '../inbox/conversation-tags';
 import { TEMPLATE_HEADER_MEDIA } from '../templates/definition';
+import { MESSAGE_TEMPLATE_HISTORY } from './message-templates';
 import {
   apiStartAutomationSchema,
   apiStartManyAutomationRunsSchema,
@@ -127,6 +132,17 @@ import {
   type ApiDealHistoryType,
 } from './deals';
 import { API_NOTE_MAX_LENGTH, apiCreateNoteSchema } from './notes';
+import { apiCreatePipelineSchema, apiUpdatePipelineSchema } from './pipelines';
+import { apiCreateTeamSchema, apiUpdateTeamSchema } from './teams';
+import { apiUpdateMemberSchema } from './members';
+import { apiCreateClosedDaySchema, apiUpdateBusinessHoursSchema } from './business-hours';
+import { MAX_RANGES_PER_DAY } from '../inbox/business-hours';
+import { MAX_SAVED_REPLIES } from '../inbox/saved-replies';
+import {
+  SATISFACTION_SURVEY_STATUSES,
+  apiSatisfactionSurveySchema,
+} from './satisfaction-survey-view';
+import { apiCreateSavedReplySchema, apiUpdateSavedReplySchema } from './saved-replies';
 import { apiCreateTaskSchema, apiUpdateTaskSchema } from './tasks';
 import { apiUpdateOrderSchema } from './orders';
 import {
@@ -416,7 +432,71 @@ export const apiPipelineSchema = z.object({
       }),
     )
     .describe('In board order, archived stages last.'),
+  version: z
+    .number()
+    .int()
+    .describe(
+      'Moves on with every change of the pipeline or its stages; PATCH /pipelines/{id} takes it as `expectedVersion`.',
+    ),
+  createdBy: z
+    .enum(['member', 'api'])
+    .describe('Who added the pipeline: a member in Settings (never which), or an API key.'),
+  createdByApiKeyId: z
+    .uuid()
+    .nullable()
+    .describe('With `createdBy` `api`, the key that added it; null otherwise.'),
   createdAt: z.iso.datetime(),
+});
+
+/** A CRM pipeline's weighted forecast (ADR-288). */
+export const apiPipelineForecastSchema = z.object({
+  pipelineId: z.uuid(),
+  currency: z.string().describe('ISO 4217, like INR: the currency of every value.'),
+  timeZone: z
+    .string()
+    .describe('The company’s time zone, like Asia/Kolkata: the months are its calendar months.'),
+  months: z
+    .array(z.string())
+    .length(3)
+    .describe('This month and the next two, YYYY-MM: the months of the first three buckets.'),
+  asOf: z.iso.datetime().describe('When the forecast was read.'),
+  hasChances: z
+    .boolean()
+    .describe(
+      'Whether any active stage of the pipeline has a chance of winning; without one nothing is weighed and every `weightedMinor` is null.',
+    ),
+  buckets: z
+    .array(
+      z.object({
+        bucket: z
+          .enum(CLOSE_BUCKETS)
+          .describe(
+            'When the deals are expected to close: `this_month` (dates already past included, as on the board), `next_month`, `month_after`, `later`, or `undated`.',
+          ),
+        deals: z.number().int().min(0),
+        valueMinor: z
+          .number()
+          .int()
+          .min(0)
+          .describe(
+            'Their value in the currency’s minor units (paise for INR); deals without a value count 0.',
+          ),
+        weightedMinor: z
+          .number()
+          .int()
+          .min(0)
+          .nullable()
+          .describe(
+            'Each stage’s value in the bucket times its chance, rounded to the minor unit; stages without a chance add nothing. Null when no stage has a chance.',
+          ),
+      }),
+    )
+    .describe('The five buckets, always in this order: `this_month` to `undated`.'),
+  dealsWithoutChance: z
+    .number()
+    .int()
+    .min(0)
+    .describe('Deals counted in the buckets but not weighed: their stage has no chance.'),
 });
 
 /** A CRM deal (ADR-253). */
@@ -681,6 +761,174 @@ export const apiMemberSchema = z.object({
   teamIds: z.array(z.uuid()).describe('The teams the member belongs to.'),
 });
 
+/** A member's availability, as `PATCH /members/{id}` answers it (ADR-289). */
+export const apiMemberAvailabilitySchema = z.object({
+  id: z.uuid(),
+  available: z.boolean().describe('Whether the member takes the conversations routing gives out.'),
+  changedAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When the member’s availability last changed; null when it was never set.'),
+});
+
+const apiTimeRangeSchema = z.object({
+  opens: z.string().describe('HH:MM in the company’s time zone.'),
+  closes: z.string().describe('HH:MM, after `opens`; 24:00 is midnight at the end of the day.'),
+});
+
+/** The company's business hours and whether it is open now (ADR-290). */
+export const apiBusinessHoursSchema = z.object({
+  enabled: z
+    .boolean()
+    .describe(
+      'Whether business hours are turned on; while they are off, the company counts as always open.',
+    ),
+  timeZone: z
+    .string()
+    .describe('The company’s time zone, like Asia/Kolkata, in which the hours and days are kept.'),
+  days: z
+    .array(z.array(apiTimeRangeSchema))
+    .length(7)
+    .describe(
+      'Seven days, Monday first, each with its opening ranges in order; none: closed all day.',
+    ),
+  open: z
+    .boolean()
+    .describe(
+      'Whether the company is open now: within its hours and not on a closed day, or always while the hours are off or have no opening time, as automations’ off-hours branches take it.',
+    ),
+  opensAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('While closed: when it next opens; null while open, or when not within a year.'),
+  closesAt: z.iso
+    .datetime()
+    .nullable()
+    .describe(
+      'While open by its hours: when this opening ends; null while closed, while the hours are off, or when it stays open for the next 14 days.',
+    ),
+  asOf: z.iso.datetime().describe('When `open`, `opensAt` and `closesAt` were worked out.'),
+});
+
+/** A saved reply (ADR-291). */
+export const apiSavedReplySchema = z.object({
+  id: z.uuid(),
+  shortcut: z.string().describe('What members type after / in the reply box to find it.'),
+  title: z.string(),
+  body: z
+    .string()
+    .describe(
+      'The text, with {{name}}, {{agent}} and {{company}} where the reply box fills in the customer’s name, the member’s and the company’s before the member reviews it.',
+    ),
+  createdBy: z
+    .enum(['member', 'api'])
+    .describe('Who added it: a member in Settings (never which), or an API key.'),
+  createdByApiKeyId: z.uuid().nullable(),
+  updatedBy: z.enum(['member', 'api']).describe('Who last changed it, likewise.'),
+  updatedByApiKeyId: z.uuid().nullable(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+});
+
+/** A template's content as HyFib represents it (ADR-294). */
+const apiTemplateDefinitionSchema = z.object({
+  category: z.enum(['MARKETING', 'UTILITY']),
+  header: z.discriminatedUnion('type', [
+    z.object({ type: z.literal('none') }),
+    z.object({
+      type: z.literal('text'),
+      text: z.string().describe('With {{1}} where a send gives a value.'),
+      example: z.string().nullable().describe('The value Meta reviews it with.'),
+    }),
+  ]),
+  body: z.object({
+    text: z.string().describe('With {{1}}, {{2}}… where a send gives values.'),
+    examples: z.array(z.string()).describe('The values Meta reviews it with, in order.'),
+  }),
+  footer: z.string().nullable(),
+  buttons: z.array(
+    z.discriminatedUnion('type', [
+      z.object({ type: z.literal('QUICK_REPLY'), text: z.string() }),
+      z.object({
+        type: z.literal('URL'),
+        text: z.string(),
+        url: z.string().describe('Ending with {{1}} when a send gives the end of the link.'),
+        example: z.string().optional().describe('That end as Meta reviews it.'),
+      }),
+      z.object({ type: z.literal('PHONE_NUMBER'), text: z.string(), phoneNumber: z.string() }),
+    ]),
+  ),
+});
+
+/** A message template of any status (ADR-294). */
+export const apiMessageTemplateSchema = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  language: z.string(),
+  category: z.enum(['marketing', 'utility', 'authentication']),
+  status: z
+    .enum(TEMPLATE_STATUSES)
+    .describe(
+      '`draft`, `submitting` and `submit_failed` before Meta has it; then Meta’s review states (`pending`, `approved`, `rejected`, `paused`, `disabled`, …, `unknown` for one HyFib does not recognise); `pending_deletion` and `deleted` once deleted.',
+    ),
+  rejectionReason: z.string().nullable().describe('Meta’s reason for rejecting it.'),
+  qualityScore: z.string().nullable().describe('Meta’s quality rating of an approved template.'),
+  submitError: z
+    .string()
+    .nullable()
+    .describe('Why HyFib could not submit it, while its status is `submit_failed`.'),
+  origin: z
+    .enum(['local', 'synced'])
+    .describe('`local`: added in HyFib; `synced`: found at Meta, added in WhatsApp Manager.'),
+  version: z.number().int().describe('Changes with every change HyFib records.'),
+  sendable: z
+    .boolean()
+    .describe('Whether a send can use it now, as GET /templates lists the approved templates.'),
+  unsupportedReason: z
+    .string()
+    .nullable()
+    .describe('Why HyFib cannot send it or show its content, when it cannot.'),
+  definition: apiTemplateDefinitionSchema
+    .nullable()
+    .describe('Its content as HyFib represents it; null when HyFib cannot (`unsupportedReason`).'),
+  headerMedia: z
+    .enum(TEMPLATE_HEADER_MEDIA)
+    .nullable()
+    .describe('The file its header takes when sent, or null.'),
+  channels: z
+    .array(z.object({ id: z.uuid(), phone: z.string().nullable() }))
+    .describe('The active numbers of its WhatsApp Business account, which send it once approved.'),
+  submittedAt: z.iso.datetime().nullable(),
+  lastSyncedAt: z.iso.datetime().nullable().describe('When HyFib last read it from Meta.'),
+  createdAt: z.iso.datetime().describe('When HyFib added it.'),
+  updatedAt: z.iso.datetime(),
+});
+
+/** One message template with its latest status changes (ADR-294). */
+export const apiMessageTemplateDetailSchema = apiMessageTemplateSchema.extend({
+  history: z
+    .array(
+      z.object({
+        status: z.string(),
+        reason: z.string().nullable().describe('Meta’s reason, or HyFib’s, when one was given.'),
+        source: z
+          .enum(['submit', 'sync', 'send', 'delete'])
+          .describe(
+            '`submit`: sent for review; `sync`: read from Meta; `send`: refused by Meta on a send; `delete`.',
+          ),
+        occurredAt: z.iso.datetime(),
+      }),
+    )
+    .describe(`Its latest ${MESSAGE_TEMPLATE_HISTORY} status changes, newest first.`),
+});
+
+/** A closed day (ADR-290). */
+export const apiClosedDaySchema = z.object({
+  id: z.uuid(),
+  day: z.string().describe('YYYY-MM-DD in the company’s time zone.'),
+  name: z.string(),
+});
+
 /** A WhatsApp number of the company (ADR-171). */
 export const apiChannelSchema = z.object({
   id: z
@@ -733,6 +981,32 @@ export const apiTeamSchema = z.object({
     .describe(
       '`round_robin`: conversations moved to the team without a member go to its available members in turn; `manual`: they wait for someone to take them.',
     ),
+});
+
+/** A team with its settings, members and numbers (ADR-287). */
+export const apiTeamSettingsSchema = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  description: z.string().nullable(),
+  assignment: apiTeamSchema.shape.assignment,
+  maxOpenPerMember: z
+    .number()
+    .int()
+    .nullable()
+    .describe(
+      'With round robin, the open conversations a member is given at most; null for no limit.',
+    ),
+  routingKeywords: z
+    .array(z.string())
+    .describe('Words in a customer’s first message that route the conversation to the team.'),
+  memberIds: z
+    .array(z.uuid())
+    .describe('The team’s active members, as GET /members lists them, in the order they joined.'),
+  channelIds: z
+    .array(z.uuid())
+    .describe('The WhatsApp numbers whose new conversations go to the team (GET /channels).'),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
 });
 
 /** A note a key added to a conversation (ADR-084). */
@@ -1281,6 +1555,54 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf({ type: 'array', items: ref('Template') })),
             },
             ...errors(401, 403, 429, 500),
+          },
+        },
+      },
+      '/message-templates': {
+        get: {
+          operationId: 'listMessageTemplates',
+          summary: 'Templates of every status, newest first',
+          description: `${scopeNote('templates.read')} The company’s message templates as the Templates page lists them: drafts, those Meta is reviewing, approved, rejected, paused or disabled, and those found at Meta (\`origin\`), with Meta’s reasons and quality rating, whether a send can use each now (as GET /templates lists the approved ones) and its content as HyFib represents it, null for content HyFib cannot represent. Deleted templates are listed only when \`status\` asks for them. Newest first by when HyFib added them; pages never skip or repeat a template. Filters combine. template.status_changed webhooks say when a status changes.`,
+          parameters: [
+            ...pageParams,
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: [...TEMPLATE_STATUSES] },
+              description: 'Only the templates in this status; deleted ones are listed only so.',
+            },
+            {
+              name: 'channelId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description:
+                'Only the templates this number can send: its WhatsApp Business account’s.',
+            },
+            {
+              name: 'name',
+              in: 'query',
+              schema: { type: 'string', maxLength: 512 },
+              description: 'Only the templates of this name.',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of templates.', content: pageOf('MessageTemplate') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/message-templates/{id}': {
+        get: {
+          operationId: 'getMessageTemplate',
+          summary: 'A template of any status, with its history',
+          description: `${scopeNote('templates.read')} As GET /message-templates gives it, deleted ones included, with its latest ${MESSAGE_TEMPLATE_HISTORY} status changes, newest first, and what each came from. Another company’s template answers 404, as an unknown one does.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The template.',
+              content: json(dataOf(ref('MessageTemplateDetail'))),
+            },
+            ...errors(401, 403, 404, 429, 500),
           },
         },
       },
@@ -1915,6 +2237,41 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/satisfaction-surveys': {
+        get: {
+          operationId: 'listSatisfactionSurveys',
+          summary: 'Satisfaction surveys, newest first',
+          description: [
+            `${scopeNote('conversations.read')} The surveys HyFib sends a customer when a member resolves a conversation while satisfaction surveys are on (Settings → Inbox): a question with three buttons, sent only inside the 24-hour window to a customer who has not opted out; or skipped, with the reason. Each survey has its conversation, its message and the customer’s tap by id (both among the conversation’s messages), the score once answered, and the members credited and resolving by id, as GET /members lists them. Newest first by when it was sent or skipped; pages never skip or repeat a survey. Filters combine. The surveys of erased contacts’ conversations are left out, as the conversations are.`,
+            'An answer comes later than its survey: to catch up on answers, read the surveys `asked` since you last saw them unanswered, or ask for `createdSince` a little before your previous pass began (a minute, say) and expect to see some surveys again. The question and the buttons’ labels are the company’s settings at the time, in the survey message. Conversations resolved through the API are never surveyed.',
+          ].join('\n\n'),
+          parameters: [
+            ...pageParams,
+            {
+              name: 'conversationId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only this conversation’s surveys.',
+            },
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: [...SATISFACTION_SURVEY_STATUSES] },
+              description: 'Only the surveys in this status.',
+            },
+            {
+              name: 'createdSince',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description: 'Only the surveys sent or skipped at or after this time.',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of surveys.', content: pageOf('SatisfactionSurvey') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
       '/members': {
         get: {
           operationId: 'listMembers',
@@ -1924,6 +2281,190 @@ export function buildOpenApiDocument(serverUrl: string) {
           responses: {
             '200': { description: 'A page of members.', content: pageOf('Member') },
             ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/business-hours': {
+        get: {
+          operationId: 'getBusinessHours',
+          summary: 'Business hours, and whether the company is open now',
+          description: `${scopeNote('business_hours.read', 'business_hours.manage')} The company’s weekly business hours in its time zone, as Settings → Inbox shows them, and whether it is open now (within its hours and not on a closed day), with when it next opens or closes. While the hours are off, or have no opening time, the company counts as always open, as reply-due timers and automations’ off-hours branches take it. Reading works while the company is suspended.`,
+          responses: {
+            '200': {
+              description: 'The business hours.',
+              content: json(dataOf(ref('BusinessHours'))),
+            },
+            ...errors(401, 403, 429, 500),
+          },
+        },
+        put: {
+          operationId: 'updateBusinessHours',
+          summary: 'Set the business hours',
+          description: `${scopeNote('business_hours.manage')} As owners and administrators save them in Settings → Inbox: \`days\` replaces the whole week, Monday first, each day with up to ${MAX_RANGES_PER_DAY} ranges that do not overlap (422 naming \`days.<n>\` otherwise), and \`enabled\` turns the hours on (422 without an opening time) or off. Reply-due timers and automations’ off-hours branches follow them. A week and switch the company already has are answered as they are, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
+          requestBody: { required: true, content: json(ref('UpdateBusinessHours')) },
+          responses: {
+            '200': {
+              description: 'The business hours now.',
+              content: json(dataOf(ref('BusinessHours'))),
+            },
+            ...errors(400, 401, 403, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/business-hours/closed-days': {
+        get: {
+          operationId: 'listClosedDays',
+          summary: 'Closed days, in order',
+          description: `${scopeNote('business_hours.read', 'business_hours.manage')} The days the company marked closed, from \`from\` to \`to\` (a year at most; from today in the company’s time zone by default), in order, with the span read. Closed days hold no business hours, so reply-due timers wait over them. Reading works while the company is suspended.`,
+          parameters: [
+            {
+              name: 'from',
+              in: 'query',
+              schema: { type: 'string', format: 'date' },
+              description:
+                'The first day, YYYY-MM-DD; today in the company’s time zone by default.',
+            },
+            {
+              name: 'to',
+              in: 'query',
+              schema: { type: 'string', format: 'date' },
+              description:
+                'The last day, YYYY-MM-DD, at most 365 days after `from`; that by default.',
+            },
+          ],
+          responses: {
+            '200': {
+              description: 'The closed days in the span.',
+              content: json({
+                type: 'object',
+                properties: {
+                  data: { type: 'array', items: ref('ClosedDay') },
+                  from: { type: 'string', format: 'date' },
+                  to: { type: 'string', format: 'date' },
+                },
+                required: ['data', 'from', 'to'],
+              }),
+            },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+        post: {
+          operationId: 'createClosedDay',
+          summary: 'Mark a day closed',
+          description: `${scopeNote('business_hours.manage')} As owners and administrators do in Settings → Inbox: the company is closed all that day, in its time zone, whatever its weekly hours (409 when the day is already marked closed). The audit log names the key. With an \`Idempotency-Key\`, a retry answers the first response.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateClosedDay')) },
+          responses: {
+            '201': { description: 'The closed day.', content: json(dataOf(ref('ClosedDay'))) },
+            ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/business-hours/closed-days/{id}': {
+        delete: {
+          operationId: 'deleteClosedDay',
+          summary: 'Open a closed day again',
+          description: `${scopeNote('business_hours.manage')} As owners and administrators do in Settings → Inbox: the day follows the weekly hours again. A day already opened again answers 404. The audit log names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'Opened again.',
+              content: json(
+                dataOf({
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string', format: 'uuid' },
+                    deleted: { const: true },
+                    day: { type: 'string', format: 'date' },
+                  },
+                  required: ['id', 'deleted', 'day'],
+                }),
+              ),
+            },
+            ...errors(401, 403, 404, 423, 429, 500),
+          },
+        },
+      },
+      '/saved-replies': {
+        get: {
+          operationId: 'listSavedReplies',
+          summary: 'Saved replies, by shortcut',
+          description: `${scopeNote('messages.reply', 'saved_replies.manage')} The company’s saved replies, the answers members put in the reply box, all of them (a company keeps at most ${MAX_SAVED_REPLIES}), by shortcut. A reply’s placeholders are left as written: fill {{name}}, {{agent}} and {{company}} before sending it. Reading works while the company is suspended.`,
+          responses: {
+            '200': {
+              description: 'The saved replies.',
+              content: json({
+                type: 'object',
+                properties: { data: { type: 'array', items: ref('SavedReply') } },
+                required: ['data'],
+              }),
+            },
+            ...errors(401, 403, 429, 500),
+          },
+        },
+        post: {
+          operationId: 'createSavedReply',
+          summary: 'Add a saved reply',
+          description: `${scopeNote('saved_replies.manage')} As members who supervise the inbox add one in Settings → Saved replies: a shortcut unique in the company (409 otherwise), a title, and the text, with only the placeholders {{name}}, {{agent}} and {{company}} (422 otherwise). A company keeps at most ${MAX_SAVED_REPLIES} (409 at the limit: delete one first). Settings shows it as changed through the API, and the audit log names the key. With an \`Idempotency-Key\`, a retry answers the first response.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateSavedReply')) },
+          responses: {
+            '201': { description: 'The saved reply.', content: json(dataOf(ref('SavedReply'))) },
+            ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/saved-replies/{id}': {
+        patch: {
+          operationId: 'updateSavedReply',
+          summary: 'Change a saved reply',
+          description: `${scopeNote('saved_replies.manage')} As members save one in Settings → Saved replies: what is given changes and the rest stays as it is, with the same checks as when adding one. A change that leaves the reply as it is answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateSavedReply')) },
+          responses: {
+            '200': {
+              description: 'The saved reply now.',
+              content: json(dataOf(ref('SavedReply'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+        delete: {
+          operationId: 'deleteSavedReply',
+          summary: 'Delete a saved reply',
+          description: `${scopeNote('saved_replies.manage')} As members do in Settings → Saved replies. One already deleted answers 404. The audit log names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'Deleted.',
+              content: json(
+                dataOf({
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string', format: 'uuid' },
+                    deleted: { const: true },
+                  },
+                  required: ['id', 'deleted'],
+                }),
+              ),
+            },
+            ...errors(401, 403, 404, 423, 429, 500),
+          },
+        },
+      },
+      '/members/{id}': {
+        patch: {
+          operationId: 'updateMember',
+          summary: 'Set whether a member takes conversations',
+          description: `${scopeNote('availability.write')} As members who assign conversations switch it in Settings → Teams: \`available\` \`true\` lets routing give the member conversations of their round-robin teams, and \`false\` stops it; the conversations they have stay with them. Only an active member whose role answers conversations is made available (422 otherwise; \`GET /members\` lists them); any of the company’s members can be made unavailable. Making a member available routes waiting conversations again, as Settings does. A member already so is answered as they are, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key and the inbox shows the change at once.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateMember')) },
+          responses: {
+            '200': {
+              description: 'The member’s availability now.',
+              content: json(dataOf(ref('MemberAvailability'))),
+            },
+            ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -1946,11 +2487,74 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listTeams',
           summary: 'Teams, oldest first',
-          description: `${scopeNote('conversations.read')} The company's teams and how each gives out conversations.`,
+          description: `${scopeNote('conversations.read', 'teams.manage')} The company's teams and how each gives out conversations; GET /teams/{id} gives a team's settings, members and numbers.`,
           parameters: pageParams,
           responses: {
             '200': { description: 'A page of teams.', content: pageOf('Team') },
             ...errors(401, 403, 422, 429, 500),
+          },
+        },
+        post: {
+          operationId: 'createTeam',
+          summary: 'Add a team',
+          description: `${scopeNote('teams.manage')} As members who supervise the inbox add one in Settings → Teams: a name unique among the company’s teams ignoring case (409 otherwise), how it gives out conversations, its routing keywords, members (active members whose role answers conversations; 422 naming \`memberIds\` otherwise) and numbers (the company’s; a number named here leaves the team it was in). A plan may limit how many teams a company has (412 at the limit: delete one first). Waiting conversations are routed again, so some may go to the new team at once. The audit log names the key. With an \`Idempotency-Key\`, a retry answers the first response.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateTeam')) },
+          responses: {
+            '201': {
+              description: 'The team added, with its settings.',
+              content: json(dataOf(ref('TeamSettings'))),
+            },
+            ...errors(400, 401, 403, 409, 412, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/teams/{id}': {
+        get: {
+          operationId: 'getTeam',
+          summary: 'A team with its settings',
+          description: `${scopeNote('teams.manage')} The team’s settings, its active members and its numbers, as Settings → Teams shows them. Reading works while the company is suspended.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': { description: 'The team.', content: json(dataOf(ref('TeamSettings'))) },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+        patch: {
+          operationId: 'updateTeam',
+          summary: 'Change a team',
+          description: `${scopeNote('teams.manage')} As members save a team in Settings → Teams: the settings given change and the rest stay as they are; \`memberIds\` and \`channelIds\` replace the team’s lists. The same checks as when adding one apply (409 for a name in use, 422 naming \`memberIds\` or \`channelIds\`). Waiting conversations are routed again. A change that leaves the team as it is answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateTeam')) },
+          responses: {
+            '200': {
+              description: 'The team as it is now.',
+              content: json(dataOf(ref('TeamSettings'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+        delete: {
+          operationId: 'deleteTeam',
+          summary: 'Delete a team',
+          description: `${scopeNote('teams.manage')} As members delete one in Settings → Teams: its conversations leave the team and keep their assignees, its numbers no longer route new conversations to it, and \`conversations\` counts the conversations that left it. A team already deleted answers 404. The audit log names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'Deleted.',
+              content: json(
+                dataOf({
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string', format: 'uuid' },
+                    deleted: { const: true },
+                    conversations: { type: 'integer', minimum: 0 },
+                  },
+                  required: ['id', 'deleted', 'conversations'],
+                }),
+              ),
+            },
+            ...errors(401, 403, 404, 423, 429, 500),
           },
         },
       },
@@ -2491,6 +3095,57 @@ export function buildOpenApiDocument(serverUrl: string) {
           responses: {
             '200': { description: 'A page of pipelines.', content: pageOf('Pipeline') },
             ...errors(401, 403, 422, 429, 500),
+          },
+        },
+        post: {
+          operationId: 'createPipeline',
+          summary: 'Add a CRM pipeline',
+          description: `${scopeNote('pipelines.manage')} As owners and administrators add one in Settings → Pipelines: a name unique among the company’s active pipelines (409 otherwise), a currency for every deal’s value in it, which never changes, and its stages in board order, each with a chance of winning if wanted. It is placed after the company’s other pipelines; a company uses at most ${CRM_LIMITS.pipelines} active pipelines (409 at the limit: archive one first). The pipeline is recorded as added through the API, which Settings shows, and the audit log names the key. Needs the CRM in the company’s plan (403, reason not_in_plan). With an \`Idempotency-Key\`, a retry answers the first response.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreatePipeline')) },
+          responses: {
+            '201': {
+              description: 'The pipeline added, with its stages.',
+              content: json(dataOf(ref('Pipeline'))),
+            },
+            ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/pipelines/{id}': {
+        patch: {
+          operationId: 'updatePipeline',
+          summary: 'Change, archive or restore a CRM pipeline',
+          description: [
+            `${scopeNote('pipelines.manage')} As owners and administrators do in Settings → Pipelines. \`name\` renames the pipeline. \`stages\` lists all its stages as they should be, in board order: a stage with its \`id\` is kept with its deals, renamed, moved or given another chance (left out, its chance stays); a stage without one is added; and an active stage left out is removed from the board (archived, as Settings removes stages), refused with 409 while it holds open deals. An archived stage cannot be listed (422) or brought back: the closed deals closed in it keep it. \`archived\` \`true\` archives the pipeline, refused with 409 while it holds open deals, and \`false\` restores it (409 at the company’s limit of ${CRM_LIMITS.pipelines} active pipelines, or when another active pipeline took its name meanwhile); archiving or restoring goes in a request of its own (422), and an archived pipeline is restored before it is changed (409).`,
+            'A change that leaves the pipeline as it is (the same name and stages, archiving an archived pipeline, restoring an active one) answers it as it is, with no new version or audit entry. With `expectedVersion`, a pipeline changed since is refused with 409; send it, or an `Idempotency-Key`, when a request adds stages, so a retry never adds them twice. The audit log names the key. Needs the CRM in the company’s plan (403, reason not_in_plan). The currency never changes, and pipelines are never deleted.',
+          ].join('\n\n'),
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKeyOptional' },
+          ],
+          requestBody: { required: true, content: json(ref('UpdatePipeline')) },
+          responses: {
+            '200': {
+              description: 'The pipeline as it is now, with its stages.',
+              content: json(dataOf(ref('Pipeline'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/pipelines/{id}/forecast': {
+        get: {
+          operationId: 'getPipelineForecast',
+          summary: 'A CRM pipeline’s weighted forecast',
+          description: `${scopeNote('deals.read')} The pipeline’s open deals in active stages by the month they are expected to close, in the company’s time zone: this month (dates already past included, as on the board), the next two months, later, and without a date, each with the number of deals, their value and that value weighed by each stage’s chance of winning, as Reports shows it. This month’s weighted value is the board’s. Deals in stages without a chance are counted but not weighed (\`dealsWithoutChance\`); a pipeline without any chance has no weighted values. It is read now, in one snapshot, and not stored; an archived pipeline holds no open deals, so its buckets are empty. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The forecast.',
+              content: json(dataOf(ref('PipelineForecast'))),
+            },
+            ...errors(401, 403, 404, 429, 500),
           },
         },
       },
@@ -3129,6 +3784,12 @@ export function buildOpenApiDocument(serverUrl: string) {
         `${WEBHOOK_EVENT_INFO['conversation.team_changed'].description} conversation.teamId and conversation.previousTeamId are the change (teams as GET /teams lists them); the rest is the conversation when the event is delivered. Deleting a team sends one event for each of its conversations. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookConversationTeamChanged',
       ),
+      'satisfaction_survey.answered': webhook(
+        'webhookSatisfactionSurveyAnswered',
+        WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].label,
+        `${WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].description} The survey is the survey as GET /satisfaction-surveys reads it when the event is delivered: its score (3 for the first and best button, 1 for the third), the customer’s tap and the survey message by id among the conversation’s messages, and the members credited and resolving by id. Only the customer’s first tap answers a survey, so a survey is answered once and this event is sent once for it; surveys skipped or never answered send nothing. It happens on the conversation’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only; the team, member and tag filters do not narrow it. Deliveries are not ordered.`,
+        'WebhookSatisfactionSurveyAnswered',
+      ),
       'contact.created': webhook(
         'webhookContactCreated',
         WEBHOOK_EVENT_INFO['contact.created'].label,
@@ -3433,7 +4094,22 @@ export function buildOpenApiDocument(serverUrl: string) {
         UpdateMatchingConversations: jsonSchema(apiUpdateMatchingConversationsSchema, 'input'),
         Channel: jsonSchema(apiChannelSchema),
         Member: jsonSchema(apiMemberSchema),
+        MemberAvailability: jsonSchema(apiMemberAvailabilitySchema),
+        BusinessHours: jsonSchema(apiBusinessHoursSchema),
+        UpdateBusinessHours: jsonSchema(apiUpdateBusinessHoursSchema, 'input'),
+        ClosedDay: jsonSchema(apiClosedDaySchema),
+        SatisfactionSurvey: jsonSchema(apiSatisfactionSurveySchema),
+        MessageTemplate: jsonSchema(apiMessageTemplateSchema),
+        MessageTemplateDetail: jsonSchema(apiMessageTemplateDetailSchema),
+        SavedReply: jsonSchema(apiSavedReplySchema),
+        CreateSavedReply: jsonSchema(apiCreateSavedReplySchema, 'input'),
+        UpdateSavedReply: jsonSchema(apiUpdateSavedReplySchema, 'input'),
+        CreateClosedDay: jsonSchema(apiCreateClosedDaySchema, 'input'),
+        UpdateMember: jsonSchema(apiUpdateMemberSchema, 'input'),
         Team: jsonSchema(apiTeamSchema),
+        TeamSettings: jsonSchema(apiTeamSettingsSchema),
+        CreateTeam: jsonSchema(apiCreateTeamSchema, 'input'),
+        UpdateTeam: jsonSchema(apiUpdateTeamSchema, 'input'),
         AddConversationNote: jsonSchema(apiAddNoteSchema, 'input'),
         ConversationNote: jsonSchema(apiConversationNoteSchema),
         Campaign: jsonSchema(apiCampaignSchema),
@@ -3441,6 +4117,9 @@ export function buildOpenApiDocument(serverUrl: string) {
         PaymentLink: jsonSchema(apiPaymentLinkSchema),
         UpdateOrder: jsonSchema(apiUpdateOrderSchema, 'input'),
         Pipeline: jsonSchema(apiPipelineSchema),
+        PipelineForecast: jsonSchema(apiPipelineForecastSchema),
+        CreatePipeline: jsonSchema(apiCreatePipelineSchema, 'input'),
+        UpdatePipeline: jsonSchema(apiUpdatePipelineSchema, 'input'),
         Deal: jsonSchema(apiDealSchema),
         DealHistoryEntry: jsonSchema(apiDealHistoryEntrySchema),
         CreateDeal: jsonSchema(apiCreateDealSchema, 'input'),
@@ -3502,6 +4181,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookTaskAssigneeChanged: jsonSchema(taskAssigneeChangedPayloadSchema),
         WebhookTaskStatusChanged: jsonSchema(taskStatusChangedPayloadSchema),
         WebhookNoteCreated: jsonSchema(noteCreatedPayloadSchema),
+        WebhookSatisfactionSurveyAnswered: jsonSchema(satisfactionSurveyAnsweredPayloadSchema),
         WebhookPing: jsonSchema(pingPayloadSchema),
       },
     },
@@ -3511,6 +4191,8 @@ export function buildOpenApiDocument(serverUrl: string) {
 /** The routes the document describes: method and path template (checked by a unit test). */
 export const API_ROUTES = [
   ['get', '/templates'],
+  ['get', '/message-templates'],
+  ['get', '/message-templates/{id}'],
   ['get', '/channels'],
   ['get', '/contacts'],
   ['post', '/contacts'],
@@ -3543,8 +4225,23 @@ export const API_ROUTES = [
   ['post', '/conversations/{id}/notes'],
   ['get', '/conversations/{id}/notes'],
   ['get', '/conversations/{id}/messages'],
+  ['get', '/satisfaction-surveys'],
   ['get', '/members'],
+  ['patch', '/members/{id}'],
+  ['get', '/business-hours'],
+  ['put', '/business-hours'],
+  ['get', '/business-hours/closed-days'],
+  ['post', '/business-hours/closed-days'],
+  ['delete', '/business-hours/closed-days/{id}'],
+  ['get', '/saved-replies'],
+  ['post', '/saved-replies'],
+  ['patch', '/saved-replies/{id}'],
+  ['delete', '/saved-replies/{id}'],
   ['get', '/teams'],
+  ['post', '/teams'],
+  ['get', '/teams/{id}'],
+  ['patch', '/teams/{id}'],
+  ['delete', '/teams/{id}'],
   ['get', '/campaigns'],
   ['post', '/campaigns'],
   ['get', '/campaigns/{id}'],
@@ -3575,6 +4272,9 @@ export const API_ROUTES = [
   ['post', '/orders/{id}/request-payment'],
   ['post', '/orders/{id}/cancel-payment'],
   ['get', '/pipelines'],
+  ['post', '/pipelines'],
+  ['patch', '/pipelines/{id}'],
+  ['get', '/pipelines/{id}/forecast'],
   ['get', '/deals'],
   ['post', '/deals'],
   ['get', '/deals/{id}'],

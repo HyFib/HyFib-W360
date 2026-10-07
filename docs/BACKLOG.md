@@ -868,6 +868,41 @@ verification, app review, Embedded Signup configuration).
   `GET /deals/{id}/history` with `deals.read` gives the changes the deal events report, newest first
   on exact pages, each with who made it, a key by its id and never which member; never notes or
   tasks; no migration).
+  **[Managing CRM pipelines built; its database tests run only in CI]** (ADR-286, migrations 0206
+  and 0207: `POST /pipelines` and `PATCH /pipelines/{id}` with the new `pipelines.manage` scope,
+  granted with `tenant.settings.manage`, add pipelines with their stages and chances, rename them,
+  change their stages, and archive and restore them through the Settings writes, recorded as the
+  key's; pipelines carry `version`, `createdBy` and `createdByApiKeyId`).
+  **[Managing teams built; its database tests run only in CI]** (ADR-287, migration 0208:
+  `GET /teams/{id}`, `POST /teams`, `PATCH /teams/{id}` and `DELETE /teams/{id}` with the new
+  `teams.manage` scope, granted with `inbox.supervise`, read, add, change and delete teams with
+  their settings, members and numbers through the Settings writes, recorded as the key's; a team's
+  members are only those who answer conversations, in Settings too).
+  **[A pipeline's forecast through the public API built; its database tests run only in CI]**
+  (ADR-288, no migration: `GET /pipelines/{id}/forecast` with `deals.read` gives the pipeline's open
+  deals by expected close month in the company's time zone, weighed by each stage's chance with
+  Reports' reader and arithmetic).
+  **[Setting members' availability built; its database tests run only in CI]** (ADR-289, migration
+  0209: `PATCH /members/{id}` with the new `availability.write` scope, granted with `inbox.assign`,
+  sets whether a member takes the conversations routing gives out, through the write Settings uses,
+  which now locks the member's row; recorded as the key's).
+  **[Business hours through the public API built; its database tests run only in CI]** (ADR-290,
+  migration 0210: `business_hours.read` reads the week, whether the company is open now, and its
+  closed days a year at a time; `business_hours.manage`, granted with `tenant.settings.manage`, also
+  sets the week and adds and removes closed days, through the checks and writes Settings uses,
+  recorded as the key's).
+  **[Saved replies through the public API built; its database tests run only in CI]** (ADR-291,
+  migrations 0211 and 0212: `saved_replies.manage`, granted with `inbox.supervise`, lists, adds,
+  changes and deletes the company's saved replies through the checks and writes Settings uses,
+  recorded as the key's, and keys with `messages.reply` read them; a company keeps at most 500).
+  **[Satisfaction surveys through the public API built; its database tests run only in CI]**
+  (ADR-292, no migration: keys with `conversations.read` list the company's satisfaction surveys
+  newest first on exact pages, skipped, asked or answered with the score, by conversation, status
+  and time, without erased contacts' conversations).
+  **[Templates of every status through the public API built; its database tests run only in CI]**
+  (ADR-294, no migration: keys with `templates.read` list the company's templates newest first on
+  exact pages, drafts, those Meta reviews, rejected, paused, disabled and, when asked, deleted ones,
+  by status, number and name, and read each with its latest 50 status changes).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact
@@ -881,7 +916,8 @@ verification, app review, Embedded Signup configuration).
   **[Adding CRM notes built; its database tests run only in CI]** (ADR-268, migration 0184:
   `notes.write` adds a note to a contact's or a deal's timeline as members do, recorded as written
   through the API; notes are not read through the API).
-  Remaining: call-to-action messages through the API, taking
+  Remaining: creating, changing, submitting and deleting templates through the API,
+  call-to-action messages through the API, taking
   reactions back,
   changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
@@ -1092,6 +1128,9 @@ verification, app review, Embedded Signup configuration).
   0205: `payment_link.status_changed` for every status the commerce worker writes, with the link as
   `GET /orders/{id}/payment-links` reads it, never its address or Razorpay's ids, narrowed by the
   order's number like the order events).
+  **[Satisfaction survey events built; their database tests run only in CI]** (ADR-293, migrations
+  0213 and 0214: `satisfaction_survey.answered` once for each survey a customer answers, with the
+  survey as `GET /satisfaction-surveys` reads it, narrowed by the conversation's number).
   Remaining: filters for other event types (task events by their deal's pipeline, stage or owner,
   among them) and on a message's or contact's values (such as a field's value, contact events by
   tag, or the key that started a run), other authentication (headers computed per delivery, other

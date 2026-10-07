@@ -56,6 +56,9 @@ export default async function PipelinesSettingsPage({
                     <p className="flex flex-wrap items-center gap-2 text-sm">
                       <span className="font-medium">{p.name}</span>
                       <span className="text-muted-foreground">{p.currency}</span>
+                      {p.addedThroughApi ? (
+                        <span className="text-muted-foreground">Added through the API</span>
+                      ) : null}
                     </p>
                     <ol className="flex flex-wrap gap-x-2 gap-y-1 text-sm text-muted-foreground">
                       {stages.map((s, i) => (
@@ -151,6 +154,9 @@ export default async function PipelinesSettingsPage({
                   <p className="flex flex-wrap items-center gap-2 text-sm">
                     <span className="font-medium">{p.name}</span>
                     <span className="text-muted-foreground">{p.currency}</span>
+                    {p.addedThroughApi ? (
+                      <span className="text-muted-foreground">Added through the API</span>
+                    ) : null}
                     <Badge tone="neutral">Archived</Badge>
                   </p>
                   {manage ? (
