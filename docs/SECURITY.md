@@ -181,7 +181,12 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   none. A change of details (`task.updated`, ADR-276) names which of the title, notes, due time and
   reminder changed, never their values, and the task it gives carries neither its notes nor its
   reminder, so a change of notes is named without a word of them; members and keys capture it as the
-  runtime role, in the company's scope, since no definer function changes these columns.
+  runtime role, in the company's scope, since no definer function changes these columns. Deal and
+  task events name who made each change (`changedBy`: a member, never which; an automation; or a
+  key, with its id, ADR-277), a key of the company's own only (a foreign key through the company's
+  id), so an integration can ignore its own changes; a change that does not record its maker names
+  nobody, never the maker of an earlier change, since the database clears a changer another
+  transaction recorded.
 - Customers' numbers (ADR-226): a company's owners and administrators choose the roles (supervisor,
   agent, marketer, analyst) whose members see them masked; the context leaves out
   `contacts.view_numbers` for a member whose every role that grants it is masked, and the services

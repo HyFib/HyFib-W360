@@ -10512,3 +10512,46 @@ Decision:
 
 Not built: the values before a change, the notes or the reminder in the payload, who made a change,
 and task events by their deal's pipeline, stage or owner.
+
+## ADR-277 Saying who changed a CRM deal or task in its webhook events (P5-09, P4-04) (2026-10-07)
+
+Context: integrations change deals and tasks through the API (ADR-254, ADR-255, ADR-259, ADR-260)
+and hear every change through the deal and task events (ADR-256, ADR-261, ADR-269, ADR-274 to
+ADR-276), their own included: like an order system before ADR-270, a CRM kept in step with HyFib
+could not tell a change it made from a member's or an automation's, so it either acted on its own
+echoes, and could loop, or ignored changes it needed. ADR-269 and ADR-274 to ADR-276 left who made a
+change unbuilt.
+
+Decision:
+
+- **`changedBy` and `apiKeyId`** on the deal or task of every deal and task event: `member` (never
+  which member), `automation` (an automation's run, which moves and closes deals, ADR-250 and
+  ADR-251, and adds deals and tasks) or `api` with the key's id; for `deal.created` and
+  `task.created`, who added it, read from its creator. Null for a change HyFib did not record the
+  maker of: erasure retitling a deal, changes made by servers from before this release, and events
+  captured before it. An integration ignores the events whose `apiKeyId` is its own key's, as for
+  orders (ADR-270).
+- **Recorded with the change:** `app.crm_deals` and `app.crm_tasks` gain `changed_by`,
+  `changed_by_api_key_id` (a foreign key to the company's keys through the company's id) and
+  `changed_xact`, written in the same statement as the change by every writer: members' deal and
+  task services, keys' `apiUpdateDeal` and `apiUpdateTask`, and the runner's deal steps, through one
+  helper (`crmChangedBy`). A check keeps the changer to the three values and the key to `api`. The
+  company data export carries the changer and the key, not the transaction.
+- **Never the previous changer:** a trigger before each change the events report (a deal's stage,
+  status, owner, title, value or expected close date; a task's status, assignee, title, notes, due
+  time or reminder time) clears the changer unless `changed_xact` is the transaction making the
+  change, as ADR-270 does for orders, so a change that does not record its maker names nobody.
+  Writes of nothing the events report (a reminder sent, a merge moving a deal or task to another
+  contact) keep it and send nothing.
+- **In the event, as captured:** the deal and task triggers put the changer and the key in the
+  `detail` of every event an update captures, after the trigger above; the payload gives them as
+  captured, whoever changes the deal or task later. Each deal and task event's description says so.
+  The deal and task pages, the timeline and the audit log are unchanged (they name the member,
+  automation or key already), and who last changed a deal or task is not read through the API.
+- **Migrations 0196 and 0197:** 0196 adds the columns to both tables (nullable, so neither is
+  rewritten), the foreign keys and checks NOT VALID, the runtime role's grants to update them, the
+  trigger function and its two triggers, and the deal and task capture functions with the same
+  signatures; 0197 validates the foreign keys and checks while the tables stay writable.
+
+Not built: which member made a change, who last changed a deal or task through `GET /deals` and
+`GET /tasks`, and naming erasure as the maker of its retitling.

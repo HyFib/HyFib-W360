@@ -15,7 +15,7 @@ import {
   type TaskStatus,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
-import { addActivity, memberRefs } from '../crm/common';
+import { addActivity, crmChangedBy, memberRefs } from '../crm/common';
 import { scheduleTaskReminder } from '../crm/reminders';
 import { taskTimeIssue } from '../crm/tasks';
 import type { OutboundDeps } from '../messaging/outbound';
@@ -576,6 +576,7 @@ export async function apiUpdateTask(
           completedAt: next.completedAt,
           completedByMembershipId: next.completedByMembershipId,
           version: current.version + 1,
+          ...crmChangedBy({ apiKeyId: ctx.key.id }),
         })
         .where(and(eq(crmTasks.tenantId, ctx.tenant.id), eq(crmTasks.id, current.id)));
       if (remindChanged && next.remindAt && next.reminderState === 'pending') {

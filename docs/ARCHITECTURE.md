@@ -1776,6 +1776,13 @@ true`); the same key with another request (method, path and body hashed) answers
   details in `detail`, between a reopening and a change of assignee made by the same update. Its
   payload (`taskOf`) adds `changes` to the task as it is when delivered, which carries neither its
   notes nor its reminder.
+- **Who changed a deal or task** (migrations 0196–0197, ADR-277): `changed_by`,
+  `changed_by_api_key_id` and `changed_xact` on `app.crm_deals` and `app.crm_tasks`, written with
+  each change by every writer through `crmChangedBy` (`crm/common.ts`); `app.crm_changer()`, a
+  trigger before each change the events report, clears a changer another transaction recorded. The
+  deal and task capture functions put the changer and the key in the `detail` of every event an
+  update captures, and the payloads (`dealOf`, `taskOf`) give `changedBy` and `apiKeyId` as
+  captured, an addition's from its creator.
 - **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
   notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
   SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same

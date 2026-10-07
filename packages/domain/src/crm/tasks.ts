@@ -26,6 +26,7 @@ import {
   assertCrmMember,
   assertLiveContact,
   contactRefs,
+  crmChangedBy,
   lockContact,
   memberRefs,
   trimmed,
@@ -256,6 +257,7 @@ export function taskOperations(deps: {
             ? { reminderState: 'skipped' as const, reminderDetail: 'task_closed', remindedAt: now }
             : {}),
           version,
+          ...crmChangedBy('member'),
         })
         .where(and(eq(crmTasks.tenantId, ctx.tenant.id), eq(crmTasks.id, task.id)));
       if (task.contactId) {
@@ -421,6 +423,7 @@ export function taskOperations(deps: {
                 }
               : {}),
             version,
+            ...crmChangedBy('member'),
           })
           .where(and(eq(crmTasks.tenantId, ctx.tenant.id), eq(crmTasks.id, task.id)));
         if (remindChanged && remindAt) {

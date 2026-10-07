@@ -19,7 +19,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
-import { addActivity, memberRefs } from '../crm/common';
+import { addActivity, crmChangedBy, memberRefs } from '../crm/common';
 import { MAX_DEAL_MINOR } from '../crm/money';
 import type { OutboundDeps } from '../messaging/outbound';
 import { loadEntitlements } from '../plans/entitlements';
@@ -845,6 +845,7 @@ export async function apiUpdateDeal(
           closedAt: next.closedAt,
           closedByMembershipId: next.closedByMembershipId,
           version: current.version + 1,
+          ...crmChangedBy({ apiKeyId: ctx.key.id }),
         })
         .where(and(eq(crmDeals.tenantId, ctx.tenant.id), eq(crmDeals.id, current.id)));
       for (const activity of activities) {

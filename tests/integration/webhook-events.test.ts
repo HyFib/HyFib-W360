@@ -3807,6 +3807,8 @@ describe('deal events (ADR-256)', () => {
       lostReason: 'Budget cut',
       createdBy: 'member',
       createdAt: expect.any(String),
+      changedBy: 'member',
+      apiKeyId: null,
     });
     expect(lost?.data.contact).toEqual({ id: jaya.id, phone: jaya.phone, name: 'Jaya' });
     expect(lost?.data.conversation).toBeNull();
@@ -3937,10 +3939,14 @@ describe('deal events (ADR-256)', () => {
     );
     const runDealId = byRun!.id;
 
-    // One event per step, in the order the steps happened, each to the endpoints that take it.
+    // One event per step, in the order the steps happened, each to the endpoints that take it, with
+    // who made each change (ADR-277): additions name their creator in the payload, not here.
     const events = await dealEventsOf(c);
     const sales = { pipelineId: s.salesId };
     const renewal = { pipelineId: s.renewalsId };
+    const byMember = { changedBy: 'member', apiKeyId: null };
+    const byKey = { changedBy: 'api', apiKeyId: key.key.id };
+    const byAutomation = { changedBy: 'automation', apiKeyId: null };
     expect(events.map((e) => [e.type, e.status, e.detail, e.deliveries])).toEqual([
       ['deal.created', 'open', { dealId, stageId: s.sales[0], ...sales }, 1],
       [
@@ -3952,6 +3958,7 @@ describe('deal events (ADR-256)', () => {
           ...sales,
           previousStageId: s.sales[0],
           previousPipelineId: null,
+          ...byMember,
         },
         1,
       ],
@@ -3964,20 +3971,21 @@ describe('deal events (ADR-256)', () => {
           ...renewal,
           previousStageId: s.sales[1],
           previousPipelineId: s.salesId,
+          ...byMember,
         },
         1,
       ],
       [
         'deal.status_changed',
         'lost',
-        { dealId, stageId: s.renewals[0], ...renewal, previousStatus: 'open' },
+        { dealId, stageId: s.renewals[0], ...renewal, previousStatus: 'open', ...byMember },
         2,
       ],
       // Reopened in the stage that was removed, then moved to the first stage left.
       [
         'deal.status_changed',
         'open',
-        { dealId, stageId: s.renewals[0], ...renewal, previousStatus: 'lost' },
+        { dealId, stageId: s.renewals[0], ...renewal, previousStatus: 'lost', ...byMember },
         2,
       ],
       [
@@ -3989,6 +3997,7 @@ describe('deal events (ADR-256)', () => {
           ...renewal,
           previousStageId: s.renewals[0],
           previousPipelineId: null,
+          ...byMember,
         },
         1,
       ],
@@ -4003,13 +4012,14 @@ describe('deal events (ADR-256)', () => {
           ...sales,
           previousStageId: s.sales[0],
           previousPipelineId: null,
+          ...byKey,
         },
         1,
       ],
       [
         'deal.status_changed',
         'won',
-        { dealId: apiDealId, stageId: s.sales[2], ...sales, previousStatus: 'open' },
+        { dealId: apiDealId, stageId: s.sales[2], ...sales, previousStatus: 'open', ...byKey },
         2,
       ],
       ['deal.created', 'open', { dealId: runDealId, stageId: s.sales[0], ...sales }, 1],
@@ -4022,13 +4032,20 @@ describe('deal events (ADR-256)', () => {
           ...sales,
           previousStageId: s.sales[0],
           previousPipelineId: null,
+          ...byAutomation,
         },
         1,
       ],
       [
         'deal.status_changed',
         'won',
-        { dealId: runDealId, stageId: s.sales[1], ...sales, previousStatus: 'open' },
+        {
+          dealId: runDealId,
+          stageId: s.sales[1],
+          ...sales,
+          previousStatus: 'open',
+          ...byAutomation,
+        },
         2,
       ],
     ]);
@@ -4724,6 +4741,124 @@ describe('deal events (ADR-256)', () => {
     expect(bodiesAt(agents.path).map((b) => b.type)).toEqual(Array<string>(3).fill('deal.updated'));
     expect(bodiesAt(renewals.path)).toEqual([]);
   });
+
+  it('names who made each change: a member, the automation or the key, nobody for a change that did not record it, as erasure’s, and keeps a changer to its own transaction (ADR-277)', async () => {
+    const s = await crmCompany();
+    const { c, owner } = s;
+    const hook = await addEndpoint(c, ['deal.updated', 'deal.stage_changed']);
+    const svc = crm();
+    const jaya = await newContact(owner, 'Jaya');
+    const { id: dealId } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: s.salesId,
+      stageId: s.sales[0],
+      title: 'Annual plan',
+      ownerMembershipId: null,
+    });
+    const changerOf = async () =>
+      (
+        await fx.query<{ by: string | null; key: string | null }>(
+          'SELECT changed_by AS by, changed_by_api_key_id AS key FROM app.crm_deals WHERE id = $1',
+          [dealId],
+        )
+      )[0];
+    const set = (assignments: string) =>
+      fx.query(`UPDATE app.crm_deals SET ${assignments} WHERE id = $1`, [dealId]);
+
+    // A member moves it and a key retitles it, each recorded with its change.
+    await svc.moveDeal(owner, { id: dealId, expectedVersion: 1, stageId: s.sales[1] });
+    expect(await changerOf()).toEqual({ by: 'member', key: null });
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'CRM sync', scopes: ['deals.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    await apiUpdateDeal({ db: fx.dbs.app, clock: systemClock }, key, dealId, {
+      title: 'Annual plan 2027',
+    });
+    expect(await changerOf()).toEqual({ by: 'api', key: key.key.id });
+
+    // A change that does not record its maker (a server from before this release) names nobody:
+    // the key's record is an earlier transaction's. Recorded by another transaction, a changer is
+    // cleared too; recorded by its own, it stays; a write of nothing the events report leaves it.
+    await set(`title = 'Annual plan, renewed'`);
+    expect(await changerOf()).toEqual({ by: null, key: null });
+    await set(`value_minor = 100000, changed_by = 'member', changed_xact = '1'::xid8`);
+    expect(await changerOf()).toEqual({ by: null, key: null });
+    await set(
+      `expected_close_on = '2026-12-31', changed_by = 'automation',
+       changed_xact = pg_catalog.pg_current_xact_id()`,
+    );
+    expect(await changerOf()).toEqual({ by: 'automation', key: null });
+    await set('stage_entered_at = now()');
+    expect(await changerOf()).toEqual({ by: 'automation', key: null });
+
+    // Erasure retitles it and records nobody.
+    await contactsService().eraseContact(owner, { contactId: jaya.id, suppress: false });
+    expect(await changerOf()).toEqual({ by: null, key: null });
+
+    // Each event, and its payload when delivered, names the maker of its change as captured.
+    const events = await dealEventsOf(c);
+    const makers = [
+      ['member', null],
+      ['api', key.key.id],
+      [null, null],
+      [null, null],
+      ['automation', null],
+      [null, null],
+    ];
+    expect(events.map((e) => [e.type, e.detail.changedBy, e.detail.apiKeyId])).toEqual([
+      ['deal.stage_changed', ...makers[0]!],
+      ...makers.slice(1).map((m) => ['deal.updated', ...m]),
+    ]);
+    await deliverDue(c);
+    const bodies = bodiesById(hook.path);
+    expect(
+      events.map((e) => [dealIn(bodies.get(e.id)).changedBy, dealIn(bodies.get(e.id)).apiKeyId]),
+    ).toEqual(makers);
+
+    // The database keeps the changer to a member, an automation or a key of the deal's company,
+    // named only for a key's change, and the runtime role records it.
+    for (const bad of [
+      `changed_by = 'api', changed_by_api_key_id = NULL`,
+      `changed_by = 'member', changed_by_api_key_id = '${key.key.id}'`,
+      `changed_by = NULL, changed_by_api_key_id = '${key.key.id}'`,
+      `changed_by = 'payment_link', changed_by_api_key_id = NULL`,
+    ]) {
+      await expect(set(bad), bad).rejects.toThrow(/crm_deals_changed_by"/);
+    }
+    const other = await fx.company();
+    await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      await fx.ctx(other, other.owner),
+      { name: 'Elsewhere', scopes: ['deals.write'], expiresInDays: 0 },
+    );
+    const [theirKey] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.api_keys WHERE tenant_id = $1 AND name = $2',
+      [other.tenant.id, 'Elsewhere'],
+    );
+    await expect(
+      set(`changed_by = 'api', changed_by_api_key_id = '${theirKey!.id}'`),
+    ).rejects.toThrow(/crm_deals_changed_by_api_key_fk/);
+    await set(`changed_by = 'api', changed_by_api_key_id = '${key.key.id}'`);
+    expect(await changerOf()).toEqual({ by: 'api', key: key.key.id });
+    const grants = await fx.query<{ t: string; c: string; can: boolean }>(
+      `SELECT t, c, has_column_privilege('w360_app', t, c, 'UPDATE') AS can
+         FROM unnest(ARRAY['app.crm_deals', 'app.crm_tasks']) AS t,
+              unnest(ARRAY['changed_by', 'changed_by_api_key_id', 'changed_xact']) AS c`,
+    );
+    expect(grants.map((g) => [g.t, g.c, g.can]).sort()).toEqual(
+      ['app.crm_deals', 'app.crm_tasks']
+        .flatMap((table) =>
+          ['changed_by', 'changed_by_api_key_id', 'changed_xact'].map((column) => [
+            table,
+            column,
+            true,
+          ]),
+        )
+        .sort(),
+    );
+  });
 });
 
 describe('task events (ADR-261)', () => {
@@ -4883,16 +5018,31 @@ describe('task events (ADR-261)', () => {
     );
     const runTaskId = byRun!.id;
 
-    // One event per addition and status change, in order, each to the endpoints that take it.
+    // One event per addition and status change, in order, each to the endpoints that take it, with
+    // who made each change (ADR-277).
     const events = await taskEventsOf(c);
+    const byMember = { changedBy: 'member', apiKeyId: null };
+    const byKey = { changedBy: 'api', apiKeyId: key.key.id };
     expect(events.map((e) => [e.type, e.status, e.detail, e.contact_id, e.deliveries])).toEqual([
       ['task.created', 'open', { taskId }, jaya.id, 1],
-      ['task.status_changed', 'done', { taskId, previousStatus: 'open' }, jaya.id, 2],
-      ['task.status_changed', 'open', { taskId, previousStatus: 'done' }, jaya.id, 2],
-      ['task.status_changed', 'cancelled', { taskId, previousStatus: 'open' }, jaya.id, 2],
+      ['task.status_changed', 'done', { taskId, previousStatus: 'open', ...byMember }, jaya.id, 2],
+      ['task.status_changed', 'open', { taskId, previousStatus: 'done', ...byMember }, jaya.id, 2],
+      [
+        'task.status_changed',
+        'cancelled',
+        { taskId, previousStatus: 'open', ...byMember },
+        jaya.id,
+        2,
+      ],
       ['task.created', 'open', { taskId: soloId }, null, 1],
       ['task.created', 'open', { taskId: apiTaskId }, jaya.id, 1],
-      ['task.status_changed', 'done', { taskId: apiTaskId, previousStatus: 'open' }, jaya.id, 2],
+      [
+        'task.status_changed',
+        'done',
+        { taskId: apiTaskId, previousStatus: 'open', ...byKey },
+        jaya.id,
+        2,
+      ],
       ['task.created', 'open', { taskId: runTaskId }, customerId, 1],
     ]);
     expect(events.every((e) => e.conversation_id === null)).toBe(true);
@@ -4925,6 +5075,17 @@ describe('task events (ADR-261)', () => {
       ['task.created', apiTaskId, 'open', null, 'api'],
       ['task.status_changed', apiTaskId, 'done', 'open', 'api'],
       ['task.created', runTaskId, 'open', null, 'automation'],
+    ]);
+    // Who made each: an addition's maker is the task's creator, a change's as captured (ADR-277).
+    expect(delivered.map((b) => [taskIn(b).changedBy, taskIn(b).apiKeyId])).toEqual([
+      ['member', null],
+      ['member', null],
+      ['member', null],
+      ['member', null],
+      ['member', null],
+      ['api', key.key.id],
+      ['api', key.key.id],
+      ['automation', null],
     ]);
     const [jayaTask] = await fx.query<{ created_at: Date }>(
       'SELECT created_at FROM app.crm_tasks WHERE id = $1',
@@ -5338,5 +5499,72 @@ describe('task events (ADR-261)', () => {
         .map((b) => b.type)
         .sort(),
     ).toEqual(['task.created', 'task.status_changed', 'task.status_changed']);
+  });
+
+  it('names who made each change of a task, the member or the key, and nobody for a change that did not record it (ADR-277)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const svc = crm();
+    const hook = await addEndpoint(c, [
+      'task.updated',
+      'task.assignee_changed',
+      'task.status_changed',
+    ]);
+    const jaya = await newContact(owner, 'Jaya');
+    const { id: taskId } = await svc.createTask(owner, {
+      title: 'Call Jaya',
+      assigneeMembershipId: owner.membership.id,
+      contactId: jaya.id,
+    });
+    const set = (assignments: string) =>
+      fx.query(`UPDATE app.crm_tasks SET ${assignments} WHERE id = $1`, [taskId]);
+
+    // A member completes it; a key reopens and retitles it in one request; a write of nothing the
+    // events report keeps the key; a change that does not record its maker names nobody.
+    await svc.completeTask(owner, { id: taskId, expectedVersion: 1 });
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Task sync', scopes: ['tasks.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    const apiDeps = { db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer };
+    await apiUpdateTask(apiDeps, key, taskId, { status: 'open', title: 'Call Jaya again' });
+    await set(`reminder_state = 'none'`);
+    expect(
+      await fx.query('SELECT changed_by, changed_by_api_key_id FROM app.crm_tasks WHERE id = $1', [
+        taskId,
+      ]),
+    ).toEqual([{ changed_by: 'api', changed_by_api_key_id: key.key.id }]);
+    await set(`notes = 'Ask about the renewal'`);
+
+    const events = await taskEventsOf(c);
+    const makers = [
+      ['task.status_changed', 'member', null],
+      ['task.status_changed', 'api', key.key.id],
+      ['task.updated', 'api', key.key.id],
+      ['task.updated', null, null],
+    ];
+    expect(events.map((e) => [e.type, e.detail.changedBy, e.detail.apiKeyId])).toEqual(makers);
+    await deliverDue(c);
+    const bodies = bodiesById(hook.path);
+    expect(
+      events.map((e) => {
+        const task = taskIn(bodies.get(e.id));
+        return [bodies.get(e.id)?.type, task.changedBy, task.apiKeyId];
+      }),
+    ).toEqual(makers);
+
+    // The database keeps a task's changer as a deal's.
+    for (const bad of [
+      `changed_by = 'api', changed_by_api_key_id = NULL`,
+      `changed_by = 'automation', changed_by_api_key_id = '${key.key.id}'`,
+      `changed_by = 'erasure', changed_by_api_key_id = NULL`,
+    ]) {
+      await expect(set(bad), bad).rejects.toThrow(/crm_tasks_changed_by"/);
+    }
+    await expect(set(`changed_by = 'api', changed_by_api_key_id = '${uuidv7()}'`)).rejects.toThrow(
+      /crm_tasks_changed_by_api_key_fk/,
+    );
   });
 });

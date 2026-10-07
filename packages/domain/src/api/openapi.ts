@@ -2921,7 +2921,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'deal.created': webhook(
         'webhookDealCreated',
         WEBHOOK_EVENT_INFO['deal.created'].label,
-        `${WEBHOOK_EVENT_INFO['deal.created'].description} deal.stageId, deal.pipelineId and deal.status are those it was added with; the rest is the deal when the event is delivered, so a deal whose contact was erased is sent as erasure left it, without the contact's number or name. Read deals with GET /deals/{id} (\`deals.read\`).`,
+        `${WEBHOOK_EVENT_INFO['deal.created'].description} deal.stageId, deal.pipelineId and deal.status are those it was added with; the rest is the deal when the event is delivered, so a deal whose contact was erased is sent as erasure left it, without the contact's number or name. Read deals with GET /deals/{id} (\`deals.read\`). Every deal event's deal.changedBy says who made what it reports, as captured: a member, an automation or an API key, which deal.apiKeyId names, so an integration that changes deals through the API can tell its own changes from others'.`,
         'WebhookDealCreated',
       ),
       'deal.updated': webhook(
@@ -2951,7 +2951,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'task.created': webhook(
         'webhookTaskCreated',
         WEBHOOK_EVENT_INFO['task.created'].label,
-        `${WEBHOOK_EVENT_INFO['task.created'].description} task.status is the one it was added with; the rest is the task when the event is delivered. A task’s notes are never sent: read the task with GET /tasks/{id} (\`tasks.read\`). Erasing a contact deletes its tasks, so the events of an erased contact’s task are no longer delivered.`,
+        `${WEBHOOK_EVENT_INFO['task.created'].description} task.status is the one it was added with; the rest is the task when the event is delivered. A task’s notes are never sent: read the task with GET /tasks/{id} (\`tasks.read\`). Erasing a contact deletes its tasks, so the events of an erased contact’s task are no longer delivered. Every task event's task.changedBy says who made what it reports, as captured: a member, an automation (which only adds tasks) or an API key, which task.apiKeyId names, so an integration that changes tasks through the API can tell its own changes from others'.`,
         'WebhookTaskCreated',
       ),
       'task.updated': webhook(

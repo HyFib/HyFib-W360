@@ -11,6 +11,7 @@ import {
   CHANNEL_STATUSES,
   CONTACT_SOURCES,
   CONVERSATION_STATUSES,
+  CRM_CHANGERS,
   DEAL_STATUSES,
   MESSAGE_TYPES,
   ORDER_STATUSES,
@@ -99,6 +100,7 @@ import {
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
   buildWebhookPayload,
+  capturedCrmChanger,
   campaignStatusChangedPayloadSchema,
   dealCreatedPayloadSchema,
   dealStageChangedPayloadSchema,
@@ -1220,6 +1222,8 @@ describe('webhook payload schemas', () => {
       lostReason: null,
       createdBy: 'member',
       createdAt: base.createdAt,
+      changedBy: 'member',
+      apiKeyId: null,
     };
     const person = { id: base.id, phone: '+919876543210', name: 'Jaya' };
     const created = {
@@ -1281,6 +1285,23 @@ describe('webhook payload schemas', () => {
     }
     expect(WEBHOOK_DEAL_DETAIL_CHANGES).toEqual(['title', 'valueMinor', 'expectedCloseOn']);
     expect(dealUpdatedPayloadSchema.safeParse(created).success).toBe(false);
+    // Who made what the event reports, as captured (ADR-277): each kind, the key for a key's
+    // change, or nobody when the change did not record it (erasure's retitling).
+    expect(CRM_CHANGERS).toEqual(['member', 'automation', 'api']);
+    for (const [changedBy, apiKeyId] of [
+      ['member', null],
+      ['automation', null],
+      ['api', base.id],
+      [null, null],
+    ]) {
+      expect(
+        dealUpdatedPayloadSchema.safeParse({
+          ...updated,
+          data: { ...created.data, deal: { ...deal, changedBy, apiKeyId }, changes: ['title'] },
+        }).success,
+        String(changedBy),
+      ).toBe(true);
+    }
     // Every status a deal can reach, from every other one, with a lost deal's reason.
     for (const status of DEAL_STATUSES) {
       for (const previousStatus of DEAL_STATUSES) {
@@ -1333,6 +1354,10 @@ describe('webhook payload schemas', () => {
       { previousPipelineId: undefined },
       { previousOwnerId: undefined },
       { previousOwnerId: 'asha' },
+      { changedBy: 'erasure' },
+      { changedBy: undefined },
+      { apiKeyId: 'key-1' },
+      { apiKeyId: undefined },
     ]) {
       expect(
         dealCreatedPayloadSchema.safeParse({
@@ -1361,6 +1386,8 @@ describe('webhook payload schemas', () => {
       dealId: null,
       createdBy: 'member',
       createdAt: base.createdAt,
+      changedBy: 'member',
+      apiKeyId: null,
     };
     const person = { id: base.id, phone: '+919876543210', name: 'Jaya' };
     const created = { ...base, type: 'task.created', data: { task, contact: person } };
@@ -1440,6 +1467,9 @@ describe('webhook payload schemas', () => {
       { previousAssigneeId: undefined },
       { dueAt: '2026-10-09' },
       { dealId: undefined },
+      { changedBy: 'erasure' },
+      { changedBy: undefined },
+      { apiKeyId: 'key-1' },
     ]) {
       expect(
         taskCreatedPayloadSchema.safeParse({
@@ -1465,7 +1495,23 @@ describe('webhook payload schemas', () => {
         'dealId',
         'createdBy',
         'createdAt',
+        'changedBy',
+        'apiKeyId',
       ]);
+    }
+    // A key's change names the key; a change that did not record its maker names nobody (ADR-277).
+    for (const [changedBy, apiKeyId] of [
+      ['api', base.id],
+      [null, null],
+    ]) {
+      expect(
+        taskStatusChangedPayloadSchema.safeParse({
+          ...created,
+          type: 'task.status_changed',
+          data: { ...created.data, task: { ...task, status: 'done', changedBy, apiKeyId } },
+        }).success,
+        String(changedBy),
+      ).toBe(true);
     }
     expect(Object.keys(taskUpdatedPayloadSchema.shape.data.shape)).toEqual([
       'task',
@@ -1746,6 +1792,81 @@ describe('the OpenAPI document', () => {
     expect(orderReceivedPayloadSchema.shape.data.shape.order.shape.changedBy.description).toContain(
       'Null for order.received',
     );
+  });
+
+  it('reads who changed a deal or a task as its event captured it, naming a key only for a key’s change (ADR-277)', () => {
+    const key = '0192a1b2-0000-7000-8000-00000000000c';
+    expect(capturedCrmChanger({ changedBy: 'api', apiKeyId: key })).toEqual({
+      changedBy: 'api',
+      apiKeyId: key,
+    });
+    expect(capturedCrmChanger({ changedBy: 'member', apiKeyId: null })).toEqual({
+      changedBy: 'member',
+      apiKeyId: null,
+    });
+    expect(capturedCrmChanger({ changedBy: 'automation', apiKeyId: key })).toEqual({
+      changedBy: 'automation',
+      apiKeyId: null,
+    });
+    // Nobody: a change that did not record its maker, an event from before, or a maker unknown.
+    for (const detail of [
+      { changedBy: null, apiKeyId: null },
+      {},
+      { changedBy: 'erasure' },
+      { changedBy: 'payment_link', apiKeyId: key },
+    ]) {
+      expect(capturedCrmChanger(detail), JSON.stringify(detail)).toEqual({
+        changedBy: null,
+        apiKeyId: null,
+      });
+    }
+    expect(capturedCrmChanger({ changedBy: 'api', apiKeyId: 42 })).toEqual({
+      changedBy: 'api',
+      apiKeyId: null,
+    });
+  });
+
+  it('describes who changed a deal or a task: a member, an automation or a key it names (ADR-277)', () => {
+    const deal = dealUpdatedPayloadSchema.shape.data.shape.deal.shape;
+    const task = taskUpdatedPayloadSchema.shape.data.shape.task.shape;
+    for (const shape of [deal, task]) {
+      expect(shape.changedBy.unwrap().options).toEqual(['member', 'automation', 'api']);
+      expect(shape.changedBy.description).toContain('never which member');
+      expect(shape.changedBy.description).toContain('as it was captured');
+      expect(shape.apiKeyId.description).toContain('when changedBy is api');
+    }
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    expect(doc.webhooks['deal.created'].post.description).toContain(
+      "Every deal event's deal.changedBy says who made what it reports, as captured: a member, an automation or an API key, which deal.apiKeyId names, so an integration that changes deals through the API can tell its own changes",
+    );
+    expect(doc.webhooks['task.created'].post.description).toContain(
+      "Every task event's task.changedBy says who made what it reports, as captured: a member, an automation (which only adds tasks) or an API key, which task.apiKeyId names",
+    );
+    expect(deal.changedBy.description).toContain('for deal.created, who added the deal');
+    expect(deal.changedBy.description).toContain('such as erasure retitling the deal');
+    expect(task.changedBy.description).toContain('for task.created, who added the task');
+    // Every deal and task event carries them.
+    for (const schema of [
+      dealCreatedPayloadSchema,
+      dealStageChangedPayloadSchema,
+      dealOwnerChangedPayloadSchema,
+      dealStatusChangedPayloadSchema,
+    ]) {
+      expect(Object.keys(schema.shape.data.shape.deal.shape).slice(-2)).toEqual([
+        'changedBy',
+        'apiKeyId',
+      ]);
+    }
+    for (const schema of [
+      taskCreatedPayloadSchema,
+      taskAssigneeChangedPayloadSchema,
+      taskStatusChangedPayloadSchema,
+    ]) {
+      expect(Object.keys(schema.shape.data.shape.task.shape).slice(-2)).toEqual([
+        'changedBy',
+        'apiKeyId',
+      ]);
+    }
   });
 
   it('describes the task events: the change, what is never sent and what sends nothing (ADR-261)', () => {

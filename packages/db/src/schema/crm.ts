@@ -1,4 +1,13 @@
-import { bigint, date, integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import {
+  bigint,
+  customType,
+  date,
+  integer,
+  smallint,
+  text,
+  timestamp,
+  uuid,
+} from 'drizzle-orm/pg-core';
 import { jsonb } from './columns';
 import { appSchema } from './tenancy';
 
@@ -8,6 +17,15 @@ import { appSchema } from './tenancy';
  * Money is an integer in the pipeline currency's minor unit.
  */
 const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
+
+/** PostgreSQL xid8, carried as a decimal string (values exceed Number.MAX_SAFE_INTEGER). */
+const xid8 = customType<{ data: string; driverData: string }>({
+  dataType: () => 'xid8',
+});
+
+/** Who changes a deal or a task (migration 0196, ADR-277): a member, an automation's run or a key. */
+export const CRM_CHANGERS = ['member', 'automation', 'api'] as const;
+export type CrmChanger = (typeof CRM_CHANGERS)[number];
 
 export const crmPipelines = appSchema.table('crm_pipelines', {
   id: uuid('id').primaryKey(),
@@ -61,6 +79,15 @@ export const crmDeals = appSchema.table('crm_deals', {
   createdByAutomationId: uuid('created_by_automation_id'),
   /** The API key that created the deal (migration 0169, ADR-254). */
   createdByApiKeyId: uuid('created_by_api_key_id'),
+  /**
+   * Who made the latest change its events report, with the key for `api` (migration 0196,
+   * ADR-277); null when the change did not record it. The database clears a changer an earlier
+   * transaction recorded (`changedXact`), so a change that does not say who made it never names the
+   * one before.
+   */
+  changedBy: text('changed_by', { enum: CRM_CHANGERS }),
+  changedByApiKeyId: uuid('changed_by_api_key_id'),
+  changedXact: xid8('changed_xact'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
@@ -93,6 +120,15 @@ export const crmTasks = appSchema.table('crm_tasks', {
   createdByAutomationId: uuid('created_by_automation_id'),
   /** The API key that created the task (migration 0175, ADR-259). */
   createdByApiKeyId: uuid('created_by_api_key_id'),
+  /**
+   * Who made the latest change its events report, with the key for `api` (migration 0196,
+   * ADR-277); null when the change did not record it. The database clears a changer an earlier
+   * transaction recorded (`changedXact`), so a change that does not say who made it never names the
+   * one before.
+   */
+  changedBy: text('changed_by', { enum: CRM_CHANGERS }),
+  changedByApiKeyId: uuid('changed_by_api_key_id'),
+  changedXact: xid8('changed_xact'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });

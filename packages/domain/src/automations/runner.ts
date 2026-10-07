@@ -36,7 +36,7 @@ import { permissionsForRoles } from '../authz/permissions';
 import { lockCampaignSends, marketingCapReached } from '../campaigns/frequency-cap';
 import { checkTemplateEligibility } from '../consent/service';
 import { MAX_TAGS_PER_CONTACT, coerceFieldValue } from '../contacts/fields';
-import { addActivity, memberRefs } from '../crm/common';
+import { addActivity, crmChangedBy, memberRefs } from '../crm/common';
 import { localDateAfter } from '../crm/time';
 import { scheduleTaskReminder } from '../crm/reminders';
 import { FLOW_TOKEN_DAYS, buildFlowMessageRequest, newFlowToken } from '../flows/model';
@@ -1022,7 +1022,12 @@ async function applyMoveDealEffect(
   if (deal.stageId === effect.stageId) return 'deal_in_stage';
   await tx
     .update(crmDeals)
-    .set({ stageId: effect.stageId, stageEnteredAt: now, version: deal.version + 1 })
+    .set({
+      stageId: effect.stageId,
+      stageEnteredAt: now,
+      version: deal.version + 1,
+      ...crmChangedBy('automation'),
+    })
     .where(and(eq(crmDeals.tenantId, run.tenantId), eq(crmDeals.id, deal.id)));
   await addActivity(tx, {
     tenantId: run.tenantId,
@@ -1122,6 +1127,7 @@ async function applyCloseDealEffect(
       closedByMembershipId: null,
       lostReason: effect.outcome === 'lost' ? effect.lostReason : null,
       version: deal.version + 1,
+      ...crmChangedBy('automation'),
     })
     .where(and(eq(crmDeals.tenantId, run.tenantId), eq(crmDeals.id, deal.id)));
   const by = { automationId: run.automationId, runId: run.id };

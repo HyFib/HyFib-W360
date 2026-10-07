@@ -10,6 +10,7 @@ import {
   sql,
   users,
   type CrmActivityKind,
+  type CrmChanger,
   type Tx,
 } from '@w360/db';
 import { permissionsForRoles } from '../authz/permissions';
@@ -188,6 +189,23 @@ export async function addActivity(
     createdAt: input.at,
   });
   return id;
+}
+
+/** Who changes a deal or a task: a member, an automation's run or an API key (named). */
+export type CrmChange = Exclude<CrmChanger, 'api'> | { apiKeyId: string };
+
+/**
+ * The columns that record who changes a deal or a task (ADR-277), written in the same statement as
+ * the change. The transaction id marks the record as this change's: the database clears a changer
+ * an earlier transaction recorded, so a change written without these columns never names the one
+ * before, and its events say nobody.
+ */
+export function crmChangedBy(by: CrmChange) {
+  return {
+    changedBy: typeof by === 'string' ? by : ('api' as const),
+    changedByApiKeyId: typeof by === 'string' ? null : by.apiKeyId,
+    changedXact: sql`pg_catalog.pg_current_xact_id()`,
+  };
 }
 
 export function versionConflict(): AppError {

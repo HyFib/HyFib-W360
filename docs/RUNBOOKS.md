@@ -2779,6 +2779,17 @@ left it. One API request that changes details and completes the task sends the c
 status `open`, then the completion; one that also gives the task to another member sends the change
 of details before the change of assignee, and one that reopens it sends the reopening first.
 
+**An integration acts on its own deal or task changes, or ignores someone else's (ADR-277).** Every
+deal and task event's `deal.changedBy` or `task.changedBy` says who made the change it reports:
+`member` (never which), `automation`, or `api` with `apiKeyId`, the key's id; for an addition, who
+added it. An integration ignores the events whose `apiKeyId` is the id of the key it changes deals
+and tasks with (`GET /webhook-endpoints` answers an endpoint it added with its key's id).
+`changedBy` is null when HyFib did not record the maker: erasure retitling a deal, changes made by
+servers from before the release that added it (during its rollout, deliveries an older worker built
+have no `changedBy` at all), and events captured before it; treat those as someone else's. A change
+is never named after the maker of an earlier one: the database clears a changer another transaction
+recorded.
+
 **A receiver misses the conversations of a tagged customer (ADR-267).** An endpoint can take the
 message and conversation events of the conversations whose contact has chosen tags only. The
 endpoints list shows them ("Contact tags whose conversations’ events are sent: …"), and the API

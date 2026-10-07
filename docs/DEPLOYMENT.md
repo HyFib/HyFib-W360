@@ -807,6 +807,15 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    label for it): add it to endpoints once the rollout ends, and turn it off before rolling web
    servers back to such an image.
 
+   Migration 0196 (ADR-277) adds who changed a deal or task (`changed_by`, `changed_by_api_key_id`,
+   `changed_xact`) to `app.crm_deals` and `app.crm_tasks`, nullable, so neither table is rewritten,
+   with their foreign keys and checks NOT VALID (0197 validates them while the tables stay
+   writable), the runtime role's grants, the trigger that clears a changer another transaction
+   recorded, and the deal and task capture functions with the same signatures. Until the rollout
+   ends, changes made by web servers and workers from before it record nobody, so their events name
+   nobody (`changedBy` null), and a delivery an older worker builds has no `changedBy` or `apiKeyId`
+   at all; rolling back leaves the columns, which older code neither reads nor writes.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

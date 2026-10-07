@@ -17,6 +17,7 @@ import {
   contacts,
   CONVERSATION_STATUSES,
   conversations,
+  CRM_CHANGERS,
   crmDeals,
   crmPipelines,
   crmTasks,
@@ -633,6 +634,18 @@ const webhookDealSchema = z.object({
     .enum(['member', 'automation', 'api'])
     .describe('Who added the deal: a member, an automation’s run or an API key.'),
   createdAt: z.iso.datetime(),
+  changedBy: z
+    .enum(CRM_CHANGERS)
+    .nullable()
+    .describe(
+      'Who made what this event reports, as it was captured: a member (never which member), an automation’s run, or an API key (api, named by apiKeyId); for deal.created, who added the deal. Null for a change HyFib did not record the maker of, such as erasure retitling the deal.',
+    ),
+  apiKeyId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The API key that made what this event reports, when changedBy is api; null otherwise.',
+    ),
 });
 const webhookDealDataSchema = z.object({
   deal: webhookDealSchema,
@@ -705,6 +718,18 @@ const webhookTaskSchema = z.object({
     .enum(['member', 'automation', 'api'])
     .describe('Who added the task: a member, an automation’s run or an API key.'),
   createdAt: z.iso.datetime(),
+  changedBy: z
+    .enum(CRM_CHANGERS)
+    .nullable()
+    .describe(
+      'Who made what this event reports, as it was captured: a member (never which member) or an API key (api, named by apiKeyId); for task.created, who added the task, an automation’s run among them. Null for a change HyFib did not record the maker of.',
+    ),
+  apiKeyId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The API key that made what this event reports, when changedBy is api; null otherwise.',
+    ),
 });
 const webhookTaskDataSchema = z.object({
   task: webhookTaskSchema,
@@ -775,6 +800,15 @@ const str = (value: unknown): string | null => (typeof value === 'string' ? valu
 const detailChanges = <T extends string>(detail: Record<string, unknown>, names: readonly T[]) => {
   const captured = Array.isArray(detail.changes) ? detail.changes : [];
   return names.filter((name) => captured.includes(name));
+};
+
+/**
+ * Who made a deal's or task's change, as its event captured it (ADR-277), with the key for `api`;
+ * nobody when the change did not record it, and for events captured before it.
+ */
+export const capturedCrmChanger = (detail: Record<string, unknown>) => {
+  const changedBy = CRM_CHANGERS.find((changer) => changer === detail.changedBy) ?? null;
+  return { changedBy, apiKeyId: changedBy === 'api' ? str(detail.apiKeyId) : null };
 };
 
 /** Who changed an order's status, as its event captured it (ADR-270); null when not recorded. */
@@ -1424,13 +1458,18 @@ export async function buildWebhookPayload(
     case 'deal.stage_changed':
     case 'deal.owner_changed':
     case 'deal.status_changed': {
-      // The stage, pipeline and status, and those before them, as captured, and for a change of
-      // owner the owners; the rest as it is now, so an erased contact's deal is sent as erasure left
-      // it.
+      // The stage, pipeline and status, and those before them, as captured, for a change of owner
+      // the owners, and who made the change (an addition's maker is the deal's creator); the rest
+      // as it is now, so an erased contact's deal is sent as erasure left it.
       const deal = await dealOf(tx, tenantId, str(event.detail.dealId));
       if (!deal) throw new WebhookEventGoneError();
       const moved = event.type === 'deal.stage_changed';
       const owned = event.type === 'deal.owner_changed';
+      const createdBy = deal.apiKeyId ? 'api' : deal.automationId ? 'automation' : 'member';
+      const changer =
+        event.type === 'deal.created'
+          ? { changedBy: createdBy, apiKeyId: deal.apiKeyId }
+          : capturedCrmChanger(event.detail);
       return {
         ...base,
         data: {
@@ -1450,8 +1489,9 @@ export async function buildWebhookPayload(
             ownerId: owned ? str(event.detail.ownerId) : deal.ownerId,
             expectedCloseOn: deal.expectedCloseOn,
             lostReason: deal.lostReason,
-            createdBy: deal.apiKeyId ? 'api' : deal.automationId ? 'automation' : 'member',
+            createdBy,
             createdAt: deal.createdAt.toISOString(),
+            ...changer,
           },
           conversation: deal.conversationId ? { id: deal.conversationId } : null,
           contact: await contactOf(tx, tenantId, deal.contactId),
@@ -1465,12 +1505,18 @@ export async function buildWebhookPayload(
     case 'task.updated':
     case 'task.assignee_changed':
     case 'task.status_changed': {
-      // The status, and the one before it, as captured, for a change of assignee the assignees,
-      // and for a change of details the names of what changed; the rest as it is now. Erasing a contact deletes its tasks, so an erased
-      // contact's task is gone and its events send nothing.
+      // The status, and the one before it, as captured, for a change of assignee the assignees, for
+      // a change of details the names of what changed, and who made the change (an addition's
+      // maker is the task's creator); the rest as it is now. Erasing a contact deletes its tasks,
+      // so an erased contact's task is gone and its events send nothing.
       const task = await taskOf(tx, tenantId, str(event.detail.taskId));
       if (!task) throw new WebhookEventGoneError();
       const reassigned = event.type === 'task.assignee_changed';
+      const createdBy = task.apiKeyId ? 'api' : task.automationId ? 'automation' : 'member';
+      const changer =
+        event.type === 'task.created'
+          ? { changedBy: createdBy, apiKeyId: task.apiKeyId }
+          : capturedCrmChanger(event.detail);
       return {
         ...base,
         data: {
@@ -1484,8 +1530,9 @@ export async function buildWebhookPayload(
             assigneeId: reassigned ? str(event.detail.assigneeId) : task.assigneeId,
             previousAssigneeId: reassigned ? str(event.detail.previousAssigneeId) : null,
             dealId: task.dealId,
-            createdBy: task.apiKeyId ? 'api' : task.automationId ? 'automation' : 'member',
+            createdBy,
             createdAt: task.createdAt.toISOString(),
+            ...changer,
           },
           contact: await contactOf(tx, tenantId, task.contactId),
           ...(event.type === 'task.updated'
