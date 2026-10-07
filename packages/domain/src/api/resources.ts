@@ -64,6 +64,8 @@ import { loadEntitlements } from '../plans/entitlements';
 import {
   buildTemplateSend,
   HEADER_MEDIA_NAMES,
+  linkButtons,
+  linkValuesProblem,
   sendSpecFor,
   TEMPLATE_LIMITS,
   type SendSpec,
@@ -71,7 +73,7 @@ import {
   type TemplateParams,
 } from '../templates/definition';
 import { decodeKeysetCursor, likePattern, parseInput } from '../validation';
-import { apiContactById, toApiContact, type ApiContact } from './contact-view';
+import { apiContactById, apiContactNotFound, toApiContact, type ApiContact } from './contact-view';
 import {
   apiContactFieldFiltersSchema,
   apiContactPage,
@@ -174,9 +176,16 @@ const templateVariablesField = z
   .object({
     header: z.array(variableValue).max(1).default([]),
     body: z.array(variableValue).max(TEMPLATE_LIMITS.bodyVariables).default([]),
+    buttons: z
+      .array(variableValue)
+      .max(TEMPLATE_LIMITS.urlButtons)
+      .default([])
+      .describe(
+        'For a template whose website buttons’ links end with a value (its `links` in GET /templates), the end of each link, in the order of `links`: appended to the link where its {{1}} is, with no spaces, and unable to change the website it opens.',
+      ),
   })
   .strict()
-  .default({ header: [], body: [] })
+  .default({ header: [], body: [], buttons: [] })
   .describe('Values for the template’s {{1}}, {{2}}… in order.');
 
 /** The file of a template's photo, video or document header (ADR-201), from a link (ADR-194). */
@@ -911,9 +920,11 @@ export interface ApiTemplate {
   name: string;
   language: string;
   category: 'utility' | 'marketing';
-  variables: { header: number; body: number };
+  variables: { header: number; body: number; buttons: number };
   /** The file a send gives for the template's header (ADR-201), or null for other headers. */
   headerMedia: TemplateHeaderMedia | null;
+  /** The website buttons whose link ends with a value a send gives (ADR-228), in that order. */
+  links: { button: string; url: string }[];
   text: { header: string | null; body: string; footer: string | null };
   channels: { id: string; phone: string | null }[];
 }
@@ -1064,7 +1075,7 @@ export async function apiListTemplates(
       const data: ApiTemplate[] = [];
       for (const t of rows) {
         // Templates with a photo, video or document header are listed: a send gives the file
-        // (ADR-201).
+        // (ADR-201), as it gives the ends of links (ADR-228).
         const spec = sendSpecFor(t.category, t.components, { mediaHeaders: true });
         if (!spec.supported) continue;
         const definition = spec.definition;
@@ -1073,8 +1084,13 @@ export async function apiListTemplates(
           name: t.name,
           language: t.language,
           category: t.category === 'MARKETING' ? 'marketing' : 'utility',
-          variables: { header: spec.headerParams, body: spec.bodyParams },
+          variables: {
+            header: spec.headerParams,
+            body: spec.bodyParams,
+            buttons: spec.buttonParams,
+          },
           headerMedia: spec.headerMedia,
+          links: linkButtons(definition).map((b) => ({ button: b.text, url: b.url })),
           text: {
             header: definition.header.type === 'text' ? definition.header.text : null,
             body: definition.body.text,
@@ -1139,11 +1155,15 @@ export async function apiGetContact(
 ): Promise<ApiContact> {
   assertScope(ctx, 'contacts.read');
   if (!z.uuid().safeParse(contactId).success) throw notFound('Contact');
-  const row = await deps.db.run(ctx.scope, (tx) => apiContactById(tx, ctx.tenant.id, contactId), {
-    accessMode: 'read only',
-  });
-  if (!row) throw notFound('Contact');
-  return toApiContact(row);
+  return deps.db.run(
+    ctx.scope,
+    async (tx) => {
+      const row = await apiContactById(tx, ctx.tenant.id, contactId);
+      if (!row) throw await apiContactNotFound(tx, ctx.tenant.id, contactId);
+      return toApiContact(row);
+    },
+    { accessMode: 'read only' },
+  );
 }
 
 /**
@@ -1282,7 +1302,7 @@ export async function apiRecordConsent(
       .from(contacts)
       .where(and(eq(contacts.tenantId, ctx.tenant.id), eq(contacts.id, contactId)))
       .for('update');
-    if (!contact || contact.erasedAt) throw notFound('Contact');
+    if (!contact || contact.erasedAt) throw await apiContactNotFound(tx, ctx.tenant.id, contactId);
     await recordConsentEvents(tx, [
       {
         tenantId: ctx.tenant.id,
@@ -1464,7 +1484,8 @@ interface TemplateSendValues {
 /**
  * The template, when it is the company's, approved and one HyFib can send; its category decides the
  * scope the key needs. A template with a photo, video or document header is sendable here, as each
- * send gives its file by link (ADR-201).
+ * send gives its file by link (ADR-201), and so is one whose website buttons' links end with a
+ * value, which each send gives (ADR-228).
  */
 async function loadSendableTemplate(
   tx: Tx,
@@ -1486,9 +1507,10 @@ async function loadSendableTemplate(
 }
 
 /**
- * Refuses values that do not fill the template: its variables, and the file of a photo, video or
- * document header, which only a template with one takes (ADR-201). In a list of sends `place`
- * names the send (`messages.3`).
+ * Refuses values that do not fill the template: its variables, the ends of its links, which must
+ * leave each button on its website (ADR-228), and the file of a photo, video or document header,
+ * which only a template with one takes (ADR-201). In a list of sends `place` names the send
+ * (`messages.3`).
  */
 function assertTemplateValues(
   spec: SendableTemplate['spec'],
@@ -1496,13 +1518,28 @@ function assertTemplateValues(
   place?: string,
 ): void {
   const at = (field: string) => (place ? `${place}.${field}` : field);
-  if (variables.header.length !== spec.headerParams || variables.body.length !== spec.bodyParams) {
-    const message = `This template needs ${spec.headerParams} header and ${spec.bodyParams} body variables.`;
+  if (
+    variables.header.length !== spec.headerParams ||
+    variables.body.length !== spec.bodyParams ||
+    variables.buttons.length !== spec.buttonParams
+  ) {
+    const message =
+      spec.buttonParams > 0
+        ? `This template needs ${spec.headerParams} header, ${spec.bodyParams} body and ${spec.buttonParams} button variables.`
+        : `This template needs ${spec.headerParams} header and ${spec.bodyParams} body variables.`;
     throw new AppError(
       'validation_failed',
       message,
       place ? { issues: [{ path: at('variables'), message }] } : {},
     );
+  }
+  const linkProblem = linkValuesProblem(spec.definition, variables.buttons);
+  if (linkProblem) {
+    throw new AppError('validation_failed', linkProblem.message, {
+      issues: [
+        { path: at(`variables.buttons.${linkProblem.index}`), message: linkProblem.message },
+      ],
+    });
   }
   if ((spec.headerMedia === null) === (headerMedia === undefined)) return;
   const message = spec.headerMedia

@@ -95,6 +95,7 @@ const templateRef: TemplateReference = {
   unsupported: null,
   headerParams: 0,
   bodyParams: 2,
+  links: [],
   quickReplies: [
     { index: 0, title: 'Track order' },
     { index: 2, title: 'Talk to us' },
@@ -179,6 +180,84 @@ describe('template step parsing', () => {
   });
 });
 
+describe('the ends of links (ADR-229)', () => {
+  const linked = (links: string[]) =>
+    graphOf({
+      version: 1,
+      start: 'notify',
+      nodes: [
+        {
+          id: 'notify',
+          type: 'send_template',
+          templateId: TEMPLATE,
+          header: [],
+          body: ['{{order.customer_name}}', '{{order.number}}'],
+          links,
+          next: 'bye',
+        },
+        { id: 'bye', type: 'end' },
+      ],
+    });
+  const reference: TemplateReference = {
+    ...templateRef,
+    quickReplies: [],
+    links: [{ index: 0, text: 'Track', url: 'https://shop.example/track/{{1}}' }],
+  };
+  const issues = (graph: AutomationGraph) =>
+    checkGraph(graph, { templates: new Map([[TEMPLATE, reference]]), storeEvent: true })
+      .filter((i) => i.level === 'error')
+      .map((i) => i.message);
+
+  it('fill each link with placeholders, kept as rendered, and fail without one', () => {
+    const graph = linked(['  {{order.items}}\n\nnow ']);
+    expect(issues(graph)).toEqual([]);
+    const sent = step(graph, initialRunState(graph), { kind: 'continue' });
+    // White space inside is kept: whether the link can end with it is checked when queued.
+    expect(sent.effects[0]).toMatchObject({
+      kind: 'send_template',
+      body: ['Nila Customer', '#1001'],
+      links: ['Lavender candle and 1 more\n\nnow'],
+    });
+    const empty = linked(['{{order.tracking_number}}']);
+    const failed = step(empty, initialRunState(empty), { kind: 'continue' });
+    expect(failed.status).toBe('failed');
+    expect(failed.log.detail).toBe('missing_variable');
+    expect(failed.effects).toEqual([]);
+  });
+
+  it('are counted with the variables, and versions saved before have none', () => {
+    expect(issues(linked([]))[0]).toBe(
+      'The template “order_confirmed” has 3 variables: fill in each one.',
+    );
+    expect(issues(linked(['a', 'b']))[0]).toMatch(/has 3 variables/);
+    const old = graphOf({
+      version: 1,
+      start: 'a',
+      nodes: [
+        { id: 'a', type: 'send_template', templateId: TEMPLATE, header: [], body: [], next: null },
+      ],
+    });
+    expect(old.nodes[0]).toMatchObject({ links: [] });
+    expect(
+      parseGraph({
+        version: 1,
+        start: 'a',
+        nodes: [
+          {
+            id: 'a',
+            type: 'send_template',
+            templateId: TEMPLATE,
+            header: [],
+            body: [],
+            links: ['a', 'b', 'c'],
+            next: null,
+          },
+        ],
+      }).ok,
+    ).toBe(false);
+  });
+});
+
 describe('order placeholders', () => {
   it('render from the order, empty where it has no value or there is no order', () => {
     const values = { contactName: 'Nila', companyName: 'Cora', variables: {}, order };
@@ -227,6 +306,7 @@ describe('send_template', () => {
         templateId: TEMPLATE,
         header: ['Cora Candles'],
         body: ['Nila', 'Lavender candle and 1 more now', 'here'],
+        links: [],
         ask: false,
         buttons: [],
       },
@@ -260,6 +340,7 @@ describe('ask_template', () => {
         templateId: TEMPLATE,
         header: [],
         body: ['Nila Customer', '#1001'],
+        links: [],
         ask: true,
         buttons: [
           { index: 0, title: 'Track order', payload: botButtonId(RUN, 'confirm', 1, 0) },

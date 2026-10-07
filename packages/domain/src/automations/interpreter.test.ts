@@ -373,7 +373,7 @@ describe('automation triggers', () => {
         { type: 'conversation_started', hours: 'any', cooldownMinutes: 0 },
         { text: 'hi', newCase: true },
       ),
-    ).toBe(2);
+    ).toBe(3);
     expect(
       matchTrigger(
         { type: 'conversation_started', hours: 'any', cooldownMinutes: 0 },
@@ -385,7 +385,7 @@ describe('automation triggers', () => {
         { type: 'any_message', hours: 'any', cooldownMinutes: 0 },
         { text: null, newCase: false },
       ),
-    ).toBe(3);
+    ).toBe(4);
     expect(
       parseTrigger({
         type: 'keyword',
@@ -398,6 +398,39 @@ describe('automation triggers', () => {
       ok: false,
       message: 'Keywords need at least one letter or digit.',
     });
+  });
+
+  it('start on keywords with small typos only when asked, ranked below any match without them (ADR-240)', () => {
+    const base = {
+      type: 'keyword',
+      keywords: ['refund', 'menu'],
+      hours: 'any',
+      cooldownMinutes: 0,
+    };
+    const contains = parseTrigger({ ...base, match: 'contains', typos: true });
+    const exact = parseTrigger({ ...base, match: 'exact', typos: true });
+    const strict = parseTrigger({ ...base, match: 'contains' });
+    if (!contains.ok || !exact.ok || !strict.ok) throw new Error('trigger');
+    // Saved without the option, a trigger reads as before.
+    expect(strict.trigger).not.toHaveProperty('typos');
+    const at = (trigger: typeof contains.trigger, text: string) =>
+      matchTrigger(trigger, { text, newCase: false });
+    expect(at(contains.trigger, 'Refund')).toBe(0);
+    expect(at(contains.trigger, 'I want a refund')).toBe(1);
+    expect(at(contains.trigger, 'I want a refnud')).toBe(2);
+    expect(at(contains.trigger, 'the meny')).toBeNull();
+    expect(at(exact.trigger, 'refnud!')).toBe(2);
+    expect(at(exact.trigger, 'I want a refnud')).toBeNull();
+    expect(at(exact.trigger, 'I want a refund')).toBeNull();
+    expect(at(strict.trigger, 'I want a refnud')).toBeNull();
+    // A match with typos still ranks above a new conversation's automation.
+    expect(at(contains.trigger, 'refnud')).toBeLessThan(
+      matchTrigger(
+        { type: 'conversation_started', hours: 'any', cooldownMinutes: 0 },
+        { text: 'refnud', newCase: true },
+      ) ?? Infinity,
+    );
+    expect(parseTrigger({ ...base, match: 'contains', typos: 'yes' }).ok).toBe(false);
   });
 });
 
@@ -835,6 +868,80 @@ describe('automation HTTP step', () => {
       raw.nodes[1] = { ...raw.nodes[1], headers: [header] };
       expect(parseGraph(raw).ok, header.name).toBe(false);
     }
+  });
+
+  it('checks a form body as written, and refuses a Content-Type header with it (ADR-236)', () => {
+    const form = (body: string, extra: Record<string, unknown> = {}) =>
+      order({ bodyFormat: 'form', body, ...extra });
+    for (const ok of [
+      'a=1',
+      'order={{answer.order_no}}&who={{name}}',
+      'note=Hello+there&x=%20',
+      'items[0]=a&empty=',
+    ]) {
+      expect(errors(form(ok)), ok).toEqual([]);
+    }
+    const syntax =
+      'A form body is name=value fields joined by &, written URL-encoded, for example phone={{answer.phone}}&note=Hello%20there.';
+    for (const bad of ['{"order": "1"}', 'a=1&&b=2', 'a=1&', 'note=Hello there', 'novalue', '=x']) {
+      expect(errors(form(bad)), bad).toContain(syntax);
+    }
+    expect(errors(form('a=%zz'))).toContain(
+      'A % in a form body starts an encoded character, like %20 for a space.',
+    );
+    expect(
+      errors(form('a=1', { headers: [{ name: 'content-type', value: 'text/plain' }] })),
+    ).toContain(
+      'HyFib sends form bodies as application/x-www-form-urlencoded: remove the Content-Type header.',
+    );
+    // A body without a format is JSON, as before.
+    expect(errors(order({ body: 'a=1' }))).toContain(
+      'The body must be JSON, with placeholders inside quotes.',
+    );
+  });
+
+  it('sends a form body with its values URL-encoded, and says it is one (ADR-236)', () => {
+    const graph = order({
+      bodyFormat: 'form',
+      body: 'order={{answer.order_no}}&note={{name}}&src=whats%20app',
+    });
+    const odd = { ...facts, contactName: 'Asha "A" & Co/x=1' };
+    const asked = runUntilStop(graph, initialRunState(graph), odd).last;
+    const answered = step(
+      graph,
+      asked.state,
+      { kind: 'reply', reply: { type: 'text', text: '4217', buttonId: null } },
+      odd,
+    );
+    const [effect] = step(graph, answered.state, { kind: 'continue' }, odd).effects;
+    expect(effect).toMatchObject({
+      kind: 'http_request',
+      body: 'order=4217&note=Asha%20%22A%22%20%26%20Co%2Fx%3D1&src=whats%20app',
+      headers: [
+        { name: 'Authorization', parts: [{ text: 'Bearer ' }, { secret: 'shop_token' }] },
+        { name: 'Content-Type', parts: [{ text: 'application/x-www-form-urlencoded' }] },
+      ],
+    });
+    // A value can neither add a field nor end one: the receiver reads the values as given.
+    expect(Object.fromEntries(new URLSearchParams((effect as { body: string }).body))).toEqual({
+      order: '4217',
+      note: 'Asha "A" & Co/x=1',
+      src: 'whats app',
+    });
+    // A request without a body says nothing of a form.
+    const get = order({ bodyFormat: 'form', body: null, method: 'GET' });
+    const asking = runUntilStop(get, initialRunState(get), odd).last;
+    const replied = step(
+      get,
+      asking.state,
+      { kind: 'reply', reply: { type: 'text', text: '4217', buttonId: null } },
+      odd,
+    );
+    const [plain] = step(get, replied.state, { kind: 'continue' }, odd).effects;
+    expect(plain).toMatchObject({
+      body: null,
+      headers: [{ name: 'Authorization', parts: [{ text: 'Bearer ' }, { secret: 'shop_token' }] }],
+    });
   });
 
   it('renders the request, waits for its result and saves values only on success', () => {

@@ -8,6 +8,7 @@ import { FormError, FormSuccess } from '@/components/form-status';
 import {
   SegmentBuilder,
   type BuilderField,
+  type BuilderStore,
   type Definition,
 } from '@/components/segments/segment-builder';
 import type { SendableTemplate, SenderChannel } from '@/components/templates/template-sender';
@@ -25,7 +26,8 @@ export interface EditableCampaign {
   name: string;
   channelAccountId: string | null;
   templateId: string | null;
-  variables: { header: Source[]; body: Source[] };
+  /** `buttons`: the ends of the template's links that take a value (ADR-229). */
+  variables: { header: Source[]; body: Source[]; buttons: Source[] };
   segmentId: string | null;
   audienceDefinition: Definition | null;
   timezone: string;
@@ -69,6 +71,8 @@ export function CampaignEditor({
   segments,
   fields,
   campaigns,
+  stores,
+  orderCurrencies,
   timezones,
   currencies,
 }: {
@@ -79,6 +83,9 @@ export function CampaignEditor({
   segments: { id: string; name: string }[];
   fields: BuilderField[];
   campaigns: { id: string; name: string }[];
+  /** For audience conditions on store orders (ADR-231). */
+  stores: BuilderStore[];
+  orderCurrencies: string[];
   timezones: string[];
   currencies: string[];
 }) {
@@ -108,6 +115,7 @@ export function CampaignEditor({
   const template = available.find((t) => t.id === c.templateId);
   const header = resize(c.variables.header, template?.headerParams ?? 0);
   const body = resize(c.variables.body, template?.bodyParams ?? 0);
+  const buttons = resize(c.variables.buttons, template?.links.length ?? 0);
   const preview: RenderedTemplate | null = template
     ? {
         ...template.preview,
@@ -121,14 +129,20 @@ export function CampaignEditor({
           template.preview.body,
           body.map((s) => describe(s, fields)),
         ),
+        // Each link that takes a value, ending with what fills it.
+        buttons: template.preview.buttons.map((b, index) => {
+          const i = template.links.findIndex((link) => link.index === index);
+          const link = template.links[i];
+          return link
+            ? { ...b, url: `${link.url.slice(0, -'{{1}}'.length)}${describe(buttons[i], fields)}` }
+            : b;
+        }),
       }
     : null;
-  const setVariable = (part: 'header' | 'body', index: number, source: Source) => {
-    const list = part === 'header' ? [...header] : [...body];
-    list[index] = source;
-    update({
-      variables: { header: part === 'header' ? list : header, body: part === 'body' ? list : body },
-    });
+  const setVariable = (part: 'header' | 'body' | 'buttons', index: number, source: Source) => {
+    const next = { header: [...header], body: [...body], buttons: [...buttons] };
+    next[part][index] = source;
+    update({ variables: next });
   };
 
   function submit(event: React.FormEvent) {
@@ -144,7 +158,7 @@ export function CampaignEditor({
           name: c.name,
           channelAccountId: c.channelAccountId,
           templateId: template ? template.id : null,
-          variables: { header, body },
+          variables: { header, body, buttons },
           audience:
             audienceKind === 'segment'
               ? c.segmentId
@@ -234,7 +248,7 @@ export function CampaignEditor({
                 onChange={(e) =>
                   update({
                     templateId: e.target.value || null,
-                    variables: { header: [], body: [] },
+                    variables: { header: [], body: [], buttons: [] },
                   })
                 }
               >
@@ -254,17 +268,22 @@ export function CampaignEditor({
               {[
                 ...header.map((s, i) => ({ part: 'header' as const, index: i, source: s })),
                 ...body.map((s, i) => ({ part: 'body' as const, index: i, source: s })),
+                ...buttons.map((s, i) => ({ part: 'buttons' as const, index: i, source: s })),
               ].map(({ part, index, source }) => (
                 <VariableInput
                   key={`${part}-${index}`}
                   id={`cmp-var-${part}-${index}`}
-                  label={`${part === 'header' ? 'Header' : 'Body'} variable {{${index + 1}}}`}
+                  label={
+                    part === 'buttons'
+                      ? `End of the “${template.links[index]?.text ?? ''}” link`
+                      : `${part === 'header' ? 'Header' : 'Body'} variable {{${index + 1}}}`
+                  }
                   source={source}
                   fields={fields}
                   onChange={(next) => setVariable(part, index, next)}
                 />
               ))}
-              {header.length + body.length === 0 ? (
+              {header.length + body.length + buttons.length === 0 ? (
                 <p className="text-sm text-muted-foreground">This template has no variables.</p>
               ) : null}
             </div>
@@ -331,6 +350,8 @@ export function CampaignEditor({
             }}
             fields={fields}
             campaigns={campaigns.filter((x) => x.id !== c.id)}
+            stores={stores}
+            orderCurrencies={orderCurrencies}
             idPrefix="cmp-seg"
           />
         )}

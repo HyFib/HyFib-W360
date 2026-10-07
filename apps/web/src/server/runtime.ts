@@ -44,10 +44,12 @@ import {
   createFlowsService,
   createReportsService,
   createConsentService,
+  createSetupChecklistService,
   createContactMergeService,
   createContactsService,
   createEmailPreferencesService,
   createInboxService,
+  createPresenceService,
   createReceivedMediaService,
   createFileRepliesService,
   createOnboardingService,
@@ -100,10 +102,12 @@ import {
   type GrowthService,
   type ReportsService,
   type ConsentService,
+  type SetupChecklistService,
   type ContactMergeService,
   type ContactsService,
   type EmailPreferencesService,
   type InboxService,
+  type PresenceService,
   type ReceivedMediaService,
   type FileRepliesService,
   type JobQueue,
@@ -174,6 +178,8 @@ export interface Runtime {
   /** Billing → Usage and rates: Meta's rates and this month's estimate (ADR-060). */
   billingUsage: BillingUsageService;
   inbox: InboxService;
+  /** Members who have a conversation open (ADR-243). */
+  presence: PresenceService;
   /** Files customers send, fetched from WhatsApp per request (ADR-216); null without Meta. */
   receivedMedia: ReceivedMediaService | null;
   /** Files members send from the inbox, uploaded to WhatsApp (ADR-218); null without Meta. */
@@ -196,6 +202,8 @@ export interface Runtime {
   /** Merging two contacts into one (ADR-224). */
   contactMerges: ContactMergeService;
   consent: ConsentService;
+  /** The company's setup checklist (ADR-233). */
+  setup: SetupChecklistService;
   templates: TemplatesService;
   segments: SegmentsService;
   campaigns: CampaignsService;
@@ -349,6 +357,7 @@ async function init(): Promise<Runtime> {
   const platformReconciliation = createPlatformReconciliationService({ platformDb });
   const billingUsage = createBillingUsageService({ db, clock: systemClock });
   const inbox = createInboxService({ db, clock: systemClock, jobs, signer });
+  const presence = createPresenceService({ db, clock: systemClock });
   const emailPreferences = createEmailPreferencesService({ db });
   const teams = createTeamsService({ db, clock: systemClock });
   const businessHours = createBusinessHoursService({ db, clock: systemClock });
@@ -360,6 +369,7 @@ async function init(): Promise<Runtime> {
   const contacts = createContactsService({ db, clock: systemClock });
   const contactMerges = createContactMergeService({ db, clock: systemClock });
   const consent = createConsentService({ db, clock: systemClock });
+  const setup = createSetupChecklistService({ db, clock: systemClock });
   const templates = createTemplatesService({ db, jobs, signer, clock: systemClock });
   const segments = createSegmentsService({ db, clock: systemClock });
   const campaignNotices: CampaignNoticeDeps = { outbox, appBaseUrl: config.APP_BASE_URL };
@@ -561,6 +571,7 @@ async function init(): Promise<Runtime> {
     platformReconciliation,
     billingUsage,
     inbox,
+    presence,
     receivedMedia,
     fileReplies,
     mediaGraph,
@@ -576,6 +587,7 @@ async function init(): Promise<Runtime> {
     contacts,
     contactMerges,
     consent,
+    setup,
     templates,
     segments,
     campaigns,

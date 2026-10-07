@@ -572,6 +572,37 @@ function templateHeaderProblem(body: unknown): string | null {
   return null;
 }
 
+/**
+ * Checks a template's button parameters (research M-177, M-198): each `button` component has an
+ * `index` given as text and one parameter, a `payload` for a quick reply (`sub_type`
+ * `quick_reply`) or a `text`, the end of the link, for a website button (`sub_type` `url`). HyFib
+ * sends no other button parameter.
+ */
+function templateButtonProblem(body: unknown): string | null {
+  const b = body as { type?: unknown; template?: unknown } | undefined;
+  if (b?.type !== 'template') return null;
+  const components = (b.template as { components?: unknown } | null | undefined)?.components;
+  if (!Array.isArray(components)) return null;
+  for (const component of components) {
+    const c = component as Record<string, unknown> | null;
+    if (c?.type !== 'button') continue;
+    if (typeof c.index !== 'string' || !/^\d+$/.test(c.index)) return 'template.button.index';
+    const parameters = c.parameters;
+    if (!Array.isArray(parameters) || parameters.length !== 1) return 'template.button.parameters';
+    const parameter = parameters[0] as Record<string, unknown> | null;
+    if (c.sub_type === 'quick_reply') {
+      if (parameter?.type !== 'payload' || !isText(parameter.payload)) {
+        return 'template.button.payload';
+      }
+    } else if (c.sub_type === 'url') {
+      if (parameter?.type !== 'text' || !isText(parameter.text)) return 'template.button.text';
+    } else {
+      return 'template.button.sub_type';
+    }
+  }
+  return null;
+}
+
 /** Checks the `context` of a reply that quotes a message (research M-041, M-183). */
 function contextProblem(body: unknown): string | null {
   const context = (body as { context?: unknown } | undefined)?.context;
@@ -951,7 +982,8 @@ export async function startGraphStandIn(options: {
           mediaProblem(body) ??
           locationProblem(body) ??
           contactsProblem(body) ??
-          templateHeaderProblem(body);
+          templateHeaderProblem(body) ??
+          templateButtonProblem(body);
         if (shapeInvalid) {
           return graphError(res, 400, 100, `(#100) Invalid parameter: ${shapeInvalid}`);
         }

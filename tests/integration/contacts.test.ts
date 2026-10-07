@@ -219,7 +219,7 @@ describe('contacts', () => {
   });
 });
 
-describe('bulk tag edits (ADR-213)', () => {
+describe('bulk tag and field edits (ADR-213, ADR-238)', () => {
   async function tagsOf(contactId: string) {
     const rows = await fx.query<{ tag: string }>(
       'SELECT tag FROM app.contact_tags WHERE contact_id = $1 ORDER BY tag',
@@ -387,6 +387,219 @@ describe('bulk tag edits (ADR-213)', () => {
     );
   });
 
+  async function attributesOf(contactId: string) {
+    const [row] = await fx.query<{ attributes: Record<string, unknown> }>(
+      'SELECT attributes FROM app.contacts WHERE id = $1',
+      [contactId],
+    );
+    return row?.attributes;
+  }
+
+  async function feedRows(contactId: string) {
+    const [row] = await fx.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM app.contact_changes WHERE contact_id = $1',
+      [contactId],
+    );
+    return row?.n;
+  }
+
+  it('sets one custom field on every contact the filters match, or clears it, only where that changes it, and audits each edit (ADR-238)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await contactsSvc.createField(owner, { label: 'City', type: 'text' });
+    await contactsSvc.createField(owner, { label: 'Orders', type: 'number' });
+    await contactsSvc.createField(owner, { label: 'Wholesale', type: 'boolean' });
+    const a = await contactsSvc.createContact(owner, {
+      displayName: 'Asha Rao',
+      phone: '+919822000001',
+      tags: ['pune'],
+      attributes: { city: 'Mumbai' },
+    });
+    const b = await contactsSvc.createContact(owner, {
+      displayName: 'Bina Shah',
+      phone: '+919822000002',
+      tags: ['pune'],
+      attributes: { city: 'Pune', orders: '3' },
+    });
+    const other = await contactsSvc.createContact(owner, {
+      displayName: 'Dev Mehta',
+      phone: '+919822000003',
+      tags: ['mumbai'],
+      attributes: { city: 'Mumbai' },
+    });
+    const erased = await contactsSvc.createContact(owner, {
+      displayName: 'Esha Paul',
+      phone: '+919822000004',
+      tags: ['pune'],
+    });
+    await contactsSvc.eraseContact(owner, { contactId: erased.id, suppress: false });
+    const pune = { tag: 'pune' };
+    expect(await contactsSvc.countContacts(owner, pune)).toBe(2);
+
+    // The value is checked against the field's type, the field must be the company's, and the
+    // number shown must still be the number matching.
+    await expectAppError(
+      contactsSvc.bulkSetField(owner, {
+        filter: pune,
+        key: 'orders',
+        value: 'many',
+        expectedCount: 2,
+      }),
+      'validation_failed',
+      /Orders must be a number\./,
+    );
+    await expectAppError(
+      contactsSvc.bulkSetField(owner, {
+        filter: pune,
+        key: 'country',
+        value: 'India',
+        expectedCount: 2,
+      }),
+      'validation_failed',
+      /Choose one of the company’s custom fields\./,
+    );
+    await expectAppError(
+      contactsSvc.bulkSetField(owner, {
+        filter: pune,
+        key: 'city',
+        value: 'Pune',
+        expectedCount: 3,
+      }),
+      'conflict',
+      /These filters now match 2 contacts, not 3\./,
+    );
+    expect(await attributesOf(a.id)).toEqual({ city: 'Mumbai' });
+
+    const feedBefore = { a: await feedRows(a.id), b: await feedRows(b.id) };
+    expect(
+      await contactsSvc.bulkSetField(
+        owner,
+        { filter: pune, key: 'city', value: ' Pune ', expectedCount: 2 },
+        { ipAddress: '203.0.113.7' },
+      ),
+    ).toEqual({ key: 'city', label: 'City', value: 'Pune', matched: 2, changed: 1, unchanged: 1 });
+    expect(await attributesOf(a.id)).toEqual({ city: 'Pune' });
+    expect(await attributesOf(b.id)).toEqual({ city: 'Pune', orders: 3 });
+    expect(await attributesOf(other.id)).toEqual({ city: 'Mumbai' });
+    // The contact that changed is a change in the contact feed; the one left as it was is not.
+    expect(await feedRows(a.id)).toBe(feedBefore.a! + 1);
+    expect(await feedRows(b.id)).toBe(feedBefore.b);
+
+    // Typed values, stored as one contact's edit stores them.
+    expect(
+      await contactsSvc.bulkSetField(owner, {
+        filter: pune,
+        key: 'wholesale',
+        value: 'Yes',
+        expectedCount: 2,
+      }),
+    ).toMatchObject({ value: true, changed: 2, unchanged: 0 });
+    expect(await attributesOf(b.id)).toEqual({ city: 'Pune', orders: 3, wholesale: true });
+
+    // Clearing, by an agent, for the contacts a search finds; clearing again changes nothing.
+    const agent = await fx.ctx(c, c.agent);
+    expect(
+      await contactsSvc.bulkSetField(agent, {
+        filter: { q: 'Shah' },
+        key: 'orders',
+        value: '',
+        expectedCount: 1,
+      }),
+    ).toEqual({
+      key: 'orders',
+      label: 'Orders',
+      value: null,
+      matched: 1,
+      changed: 1,
+      unchanged: 0,
+    });
+    expect(await attributesOf(b.id)).toEqual({ city: 'Pune', wholesale: true });
+    expect(
+      await contactsSvc.bulkSetField(owner, {
+        filter: pune,
+        key: 'orders',
+        value: '  ',
+        expectedCount: 2,
+      }),
+    ).toMatchObject({ value: null, matched: 2, changed: 0, unchanged: 2 });
+
+    // Audited with the field, the counts and which filters were used, never the value or the
+    // search text.
+    const audit = await fx.query<{ actor_id: string; metadata: Record<string, unknown> }>(
+      `SELECT actor_id, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'contacts.bulk_field_set' ORDER BY id`,
+      [c.tenant.id],
+    );
+    expect(audit).toEqual([
+      {
+        actor_id: c.owner.id,
+        metadata: {
+          key: 'city',
+          cleared: false,
+          matched: 2,
+          changed: 1,
+          unchanged: 1,
+          filter: { q: false, tag: 'pune', consent: 'any' },
+        },
+      },
+      expect.objectContaining({ actor_id: c.owner.id }),
+      {
+        actor_id: c.agent.id,
+        metadata: {
+          key: 'orders',
+          cleared: true,
+          matched: 1,
+          changed: 1,
+          unchanged: 0,
+          filter: { q: true, tag: null, consent: 'any' },
+        },
+      },
+      expect.objectContaining({ actor_id: c.owner.id }),
+    ]);
+    expect(JSON.stringify(audit)).not.toContain('Pune');
+    expect(JSON.stringify(audit)).not.toContain('Shah');
+
+    // Members who cannot change contacts cannot use it; another company's fields and contacts
+    // are its own.
+    const user = await createUser(fx.dbs, { name: 'Analyst B' });
+    const { token } = await invite(fx.dbs, c.tenant, c.owner, user.email, ['analyst']);
+    await acceptInvitation(fx.dbs, user, token);
+    const analyst = await fx.ctx(c, user);
+    await expectAppError(
+      contactsSvc.bulkSetField(analyst, {
+        filter: pune,
+        key: 'city',
+        value: 'Goa',
+        expectedCount: 2,
+      }),
+      'forbidden',
+    );
+    const d = await fx.company();
+    const elsewhere = await fx.ctx(d, d.owner);
+    await expectAppError(
+      contactsSvc.bulkSetField(elsewhere, {
+        filter: pune,
+        key: 'city',
+        value: 'Goa',
+        expectedCount: 2,
+      }),
+      'validation_failed',
+      /Choose one of the company’s custom fields\./,
+    );
+    await contactsSvc.createField(elsewhere, { label: 'City', type: 'text' });
+    await expectAppError(
+      contactsSvc.bulkSetField(elsewhere, {
+        filter: pune,
+        key: 'city',
+        value: 'Goa',
+        expectedCount: 2,
+      }),
+      'conflict',
+      /These filters now match 0 contacts, not 2\./,
+    );
+    expect(await attributesOf(a.id)).toEqual({ city: 'Pune', wholesale: true });
+  });
+
   it('refuses more contacts than one edit may change', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
@@ -415,6 +628,24 @@ describe('bulk tag edits (ADR-213)', () => {
       [c.tenant.id],
     );
     expect(left!.n).toBe(BULK_TAG_LIMIT + 1);
+    // A field edit has the same limit (ADR-238).
+    await contactsSvc.createField(owner, { label: 'City', type: 'text' });
+    await expectAppError(
+      contactsSvc.bulkSetField(owner, {
+        filter: { tag: 'lead' },
+        key: 'city',
+        value: 'Pune',
+        expectedCount: BULK_TAG_LIMIT,
+      }),
+      'validation_failed',
+      /At most 10,000 contacts can be edited at once\. Narrow the filters first\./,
+    );
+    const [set] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM app.contacts
+        WHERE tenant_id = $1 AND (attributes -> 'city') IS NOT NULL`,
+      [c.tenant.id],
+    );
+    expect(set!.n).toBe(0);
   });
 });
 

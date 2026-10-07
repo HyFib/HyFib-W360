@@ -1,10 +1,11 @@
 'use client';
 import type { ReactNode } from 'react';
-import { Button, Field, Input, Select, Textarea } from '@w360/ui';
+import { Button, Checkbox, Field, Input, Select, Textarea } from '@w360/ui';
 import {
   ANSWER_FORMATS,
   AUTOMATION_LIMITS,
   COMPARISONS,
+  FORM_CONTENT_TYPE,
   HTTP_BODY_METHODS,
   HTTP_METHODS,
   HTTP_WAIT_MINUTES,
@@ -13,6 +14,7 @@ import {
   type HttpMethod,
   type NodeOf,
 } from '@w360/domain/automation-model';
+import { FLOW_LIMITS } from '@w360/domain/flow-json';
 
 /**
  * Field editors for each step type. Every control is labelled; "next step" choices list the
@@ -21,6 +23,14 @@ import {
 export interface StepChoice {
   id: string;
   label: string;
+}
+
+/** An active pipeline a deal step may use, with its currency and active stages. */
+export interface EditorPipeline {
+  id: string;
+  name: string;
+  currency: string;
+  stages: { id: string; name: string }[];
 }
 
 /** A company template as the builder sees it (from the latest copy synced from Meta). */
@@ -35,6 +45,8 @@ export interface EditorTemplate {
   unsupported: string | null;
   headerParams: number;
   bodyParams: number;
+  /** Website buttons whose link ends with a value, in the order a step fills them (ADR-229). */
+  links: readonly { index: number; text: string; url: string }[];
   /** Quick-reply buttons by their position among the template's buttons. */
   quickReplies: readonly { index: number; title: string }[];
   preview: { header: string | null; body: string; footer: string | null } | null;
@@ -43,6 +55,12 @@ export interface EditorTemplate {
 export interface NodeFieldOptions {
   steps: StepChoice[];
   teams: { id: string; name: string }[];
+  /** Active members who can use the CRM, whom task steps may create tasks for. */
+  crmMembers: { id: string; name: string }[];
+  /** Active pipelines with their currency and active stages, for deal steps. */
+  crmPipelines: EditorPipeline[];
+  /** The company's forms that can be sent, of the automation's number's account when it has one. */
+  flows: { id: string; name: string }[];
   fields: { key: string; label: string; type: string }[];
   /** Answer names saved by questions and web requests in this automation. */
   answers: string[];
@@ -407,6 +425,84 @@ export function NodeFields({
           />
         </div>
       );
+    case 'send_flow':
+      return (
+        <div className="grid gap-4">
+          <Field
+            id={`${p}-flow`}
+            label="Form"
+            description="A published form of the number's WhatsApp account. The customer's answers go to the contact as the form maps them."
+          >
+            {(aria) => (
+              <Select
+                {...aria}
+                value={node.flowId}
+                onChange={(e) => patch(node, { flowId: e.target.value })}
+              >
+                {options.flows.some((f) => f.id === node.flowId) ? null : (
+                  <option value={node.flowId}>Choose a form</option>
+                )}
+                {options.flows.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.name}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+          <Field id={`${p}-body`} label="Message" description={hintFor(options)}>
+            {(aria) => (
+              <Textarea
+                {...aria}
+                rows={3}
+                value={node.body}
+                maxLength={FLOW_LIMITS.bodyLength}
+                onChange={(e) => patch(node, { body: e.target.value })}
+              />
+            )}
+          </Field>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Field id={`${p}-header`} label="Header (optional)">
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={node.header ?? ''}
+                  maxLength={FLOW_LIMITS.headerLength}
+                  onChange={(e) => patch(node, { header: e.target.value || null })}
+                />
+              )}
+            </Field>
+            <Field id={`${p}-footer`} label="Footer (optional)">
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={node.footer ?? ''}
+                  maxLength={FLOW_LIMITS.footerLength}
+                  onChange={(e) => patch(node, { footer: e.target.value || null })}
+                />
+              )}
+            </Field>
+            <Field id={`${p}-cta`} label="Button">
+              {(aria) => (
+                <Input
+                  {...aria}
+                  value={node.cta}
+                  maxLength={FLOW_LIMITS.ctaLength}
+                  onChange={(e) => patch(node, { cta: e.target.value })}
+                />
+              )}
+            </Field>
+          </div>
+          <NextSelect
+            id={`${p}-next`}
+            label="Then"
+            value={node.next}
+            self={node.id}
+            options={options}
+            onChange={(next) => patch(node, { next })}
+          />
+        </div>
+      );
     case 'ask_buttons':
       return <AskButtonsFields node={node} options={options} onChange={onChange} />;
     case 'send_template':
@@ -706,6 +802,235 @@ export function NodeFields({
         </div>
       );
     }
+    case 'create_task':
+      return (
+        <div className="grid gap-4">
+          <Field
+            id={`${p}-task`}
+            label="Task"
+            description={`The task about the contact, in the CRM. ${hintFor(options)}`}
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                value={node.title}
+                maxLength={AUTOMATION_LIMITS.taskTitleLength}
+                onChange={(e) => patch(node, { title: e.target.value })}
+              />
+            )}
+          </Field>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field
+              id={`${p}-assignee`}
+              label="For"
+              description="An active member who can use the CRM. If they no longer can when the step runs, no task is created and the run goes on."
+            >
+              {(aria) => (
+                <Select
+                  {...aria}
+                  value={node.assigneeMembershipId}
+                  onChange={(e) => patch(node, { assigneeMembershipId: e.target.value })}
+                >
+                  {options.crmMembers.some((m) => m.id === node.assigneeMembershipId) ? null : (
+                    <option value={node.assigneeMembershipId}>Choose a member</option>
+                  )}
+                  {options.crmMembers.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+            <Field
+              id={`${p}-due`}
+              label="Due after (hours)"
+              description="Left empty, the task has no due time."
+            >
+              {(aria) => (
+                <Input
+                  {...aria}
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  max={AUTOMATION_LIMITS.taskDueHours}
+                  value={
+                    node.dueInHours !== null && Number.isFinite(node.dueInHours)
+                      ? node.dueInHours
+                      : ''
+                  }
+                  onChange={(e) =>
+                    patch(node, {
+                      dueInHours:
+                        e.target.value === '' ? null : Number.parseInt(e.target.value, 10),
+                    })
+                  }
+                />
+              )}
+            </Field>
+          </div>
+          <label htmlFor={`${p}-remind`} className="flex items-center gap-2 text-sm">
+            <Checkbox
+              id={`${p}-remind`}
+              checked={node.remind === true}
+              onChange={(e) =>
+                patch(node, e.target.checked ? { remind: true } : { remind: undefined })
+              }
+            />
+            Email them a reminder when it is due
+          </label>
+          <NextSelect
+            id={`${p}-next`}
+            label="Then"
+            value={node.next}
+            self={node.id}
+            options={options}
+            onChange={(next) => patch(node, { next })}
+          />
+        </div>
+      );
+    case 'create_deal': {
+      const pipeline = options.crmPipelines.find((pl) => pl.id === node.pipelineId);
+      return (
+        <div className="grid gap-4">
+          <Field
+            id={`${p}-deal`}
+            label="Deal"
+            description={`The deal for the contact, from this conversation. ${hintFor(options)}`}
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                value={node.title}
+                maxLength={AUTOMATION_LIMITS.dealTitleLength}
+                onChange={(e) => patch(node, { title: e.target.value })}
+              />
+            )}
+          </Field>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field
+              id={`${p}-pipeline`}
+              label="Pipeline"
+              description="No deal is created when the contact already has an open deal in it."
+            >
+              {(aria) => (
+                <Select
+                  {...aria}
+                  value={node.pipelineId}
+                  onChange={(e) => {
+                    const next = options.crmPipelines.find((pl) => pl.id === e.target.value);
+                    patch(node, {
+                      pipelineId: e.target.value,
+                      stageId: next?.stages[0]?.id ?? '',
+                    });
+                  }}
+                >
+                  {pipeline ? null : <option value={node.pipelineId}>Choose a pipeline</option>}
+                  {options.crmPipelines.map((pl) => (
+                    <option key={pl.id} value={pl.id}>
+                      {pl.name}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+            <Field id={`${p}-stage`} label="Stage">
+              {(aria) => (
+                <Select
+                  {...aria}
+                  value={node.stageId}
+                  onChange={(e) => patch(node, { stageId: e.target.value })}
+                >
+                  {pipeline?.stages.some((st) => st.id === node.stageId) ? null : (
+                    <option value={node.stageId}>Choose a stage</option>
+                  )}
+                  {(pipeline?.stages ?? []).map((st) => (
+                    <option key={st.id} value={st.id}>
+                      {st.name}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+            <Field
+              id={`${p}-value`}
+              label={pipeline ? `Value (${pipeline.currency})` : 'Value'}
+              description="Left empty, the deal has no value."
+            >
+              {(aria) => (
+                <Input
+                  {...aria}
+                  inputMode="decimal"
+                  value={node.value ?? ''}
+                  maxLength={AUTOMATION_LIMITS.dealValueLength}
+                  onChange={(e) => patch(node, { value: e.target.value || null })}
+                />
+              )}
+            </Field>
+            <Field
+              id={`${p}-owner`}
+              label="Owner"
+              description="If they can no longer use the CRM when the step runs, the deal has no owner."
+            >
+              {(aria) => (
+                <Select
+                  {...aria}
+                  value={node.ownerMembershipId ?? ''}
+                  onChange={(e) => patch(node, { ownerMembershipId: e.target.value || null })}
+                >
+                  <option value="">Nobody</option>
+                  {node.ownerMembershipId &&
+                  !options.crmMembers.some((m) => m.id === node.ownerMembershipId) ? (
+                    <option value={node.ownerMembershipId}>
+                      A member who can no longer use the CRM
+                    </option>
+                  ) : null}
+                  {options.crmMembers.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+            <Field
+              id={`${p}-close`}
+              label="Expected to close after (days)"
+              description="Counted on the company's calendar from the day the step runs; left empty, no date."
+            >
+              {(aria) => (
+                <Input
+                  {...aria}
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  max={AUTOMATION_LIMITS.dealCloseDays}
+                  value={
+                    typeof node.closeInDays === 'number' && Number.isFinite(node.closeInDays)
+                      ? node.closeInDays
+                      : ''
+                  }
+                  onChange={(e) =>
+                    patch(node, {
+                      closeInDays:
+                        e.target.value === '' ? undefined : Number.parseInt(e.target.value, 10),
+                    })
+                  }
+                />
+              )}
+            </Field>
+          </div>
+          <NextSelect
+            id={`${p}-next`}
+            label="Then"
+            value={node.next}
+            self={node.id}
+            options={options}
+            onChange={(next) => patch(node, { next })}
+          />
+        </div>
+      );
+    }
     case 'wait':
       return (
         <div className="grid gap-4 sm:grid-cols-2">
@@ -940,6 +1265,7 @@ function TemplateFields({
     if (!next) return;
     const header = resized(node.header, next.headerParams);
     const body = resized(node.body, next.bodyParams);
+    const links = resized(node.links, next.links.length);
     if (node.type === 'ask_template') {
       // One branch per quick-reply button, keeping where a button that stayed the same went.
       const buttons = next.quickReplies.map((q) => ({
@@ -947,12 +1273,12 @@ function TemplateFields({
         title: q.title,
         next: node.buttons.find((b) => b.index === q.index && b.title === q.title)?.next ?? null,
       }));
-      onChange({ ...node, templateId: next.id, header, body, buttons });
+      onChange({ ...node, templateId: next.id, header, body, links, buttons });
     } else {
-      onChange({ ...node, templateId: next.id, header, body });
+      onChange({ ...node, templateId: next.id, header, body, links });
     }
   };
-  const setParam = (part: 'header' | 'body', index: number, value: string) =>
+  const setParam = (part: 'header' | 'body' | 'links', index: number, value: string) =>
     onChange({ ...node, [part]: node[part].map((v, j) => (j === index ? value : v)) });
   return (
     <div className="grid gap-4">
@@ -1019,6 +1345,23 @@ function TemplateFields({
               value={value}
               maxLength={1000}
               onChange={(e) => setParam('body', i, e.target.value)}
+            />
+          )}
+        </Field>
+      ))}
+      {node.links.map((value, i) => (
+        <Field
+          key={`link-${i}`}
+          id={`${p}-link-${i}`}
+          label={`End of the “${template?.links[i]?.text ?? ''}” link`}
+          description={`Replaces {{1}} in ${template?.links[i]?.url ?? 'the link'}. Placeholders work; the result cannot hold spaces or change the website, or the run fails.`}
+        >
+          {(aria) => (
+            <Input
+              {...aria}
+              value={value}
+              maxLength={1000}
+              onChange={(e) => setParam('links', i, e.target.value)}
             />
           )}
         </Field>
@@ -1257,10 +1600,28 @@ function HttpRequestFields({
         ) : null}
       </fieldset>
       {hasBody ? (
+        <Field id={`${p}-format`} label="Body format">
+          {(aria) => (
+            <Select
+              {...aria}
+              value={node.bodyFormat ?? 'json'}
+              onChange={(e) => patch({ bodyFormat: e.target.value === 'form' ? 'form' : 'json' })}
+            >
+              <option value="json">JSON (application/json)</option>
+              <option value="form">Form fields ({FORM_CONTENT_TYPE})</option>
+            </Select>
+          )}
+        </Field>
+      ) : null}
+      {hasBody ? (
         <Field
           id={`${p}-body`}
           label="Body (optional)"
-          description={`JSON, sent as application/json. Put placeholders inside quotes, for example {"order": "{{answer.order_no}}"}; their values are escaped.`}
+          description={
+            node.bodyFormat === 'form'
+              ? 'Fields as name=value joined by &, written URL-encoded, for example phone={{answer.phone}}&note=Hello%20there; placeholder values are URL-encoded. Do not add a Content-Type header.'
+              : `JSON, sent as application/json. Put placeholders inside quotes, for example {"order": "{{answer.order_no}}"}; their values are escaped.`
+          }
         >
           {(aria) => (
             <Textarea

@@ -181,6 +181,8 @@ describe('database roles', () => {
       'ops.api_key_usage_notices_due(integer)',
       // The purge of full rate limit buckets (0041), for the worker.
       'ops.purge_rate_limit_buckets(integer)',
+      // The purge of who had a conversation open, not reported for an hour (0157), for the worker.
+      'ops.purge_conversation_viewers(integer)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);
@@ -297,7 +299,7 @@ describe('database roles', () => {
     // Outgoing webhooks (0025, 0047, 0096): the dispatch and retention sweeps for the worker;
     // capture, which the triggers call as the role making the change (the runtime role, or a
     // definer function), and adding what a contact's change changed to the event its transaction
-    // captured; the trigger functions for nobody.
+    // captured; the trigger functions, with the merge's capture (0150), for nobody.
     for (const fn of ['ops.webhook_dispatch_due(integer)', 'ops.purge_webhook_data(integer)']) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);
@@ -323,6 +325,7 @@ describe('database roles', () => {
       'app.webhook_capture_contact()',
       'app.webhook_capture_contact_tag()',
       'app.webhook_capture_contact_fields()',
+      'app.contact_merges_capture()',
     ]) {
       for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
         expect(await can(role, fn), `${role} ${fn}`).toBe(false);

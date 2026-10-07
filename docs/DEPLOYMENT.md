@@ -493,6 +493,108 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    keep being written. Old servers never call the function; until the web rollout ends, an old web
    server shows no merge.
 
+   Migration 0150 (ADR-225) replaces the endpoints' event check (validated at once: at most 10
+   endpoints per company) and the events' type check (NOT VALID; 0151 validates it while captures go
+   on), and adds a trigger on `app.contact_merges`. Workers roll out before web servers, so no
+   endpoint takes `contact.merged` before every worker can describe it. A worker from before it
+   cannot describe the event and fails its company's delivery run each time it claims one, so before
+   rolling workers back to such an image, turn the event off on the endpoints that take it; newer
+   workers fail only that delivery (`payload_failed`, replayable).
+
+   Migration 0152 (ADR-226) adds `app.tenants.masked_number_roles` (an empty list, without rewriting
+   the table) with a check that reads the companies once under the migration's lock, and the runtime
+   role's grant to change it. Old servers ignore the column: until the web rollout ends, an old web
+   server shows no setting and masks nothing, so a company should choose roles once the rollout is
+   done.
+
+   Migration 0153 (ADR-227) widens the same scope checks again, with the same brief locks. Web
+   servers from before it do not know `contacts.merge`: until the web rollout ends, an old server
+   answers Settings → API keys with an error for a company with a key holding it (and the platform
+   plan pages for a plan version including it), and `POST /api/v1/contacts/{id}/merge` with 404;
+   rolling web servers back to an image from before it does the same. Workers are not affected.
+
+   ADR-228 has no migration. Until the web rollout ends, an old web server refuses a draft whose
+   website button's link ends with `{{1}}`, shows such templates as not sendable, leaves them out of
+   GET /api/v1/templates, and answers a send giving `variables.buttons` with 422 (a field it does
+   not know) and a send of such a template with 501; rolling web servers back to an image from
+   before it does the same and cannot open such a draft in the editor. Workers send the request
+   the web server stored; their own sends of these templates came with ADR-229, below.
+
+   ADR-229 has no migration. Campaigns, automations and store messages now send templates whose
+   links end with a value from workers, which roll out before web servers, so no member chooses such
+   a template for them before every worker can send it. Rolling workers back to an image from before
+   it pauses such campaigns (`template_not_approved`), skips such store messages
+   (`template_unavailable`) and fails such automation runs (`template_unavailable`) until they roll
+   forward. Web servers from before ADR-228 offer no such template to campaigns, automations or
+   store messages, and drop `variables.buttons` from a campaign draft given through the API (a field
+   of the variables they do not know), whose template they then report as one HyFib cannot send.
+
+   Migration 0154 (ADR-230) adds `app.overdue_reply_notices`, the sweep function and the definer's
+   reads, and replaces the members' email choice check with one allowing `reply_overdue` (validated
+   under a brief lock on `app.memberships`, one row per membership). Migration 0155 builds the index
+   of open reply turns concurrently, outside a transaction; if it fails, see `docs/RUNBOOKS.md`.
+   Workers roll out first and start emailing about overdue replies once both are applied. Until the
+   web rollout ends, an old web server does not list the new kind in Settings → Notifications, and a
+   member saving their choices there keeps whatever they chose for it (kinds a server does not show
+   keep their setting). Rolling workers back stops the emails; the notices stay and are honoured
+   again when workers roll forward.
+
+   Segment conditions on store orders (ADR-231) need no migration. Only web servers read segments'
+   conditions: until the web rollout ends, an old web server refuses the new conditions and reports
+   a segment or a draft's audience holding one as one it cannot read (the segment page, a campaign's
+   review and the API say so). Rolling the web back leaves them so until it rolls forward; campaigns
+   already submitted keep the recipients frozen when submitted.
+
+   Form bodies for HTTP steps (ADR-236) need no migration. Workers make the calls, so roll them out
+   before the web (as step 4 does): until the web rollout ends, an old web server neither shows nor
+   keeps a step's body format, and saving an automation there turns its form body back into one
+   checked as JSON. Rolling workers back while an automation with a form body is published would
+   send that body as JSON: unpublish such automations first.
+
+   Migration 0156 (ADR-242) adds `app.crm_stages.win_percent`, a nullable column without a default
+   (the table is not rewritten), and the runtime role's update of it. Until the web rollout ends, an
+   old web server neither shows nor sets stage chances and its board has no weighted figures, but
+   saving a pipeline there keeps the chances it does not know (its update names only names and
+   positions). Rolling the web back hides them until it rolls forward.
+
+   Migration 0157 (ADR-243) adds `app.conversation_viewers` (with its deletion step and policies)
+   and `ops.purge_conversation_viewers` for the worker; workers roll out first, so the purge runs
+   before any page reports. Until the web rollout ends, an old web server's conversation pages
+   neither report nor show who else has a conversation open, so its members are not named to others;
+   a report from a new page that reaches an old server finds no route and the page says it could not
+   check, until a report reaches a new server.
+
+   Migration 0158 (ADR-244) adds `app.crm_tasks.created_by_automation_id`, makes
+   `created_by_membership_id` nullable (both without rewriting the table) and adds, NOT VALID, the
+   creator check, the foreign key to the automation and the run steps' outcome check with `created`
+   and `skipped`; 0159 validates them while the tables stay writable. Roll the workers out before
+   the web tier as usual: a worker of the previous release cannot read a published version with a
+   task step and would fail its runs as unreadable. An old web server cannot read a draft with a
+   task step either: its editor opens such an automation with the starter steps, and saving there
+   would replace the draft, so do not edit automations with task steps until the web rollout ends.
+   Old servers list the tasks automations create as before (they never show who created a task).
+
+   Migration 0160 (ADR-245) does the same for deals (`app.crm_deals.created_by_automation_id`,
+   `created_by_membership_id` nullable, the creator check and the foreign key NOT VALID) and 0161
+   validates them. The same rollout rules apply to deal steps: workers first, and no editing of
+   automations with deal steps on old web servers. Until the web rollout ends, an old web server
+   shows a deal an automation created without saying who created it.
+
+   ADR-246 has no migration. An old worker reads a task step's reminder as absent and creates the
+   task without it, so roll the workers out before the web tier as usual.
+
+   ADR-247 has no migration either: an old worker reads a deal step's expected close date as absent
+   and creates the deal without it.
+
+   ADR-248 has no migration. A worker of the previous release cannot read a published version with a
+   form step and would fail its runs as unreadable, so roll the workers out first. An old web server
+   cannot read a draft with a form step either: its editor opens it with the starter steps, and
+   saving there would replace the draft, so do not edit automations with form steps until the web
+   rollout ends.
+
+   ADR-249 has no migration. Until the workers roll out, an old worker still creates the tasks and
+   deals of automations whose company's plan no longer includes the CRM.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

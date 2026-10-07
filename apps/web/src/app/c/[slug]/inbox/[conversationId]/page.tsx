@@ -15,6 +15,7 @@ import { ConversationControls, TeamControl } from '@/components/inbox/conversati
 import { ConversationTags } from '@/components/inbox/conversation-tags';
 import { InboxShell, inboxQueryString } from '@/components/inbox/inbox-shell';
 import { MarkRead } from '@/components/inbox/mark-read';
+import { ConversationPresence } from '@/components/inbox/conversation-presence';
 import { MessageBubble, type ThreadMessage } from '@/components/inbox/message-bubble';
 import { NoteForm } from '@/components/inbox/note-form';
 import { ReplyTimer } from '@/components/inbox/reply-timer';
@@ -57,7 +58,7 @@ export default async function ConversationPage({
   // Store orders carry customers' details: contacts.read too (as on the store pages).
   const showStoreOrders = showCommerce && can(ctx, 'contacts.read');
   const [
-    { query, views, list, filters, unreadMentions, available },
+    { query, views, list, filters, unreadMentions, available, waiting },
     members,
     templates,
     mentionable,
@@ -130,6 +131,7 @@ export default async function ConversationPage({
       filters={filters}
       unreadMentions={unreadMentions}
       available={available}
+      waiting={waiting}
     >
       <MarkRead slug={ctx.tenant.slug} conversationId={conv.id} unread={unread} />
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_18rem]">
@@ -210,6 +212,7 @@ export default async function ConversationPage({
                 />
               </p>
             ) : null}
+            <ConversationPresence slug={ctx.tenant.slug} conversationId={conv.id} />
             {thread.automation ? (
               <Alert tone="info">
                 <div className="flex flex-wrap items-center justify-between gap-3">

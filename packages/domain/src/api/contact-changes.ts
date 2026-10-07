@@ -4,8 +4,10 @@ import {
   and,
   asc,
   contactChanges,
+  contactMerges,
   contacts,
   eq,
+  inArray,
   outerColumn,
   sql,
   systemScope,
@@ -24,6 +26,10 @@ import { API_LIMITS } from './model';
  * only changes made by transactions below the snapshot's xmin. Every transaction below it has
  * finished, so what a page reads is final, and a change committed later always lies beyond the
  * page's cursor: following `nextCursor` misses no change and repeats only contacts changed again.
+ *
+ * A merged contact is deleted with its changes, and the merge records a change of the contact kept
+ * (migration 0150, ADR-225): each contact read names the contacts merged into it, so a reader
+ * learns of a merge when it reads the kept contact at that change or a later one.
  */
 
 export const apiContactChangesQuerySchema = z
@@ -43,6 +49,11 @@ export interface ApiContactChange {
   erased: boolean;
   /** The contact as it is now; null once erased. */
   contact: ApiContact | null;
+  /**
+   * The contacts merged into this one, oldest merge first, those merged into a contact merged into
+   * it later included (ADR-225): they no longer exist.
+   */
+  mergedContactIds: string[];
 }
 
 export interface ApiContactChangePage {
@@ -76,10 +87,10 @@ export async function apiContactChanges(
   const q = parseInput(apiContactChangesQuerySchema, query);
   const from = openContactChangeCursor(deps.keyring, ctx.tenant.id, q.cursor);
   const finished = sql`pg_snapshot_xmin(pg_current_snapshot())`;
-  const rows = await deps.db.run(
+  const { rows, merges } = await deps.db.run(
     ctx.scope,
-    (tx) =>
-      tx
+    async (tx) => {
+      const rows = await tx
         .select({
           ...apiContactColumns,
           changeId: sql<string>`${contactChanges.id}::text`,
@@ -107,16 +118,44 @@ export async function apiContactChanges(
           ),
         )
         .orderBy(asc(contactChanges.xact), asc(contactChanges.id))
-        .limit(q.limit + 1),
-    { accessMode: 'read only' },
+        .limit(q.limit + 1);
+      // In the same snapshot as the page, so a merge it read is listed.
+      const ids = rows.slice(0, q.limit).map((r) => r.id);
+      const merges =
+        ids.length === 0
+          ? []
+          : await tx
+              .select({
+                keptContactId: contactMerges.keptContactId,
+                mergedContactId: contactMerges.mergedContactId,
+              })
+              .from(contactMerges)
+              .where(
+                and(
+                  eq(contactMerges.tenantId, ctx.tenant.id),
+                  inArray(contactMerges.keptContactId, ids),
+                ),
+              )
+              .orderBy(asc(contactMerges.mergedAt), asc(contactMerges.mergedContactId));
+      return { rows, merges };
+    },
+    { isolationLevel: 'repeatable read', accessMode: 'read only' },
   );
   const page = rows.slice(0, q.limit);
   const last = page.at(-1);
+  const mergedInto = new Map<string, string[]>();
+  for (const m of merges) {
+    mergedInto.set(m.keptContactId, [
+      ...(mergedInto.get(m.keptContactId) ?? []),
+      m.mergedContactId,
+    ]);
+  }
   return {
     data: page.map((r) => ({
       id: r.id,
       erased: r.erasedAt !== null,
       contact: r.erasedAt === null ? toApiContact(r) : null,
+      mergedContactIds: mergedInto.get(r.id) ?? [],
     })),
     nextCursor: sealContactChangeCursor(
       deps.keyring,

@@ -32,6 +32,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { seesNumbers, shownNumber } from '../contacts/number-masking';
 import { ROLE_PERMISSIONS, type Permission } from '../authz/permissions';
 import { recordAudit, type RequestMeta } from '../audit';
 import { DEFAULT_MESSAGING_SETTINGS } from '../consent/service';
@@ -50,7 +51,8 @@ import {
 } from '../inbox/routing';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
-import { loadReplyTarget, replyTimer, type ReplyTarget } from '../inbox/sla';
+import { WAITING_REPLY_LIMIT, type WaitingReply } from '../inbox/overdue-notice';
+import { loadReplyTarget, replyDueAt, replyTimer, type ReplyTarget } from '../inbox/sla';
 import { decodeKeysetCursor, encodeKeysetCursor, likePattern } from '../validation';
 import { emitTenantEvent } from './events';
 import { messageSnippet } from './message-text';
@@ -196,7 +198,7 @@ function timerFields(target: ReplyTarget, waitingSince: Date | null, now: Date) 
  * SQL condition: the member `membershipId` (with `rolesColumn`) can see the conversation whose
  * assignee is `assigneeColumn`. Mirrors canSeeConversation for another member.
  */
-function memberCanSee(rolesColumn: SQL, membershipIdColumn: SQL, assigneeColumn: SQL): SQL {
+export function memberCanSee(rolesColumn: SQL, membershipIdColumn: SQL, assigneeColumn: SQL): SQL {
   return sql`(${rolesColumn} && ${sql.param(READ_ALL_ROLES)}::text[]
     or (${rolesColumn} && ${sql.param(READ_ASSIGNED_ROLES)}::text[]
         and (${assigneeColumn} is null or ${assigneeColumn} = ${membershipIdColumn})))`;
@@ -281,9 +283,12 @@ export function createInboxService(deps: InboxDeps) {
       const now = clock.now();
       const search = q.q?.trim();
       const digits = search?.replace(/[\s()+\-.]/g, '') ?? '';
+      // A member who sees numbers masked finds a conversation by the whole number only (ADR-226).
       const searchCondition = search
         ? /^[0-9]{3,15}$/.test(digits)
-          ? sql`${contacts.phoneE164} like ${likePattern(digits)}`
+          ? seesNumbers(ctx)
+            ? sql`${contacts.phoneE164} like ${likePattern(digits)}`
+            : eq(contacts.phoneE164, `+${digits}`)
           : sql`${contacts.displayName} ilike ${likePattern(search)}`
         : undefined;
       // Turn start times carry microseconds but cursors carry milliseconds: order and page the
@@ -411,7 +416,7 @@ export function createInboxService(deps: InboxDeps) {
         id: r.id,
         status: r.status,
         contactName: r.contactName,
-        contactPhone: r.contactPhone,
+        contactPhone: shownNumber(ctx, r.contactPhone),
         channelName: r.channelName,
         lastMessageAt: r.lastMessageAt?.toISOString() ?? null,
         lastMessagePreview: r.lastMessagePreview,
@@ -652,7 +657,7 @@ export function createInboxService(deps: InboxDeps) {
               channelAccountId: conv.channelAccountId,
               whatsappAccountId: conv.whatsappAccountId,
               contactName: conv.contactName ?? identity?.profileName ?? null,
-              contactPhone: conv.contactPhone,
+              contactPhone: shownNumber(ctx, conv.contactPhone),
               identity: { hasPhone: Boolean(identity?.waId), hasUserId: Boolean(identity?.bsuid) },
               channelName: conv.channelName,
               channelActive: conv.channelStatus === 'active',
@@ -773,7 +778,7 @@ export function createInboxService(deps: InboxDeps) {
       const timeZone = ctx.tenant.timezone;
       yield transcriptHeader({
         contactName: conv.contactName,
-        contactPhone: conv.contactPhone,
+        contactPhone: shownNumber(ctx, conv.contactPhone),
         number: conv.number,
         companyName: ctx.tenant.name,
         timeZone,
@@ -1176,9 +1181,62 @@ export function createInboxService(deps: InboxDeps) {
       );
       return rows.map((r) => ({
         ...r,
+        contactPhone: shownNumber(ctx, r.contactPhone),
         readAt: r.readAt?.toISOString() ?? null,
         createdAt: r.createdAt.toISOString(),
       }));
+    },
+
+    /**
+     * When the replies to the customers waiting in conversations the member can see are due
+     * (ADR-241), the earliest first and at most WAITING_REPLY_LIMIT, for the inbox's notice of
+     * overdue replies; none without a first-response target. Only times and whether each
+     * conversation is the member's: nothing about the customers, conversations or messages.
+     */
+    async waitingReplies(ctx: TenantContext): Promise<{ waits: WaitingReply[]; capped: boolean }> {
+      if (!can(ctx, 'inbox.read_all') && !can(ctx, 'inbox.read_assigned')) {
+        return { waits: [], capped: false };
+      }
+      return db.run(
+        ctx.scope,
+        async (tx) => {
+          const target = await loadReplyTarget(tx, ctx.tenant.id, ctx.tenant.timezone);
+          if (!target.minutes) return { waits: [], capped: false };
+          // A due time follows its start (business minutes only move it later), so the earliest
+          // starts are the earliest due.
+          const rows = await tx
+            .select({
+              startedAt: conversationTurns.startedAt,
+              assignedMembershipId: conversations.assignedMembershipId,
+            })
+            .from(conversationTurns)
+            .innerJoin(
+              conversations,
+              and(
+                eq(conversations.tenantId, conversationTurns.tenantId),
+                eq(conversations.id, conversationTurns.conversationId),
+              ),
+            )
+            .where(
+              and(
+                eq(conversationTurns.tenantId, ctx.tenant.id),
+                isNull(conversationTurns.endedAt),
+                or(eq(conversations.status, 'open'), eq(conversations.status, 'pending')),
+                visibilityFilter(ctx),
+              ),
+            )
+            .orderBy(asc(conversationTurns.startedAt), asc(conversationTurns.id))
+            .limit(WAITING_REPLY_LIMIT + 1);
+          const waits = rows.slice(0, WAITING_REPLY_LIMIT).flatMap((r) => {
+            const due = replyDueAt(target, r.startedAt);
+            return due
+              ? [{ dueAt: due.toISOString(), mine: r.assignedMembershipId === ctx.membership.id }]
+              : [];
+          });
+          return { waits, capped: rows.length > WAITING_REPLY_LIMIT };
+        },
+        { accessMode: 'read only' },
+      );
     },
 
     /** Unread mentions of the current member in conversations they can see. */

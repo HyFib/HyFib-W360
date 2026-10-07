@@ -1,4 +1,4 @@
-import { bigint, date, integer, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { bigint, date, integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { jsonb } from './columns';
 import { appSchema } from './tenancy';
 
@@ -29,6 +29,8 @@ export const crmStages = appSchema.table('crm_stages', {
   name: text('name').notNull(),
   position: integer('position').notNull(),
   archivedAt: tz('archived_at'),
+  /** The chance, in whole percent, that the stage's open deals are won (ADR-242); null: not set. */
+  winPercent: smallint('win_percent'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
@@ -53,7 +55,10 @@ export const crmDeals = appSchema.table('crm_deals', {
   closedAt: tz('closed_at'),
   closedByMembershipId: uuid('closed_by_membership_id'),
   version: integer('version').notNull().default(1),
-  createdByMembershipId: uuid('created_by_membership_id').notNull(),
+  /** The member who created the deal, or null when an automation did (migration 0160, ADR-245). */
+  createdByMembershipId: uuid('created_by_membership_id'),
+  /** The automation whose run created the deal (ADR-245); exactly one creator is set. */
+  createdByAutomationId: uuid('created_by_automation_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
@@ -80,7 +85,10 @@ export const crmTasks = appSchema.table('crm_tasks', {
   completedAt: tz('completed_at'),
   completedByMembershipId: uuid('completed_by_membership_id'),
   version: integer('version').notNull().default(1),
-  createdByMembershipId: uuid('created_by_membership_id').notNull(),
+  /** The member who created the task, or null when an automation did (migration 0158, ADR-244). */
+  createdByMembershipId: uuid('created_by_membership_id'),
+  /** The automation whose run created the task (ADR-244); exactly one creator is set. */
+  createdByAutomationId: uuid('created_by_automation_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });

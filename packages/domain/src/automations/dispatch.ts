@@ -199,9 +199,9 @@ export async function dispatchInboundToAutomation(
   if (!(await consumeAutomationRun(tx, input.tenantId, now)).ok) return 'none';
 
   const runId = uuidv7();
-  const triggerType = (['keyword', 'keyword', 'conversation_started', 'any_message'] as const)[
-    best.rank
-  ];
+  const triggerType = (
+    ['keyword', 'keyword', 'keyword', 'conversation_started', 'any_message'] as const
+  )[best.rank];
   await tx.insert(automationRuns).values({
     id: runId,
     tenantId: input.tenantId,

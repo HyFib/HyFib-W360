@@ -905,8 +905,9 @@ describe('template sends', () => {
       name: utility.name,
       language: 'en',
       category: 'utility',
-      variables: { header: 0, body: 2 },
+      variables: { header: 0, body: 2, buttons: 0 },
       headerMedia: null,
+      links: [],
       text: { header: null, body: 'Hi {{1}}, your order {{2}} has shipped.', footer: null },
       channels: [{ id: c.channelAccountId, phone: '+91 90000 00000' }],
     });
@@ -1229,6 +1230,128 @@ describe('template sends', () => {
     expect(failed.error).toMatchObject({ code: '131026' });
   });
 
+  it('send a template whose website button’s link ends with a value, each send giving it (ADR-228)', async () => {
+    const tracking = await approvedTemplate(c, {
+      category: 'UTILITY',
+      header: { type: 'none' },
+      body: { text: 'Hi {{1}}, order {{2}} has shipped.', examples: ['Asha', 'A-1001'] },
+      footer: null,
+      buttons: [
+        {
+          type: 'URL',
+          text: 'Track order',
+          url: 'https://shop.example/track/{{1}}',
+          example: 'A-1001',
+        },
+      ],
+    });
+    const { ctx } = await apiKey(c, ['templates.read', 'messages.send']);
+    // Listed with the link each send ends.
+    const { data } = await apiListTemplates(deps(), ctx);
+    expect(data.find((t) => t.id === tracking.id)).toMatchObject({
+      variables: { header: 0, body: 2, buttons: 1 },
+      links: [{ button: 'Track order', url: 'https://shop.example/track/{{1}}' }],
+    });
+
+    const sent = await apiSendTemplate(
+      deps(),
+      ctx,
+      {
+        to: '+919811160601',
+        templateId: tracking.id,
+        variables: { body: ['Asha', 'A-601'], buttons: ['A-601'] },
+      },
+      idem('link-tpl-1', 'link-tpl-1'),
+    );
+    expect(sent.status).toBe(201);
+    const queued = sent.body.data as { id: string };
+    const [stored] = await fx.query<{
+      content: { rendered: { buttons: unknown[] } };
+      request: { template: { components: unknown[] } };
+      intent_id: string;
+    }>(
+      `SELECT m.content, si.request, si.id AS intent_id FROM app.messages m
+         JOIN app.send_intents si ON si.tenant_id = m.tenant_id AND si.message_id = m.id
+        WHERE m.id = $1`,
+      [queued.id],
+    );
+    expect(stored?.request.template.components).toEqual([
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: 'Asha' },
+          { type: 'text', text: 'A-601' },
+        ],
+      },
+      {
+        type: 'button',
+        sub_type: 'url',
+        index: '0',
+        parameters: [{ type: 'text', text: 'A-601' }],
+      },
+    ]);
+    expect(stored?.content.rendered.buttons).toEqual([
+      { type: 'URL', text: 'Track order', url: 'https://shop.example/track/A-601' },
+    ]);
+    // The stand-in takes the end of the link as the button's text parameter (research M-198).
+    const result = await processSendIntent(
+      { ...deps(), keyring: fx.keyring, graph: fx.graph, rate: sendRate },
+      authorizedTenantScope(c.tenant.id, null),
+      stored!.intent_id,
+    );
+    expect(result.outcome).toBe('accepted');
+
+    // Refused before anything is written: values missing or not wanted, by count; a value a
+    // link cannot end with, by its place.
+    const one = (variables: Record<string, unknown>, key: string, templateId = tracking.id) =>
+      apiSendTemplate(deps(), ctx, { to: '+919811160602', templateId, variables }, idem(key, key));
+    await expectAppError(
+      one({ body: ['a', 'b'] }, 'link-tpl-2'),
+      'validation_failed',
+      /^This template needs 0 header, 2 body and 1 button variables\.$/,
+    );
+    await expectAppError(
+      one({ body: ['a', 'b'], buttons: ['x'] }, 'link-tpl-3', utility.id),
+      'validation_failed',
+      /^This template needs 0 header and 2 body variables\.$/,
+    );
+    const refused = await expectAppError(
+      one({ body: ['a', 'b'], buttons: ['A 602'] }, 'link-tpl-4'),
+      'validation_failed',
+    );
+    expect(isAppError(refused) && refused.publicMessage).toBe(
+      'Track order: The end of a link cannot contain spaces.',
+    );
+    expect(isAppError(refused) && refused.issues?.map((i) => i.path)).toEqual([
+      'variables.buttons.0',
+    ]);
+    const many = await expectAppError(
+      apiSendManyTemplates(
+        deps(),
+        ctx,
+        {
+          templateId: tracking.id,
+          messages: [
+            { to: '+919811160603', variables: { body: ['a', 'b'], buttons: ['A-603'] } },
+            { to: '+919811160604', variables: { body: ['a', 'b'], buttons: ['A\t604'] } },
+          ],
+        },
+        idem('link-tpl-5', 'link-tpl-5'),
+      ),
+      'validation_failed',
+    );
+    expect(isAppError(many) && many.issues?.map((i) => i.path)).toEqual([
+      'messages.1.variables.buttons.0',
+    ]);
+    // No contact was created for the refused numbers.
+    const [written] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM app.contacts
+        WHERE tenant_id = $1 AND phone_e164 IN ('+919811160602', '+919811160603', '+919811160604')`,
+      [c.tenant.id],
+    );
+    expect(written!.n).toBe(0);
+  });
+
   it('send a template with a photo or document header, each send giving its file by link (ADR-201)', async () => {
     const photo = await syncedMediaTemplate(c, 'IMAGE');
     const receipt = await syncedMediaTemplate(c, 'DOCUMENT');
@@ -1240,8 +1363,9 @@ describe('template sends', () => {
       name: photo.name,
       language: 'en',
       category: 'utility',
-      variables: { header: 0, body: 2 },
+      variables: { header: 0, body: 2, buttons: 0 },
       headerMedia: 'image',
+      links: [],
       text: { header: null, body: 'Hi {{1}}, parcel {{2}} was delivered.', footer: null },
       channels: [{ id: c.channelAccountId, phone: '+91 90000 00000' }],
     });
@@ -6593,6 +6717,81 @@ describe('automations started through the API (ADR-077)', () => {
       reason: 'Plan for the API automation tests',
     });
   }
+
+  it('fill the ends of a template’s links from the inputs, and fail a run whose end the link cannot take (ADR-229)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const template = await approvedTemplate(c, {
+      category: 'UTILITY',
+      header: { type: 'none' },
+      body: { text: 'Hi {{1}}, manage your booking below.', examples: ['Asha'] },
+      footer: null,
+      buttons: [
+        {
+          type: 'URL',
+          text: 'Manage booking',
+          url: 'https://clinic.example/booking/{{1}}',
+          example: 'B-1',
+        },
+      ],
+    });
+    const trigger: AutomationTrigger = { type: 'api', inputs: ['patient', 'booking'] };
+    const graph = (links: string[]) => ({
+      version: 1,
+      start: 'send',
+      nodes: [
+        {
+          id: 'send',
+          type: 'send_template',
+          templateId: template.id,
+          header: [],
+          body: ['{{input.patient}}'],
+          links,
+          next: null,
+        },
+      ],
+    });
+    // A step that leaves the link's end out does not pass the checks.
+    const unfinished = await save(owner, 'No link', trigger, graph([]), c.channelAccountId);
+    expect(unfinished.issues.map((i) => i.message)).toContain(
+      `The template “${template.name}” has 2 variables: fill in each one.`,
+    );
+    const flow = await publish(
+      owner,
+      'Booking link',
+      trigger,
+      graph(['{{input.booking}}']),
+      c.channelAccountId,
+    );
+    const { ctx } = await apiKey(c, ['automations.start'], 'Clinic system');
+    const start = async (to: string, booking: string, key: string) =>
+      (
+        await apiStartAutomationRun(
+          deps(),
+          ctx,
+          flow.id,
+          { to, inputs: { patient: 'Asha', booking } },
+          idem(key, key),
+        )
+      ).body.data as ApiAutomationRun;
+
+    const good = await start('+91 98111 70001', 'B-42', 'link-run-1');
+    expect(await driveRun(c, good.id)).toBe('completed');
+    expect(templateSends('919811170001')[0]?.components).toContainEqual({
+      type: 'button',
+      sub_type: 'url',
+      index: '0',
+      parameters: [{ type: 'text', text: 'B-42' }],
+    });
+    // An end with a space: nothing is sent and the run says why.
+    const bad = await start('+91 98111 70002', 'B 43', 'link-run-2');
+    expect(await driveRun(c, bad.id)).toBe('failed');
+    expect(await runRow(bad.id)).toMatchObject({
+      end_reason: 'send_blocked',
+      end_detail: 'invalid_link',
+    });
+    expect(templateSends('919811170002')).toEqual([]);
+  });
 
   it('start a published automation for a contact once per Idempotency-Key, with its inputs, and follow the contact’s tap', async () => {
     const c = await fx.company();

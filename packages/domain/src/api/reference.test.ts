@@ -201,6 +201,7 @@ describe('API reference (ADR-152)', () => {
       ['code', 1, true],
       ['message', 1, true],
       ['reason', 1, false],
+      ['mergedInto', 1, false],
       ['issues', 1, false],
       ['path', 2, true],
       ['message', 2, true],
@@ -210,7 +211,7 @@ describe('API reference (ADR-152)', () => {
     const conditions = search.findIndex((f) => f.name === 'conditions');
     expect(search[conditions]?.type).toEqual({
       kind: 'array',
-      items: { kind: 'shapes', count: 10 },
+      items: { kind: 'shapes', count: 12 },
     });
     const conditionShapes = [
       'type = field',
@@ -222,6 +223,8 @@ describe('API reference (ADR-152)', () => {
       'type = calling_code',
       'type = last_message',
       'type = campaign',
+      'type = orders',
+      'type = spend',
     ];
     const shapes = search.filter((f) => f.shape);
     expect(shapes.filter((f) => f.depth === 1).map((f) => f.name)).toEqual([
@@ -236,7 +239,7 @@ describe('API reference (ADR-152)', () => {
     );
     expect(search[groupConditions]?.type).toEqual({
       kind: 'array',
-      items: { kind: 'shapes', count: 9 },
+      items: { kind: 'shapes', count: 11 },
     });
     const tag = search.findIndex((f) => f.name === 'type = tag');
     expect(search.slice(tag + 1, tag + 4).map((f) => [f.name, f.depth])).toEqual([

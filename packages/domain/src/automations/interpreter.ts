@@ -6,7 +6,9 @@ import {
   HTTP_BODY_METHODS,
   HTTP_WAIT_MINUTES,
   RUN_BUDGETS,
+  encodeFormValue,
   encodeJsonString,
+  FORM_CONTENT_TYPE,
   httpPathTemplate,
   renderHttpHeader,
   renderHttpText,
@@ -19,7 +21,11 @@ import {
   type NodeOf,
   type OrderPlaceholderValues,
 } from './graph';
+import { FLOW_LIMITS } from '../flows/flow-json';
 import { normalizeRoutingText } from '../inbox/keywords';
+
+/** A form's message as WhatsApp takes it (ADR-248). */
+const FLOW_BODY_LENGTH = FLOW_LIMITS.bodyLength;
 
 /**
  * The automation interpreter: a pure function from (graph, run state, event, facts) to the next
@@ -104,8 +110,22 @@ export type RunEffect =
       templateId: string;
       header: string[];
       body: string[];
+      /** The ends of the template's links that take a value, as rendered (ADR-229). */
+      links: string[];
       ask: boolean;
       buttons: { index: number; title: string; payload: string }[];
+    }
+  /**
+   * One of the company's forms (ADR-248), with the message as rendered; the header, footer and
+   * button text as written.
+   */
+  | {
+      kind: 'send_flow';
+      flowId: string;
+      header: string | null;
+      body: string;
+      footer: string | null;
+      cta: string;
     }
   | { kind: 'add_tag'; tag: string }
   | { kind: 'remove_tag'; tag: string }
@@ -126,6 +146,32 @@ export type RunEffect =
       headers: { name: string; parts: HttpHeaderPart[] }[];
       body: string | null;
       save: { path: string; saveAs: string }[];
+    }
+  /**
+   * A CRM task about the run's contact for a member, created by the automation (ADR-244): the
+   * title as rendered (empty when its placeholders filled in nothing), due after `dueInHours`.
+   */
+  | {
+      kind: 'create_task';
+      title: string;
+      assigneeMembershipId: string;
+      dueInHours: number | null;
+      /** Email the member when the task is due (ADR-246): only with a due time. */
+      remind: boolean;
+    }
+  /**
+   * A CRM deal for the run's contact and conversation, created by the automation (ADR-245): the
+   * title as rendered (empty when its placeholders filled in nothing), the value as typed.
+   */
+  | {
+      kind: 'create_deal';
+      title: string;
+      pipelineId: string;
+      stageId: string;
+      value: string | null;
+      ownerMembershipId: string | null;
+      /** Days after the step runs that the deal is expected to close (ADR-247), or null. */
+      closeInDays: number | null;
     }
   | { kind: 'handoff'; teamId: string | null };
 
@@ -154,7 +200,10 @@ export type StepLogOutcome =
   | 'completed'
   | 'failed'
   | 'requested'
-  | 'responded';
+  | 'responded'
+  | 'created'
+  /** Recorded by the runner when a task or deal step created nothing (ADR-244, ADR-245). */
+  | 'skipped';
 
 export interface StepResult {
   /** True when the event did not apply to the run's position (nothing to record or apply). */
@@ -476,6 +525,23 @@ export function advance(input: AdvanceInput): StepResult {
         if (isResult(built)) return built;
         return moveTo(current.next, built.state, [built.effect], 'sent', null);
       }
+      case 'send_flow': {
+        const built = message(base, () => {
+          const body = truncate(renderText(current.body, values(base.variables)), FLOW_BODY_LENGTH);
+          return body
+            ? {
+                kind: 'send_flow',
+                flowId: current.flowId,
+                header: current.header,
+                body,
+                footer: current.footer,
+                cta: current.cta,
+              }
+            : null;
+        });
+        if (isResult(built)) return built;
+        return moveTo(current.next, built.state, [built.effect], 'sent', null);
+      }
       case 'ask_buttons': {
         const built = message(base, () =>
           buttonsEffect(current, current.body, base.visit, base.variables),
@@ -495,14 +561,20 @@ export function advance(input: AdvanceInput): StepResult {
         const vals = values(base.variables);
         const header = current.header.map((t) => templateParam(renderText(t, vals)));
         const body = current.body.map((t) => templateParam(renderText(t, vals)));
+        // The end of a link is kept as rendered (no white space collapsed): whether it can end
+        // the template's link is checked when the template is queued.
+        const links = current.links.map((t) => renderText(t, vals).trim());
         // Nothing is sent with a blank variable.
-        if ([...header, ...body].some((v) => !v)) return fail('error', 'missing_variable', base);
+        if ([...header, ...body, ...links].some((v) => !v)) {
+          return fail('error', 'missing_variable', base);
+        }
         const ask = current.type === 'ask_template';
         const effect: RunEffect = {
           kind: 'send_template',
           templateId: current.templateId,
           header,
           body,
+          links,
           ask,
           buttons: ask
             ? current.buttons.map((b) => ({
@@ -545,22 +617,58 @@ export function advance(input: AdvanceInput): StepResult {
         };
         return moveTo(current.next, base, [effect], 'updated', null);
       }
+      case 'create_task': {
+        const effect: RunEffect = {
+          kind: 'create_task',
+          // One line: renderText trims, and line breaks or runs of spaces become one space.
+          title: clipText(
+            renderText(current.title, values(base.variables)).replace(/\s+/g, ' '),
+            AUTOMATION_LIMITS.taskTitleLength,
+          ),
+          assigneeMembershipId: current.assigneeMembershipId,
+          dueInHours: current.dueInHours,
+          remind: current.remind === true && current.dueInHours !== null,
+        };
+        return moveTo(current.next, base, [effect], 'created', null);
+      }
+      case 'create_deal': {
+        const effect: RunEffect = {
+          kind: 'create_deal',
+          // One line, as for task titles.
+          title: clipText(
+            renderText(current.title, values(base.variables)).replace(/\s+/g, ' '),
+            AUTOMATION_LIMITS.dealTitleLength,
+          ),
+          pipelineId: current.pipelineId,
+          stageId: current.stageId,
+          value: current.value,
+          ownerMembershipId: current.ownerMembershipId,
+          closeInDays: current.closeInDays ?? null,
+        };
+        return moveTo(current.next, base, [effect], 'created', null);
+      }
       case 'http_request': {
         if (base.httpCalls + 1 > RUN_BUDGETS.maxHttpCalls)
           return fail('budget_http', 'budget_http', base);
         const vals = values(base.variables);
+        const sendsBody = current.body !== null && HTTP_BODY_METHODS.has(current.method);
+        // A form body's values are URL-encoded and it says so (ADR-236); JSON is the default.
+        const form = sendsBody && current.bodyFormat === 'form';
         const effect: RunEffect = {
           kind: 'http_request',
           method: current.method,
           url: renderHttpText(current.url, vals, encodeURIComponent),
           path: httpPathTemplate(current.url),
-          headers: current.headers.map((h) => ({
-            name: h.name,
-            parts: renderHttpHeader(h.value, vals),
-          })),
+          headers: [
+            ...current.headers.map((h) => ({
+              name: h.name,
+              parts: renderHttpHeader(h.value, vals),
+            })),
+            ...(form ? [{ name: 'Content-Type', parts: [{ text: FORM_CONTENT_TYPE }] }] : []),
+          ],
           body:
-            current.body && HTTP_BODY_METHODS.has(current.method)
-              ? renderHttpText(current.body, vals, encodeJsonString)
+            sendsBody && current.body
+              ? renderHttpText(current.body, vals, form ? encodeFormValue : encodeJsonString)
               : null,
           save: current.save.map((item) => ({ path: item.path, saveAs: item.saveAs })),
         };

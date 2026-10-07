@@ -26,6 +26,13 @@ export const TENANT_ROLES = [
 ] as const;
 export type TenantRole = (typeof TENANT_ROLES)[number];
 
+/**
+ * The roles a company can hide customers' numbers from (migration 0152, ADR-226); owners and
+ * administrators always see them.
+ */
+export const MASKABLE_ROLES = ['supervisor', 'agent', 'marketer', 'analyst'] as const;
+export type MaskableRole = (typeof MASKABLE_ROLES)[number];
+
 /** restricted: the company's plan lapsed (ADR-051); it behaves like suspended. */
 export const TENANT_STATUSES = [
   'active',
@@ -53,6 +60,12 @@ export const tenants = appSchema.table('tenants', {
   locale: text('locale').notNull().default('en'),
   dataRegion: text('data_region').notNull().default('in'),
   requireMfaAllMembers: boolean('require_mfa_all_members').notNull().default(false),
+  /** The roles whose members see customers' numbers masked (migration 0152, ADR-226). */
+  maskedNumberRoles: text('masked_number_roles')
+    .array()
+    .notNull()
+    .default(sql`'{}'::text[]`)
+    .$type<MaskableRole[]>(),
   /** The share of a monthly limit at which billing managers are warned (ADR-144). */
   usageWarningPercent: smallint('usage_warning_percent').notNull().default(80),
   createdByUserId: text('created_by_user_id').notNull(),

@@ -1,6 +1,15 @@
 import { z } from 'zod';
 import { normalizeTag } from '../contacts/fields';
-import { equalsKeyword, matchesKeyword, normalizeRoutingText } from '../inbox/keywords';
+import {
+  equalsKeyword,
+  equalsKeywordWithTypos,
+  matchesKeyword,
+  matchesKeywordWithTypos,
+  normalizeRoutingText,
+  typoAllowance,
+} from '../inbox/keywords';
+import { parseAmountToMinor } from '../crm/money';
+import { FLOW_LIMITS } from '../flows/flow-json';
 import { TEMPLATE_LIMITS } from '../templates/definition';
 
 /**
@@ -43,6 +52,14 @@ export const AUTOMATION_LIMITS = {
   /** Inputs an automation started through the API declares, and the characters of each value. */
   apiInputs: 10,
   apiInputLength: 1000,
+  /** A CRM task's title (as the CRM allows) and how far ahead its due time may be (90 days). */
+  taskTitleLength: 200,
+  taskDueHours: 2160,
+  /** A CRM deal's title (as the CRM allows), and the characters of its value as typed. */
+  dealTitleLength: 120,
+  dealValueLength: 24,
+  /** How far ahead a deal step's expected close date may be, in days. */
+  dealCloseDays: 365,
 } as const;
 
 /**
@@ -262,6 +279,14 @@ export const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;
 export type HttpMethod = (typeof HTTP_METHODS)[number];
 /** Methods that send a body. */
 export const HTTP_BODY_METHODS: ReadonlySet<HttpMethod> = new Set(['POST', 'PUT', 'PATCH']);
+/**
+ * How an HTTP step's body is written and sent (ADR-236): JSON (application/json, the default when
+ * a step does not say), or form fields (application/x-www-form-urlencoded), whose placeholders are
+ * URL-encoded.
+ */
+export const HTTP_BODY_FORMATS = ['json', 'form'] as const;
+export type HttpBodyFormat = (typeof HTTP_BODY_FORMATS)[number];
+export const FORM_CONTENT_TYPE = 'application/x-www-form-urlencoded';
 /** How long a run waits for an HTTP call's result before taking the failure branch. */
 export const HTTP_WAIT_MINUTES = 2;
 const HTTP_HEADER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,59}$/;
@@ -326,6 +351,8 @@ const httpRequestNode = z.object({
     )
     .nullable()
     .transform((v) => (v && v.trim() ? v : null)),
+  /** The body's format; left out, JSON (ADR-236). */
+  bodyFormat: z.enum(HTTP_BODY_FORMATS).optional(),
   /** Values to save from a JSON response, as answers. */
   save: z
     .array(
@@ -359,6 +386,46 @@ const handoffNode = z.object({
 
 const endNode = z.object({ id: nodeIdSchema, type: z.literal('end'), label: labelSchema });
 
+/**
+ * One of the company's WhatsApp forms (Flows) sent in the conversation (ADR-248), a session message
+ * like a text: the customer's answers are applied to the contact as the form maps them. The message
+ * may hold placeholders; the header, footer and button text are sent as written.
+ */
+const sendFlowNode = z.object({
+  id: nodeIdSchema,
+  type: z.literal('send_flow'),
+  label: labelSchema,
+  flowId: z.uuid('Choose a form.'),
+  header: optionalShortText(FLOW_LIMITS.headerLength, 'header'),
+  body: textSchema(FLOW_LIMITS.bodyLength, 'message'),
+  footer: optionalShortText(FLOW_LIMITS.footerLength, 'footer'),
+  cta: textSchema(FLOW_LIMITS.ctaLength, 'button text'),
+  next: nextSchema,
+});
+
+/**
+ * A CRM task about the run's contact for a member of the company (ADR-244), created by the
+ * automation. The title may hold placeholders, filled in when the step runs.
+ */
+const createTaskNode = z.object({
+  id: nodeIdSchema,
+  type: z.literal('create_task'),
+  label: labelSchema,
+  title: textSchema(AUTOMATION_LIMITS.taskTitleLength, 'task title'),
+  /** Who the task is for: an active member who can use the CRM, checked again when it runs. */
+  assigneeMembershipId: z.uuid('Choose who the task is for.'),
+  /** Due this many hours after the step runs; null: no due time. */
+  dueInHours: z
+    .number()
+    .int('Use whole hours.')
+    .min(1, 'At least 1 hour.')
+    .max(AUTOMATION_LIMITS.taskDueHours, 'At most 90 days (2160 hours).')
+    .nullable(),
+  /** Email the member when the task is due (ADR-246); needs a due time. Absent: no reminder. */
+  remind: z.boolean().optional(),
+  next: nextSchema,
+});
+
 /** A template variable's text (an empty one is a check error, so an unfinished draft can be saved). */
 const templateParamSchema = z
   .string()
@@ -368,7 +435,10 @@ const templateParamSchema = z
     `Template variables are limited to ${TEMPLATE_LIMITS.parameterValue} characters.`,
   );
 
-/** The template a step sends and the texts (with placeholders) for its variables, in order. */
+/**
+ * The template a step sends and the texts (with placeholders) for its variables, in order, and for
+ * the ends of its links that take a value (ADR-229; versions saved before have none).
+ */
 const templateFields = {
   templateId: z.uuid('Choose a template.'),
   header: z.array(templateParamSchema).max(1, 'A template header has at most one variable.'),
@@ -378,6 +448,13 @@ const templateFields = {
       TEMPLATE_LIMITS.bodyVariables,
       `A template has at most ${TEMPLATE_LIMITS.bodyVariables} variables.`,
     ),
+  links: z
+    .array(templateParamSchema)
+    .max(
+      TEMPLATE_LIMITS.urlButtons,
+      `A template has at most ${TEMPLATE_LIMITS.urlButtons} links that take a value.`,
+    )
+    .default([]),
 };
 
 const sendTemplateNode = z.object({
@@ -428,16 +505,63 @@ const askTemplateNode = z.object({
   timeoutNext: nextSchema,
 });
 
+/**
+ * A CRM deal for the run's contact and conversation in a stage of a pipeline (ADR-245), created by
+ * the automation unless the contact already has an open deal in that pipeline. The title may hold
+ * placeholders, filled in when the step runs.
+ */
+const createDealNode = z.object({
+  id: nodeIdSchema,
+  type: z.literal('create_deal'),
+  label: labelSchema,
+  title: textSchema(AUTOMATION_LIMITS.dealTitleLength, 'deal title'),
+  pipelineId: z.uuid('Choose a pipeline.'),
+  stageId: z.uuid('Choose a stage.'),
+  /** The value as typed, in the pipeline's currency ("2,500.50"); null: no value. */
+  value: z
+    .string()
+    .trim()
+    .max(AUTOMATION_LIMITS.dealValueLength, 'Enter the value as a number.')
+    .nullable()
+    .transform((v) => (v ? v : null)),
+  /** Who owns the deal: an active member who can use the CRM, checked again when it runs. */
+  ownerMembershipId: z.uuid('Choose who owns the deal.').nullable(),
+  /**
+   * Expected to close this many days after the step runs, on the company's calendar (ADR-247);
+   * absent or null: no expected date.
+   */
+  closeInDays: z
+    .number()
+    .int('Use whole days.')
+    .min(0, 'Use 0 for the day the step runs, or more.')
+    .max(AUTOMATION_LIMITS.dealCloseDays, 'At most a year (365 days).')
+    .nullable()
+    .optional(),
+  next: nextSchema,
+});
+
+/**
+ * A deal step's value in minor units of the pipeline's currency: null without a value, undefined
+ * when the text is not an amount in that currency or is more than a deal can hold.
+ */
+export function dealValueMinor(value: string | null, currency: string): number | null | undefined {
+  if (value === null) return null;
+  return parseAmountToMinor(value, currency) ?? undefined;
+}
+
 export const nodeSchema = z.discriminatedUnion('type', [
   sendTextNode,
   askButtonsNode,
   askTextNode,
   sendTemplateNode,
   askTemplateNode,
+  sendFlowNode,
   conditionNode,
   updateContactNode,
   updateConversationNode,
   httpRequestNode,
+  createTaskNode,
+  createDealNode,
   waitNode,
   handoffNode,
   endNode,
@@ -452,10 +576,13 @@ export const NODE_TYPES: readonly NodeType[] = [
   'ask_text',
   'send_template',
   'ask_template',
+  'send_flow',
   'condition',
   'update_contact',
   'update_conversation',
   'http_request',
+  'create_task',
+  'create_deal',
   'wait',
   'handoff',
   'end',
@@ -467,10 +594,13 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   ask_text: 'Ask a question',
   send_template: 'Send a template',
   ask_template: 'Ask with a template',
+  send_flow: 'Send a form',
   condition: 'Condition',
   update_contact: 'Update contact',
   update_conversation: 'Tag the conversation',
   http_request: 'Call a web address',
+  create_task: 'Create a CRM task',
+  create_deal: 'Create a CRM deal',
   wait: 'Wait',
   handoff: 'Hand off to people',
   end: 'End',
@@ -492,6 +622,7 @@ export const SESSION_MESSAGE_NODE_TYPES: ReadonlySet<NodeType> = new Set([
   'send_text',
   'ask_buttons',
   'ask_text',
+  'send_flow',
 ]);
 
 export const graphSchema = z.object({
@@ -552,6 +683,11 @@ export const triggerSchema = z.discriminatedUnion('type', [
       .max(AUTOMATION_LIMITS.keywords, `At most ${AUTOMATION_LIMITS.keywords} keywords.`)
       .transform((list) => [...new Set(list)]),
     match: z.enum(['exact', 'contains']),
+    /**
+     * Also start when a word of the message is a keyword word with a small typo (ADR-240); absent
+     * means words must match exactly, as before.
+     */
+    typos: z.boolean().optional(),
     ...triggerCommon,
   }),
   z.object({ type: z.literal('conversation_started'), ...triggerCommon }),
@@ -592,8 +728,11 @@ export const TRIGGER_LABELS: Record<TriggerType, string> = {
   api: 'A call from your systems through the HyFib W360 API',
 };
 
-/** How strongly a trigger matched; lower wins (exact keyword, keyword, new conversation, any). */
-export type TriggerRank = 0 | 1 | 2 | 3;
+/**
+ * How strongly a trigger matched; lower wins: the message is a keyword, contains one, matches one
+ * only with typos (ADR-240), a new conversation, any message.
+ */
+export type TriggerRank = 0 | 1 | 2 | 3 | 4;
 
 /**
  * Whether a customer message starts this trigger. `text` is the message text (or the tapped
@@ -608,15 +747,19 @@ export function matchTrigger(
     case 'keyword': {
       if (!message.text) return null;
       const text = message.text;
-      if (trigger.match === 'exact')
-        return trigger.keywords.some((k) => equalsKeyword(text, k)) ? 0 : null;
       if (trigger.keywords.some((k) => equalsKeyword(text, k))) return 0;
-      return trigger.keywords.some((k) => matchesKeyword(text, k)) ? 1 : null;
+      if (trigger.match === 'contains' && trigger.keywords.some((k) => matchesKeyword(text, k))) {
+        return 1;
+      }
+      // A match only with typos ranks below every match without them, of any automation.
+      if (!trigger.typos) return null;
+      const near = trigger.match === 'exact' ? equalsKeywordWithTypos : matchesKeywordWithTypos;
+      return trigger.keywords.some((k) => near(text, k)) ? 2 : null;
     }
     case 'conversation_started':
-      return message.newCase ? 2 : null;
+      return message.newCase ? 3 : null;
     case 'any_message':
-      return 3;
+      return 4;
     case 'store_event':
     case 'api':
       return null;
@@ -640,7 +783,7 @@ export function describeTrigger(trigger: AutomationTrigger): string {
     case 'keyword':
       return `${trigger.match === 'exact' ? 'A message is exactly' : 'A message contains'} ${trigger.keywords
         .map((k) => `“${k}”`)
-        .join(', ')}${hours}`;
+        .join(', ')}${trigger.typos ? `, allowing small typos${hours ? ',' : ''}` : ''}${hours}`;
     case 'conversation_started':
       return `A customer starts a conversation${hours}`;
     case 'any_message':
@@ -732,6 +875,31 @@ function placeholderValue(name: string, values: TextValues): string | null {
 
 /** Escapes a value for use inside a JSON string of an HTTP body. */
 export const encodeJsonString = (value: string): string => JSON.stringify(value).slice(1, -1);
+
+/** Encodes a value for a field of a form body (ADR-236): every character but A–Z a–z 0–9 -_.!~*'(). */
+export const encodeFormValue = (value: string): string => encodeURIComponent(value);
+
+/** A form field as written, placeholders taken as values: a name, `=`, a value, URL-encoded. */
+const FORM_FIELD_RE = /^[A-Za-z0-9._~*'()!\-[\]%+]+=[A-Za-z0-9._~*'()!\-[\]%+]*$/;
+
+/**
+ * Why a form body (ADR-236) cannot be sent as written, or null: fields joined by &, each a name
+ * and a value already URL-encoded (%20 or + for a space), placeholders standing for values.
+ */
+export function formBodyProblem(body: string): string | null {
+  const fields = body.replace(PLACEHOLDER_RE, 'x').split('&');
+  for (const field of fields) {
+    if (!FORM_FIELD_RE.test(field)) {
+      return 'A form body is name=value fields joined by &, written URL-encoded, for example phone={{answer.phone}}&note=Hello%20there.';
+    }
+    try {
+      decodeURIComponent(field.replace(/\+/g, ' '));
+    } catch {
+      return 'A % in a form body starts an encoded character, like %20 for a space.';
+    }
+  }
+  return null;
+}
 
 const utf8 = new TextEncoder();
 /**
@@ -877,6 +1045,12 @@ function httpStepIssues(node: NodeOf<'http_request'>, refs: GraphReferences): st
   }
   if (node.body && !HTTP_BODY_METHODS.has(node.method)) {
     out.push(`${node.method} requests have no body.`);
+  } else if (node.body && node.bodyFormat === 'form') {
+    const problem = formBodyProblem(node.body);
+    if (problem) out.push(problem);
+    if (node.headers.some((h) => h.name.toLowerCase() === 'content-type')) {
+      out.push(`HyFib sends form bodies as ${FORM_CONTENT_TYPE}: remove the Content-Type header.`);
+    }
   } else if (node.body) {
     try {
       JSON.parse(node.body.replace(PLACEHOLDER_RE, 'x'));
@@ -960,6 +1134,20 @@ export function triggerIssues(
       },
     ];
   }
+  if (
+    trigger.type === 'keyword' &&
+    trigger.typos &&
+    !trigger.keywords.some((k) => k.split(' ').some((w) => typoAllowance(w) > 0))
+  ) {
+    return [
+      {
+        level: 'warning',
+        nodeId: null,
+        message:
+          'Typos are allowed only in words of five letters or more without digits, so these keywords still match exactly.',
+      },
+    ];
+  }
   return [];
 }
 
@@ -968,8 +1156,11 @@ export function edgesOf(node: AutomationNode): { label: string; target: string |
   switch (node.type) {
     case 'send_text':
     case 'send_template':
+    case 'send_flow':
     case 'update_contact':
     case 'update_conversation':
+    case 'create_task':
+    case 'create_deal':
     case 'wait':
       return [{ label: 'next', target: node.next }];
     case 'ask_template':
@@ -1027,6 +1218,8 @@ function textsOf(node: AutomationNode): string[] {
   switch (node.type) {
     case 'send_text':
       return [node.text];
+    case 'send_flow':
+      return [node.body];
     case 'send_template':
     case 'ask_template':
       return [...node.header, ...node.body];
@@ -1036,6 +1229,9 @@ function textsOf(node: AutomationNode): string[] {
       return [node.text, ...(node.retryText ? [node.retryText] : [])];
     case 'update_contact':
       return node.action.kind === 'set_field' ? [node.action.value] : [];
+    case 'create_task':
+    case 'create_deal':
+      return [node.title];
     default:
       return [];
   }
@@ -1044,6 +1240,21 @@ function textsOf(node: AutomationNode): string[] {
 export interface GraphReferences {
   /** Teams of the company; when given, hand-off teams must be among them. */
   teamIds?: ReadonlySet<string>;
+  /**
+   * The company's forms by id, with their WhatsApp account and whether they can be sent (published
+   * at Meta); when given, form steps must use one that can, of the automation's account (ADR-248).
+   */
+  flows?: ReadonlyMap<string, { whatsappAccountId: string; sendable: boolean }>;
+  /**
+   * Active members who can use the CRM; when given, the members task steps create tasks for must
+   * be among them (ADR-244).
+   */
+  crmMemberIds?: ReadonlySet<string>;
+  /**
+   * Active pipelines by id, with their currency and active stages; when given, deal steps must use
+   * an active stage of an active pipeline and a value in its currency (ADR-245).
+   */
+  crmPipelines?: ReadonlyMap<string, { currency: string; stageIds: ReadonlySet<string> }>;
   /** Contact field keys of the company; when given, fields must be among them. */
   fieldKeys?: ReadonlySet<string>;
   /** Domains the company allows HTTP steps to call; when given, addresses must match one. */
@@ -1082,6 +1293,8 @@ export interface TemplateReference {
   unsupported: string | null;
   headerParams: number;
   bodyParams: number;
+  /** Its website buttons whose link ends with a value, in the order a step fills them (ADR-229). */
+  links: readonly { index: number; text: string; url: string }[];
   /** Its quick-reply buttons, by their position among the template's buttons. */
   quickReplies: readonly { index: number; title: string }[];
 }
@@ -1329,6 +1542,41 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
     if (node.type === 'handoff' && node.teamId && refs.teamIds && !refs.teamIds.has(node.teamId)) {
       issues.push({ level: 'error', nodeId: node.id, message: 'The team no longer exists.' });
     }
+    if (node.type === 'create_task' && node.remind && node.dueInHours === null) {
+      issues.push({
+        level: 'error',
+        nodeId: node.id,
+        message: 'Give the task a due time for its reminder, or send no reminder.',
+      });
+    }
+    if (
+      node.type === 'create_task' &&
+      refs.crmMemberIds &&
+      !refs.crmMemberIds.has(node.assigneeMembershipId)
+    ) {
+      issues.push({
+        level: 'error',
+        nodeId: node.id,
+        message: 'Choose an active member who can use the CRM for the task.',
+      });
+    }
+    if (node.type === 'send_flow' && refs.flows) {
+      const flow = refs.flows.get(node.flowId);
+      const message = !flow
+        ? 'The form no longer exists.'
+        : !flow.sendable
+          ? 'Publish the form before an automation sends it.'
+          : refs.channelWhatsappAccountId &&
+              flow.whatsappAccountId !== refs.channelWhatsappAccountId
+            ? 'Choose a form of the WhatsApp account of the automation’s number.'
+            : null;
+      if (message) issues.push({ level: 'error', nodeId: node.id, message });
+    }
+    if (node.type === 'create_deal') {
+      for (const message of dealStepIssues(node, refs)) {
+        issues.push({ level: 'error', nodeId: node.id, message });
+      }
+    }
     if (node.type === 'send_template' || node.type === 'ask_template') {
       if ([...node.header, ...node.body].some((v) => !v)) {
         issues.push({
@@ -1469,9 +1717,10 @@ function templateStepIssues(
     out.push(template.unsupported);
   } else if (
     node.header.length !== template.headerParams ||
-    node.body.length !== template.bodyParams
+    node.body.length !== template.bodyParams ||
+    node.links.length !== template.links.length
   ) {
-    const count = template.headerParams + template.bodyParams;
+    const count = template.headerParams + template.bodyParams + template.links.length;
     out.push(
       `The template “${template.name}” has ${count} variable${count === 1 ? '' : 's'}: fill in each one.`,
     );
@@ -1500,6 +1749,26 @@ function templateStepIssues(
 }
 
 /** Steps the first step leads to, directly or not (the first step included). */
+/** What is wrong with a deal step in this company (ADR-245). */
+function dealStepIssues(node: NodeOf<'create_deal'>, refs: GraphReferences): string[] {
+  const issues: string[] = [];
+  const pipeline = refs.crmPipelines?.get(node.pipelineId);
+  if (refs.crmPipelines && (!pipeline || !pipeline.stageIds.has(node.stageId))) {
+    issues.push('Choose an active stage of an active pipeline for the deal.');
+  }
+  if (pipeline && dealValueMinor(node.value, pipeline.currency) === undefined) {
+    issues.push(`Enter the deal’s value as an amount in ${pipeline.currency}, or leave it empty.`);
+  }
+  if (
+    node.ownerMembershipId &&
+    refs.crmMemberIds &&
+    !refs.crmMemberIds.has(node.ownerMembershipId)
+  ) {
+    issues.push('Choose an active member who can use the CRM to own the deal, or nobody.');
+  }
+  return issues;
+}
+
 function reachableFrom(start: string, byId: ReadonlyMap<string, AutomationNode>): Set<string> {
   const reachable = new Set<string>();
   const stack = byId.has(start) ? [start] : [];

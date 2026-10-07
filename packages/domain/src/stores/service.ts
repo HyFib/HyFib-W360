@@ -27,6 +27,7 @@ import {
 } from '@w360/db';
 import { recordAudit, recordSystemAudit, type RequestMeta } from '../audit';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { seesNumbers, shownNumber } from '../contacts/number-masking';
 import { CALLING_CODE_RE } from '../contacts/phone';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
@@ -236,6 +237,28 @@ export function createStoreService(deps: StoreServiceDeps) {
       );
     },
 
+    /** The currencies of the company's store orders, for segments' spend condition (ADR-231). */
+    async orderCurrencies(ctx: TenantContext): Promise<string[]> {
+      assertCan(ctx, 'commerce.read');
+      const rows = await db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .selectDistinct({ currency: commerceStoreOrders.currency })
+            .from(commerceStoreOrders)
+            .where(
+              and(
+                eq(commerceStoreOrders.tenantId, ctx.tenant.id),
+                sql`${commerceStoreOrders.currency} is not null`,
+              ),
+            )
+            .orderBy(asc(commerceStoreOrders.currency))
+            .limit(20),
+        { accessMode: 'read only' },
+      );
+      return rows.flatMap((r) => (r.currency ? [r.currency] : []));
+    },
+
     async store(ctx: TenantContext, id: string) {
       assertCan(ctx, 'commerce.read');
       const { id: storeId } = parseInput(idSchema, { id });
@@ -308,7 +331,9 @@ export function createStoreService(deps: StoreServiceDeps) {
             pendingReads: counts?.pending ?? 0,
             // Who asked for their data is shown only to members who can answer it.
             privacyRequests: requests.map((r) =>
-              manage ? r : { ...r, customerEmail: null, customerPhone: null },
+              manage
+                ? { ...r, customerPhone: shownNumber(ctx, r.customerPhone) }
+                : { ...r, customerEmail: null, customerPhone: null },
             ),
             canManage: manage,
           };
@@ -928,7 +953,11 @@ export function createStoreService(deps: StoreServiceDeps) {
                   ? or(
                       sql`${commerceStoreOrders.name} ilike ${likePattern(data.q)}`,
                       sql`${commerceStoreOrders.customerName} ilike ${likePattern(data.q)}`,
-                      sql`${commerceStoreOrders.customerPhone} ilike ${likePattern(data.q)}`,
+                      // A member who sees numbers masked finds an order by the whole number only
+                      // (ADR-226).
+                      seesNumbers(ctx)
+                        ? sql`${commerceStoreOrders.customerPhone} ilike ${likePattern(data.q)}`
+                        : eq(commerceStoreOrders.customerPhone, data.q),
                       sql`${commerceStoreOrders.customerEmail} ilike ${likePattern(data.q)}`,
                     )
                   : undefined,
@@ -944,7 +973,10 @@ export function createStoreService(deps: StoreServiceDeps) {
       const page = rows.slice(0, pageSize);
       const last = page.at(-1);
       return {
-        orders: page.map(({ cursorAt: _cursorAt, ...order }) => order),
+        orders: page.map(({ cursorAt: _cursorAt, ...order }) => ({
+          ...order,
+          customerPhone: shownNumber(ctx, order.customerPhone),
+        })),
         next: rows.length > pageSize && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
       };
     },
@@ -1001,7 +1033,13 @@ export function createStoreService(deps: StoreServiceDeps) {
                 )
                 .limit(1)
             : [];
-          return { ...order, items, contact: contact ?? null };
+          return {
+            ...order,
+            // The customer's number as the member may see it (ADR-226).
+            order: { ...order.order, customerPhone: shownNumber(ctx, phone) },
+            items,
+            contact: contact ?? null,
+          };
         },
         { accessMode: 'read only' },
       );

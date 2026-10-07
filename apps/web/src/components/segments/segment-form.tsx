@@ -10,17 +10,26 @@ import {
 } from '@/app/actions/campaigns';
 import { ClientButton, ClientForm } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
-import { SegmentBuilder, type BuilderField, type Definition } from './segment-builder';
+import {
+  SegmentBuilder,
+  type BuilderField,
+  type BuilderStore,
+  type Definition,
+} from './segment-builder';
 
 export function SegmentForm({
   slug,
   fields,
   campaigns,
+  stores,
+  orderCurrencies,
   existing,
 }: {
   slug: string;
   fields: BuilderField[];
   campaigns: { id: string; name: string }[];
+  stores: BuilderStore[];
+  orderCurrencies: string[];
   existing?: { id: string; name: string; version: number; definition: Definition };
 }) {
   const router = useRouter();
@@ -85,6 +94,8 @@ export function SegmentForm({
           onChange={setDefinition}
           fields={fields}
           campaigns={campaigns}
+          stores={stores}
+          orderCurrencies={orderCurrencies}
         />
         <div>
           <Button type="submit" disabled={busy}>

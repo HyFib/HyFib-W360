@@ -8,6 +8,7 @@ interface ChangePage {
     id: string;
     erased: boolean;
     contact: { name: string | null; tags: string[] } | null;
+    mergedContactIds: string[];
   }[];
   nextCursor: string;
   hasMore: boolean;
@@ -97,7 +98,7 @@ test('a key follows contact changes: every contact first, then what members chan
   await page.getByRole('alertdialog').getByRole('button', { name: 'Erase contact' }).click();
   await expect(page).toHaveURL(new RegExp(`/c/${slug}/contacts$`));
   await changesUntil(tagged.nextCursor, (page) =>
-    expect(page.data).toEqual([{ id: mohan, erased: true, contact: null }]),
+    expect(page.data).toEqual([{ id: mohan, erased: true, contact: null, mergedContactIds: [] }]),
   );
 
   // A cursor the feed did not give is refused, naming it.

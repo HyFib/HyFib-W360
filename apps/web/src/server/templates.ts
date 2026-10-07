@@ -1,11 +1,17 @@
 import 'server-only';
-import { can, renderPlaceholders, sendSpecFor, type TenantContext } from '@w360/domain';
+import {
+  can,
+  linkButtons,
+  renderPlaceholders,
+  sendSpecFor,
+  type TenantContext,
+} from '@w360/domain';
 import type { SendableTemplate } from '@/components/templates/template-sender';
 import { getRuntime } from './runtime';
 
 /**
  * Approved templates this member may send (marketing templates need `campaigns.send`), with the
- * parameter counts the sender form needs.
+ * parameter counts the sender form needs and the links that end with a value (ADR-228).
  */
 export async function sendableTemplates(ctx: TenantContext): Promise<SendableTemplate[]> {
   if (!can(ctx, 'templates.read')) return [];
@@ -26,6 +32,7 @@ export async function sendableTemplates(ctx: TenantContext): Promise<SendableTem
       whatsappAccountId: t.whatsappAccountId,
       headerParams: spec.headerParams,
       bodyParams: spec.bodyParams,
+      links: linkButtons(spec.definition),
       preview: renderPlaceholders(spec.definition),
     });
   }

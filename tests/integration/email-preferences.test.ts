@@ -35,6 +35,7 @@ describe('members’ choice of notice emails (ADR-215)', () => {
     const svc = createEmailPreferencesService({ db: fx.dbs.app });
     expect((await svc.getEmailPreferences(owner)).map((p) => [p.kind, p.email])).toEqual([
       ['mentions', true],
+      ['reply_overdue', true],
       ['campaign_approvals', true],
       ['campaign_reviews', true],
       ['campaign_pauses', true],
@@ -45,6 +46,12 @@ describe('members’ choice of notice emails (ADR-215)', () => {
         kind: 'mentions',
         label: 'Mentions in notes',
         description: expect.stringContaining('10 minutes later') as unknown as string,
+        email: true,
+      },
+      {
+        kind: 'reply_overdue',
+        label: 'Customers waiting past the reply target',
+        description: expect.stringContaining('first-response target') as unknown as string,
         email: true,
       },
     ]);

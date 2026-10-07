@@ -119,6 +119,13 @@ describe('the contact change feed (ADR-114)', () => {
       string,
       { required?: string[]; properties?: Record<string, unknown> }
     >;
-    expect(schemas.ContactChange?.required).toEqual(['id', 'erased', 'contact']);
+    expect(schemas.ContactChange?.required).toEqual([
+      'id',
+      'erased',
+      'contact',
+      'mergedContactIds',
+    ]);
+    // A merged contact is read through the contact it was merged into (ADR-225).
+    expect(op?.description).toContain('naming it in `mergedContactIds`');
   });
 });

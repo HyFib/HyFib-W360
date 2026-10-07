@@ -88,10 +88,12 @@ import {
 import {
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
+  buildWebhookPayload,
   campaignStatusChangedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
+  contactMergedPayloadSchema,
   contactUpdatedPayloadSchema,
   CONTACT_CHANGE_PART_RE,
   conversationAssignmentPayloadSchema,
@@ -729,8 +731,20 @@ describe('webhook payload schemas', () => {
         expect(schema.safeParse({ ...base, type, data: data(shown) }).success, type).toBe(false);
       }
     }
+    // A merge names the merged contact, and gives the contact it belongs to now (ADR-225).
+    const merged = (data: Record<string, unknown>) =>
+      contactMergedPayloadSchema.safeParse({ ...base, type: 'contact.merged', data }).success;
+    for (const shown of [person, erased]) {
+      expect(merged({ contact: shown, mergedContactId: base.id })).toBe(true);
+    }
+    expect(merged({ contact: person })).toBe(false);
+    expect(merged({ contact: person, mergedContactId: 'gone' })).toBe(false);
+    expect(merged({ contact: null, mergedContactId: base.id })).toBe(false);
     // A contact reads as the API's contact, and whether it was erased.
     expect(Object.keys(contactCreatedPayloadSchema.shape.data.shape.contact.shape).sort()).toEqual(
+      [...Object.keys(apiContactSchema.shape), 'erased'].sort(),
+    );
+    expect(Object.keys(contactMergedPayloadSchema.shape.data.shape.contact.shape).sort()).toEqual(
       [...Object.keys(apiContactSchema.shape), 'erased'].sort(),
     );
     expect(
@@ -1234,6 +1248,9 @@ describe('the OpenAPI document', () => {
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     expect(Object.keys(doc.webhooks)).toEqual([...WEBHOOK_EVENT_KEYS, 'ping']);
     expect(Object.keys(WEBHOOK_EVENT_INFO)).toEqual([...WEBHOOK_EVENT_KEYS]);
+    // Each event has a label of its own, as Settings → Webhooks lists them.
+    const labels = Object.values(WEBHOOK_EVENT_INFO).map((info) => info.label);
+    expect(new Set(labels).size).toBe(labels.length);
     expect(WEBHOOK_EVENT_KEYS).toEqual([
       'message.received',
       'message.status',
@@ -1245,6 +1262,7 @@ describe('the OpenAPI document', () => {
       'contact.created',
       'contact.updated',
       'contact.erased',
+      'contact.merged',
       'automation.run_started',
       'automation.run_ended',
       'order.received',
@@ -1270,6 +1288,35 @@ describe('the OpenAPI document', () => {
       ]);
       expect(hook.post.security).toEqual([]);
     }
+  });
+
+  it('builds no body for an event type it does not know, before reading anything', async () => {
+    const unreadable = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('the database was read');
+        },
+      },
+    ) as unknown as Parameters<typeof buildWebhookPayload>[0];
+    const event = {
+      id: '0192f3a4-5b6c-7d8e-9f00-112233445566',
+      tenantId: '0192f3a4-5b6c-7d8e-9f00-112233445577',
+      type: 'contact.forgotten',
+      messageId: null,
+      conversationId: null,
+      contactId: null,
+      templateId: null,
+      status: null,
+      detail: {},
+      contactChanges: null,
+      tagsAdded: null,
+      tagsRemoved: null,
+      occurredAt: new Date('2026-10-06T00:00:00Z'),
+    } as unknown as Parameters<typeof buildWebhookPayload>[1];
+    await expect(buildWebhookPayload(unreadable, event, 'endpoint')).rejects.toThrow(
+      'No webhook payload is built for events of type contact.forgotten',
+    );
   });
 
   it('says what a contact.updated changed: always given, a list of parts or null (ADR-121)', () => {
@@ -1935,6 +1982,7 @@ describe('number filters (ADR-170)', () => {
       'contact.created': contactCreatedPayloadSchema,
       'contact.updated': contactUpdatedPayloadSchema,
       'contact.erased': contactErasedPayloadSchema,
+      'contact.merged': contactMergedPayloadSchema,
       'automation.run_started': automationRunStartedPayloadSchema,
       'automation.run_ended': automationRunEndedPayloadSchema,
       'order.received': orderReceivedPayloadSchema,

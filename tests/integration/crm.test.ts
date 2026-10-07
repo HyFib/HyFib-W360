@@ -6,13 +6,18 @@ import { QUEUES } from '@w360/contracts';
 import { authorizedTenantScope } from '@w360/db';
 import {
   CRM_LIMITS,
+  DEAL_CSV_COLUMNS,
+  DEAL_EXPORT_BATCH,
   createContactsService,
   createCrmService,
   createReportsService,
   findDueReminders,
+  maskPhoneNumber,
+  monthEndIn,
   sendTaskReminder,
   type TenantContext,
 } from '@w360/domain';
+import { acceptInvitation, createUser, invite } from './helpers';
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
 
 /**
@@ -370,6 +375,213 @@ describe('crm deals', () => {
     ).rejects.toThrow(/append-only/);
   });
 
+  it('moves an open deal to a stage of another pipeline of its currency (ADR-234)', async () => {
+    const { c, owner, agent, pipeline, newStage } = await setup();
+    const svc = crm();
+    const contactId = await newContact(owner, 'Chitra');
+    const { id } = await svc.createDeal(agent, {
+      contactId,
+      pipelineId: pipeline.id,
+      stageId: newStage.id,
+      title: 'Renewal',
+      value: '5,000',
+    });
+    const { id: renewalsId } = await svc.createPipeline(owner, {
+      name: 'Renewals',
+      currency: 'INR',
+      stages: ['Due', 'Renewed'],
+    });
+    const renewals = (await svc.listPipelines(owner)).find((p) => p.id === renewalsId)!;
+    const renewed = renewals.stages[1]!;
+
+    // A stage must belong to the pipeline named.
+    await expectAppError(
+      svc.moveDeal(agent, {
+        id,
+        expectedVersion: 1,
+        pipelineId: renewals.id,
+        stageId: newStage.id,
+      }),
+      'validation_failed',
+      /Choose a stage of the pipeline/,
+    );
+    // Another company's pipeline reads as one that does not exist.
+    const other = await setup();
+    await expectAppError(
+      svc.moveDeal(agent, {
+        id,
+        expectedVersion: 1,
+        pipelineId: other.pipeline.id,
+        stageId: other.newStage.id,
+      }),
+      'validation_failed',
+      /Choose a stage of the pipeline/,
+    );
+
+    expect(
+      await svc.moveDeal(agent, {
+        id,
+        expectedVersion: 1,
+        pipelineId: renewals.id,
+        stageId: renewed.id,
+      }),
+    ).toEqual({ version: 2 });
+    const deal = await svc.getDeal(owner, id);
+    expect(deal).toMatchObject({
+      pipelineId: renewals.id,
+      pipelineName: 'Renewals',
+      stageId: renewed.id,
+      stageName: 'Renewed',
+      valueMinor: 500000,
+      currency: 'INR',
+      version: 2,
+    });
+    expect(deal.timeline[0]).toMatchObject({
+      kind: 'stage_changed',
+      data: {
+        fromStageId: newStage.id,
+        toStageId: renewed.id,
+        fromPipelineId: pipeline.id,
+        toPipelineId: renewals.id,
+      },
+    });
+    // The board of each pipeline shows it where it is now.
+    expect(
+      (await svc.board(owner, { pipelineId: pipeline.id }))!.columns.every(
+        (col) => col.count === 0,
+      ),
+    ).toBe(true);
+    expect(
+      (await svc.board(owner, { pipelineId: renewals.id }))!.columns.find(
+        (col) => col.stage.id === renewed.id,
+      )?.count,
+    ).toBe(1);
+
+    // An archived pipeline takes no deal.
+    const { id: archivedId } = await svc.createPipeline(owner, {
+      name: 'Old',
+      currency: 'INR',
+      stages: ['Lead'],
+    });
+    const archived = (await svc.listPipelines(owner)).find((p) => p.id === archivedId)!;
+    await svc.archivePipeline(owner, { id: archived.id, expectedVersion: archived.version });
+    await expectAppError(
+      svc.moveDeal(agent, {
+        id,
+        expectedVersion: 2,
+        pipelineId: archived.id,
+        stageId: archived.stages[0]!.id,
+      }),
+      'conflict',
+      /archived/,
+    );
+    expect(c.tenant.id).not.toBe(other.c.tenant.id);
+  });
+
+  it('weighs open deals by their stage’s chance of winning, for the pipeline and the month (ADR-242)', async () => {
+    const { owner, agent, pipeline, newStage, qualified, proposal } = await setup();
+    const svc = crm();
+    const contactId = await newContact(owner, 'Hema');
+    const { version } = await svc.updatePipeline(owner, {
+      id: pipeline.id,
+      expectedVersion: pipeline.version,
+      name: 'Sales',
+      stages: [
+        { id: newStage.id, name: 'New', winPercent: 10 },
+        { id: qualified.id, name: 'Qualified', winPercent: 50 },
+        { id: proposal.id, name: 'Proposal' },
+      ],
+    });
+    // Expected to close on the month's last day (company time), the day after, and some day.
+    const monthEnd = monthEndIn(new Date(), owner.tenant.timezone);
+    const after = new Date(`${monthEnd}T00:00:00Z`);
+    after.setUTCDate(after.getUTCDate() + 1);
+    const deal = (stageId: string, title: string, value: string, expectedCloseOn: string | null) =>
+      svc.createDeal(owner, {
+        contactId,
+        pipelineId: pipeline.id,
+        stageId,
+        title,
+        value,
+        expectedCloseOn,
+      });
+    await deal(newStage.id, 'Annual plan', '1,000', monthEnd);
+    await deal(qualified.id, 'Second store', '500', after.toISOString().slice(0, 10));
+    await deal(qualified.id, 'Add-on', '300', null);
+    await deal(proposal.id, 'Franchise', '2,000', monthEnd);
+
+    const board = (await svc.board(owner, { pipelineId: pipeline.id }))!;
+    expect(board.columns.map((c) => [c.stage.winPercent, c.valueMinor, c.weightedMinor])).toEqual([
+      [10, 100_000, 10_000],
+      [50, 80_000, 40_000],
+      [null, 200_000, null],
+    ]);
+    // The month counts only the deals of stages with a chance expected to close by its end.
+    expect(board.forecast).toEqual({
+      hasChances: true,
+      weightedMinor: 50_000,
+      weightedMonthMinor: 10_000,
+      stagesWithoutChance: 1,
+      monthEnd,
+    });
+    // The owner filter applies: none of these deals has an owner.
+    expect(
+      (await svc.board(agent, { pipelineId: pipeline.id, owner: 'mine' }))!.forecast,
+    ).toMatchObject({ weightedMinor: 0, weightedMonthMinor: 0, stagesWithoutChance: 0 });
+
+    // An update that leaves chances out keeps them; one beyond 100% or by an agent changes nothing.
+    const names = [
+      { id: newStage.id, name: 'New' },
+      { id: qualified.id, name: 'Qualified' },
+      { id: proposal.id, name: 'Proposal' },
+    ];
+    await svc.updatePipeline(owner, {
+      id: pipeline.id,
+      expectedVersion: version,
+      name: 'Sales',
+      stages: names,
+    });
+    const kept = (await svc.listPipelines(owner)).find((p) => p.id === pipeline.id)!;
+    expect(kept.stages.map((s) => s.winPercent)).toEqual([10, 50, null]);
+    await expectAppError(
+      svc.updatePipeline(owner, {
+        id: pipeline.id,
+        expectedVersion: kept.version,
+        name: 'Sales',
+        stages: [{ ...names[0]!, winPercent: 101 }, names[1]!, names[2]!],
+      }),
+      'validation_failed',
+      /between 0 and 100/,
+    );
+    await expectAppError(
+      svc.updatePipeline(agent, {
+        id: pipeline.id,
+        expectedVersion: kept.version,
+        name: 'Sales',
+        stages: [{ ...names[0]!, winPercent: 90 }, names[1]!, names[2]!],
+      }),
+      'forbidden',
+    );
+    expect(
+      (await svc.listPipelines(owner)).find((p) => p.id === pipeline.id)!.stages[0]!.winPercent,
+    ).toBe(10);
+
+    // A new pipeline takes chances with its stages.
+    const { id: renewals } = await svc.createPipeline(owner, {
+      name: 'Renewals',
+      currency: 'INR',
+      stages: [{ name: 'Due', winPercent: 80 }, 'Unsure'],
+    });
+    expect(
+      (await svc.listPipelines(owner))
+        .find((p) => p.id === renewals)!
+        .stages.map((s) => [s.name, s.winPercent]),
+    ).toEqual([
+      ['Due', 80],
+      ['Unsure', null],
+    ]);
+  });
+
   it('links a deal to a conversation only for members who can see it', async () => {
     const { c, owner, agent, pipeline, newStage } = await setup();
     const waId = `91${randomInt(7_000_000_000, 9_999_999_999)}`;
@@ -699,6 +911,167 @@ describe('crm races and edge cases', () => {
     expect(second.deals).toHaveLength(10);
     expect(second.nextCursor).toBeNull();
     expect(new Set([...first.deals, ...second.deals].map((d) => d.id)).size).toBe(60);
+  });
+});
+
+describe('crm deal export (ADR-239)', () => {
+  /** The export's lines without the byte order mark and the last line break. */
+  async function exported(ctx: TenantContext, input: unknown = {}) {
+    let csv = '';
+    for await (const chunk of crm().exportDeals(ctx, input, { ipAddress: '203.0.113.9' })) {
+      csv += chunk;
+    }
+    expect(csv.startsWith('\uFEFF')).toBe(true);
+    return csv.slice(1).split('\r\n').slice(0, -1);
+  }
+
+  async function phoneOf(contactId: string) {
+    const [row] = await fx.query<{ phone_e164: string }>(
+      'SELECT phone_e164 FROM app.contacts WHERE id = $1',
+      [contactId],
+    );
+    return row!.phone_e164;
+  }
+
+  it('writes the deals a view shows with its filters, numbers as the member may see them, and audits each export', async () => {
+    const { c, owner, agent, marketer, pipeline, newStage, qualified } = await setup();
+    const svc = crm();
+    const asha = await newContact(owner, 'Asha');
+    const bala = await newContact(owner, 'Bala');
+    const { id: openId } = await svc.createDeal(owner, {
+      contactId: asha,
+      pipelineId: pipeline.id,
+      stageId: newStage.id,
+      title: 'Annual plan',
+      value: '25,000.50',
+      ownerMembershipId: agent.membership.id,
+      expectedCloseOn: '2026-12-31',
+    });
+    await svc.createTask(owner, {
+      title: 'Send the proposal',
+      dealId: openId,
+      assigneeMembershipId: owner.membership.id,
+    });
+    const { id: lostId } = await svc.createDeal(owner, {
+      contactId: bala,
+      pipelineId: pipeline.id,
+      stageId: qualified.id,
+      title: '=HYPERLINK("http://x")',
+    });
+    await svc.closeDeal(owner, {
+      id: lostId,
+      expectedVersion: 1,
+      outcome: 'lost',
+      lostReason: 'Too expensive',
+    });
+
+    // Newest first; the formula in the title neutralised; values exact; times in UTC.
+    const all = await exported(owner);
+    expect(all).toHaveLength(3);
+    expect(all[0]).toBe(DEAL_CSV_COLUMNS.join(','));
+    const lost = all[1]!.split(',');
+    expect(lost.slice(0, 10)).toEqual([
+      lostId,
+      `"'=HYPERLINK(""http://x"")"`,
+      'Sales',
+      'Qualified',
+      'lost',
+      'INR',
+      '',
+      '',
+      'Bala',
+      await phoneOf(bala),
+    ]);
+    expect(lost.slice(13)).toEqual([expect.stringMatching(/^2\d{3}-.+Z$/), 'Too expensive', '0']);
+    const open = all[2]!.split(',');
+    expect([...open.slice(0, 11), ...open.slice(13)]).toEqual([
+      openId,
+      'Annual plan',
+      'Sales',
+      'New',
+      'open',
+      'INR',
+      '25000.50',
+      'Agent',
+      'Asha',
+      await phoneOf(asha),
+      '2026-12-31',
+      '',
+      '',
+      '1',
+    ]);
+    expect(new Date(open[11]!).toISOString()).toBe(open[11]);
+
+    // The filters of the board and the lists.
+    expect(await exported(owner, { status: 'open' })).toHaveLength(2);
+    expect(await exported(owner, { status: 'lost', pipelineId: pipeline.id })).toHaveLength(2);
+    expect(await exported(owner, { status: 'open', owner: 'mine' })).toHaveLength(1);
+    expect(await exported(owner, { owner: agent.membership.id })).toHaveLength(2);
+    await expectAppError(exported(owner, { status: 'closed' }), 'validation_failed');
+    const other = await setup();
+    await expectAppError(exported(owner, { pipelineId: other.pipeline.id }), 'not_found');
+    expect(await exported(other.owner)).toEqual([DEAL_CSV_COLUMNS.join(',')]);
+
+    // CRM access without contact exports, or contact exports without CRM access, is refused.
+    await expectAppError(exported(agent), 'forbidden');
+    await expectAppError(exported(marketer), 'forbidden');
+
+    // A member with both, whose roles the company masks, gets numbers masked (ADR-226).
+    const user = await createUser(fx.dbs, { name: 'Sales lead' });
+    const { token } = await invite(fx.dbs, c.tenant, c.owner, user.email, ['agent', 'marketer']);
+    await acceptInvitation(fx.dbs, user, token);
+    await fx.query(
+      `UPDATE app.tenants SET masked_number_roles = '{agent,marketer}' WHERE id = $1`,
+      [c.tenant.id],
+    );
+    const lead = await fx.ctx(c, user);
+    expect(lead.permissions.has('contacts.view_numbers')).toBe(false);
+    const masked = await exported(lead, { status: 'open' });
+    expect(masked[1]!.split(',')[9]).toBe(`'${maskPhoneNumber(await phoneOf(asha))}`);
+    expect(masked.join('\n')).not.toContain(await phoneOf(asha));
+
+    // Each export is audited with its filters; refused ones are not.
+    const audit = await fx.query<{ actor_id: string; metadata: Record<string, unknown> }>(
+      `SELECT actor_id, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'crm.deals_exported' ORDER BY id`,
+      [c.tenant.id],
+    );
+    expect(audit).toEqual([
+      { actor_id: c.owner.id, metadata: { status: null, pipelineId: null, owner: 'all' } },
+      { actor_id: c.owner.id, metadata: { status: 'open', pipelineId: null, owner: 'all' } },
+      { actor_id: c.owner.id, metadata: { status: 'lost', pipelineId: pipeline.id, owner: 'all' } },
+      { actor_id: c.owner.id, metadata: { status: 'open', pipelineId: null, owner: 'mine' } },
+      {
+        actor_id: c.owner.id,
+        metadata: { status: null, pipelineId: null, owner: agent.membership.id },
+      },
+      { actor_id: user.id, metadata: { status: 'open', pipelineId: null, owner: 'all' } },
+    ]);
+  });
+
+  it('exports more deals than one batch holds, created at the same moment, each once', async () => {
+    const { owner, pipeline, newStage } = await setup();
+    const contactId = await newContact(owner, 'Isha');
+    // Deals created in one statement share one creation time, to the microsecond.
+    await fx.query(
+      `insert into app.crm_deals (id, tenant_id, pipeline_id, stage_id, contact_id, title,
+         created_by_membership_id)
+       select gen_random_uuid(), $1, $2, $3, $4, 'Deal ' || g, $5
+         from generate_series(1, $6::int) g`,
+      [
+        owner.tenant.id,
+        pipeline.id,
+        newStage.id,
+        contactId,
+        owner.membership.id,
+        DEAL_EXPORT_BATCH + 1,
+      ],
+    );
+    const lines = await exported(owner);
+    expect(lines).toHaveLength(DEAL_EXPORT_BATCH + 2);
+    expect(new Set(lines.slice(1).map((line) => line.split(',')[0])).size).toBe(
+      DEAL_EXPORT_BATCH + 1,
+    );
   });
 });
 

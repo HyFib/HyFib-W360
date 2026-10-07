@@ -172,6 +172,26 @@ function sized(
 }
 
 /**
+ * Keeps the ends of the template's links the size of its links that take a value (ADR-229): an
+ * order's tracking number to start with, or text to type for a checkout.
+ */
+function sizedLinks(
+  sources: StoreVariableSource[],
+  count: number,
+  subject: Subject,
+): StoreVariableSource[] {
+  const next = sources.slice(0, count);
+  while (next.length < count) {
+    next.push(
+      subject === 'checkout'
+        ? { source: 'static', value: '' }
+        : { source: 'order', field: 'tracking_number' },
+    );
+  }
+  return next;
+}
+
+/**
  * One event's message: switched on or off, the number and what happens (a template with its
  * variables and buttons, or an automation for order events), and the delay.
  */
@@ -234,6 +254,7 @@ export function StoreMessageRuleForm({
   const cod = rule.event === 'cod_confirmation';
   const header = template ? sized(variables.header, template.headerParams, subject) : [];
   const body = template ? sized(variables.body, template.bodyParams, subject) : [];
+  const buttons = template ? sizedLinks(variables.buttons, template.links.length, subject) : [];
 
   if (!rule.available) {
     return (
@@ -262,7 +283,7 @@ export function StoreMessageRuleForm({
           automationId: startsAutomation && automationId ? automationId : null,
           channelAccountId: channelId || null,
           templateId: template ? template.id : null,
-          variables: { header, body },
+          variables: { header, body, buttons },
           delayMinutes: Number.parseInt(delay, 10) || 0,
           confirmButton: cod && confirmButton !== '' ? Number(confirmButton) : null,
           cancelButton: cod && cancelButton !== '' ? Number(cancelButton) : null,
@@ -398,7 +419,7 @@ export function StoreMessageRuleForm({
               subject={subject}
               source={source}
               onChange={(next) =>
-                setVariables({ header: header.map((s, j) => (j === i ? next : s)), body })
+                setVariables({ header: header.map((s, j) => (j === i ? next : s)), body, buttons })
               }
             />
           ))}
@@ -410,7 +431,19 @@ export function StoreMessageRuleForm({
               subject={subject}
               source={source}
               onChange={(next) =>
-                setVariables({ header, body: body.map((s, j) => (j === i ? next : s)) })
+                setVariables({ header, body: body.map((s, j) => (j === i ? next : s)), buttons })
+              }
+            />
+          ))}
+          {buttons.map((source, i) => (
+            <VariableInput
+              key={`l${i}`}
+              id={`${id}-l${i}`}
+              label={`End of the “${template.links[i]?.text ?? ''}” link (replaces {{1}} in ${template.links[i]?.url ?? 'the link'})`}
+              subject={subject}
+              source={source}
+              onChange={(next) =>
+                setVariables({ header, body, buttons: buttons.map((s, j) => (j === i ? next : s)) })
               }
             />
           ))}

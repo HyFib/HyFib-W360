@@ -492,6 +492,14 @@ function Body({
       const buttons = Array.isArray(rendered.buttons)
         ? (rendered.buttons as { text?: unknown }[]).map((b) => text(b.text)).filter(Boolean)
         : [];
+      // The links of website buttons whose link ended with a value, as sent (ADR-228).
+      const sentLinks = Array.isArray(rendered.buttons)
+        ? (rendered.buttons as { text?: unknown; url?: unknown }[]).flatMap((b) => {
+            const label = text(b.text);
+            const url = text(b.url);
+            return label && url?.startsWith('https://') ? [{ label, url }] : [];
+          })
+        : [];
       // A photo, video or document header sent through the API from an https link (ADR-201).
       const headerMedia = (c.headerMedia ?? {}) as Record<string, unknown>;
       const headerLink = text(headerMedia.link);
@@ -524,6 +532,19 @@ function Body({
           {buttons.length > 0 ? (
             <p className="text-xs opacity-80">Buttons: {buttons.join(' · ')}</p>
           ) : null}
+          {sentLinks.map((link, i) => (
+            <p key={i} className="text-xs opacity-80">
+              {link.label}:{' '}
+              <a
+                href={link.url}
+                target="_blank"
+                rel="noopener noreferrer nofollow"
+                className="break-all underline"
+              >
+                {link.url}
+              </a>
+            </p>
+          ))}
         </div>
       );
     }

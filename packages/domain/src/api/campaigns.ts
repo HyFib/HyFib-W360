@@ -57,7 +57,7 @@ import {
 import { campaignVariablesSchema, readCampaignVariables } from '../campaigns/variables';
 import type { OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
-import { apiSearchConditionSchema } from './contact-search';
+import { apiSearchConditionSchema, assertOrderConditionScope } from './contact-search';
 import { apiActor, assertAnyScope, assertScope, hasScope, type ApiContext } from './context';
 import type { ApiResponse, IdempotencyInput } from './idempotency';
 import { API_LIMITS } from './model';
@@ -137,6 +137,14 @@ export const apiCampaignWithResultsSchema = apiCampaignSchema.extend({
 
 const timezoneField = z.string().min(1).max(64).describe('An IANA time zone, like Asia/Kolkata.');
 
+/** An audience's conditions on store orders also need `orders.read` (ADR-231). */
+function assertAudienceScopes(
+  ctx: ApiContext,
+  audience: { conditions: readonly { type: string }[] } | { segmentId: string } | null | undefined,
+): void {
+  if (audience && 'conditions' in audience) assertOrderConditionScope(ctx, audience.conditions);
+}
+
 /** Who a draft goes to (ADR-186): one of the company's segments, or conditions as one holds them. */
 const apiAudienceSchema = z
   .union([
@@ -170,7 +178,7 @@ const apiAudienceSchema = z
 
 /** How a draft fills its template's variables (ADR-186), as members choose it. */
 const apiVariablesSchema = campaignVariablesSchema.describe(
-  "How each of the template's variables is filled for a recipient, in order (header, then body): fixed text (static), the contact's name with a fallback (name), or a custom field with an optional fallback (field). A recipient whose variable has no value and no fallback is skipped.",
+  "How each of the template's variables is filled for a recipient, in order (header, body, then `buttons`: the end of each of the template's `links` in GET /templates): fixed text (static), the contact's name with a fallback (name), or a custom field with an optional fallback (field). A recipient whose variable has no value and no fallback is skipped; for the end of a link, a value with spaces or one that would change the website counts as none.",
 );
 
 const apiWindowSchema = z
@@ -905,6 +913,7 @@ export async function apiCreateCampaign(
 ): Promise<ApiResponse> {
   assertScope(ctx, 'campaigns.write');
   const given = parseInput(apiCreateCampaignSchema, input);
+  assertAudienceScopes(ctx, given.audience);
   return deps.db.run(ctx.scope, async (tx) => {
     // A new draft takes the company's time zone, as members' new drafts do.
     const [company] = await tx
@@ -962,6 +971,7 @@ export async function apiUpdateCampaign(
   assertScope(ctx, 'campaigns.write');
   if (!z.uuid().safeParse(campaignId).success) throw notFound('Campaign');
   const { expectedVersion, ...given } = parseInput(apiUpdateCampaignSchema, input);
+  assertAudienceScopes(ctx, given.audience);
   return deps.db.run(ctx.scope, async (tx) => {
     const c = await lockCampaign(tx, ctx.tenant.id, campaignId);
     if (c.status !== 'draft') throw statusRefusal(DRAFTS_ONLY, c.status);

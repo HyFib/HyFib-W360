@@ -48,7 +48,11 @@ verification, app review, Embedded Signup configuration).
   warnings (phase 3 with presence), template picker (phase 3), byte ranges so Safari plays
   recordings and videos.
 - **P2-10 Channel settings UI** — done: connect (Embedded Signup), setup progress and errors, retry,
-  disconnect, quality and health time. Remaining: messaging limits and granted permissions display.
+  disconnect, quality and health time. **[The overview's setup checklist built from the company's
+  data; its database and browser tests run only in CI]** (ADR-233, W-026: two-factor, an active
+  number or one to reconnect, an approved template, contacts, teammates or a pending invitation, a
+  first-response target, each shown to members who can read its data; no migration). Remaining:
+  messaging limits and granted permissions display.
 - **P2-11 Platform quarantine view** — done with P5-10 (ADR-054): the operations console's
   Integrations page lists quarantined webhooks without their content and platform administrators
   resolve them, or retry their receipts, with a reason in the platform audit log.
@@ -73,8 +77,15 @@ verification, app review, Embedded Signup configuration).
   them; no migration). **[Merging contacts built; its database and browser tests run only in CI]**
   (ADR-224, H-019, migrations 0147 to 0149: owners and administrators merge a duplicate into the
   contact they keep after reviewing both; everything moves, the stricter consent stands, and the
-  duplicate is deleted with a record of the merge). **Remaining:** role-based number masking
-  (W-044), bulk edits of other fields, merges through the API, joining conversations.
+  duplicate is deleted with a record of the merge). **[Number masking built; its database and
+  browser tests run only in CI]** (ADR-226, W-044, migration 0152: owners and administrators choose
+  the roles whose members see customers' numbers masked, enforced in the services, with searches by
+  whole numbers only). **[Merges through the API built; their database tests run only in CI]**
+  (ADR-227, migration 0153: a `contacts.merge` scope, granted by members who may delete contacts,
+  for `POST /contacts/{id}/merge`). **[Bulk field edits built; their database and browser tests run
+  only in CI]** (ADR-238: one custom field set to one value, or cleared, on up to 10,000 contacts
+  the page's filters match, after a confirmation, with the checks of a member's edit and of bulk tag
+  edits; no migration). **Remaining:** joining conversations.
 - **P3-02 Consent & suppression** — _implemented (2026-09-26)_: consent events with provenance,
   opt-out/opt-in keywords, Meta 131050 opt-outs, suppression list, send-time enforcement (race test
   with a queued template, and with campaigns). **Remaining:** review Meta's
@@ -82,11 +93,16 @@ verification, app review, Embedded Signup configuration).
 - **P3-03 Templates** — _implemented (2026-09-26), not verified against Meta_: drafts, validation,
   write-ahead submission with lost-response reconciliation, Graph listing sync (webhook-triggered
   and periodic), deletion, status history, template sends from contacts and the inbox.
-  **Remaining:** creating media headers (Resumable Upload + media storage) and sending them outside
-  the API (which sends them with a link since ADR-201), URL buttons with variables (the
-  example format must be confirmed), named parameters, authentication/OTP, carousel, LTO, copy-code
-  and catalog templates, editing approved templates (`POST /{template-id}`), template library
-  (W-070), and a sandbox run with a real WABA.
+  **[Website buttons whose link ends with a value built; their database and browser tests run only
+  in CI]** (ADR-228: created with their example, synced, and sent from contacts, conversations and
+  the API; ADR-229: filled by campaigns, automations and store messages too). **[Starter templates
+  built; their browser test runs only in CI]** (ADR-232, W-070: twelve starters in HyFib's own copy,
+  eight utility and four marketing, that fill the New template editor; marketing ones get the
+  company's marketing opt-out keyword as a button; no migration). **Remaining:** creating media
+  headers (Resumable Upload + media storage) and sending them outside the API (which sends them with
+  a link since ADR-201), named parameters, authentication/OTP, carousel, LTO, copy-code and catalog
+  templates, editing approved templates (`POST /{template-id}`), starters in other languages, and a
+  sandbox run with a real WABA.
 - **P3-04 Campaigns** — _implemented (2026-09-26), sends verified against the Graph stand-in
   only_: saved segments (incl. campaign-response retargeting), drafts with a review panel,
   audience snapshots re-checked when queued and before dispatch, optional four-eyes approval,
@@ -103,9 +119,13 @@ verification, app review, Embedded Signup configuration).
   built; its database and browser tests run only in CI]** (ADR-214: the member it sent under is told
   it finished, or that its sending period ended and how many contacts it had not reached, with its
   counts; no migration). Keys draft, review and submit campaigns for a member's approval through the
-  public API (ADR-186, ADR-193, ADR-202). **Remaining:** the 10k run in staging with real dispatch,
-  per-recipient time zones, A/B variants, messaging-tier awareness (read the number's limit from
-  Meta), media-header templates (only the API sends them, ADR-201).
+  public API (ADR-186, ADR-193, ADR-202). **[Segment conditions on store orders built; their
+  database tests run only in CI]** (ADR-231, W-051: how many orders a contact placed, or what they
+  spent in one currency, in the last days or ever, in one store or all, matched by number; members
+  need store order access to use them and keys `orders.read`; no migration). **Remaining:** the 10k
+  run in staging with real dispatch, per-recipient time zones, A/B variants, messaging-tier
+  awareness (read the number's limit from Meta), media-header templates (only the API sends them,
+  ADR-201).
 - **P3-05 Reports** — _implemented (2026-09-26); provider data verified against the Graph stand-in
   only_: persisted, versioned metric definitions; periods of whole days in the company time zone;
   messaging outcomes with denominators; estimated Meta charges from Meta's billable flag and
@@ -136,10 +156,18 @@ verification, app review, Embedded Signup configuration).
   receipts and typing indicators built; their database and browser tests run only in CI]** (ADR-223,
   migration 0146: a company setting, off by default, marks the customer's message read when a member
   opens the conversation and shows the customer a typing indicator while a member writes).
-  **Remaining:** per-team SLA targets and calendars, SLA breach notifications (email or in-app),
-  presence of members (who is viewing a conversation), private team queues (would change visibility,
-  ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA,
-  phone-number masking (W-044).
+  **[Emails when a reply is overdue built; their database tests run only in CI]** (ADR-230,
+  migrations 0154 and 0155: the member it is assigned to, else its team, else the members who assign
+  conversations, once per wait, one email per member per sweep, never the customer's details;
+  members can turn them off). **[A notice of overdue replies in the inbox built; its database test
+  runs only in CI]** (ADR-241: above the conversation list, how many customers the member can see
+  wait past the target, counted against the clock in the browser from due times only; no migration).
+  **[Presence of members built; its database and browser tests run only in CI]** (ADR-243, migration
+  0157: a conversation names the other members who have it open, reported every 20 seconds while its
+  page is visible; a member's row is deleted when they leave and an hour after their last report).
+  **Remaining:** per-team SLA targets and calendars, private team queues (would change visibility,
+  ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA
+  (phone-number masking: P3-01, ADR-226).
 
 ## Phase 4 — automation, Flows, CRM, commerce
 
@@ -156,11 +184,17 @@ verification, app review, Embedded Signup configuration).
   person never answer at once. Template steps (send a template, ask with a template's quick replies)
   and the order-event trigger came with P4-06e. **[Steps that tag the conversation built; their
   database and browser tests run only in CI]** (ADR-222: a step adds or removes a tag on the run's
-  conversation and a condition reads its tags; no migration). **Remaining:** Flow and catalog steps
-  (sending a WhatsApp Flow or products from a run), starting runs from the public API or campaigns,
-  enrolling contacts or segments in a sequence without a customer message or order event, fuzzy
-  keyword matching, a drag-and-drop canvas (ADR-034), run export, usage billing for automation
-  steps, a real sandbox run (release checklist).
+  conversation and a condition reads its tags; no migration). **[Run export built; its database test
+  runs only in CI]** (ADR-237: the runs the list shows as CSV, with its filters, without customer
+  data, with `automations.read`, audited; no migration). **[Keyword typos built; their database test
+  runs only in CI]** (ADR-240: keyword triggers may also start on small typos, by word length, never
+  in short words or numbers, ranked below every match without typos; no migration). **[Form steps
+  built; their database and browser tests run only in CI]** (ADR-248: a published form sent in the
+  conversation with a token of its own, as a member sends it, while the plan includes WhatsApp
+  Flows; no migration). **Remaining:** catalog steps (sending products from a run), starting runs
+  from the public API or campaigns, enrolling contacts or segments in a sequence without a customer
+  message or order event, a drag-and-drop canvas (ADR-034), usage billing for automation steps, a
+  real sandbox run (release checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
   local target server only_: "Call a web address" steps (method, address with URL-encoded
   placeholders, headers, JSON body, values saved from the response, success and failure branches);
@@ -171,9 +205,11 @@ verification, app review, Embedded Signup configuration).
   outcomes on run pages; erasure and retention of saved values. T: egress unit suite (blocked
   ranges and notations, pinning, redirects, limits, headers), `automation-http.test.ts` (made once,
   refusals, crash and late results, timeouts, cancellation, sweep, erasure, retention, settings,
-  isolation), e2e `web-requests.spec.ts`. **Remaining:** calls against a real company API in an
-  authorized environment (release checklist), response headers or non-JSON bodies as values,
-  retries a company opts into for idempotent requests, form-encoded bodies, OAuth client flows.
+  isolation), e2e `web-requests.spec.ts`. **[Form bodies built; their database test runs only in
+  CI]** (ADR-236: a step's body as URL-encoded form fields, placeholders URL-encoded, sent as
+  `application/x-www-form-urlencoded`; no migration). **Remaining:** calls against a real company
+  API in an authorized environment (release checklist), response headers or non-JSON bodies as
+  values, retries a company opts into for idempotent requests, OAuth client flows.
 - **P4-03 WhatsApp Flows** — _implemented and locally verified (2026-09-27) against the Graph
   stand-in and signed, encrypted test requests; no live WhatsApp traffic yet_: Flow JSON written as
   text with checks while typing; drafts sent to Meta by the worker, one written-ahead operation at a
@@ -189,9 +225,10 @@ verification, app review, Embedded Signup configuration).
   and completion, a completion by another contact, erasure, the endpoint with every refusal and a
   secret moved to another domain, isolation), unit tests (Flow JSON checks, decryption with
   rotation and tampering, the message, health status), e2e `flows.spec.ts` (create, publish, send,
-  complete; encrypted requests through the route). **Remaining:** checks on an approved sandbox
-  number and a real account's keys (release checklist), a visual form builder, sending flows from
-  automations, campaigns and templates, flows that open with `data_exchange`, Meta's flow metrics.
+  complete; encrypted requests through the route). **[Sending forms from automations built; its
+  database and browser tests run only in CI]** (ADR-248). **Remaining:** checks on an approved
+  sandbox number and a real account's keys (release checklist), a visual form builder, sending flows
+  from campaigns and templates, flows that open with `data_exchange`, Meta's flow metrics.
 - **P4-04 CRM** — _implemented and locally verified (2026-09-27); reminder emails verified through
   Mailpit only_: pipelines (company settings, audited) with ordered stages and one currency each,
   archived instead of deleted; deals linked to a contact for life and optionally to a conversation,
@@ -201,11 +238,30 @@ verification, app review, Embedded Signup configuration).
   with a reason when stale, closed or the assignee lost access); notes; an append-only timeline per
   contact and deal; CRM panels on the contact page and beside a conversation; deal outcomes, win
   rate, time to win and open pipeline in reports and CSV; erasure of the CRM free text. T: reminders
-  exactly once under repeated signals; erasure; isolation. **Remaining:** custom deal fields,
-  products on deals, deal import and export, forecasting, moving deals between pipelines in the UI
-  (the service supports it), automation steps that create deals or tasks, CRM connectors (HubSpot,
-  Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
-  checklist).
+  exactly once under repeated signals; erasure; isolation. **[Moving deals between pipelines in the
+  app built; its database and browser tests run only in CI]** (ADR-234: the deal page offers the
+  company's other active pipelines and their stages; the service keeps its rules; no migration).
+  **[Deal export built; its database tests run only in CI]** (ADR-239: the deals a view shows as
+  CSV, with `crm.read` and `contacts.export`, numbers masked as for the member, audited; no
+  migration). **[Stage chances and a weighted forecast built; their database and browser tests run
+  only in CI]** (ADR-242, migration 0156: a chance of winning per stage weighs the board's open
+  deals, for the pipeline and for the deals expected to close this month). **[Automation steps that
+  create a CRM task built; their database and browser tests run only in CI]** (ADR-244, migrations
+  0158 and 0159: a step creates a task about the run's contact for an active member who can use the
+  CRM, recorded as created by the automation; a member who left is skipped and the run goes on).
+  **[Automation steps that create a CRM deal built; their database and browser tests run only in
+  CI]** (ADR-245, migrations 0160 and 0161: a deal for the run's contact and conversation in a stage
+  of an active pipeline, with an optional value in its currency and owner, unless the contact
+  already has an open deal there). **[Reminders for automation tasks built; their database and
+  browser tests run only in CI]** (ADR-246: a task step may email the member when the task is due,
+  as a member's task reminder does; no migration). **[Expected close dates from deal steps built;
+  their database and browser tests run only in CI]** (ADR-247: a number of days after the step runs,
+  on the company's calendar; no migration). **[CRM steps that follow the plan built; their database
+  test runs only in CI]** (ADR-249: without the CRM in the plan, task and deal steps create nothing
+  and say why, and cannot be published; no migration). **Remaining:** custom deal fields, products
+  on deals, deal import, forecasts in Reports, automation steps that move deals, CRM connectors
+  (HubSpot, Salesforce, Zoho: integrations), reminder emails through the production SMTP provider
+  (release checklist).
 - **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad
   traffic yet_: click-to-chat links (a short link that counts clicks per link and company day
   without any visitor data and redirects to wa.me with a pre-filled message and an optional
@@ -239,10 +295,13 @@ verification, app review, Embedded Signup configuration).
   lease, not-sent reason, erasure, isolation; 15 deliberate regressions caught), unit tests (prices,
   order parsing, message shapes, limits, references, the Payment Link client), e2e
   `commerce.spec.ts` (catalog read, products sent, order, keys, payment request, forged and signed
-  notifications, paid and fulfilled). **Remaining:** checks on an approved sandbox number and with a
-  company's Razorpay test keys (release checklist), product enquiries (`referred_product`), payments
-  inside WhatsApp (`order_details`, needs Meta payment configuration), writing to catalogs and stock,
-  refunds from HyFib, order reports and exports, sending products from automations.
+  notifications, paid and fulfilled). **[Order exports built; their database test runs only in CI]**
+  (ADR-235: the orders a member can see as CSV, filtered by status, with `commerce.read` and
+  `contacts.export`, numbers masked as for the member, erased contacts blanked, audited; no
+  migration). **Remaining:** checks on an approved sandbox number and with a company's Razorpay test
+  keys (release checklist), product enquiries (`referred_product`), payments inside WhatsApp
+  (`order_details`, needs Meta payment configuration), writing to catalogs and stock, refunds from
+  HyFib, order reports, sending products from automations.
 - **P4-06b Store connectors** — _implemented and locally verified (2026-09-27) against the Shopify
   and WooCommerce stand-ins; no live store traffic yet_: companies connect Shopify stores through
   HyFib's Shopify app (a signed callback bound to the member who started it, `read_orders` and
@@ -711,6 +770,14 @@ verification, app review, Embedded Signup configuration).
   **[Conversation tags through the API built; their database and browser tests run only in CI]**
   (ADR-221: conversations carry `tags`, `GET /conversations` filters by `tag`, and the three calls
   that change conversations take `addTags` and `removeTags`; no migration).
+  **[Merging contacts through the API built; its database tests run only in CI]** (ADR-227,
+  migration 0153: `POST /contacts/{id}/merge` with the `contacts.merge` scope merges a contact into
+  another as owners and administrators do, answering the kept contact and what moved).
+  **[Website buttons whose link ends with a value built; their database and browser tests run only
+  in CI]** (ADR-228: GET /templates gives each such button's link in `links` and how many values a
+  send gives in `variables.buttons`; a send gives the end of each link in `variables.buttons`).
+  **[Campaign drafts take the ends of links; their database tests run only in CI]** (ADR-229:
+  `variables.buttons`, one source per link, as members choose them).
   Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,
@@ -846,12 +913,15 @@ verification, app review, Embedded Signup configuration).
   (ADR-192: an endpoint takes the ends of the runs that ended for the reasons it chooses, each
   narrowing the end it belongs to, such as only the failures to send among failed runs, or every end
   as before). **[Contact cards' contacts built; their database tests run only in CI]** (ADR-196:
-  `message.received` gives a contact card's contacts, as the API does). Remaining:
-  filters for other event types and on a message's or contact's values (such as by tag or a field's
-  value, or the key that started a run), other authentication (headers computed
-  per delivery, other OAuth grants),
-  mutual TLS, fixed egress addresses, events for store orders, Payment Links and each step of a run,
-  `createdAt` finer than the millisecond, load tests.
+  `message.received` gives a contact card's contacts, as the API does). **[Merge events built; their
+  database tests run only in CI]** (ADR-225: `contact.merged` names the merged contact and gives the
+  contact it belongs to now; the API answers a merged contact's id with 404, reason
+  `contact_merged`, naming that contact, and `GET /contact-changes` lists the contacts merged into
+  each contact it reads). Remaining: filters for other event types and on a message's or contact's
+  values (such as by tag or a field's value, or the key that started a run), other authentication
+  (headers computed per delivery, other OAuth grants), mutual TLS, fixed egress addresses, events
+  for store orders, Payment Links and each step of a run, `createdAt` finer than the millisecond,
+  load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

@@ -9,8 +9,10 @@ import {
   crmPipelines,
   crmStages,
   crmTasks,
+  DEAL_STATUSES,
   desc,
   eq,
+  exactTimestamp,
   inArray,
   isNull,
   sql,
@@ -19,7 +21,10 @@ import {
   type DealStatus,
   type Tx,
 } from '@w360/db';
+import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { CSV_BOM, csvLine } from '../contacts/csv';
+import type { NumberViewer } from '../contacts/number-masking';
 import { canSeeConversation } from '../messaging/outbound';
 import { parseInput } from '../validation';
 import {
@@ -36,9 +41,12 @@ import {
   type ContactRef,
   type MemberRef,
 } from './common';
+import { DEAL_CSV_COLUMNS, dealCsvLine } from './deals-csv';
+import { forecast, weigh, type Forecast } from './forecast';
 import { currencyDigits, parseAmountToMinor } from './money';
 import { loadPipelines, type PipelineSummary, type StageSummary } from './pipelines';
 import { tasksWhere, type TaskItem } from './tasks';
+import { monthEndIn } from './time';
 
 export interface DealCard {
   id: string;
@@ -63,12 +71,16 @@ export interface BoardColumn {
   /** All open deals in the stage (the list may be cut at CRM_LIMITS.boardDealsPerStage). */
   count: number;
   valueMinor: number;
+  /** Their value times the stage's chance of winning (ADR-242); null without a chance. */
+  weightedMinor: number | null;
 }
 
 export interface Board {
   pipeline: PipelineSummary;
   pipelines: PipelineSummary[];
   columns: BoardColumn[];
+  /** The weighted pipeline of the columns shown, and of the deals expected to close by `monthEnd`. */
+  forecast: Forecast & { monthEnd: string };
 }
 
 export interface ActivityItem {
@@ -91,6 +103,8 @@ export interface DealDetail extends DealCard {
   closedBy: MemberRef | null;
   createdAt: string;
   createdBy: MemberRef | null;
+  /** The deal was created by an automation's run, not a member (ADR-245). */
+  createdByAutomation: boolean;
   /** Only for members who can see the conversation. */
   conversationId: string | null;
   tasks: { open: TaskItem[]; done: TaskItem[] };
@@ -179,6 +193,16 @@ const listSchema = z.object({
 
 const LIST_PAGE = 50;
 
+/** A deal export (ADR-239): the board's or a list's filters, each optional. */
+export const dealExportSchema = z.object({
+  status: z.enum(DEAL_STATUSES).optional(),
+  pipelineId: uuidSchema.optional(),
+  owner: boardSchema.shape.owner,
+});
+
+/** Deals read per batch of an export, each batch in its own read-only transaction. */
+export const DEAL_EXPORT_BATCH = 500;
+
 function parseValue(text: string, currency: string): number | null {
   if (!text) return null;
   const minor = parseAmountToMinor(text, currency);
@@ -208,6 +232,7 @@ async function dealCards(
   tenantId: string,
   rows: DealRow[],
   currencies: ReadonlyMap<string, string>,
+  viewer: NumberViewer,
 ): Promise<DealCard[]> {
   if (rows.length === 0) return [];
   const members = await memberRefs(
@@ -219,6 +244,7 @@ async function dealCards(
     tx,
     tenantId,
     rows.map((r) => r.contactId),
+    viewer,
   );
   const counts = await tx
     .select({ dealId: crmTasks.dealId, n: sql<number>`count(*)::int` })
@@ -403,11 +429,15 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             eq(crmDeals.status, 'open'),
             ownerFilter(ctx, data.owner),
           );
+          // Deals expected to close by the end of this month, in the company's time (ADR-242).
+          const monthEnd = monthEndIn(clock.now(), ctx.tenant.timezone);
           const totals = await tx
             .select({
               stageId: crmDeals.stageId,
               n: sql<number>`count(*)::int`,
               value: sql<string>`coalesce(sum(${crmDeals.valueMinor}), 0)::text`,
+              monthValue: sql<string>`coalesce(sum(${crmDeals.valueMinor})
+                filter (where ${crmDeals.expectedCloseOn} <= ${monthEnd}::date), 0)::text`,
             })
             .from(crmDeals)
             .where(where)
@@ -435,21 +465,40 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             ctx.tenant.id,
             rows,
             new Map([[pipeline.id, pipeline.currency]]),
+            ctx,
           );
+          const stages = pipeline.stages
+            .filter((s) => !s.archived)
+            .map((stage) => {
+              const total = totals.find((t) => t.stageId === stage.id);
+              return {
+                stage,
+                count: total?.n ?? 0,
+                valueMinor: Number(total?.value ?? 0),
+                monthValueMinor: Number(total?.monthValue ?? 0),
+              };
+            });
           return {
             pipeline,
             pipelines,
-            columns: pipeline.stages
-              .filter((s) => !s.archived)
-              .map((stage) => {
-                const total = totals.find((t) => t.stageId === stage.id);
-                return {
-                  stage,
-                  deals: cards.filter((c) => c.stageId === stage.id),
-                  count: total?.n ?? 0,
-                  valueMinor: Number(total?.value ?? 0),
-                };
-              }),
+            columns: stages.map(({ stage, count, valueMinor }) => ({
+              stage,
+              deals: cards.filter((c) => c.stageId === stage.id),
+              count,
+              valueMinor,
+              weightedMinor: stage.winPercent === null ? null : weigh(valueMinor, stage.winPercent),
+            })),
+            forecast: {
+              ...forecast(
+                stages.map((s) => ({
+                  count: s.count,
+                  valueMinor: s.valueMinor,
+                  monthValueMinor: s.monthValueMinor,
+                  winPercent: s.stage.winPercent,
+                })),
+              ),
+              monthEnd,
+            },
           };
         },
         { accessMode: 'read only' },
@@ -498,6 +547,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
               ctx.tenant.id,
               page.map((r) => r.deal),
               await pipelineCurrencies(tx, ctx.tenant.id),
+              ctx,
             ),
             nextCursor:
               rows.length > LIST_PAGE && last
@@ -509,6 +559,123 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
         },
         { accessMode: 'read only' },
       );
+    },
+
+    /**
+     * The deals the board or a list shows as CSV (ADR-239), newest first, streamed in batches,
+     * with their filters (a status, a pipeline, an owner). They carry customers' names and numbers,
+     * so they need `contacts.export` too; numbers are shown as the member may see them (ADR-226).
+     * Audited before the first line.
+     */
+    async *exportDeals(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta = {},
+    ): AsyncGenerator<string> {
+      assertCan(ctx, 'crm.read');
+      assertCan(ctx, 'contacts.export');
+      const data = parseInput(dealExportSchema, input ?? {});
+      await db.run(ctx.scope, async (tx) => {
+        if (data.pipelineId) {
+          const [pipeline] = await tx
+            .select({ id: crmPipelines.id })
+            .from(crmPipelines)
+            .where(
+              and(eq(crmPipelines.tenantId, ctx.tenant.id), eq(crmPipelines.id, data.pipelineId)),
+            );
+          if (!pipeline) throw notFound('Pipeline');
+        }
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'crm.deals_exported',
+            subjectType: 'tenant',
+            subjectId: ctx.tenant.id,
+            metadata: {
+              status: data.status ?? null,
+              pipelineId: data.pipelineId ?? null,
+              owner: data.owner,
+            },
+          },
+          meta,
+        );
+      });
+      yield CSV_BOM + csvLine(DEAL_CSV_COLUMNS);
+      let before: { at: string; id: string } | null = null;
+      for (;;) {
+        const cursor: { at: string; id: string } | null = before;
+        const batch: { lines: string[]; next: { at: string; id: string } | null } = await db.run(
+          ctx.scope,
+          async (tx) => {
+            // Exact to the microsecond, so a batch never ends between two deals created in the same
+            // millisecond.
+            const rows = await tx
+              .select({ deal: crmDeals, cursorAt: exactTimestamp(crmDeals.createdAt) })
+              .from(crmDeals)
+              .where(
+                and(
+                  eq(crmDeals.tenantId, ctx.tenant.id),
+                  data.status ? eq(crmDeals.status, data.status) : undefined,
+                  data.pipelineId ? eq(crmDeals.pipelineId, data.pipelineId) : undefined,
+                  ownerFilter(ctx, data.owner),
+                  cursor
+                    ? sql`(${crmDeals.createdAt}, ${crmDeals.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
+                    : undefined,
+                ),
+              )
+              .orderBy(desc(crmDeals.createdAt), desc(crmDeals.id))
+              .limit(DEAL_EXPORT_BATCH);
+            const deals = rows.map((r) => r.deal);
+            const last = rows.at(-1);
+            const cards = await dealCards(
+              tx,
+              ctx.tenant.id,
+              deals,
+              await pipelineCurrencies(tx, ctx.tenant.id),
+              ctx,
+            );
+            const pipelines = await loadPipelines(tx, ctx.tenant.id, { includeArchived: true });
+            const stages = new Map(
+              pipelines.flatMap((p) => p.stages.map((st) => [st.id, st.name])),
+            );
+            const names = new Map(pipelines.map((p) => [p.id, p.name]));
+            return {
+              lines: deals.map((deal, i) => {
+                const card = cards[i];
+                return dealCsvLine({
+                  id: deal.id,
+                  title: deal.title,
+                  pipelineName: names.get(deal.pipelineId) ?? '',
+                  stageName: stages.get(deal.stageId) ?? '',
+                  status: deal.status,
+                  currency: card?.currency ?? '',
+                  valueMinor: deal.valueMinor,
+                  ownerName: card?.owner?.name ?? null,
+                  contactName: card?.contact.name ?? null,
+                  contactPhone: card?.contact.phone ?? null,
+                  contactErased: card?.contact.erased ?? true,
+                  expectedCloseOn: deal.expectedCloseOn,
+                  createdAt: deal.createdAt,
+                  stageEnteredAt: deal.stageEnteredAt,
+                  closedAt: deal.closedAt,
+                  lostReason: deal.lostReason,
+                  openTasks: card?.openTasks ?? 0,
+                });
+              }),
+              // The next batch starts after this one's last deal, unless this one was the last.
+              next:
+                rows.length === DEAL_EXPORT_BATCH && last
+                  ? { at: last.cursorAt, id: last.deal.id }
+                  : null,
+            };
+          },
+          { accessMode: 'read only' },
+        );
+        if (batch.lines.length > 0) yield batch.lines.join('');
+        if (!batch.next) break;
+        before = batch.next;
+      }
     },
 
     async getDeal(ctx: TenantContext, id: string): Promise<DealDetail> {
@@ -551,6 +718,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             ctx.tenant.id,
             [row.deal],
             new Map([[row.deal.pipelineId, row.currency]]),
+            ctx,
           );
           const people = await memberRefs(tx, ctx.tenant.id, [
             row.deal.closedByMembershipId,
@@ -569,11 +737,14 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
               ? (people.get(row.deal.closedByMembershipId) ?? null)
               : null,
             createdAt: row.deal.createdAt.toISOString(),
-            createdBy: people.get(row.deal.createdByMembershipId) ?? null,
+            createdBy: row.deal.createdByMembershipId
+              ? (people.get(row.deal.createdByMembershipId) ?? null)
+              : null,
+            createdByAutomation: row.deal.createdByAutomationId !== null,
             conversationId: visible ? row.deal.conversationId : null,
             tasks: {
-              open: await tasksWhere(tx, ctx.tenant.id, { dealId: id, status: 'open' }),
-              done: await tasksWhere(tx, ctx.tenant.id, { dealId: id, status: 'done' }),
+              open: await tasksWhere(tx, ctx.tenant.id, { dealId: id, status: 'open' }, ctx),
+              done: await tasksWhere(tx, ctx.tenant.id, { dealId: id, status: 'done' }, ctx),
             },
             timeline: await timeline(tx, ctx.tenant.id, { dealId: id }),
           };
@@ -589,7 +760,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
       return db.run(
         ctx.scope,
         async (tx) => {
-          const contact = (await contactRefs(tx, ctx.tenant.id, [contactId])).get(contactId);
+          const contact = (await contactRefs(tx, ctx.tenant.id, [contactId], ctx)).get(contactId);
           if (!contact) throw notFound('Contact');
           const rows = await tx
             .select()
@@ -604,8 +775,9 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
               ctx.tenant.id,
               rows,
               await pipelineCurrencies(tx, ctx.tenant.id),
+              ctx,
             ),
-            tasks: await tasksWhere(tx, ctx.tenant.id, { contactId, status: 'open' }),
+            tasks: await tasksWhere(tx, ctx.tenant.id, { contactId, status: 'open' }, ctx),
             timeline: await timeline(tx, ctx.tenant.id, { contactId }),
           };
         },

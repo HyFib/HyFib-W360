@@ -60,6 +60,8 @@ export const STEP_OUTCOMES: Record<string, string> = {
   taken_over: 'Taken over',
   requested: 'Made a web request',
   responded: 'Web request finished',
+  created: 'Created in the CRM',
+  skipped: 'Skipped the step',
 };
 
 export const STEP_DETAILS: Record<string, string> = {
@@ -72,12 +74,18 @@ export const STEP_DETAILS: Record<string, string> = {
   'store_event:order_shipped': 'an order shipped by a store',
   'store_event:order_delivered': 'an order delivered',
   'store_event:order_cancelled': 'an order cancelled in a store',
+  // Form steps (ADR-248, checked again when the step runs).
+  flow_unavailable:
+    'the form is archived, no longer published, or of another WhatsApp account than the number',
+  flows_not_in_plan: 'the company’s plan does not include WhatsApp Flows',
   // Template steps (checked again when the step runs).
   template_unavailable: 'the template is no longer approved, or HyFib cannot send it',
   template_changed:
     'the template’s variables or quick-reply buttons changed after the step was set up',
   channel_unavailable: 'the WhatsApp number is not active or does not match the template',
   missing_variable: 'a template variable was empty after filling in placeholders',
+  invalid_link:
+    'the end of a website button’s link held spaces, was too long or would change the website',
   suppressed: 'the number is on the company’s suppression list',
   opted_out: 'the contact opted out of these messages',
   no_marketing_opt_in: 'the template is a marketing template and the contact has not opted in',
@@ -91,6 +99,20 @@ export const STEP_DETAILS: Record<string, string> = {
   conversation_too_many_tags: 'the conversation already has the maximum number of tags',
   field_missing: 'the contact field no longer exists',
   invalid_value: 'the value did not fit the contact field',
+  // Task and deal steps (ADR-249): the plan's CRM.
+  crm_not_in_plan: 'the company’s plan does not include the CRM',
+  // Task steps (ADR-244): why no task was created.
+  task_title_empty: 'the task’s title was empty after filling in placeholders',
+  task_assignee_unavailable:
+    'the member the task was for is no longer an active member who can use the CRM',
+  // Deal steps (ADR-245): why no deal was created, or what it was created without.
+  deal_title_empty: 'the deal’s title was empty after filling in placeholders',
+  deal_stage_unavailable: 'the pipeline or the stage was archived or removed',
+  deal_already_open: 'the contact already has an open deal in the pipeline',
+  deal_owner_unavailable:
+    'the deal has no owner: the member chosen is no longer an active member who can use the CRM',
+  deal_value_invalid:
+    'the deal has no value: the value is not an amount in the pipeline’s currency',
   tester_not_member: 'the member running the test left the company',
   tester_not_permitted: 'the member running the test may no longer run tests',
   version_unreadable: 'the version could not be read',

@@ -15,6 +15,12 @@ export interface SendableTemplate {
   whatsappAccountId: string;
   headerParams: number;
   bodyParams: number;
+  /**
+   * The website buttons whose link ends with a value given when sending (ADR-228), in the order
+   * the values are given: the button's position among the buttons, its text and its link, ending
+   * with {{1}}.
+   */
+  links: { index: number; text: string; url: string }[];
   /** The template text with its {{n}} placeholders. */
   preview: RenderedTemplate;
 }
@@ -27,6 +33,17 @@ export interface SenderChannel {
 
 function fill(text: string, values: string[]): string {
   return text.replace(/\{\{\s*(\d+)\s*\}\}/g, (m, n: string) => values[Number(n) - 1] || m);
+}
+
+/** The preview's buttons, each website button whose link ends with a value showing its link. */
+function previewButtons(template: SendableTemplate, values: string[]): RenderedTemplate['buttons'] {
+  return template.preview.buttons.map((b, index) => {
+    const i = template.links.findIndex((link) => link.index === index);
+    const link = template.links[i];
+    if (!link) return b;
+    const value = values[i];
+    return { ...b, url: value ? `${link.url.slice(0, -'{{1}}'.length)}${value}` : link.url };
+  });
 }
 
 /**
@@ -55,6 +72,7 @@ export function TemplateSender({
   const template = available.find((t) => t.id === templateId);
   const [header, setHeader] = useState('');
   const [body, setBody] = useState<string[]>([]);
+  const [links, setLinks] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -65,6 +83,7 @@ export function TemplateSender({
   }
 
   const bodyValues = Array.from({ length: template?.bodyParams ?? 0 }, (_, i) => body[i] ?? '');
+  const linkValues = Array.from({ length: template?.links.length ?? 0 }, (_, i) => links[i] ?? '');
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -78,7 +97,11 @@ export function TemplateSender({
         contactId,
         channelAccountId: channel.id,
         templateId: template.id,
-        params: { header: template.headerParams ? [header] : [], body: bodyValues },
+        params: {
+          header: template.headerParams ? [header] : [],
+          body: bodyValues,
+          buttons: linkValues,
+        },
         clientKey: pendingKey.current,
       });
       if (result.ok) {
@@ -86,6 +109,7 @@ export function TemplateSender({
         setNotice('Template queued. Its delivery status appears in the conversation.');
         setHeader('');
         setBody([]);
+        setLinks([]);
       } else {
         setError(result.message);
         if (result.code !== 'internal') pendingKey.current = null;
@@ -136,6 +160,7 @@ export function TemplateSender({
                   setTemplateId(e.target.value);
                   setHeader('');
                   setBody([]);
+                  setLinks([]);
                 }}
               >
                 <option value="">Choose a template</option>
@@ -177,6 +202,30 @@ export function TemplateSender({
               )}
             </Field>
           ))}
+          {template
+            ? template.links.map((link, i) => (
+                <Field
+                  key={`link-${i}`}
+                  id={`send-link-${i}`}
+                  label={`End of the “${link.text}” link`}
+                  description={`Replaces {{1}} in ${link.url}, without spaces.`}
+                >
+                  {(aria) => (
+                    <Input
+                      {...aria}
+                      value={linkValues[i] ?? ''}
+                      maxLength={1000}
+                      required
+                      onChange={(e) => {
+                        const next = [...linkValues];
+                        next[i] = e.target.value;
+                        setLinks(next);
+                      }}
+                    />
+                  )}
+                </Field>
+              ))
+            : null}
           {template ? (
             <TemplatePreview
               label="Message preview"
@@ -184,6 +233,7 @@ export function TemplateSender({
                 ...template.preview,
                 header: template.preview.header ? fill(template.preview.header, [header]) : null,
                 body: fill(template.preview.body, bodyValues),
+                buttons: previewButtons(template, linkValues),
               }}
             />
           ) : null}

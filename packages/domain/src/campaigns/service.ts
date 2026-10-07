@@ -32,6 +32,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { shownNumber } from '../contacts/number-masking';
 import { permissionsForRoles } from '../authz/permissions';
 import { recordAudit, type RequestMeta } from '../audit';
 import {
@@ -49,7 +50,7 @@ import { STATUS_RANK } from '../messaging/status';
 import { queueTemplateMessage } from '../messaging/outbound';
 import { formatCompanyTime } from '../tenancy/deletion';
 import { wantsEmail } from '../tenancy/email-preferences';
-import { sendSpecFor } from '../templates/definition';
+import { linkButtons, sendSpecFor, type SendSpec } from '../templates/definition';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import {
   MAX_AUDIENCE,
@@ -72,6 +73,7 @@ import {
   type ScheduleAdjustment,
 } from './schedule';
 import {
+  assertCanUseDefinition,
   loadFieldTypes,
   segmentDefinitionSchema,
   checkSegmentDefinition,
@@ -590,6 +592,15 @@ async function loadTemplate(tx: Tx, tenantId: string, templateId: string | null)
   return info;
 }
 
+/** What a mapping is checked against: the template's counts and its links that take a value. */
+function variableSpec(spec: Extract<SendSpec, { supported: true }>) {
+  return {
+    headerParams: spec.headerParams,
+    bodyParams: spec.bodyParams,
+    links: linkButtons(spec.definition),
+  };
+}
+
 async function loadChannel(tx: Tx, tenantId: string, channelAccountId: string | null) {
   if (!channelAccountId) return null;
   const [c] = await tx
@@ -691,7 +702,7 @@ async function evaluateReadiness(
       const fields = await loadFieldTypes(tx, company.id);
       const problem = checkVariables(
         readCampaignVariables(c.variables),
-        template.spec,
+        variableSpec(template.spec),
         new Set(fields.keys()),
       );
       if (problem) problems.push(problem);
@@ -1844,6 +1855,7 @@ export function createCampaignsService(deps: CampaignDeps) {
                         supported: true as const,
                         headerParams: template.spec.headerParams,
                         bodyParams: template.spec.bodyParams,
+                        buttonParams: template.spec.buttonParams,
                         definition: template.spec.definition,
                       }
                     : { supported: false as const, reason: template.spec.reason },
@@ -1876,7 +1888,7 @@ export function createCampaignsService(deps: CampaignDeps) {
           id,
           tenantId: ctx.tenant.id,
           name: data.name,
-          variables: { header: [], body: [] },
+          variables: { header: [], body: [], buttons: [] },
           timezone: ctx.tenant.timezone,
           createdByUserId: ctx.user.id,
         });
@@ -1896,6 +1908,12 @@ export function createCampaignsService(deps: CampaignDeps) {
       if (!z.uuid().safeParse(campaignId).success) throw notFound('Campaign');
       const { expectedVersion, ...data } = parseInput(updateCampaignSchema, input);
       const draft = prepareCampaignDraft(data);
+      if (draft.data.audience.kind === 'conditions') {
+        assertCanUseDefinition(
+          ctx,
+          parseInput(segmentDefinitionSchema, draft.data.audience.definition),
+        );
+      }
       return db.run(ctx.scope, async (tx) => {
         const c = await lockCampaign(tx, ctx.tenant.id, campaignId);
         if (c.status !== 'draft') throw new AppError('conflict', DRAFTS_ONLY);
@@ -2298,9 +2316,10 @@ export function createCampaignsService(deps: CampaignDeps) {
           if (!template?.spec.supported)
             throw new AppError('precondition_failed', 'Choose an approved template first.');
           const variables = readCampaignVariables(c.variables);
+          const spec = variableSpec(template.spec);
           const problem = checkVariables(
             variables,
-            template.spec,
+            spec,
             new Set((await loadFieldTypes(tx, ctx.tenant.id)).keys()),
           );
           if (problem) throw new AppError('precondition_failed', problem);
@@ -2318,7 +2337,7 @@ export function createCampaignsService(deps: CampaignDeps) {
                     and(eq(contacts.tenantId, ctx.tenant.id), inArray(contacts.phoneE164, valid)),
                   )
               : [];
-          return { c, variables, people };
+          return { c, variables, links: spec.links, people };
         },
         { accessMode: 'read only' },
       );
@@ -2334,7 +2353,7 @@ export function createCampaignsService(deps: CampaignDeps) {
           results.push({ phone: e164, ok: false, message: 'Not a contact yet. Add them first.' });
           continue;
         }
-        const resolved = resolveVariables(prepared.variables, person);
+        const resolved = resolveVariables(prepared.variables, person, prepared.links);
         if (!resolved.ok) {
           results.push({
             phone: e164,
@@ -2428,7 +2447,7 @@ export function createCampaignsService(deps: CampaignDeps) {
           id: r.id,
           contactId: r.contact_id,
           displayName: r.display_name,
-          phoneE164: r.phone_e164,
+          phoneE164: shownNumber(ctx, r.phone_e164),
           state: r.state,
           skipReason: r.skip_reason,
           messageStatus: r.message_status,
@@ -2500,7 +2519,8 @@ export function createCampaignsService(deps: CampaignDeps) {
           const iso = (v: string | number | null | undefined) =>
             v ? new Date(String(v)).toISOString() : '';
           chunk += csvLine([
-            r.phone_e164 as string | null,
+            // Numbers as the member may see them (ADR-226).
+            shownNumber(ctx, r.phone_e164 as string | null),
             r.display_name as string | null,
             r.state as string,
             r.skip_reason as string | null,

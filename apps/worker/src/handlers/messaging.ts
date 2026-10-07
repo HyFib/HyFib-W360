@@ -16,12 +16,14 @@ import {
   newResealState,
   newResignState,
   noticeApiKeyUsageDue,
+  noticeOverdueReplies,
   processChannelOnboarding,
   processMetaWebhookReceipt,
   processSendIntent,
   purgeApiIdempotencyKeys,
   purgeDeadLetters,
   purgeRateLimitBuckets,
+  purgeConversationViewers,
   queueWaitLimits,
   recoverExpiredSend,
   remindExpiringApiKeys,
@@ -227,6 +229,23 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     if (reminders > 0) rt.logger.info({ reminders }, 'task reminders signalled');
     const routed = await routeDueConversations(rt.db);
     if (routed > 0) rt.logger.info({ routed }, 'waiting conversations assigned');
+    // Emails when a waiting customer's reply is overdue (ADR-230), after routing assigned them.
+    const overdue = await noticeOverdueReplies({
+      db: rt.db,
+      clock: rt.clock,
+      outbox: rt.notices.outbox,
+      appBaseUrl: rt.notices.appBaseUrl,
+    });
+    for (const failure of overdue.failed) {
+      rt.logger.warn(
+        { tenantId: failure.tenantId, err: toError(failure.error).message },
+        'overdue reply emails failed; will retry',
+      );
+    }
+    if (overdue.noticed + overdue.waiting + overdue.skipped > 0) {
+      const { noticed, emails, waiting, skipped } = overdue;
+      rt.logger.info({ noticed, emails, waiting, skipped }, 'overdue replies');
+    }
     const retention = await applyMessagingRetention(rt.db);
     if (retention.bodiesErased + retention.receiptsDeleted + retention.eventsPruned > 0) {
       rt.logger.info(retention, 'messaging retention applied');
@@ -272,6 +291,9 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     // Token buckets that are full again limit nothing (ADR-068).
     const buckets = await purgeRateLimitBuckets(rt.db);
     if (buckets > 0) rt.logger.info({ buckets }, 'full rate limit buckets deleted');
+    // Who had a conversation open, not reported for an hour (ADR-243).
+    const viewers = await purgeConversationViewers(rt.db);
+    if (viewers > 0) rt.logger.info({ viewers }, 'old conversation presence deleted');
     // Contact changes a later change of the same contact replaced (ADR-114).
     const contactChanges = await compactContactChanges(rt.db);
     if (contactChanges > 0) rt.logger.info({ contactChanges }, 'replaced contact changes deleted');

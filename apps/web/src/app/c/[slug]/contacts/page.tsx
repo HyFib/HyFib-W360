@@ -19,6 +19,7 @@ import {
   TR,
   Table,
 } from '@w360/ui';
+import { BulkFieldForm } from '@/components/contacts/bulk-field-form';
 import { BulkTagForm } from '@/components/contacts/bulk-tag-form';
 import { ConsentBadge } from '@/components/contacts/consent-badge';
 import { PageHeader } from '@/components/page-header';
@@ -66,11 +67,12 @@ export default async function ContactsPage({
     list = await contacts.listContacts(ctx, filter);
   }
   const tags = await contacts.listTags(ctx);
-  // Bulk tag edits (ADR-213) need the number of contacts the filters match.
+  // Bulk tag and field edits (ADR-213, ADR-238) need the number of contacts the filters match.
   const matching =
     can(ctx, 'contacts.write') && list.items.length > 0
       ? await contacts.countContacts(ctx, filter)
       : 0;
+  const fields = matching > 0 && matching <= BULK_TAG_LIMIT ? await contacts.listFields(ctx) : [];
   const base = `/c/${ctx.tenant.slug}/contacts`;
   const query = new URLSearchParams(
     Object.entries(filter).filter(
@@ -164,10 +166,20 @@ export default async function ContactsPage({
         {matching > BULK_TAG_LIMIT ? (
           <p className="text-sm text-muted-foreground">
             More than {BULK_TAG_LIMIT.toLocaleString('en-IN')} contacts match these filters. Narrow
-            them to add or remove a tag on all of them at once.
+            them to change a tag or a custom field on all of them at once.
           </p>
         ) : matching > 0 ? (
-          <BulkTagForm slug={ctx.tenant.slug} filter={filter} count={matching} />
+          <div className="grid gap-3">
+            <BulkTagForm slug={ctx.tenant.slug} filter={filter} count={matching} />
+            {fields.length > 0 ? (
+              <BulkFieldForm
+                slug={ctx.tenant.slug}
+                filter={filter}
+                count={matching}
+                fields={fields}
+              />
+            ) : null}
+          </div>
         ) : null}
         {list.items.length === 0 ? (
           <EmptyState

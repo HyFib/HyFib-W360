@@ -19,3 +19,19 @@ export function endOfLocalDay(at: Date, timeZone: string): Date {
     timeZone,
   ).instant;
 }
+
+/** The local calendar date `days` after the one containing `at` in `timeZone`, as YYYY-MM-DD. */
+export function localDateAfter(at: Date, timeZone: string, days: number): string {
+  const today = zonedParts(at.getTime(), timeZone);
+  // Calendar arithmetic in UTC, which has no daylight saving.
+  const date = new Date(Date.UTC(today.year, today.month - 1, today.day + days));
+  return date.toISOString().slice(0, 10);
+}
+
+/** The last day of the local calendar month containing `at` in `timeZone`, as YYYY-MM-DD. */
+export function monthEndIn(at: Date, timeZone: string): string {
+  const today = zonedParts(at.getTime(), timeZone);
+  // Day 0 of the next month is the last day of this one (UTC has no daylight saving).
+  const last = new Date(Date.UTC(today.year, today.month, 0)).getUTCDate();
+  return `${today.year}-${String(today.month).padStart(2, '0')}-${String(last).padStart(2, '0')}`;
+}

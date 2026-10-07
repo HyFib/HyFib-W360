@@ -336,6 +336,13 @@ has 50 tags keeps them, and the result counts it; remove a tag from it first. Ea
 audit log as `contacts.bulk_tagged` with its counts; each changed contact also appears in the
 contact feed and as a `contact.updated` webhook event.
 
+**A bulk field edit was refused or changed fewer contacts than expected (ADR-238).** It is refused
+like a bulk tag edit when the matches changed or exceed 10,000, and when the value does not fit the
+field's type (the message names the field). Contacts that already had the value are counted, not
+changed. Each edit is in the audit log as `contacts.bulk_field_set` with the field's key and its
+counts (never the value); each changed contact also appears in the contact feed and as a
+`contact.updated` webhook event.
+
 **Erasure request.** A member with `contacts.delete` erases the contact from its page (keep the
 number suppressed unless the requester asks otherwise). The action is audited
 (`contact.erased`). Data already delivered to Meta is outside our database (see
@@ -528,10 +535,38 @@ leads to the contact it was merged into (`app.contact_merges`), and the audit lo
 `contact.merged` with the counts moved. A merge cannot be undone; a mistaken one is corrected by
 hand (a number moved back by a member, consent recorded again with evidence).
 
+**An integration still has a merged contact (ADR-225).** Endpoints that take `contact.merged` are
+sent one event per merge, with `mergedContactId` and the contact it belongs to now; the contact
+endpoints of the API answer the merged id with 404, reason `contact_merged`, and `mergedInto`;
+`GET /contact-changes` lists `mergedContactIds` on the kept contact. Events of the merged contact
+not yet delivered at the merge end as `event_gone` (Settings → Webhooks shows them as failed). A
+receiver that still holds the merged contact deletes its copy or moves what it keeps to the kept
+contact.
+
+**A member sees customers' numbers masked, or whole when they should not (ADR-226).** Settings →
+Security lists the roles whose members see numbers masked; owners and administrators always see them
+whole, and a member with another role that is not masked sees them whole too. A change applies to
+the next page the member opens. The audit log has `tenant.number_masking_updated` with the roles
+before and after. Masked members find contacts, conversations and orders by a whole number only.
+Numbers customers wrote in messages, and those the public API and webhooks carry, are not masked.
+
 **Migration 0148 or 0149 failed.** They build `app.campaign_recipients_contact_idx` and
 `app.automation_runs_contact_idx` concurrently. If one failed, an INVALID index can remain: run
 `DROP INDEX CONCURRENTLY app.campaign_recipients_contact_idx;` (or
 `app.automation_runs_contact_idx`) and run the migrations again.
+
+**Migration 0155 failed.** It builds `app.conversation_turns_open_started_idx` concurrently. If it
+failed, an INVALID index can remain: run
+`DROP INDEX CONCURRENTLY app.conversation_turns_open_started_idx;` and run the migrations again.
+
+**Members were not emailed about an overdue reply.** Emails go only to companies with a
+first-response target (Settings → Inbox), once per wait, after its due time (in business hours when
+they are on). `app.overdue_reply_notices` for the turn says what happened: no row (not due yet, or
+the worker's sweep has not run), `waiting` (due at `due_at`, business hours), `skipped` with
+`too_late` (due more than a day before the sweep saw it), `no_one` (no active member could answer
+it) or `opted_out` (every member responsible turned these emails off), or `sent` with the members
+emailed. The worker logs `overdue replies` with counts, and
+`overdue reply emails failed; will retry` with the company when a pass failed.
 
 **Migration 0010 failed.** It builds `app.conversations_team_idx` concurrently. If it failed, an
 INVALID index can remain: run `DROP INDEX CONCURRENTLY app.conversations_team_idx;` and run the

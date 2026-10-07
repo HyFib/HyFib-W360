@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { isAppError } from '@w360/core';
-import { can } from '@w360/domain';
+import { can, seesNumbers } from '@w360/domain';
 import {
   Alert,
   Badge,
@@ -130,10 +130,7 @@ export default async function ContactPage({
   const showCrm = can(ctx, 'crm.read');
   const [consentView, suppressed, channels, sendable, crmData, lookups] = await Promise.all([
     consent.consentForContact(ctx, contact.id),
-    consent.suppressionsFor(ctx, [
-      ...(contact.phoneE164 ? [contact.phoneE164] : []),
-      ...detail.identities.flatMap((i) => (i.waId ? [`+${i.waId}`] : [])),
-    ]),
+    consent.suppressionsForContact(ctx, contact.id),
     templates.sendChannels(ctx),
     sendableTemplates(ctx),
     showCrm ? crm.contactCrm(ctx, contact.id) : null,
@@ -190,7 +187,10 @@ export default async function ContactPage({
                   ),
                 }}
                 fields={detail.fields}
-                phoneEditable={detail.identities.length === 0}
+                // A number masked for this member stays as it is (ADR-226).
+                phoneEditable={
+                  detail.identities.length === 0 && (seesNumbers(ctx) || !contact.phoneE164)
+                }
                 canEdit={canWrite}
               />
             </CardContent>

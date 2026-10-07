@@ -54,6 +54,7 @@ const templateRef: TemplateReference = {
   unsupported: null,
   headerParams: 0,
   bodyParams: 2,
+  links: [],
   quickReplies: [{ index: 0, title: 'Confirm' }],
 };
 
@@ -105,6 +106,56 @@ describe('the API trigger (ADR-077)', () => {
     expect(triggerIssues({ type: 'any_message', hours: 'any', cooldownMinutes: 0 }, null)).toEqual(
       [],
     );
+  });
+});
+
+describe('keyword triggers with small typos (ADR-240)', () => {
+  const keyword = (keywords: string[], typos?: boolean) => {
+    const parsed = parseTrigger({
+      type: 'keyword',
+      keywords,
+      match: 'contains',
+      hours: 'open',
+      cooldownMinutes: 0,
+      ...(typos === undefined ? {} : { typos }),
+    });
+    if (!parsed.ok) throw new Error(parsed.message);
+    return parsed.trigger;
+  };
+
+  it('warn when no keyword word is long enough, or free of digits, to allow a typo', () => {
+    expect(triggerIssues(keyword(['menu', 'hi', 'top 10'], true), null)).toEqual([
+      {
+        level: 'warning',
+        nodeId: null,
+        message:
+          'Typos are allowed only in words of five letters or more without digits, so these keywords still match exactly.',
+      },
+    ]);
+    // Judged word by word: "top up" is long enough as a whole, but neither word allows a typo.
+    expect(triggerIssues(keyword(['top up'], true), null)).toHaveLength(1);
+    expect(triggerIssues(keyword(['menu', 'track order'], true), null)).toEqual([]);
+    expect(triggerIssues(keyword(['menu'], false), null)).toEqual([]);
+    expect(triggerIssues(keyword(['menu']), null)).toEqual([]);
+  });
+
+  it('say so in the trigger’s description', () => {
+    expect(describeTrigger(keyword(['refund', 'menu'], true))).toBe(
+      'A message contains “refund”, “menu”, allowing small typos, while the business is open',
+    );
+    expect(describeTrigger(keyword(['refund']))).toBe(
+      'A message contains “refund” while the business is open',
+    );
+    expect(
+      describeTrigger({
+        type: 'keyword',
+        keywords: ['refund'],
+        match: 'exact',
+        typos: true,
+        hours: 'any',
+        cooldownMinutes: 0,
+      }),
+    ).toBe('A message is exactly “refund”, allowing small typos');
   });
 });
 

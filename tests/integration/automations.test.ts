@@ -6,6 +6,7 @@ import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/co
 import { QUEUES } from '@w360/contracts';
 import { authorizedTenantScope, type Database } from '@w360/db';
 import {
+  localDateAfter,
   advanceAutomationRun,
   apiSendReaction,
   apiSendText,
@@ -17,22 +18,32 @@ import {
   createAutomationService,
   createBusinessHoursService,
   createContactsService,
+  createCrmService,
   createInboxService,
+  createPlanAdminService,
   createReportsService,
   createTeamsService,
+  dayOf,
   findDueAutomationRuns,
   MAX_STEP_FAILURES,
   PgBossJobQueue,
+  RUN_CSV_COLUMNS,
   processSendIntent,
   queueTextMessage,
   routeDueConversations,
   signalAutomationRun,
   type AutomationTrigger,
   type JobQueue,
+  type PlatformActor,
   type TenantContext,
 } from '@w360/domain';
-import { connectTestDatabases } from './helpers';
-import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
+import { connectTestDatabases, createUser } from './helpers';
+import {
+  nextExternalId,
+  startWhatsAppFixture,
+  type Company,
+  type WhatsAppFixture,
+} from './whatsapp-fixture';
 
 /**
  * Automations against real PostgreSQL, pg-boss and the test-only Graph stand-in: immutable
@@ -250,6 +261,45 @@ async function stepLog(runId: string) {
     `SELECT seq, outcome, node_id, branch, detail FROM app.automation_run_steps WHERE run_id = $1 ORDER BY seq`,
     [runId],
   );
+}
+
+let planCodes = 0;
+/** Moves the company to a published plan with `modules` (P5-01), as platform staff would. */
+async function onPlan(c: Company, modules: string[]) {
+  const staff = await createUser(fx.dbs, { twoFactor: true });
+  await fx.dbs.ownerPool.query(
+    `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_owner')`,
+    [staff.id],
+  );
+  const actor: PlatformActor = {
+    userId: staff.id,
+    role: 'platform_owner',
+    correlationId: uuidv7(),
+  };
+  const plans = createPlanAdminService({ platformDb: fx.dbs.platform, clock: systemClock });
+  planCodes += 1;
+  const { id: planId } = await plans.createPlan(actor, {
+    code: `au-${Date.now().toString(36)}-${planCodes}`,
+    name: 'Automations plan',
+    price: '999',
+    intervalMonths: '1',
+    trialDays: '0',
+    graceDays: '7',
+    seatsIncluded: '10',
+    numbersIncluded: '5',
+    modules,
+  });
+  await plans.publishPlan(actor, planId);
+  const view = await plans.tenantPlan(actor, c.tenant.id);
+  await plans.setTenantPlan(actor, {
+    tenantId: c.tenant.id,
+    version: view.state.version,
+    status: 'active',
+    planId,
+    periodStart: dayOf(new Date(), 'Asia/Kolkata'),
+    periodEnd: dayOf(new Date(Date.now() + 30 * 86_400_000), 'Asia/Kolkata'),
+    reason: 'Plan for the automation tests',
+  });
 }
 
 async function botMessages(conversationId: string) {
@@ -536,6 +586,44 @@ describe('automation versions', () => {
   });
 });
 
+describe('keyword triggers with small typos (ADR-240)', () => {
+  it('start on a typo only when the trigger allows them, and lose to a match without typos', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const refunds = await publish(
+      owner,
+      'Refunds',
+      {
+        type: 'keyword',
+        keywords: ['refund'],
+        match: 'contains',
+        typos: true,
+        hours: 'any',
+        cooldownMinutes: 0,
+      },
+      menuGraph(),
+    );
+    const deliveries = await publish(owner, 'Deliveries', keyword('delivery'), menuGraph());
+    const startedBy = (conversationId: string) =>
+      fx.query<{ automation_id: string; trigger_type: string }>(
+        `SELECT automation_id, trigger_type FROM app.automation_runs WHERE conversation_id = $1`,
+        [conversationId],
+      );
+
+    // A typo starts the automation that allows them, as a keyword start.
+    const typo = await inbound(c, waId(), 'I want a refnud');
+    expect(await startedBy(typo)).toEqual([{ automation_id: refunds.id, trigger_type: 'keyword' }]);
+    // Without the option, a typo starts nothing.
+    const strict = await inbound(c, waId(), 'where is my delivry');
+    expect(await startedBy(strict)).toEqual([]);
+    // A message that matches another automation without typos starts that one.
+    const both = await inbound(c, waId(), 'refnud for my delivery');
+    expect(await startedBy(both)).toEqual([
+      { automation_id: deliveries.id, trigger_type: 'keyword' },
+    ]);
+  });
+});
+
 describe('automation runs', () => {
   it('runs buttons, a validated answer and a contact update, and hands off to a team', async () => {
     const c = await fx.company();
@@ -648,6 +736,60 @@ describe('automation runs', () => {
       start_reason: 'handoff',
       end_reason: 'replied',
     });
+  });
+
+  it('exports the runs the list shows as CSV, without customer data, audited (ADR-237)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const { id: automationId } = await publish(owner, 'Menu, main', keyword('menu'), menuGraph());
+    const from = waId();
+    const conv = await inbound(c, from, 'Menu');
+    const run = await onlyRun(conv);
+    await advance(c, run.id);
+    const { status } = await onlyRun(conv);
+    expect(['running', 'waiting']).toContain(status);
+    const svc = automations();
+    const read = async (ctx: TenantContext, input: unknown = {}) => {
+      let out = '';
+      for await (const chunk of svc.exportRuns(ctx, input, { ipAddress: '203.0.113.9' })) {
+        out += chunk;
+      }
+      return out
+        .replace(/^\uFEFF/, '')
+        .trimEnd()
+        .split('\r\n');
+    };
+
+    const lines = await read(owner);
+    expect(lines[0]).toBe(RUN_CSV_COLUMNS.join(','));
+    expect(lines).toHaveLength(2);
+    expect(lines[1]?.startsWith(`${run.id},"Menu, main",1,live,${status},`)).toBe(true);
+    expect(lines[1]).toContain(',keyword,');
+    // Nothing about the customer: neither the number nor the conversation.
+    expect(lines[1]).not.toContain(from);
+    expect(lines[1]).not.toContain(conv);
+    // The list's filters apply; an unknown status is refused.
+    expect(await read(owner, { automationId, status: 'active' })).toHaveLength(2);
+    expect(await read(owner, { status: 'completed' })).toEqual([RUN_CSV_COLUMNS.join(',')]);
+    await expectAppError(read(owner, { status: 'paused' }), 'validation_failed');
+    // Agents do not read automations.
+    await expectAppError(read(agent), 'forbidden');
+    const audits = await fx.query<{
+      metadata: { automationId: string | null; status: string | null };
+    }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'automation.runs_exported' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(audits.map((a) => a.metadata)).toEqual([
+      { automationId: null, status: null },
+      { automationId, status: 'active' },
+      { automationId: null, status: 'completed' },
+    ]);
+    // Another company's export holds none of these runs.
+    const other = await fx.company();
+    expect(await read(await fx.ctx(other, other.owner))).toEqual([RUN_CSV_COLUMNS.join(',')]);
   });
 
   it('never lets the bot and a person answer at once', async () => {
@@ -1939,6 +2081,647 @@ describe('automations that tag the conversation (ADR-222)', () => {
     expect(await tagsOf(full)).toEqual([...twenty].sort());
     expect((await stepLog(run.id)).find((s) => s.node_id === 'tag')?.detail).toBe(
       'conversation_too_many_tags',
+    );
+  });
+});
+
+describe('automations that create CRM tasks (ADR-244)', () => {
+  /** A callback task for `assignee`, due in 4 hours, then a message to the customer. */
+  const callback = (assignee: string, task: Record<string, unknown> = {}) => ({
+    version: 1,
+    start: 'task',
+    nodes: [
+      {
+        id: 'task',
+        type: 'create_task',
+        title: 'Call {{name}} back',
+        assigneeMembershipId: assignee,
+        dueInHours: 4,
+        next: 'thanks',
+        ...task,
+      },
+      { id: 'thanks', type: 'send_text', text: 'Someone will call you soon.', next: null },
+    ],
+  });
+
+  const tasksOf = (tenantId: string) =>
+    fx.query<{
+      id: string;
+      title: string;
+      contact_id: string;
+      assignee_membership_id: string;
+      due_at: Date | null;
+      status: string;
+      created_by_membership_id: string | null;
+      created_by_automation_id: string | null;
+    }>(
+      `SELECT id, title, contact_id, assignee_membership_id, due_at, status,
+              created_by_membership_id, created_by_automation_id
+         FROM app.crm_tasks WHERE tenant_id = $1 ORDER BY created_at, id`,
+      [tenantId],
+    );
+
+  it('creates the task for the chosen member about the run’s contact, as the automation', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const { id: automationId } = await publish(
+      owner,
+      'Callbacks',
+      keyword('call me'),
+      callback(agent.membership.id),
+    );
+    const conversationId = await inbound(c, waId(), 'please call me');
+    const run = await onlyRun(conversationId);
+    const before = Date.now();
+    expect((await drive(c, conversationId, run.id)).outcome).toBe('ended');
+    const after = Date.now();
+
+    const [contact] = await fx.query<{ contact_id: string }>(
+      'SELECT contact_id FROM app.conversations WHERE id = $1',
+      [conversationId],
+    );
+    const tasks = await tasksOf(c.tenant.id);
+    expect(tasks).toHaveLength(1);
+    const task = tasks[0]!;
+    expect(task).toMatchObject({
+      title: 'Call Priya Customer back',
+      contact_id: contact!.contact_id,
+      assignee_membership_id: agent.membership.id,
+      status: 'open',
+      created_by_membership_id: null,
+      created_by_automation_id: automationId,
+    });
+    expect(task.due_at!.getTime()).toBeGreaterThanOrEqual(before + 4 * 3_600_000);
+    expect(task.due_at!.getTime()).toBeLessThanOrEqual(after + 4 * 3_600_000);
+    // On the contact's CRM timeline, created by no member, naming the automation and the run.
+    expect(
+      await fx.query(
+        `SELECT kind, actor_membership_id, data FROM app.crm_activities
+          WHERE tenant_id = $1 AND task_id = $2`,
+        [c.tenant.id, task.id],
+      ),
+    ).toEqual([
+      {
+        kind: 'task_created',
+        actor_membership_id: null,
+        data: { automationId, runId: run.id },
+      },
+    ]);
+    expect((await stepLog(run.id)).map((s) => [s.node_id, s.outcome, s.detail])).toEqual(
+      expect.arrayContaining([
+        ['task', 'created', null],
+        ['thanks', 'sent', null],
+      ]),
+    );
+  });
+
+  it('emails the member a reminder when the task is due, when the step asks (ADR-246)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    await publish(
+      owner,
+      'Callbacks',
+      keyword('call me'),
+      callback(agent.membership.id, { remind: true }),
+    );
+    const conversationId = await inbound(c, waId(), 'call me tomorrow');
+    const run = await onlyRun(conversationId);
+    expect((await drive(c, conversationId, run.id)).outcome).toBe('ended');
+    const [task] = await fx.query<{
+      id: string;
+      due_at: Date;
+      remind_at: Date | null;
+      reminder_state: string;
+    }>(`SELECT id, due_at, remind_at, reminder_state FROM app.crm_tasks WHERE tenant_id = $1`, [
+      c.tenant.id,
+    ]);
+    expect(task).toMatchObject({ reminder_state: 'pending', remind_at: task!.due_at });
+    // The reminder job waits for the due time, as for a member's task with a reminder.
+    const [job] = await fx.query<{ start_after: Date }>(
+      `SELECT start_after FROM pgboss.job WHERE name = $1 AND singleton_key = $2`,
+      [QUEUES.crmReminder.name, `${task!.id}:${task!.due_at.getTime()}`],
+    );
+    expect(job?.start_after).toEqual(task!.due_at);
+  });
+
+  it('creates no task for a member who can no longer use the CRM, says why and goes on', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    await publish(owner, 'Callbacks', keyword('call me'), callback(agent.membership.id));
+    await fx.query(`UPDATE app.memberships SET status = 'suspended' WHERE id = $1`, [
+      agent.membership.id,
+    ]);
+    const conversationId = await inbound(c, waId(), 'call me please');
+    const run = await onlyRun(conversationId);
+    expect((await drive(c, conversationId, run.id)).outcome).toBe('ended');
+    expect(await tasksOf(c.tenant.id)).toEqual([]);
+    const log = await stepLog(run.id);
+    expect(log.find((s) => s.node_id === 'task')).toMatchObject({
+      outcome: 'skipped',
+      detail: 'task_assignee_unavailable',
+    });
+    expect(log.find((s) => s.node_id === 'thanks')?.outcome).toBe('sent');
+  });
+
+  it('is published only for an active member who can use the CRM, by a member who may edit the CRM', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const marketer = await fx.ctx(c, c.marketer);
+    // A marketer cannot use the CRM: no task can be for them.
+    await expectAppError(
+      publish(owner, 'Callbacks', keyword('call me'), callback(marketer.membership.id)),
+      'precondition_failed',
+      /active member who can use the CRM/,
+    );
+    // A member whose roles do not let them edit the CRM cannot publish or test a task step.
+    const agent = await fx.ctx(c, c.agent);
+    const noCrm: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'crm.write')),
+    };
+    // (Each attempt creates its automation before publishing, so each has a name of its own.)
+    await expectAppError(
+      publish(noCrm, 'Agent callbacks', keyword('call me'), callback(agent.membership.id)),
+      'forbidden',
+      /permission to edit the CRM/,
+    );
+  });
+});
+
+describe('automations that create CRM deals (ADR-245)', () => {
+  const crm = () =>
+    createCrmService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
+
+  /** A company with a Sales pipeline (INR) and an automation that opens a deal in its first stage. */
+  async function setup(
+    options: {
+      owner?: (c: Company) => Promise<string | null>;
+      value?: string | null;
+      closeInDays?: number;
+    } = {},
+  ) {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { id: pipelineId } = await crm().createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New', 'Qualified'],
+    });
+    const [pipeline] = (await crm().listPipelines(owner)).filter((p) => p.id === pipelineId);
+    const stageId = pipeline!.stages[0]!.id;
+    const dealOwner = options.owner ? await options.owner(c) : null;
+    const { id: automationId } = await publish(owner, 'Leads', keyword('price'), {
+      version: 1,
+      start: 'deal',
+      nodes: [
+        {
+          id: 'deal',
+          type: 'create_deal',
+          title: 'Kettles for {{name}}',
+          pipelineId,
+          stageId,
+          value: options.value === undefined ? '2,500.50' : options.value,
+          ownerMembershipId: dealOwner,
+          ...(options.closeInDays === undefined ? {} : { closeInDays: options.closeInDays }),
+          next: 'thanks',
+        },
+        { id: 'thanks', type: 'send_text', text: 'We will send you a quote.', next: null },
+      ],
+    });
+    return { c, owner, pipelineId, stageId, automationId };
+  }
+
+  const dealsOf = (tenantId: string) =>
+    fx.query<{
+      id: string;
+      title: string;
+      pipeline_id: string;
+      stage_id: string;
+      contact_id: string;
+      conversation_id: string | null;
+      value_minor: string | null;
+      owner_membership_id: string | null;
+      status: string;
+      created_by_membership_id: string | null;
+      created_by_automation_id: string | null;
+    }>(
+      `SELECT id, title, pipeline_id, stage_id, contact_id, conversation_id, value_minor,
+              owner_membership_id, status, created_by_membership_id, created_by_automation_id
+         FROM app.crm_deals WHERE tenant_id = $1 ORDER BY created_at, id`,
+      [tenantId],
+    );
+
+  it('creates the deal for the run’s contact and conversation, as the automation, once while it is open', async () => {
+    const s = await setup({
+      owner: async (c) => (await fx.ctx(c, c.agent)).membership.id,
+      closeInDays: 30,
+    });
+    const agent = await fx.ctx(s.c, s.c.agent);
+    const from = waId();
+    const conversationId = await inbound(s.c, from, 'what is the price?');
+    const run = await onlyRun(conversationId);
+    const before = new Date();
+    expect((await drive(s.c, conversationId, run.id)).outcome).toBe('ended');
+    const after = new Date();
+    const [contact] = await fx.query<{ contact_id: string }>(
+      'SELECT contact_id FROM app.conversations WHERE id = $1',
+      [conversationId],
+    );
+    const deals = await dealsOf(s.c.tenant.id);
+    expect(deals).toEqual([
+      expect.objectContaining({
+        title: 'Kettles for Priya Customer',
+        pipeline_id: s.pipelineId,
+        stage_id: s.stageId,
+        contact_id: contact!.contact_id,
+        conversation_id: conversationId,
+        value_minor: '250050',
+        owner_membership_id: agent.membership.id,
+        status: 'open',
+        created_by_membership_id: null,
+        created_by_automation_id: s.automationId,
+      }),
+    ]);
+    // Expected to close 30 days after the step ran, on the company's calendar (ADR-247).
+    const [close] = await fx.query<{ close_on: string }>(
+      'SELECT expected_close_on::text AS close_on FROM app.crm_deals WHERE id = $1',
+      [deals[0]!.id],
+    );
+    expect([
+      localDateAfter(before, 'Asia/Kolkata', 30),
+      localDateAfter(after, 'Asia/Kolkata', 30),
+    ]).toContain(close!.close_on);
+    expect(
+      await fx.query(
+        `SELECT kind, actor_membership_id, data FROM app.crm_activities
+          WHERE tenant_id = $1 AND deal_id = $2`,
+        [s.c.tenant.id, deals[0]!.id],
+      ),
+    ).toEqual([
+      {
+        kind: 'deal_created',
+        actor_membership_id: null,
+        data: {
+          stageId: s.stageId,
+          valueMinor: 250050,
+          automationId: s.automationId,
+          runId: run.id,
+        },
+      },
+    ]);
+    // The deal page says an automation created it.
+    const detail = await crm().getDeal(s.owner, deals[0]!.id);
+    expect(detail).toMatchObject({ createdBy: null, createdByAutomation: true });
+
+    // The customer asks again: the open deal is not created twice, and the run goes on.
+    const again = await inbound(s.c, from, 'price again please');
+    const runs = await runsOf(again);
+    const second = runs.at(-1)!;
+    expect((await drive(s.c, again, second.id)).outcome).toBe('ended');
+    expect(await dealsOf(s.c.tenant.id)).toHaveLength(1);
+    const log = await stepLog(second.id);
+    expect(log.find((st) => st.node_id === 'deal')).toMatchObject({
+      outcome: 'skipped',
+      detail: 'deal_already_open',
+    });
+    expect(log.find((st) => st.node_id === 'thanks')?.outcome).toBe('sent');
+  });
+
+  it('leaves out an owner who can no longer use the CRM, and skips an archived stage', async () => {
+    const s = await setup({
+      owner: async (c) => (await fx.ctx(c, c.agent)).membership.id,
+      value: null,
+    });
+    const agent = await fx.ctx(s.c, s.c.agent);
+    await fx.query(`UPDATE app.memberships SET status = 'suspended' WHERE id = $1`, [
+      agent.membership.id,
+    ]);
+    const conversationId = await inbound(s.c, waId(), 'price?');
+    const run = await onlyRun(conversationId);
+    expect((await drive(s.c, conversationId, run.id)).outcome).toBe('ended');
+    expect(await dealsOf(s.c.tenant.id)).toEqual([
+      expect.objectContaining({ owner_membership_id: null, value_minor: null }),
+    ]);
+    expect((await stepLog(run.id)).find((st) => st.node_id === 'deal')).toMatchObject({
+      outcome: 'created',
+      detail: 'deal_owner_unavailable',
+    });
+
+    // The pipeline is archived: another customer's run creates nothing and goes on.
+    await fx.query(`UPDATE app.crm_pipelines SET archived_at = now() WHERE id = $1`, [
+      s.pipelineId,
+    ]);
+    const other = await inbound(s.c, waId(), 'price please');
+    const otherRun = await onlyRun(other);
+    expect((await drive(s.c, other, otherRun.id)).outcome).toBe('ended');
+    expect(await dealsOf(s.c.tenant.id)).toHaveLength(1);
+    expect((await stepLog(otherRun.id)).find((st) => st.node_id === 'deal')).toMatchObject({
+      outcome: 'skipped',
+      detail: 'deal_stage_unavailable',
+    });
+  });
+
+  it('is published only with an active stage, a value in the pipeline’s currency and an owner who can use the CRM', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const marketer = await fx.ctx(c, c.marketer);
+    const { id: pipelineId } = await crm().createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New'],
+    });
+    const [pipeline] = (await crm().listPipelines(owner)).filter((p) => p.id === pipelineId);
+    const stageId = pipeline!.stages[0]!.id;
+    const graph = (deal: Record<string, unknown>) => ({
+      version: 1,
+      start: 'deal',
+      nodes: [
+        {
+          id: 'deal',
+          type: 'create_deal',
+          title: 'Deal',
+          pipelineId,
+          stageId,
+          value: null,
+          ownerMembershipId: null,
+          next: null,
+          ...deal,
+        },
+      ],
+    });
+    await expectAppError(
+      publish(owner, 'Leads', keyword('price'), graph({ value: '12.345' })),
+      'precondition_failed',
+      /amount in INR/,
+    );
+    // (Each attempt creates its automation before publishing, so each has a name of its own.)
+    await expectAppError(
+      publish(
+        owner,
+        'Owned leads',
+        keyword('price'),
+        graph({ ownerMembershipId: marketer.membership.id }),
+      ),
+      'precondition_failed',
+      /own the deal/,
+    );
+    await fx.query(`UPDATE app.crm_stages SET archived_at = now() WHERE id = $1`, [stageId]);
+    await expectAppError(
+      publish(owner, 'Archived leads', keyword('price'), graph({})),
+      'precondition_failed',
+      /active stage of an active pipeline/,
+    );
+  });
+
+  it('creates no task or deal once the plan leaves out the CRM, says why and goes on (ADR-249)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const { id: pipelineId } = await crm().createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New'],
+    });
+    const [pipeline] = (await crm().listPipelines(owner)).filter((p) => p.id === pipelineId);
+    const graph = {
+      version: 1,
+      start: 'task',
+      nodes: [
+        {
+          id: 'task',
+          type: 'create_task',
+          title: 'Call {{name}}',
+          assigneeMembershipId: agent.membership.id,
+          dueInHours: null,
+          next: 'deal',
+        },
+        {
+          id: 'deal',
+          type: 'create_deal',
+          title: 'Kettles for {{name}}',
+          pipelineId,
+          stageId: pipeline!.stages[0]!.id,
+          value: null,
+          ownerMembershipId: null,
+          next: 'thanks',
+        },
+        { id: 'thanks', type: 'send_text', text: 'We will be in touch.', next: null },
+      ],
+    };
+    await publish(owner, 'Leads', keyword('price'), graph);
+    // Platform staff move the company to a plan without the CRM.
+    await onPlan(c, ['automations', 'flows']);
+
+    const conversationId = await inbound(c, waId(), 'price please');
+    const run = await onlyRun(conversationId);
+    expect((await drive(c, conversationId, run.id)).outcome).toBe('ended');
+    expect(
+      await fx.query('SELECT id FROM app.crm_tasks WHERE tenant_id = $1', [c.tenant.id]),
+    ).toEqual([]);
+    expect(await dealsOf(c.tenant.id)).toEqual([]);
+    const log = await stepLog(run.id);
+    for (const nodeId of ['task', 'deal']) {
+      expect(
+        log.find((st) => st.node_id === nodeId),
+        nodeId,
+      ).toMatchObject({
+        outcome: 'skipped',
+        detail: 'crm_not_in_plan',
+      });
+    }
+    expect(log.find((st) => st.node_id === 'thanks')?.outcome).toBe('sent');
+    // Nor can such steps be published, whatever the member's roles.
+    await expectAppError(
+      publish(await fx.ctx(c, c.owner), 'More leads', keyword('quote'), graph),
+      'forbidden',
+      /does not include CRM/,
+    );
+  });
+});
+
+describe('automations that send a form (ADR-248)', () => {
+  /** A form of the company's WhatsApp account, at Meta with `status`. */
+  async function form(c: Company, status = 'PUBLISHED') {
+    const id = uuidv7();
+    const metaFlowId = nextExternalId();
+    const publicId = Array.from(
+      { length: 16 },
+      () => 'abcdefghijklmnopqrstuvwxyz234567'[randomInt(32)],
+    ).join('');
+    await fx.query(
+      `INSERT INTO app.flows (id, tenant_id, whatsapp_account_id, public_id, name, categories,
+         flow_json, json_version, first_screen, meta_flow_id, meta_status, created_by_membership_id)
+       VALUES ($1, $2, $3, $4, 'Booking', ARRAY['APPOINTMENT_BOOKING'], '{}', '7.2', 'START', $5, $6, $7)`,
+      [
+        id,
+        c.tenant.id,
+        c.whatsappAccountId,
+        publicId,
+        metaFlowId,
+        status,
+        c.tenant.ownerMembershipId,
+      ],
+    );
+    return { id, metaFlowId };
+  }
+
+  const booking = (flowId: string) => ({
+    version: 1,
+    start: 'form',
+    nodes: [
+      {
+        id: 'form',
+        type: 'send_flow',
+        flowId,
+        header: null,
+        body: 'Hi {{name}}, pick a time.',
+        footer: null,
+        cta: 'Book now',
+        next: null,
+      },
+    ],
+  });
+
+  it('sends the form with a new token for the conversation, as the automation', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const flow = await form(c);
+    await publish(owner, 'Bookings', keyword('book'), booking(flow.id));
+    const conversationId = await inbound(c, waId(), 'book a visit');
+    const run = await onlyRun(conversationId);
+    const before = Date.now();
+    expect((await drive(c, conversationId, run.id)).outcome).toBe('ended');
+    const [sent] = await fx.query<{
+      id: string;
+      type: string;
+      content: { flow: Record<string, unknown>; automationRunId: string };
+      sender_type: string;
+    }>(
+      `SELECT id, type, content, sender_type FROM app.messages
+        WHERE conversation_id = $1 AND direction = 'outbound'`,
+      [conversationId],
+    );
+    expect(sent).toMatchObject({
+      type: 'interactive',
+      sender_type: 'bot',
+      content: {
+        flow: {
+          id: flow.id,
+          name: 'Booking',
+          mode: 'published',
+          body: 'Hi Priya Customer, pick a time.',
+          cta: 'Book now',
+        },
+        automationRunId: run.id,
+      },
+    });
+    const [record] = await fx.query<{
+      flow_id: string;
+      contact_id: string;
+      token: string;
+      mode: string;
+      sent_by_membership_id: string | null;
+      expires_at: Date;
+    }>(
+      `SELECT flow_id, contact_id, token, mode, sent_by_membership_id, expires_at
+         FROM app.flow_sends WHERE message_id = $1`,
+      [sent!.id],
+    );
+    expect(record).toMatchObject({
+      flow_id: flow.id,
+      mode: 'published',
+      sent_by_membership_id: null,
+    });
+    expect(record!.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(record!.expires_at.getTime()).toBeGreaterThanOrEqual(before + 30 * 86_400_000);
+    // Sent to WhatsApp as Meta's form message, with the token and the published mode.
+    const [intent] = await fx.query<{ request: Record<string, unknown> }>(
+      'SELECT request FROM app.send_intents WHERE message_id = $1',
+      [sent!.id],
+    );
+    expect(intent!.request).toMatchObject({
+      interactive: {
+        type: 'flow',
+        body: { text: 'Hi Priya Customer, pick a time.' },
+        action: {
+          name: 'flow',
+          parameters: {
+            flow_id: flow.metaFlowId,
+            flow_cta: 'Book now',
+            flow_token: record!.token,
+            mode: 'published',
+          },
+        },
+      },
+    });
+    expect((await stepLog(run.id)).map((st) => [st.node_id, st.outcome])).toEqual(
+      expect.arrayContaining([['form', 'sent']]),
+    );
+  });
+
+  it('does not send a form that is no longer published: the run passes the conversation to people', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const flow = await form(c);
+    await publish(owner, 'Bookings', keyword('book'), booking(flow.id));
+    await fx.query(`UPDATE app.flows SET meta_status = 'DEPRECATED' WHERE id = $1`, [flow.id]);
+    const conversationId = await inbound(c, waId(), 'book please');
+    const run = await onlyRun(conversationId);
+    expect((await drive(c, conversationId, run.id)).outcome).toBe('ended');
+    expect(await onlyRun(conversationId)).toMatchObject({
+      status: 'failed',
+      end_reason: 'send_blocked',
+    });
+    expect((await stepLog(run.id)).find((st) => st.node_id === 'form')).toMatchObject({
+      outcome: 'failed',
+      detail: 'flow_unavailable',
+    });
+    expect(
+      await fx.query('SELECT id FROM app.flow_sends WHERE conversation_id = $1', [conversationId]),
+    ).toEqual([]);
+  });
+
+  it('is published only with a published form', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const draft = await form(c, 'DRAFT');
+    await expectAppError(
+      publish(owner, 'Bookings', keyword('book'), booking(draft.id)),
+      'precondition_failed',
+      /Publish the form/,
+    );
+  });
+
+  it('sends no form, and publishes no form step, when the plan leaves out WhatsApp Flows', async () => {
+    const c = await fx.company();
+    const flow = await form(c);
+    await publish(await fx.ctx(c, c.owner), 'Bookings', keyword('book'), booking(flow.id));
+    // Platform staff move the company to a plan with automations but without forms.
+    await onPlan(c, ['automations']);
+
+    // The automation still runs, but its form is not sent: the run passes the conversation on.
+    const conversationId = await inbound(c, waId(), 'book a table');
+    const run = await onlyRun(conversationId);
+    expect((await drive(c, conversationId, run.id)).outcome).toBe('ended');
+    expect(await onlyRun(conversationId)).toMatchObject({
+      status: 'failed',
+      end_reason: 'send_blocked',
+    });
+    expect((await stepLog(run.id)).find((st) => st.node_id === 'form')).toMatchObject({
+      outcome: 'failed',
+      detail: 'flows_not_in_plan',
+    });
+    expect(
+      await fx.query('SELECT id FROM app.flow_sends WHERE conversation_id = $1', [conversationId]),
+    ).toEqual([]);
+    // Nor can a form step be published, as a form cannot be sent in the inbox.
+    await expectAppError(
+      publish(await fx.ctx(c, c.owner), 'More bookings', keyword('visit'), booking(flow.id)),
+      'forbidden',
+      /does not include WhatsApp Flows/,
     );
   });
 });

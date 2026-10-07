@@ -13,6 +13,7 @@ import {
   channelAccounts,
   commerceOrderItems,
   commerceOrders,
+  contactMerges,
   contacts,
   CONVERSATION_STATUSES,
   conversations,
@@ -367,6 +368,19 @@ export const contactUpdatedPayloadSchema = envelope(
 export const contactErasedPayloadSchema = envelope(
   'contact.erased',
   z.object({ contact: webhookContactSchema }),
+);
+export const contactMergedPayloadSchema = envelope(
+  'contact.merged',
+  z.object({
+    contact: webhookContactSchema.describe(
+      'The contact the other was merged into, as it is when the event is delivered; if it was merged into another contact since, that contact.',
+    ),
+    mergedContactId: z
+      .uuid()
+      .describe(
+        'The contact merged and deleted: its conversations, consent, tags and other records are the contact’s now, and its id is no longer found. Delete your copy, or move what you keep of it to the contact.',
+      ),
+  }),
 );
 
 const webhookRunSchema = z.object({
@@ -815,6 +829,21 @@ async function webhookContactOf(tx: Tx, tenantId: string, contactId: string | nu
   };
 }
 
+/**
+ * The contact a merged contact belongs to now (ADR-225): app.contact_merges names it, and a later
+ * merge of that contact points its row at the contact kept then.
+ */
+async function keptContactOf(tx: Tx, tenantId: string, mergedContactId: string | null) {
+  if (!mergedContactId || !z.uuid().safeParse(mergedContactId).success) return null;
+  const [row] = await tx
+    .select({ id: contactMerges.keptContactId })
+    .from(contactMerges)
+    .where(
+      and(eq(contactMerges.tenantId, tenantId), eq(contactMerges.mergedContactId, mergedContactId)),
+    );
+  return row?.id ?? null;
+}
+
 /** A live run with its automation's name and its number, in the company. */
 async function runOf(tx: Tx, tenantId: string, runId: string | null) {
   if (!runId || !z.uuid().safeParse(runId).success) return null;
@@ -1063,6 +1092,14 @@ export async function buildWebhookPayload(
           }
         : { ...base, data: { contact } };
     }
+    case 'contact.merged': {
+      // The merged contact as captured; the contact it belongs to as it is now.
+      const mergedContactId = str(event.detail.mergedContactId);
+      const keptId = await keptContactOf(tx, tenantId, mergedContactId);
+      const contact = await webhookContactOf(tx, tenantId, keptId);
+      if (!contact || !mergedContactId) throw new WebhookEventGoneError();
+      return { ...base, data: { contact, mergedContactId } };
+    }
     case 'automation.run_started':
     case 'automation.run_ended': {
       // The status, end reason and end as captured; the rest as it is now.
@@ -1212,6 +1249,10 @@ export async function buildWebhookPayload(
       };
     }
   }
+  // A type this build does not describe, such as one a newer release added, read by a worker
+  // rolled back: the delivery fails without an attempt (and is replayed once fixed) rather than
+  // sending a body without data.
+  throw new Error(`No webhook payload is built for events of type ${String(event.type)}`);
 }
 
 /**

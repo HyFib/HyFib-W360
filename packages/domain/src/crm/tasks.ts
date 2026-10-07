@@ -17,6 +17,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, type TenantContext } from '../authz/context';
+import type { NumberViewer } from '../contacts/number-masking';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { parseInput } from '../validation';
@@ -111,6 +112,7 @@ export async function taskItems(
   tx: Tx,
   tenantId: string,
   rows: (typeof crmTasks.$inferSelect)[],
+  viewer: NumberViewer,
 ): Promise<TaskItem[]> {
   const members = await memberRefs(
     tx,
@@ -121,6 +123,7 @@ export async function taskItems(
     tx,
     tenantId,
     rows.map((r) => r.contactId),
+    viewer,
   );
   const dealIds = [...new Set(rows.map((r) => r.dealId).filter((id): id is string => id !== null))];
   const deals =
@@ -153,6 +156,7 @@ export async function tasksWhere(
   tx: Tx,
   tenantId: string,
   filter: { contactId?: string; dealId?: string; status: 'open' | 'done' },
+  viewer: NumberViewer,
 ): Promise<TaskItem[]> {
   const rows = await tx
     .select()
@@ -173,7 +177,7 @@ export async function tasksWhere(
         : [desc(crmTasks.completedAt)]),
     )
     .limit(100);
-  return taskItems(tx, tenantId, rows);
+  return taskItems(tx, tenantId, rows, viewer);
 }
 
 async function lockTask(tx: Tx, tenantId: string, id: string, expectedVersion: number) {
@@ -281,7 +285,7 @@ export function taskOperations(deps: {
                 : [desc(crmTasks.completedAt)]),
             )
             .limit(200);
-          return taskItems(tx, ctx.tenant.id, rows);
+          return taskItems(tx, ctx.tenant.id, rows, ctx);
         },
         { accessMode: 'read only' },
       );

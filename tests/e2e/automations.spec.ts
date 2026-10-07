@@ -204,3 +204,103 @@ test('an automation tags the conversation it answers, and the inbox shows the ta
   await page.goto(`/c/${slug}/inbox?view=all&status=open&tag=refund`);
   await expect(item).toHaveCount(1);
 });
+
+test('an automation creates a CRM task and a deal about the customer (ADR-244, ADR-245)', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const email = uniqueEmail('bottask');
+  const slug = `bottask-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Tomas Tasks', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Task Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  // A Sales pipeline (INR) for the deal.
+  await page.goto(`/c/${slug}/settings/pipelines`);
+  await page.getByLabel('Name', { exact: true }).fill('Sales');
+  await page.getByRole('button', { name: 'Create pipeline' }).click();
+  await expect(page.getByText('Pipeline created.')).toBeVisible();
+
+  // The pipelines page has Name fields of its own: the link navigates on the client.
+  await page.getByRole('link', { name: 'Automations' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Automations' })).toBeVisible();
+  await page.getByLabel('Name', { exact: true }).fill('Callbacks');
+  await page.getByRole('button', { name: 'Create draft' }).click();
+  await expect(page.getByRole('heading', { name: 'Callbacks' })).toBeVisible();
+
+  // A greeting, then a step that creates a callback task for the owner, due in 4 hours.
+  await page.getByLabel('Start when').selectOption('keyword');
+  await page.getByLabel('Keywords').fill('call me');
+  await page.locator('#step-welcome-text').fill('We will call you back.');
+  await page.getByLabel('Add a step').selectOption('create_task');
+  await page.getByRole('button', { name: 'Add step' }).click();
+  await page.locator('#step-create-task-1-task').fill('Call {{name}} back');
+  await page.locator('#step-create-task-1-assignee').selectOption({ label: 'Tomas Tasks' });
+  await page.locator('#step-create-task-1-due').fill('4');
+  await page.locator('#step-create-task-1-remind').check();
+  await page.locator('#step-welcome-next').selectOption('create-task-1');
+  // Then a deal in the pipeline's first stage, worth ₹2,500.50, owned by the owner.
+  await page.getByLabel('Add a step').selectOption('create_deal');
+  await page.getByRole('button', { name: 'Add step' }).click();
+  await page.locator('#step-create-deal-1-deal').fill('Kettles for {{name}}');
+  await expect(page.locator('#step-create-deal-1-stage')).toHaveValue(/.+/);
+  await page.locator('#step-create-deal-1-value').fill('2,500.50');
+  await page.locator('#step-create-deal-1-owner').selectOption({ label: 'Tomas Tasks' });
+  await page.locator('#step-create-deal-1-close').fill('30');
+  await page.locator('#step-create-task-1-next').selectOption('create-deal-1');
+  await expect(page.getByText(/to fix before publishing/)).toBeHidden();
+
+  // The simulator says what the steps would do, and creates nothing.
+  await page.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(
+    page.getByText(
+      'CRM task “Call Asha back” created for Tomas Tasks, due in 4 hours, with a reminder email when due.',
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      'CRM deal “Kettles for Asha” created in Sales (New), worth ₹2,500.50, owned by Tomas Tasks, expected to close in 30 days, unless the contact already has an open deal there.',
+    ),
+  ).toBeVisible();
+
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByText('Draft saved.')).toBeVisible();
+  await page.getByRole('button', { name: 'Publish' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Publish' }).click();
+  await expect(page.getByText('Published.')).toBeVisible();
+
+  // A customer asks for a call: the run answers, then the owner has a task about the customer.
+  await sendSignedWebhook(
+    request,
+    inboundMessage(wabaId, phoneNumberId, randomWaId(), 'please call me'),
+  );
+  const task = page.getByRole('listitem').filter({ hasText: 'Call Priya Customer back' });
+  await expect(async () => {
+    await page.goto(`/c/${slug}/crm/tasks`);
+    await expect(task).toBeVisible({ timeout: 2_000 });
+  }).toPass({ timeout: 60_000 });
+  await expect(task.getByRole('link', { name: /Priya Customer/ })).toBeVisible();
+  // Its reminder is set for the due time (ADR-246).
+  await expect(task).toContainText('Reminder set');
+  await expectNoHorizontalOverflow(page);
+
+  // The deal is on the board (the run's next step), and its page says an automation created it.
+  const deal = page.getByRole('link', { name: 'Kettles for Priya Customer' });
+  await expect(async () => {
+    await page.goto(`/c/${slug}/crm`);
+    await expect(deal).toBeVisible({ timeout: 2_000 });
+  }).toPass({ timeout: 60_000 });
+  await deal.click();
+  await expect(
+    page.getByRole('heading', { name: 'Kettles for Priya Customer', level: 1 }),
+  ).toBeVisible();
+  await expect(page.getByText('Sales · ₹2,500.50')).toBeVisible();
+  await expect(
+    page.getByText(/by an automation · owner Tomas Tasks · expected to close \d{4}-\d{2}-\d{2}/),
+  ).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+});

@@ -22,6 +22,8 @@ export const EXPORT_EXCLUDED_TABLES: Readonly<Record<string, string>> = {
   'app.commerce_store_fetches': 'Bookkeeping of reads from stores.',
   'app.contact_changes':
     'Positions of the API’s contact change feed (ADR-114): which contact changed in which transaction; the contacts themselves are exported.',
+  'app.conversation_viewers':
+    'Which members had a conversation open in the last hour (ADR-243), deleted an hour after.',
   'app.flow_key_uploads': 'Bookkeeping of Flow key uploads to Meta.',
   'app.flow_keys':
     'Flow encryption keys: the private key is never exported and the public key is at Meta.',
@@ -960,6 +962,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'closed_by_membership_id',
       'version',
       'created_by_membership_id',
+      'created_by_automation_id',
       'created_at',
       'updated_at',
     ],
@@ -980,7 +983,16 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
   },
   {
     table: 'app.crm_stages',
-    columns: ['id', 'pipeline_id', 'name', 'position', 'archived_at', 'created_at', 'updated_at'],
+    columns: [
+      'id',
+      'pipeline_id',
+      'name',
+      'position',
+      'archived_at',
+      'win_percent',
+      'created_at',
+      'updated_at',
+    ],
   },
   {
     table: 'app.crm_tasks',
@@ -1001,6 +1013,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'completed_by_membership_id',
       'version',
       'created_by_membership_id',
+      'created_by_automation_id',
       'created_at',
       'updated_at',
     ],
@@ -1283,6 +1296,19 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
   {
     table: 'app.note_mentions',
     columns: ['id', 'note_id', 'membership_id', 'read_at', 'created_at'],
+  },
+  {
+    table: 'app.overdue_reply_notices',
+    columns: [
+      'id',
+      'turn_id',
+      'state',
+      'due_at',
+      'emailed',
+      'skip_reason',
+      'created_at',
+      'updated_at',
+    ],
   },
   {
     table: 'app.payment_mandates',

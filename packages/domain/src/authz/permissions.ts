@@ -30,6 +30,11 @@ export const PERMISSIONS = [
   'contacts.import',
   'contacts.export',
   'contacts.delete',
+  /**
+   * See customers' phone numbers whole (ADR-226); without it a member sees them masked. A company
+   * can take it from the roles it chooses.
+   */
+  'contacts.view_numbers',
   'templates.read',
   'templates.write',
   'templates.submit',
@@ -84,6 +89,7 @@ export const ROLE_PERMISSIONS: Record<TenantRole, ReadonlySet<Permission>> = {
     'contacts.read',
     'contacts.write',
     'contacts.import',
+    'contacts.view_numbers',
     'templates.read',
     'campaigns.read',
     'automations.read',
@@ -104,6 +110,7 @@ export const ROLE_PERMISSIONS: Record<TenantRole, ReadonlySet<Permission>> = {
     'inbox.reply',
     'contacts.read',
     'contacts.write',
+    'contacts.view_numbers',
     'templates.read',
     'crm.read',
     'crm.write',
@@ -118,6 +125,7 @@ export const ROLE_PERMISSIONS: Record<TenantRole, ReadonlySet<Permission>> = {
     'contacts.write',
     'contacts.import',
     'contacts.export',
+    'contacts.view_numbers',
     'templates.read',
     'templates.write',
     'templates.submit',
@@ -137,6 +145,7 @@ export const ROLE_PERMISSIONS: Record<TenantRole, ReadonlySet<Permission>> = {
     'tenant.read',
     'members.read',
     'channels.read',
+    'contacts.view_numbers',
     'templates.read',
     'campaigns.read',
     'automations.read',
@@ -175,6 +184,7 @@ export const ALLOWED_WHEN_SUSPENDED: ReadonlySet<Permission> = new Set<Permissio
   'contacts.read',
   'contacts.export',
   'contacts.delete',
+  'contacts.view_numbers',
   'templates.read',
   'campaigns.read',
   'automations.read',

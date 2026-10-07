@@ -21,6 +21,9 @@ export function TemplatePreview({
           {rendered.buttons.map((b, i) => (
             <li key={i} className="text-center text-xs font-medium text-primary">
               {b.text}
+              {b.url ? (
+                <span className="block break-all font-normal text-muted-foreground">{b.url}</span>
+              ) : null}
             </li>
           ))}
         </ul>

@@ -40,6 +40,20 @@ export async function updateCompanySecurityAction(
   });
 }
 
+/** Sets the roles whose members see customers' numbers masked (ADR-226). */
+export async function updateNumberMaskingAction(
+  slug: string,
+  input: unknown,
+): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { tenancy } = await getRuntime();
+    await tenancy.updateNumberMasking(ctx, input, await requestMeta());
+    refresh();
+    return null;
+  });
+}
+
 /** Sets which notice emails the member gets from this company (ADR-215). */
 export async function updateEmailPreferencesAction(
   slug: string,

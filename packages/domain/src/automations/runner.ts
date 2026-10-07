@@ -11,6 +11,12 @@ import {
   contactTags,
   contacts,
   conversations,
+  crmDeals,
+  crmPipelines,
+  crmStages,
+  crmTasks,
+  flowSends,
+  flows,
   conversationTags,
   eq,
   gte,
@@ -30,14 +36,31 @@ import { permissionsForRoles } from '../authz/permissions';
 import { lockCampaignSends, marketingCapReached } from '../campaigns/frequency-cap';
 import { checkTemplateEligibility } from '../consent/service';
 import { MAX_TAGS_PER_CONTACT, coerceFieldValue } from '../contacts/fields';
+import { addActivity, memberRefs } from '../crm/common';
+import { localDateAfter } from '../crm/time';
+import { scheduleTaskReminder } from '../crm/reminders';
+import { FLOW_TOKEN_DAYS, buildFlowMessageRequest, newFlowToken } from '../flows/model';
+import { SENDABLE_STATUSES } from '../flows/service';
+import { loadEntitlements } from '../plans/entitlements';
 import { phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { businessStatusAt, loadBusinessCalendar } from '../inbox/business-hours';
 import { MAX_TAGS_PER_CONVERSATION } from '../inbox/conversation-tags';
 import { emitTenantEvent } from '../messaging/events';
 import { STATUS_RANK } from '../messaging/status';
 import { orderPlaceholderValues } from '../stores/order-values';
-import { buildTemplateSend, sendSpecFor } from '../templates/definition';
-import { RUN_BUDGETS, graphSchema, type AutomationGraph, type AutomationNode } from './graph';
+import {
+  TEMPLATE_LIMITS,
+  buildTemplateSend,
+  linkValuesProblem,
+  sendSpecFor,
+} from '../templates/definition';
+import {
+  RUN_BUDGETS,
+  dealValueMinor,
+  graphSchema,
+  type AutomationGraph,
+  type AutomationNode,
+} from './graph';
 import {
   FINISHED_HTTP_STATES,
   httpCallDetail,
@@ -235,7 +258,7 @@ async function loadFacts(
   };
 }
 
-type SendEffect = Extract<RunEffect, { kind: 'send_text' | 'send_buttons' }>;
+type SendEffect = Extract<RunEffect, { kind: 'send_text' | 'send_buttons' | 'send_flow' }>;
 
 /**
  * Queues a bot message through the send pipeline, after the checks a member's reply gets: the
@@ -289,6 +312,16 @@ export async function queueBotMessage(
     )
     .limit(1);
   if (!identity?.waId) return { ok: false, code: 'no_phone' };
+  if (effect.kind === 'send_flow') {
+    return queueBotFlow(tx, deps, {
+      run,
+      conversation,
+      effect,
+      now,
+      waId: identity.waId,
+      whatsappAccountId: channel.whatsappAccountId,
+    });
+  }
 
   const base = { messaging_product: 'whatsapp', recipient_type: 'individual', to: identity.waId };
   const request =
@@ -367,6 +400,122 @@ export async function queueBotMessage(
   return { ok: true, messageId };
 }
 
+/**
+ * Queues a form step's form (ADR-248) once the channel, window and number checks passed: as in the
+ * inbox, the company's plan must include WhatsApp Flows (otherwise `flows_not_in_plan`), and the form
+ * must still be published at Meta, of the number's WhatsApp account and not archived (otherwise
+ * `flow_unavailable`). It is sent like a member's form, with a new flow token recorded for the
+ * conversation and contact, so the customer's answers are applied as the form maps them.
+ */
+async function queueBotFlow(
+  tx: Tx,
+  deps: RunSignalDeps,
+  input: {
+    run: AutomationRun;
+    conversation: { id: string; channelAccountId: string; contactId: string };
+    effect: Extract<RunEffect, { kind: 'send_flow' }>;
+    now: Date;
+    waId: string;
+    whatsappAccountId: string;
+  },
+): Promise<{ ok: true; messageId: string } | { ok: false; code: string }> {
+  const { run, conversation, effect, now } = input;
+  if (!(await loadEntitlements(tx, run.tenantId)).modules.has('flows')) {
+    return { ok: false, code: 'flows_not_in_plan' };
+  }
+  const [flow] = await tx
+    .select({
+      id: flows.id,
+      name: flows.name,
+      whatsappAccountId: flows.whatsappAccountId,
+      metaFlowId: flows.metaFlowId,
+      metaStatus: flows.metaStatus,
+      archivedAt: flows.archivedAt,
+    })
+    .from(flows)
+    .where(and(eq(flows.tenantId, run.tenantId), eq(flows.id, effect.flowId)));
+  if (
+    !flow ||
+    flow.archivedAt ||
+    !flow.metaFlowId ||
+    flow.whatsappAccountId !== input.whatsappAccountId ||
+    !flow.metaStatus ||
+    !SENDABLE_STATUSES.includes(flow.metaStatus)
+  ) {
+    return { ok: false, code: 'flow_unavailable' };
+  }
+  const message = {
+    header: effect.header,
+    body: effect.body,
+    footer: effect.footer,
+    cta: effect.cta,
+  };
+  const token = newFlowToken();
+  const messageId = uuidv7();
+  const intentId = uuidv7();
+  await tx.insert(messages).values({
+    id: messageId,
+    tenantId: run.tenantId,
+    conversationId: conversation.id,
+    channelAccountId: conversation.channelAccountId,
+    direction: 'outbound',
+    type: 'interactive',
+    content: {
+      flow: { id: flow.id, name: flow.name, mode: 'published', ...message },
+      automationRunId: run.id,
+    },
+    status: 'queued',
+    statusRank: STATUS_RANK.queued,
+    senderType: 'bot',
+    senderMembershipId: null,
+  });
+  await tx.insert(sendIntents).values({
+    id: intentId,
+    tenantId: run.tenantId,
+    messageId,
+    channelAccountId: conversation.channelAccountId,
+    request: buildFlowMessageRequest(input.waId, message, {
+      metaFlowId: flow.metaFlowId,
+      token,
+      mode: 'published',
+    }),
+    actorUserId: run.startedByUserId,
+  });
+  await tx.insert(flowSends).values({
+    id: uuidv7(),
+    tenantId: run.tenantId,
+    flowId: flow.id,
+    conversationId: conversation.id,
+    contactId: conversation.contactId,
+    messageId,
+    token,
+    mode: 'published',
+    sentByMembershipId: null,
+    expiresAt: new Date(now.getTime() + FLOW_TOKEN_DAYS * 86_400_000),
+  });
+  await tx
+    .update(conversations)
+    .set({ lastMessageAt: now, lastMessagePreview: clipText(`[Form] ${flow.name}`, 200) })
+    .where(and(eq(conversations.tenantId, run.tenantId), eq(conversations.id, conversation.id)));
+  await emitTenantEvent(tx, run.tenantId, {
+    type: 'message.created',
+    conversationId: conversation.id,
+    payload: { messageId },
+  });
+  await deps.jobs.enqueue(
+    tx,
+    QUEUES.messageSend.name,
+    deps.signer.sign({
+      kind: 'message.send',
+      tenantId: run.tenantId,
+      actorUserId: run.startedByUserId,
+      ref: intentId,
+    }),
+    { singletonKey: intentId, group: { id: conversation.channelAccountId } },
+  );
+  return { ok: true, messageId };
+}
+
 type TemplateEffect = Extract<RunEffect, { kind: 'send_template' }>;
 
 /**
@@ -402,8 +551,19 @@ export async function queueBotTemplate(
   }
   const spec = sendSpecFor(template.category, template.components);
   if (!spec.supported) return { ok: false, code: 'template_unavailable' };
-  if (effect.header.length !== spec.headerParams || effect.body.length !== spec.bodyParams) {
+  if (
+    effect.header.length !== spec.headerParams ||
+    effect.body.length !== spec.bodyParams ||
+    effect.links.length !== spec.buttonParams
+  ) {
     return { ok: false, code: 'template_changed' };
+  }
+  // A rendered end of a link that the link cannot take (spaces, too long, another website).
+  if (
+    effect.links.some((v) => v.length > TEMPLATE_LIMITS.parameterValue) ||
+    linkValuesProblem(spec.definition, effect.links)
+  ) {
+    return { ok: false, code: 'invalid_link' };
   }
   if (effect.ask) {
     // The quick-reply buttons the step branches on, exactly as the template has them now.
@@ -474,7 +634,7 @@ export async function queueBotTemplate(
   const built = buildTemplateSend(
     template,
     spec,
-    { header: effect.header, body: effect.body },
+    { header: effect.header, body: effect.body, buttons: effect.links },
     { quickReplyPayloads: new Map(effect.buttons.map((b) => [b.index, b.payload])) },
   );
   const messageId = uuidv7();
@@ -666,6 +826,168 @@ async function applyConversationEffect(
     });
   }
   return null;
+}
+
+/**
+ * Creates the CRM task a step asks for (ADR-244) about the run's contact, as the automation, and
+ * puts it on the contact's CRM timeline; returns a note for the step log when it was skipped. A
+ * member who left or can no longer use the CRM gets no task, nor does an erased contact, and a title
+ * whose placeholders filled in nothing creates none. The contact is held for key share, as for the
+ * contact's tags, so an erasure waits for the task (and deletes it) or comes first.
+ */
+async function applyTaskEffect(
+  tx: Tx,
+  deps: AutomationRunnerDeps,
+  run: AutomationRun,
+  effect: Extract<RunEffect, { kind: 'create_task' }>,
+  now: Date,
+): Promise<string | null> {
+  // A plan without the CRM takes away writing it (ADR-051), from automations too (ADR-249).
+  if (!(await loadEntitlements(tx, run.tenantId)).modules.has('crm')) return 'crm_not_in_plan';
+  if (!effect.title) return 'task_title_empty';
+  const [contact] = await tx
+    .select({ erasedAt: contacts.erasedAt })
+    .from(contacts)
+    .where(and(eq(contacts.tenantId, run.tenantId), eq(contacts.id, run.contactId)))
+    .for('key share');
+  if (!contact || contact.erasedAt) return 'contact_erased';
+  const assignee = (await memberRefs(tx, run.tenantId, [effect.assigneeMembershipId])).get(
+    effect.assigneeMembershipId,
+  );
+  if (!assignee?.active) return 'task_assignee_unavailable';
+  const id = uuidv7();
+  const dueAt =
+    effect.dueInHours === null ? null : new Date(now.getTime() + effect.dueInHours * 3_600_000);
+  // A reminder is emailed when the task is due (ADR-246), as for a member's task with a reminder.
+  const remindAt = effect.remind ? dueAt : null;
+  await tx.insert(crmTasks).values({
+    id,
+    tenantId: run.tenantId,
+    title: effect.title,
+    contactId: run.contactId,
+    assigneeMembershipId: effect.assigneeMembershipId,
+    dueAt,
+    remindAt,
+    reminderState: remindAt ? 'pending' : 'none',
+    createdByAutomationId: run.automationId,
+  });
+  if (remindAt) {
+    await scheduleTaskReminder(deps, tx, { tenantId: run.tenantId, taskId: id, remindAt });
+  }
+  await addActivity(tx, {
+    tenantId: run.tenantId,
+    contactId: run.contactId,
+    taskId: id,
+    actorMembershipId: null,
+    kind: 'task_created',
+    data: { automationId: run.automationId, runId: run.id },
+    at: now,
+  });
+  return null;
+}
+
+/**
+ * Creates the CRM deal a step asks for (ADR-245) for the run's contact and conversation, as the
+ * automation, and puts it on the contact's CRM timeline. Nothing is created (`skipped`, with a note
+ * for the step log) for an erased contact, a pipeline or stage that is archived or gone, a contact
+ * who already has an open deal in the pipeline, or a title whose placeholders filled in nothing. An
+ * owner who can no longer use the CRM, or a value that is not an amount in the pipeline's currency,
+ * is left out of the deal with a note. The contact is held for no key update, so two runs of the
+ * same contact (in two conversations) create one deal, one after the other.
+ */
+async function applyDealEffect(
+  tx: Tx,
+  run: AutomationRun,
+  effect: Extract<RunEffect, { kind: 'create_deal' }>,
+  now: Date,
+): Promise<{ skipped: boolean; notes: string[] }> {
+  const skip = (note: string) => ({ skipped: true, notes: [note] });
+  // As for task steps (ADR-249).
+  if (!(await loadEntitlements(tx, run.tenantId)).modules.has('crm'))
+    return skip('crm_not_in_plan');
+  if (!effect.title) return skip('deal_title_empty');
+  const [contact] = await tx
+    .select({ erasedAt: contacts.erasedAt })
+    .from(contacts)
+    .where(and(eq(contacts.tenantId, run.tenantId), eq(contacts.id, run.contactId)))
+    .for('no key update');
+  if (!contact || contact.erasedAt) return skip('contact_erased');
+  const [pipeline] = await tx
+    .select({ archivedAt: crmPipelines.archivedAt, currency: crmPipelines.currency })
+    .from(crmPipelines)
+    .where(and(eq(crmPipelines.tenantId, run.tenantId), eq(crmPipelines.id, effect.pipelineId)))
+    .for('share');
+  const [stage] = await tx
+    .select({ archivedAt: crmStages.archivedAt })
+    .from(crmStages)
+    .where(
+      and(
+        eq(crmStages.tenantId, run.tenantId),
+        eq(crmStages.id, effect.stageId),
+        eq(crmStages.pipelineId, effect.pipelineId),
+      ),
+    );
+  if (!pipeline || pipeline.archivedAt || !stage || stage.archivedAt) {
+    return skip('deal_stage_unavailable');
+  }
+  const [open] = await tx
+    .select({ id: crmDeals.id })
+    .from(crmDeals)
+    .where(
+      and(
+        eq(crmDeals.tenantId, run.tenantId),
+        eq(crmDeals.contactId, run.contactId),
+        eq(crmDeals.pipelineId, effect.pipelineId),
+        eq(crmDeals.status, 'open'),
+      ),
+    )
+    .limit(1);
+  if (open) return skip('deal_already_open');
+  const notes: string[] = [];
+  let owner = effect.ownerMembershipId;
+  if (owner && !(await memberRefs(tx, run.tenantId, [owner])).get(owner)?.active) {
+    owner = null;
+    notes.push('deal_owner_unavailable');
+  }
+  let valueMinor = dealValueMinor(effect.value, pipeline.currency);
+  if (valueMinor === undefined) {
+    valueMinor = null;
+    notes.push('deal_value_invalid');
+  }
+  // The expected close date is a date on the company's calendar (ADR-247).
+  let expectedCloseOn: string | null = null;
+  if (effect.closeInDays !== null) {
+    const [company] = await tx
+      .select({ timezone: tenants.timezone })
+      .from(tenants)
+      .where(eq(tenants.id, run.tenantId));
+    if (company) expectedCloseOn = localDateAfter(now, company.timezone, effect.closeInDays);
+  }
+  const id = uuidv7();
+  await tx.insert(crmDeals).values({
+    id,
+    tenantId: run.tenantId,
+    pipelineId: effect.pipelineId,
+    stageId: effect.stageId,
+    contactId: run.contactId,
+    conversationId: run.conversationId,
+    title: effect.title,
+    valueMinor,
+    ownerMembershipId: owner,
+    expectedCloseOn,
+    stageEnteredAt: now,
+    createdByAutomationId: run.automationId,
+  });
+  await addActivity(tx, {
+    tenantId: run.tenantId,
+    contactId: run.contactId,
+    dealId: id,
+    actorMembershipId: null,
+    kind: 'deal_created',
+    data: { stageId: effect.stageId, valueMinor, automationId: run.automationId, runId: run.id },
+    at: now,
+  });
+  return { skipped: false, notes };
 }
 
 type StepOutcome =
@@ -884,9 +1206,15 @@ async function runStep(
     let messageId: string | null = null;
     const notes: string[] = [];
     let blocked: string | null = null;
+    // A task or deal step that created nothing (ADR-244, ADR-245): the step log says so and why.
+    let skipped = false;
     let handoff: { teamId: string | null } | null = null;
     for (const effect of result.effects) {
-      if (effect.kind === 'send_text' || effect.kind === 'send_buttons') {
+      if (
+        effect.kind === 'send_text' ||
+        effect.kind === 'send_buttons' ||
+        effect.kind === 'send_flow'
+      ) {
         const sent = await queueBotMessage(tx, deps, { run, conversation: conv, effect, now });
         if (!sent.ok) {
           blocked = sent.code;
@@ -933,6 +1261,16 @@ async function runStep(
       ) {
         const note = await applyConversationEffect(tx, run, conv.assignedMembershipId, effect);
         if (note) notes.push(note);
+      } else if (effect.kind === 'create_task') {
+        const note = await applyTaskEffect(tx, deps, run, effect, now);
+        if (note) {
+          notes.push(note);
+          skipped = true;
+        }
+      } else if (effect.kind === 'create_deal') {
+        const deal = await applyDealEffect(tx, run, effect, now);
+        notes.push(...deal.notes);
+        skipped = deal.skipped;
       } else {
         const note = await applyContactEffect(tx, run, effect);
         if (note) notes.push(note);
@@ -969,7 +1307,7 @@ async function runStep(
     await appendRunStep(tx, tenantId, run.id, {
       nodeId: result.log.nodeId,
       nodeType: result.log.nodeType,
-      outcome: result.log.outcome,
+      outcome: skipped ? 'skipped' : result.log.outcome,
       branch: result.log.branch,
       messageId,
       detail: [result.log.detail, ...notes].filter(Boolean).join(', ') || null,

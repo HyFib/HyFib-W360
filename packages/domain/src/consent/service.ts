@@ -5,6 +5,7 @@ import {
   asc,
   consentEvents,
   contactConsents,
+  contactIdentities,
   contacts,
   desc,
   eq,
@@ -24,6 +25,7 @@ import {
 import { assertCan, type TenantContext } from '../authz/context';
 import { attributeCampaignOptOut } from '../campaigns/attribution';
 import { recordAudit, type RequestMeta } from '../audit';
+import { shownNumber } from '../contacts/number-masking';
 import { normalizePhone } from '../contacts/phone';
 import { parseInput } from '../validation';
 import {
@@ -456,7 +458,8 @@ export function createConsentService(deps: { db: Database; clock: Clock }) {
       );
       const items = rows.slice(0, limit);
       return {
-        items,
+        // Numbers as the member may see them (ADR-226); the cursor is the row's id.
+        items: items.map((r) => ({ ...r, phoneE164: shownNumber(ctx, r.phoneE164) ?? '' })),
         nextCursor: rows.length > limit ? (items[items.length - 1]?.id ?? null) : null,
       };
     },
@@ -574,13 +577,36 @@ export function createConsentService(deps: { db: Database; clock: Clock }) {
     },
 
     /** Suppression entries for a set of numbers (contact pages show whether a number is blocked). */
-    async suppressionsFor(ctx: TenantContext, phones: string[]) {
+    /**
+     * The suppression list's entries for a contact's numbers: its own and those of its WhatsApp
+     * identities, read here so that a member who sees numbers masked (ADR-226) is told without
+     * being given them; each number as the member may see it.
+     */
+    async suppressionsForContact(ctx: TenantContext, contactId: string) {
       assertCan(ctx, 'contacts.read');
-      if (phones.length === 0) return [];
-      return db.run(
+      if (!z.uuid().safeParse(contactId).success) return [];
+      const rows = await db.run(
         ctx.scope,
-        (tx) =>
-          tx
+        async (tx) => {
+          const [contact] = await tx
+            .select({ phoneE164: contacts.phoneE164 })
+            .from(contacts)
+            .where(and(eq(contacts.tenantId, ctx.tenant.id), eq(contacts.id, contactId)));
+          const identities = await tx
+            .select({ waId: contactIdentities.waId })
+            .from(contactIdentities)
+            .where(
+              and(
+                eq(contactIdentities.tenantId, ctx.tenant.id),
+                eq(contactIdentities.contactId, contactId),
+              ),
+            );
+          const phones = [
+            ...(contact?.phoneE164 ? [contact.phoneE164] : []),
+            ...identities.flatMap((i) => (i.waId ? [`+${i.waId}`] : [])),
+          ];
+          if (phones.length === 0) return [];
+          return tx
             .select({
               id: suppressions.id,
               phoneE164: suppressions.phoneE164,
@@ -594,9 +620,11 @@ export function createConsentService(deps: { db: Database; clock: Clock }) {
                 or(...phones.map((p) => eq(suppressions.phoneE164, p))),
               ),
             )
-            .orderBy(asc(suppressions.createdAt)),
+            .orderBy(asc(suppressions.createdAt));
+        },
         { accessMode: 'read only' },
       );
+      return rows.map((r) => ({ ...r, phoneE164: shownNumber(ctx, r.phoneE164) ?? '' }));
     },
   };
 }

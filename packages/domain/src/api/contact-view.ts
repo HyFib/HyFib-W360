@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { and, contacts, eq, isNull, outerColumn, sql, type Tx } from '@w360/db';
+import { AppError, notFound } from '@w360/core';
+import { and, contactMerges, contacts, eq, isNull, outerColumn, sql, type Tx } from '@w360/db';
 
 /** A custom field's value: text and dates (`YYYY-MM-DD`) as strings, numbers, yes/no as booleans. */
 export type ApiFieldValue = string | number | boolean;
@@ -107,4 +108,19 @@ export async function apiContactById(
     .from(contacts)
     .where(and(eq(contacts.tenantId, tenantId), eq(contacts.id, id), isNull(contacts.erasedAt)));
   return row ?? null;
+}
+
+/**
+ * The error for a contact the API does not find (ADR-225). A contact merged into another names the
+ * contact it belongs to now: app.contact_merges points at the contact kept by the latest merge.
+ */
+export async function apiContactNotFound(tx: Tx, tenantId: string, id: string): Promise<AppError> {
+  const [merged] = await tx
+    .select({ keptContactId: contactMerges.keptContactId })
+    .from(contactMerges)
+    .where(and(eq(contactMerges.tenantId, tenantId), eq(contactMerges.mergedContactId, id)));
+  if (!merged) return notFound('Contact');
+  return new AppError('not_found', 'This contact was merged into another contact.', {
+    details: { apiReason: 'contact_merged', mergedInto: merged.keptContactId },
+  });
 }

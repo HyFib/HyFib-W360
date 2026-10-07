@@ -5,7 +5,12 @@ import { isAppError } from '@w360/core';
 import { can } from '@w360/domain';
 import { formatMinor, minorToInput } from '@w360/domain/crm-money';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
-import { DealEditForm, DealOutcomeActions, StageSelect } from '@/components/crm/deal-forms';
+import {
+  DealEditForm,
+  DealOutcomeActions,
+  PipelineMoveForm,
+  StageSelect,
+} from '@/components/crm/deal-forms';
 import { NoteForm, TaskForm, TaskStatusActions } from '@/components/crm/task-forms';
 import { Timeline } from '@/components/crm/timeline';
 import { PageHeader } from '@/components/page-header';
@@ -40,6 +45,9 @@ export default async function DealPage({
   const editable = canWrite && !deal.contact.erased;
   const status = DEAL_STATUS[deal.status] ?? { label: deal.status, tone: 'neutral' as const };
   const pipeline = lookups.options.find((p) => p.id === deal.pipelineId);
+  const otherPipelines = lookups.options.filter(
+    (p) => p.id !== deal.pipelineId && p.stages.length > 0,
+  );
   const me = ctx.membership.id;
   const canAssign = lookups.memberOptions.some((m) => m.membershipId === me);
   const contactHref = can(ctx, 'contacts.read')
@@ -86,6 +94,20 @@ export default async function DealPage({
                     stages={pipeline.stages}
                   />
                 </div>
+              ) : null}
+              {canWrite && deal.status === 'open' && otherPipelines.length > 0 ? (
+                <details className="grid gap-2">
+                  <summary className="cursor-pointer text-sm font-medium">
+                    Move to another pipeline
+                  </summary>
+                  <PipelineMoveForm
+                    key={`${deal.pipelineId}:${deal.version}`}
+                    slug={ctx.tenant.slug}
+                    dealId={deal.id}
+                    version={deal.version}
+                    pipelines={otherPipelines}
+                  />
+                </details>
               ) : null}
               {canWrite ? (
                 <DealOutcomeActions
@@ -221,7 +243,11 @@ export default async function DealPage({
               ) : null}
               <span className="text-xs text-muted-foreground">
                 Created {formatDateTime(deal.createdAt, tz)}
-                {deal.createdBy ? ` by ${deal.createdBy.name}` : ''}
+                {deal.createdBy
+                  ? ` by ${deal.createdBy.name}`
+                  : deal.createdByAutomation
+                    ? ' by an automation'
+                    : ''}
                 {deal.owner ? ` · owner ${deal.owner.name}` : ' · no owner'}
                 {deal.expectedCloseOn ? ` · expected to close ${deal.expectedCloseOn}` : ''}
               </span>

@@ -13,6 +13,7 @@ export const API_SCOPE_KEYS = [
   'templates.read',
   'contacts.read',
   'contacts.write',
+  'contacts.merge',
   'contact_fields.manage',
   'messages.send',
   'messages.send_marketing',
@@ -62,6 +63,14 @@ export const API_SCOPE_INFO: Record<
     description:
       'Create contacts, change their name, email, custom fields and tags, and record opt-ins and opt-outs with their evidence.',
     permission: 'contacts.write',
+    writes: true,
+  },
+  'contacts.merge': {
+    label: 'Merge contacts',
+    description:
+      'Merge two contacts of the same person: everything of one moves to the other, which keeps its details, and the merged contact is deleted. A merge cannot be undone.',
+    // Merging deletes a contact, so only members who may delete contacts grant it (ADR-227).
+    permission: 'contacts.delete',
     writes: true,
   },
   'contact_fields.manage': {
@@ -143,7 +152,7 @@ export const API_SCOPE_INFO: Record<
   'orders.read': {
     label: 'Read WhatsApp orders',
     description:
-      "List the orders customers send from the company's WhatsApp catalog and read each one's items, total, note and status, with its conversation and contact ids. Never Payment Links or payment ids. Needs Commerce in the company's plan.",
+      "List the orders customers send from the company's WhatsApp catalog and read each one's items, total, note and status, with its conversation and contact ids. Also find contacts, and build segments and campaign audiences, by how many orders they placed in the company's connected stores and what they spent there. Never Payment Links or payment ids. Needs Commerce in the company's plan.",
     permission: 'commerce.read',
     writes: false,
   },

@@ -49,18 +49,24 @@ export async function loadInboxList(ctx: TenantContext, sp: SearchParams) {
   const views: InboxQuery['view'][] = ['mine', 'unassigned', 'all'];
   const cursor = one(sp.cursor);
   const { inbox, teams, conversationTags } = await getRuntime();
-  const [list, teamOptions, channelOptions, tags, mentions, available] = await Promise.all([
-    inbox.listConversations(ctx, { ...query, ...(cursor ? { cursor } : {}) }),
-    teams.teamOptions(ctx),
-    can(ctx, 'channels.read') ? teams.channelOptions(ctx) : Promise.resolve([]),
-    conversationTags.tagsInUse(ctx),
-    inbox.unreadMentionCount(ctx),
-    can(ctx, 'inbox.reply') ? teams.getAvailability(ctx) : Promise.resolve(null),
-  ]);
+  const renderedAt = new Date().toISOString();
+  const [list, teamOptions, channelOptions, tags, mentions, available, waiting] = await Promise.all(
+    [
+      inbox.listConversations(ctx, { ...query, ...(cursor ? { cursor } : {}) }),
+      teams.teamOptions(ctx),
+      can(ctx, 'channels.read') ? teams.channelOptions(ctx) : Promise.resolve([]),
+      conversationTags.tagsInUse(ctx),
+      inbox.unreadMentionCount(ctx),
+      can(ctx, 'inbox.reply') ? teams.getAvailability(ctx) : Promise.resolve(null),
+      // The notice of overdue replies (ADR-241) counts these against the clock in the browser.
+      inbox.waitingReplies(ctx),
+    ],
+  );
   return {
     query,
     views,
     list,
+    waiting: { ...waiting, renderedAt },
     filters: {
       teams: teamOptions,
       channels: channelOptions.map((c) => ({ id: c.id, label: c.label })),

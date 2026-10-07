@@ -444,6 +444,45 @@ describe('automation HTTP step', () => {
     ]);
   });
 
+  it('sends a form body URL-encoded, as form fields (ADR-236)', async () => {
+    const s = await setup();
+    const graph = orderGraph('/orders/{{answer.order_no}}', { ask: true });
+    const formGraph = {
+      ...graph,
+      nodes: graph.nodes.map((n) =>
+        n.id === 'call'
+          ? {
+              ...n,
+              bodyFormat: 'form',
+              body: 'order={{answer.order_no}}&customer={{name}}&channel=whats%20app',
+            }
+          : n,
+      ),
+    };
+    await publish(s.owner, formGraph);
+    const from = waId();
+    const conv = await inbound(s.c, from, 'order please');
+    const run = await onlyRun(conv);
+    expect(await drive(s.c, conv, run.id)).toBe('waiting');
+    await inbound(s.c, from, '4217');
+    expect(await drive(s.c, conv, run.id)).toBe('waiting');
+    const queued = await onlyCall(run.id);
+    const before = received.length;
+    expect(await processHttpCall(httpDeps(), scopeOf(s), queued.id)).toBe('succeeded');
+    expect(received.length).toBe(before + 1);
+    const request = received.at(-1)!;
+    expect(request).toMatchObject({ method: 'POST', url: '/orders/4217' });
+    expect(request.headers['content-type']).toBe('application/x-www-form-urlencoded');
+    expect(request.body).toBe('order=4217&customer=Priya%20Customer&channel=whats%20app');
+    expect(Object.fromEntries(new URLSearchParams(request.body))).toEqual({
+      order: '4217',
+      customer: 'Priya Customer',
+      channel: 'whats app',
+    });
+    expect(await drive(s.c, conv, run.id)).toBe('ended');
+    expect(await botTexts(conv)).toEqual(['What is your order number?', 'Your order is shipped.']);
+  });
+
   it("saves an answer longer than a field's 500 characters to a contact field without splitting an emoji (ADR-131, ADR-133)", async () => {
     // The answer is clipped to a field's 500 characters where the cut falls between the two halves
     // of an emoji: jsonb refused the half left (22P02, ADR-131), and since ADR-133 the clip stops

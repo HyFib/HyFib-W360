@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { TenantRole } from '@w360/db';
 import type { TenantContext } from '../authz/context';
@@ -16,17 +16,26 @@ const shown = (roles: TenantRole[]) =>
   EMAIL_NOTICE_KINDS.filter((kind) => EMAIL_NOTICES[kind].applies(ctxOf(roles)));
 
 describe('members’ choice of notice emails (ADR-215)', () => {
-  it('lists the kinds migration 0142 allows, in the same order', () => {
-    const migration = readFileSync(
-      new URL('../../../db/migrations/0142_member_email_opt_outs.sql', import.meta.url),
-      'utf8',
-    );
-    const allowed = /CHECK \(email_opt_outs <@ ARRAY\[([^\]]+)\]::text\[\]\)/.exec(migration)?.[1];
+  it('lists the kinds the latest migration allows (0154), in the same order', () => {
+    const dir = new URL('../../../db/migrations/', import.meta.url);
+    // The check as the last migration that sets it leaves it.
+    const allowed = readdirSync(dir)
+      .filter((name) => name.endsWith('.sql'))
+      .sort()
+      .map(
+        (name) =>
+          /CHECK \(email_opt_outs <@ ARRAY\[([^\]]+)\]::text\[\]\)/.exec(
+            readFileSync(new URL(name, dir), 'utf8'),
+          )?.[1],
+      )
+      .filter((list) => list !== undefined)
+      .pop();
     expect(allowed?.split(',').map((kind) => kind.trim().replace(/'/g, ''))).toEqual([
       ...EMAIL_NOTICE_KINDS,
     ]);
     expect(EMAIL_NOTICE_KINDS).toEqual([
       'mentions',
+      'reply_overdue',
       'campaign_approvals',
       'campaign_reviews',
       'campaign_pauses',
@@ -43,8 +52,8 @@ describe('members’ choice of notice emails (ADR-215)', () => {
   it('shows each member the kinds their role can receive', () => {
     expect(shown(['owner'])).toEqual([...EMAIL_NOTICE_KINDS]);
     expect(shown(['admin'])).toEqual([...EMAIL_NOTICE_KINDS]);
-    expect(shown(['supervisor'])).toEqual(['mentions']);
-    expect(shown(['agent'])).toEqual(['mentions']);
+    expect(shown(['supervisor'])).toEqual(['mentions', 'reply_overdue']);
+    expect(shown(['agent'])).toEqual(['mentions', 'reply_overdue']);
     expect(shown(['marketer'])).toEqual([
       'campaign_reviews',
       'campaign_pauses',
@@ -54,6 +63,7 @@ describe('members’ choice of notice emails (ADR-215)', () => {
     expect(shown(['billing'])).toEqual([]);
     expect(shown(['agent', 'marketer'])).toEqual([
       'mentions',
+      'reply_overdue',
       'campaign_reviews',
       'campaign_pauses',
       'campaign_completions',
@@ -65,12 +75,14 @@ describe('members’ choice of notice emails (ADR-215)', () => {
       Object.fromEntries(EMAIL_NOTICE_KINDS.map((kind) => [kind, EMAIL_NOTICES[kind].label])),
     ).toEqual({
       mentions: 'Mentions in notes',
+      reply_overdue: 'Customers waiting past the reply target',
       campaign_approvals: 'Campaigns waiting for approval',
       campaign_reviews: 'Your campaigns reviewed',
       campaign_pauses: 'Campaigns HyFib paused',
       campaign_completions: 'Your campaigns finished',
     });
     expect(EMAIL_NOTICES.mentions.description).toContain('10 minutes later');
+    expect(EMAIL_NOTICES.reply_overdue.description).toContain('first-response target');
   });
 
   it('takes the kinds turned off, and nothing else', () => {

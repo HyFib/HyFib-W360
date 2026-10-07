@@ -4,6 +4,7 @@ import {
   CONTACT_SOURCES,
   and,
   campaigns,
+  commerceStores,
   eq,
   inArray,
   sql,
@@ -18,7 +19,10 @@ import {
   LAST_MESSAGE_COMPARISONS,
   LAST_MESSAGE_DAYS,
   NAME_COMPARISONS,
+  ORDER_CONDITION_LIMITS,
+  ORDER_COUNT_COMPARISONS,
   SEGMENT_LIMITS,
+  SPEND_COMPARISONS,
   comparisonTakesValue,
   fieldComparisonsFor,
   fieldConditionProblem,
@@ -29,6 +33,7 @@ import {
   type SegmentCondition,
 } from '../campaigns/segments';
 import { normalizeTag, validDate } from '../contacts/fields';
+import { isCurrency } from '../crm/money';
 import type { OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, parseInput } from '../validation';
 import type { ApiContact } from './contact-view';
@@ -148,6 +153,63 @@ export const apiSearchConditionSchema = z.discriminatedUnion('type', [
         .describe(
           'What happened to the campaign’s message to the contact, among the recipients it was sent to: delivered (or read), not_delivered (failed or not delivered yet), read, replied (a reply was counted for it: the last campaign message the contact was sent in the 72 hours before replying), or not_replied (delivered, without a reply). Needs campaigns.read too.',
         ),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('orders'),
+      op: z
+        .enum(ORDER_COUNT_COMPARISONS)
+        .describe(
+          'How many orders the contact placed in the company’s stores, matched by their number: at_least `count`, or fewer_than `count` (contacts without a number have none). An order counts unless the store marked it as a test, cancelled, refunded, voided, failed or deleted. Needs orders.read too.',
+        ),
+      count: z
+        .number()
+        .int()
+        .min(ORDER_CONDITION_LIMITS.count.min)
+        .max(ORDER_CONDITION_LIMITS.count.max),
+      days: z
+        .number()
+        .int()
+        .min(ORDER_CONDITION_LIMITS.days.min)
+        .max(ORDER_CONDITION_LIMITS.days.max)
+        .optional()
+        .describe('Only orders placed in the last `days` days; every order when left out.'),
+      storeId: z
+        .uuid()
+        .optional()
+        .describe('Only the orders of one of the company’s stores; every store when left out.'),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('spend'),
+      op: z
+        .enum(SPEND_COMPARISONS)
+        .describe(
+          'What the contact’s orders that count (as for `orders`) total in `currency`: at_least `amountMinor`, or less_than it (contacts without such orders total 0). Orders in other currencies are left out. Needs orders.read too.',
+        ),
+      currency: z
+        .string()
+        .regex(/^[A-Z]{3}$/, 'Give an ISO 4217 currency code, like INR.')
+        .describe('The orders’ currency, ISO 4217, like INR.'),
+      amountMinor: z
+        .number()
+        .int()
+        .min(0)
+        .max(ORDER_CONDITION_LIMITS.amountMinor.max)
+        .describe('An amount in the currency’s minor unit (paise for INR).'),
+      days: z
+        .number()
+        .int()
+        .min(ORDER_CONDITION_LIMITS.days.min)
+        .max(ORDER_CONDITION_LIMITS.days.max)
+        .optional()
+        .describe('Only orders placed in the last `days` days; every order when left out.'),
+      storeId: z
+        .uuid()
+        .optional()
+        .describe('Only the orders of one of the company’s stores; every store when left out.'),
     })
     .strict(),
 ]);
@@ -326,6 +388,11 @@ function segmentCondition(
     case 'created':
       if (!validDate(c.date)) throw invalid(at('date'), 'Give a date written as YYYY-MM-DD.');
       return c;
+    case 'spend':
+      if (!isCurrency(c.currency)) {
+        throw invalid(at('currency'), 'Give an ISO 4217 currency code HyFib knows, like INR.');
+      }
+      return c;
     default:
       return c;
   }
@@ -381,6 +448,34 @@ async function assertCampaignsExist(
 }
 
 /**
+ * Refuses an order condition naming a store the company does not have (ADR-231), naming the
+ * condition's `storeId`; another company's store reads as one that does not exist.
+ */
+async function assertStoresExist(
+  tx: Tx,
+  tenantId: string,
+  conditions: readonly PlacedCondition[],
+): Promise<void> {
+  const named = conditions.flatMap(({ condition: c }) =>
+    (c.type === 'orders' || c.type === 'spend') && c.storeId ? [c.storeId] : [],
+  );
+  if (named.length === 0) return;
+  const found = new Set(
+    (
+      await tx
+        .select({ id: commerceStores.id })
+        .from(commerceStores)
+        .where(and(eq(commerceStores.tenantId, tenantId), inArray(commerceStores.id, named)))
+    ).map((r) => r.id),
+  );
+  for (const { condition: c, place } of conditions) {
+    if ((c.type === 'orders' || c.type === 'spend') && c.storeId && !found.has(c.storeId)) {
+      throw invalid(`${place}.storeId`, 'The company has no store with this id.');
+    }
+  }
+}
+
+/**
  * Conditions given through the API as a segment's (ADR-207), checked as a search's are: each
  * against the company's fields by segments' rules, and campaigns of the company; a problem is
  * refused naming the condition's place under `base`, like `definition.conditions.1.key`. Segments
@@ -398,6 +493,7 @@ export async function apiSegmentConditions(
     segmentCondition(condition, place, fields),
   );
   await assertCampaignsExist(tx, tenantId, placed);
+  await assertStoresExist(tx, tenantId, placed);
   return converted;
 }
 
@@ -457,7 +553,8 @@ export async function apiUpdateMatchingContacts(
 
 /**
  * A `last_message` condition, in a group or not, also needs `conversations.read`, and a
- * `campaign` condition `campaigns.read` (ADR-126).
+ * `campaign` condition `campaigns.read` (ADR-126); an `orders` or `spend` condition
+ * `orders.read` (ADR-231).
  */
 function assertConditionScopes(ctx: ApiContext, placed: readonly PlacedCondition[]): void {
   if (placed.some(({ condition }) => condition.type === 'last_message')) {
@@ -465,6 +562,20 @@ function assertConditionScopes(ctx: ApiContext, placed: readonly PlacedCondition
   }
   if (placed.some(({ condition }) => condition.type === 'campaign')) {
     assertScope(ctx, 'campaigns.read');
+  }
+  assertOrderConditionScope(
+    ctx,
+    placed.map(({ condition }) => condition),
+  );
+}
+
+/** Conditions on store orders also need `orders.read` (ADR-231), wherever a key gives them. */
+export function assertOrderConditionScope(
+  ctx: ApiContext,
+  conditions: readonly { type: string }[],
+): void {
+  if (conditions.some((c) => c.type === 'orders' || c.type === 'spend')) {
+    assertScope(ctx, 'orders.read');
   }
 }
 
@@ -488,6 +599,7 @@ async function searchPage(
       : segmentCondition(item, `conditions.${i}`, fields),
   );
   await assertCampaignsExist(tx, ctx.tenant.id, placed);
+  await assertStoresExist(tx, ctx.tenant.id, placed);
   // `created` days are the company's, as in segments.
   const [company] = await tx
     .select({ timezone: tenants.timezone })

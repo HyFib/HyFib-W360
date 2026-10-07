@@ -446,6 +446,86 @@ export function StageSelect({
   );
 }
 
+/**
+ * Moves an open deal to a stage of another of the company's pipelines (ADR-234). The deal keeps its
+ * value only between pipelines of one currency: the service refuses the move otherwise.
+ */
+export function PipelineMoveForm({
+  slug,
+  dealId,
+  version,
+  pipelines,
+}: {
+  slug: string;
+  dealId: string;
+  version: number;
+  /** The company's other pipelines with stages a deal can be in. */
+  pipelines: PipelineOption[];
+}) {
+  const prefix = useId();
+  const choices = pipelines.filter((p) => p.stages.length > 0);
+  const [pipelineId, setPipelineId] = useState(choices[0]?.id ?? '');
+  const pipeline = choices.find((p) => p.id === pipelineId);
+  const [stageId, setStageId] = useState(choices[0]?.stages[0]?.id ?? '');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  if (choices.length === 0) return null;
+  return (
+    <ClientForm
+      className="grid gap-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        setBusy(true);
+        setError(null);
+        void moveDealAction(slug, { id: dealId, expectedVersion: version, pipelineId, stageId })
+          .then((r) => {
+            if (!r.ok) setError(r.message);
+          })
+          .catch(() => setError('The deal could not be moved because the connection failed.'))
+          .finally(() => setBusy(false));
+      }}
+    >
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field id={`${prefix}-pipeline`} label="Pipeline">
+          {(aria) => (
+            <Select
+              {...aria}
+              value={pipelineId}
+              onChange={(e) => {
+                setPipelineId(e.target.value);
+                setStageId(choices.find((p) => p.id === e.target.value)?.stages[0]?.id ?? '');
+              }}
+            >
+              {choices.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({p.currency})
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+        <Field id={`${prefix}-stage`} label="Stage in that pipeline">
+          {(aria) => (
+            <Select {...aria} value={stageId} onChange={(e) => setStageId(e.target.value)}>
+              {(pipeline?.stages ?? []).map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+      </div>
+      <FormError message={error} />
+      <div>
+        <Button type="submit" variant="outline" disabled={busy || !stageId}>
+          {busy ? 'Moving…' : 'Move deal'}
+        </Button>
+      </div>
+    </ClientForm>
+  );
+}
+
 /** Marks an open deal won or lost (with an optional reason), or reopens a closed one. */
 export function DealOutcomeActions({
   slug,

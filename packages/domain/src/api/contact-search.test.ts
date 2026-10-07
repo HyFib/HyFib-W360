@@ -1,16 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { isAppError } from '@w360/core';
-import type { Database } from '@w360/db';
+import { commerceStores, type Database, type Tx } from '@w360/db';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import {
   apiContactSearchSchema,
   apiSearchContacts,
+  apiSegmentConditions,
   apiUpdateMatchingContacts,
   apiUpdateMatchingContactsSchema,
   contactSearchSql,
+  type ApiSearchCondition,
 } from './contact-search';
+import { apiCreateCampaign, apiUpdateCampaign } from './campaigns';
 import type { ApiContext } from './context';
 import { API_ROUTES, buildOpenApiDocument } from './openapi';
+import { apiCreateSegment, apiUpdateSegment } from './segments';
 
 const TENANT = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
 
@@ -218,7 +222,8 @@ describe('contact searches through the API (ADR-117)', () => {
     expect(search.description).toContain('like `conditions.1.key`');
     expect(search.description).toContain('(`last_message`, which also needs `conversations.read`)');
     expect(search.description).toContain('(`campaign`, which also needs `campaigns.read`)');
-    expect(search.description).toContain('or a campaign it does not have');
+    expect(search.description).toContain('or a campaign or store it does not have');
+    expect(search.description).toContain('(`orders` and `spend`, which also need `orders.read`)');
     expect(search.description).toContain('no `Idempotency-Key` is needed');
     expect(search.requestBody).toEqual({
       required: true,
@@ -244,6 +249,8 @@ describe('contact searches through the API (ADR-117)', () => {
       'calling_code',
       'last_message',
       'campaign',
+      'orders',
+      'spend',
       'group',
     ]);
   });
@@ -385,7 +392,7 @@ describe('groups of conditions in contact searches (ADR-164)', () => {
     expect(groupShape?.required).toEqual(['type', 'match', 'conditions']);
     expect(groupShape?.properties.match?.enum).toEqual(['all', 'any']);
     expect(groupShape?.properties.conditions).toMatchObject({ minItems: 1, maxItems: 20 });
-    expect(groupShape?.properties.conditions?.items.oneOf).toHaveLength(9);
+    expect(groupShape?.properties.conditions?.items.oneOf).toHaveLength(11);
   });
 });
 
@@ -540,5 +547,157 @@ describe('changing the contacts a search finds (ADR-165)', () => {
     ]);
     expect(schema.properties.change.additionalProperties).toBe(false);
     expect([schema.properties.limit.maximum, schema.properties.limit.default]).toEqual([100, 50]);
+  });
+});
+
+describe('conditions on store orders through the API (ADR-231)', () => {
+  const orders = { type: 'orders', op: 'at_least', count: 2, days: 90 };
+  const spend = { type: 'spend', op: 'at_least', currency: 'INR', amountMinor: 500_000 };
+  const message = async (promise: Promise<unknown>) => {
+    try {
+      await promise;
+    } catch (error) {
+      if (isAppError(error)) return error.publicMessage;
+      throw error;
+    }
+    throw new Error('expected a refusal');
+  };
+  const NO_ORDERS = 'This API key does not have the orders.read scope.';
+
+  it('takes them in a search, a segment and a campaign’s audience', () => {
+    expect(
+      apiContactSearchSchema.safeParse({
+        conditions: [
+          orders,
+          spend,
+          { type: 'orders', op: 'fewer_than', count: 1, storeId: TENANT },
+          { type: 'group', match: 'any', conditions: [orders, spend] },
+        ],
+      }).success,
+    ).toBe(true);
+    for (const wrong of [
+      { ...orders, count: 0 },
+      { ...orders, op: 'more_than' },
+      { ...spend, currency: 'inr' },
+      { ...spend, amountMinor: '500' },
+      { ...spend, extra: true },
+    ]) {
+      expect(apiContactSearchSchema.safeParse({ conditions: [wrong] }).success).toBe(false);
+    }
+  });
+
+  it('needs orders.read for them, wherever a key gives them, before anything is read', async () => {
+    expect(
+      await message(
+        apiSearchContacts({ db: untouched }, ctx(['contacts.read']), { conditions: [orders] }),
+      ),
+    ).toBe(NO_ORDERS);
+    expect(
+      await message(
+        apiSearchContacts({ db: untouched }, ctx(['contacts.read']), {
+          conditions: [{ type: 'group', match: 'all', conditions: [isSet, spend] }],
+        }),
+      ),
+    ).toBe(NO_ORDERS);
+    expect(
+      await message(
+        apiCreateSegment(
+          { db: untouched, clock: { now: () => new Date() } },
+          ctx(['campaigns.write']),
+          {
+            name: 'Buyers',
+            definition: { conditions: [orders] },
+          },
+          null,
+        ),
+      ),
+    ).toBe(NO_ORDERS);
+    expect(
+      await message(
+        apiCreateCampaign(
+          { db: untouched, clock: { now: () => new Date() } },
+          ctx(['campaigns.write']),
+          { name: 'Win back', audience: { conditions: [spend] } },
+          null,
+        ),
+      ),
+    ).toBe(NO_ORDERS);
+    // With the scope, the search goes on to the database.
+    const { db, reads } = reached();
+    await expect(
+      apiSearchContacts({ db }, ctx(['contacts.read', 'orders.read']), {
+        conditions: [orders, spend],
+      }),
+    ).rejects.toThrow('reached the database');
+    expect(reads).toHaveLength(1);
+  });
+
+  it('needs orders.read to change a segment or a draft’s audience to them', async () => {
+    const deps = { db: untouched, clock: { now: () => new Date() } };
+    const id = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f03';
+    expect(
+      await message(
+        apiUpdateSegment(deps, ctx(['campaigns.write']), id, {
+          definition: { conditions: [spend] },
+        }),
+      ),
+    ).toBe(NO_ORDERS);
+    expect(
+      await message(
+        apiUpdateCampaign(deps, ctx(['campaigns.write']), id, {
+          audience: { match: 'any', conditions: [isSet, orders] },
+        }),
+      ),
+    ).toBe(NO_ORDERS);
+  });
+
+  it('refuses a store the company does not have and a currency HyFib does not know', async () => {
+    const STORE = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';
+    /** A transaction whose reads find no custom fields and only these stores. */
+    const txWith = (stores: string[]) =>
+      ({
+        select: () => ({
+          from: (table: unknown) => ({
+            where: async () => (table === commerceStores ? stores.map((s) => ({ id: s })) : []),
+          }),
+        }),
+      }) as unknown as Tx;
+    const given = apiContactSearchSchema.parse({
+      conditions: [orders, { ...spend, storeId: STORE }],
+    }).conditions as ApiSearchCondition[];
+    const refusal = async (promise: Promise<unknown>) => {
+      try {
+        await promise;
+      } catch (error) {
+        if (isAppError(error)) return [error.code, error.issues];
+        throw error;
+      }
+      throw new Error('expected a refusal');
+    };
+    expect(
+      await refusal(apiSegmentConditions(txWith([]), TENANT, given, 'definition.conditions')),
+    ).toEqual([
+      'validation_failed',
+      [
+        {
+          path: 'definition.conditions.1.storeId',
+          message: 'The company has no store with this id.',
+        },
+      ],
+    ]);
+    expect(
+      await apiSegmentConditions(txWith([STORE]), TENANT, given, 'definition.conditions'),
+    ).toEqual([orders, { ...spend, storeId: STORE }]);
+    const unknown = apiContactSearchSchema.parse({ conditions: [{ ...spend, currency: 'XQZ' }] })
+      .conditions as ApiSearchCondition[];
+    expect(await refusal(apiSegmentConditions(txWith([]), TENANT, unknown, 'conditions'))).toEqual([
+      'validation_failed',
+      [
+        {
+          path: 'conditions.0.currency',
+          message: 'Give an ISO 4217 currency code HyFib knows, like INR.',
+        },
+      ],
+    ]);
   });
 });

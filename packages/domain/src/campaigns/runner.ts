@@ -28,7 +28,7 @@ import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { emitTenantEvent } from '../messaging/events';
 import { STATUS_RANK } from '../messaging/status';
-import { buildTemplateSend, sendSpecFor } from '../templates/definition';
+import { buildTemplateSend, linkButtons, sendSpecFor } from '../templates/definition';
 import { loadRateTable, marketFor, priceFor, rateCategoryFor } from './costs';
 import { parseTimeOfDay, sendingWindow } from './schedule';
 import {
@@ -254,11 +254,13 @@ export async function runCampaignTick(
       template.status !== 'approved' ||
       template.whatsapp_account_id !== channel.whatsapp_account_id ||
       spec.headerParams !== variables.header.length ||
-      spec.bodyParams !== variables.body.length
+      spec.bodyParams !== variables.body.length ||
+      spec.buttonParams !== variables.buttons.length
     ) {
       return pause('template_not_approved');
     }
     const sendSpec = spec;
+    const links = linkButtons(spec.definition);
 
     if (c.windowStart && c.windowEnd) {
       const start = parseTimeOfDay(c.windowStart);
@@ -473,7 +475,7 @@ export async function runCampaignTick(
         skip('no_marketing_opt_in');
         continue;
       }
-      const resolved = resolveVariables(variables, person);
+      const resolved = resolveVariables(variables, person, links);
       if (!resolved.ok) {
         skip('missing_variable');
         continue;

@@ -13,35 +13,20 @@ export const dynamic = 'force-dynamic';
 export default async function OverviewPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const ctx = await requireTenant(slug);
-  const { tenancy, crm } = await getRuntime();
-  const [members, invitations, audit, tasks] = await Promise.all([
+  const { tenancy, crm, setup, meta } = await getRuntime();
+  const [members, invitations, audit, tasks, checklist] = await Promise.all([
     can(ctx, 'members.read') ? tenancy.listMembers(ctx) : Promise.resolve([]),
     can(ctx, 'members.read') ? tenancy.listInvitations(ctx) : Promise.resolve([]),
     can(ctx, 'audit.read') ? tenancy.listAuditEvents(ctx, { limit: 8 }) : Promise.resolve(null),
     can(ctx, 'crm.read') ? crm.taskCounts(ctx) : Promise.resolve(null),
+    // Worked out from the company's data, as far as the member can see it (ADR-233).
+    setup.checklist(ctx, { numbersConnectable: Boolean(meta?.embeddedSignupConfigId) }),
   ]);
   const activeMembers = members.filter((m) => m.status === 'active');
   const pendingInvites = invitations.filter((i) => i.status === 'pending');
   const base = `/c/${ctx.tenant.slug}`;
 
-  const checklist = [
-    { done: true, label: 'Verify your email address' },
-    {
-      done: ctx.user.twoFactorEnabled,
-      label: 'Enable two-factor authentication',
-      href: '/account#security',
-    },
-    {
-      done: activeMembers.length + pendingInvites.length > 1,
-      label: 'Invite your team',
-      href: `${base}/settings/members`,
-    },
-    {
-      done: false,
-      label: 'Connect a WhatsApp Business number',
-      note: 'Available once Meta Embedded Signup is configured for this deployment (phase 2).',
-    },
-  ];
+  const doneSteps = checklist.filter((step) => step.done).length;
 
   return (
     <>
@@ -51,13 +36,15 @@ export default async function OverviewPage({ params }: { params: Promise<{ slug:
           <CardHeader>
             <CardTitle>Get started</CardTitle>
             <CardDescription>
-              Complete these steps to start engaging customers on WhatsApp.
+              {doneSteps === checklist.length
+                ? 'Every step you can take here is done.'
+                : `Complete these steps to start engaging customers on WhatsApp: ${doneSteps} of ${checklist.length} done.`}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <ul className="grid gap-3">
               {checklist.map((item) => (
-                <li key={item.label} className="flex items-start gap-3">
+                <li key={item.key} className="flex items-start gap-3">
                   {item.done ? (
                     <CheckCircle2 aria-hidden="true" className="mt-0.5 size-5 text-success" />
                   ) : (
@@ -67,7 +54,7 @@ export default async function OverviewPage({ params }: { params: Promise<{ slug:
                     <span
                       className={item.done ? 'text-muted-foreground line-through' : 'font-medium'}
                     >
-                      {item.href && !item.done ? (
+                      {!item.done ? (
                         <Link href={item.href} className="underline-offset-4 hover:underline">
                           {item.label}
                         </Link>

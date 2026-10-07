@@ -9,6 +9,7 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  Checkbox,
   Field,
   Input,
   Select,
@@ -39,7 +40,12 @@ import { ClientButton, useHydrated } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
 import { AutomationDiagram } from './automation-diagram';
 import { AutomationSimulator } from './automation-simulator';
-import { NodeFields, type EditorTemplate, type NodeFieldOptions } from './node-fields';
+import {
+  NodeFields,
+  type EditorPipeline,
+  type EditorTemplate,
+  type NodeFieldOptions,
+} from './node-fields';
 
 /**
  * The automation builder: trigger, steps (a structured list with a generated diagram), live
@@ -50,6 +56,8 @@ interface TriggerForm {
   type: TriggerType;
   keywords: string;
   match: 'exact' | 'contains';
+  /** Also start on a keyword with a small typo (ADR-240). */
+  typos: boolean;
   hours: TriggerHours;
   cooldownMinutes: number;
   /** The inputs of an automation started through the API, separated by commas (ADR-077). */
@@ -62,6 +70,7 @@ function triggerForm(trigger: AutomationTrigger | null): TriggerForm {
       type: 'conversation_started',
       keywords: '',
       match: 'contains',
+      typos: false,
       hours: 'any',
       cooldownMinutes: 60,
       inputs: '',
@@ -71,6 +80,7 @@ function triggerForm(trigger: AutomationTrigger | null): TriggerForm {
     type: trigger.type,
     keywords: trigger.type === 'keyword' ? trigger.keywords.join(', ') : '',
     match: trigger.type === 'keyword' ? trigger.match : 'contains',
+    typos: trigger.type === 'keyword' && trigger.typos === true,
     hours: fromMessages ? trigger.hours : 'any',
     cooldownMinutes: fromMessages ? trigger.cooldownMinutes : 60,
     inputs: trigger.type === 'api' ? trigger.inputs.join(', ') : '',
@@ -99,6 +109,8 @@ function triggerInput(form: TriggerForm): unknown {
       .map((k) => k.trim())
       .filter(Boolean),
     match: form.match,
+    // Absent unless chosen, so a trigger saved before ADR-240 reads the same.
+    ...(form.typos ? { typos: true } : {}),
     ...common,
   };
 }
@@ -128,6 +140,9 @@ function defaultNode(
   graph: AutomationGraph,
   allowedDomains: readonly string[],
   template: EditorTemplate | undefined,
+  crmMember: string | undefined,
+  pipeline: EditorPipeline | undefined,
+  flow: { id: string } | undefined,
 ): AutomationNode {
   const id = newNodeId(graph, type);
   switch (type) {
@@ -139,6 +154,7 @@ function defaultNode(
         templateId: template?.id ?? '',
         header: Array.from({ length: template?.headerParams ?? 0 }, () => ''),
         body: Array.from({ length: template?.bodyParams ?? 0 }, () => ''),
+        links: Array.from({ length: template?.links.length ?? 0 }, () => ''),
       };
       if (type === 'send_template') return { id, type, label: '', ...fields, next: null };
       return {
@@ -217,6 +233,40 @@ function defaultNode(
         failureNext: null,
       };
     }
+    case 'create_task':
+      return {
+        id,
+        type,
+        label: '',
+        title: 'Follow up with {{name}}',
+        assigneeMembershipId: crmMember ?? '',
+        dueInHours: 24,
+        next: null,
+      };
+    case 'send_flow':
+      return {
+        id,
+        type,
+        label: '',
+        flowId: flow?.id ?? '',
+        header: null,
+        body: 'Please fill in this form.',
+        footer: null,
+        cta: 'Open the form',
+        next: null,
+      };
+    case 'create_deal':
+      return {
+        id,
+        type,
+        label: '',
+        title: 'Deal with {{name}}',
+        pipelineId: pipeline?.id ?? '',
+        stageId: pipeline?.stages[0]?.id ?? '',
+        value: null,
+        ownerMembershipId: null,
+        next: null,
+      };
     case 'handoff':
       return { id, type, label: '', teamId: null };
     case 'end':
@@ -230,8 +280,11 @@ function retarget(node: AutomationNode, target: string, value: string | null): A
   switch (node.type) {
     case 'send_text':
     case 'send_template':
+    case 'send_flow':
     case 'update_contact':
     case 'update_conversation':
+    case 'create_task':
+    case 'create_deal':
     case 'wait':
       return { ...node, next: t(node.next) };
     case 'ask_template':
@@ -282,6 +335,9 @@ export function AutomationEditor({
   channels,
   templates,
   teams,
+  crmMembers,
+  crmPipelines,
+  flows,
   fields,
   web,
 }: {
@@ -293,6 +349,12 @@ export function AutomationEditor({
   /** The company's templates (the checks need them all; steps offer the ones they can send). */
   templates: EditorTemplate[];
   teams: { id: string; name: string }[];
+  /** Active members who can use the CRM, whom task steps may create tasks for. */
+  crmMembers: { id: string; name: string }[];
+  /** Active pipelines with their currency and active stages, for deal steps. */
+  crmPipelines: EditorPipeline[];
+  /** The company's forms that are not archived, for form steps. */
+  flows: { id: string; name: string; whatsappAccountId: string; sendable: boolean }[];
   fields: { key: string; label: string; type: string }[];
   /** What web request steps may use: allowed domains and secrets (names and domains only). */
   web: {
@@ -340,6 +402,16 @@ export function AutomationEditor({
       ),
     [templates, channelWhatsappAccountId],
   );
+  // Forms a step can send: published, of the number's WhatsApp account when it is limited to one.
+  const usableFlows = useMemo(
+    () =>
+      flows.filter(
+        (f) =>
+          f.sendable &&
+          (!channelWhatsappAccountId || f.whatsappAccountId === channelWhatsappAccountId),
+      ),
+    [flows, channelWhatsappAccountId],
+  );
   const parsedTrigger = useMemo(() => parseTrigger(triggerInput(trigger)), [trigger]);
   const apiInputs = useMemo(
     () =>
@@ -351,6 +423,16 @@ export function AutomationEditor({
   const refs = useMemo(
     () => ({
       teamIds: new Set(teams.map((t) => t.id)),
+      crmMemberIds: new Set(crmMembers.map((m) => m.id)),
+      flows: new Map(
+        flows.map((f) => [f.id, { whatsappAccountId: f.whatsappAccountId, sendable: f.sendable }]),
+      ),
+      crmPipelines: new Map(
+        crmPipelines.map((pl) => [
+          pl.id,
+          { currency: pl.currency, stageIds: new Set(pl.stages.map((st) => st.id)) },
+        ]),
+      ),
       fieldKeys: new Set(fields.map((f) => f.key)),
       allowedDomains: web.allowedDomains,
       secrets: new Map(web.secrets.map((s) => [s.name, s.domain])),
@@ -360,7 +442,18 @@ export function AutomationEditor({
       apiInputs: apiInputs ? new Set(apiInputs) : undefined,
       channelWhatsappAccountId,
     }),
-    [teams, fields, web, templates, storeEvent, apiInputs, channelWhatsappAccountId],
+    [
+      teams,
+      crmMembers,
+      crmPipelines,
+      flows,
+      fields,
+      web,
+      templates,
+      storeEvent,
+      apiInputs,
+      channelWhatsappAccountId,
+    ],
   );
   const parsedGraph = useMemo(() => parseGraph(graph), [graph]);
   const issues: GraphIssue[] = useMemo(() => {
@@ -411,6 +504,9 @@ export function AutomationEditor({
   const options: NodeFieldOptions = {
     steps: stepChoices,
     teams,
+    crmMembers,
+    crmPipelines,
+    flows: usableFlows,
     fields,
     answers,
     allowedDomains: web.allowedDomains,
@@ -656,6 +752,23 @@ export function AutomationEditor({
                     </Select>
                   )}
                 </Field>
+                <div className="grid gap-1 sm:col-span-2">
+                  <label htmlFor="trigger-typos" className="flex items-center gap-2 text-sm">
+                    <Checkbox
+                      id="trigger-typos"
+                      checked={trigger.typos}
+                      onChange={(e) =>
+                        change(() => setTrigger({ ...trigger, typos: e.target.checked }))
+                      }
+                    />
+                    Also start when a keyword is written with a small typo
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    One typo in words of 5 to 8 letters, two in longer ones; the first letter must
+                    match, and shorter words and words with digits must match exactly. A message
+                    that matches another automation without typos starts that one.
+                  </p>
+                </div>
               </div>
             ) : null}
           </CardContent>
@@ -844,7 +957,15 @@ export function AutomationEditor({
                         ...g,
                         nodes: [
                           ...g.nodes,
-                          defaultNode(newType, g, web.allowedDomains, usableTemplates[0]),
+                          defaultNode(
+                            newType,
+                            g,
+                            web.allowedDomains,
+                            usableTemplates[0],
+                            crmMembers[0]?.id,
+                            crmPipelines[0],
+                            usableFlows[0],
+                          ),
                         ],
                       })),
                     )
@@ -891,6 +1012,9 @@ export function AutomationEditor({
             graph={parsedGraph.ok ? parsedGraph.graph : null}
             companyName={companyName}
             teams={teams}
+            crmMembers={crmMembers}
+            crmPipelines={crmPipelines}
+            flows={flows}
             templates={templates}
             storeEvent={storeEvent}
             apiInputs={apiInputs}

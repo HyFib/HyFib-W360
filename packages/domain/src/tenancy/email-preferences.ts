@@ -5,12 +5,13 @@ import { recordAudit, type RequestMeta } from '../audit';
 import { parseInput } from '../validation';
 
 /**
- * Which notice emails a member gets in a company (ADR-215). Every kind is on until the member turns
- * it off; a notice skips a member who turned its kind off. Security, sign-in and billing emails are
- * not listed: they cannot be turned off.
+ * Which notice emails a member gets in a company (ADR-215; overdue replies since ADR-230). Every
+ * kind is on until the member turns it off; a notice skips a member who turned its kind off.
+ * Security, sign-in and billing emails are not listed: they cannot be turned off.
  */
 export const EMAIL_NOTICE_KINDS = [
   'mentions',
+  'reply_overdue',
   'campaign_approvals',
   'campaign_reviews',
   'campaign_pauses',
@@ -27,6 +28,12 @@ export const EMAIL_NOTICES: Record<
     description:
       'Someone mentioned you in a conversation note, and you had not opened the conversation 10 minutes later.',
     applies: (ctx) => can(ctx, 'inbox.read_all') || can(ctx, 'inbox.read_assigned'),
+  },
+  reply_overdue: {
+    label: 'Customers waiting past the reply target',
+    description:
+      'A customer waited longer than the company’s first-response target in a conversation assigned to you, one for your team that nobody has taken, or (if you assign conversations) one nobody who can reply has taken.',
+    applies: (ctx) => can(ctx, 'inbox.reply'),
   },
   campaign_approvals: {
     label: 'Campaigns waiting for approval',

@@ -66,7 +66,11 @@ export function Timeline({
           {a.body ? <p className="whitespace-pre-wrap break-words">{a.body}</p> : null}
           <span className="text-xs text-muted-foreground">
             {formatDateTime(a.createdAt, timeZone)}
-            {a.actor ? ` · ${a.actor.name}` : ''}
+            {a.actor
+              ? ` · ${a.actor.name}`
+              : typeof a.data.automationId === 'string'
+                ? ' · by an automation'
+                : ''}
             {showDeal && a.dealId && a.dealTitle ? (
               <>
                 {' · '}

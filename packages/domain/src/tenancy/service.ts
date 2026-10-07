@@ -43,6 +43,7 @@ import {
 } from '@w360/contracts';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
+import { numberMaskingSchema } from '../contacts/number-masking';
 import { canAssignRoles, ROLE_LABELS } from '../authz/permissions';
 import { INBOX_WORKER_ROLES, releaseMemberConversations } from '../inbox/routing';
 import { recordAudit, type RequestMeta } from '../audit';
@@ -266,6 +267,37 @@ export function createTenancyService(deps: TenancyDeps) {
             subjectType: 'tenant',
             subjectId: ctx.tenant.id,
             metadata: { requireMfaAllMembers: data.requireMfaAllMembers },
+          },
+          meta,
+        );
+      });
+    },
+
+    /**
+     * The roles whose members see customers' numbers masked (ADR-226). Unmasking a role shows the
+     * numbers to more members, so it needs a recent sign-in, as dropping two-factor does.
+     */
+    async updateNumberMasking(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta = {},
+    ): Promise<void> {
+      assertCan(ctx, 'tenant.security.manage');
+      const { maskedNumberRoles } = parse(numberMaskingSchema, input);
+      const before = ctx.tenant.maskedNumberRoles;
+      if (before.some((role) => !maskedNumberRoles.includes(role))) {
+        assertRecentSignIn(ctx, clock.now());
+      }
+      await db.run(ctx.scope, async (tx) => {
+        await tx.update(tenants).set({ maskedNumberRoles }).where(eq(tenants.id, ctx.tenant.id));
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'tenant.number_masking_updated',
+            subjectType: 'tenant',
+            subjectId: ctx.tenant.id,
+            metadata: { maskedNumberRoles, previous: [...before] },
           },
           meta,
         );

@@ -77,6 +77,8 @@ import {
   apiContactListFilters,
   apiContactUpdateSchema,
   apiListContactFields,
+  apiMergeContacts,
+  apiMergeContactsSchema,
   apiTags,
   apiUpdateContact,
   apiUpdateManyContacts,
@@ -236,6 +238,7 @@ describe('API scopes', () => {
     const writes = API_SCOPE_KEYS.filter((s) => API_SCOPE_INFO[s].writes);
     expect(writes).toEqual([
       'contacts.write',
+      'contacts.merge',
       'contact_fields.manage',
       'messages.send',
       'messages.send_marketing',
@@ -258,6 +261,8 @@ describe('API scopes', () => {
     expect(API_SCOPE_INFO['messages.send_marketing'].permission).toBe('campaigns.send');
     expect(API_SCOPE_INFO['messages.reply'].permission).toBe('inbox.reply');
     expect(API_SCOPE_INFO['contacts.write'].permission).toBe('contacts.write');
+    // Merging deletes a contact: members merge with contacts.write and contacts.delete (ADR-227).
+    expect(API_SCOPE_INFO['contacts.merge'].permission).toBe('contacts.delete');
     // Members define fields in Settings with tenant.settings.manage (ADR-115).
     expect(API_SCOPE_INFO['contact_fields.manage'].permission).toBe('tenant.settings.manage');
     // Members pause and cancel campaigns with campaigns.send (ADR-128).
@@ -2244,6 +2249,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'contact.created',
       'contact.updated',
       'contact.erased',
+      'contact.merged',
     ]);
     const refused = apiCreateWebhookEndpointSchema.safeParse({
       ...base,
@@ -2865,6 +2871,8 @@ describe('Idempotency-Key header', () => {
 });
 
 describe('API errors', () => {
+  const KEPT_CONTACT = '0192f3a4-5b6c-7d8e-9f00-1122334455aa';
+
   it('expose only the public message, issues and curated reason of application errors', () => {
     const mapped = apiErrorResponse(
       new AppError('validation_failed', 'Bad key', {
@@ -2888,6 +2896,18 @@ describe('API errors', () => {
     });
     expect(apiErrorResponse(new AppError('tenant_suspended', 'Suspended'), 'r').status).toBe(423);
     expect(apiErrorResponse(new AppError('forbidden', 'No'), 'r').status).toBe(403);
+    // A merged contact names the contact it belongs to now (ADR-225); nothing else of the details.
+    const merged = (details: Record<string, unknown>) =>
+      apiErrorResponse(new AppError('not_found', 'Merged.', { details }), 'r').body.error;
+    expect(
+      merged({ apiReason: 'contact_merged', mergedInto: KEPT_CONTACT, tenantId: 'x' }),
+    ).toEqual({
+      code: 'not_found',
+      message: 'Merged.',
+      reason: 'contact_merged',
+      mergedInto: KEPT_CONTACT,
+    });
+    expect(merged({ mergedInto: 42 })).toEqual({ code: 'not_found', message: 'Merged.' });
   });
 
   it('turn anything else into a generic internal error without its message', () => {
@@ -3574,6 +3594,16 @@ describe('contact custom fields and changes (ADR-112)', () => {
       paths['/contacts/{id}']?.patch as unknown as { responses: Record<string, unknown> }
     ).responses;
     expect(Object.keys(patchResponses)).toEqual(expect.arrayContaining(['409', '412', '422']));
+    // A merged contact's id answers 404 naming the contact it belongs to now (ADR-225).
+    for (const op of [
+      paths['/contacts/{id}']?.get,
+      paths['/contacts/{id}']?.patch,
+      paths['/contacts/{id}/consent']?.post,
+    ]) {
+      expect(op?.description).toContain(
+        'A contact merged into another is not found: 404 with reason `contact_merged`, and `mergedInto` naming the contact it belongs to now.',
+      );
+    }
     expect(paths['/contact-fields']?.get?.operationId).toBe('listContactFields');
     expect(paths['/contact-fields']?.get?.description).toContain('`contacts.read`');
     const schemas = doc.components.schemas as Record<
@@ -4277,7 +4307,7 @@ describe('campaign drafts through the API (ADR-186)', () => {
     name: 'Diwali offer',
     channelAccountId: number,
     templateId: null,
-    variables: { header: [], body: [{ source: 'name', fallback: 'there' }] },
+    variables: { header: [], body: [{ source: 'name', fallback: 'there' }], buttons: [] },
     audience: { kind: 'segment', segmentId: segment },
     schedule: { kind: 'later', local: '2026-11-01T09:00', timezone: 'Asia/Kolkata' },
     window: { start: '09:00', end: '20:00' },
@@ -4352,7 +4382,7 @@ describe('campaign drafts through the API (ADR-186)', () => {
     };
     expect(apiCreateCampaignSchema.parse(full)).toEqual({
       ...full,
-      variables: { header: [], body: [{ source: 'static', value: 'Asha' }] },
+      variables: { header: [], body: [{ source: 'static', value: 'Asha' }], buttons: [] },
       audience: { match: 'all', conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
     });
     expect(apiCreateCampaignSchema.parse({ name: 'A', audience: { segmentId: segment } })).toEqual({
@@ -4908,7 +4938,7 @@ describe('sending a template to many numbers in one call (ADR-163)', () => {
     expect(parse({ templateId, from: templateId, messages: many(2) }).success).toBe(true);
     // Values left out are none, as for one send.
     expect(parse({ templateId, messages: [{ to: '+919811100001' }] }).data?.messages).toEqual([
-      { to: '+919811100001', variables: { header: [], body: [] } },
+      { to: '+919811100001', variables: { header: [], body: [], buttons: [] } },
     ]);
     for (const body of [
       { templateId, messages: [] },
@@ -5821,7 +5851,7 @@ describe('templates with a photo, video or document header through the API (ADR-
     ).toEqual({
       to: '+919876543210',
       templateId,
-      variables: { header: [], body: [] },
+      variables: { header: [], body: [], buttons: [] },
       headerMedia: { link },
     });
     expect(apiSendMessageSchema.parse({ to: '+919876543210', templateId })).not.toHaveProperty(
@@ -5883,7 +5913,7 @@ describe('templates with a photo, video or document header through the API (ADR-
       expect(paths['/messages']?.post?.description).toContain(words);
     }
     expect(paths['/messages/send-many']?.post?.description).toContain(
-      'a header file missing or given when the template takes none (422, naming the place, as `messages.3.variables` or `messages.3.headerMedia`)',
+      'a header file missing or given when the template takes none (422, naming the place, as `messages.3.variables`, `messages.3.variables.buttons.0` or `messages.3.headerMedia`)',
     );
     const schemas = (
       doc.components as unknown as {
@@ -5911,6 +5941,75 @@ describe('templates with a photo, video or document header through the API (ADR-
     ).items;
     expect(Object.keys(items.properties)).toEqual(['to', 'variables', 'headerMedia']);
     expect(items.required).toEqual(['to']);
+  });
+});
+
+describe('templates whose website buttons’ links end with a value, through the API (ADR-228)', () => {
+  const templateId = '0192a1b2-0000-7000-8000-000000000001';
+
+  it('take the ends of the links in `variables.buttons`, at most two, each filled in', () => {
+    expect(
+      apiSendMessageSchema.parse({
+        to: '+919876543210',
+        templateId,
+        variables: { body: ['Asha'], buttons: [' A-1 '] },
+      }).variables,
+    ).toEqual({ header: [], body: ['Asha'], buttons: ['A-1'] });
+    for (const buttons of [['a', 'b', 'c'], [''], [' '], 'A-1', [1], ['x'.repeat(1001)]]) {
+      expect(
+        apiSendMessageSchema.safeParse({ to: '+919876543210', templateId, variables: { buttons } })
+          .success,
+        JSON.stringify(buttons).slice(0, 40),
+      ).toBe(false);
+    }
+    expect(
+      apiSendManyTemplatesSchema.parse({
+        templateId,
+        messages: [{ to: '+919811100001', variables: { buttons: ['A-1', 'B-2'] } }],
+      }).messages[0]?.variables.buttons,
+    ).toEqual(['A-1', 'B-2']);
+  });
+
+  it('are described: the list names the links, a send gives their ends', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const paths = doc.paths as unknown as Record<string, Record<string, { description: string }>>;
+    expect(paths['/templates']?.get?.description).toContain(
+      'and the website buttons whose link ends with a value a send gives (`links`)',
+    );
+    expect(paths['/messages']?.post?.description).toContain(
+      'A template whose website buttons’ links end with a value (its `links` in GET /templates) needs the end of each link in `variables.buttons`, in the order of `links`: it replaces the link’s {{1}}, holds no spaces and cannot change the website the button opens (422, naming the value, as `variables.buttons.0`).',
+    );
+    const schemas = (
+      doc.components as unknown as {
+        schemas: Record<
+          string,
+          { properties: Record<string, Record<string, unknown>>; required: string[] }
+        >;
+      }
+    ).schemas;
+    expect(schemas.Template?.properties.links).toMatchObject({
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { button: { type: 'string' }, url: { type: 'string' } },
+        required: ['button', 'url'],
+      },
+    });
+    expect(schemas.Template?.required).toContain('links');
+    expect(schemas.Template?.properties.variables).toMatchObject({
+      properties: { buttons: { type: 'integer' } },
+      required: ['header', 'body', 'buttons'],
+    });
+    expect(schemas.SendTemplate?.properties.variables).toMatchObject({
+      properties: {
+        buttons: {
+          type: 'array',
+          maxItems: 2,
+          items: { type: 'string', minLength: 1, maxLength: 1000 },
+        },
+      },
+      additionalProperties: false,
+    });
   });
 });
 
@@ -6531,7 +6630,7 @@ describe("listing a segment's contacts through the API (ADR-208)", () => {
     expect(Object.keys(op?.responses ?? {})).toEqual(expect.arrayContaining(['404', '412']));
     for (const words of [
       'Scope: `campaigns.read`.',
-      'Also needs `contacts.read`, and `conversations.read` for a segment with a `last_message` condition',
+      'Also needs `contacts.read`, `conversations.read` for a segment with a `last_message` condition and `orders.read` for one with an `orders` or `spend` condition',
       'newest first, erased contacts left out, pages that never skip or repeat a contact',
       'Each page reads at most 2,000 of the company',
       'A segment with a `problem` (GET /segments/{id}) is refused with 412 saying it',
@@ -6542,5 +6641,89 @@ describe("listing a segment's contacts through the API (ADR-208)", () => {
       'With contacts read as well, list the contacts each segment holds.',
     );
     expect(API_ROUTES).toContainEqual(['get', '/segments/{id}/contacts']);
+  });
+});
+
+describe('merging contacts through the API (ADR-227)', () => {
+  const KEEP = '0192f3a4-5b6c-7d8e-9f00-112233445566';
+  const MERGE = '0192f3a4-5b6c-7d8e-9f00-112233445577';
+  const ctx = (scopes: string[], status = 'active') =>
+    ({
+      tenant: { id: 't', status },
+      key: { id: 'k', scopes: new Set(scopes) },
+      planScopes: null,
+    }) as unknown as ApiContext;
+  const unreachable = {
+    db: {
+      run: () => {
+        throw new Error('the database was reached');
+      },
+    },
+    clock: { now: () => new Date('2026-10-06T00:00:00Z') },
+  } as unknown as Parameters<typeof apiMergeContacts>[0];
+  const merge = (c: ApiContext, id: string, body: unknown) =>
+    apiMergeContacts(unreachable, c, id, body, null);
+
+  it('needs the contacts.merge scope, an active company and two contact ids, before the database', async () => {
+    await expect(
+      merge(ctx(['contacts.read', 'contacts.write']), KEEP, { mergeContactId: MERGE }),
+    ).rejects.toMatchObject({
+      code: 'forbidden',
+      publicMessage: 'This API key does not have the contacts.merge scope.',
+    });
+    await expect(
+      merge(ctx(['contacts.merge'], 'suspended'), KEEP, { mergeContactId: MERGE }),
+    ).rejects.toMatchObject({ code: 'tenant_suspended' });
+    await expect(
+      merge(ctx(['contacts.merge']), 'nope', { mergeContactId: MERGE }),
+    ).rejects.toMatchObject({ code: 'not_found' });
+    for (const body of [{}, { mergeContactId: 'nope' }, { mergeContactId: MERGE, keep: KEEP }]) {
+      await expect(
+        merge(ctx(['contacts.merge']), KEEP, body),
+        JSON.stringify(body),
+      ).rejects.toMatchObject({ code: 'validation_failed' });
+    }
+    await expect(merge(ctx(['contacts.merge']), KEEP, { mergeContactId: MERGE })).rejects.toThrow(
+      'the database was reached',
+    );
+    expect(apiMergeContactsSchema.parse({ mergeContactId: MERGE })).toEqual({
+      mergeContactId: MERGE,
+    });
+  });
+
+  it('is described with its scope, an optional Idempotency-Key, what it answers and its refusals', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const op = (
+      doc.paths as unknown as Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            description: string;
+            parameters: { $ref: string }[];
+            responses: Record<string, unknown>;
+          }
+        >
+      >
+    )['/contacts/{id}/merge']?.post;
+    expect(op?.operationId).toBe('mergeContacts');
+    expect(op?.description).toContain('`contacts.merge`');
+    expect(op?.description).toContain('which cannot be undone');
+    expect(op?.parameters.map((p) => p.$ref)).toEqual([
+      '#/components/parameters/Id',
+      '#/components/parameters/IdempotencyKeyOptional',
+    ]);
+    expect(Object.keys(op?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '404', '409', '412', '422', '423']),
+    );
+    const schemas = doc.components.schemas as Record<
+      string,
+      { required?: string[]; additionalProperties?: unknown }
+    >;
+    expect(schemas.ContactMerge?.required).toEqual(['mergeContactId']);
+    expect(schemas.ContactMerge?.additionalProperties).toBe(false);
+    expect(schemas.ContactMergeResult?.required).toEqual(['contact', 'mergedContactId', 'moved']);
+    expect(API_ROUTES).toEqual(expect.arrayContaining([['post', '/contacts/{id}/merge']]));
   });
 });

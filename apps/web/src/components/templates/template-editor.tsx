@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import {
   COMMON_TEMPLATE_LANGUAGES,
   TEMPLATE_LIMITS,
+  linkPrefix,
   positionalVariables,
   renderExample,
   validateDefinition,
@@ -37,6 +38,7 @@ export function TemplateEditor({
   slug,
   accounts,
   existing,
+  initial,
 }: {
   slug: string;
   accounts: { id: string; name: string }[];
@@ -47,13 +49,17 @@ export function TemplateEditor({
     language: string;
     definition: TemplateDefinition;
   };
+  /** A new draft's name and content to start from, such as a starter's (ADR-232). */
+  initial?: { name: string; definition: TemplateDefinition };
 }) {
   const router = useRouter();
   const langList = useId();
   const [accountId, setAccountId] = useState(accounts[0]?.id ?? '');
-  const [name, setName] = useState(existing?.name ?? '');
+  const [name, setName] = useState(existing?.name ?? initial?.name ?? '');
   const [language, setLanguage] = useState(existing?.language ?? 'en');
-  const [def, setDef] = useState<TemplateDefinition>(existing?.definition ?? EMPTY);
+  const [def, setDef] = useState<TemplateDefinition>(
+    existing?.definition ?? initial?.definition ?? EMPTY,
+  );
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [busy, startTransition] = useTransition();
@@ -324,12 +330,17 @@ export function TemplateEditor({
                 )}
               </Field>
               {b.type === 'URL' ? (
-                <Field id={`tpl-button-url-${i}`} label="Address (https://)">
+                <Field
+                  id={`tpl-button-url-${i}`}
+                  label="Address (https://)"
+                  description="End it with {{1}} to add a value when sending, such as an order number."
+                >
                   {(aria) => (
                     <Input
                       {...aria}
                       type="url"
                       value={b.url}
+                      maxLength={TEMPLATE_LIMITS.url}
                       onChange={(e) => setButton(i, { ...b, url: e.target.value })}
                     />
                   )}
@@ -355,6 +366,23 @@ export function TemplateEditor({
               >
                 Remove
               </Button>
+              {b.type === 'URL' && linkPrefix(b.url) !== null ? (
+                <div className="sm:col-span-3">
+                  <Field
+                    id={`tpl-button-example-${i}`}
+                    label="Example for the link’s {{1}} (Meta reviews it)"
+                  >
+                    {(aria) => (
+                      <Input
+                        {...aria}
+                        value={b.example ?? ''}
+                        maxLength={TEMPLATE_LIMITS.exampleValue}
+                        onChange={(e) => setButton(i, { ...b, example: e.target.value })}
+                      />
+                    )}
+                  </Field>
+                </div>
+              ) : null}
             </div>
           ))}
           {def.buttons.length < TEMPLATE_LIMITS.buttons ? (

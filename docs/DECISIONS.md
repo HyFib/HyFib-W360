@@ -8824,3 +8824,697 @@ Decision:
 Not built: merging through the API and a `contact.merged` webhook event (the merged contact's id
 stops resolving: the API answers 404), joining two conversations on one number, merging contacts
 that each have a number, undoing a merge, and suggestions of likely duplicates.
+
+## ADR-225 Telling integrations about a merge (2026-10-06)
+
+Context: a merge (ADR-224) deletes the merged contact. Integrations that keep copies of contacts,
+from webhooks or the API's change feed, had no way to learn that its id was gone: events of it not
+yet delivered stopped, the API answered a plain 404, and the feed never read it again, so their copy
+stayed.
+
+Decision:
+
+- **A `contact.merged` webhook event**, one per merge, for the endpoints that choose it in Settings
+  → Webhooks or through the API (no filter narrows it): `mergedContactId`, and `contact`, the
+  contact it belongs to now as the API describes it when the event is delivered. After a later merge
+  of that contact, that is the contact kept then: the merge points every earlier merge into it at
+  the new kept contact (`app.contact_merges`). A trigger on `app.contact_merges` captures it when
+  the merge records itself, after the merged contact is deleted, through
+  `app.capture_webhook_event`. It has no `captured_xact`, so what the merge changed of the kept
+  contact stays its own `contact.updated`. A `contact.created` or `contact.updated` of the merged
+  contact not yet delivered ends as `event_gone`, as an event of anything gone does; a
+  `consent.changed` of it is still sent, naming its id, as before.
+- **The API answers a merged contact's id** on `GET` and `PATCH /contacts/{id}` and
+  `POST /contacts/{id}/consent` with 404, reason `contact_merged`, and `mergedInto`, the contact it
+  belongs to now; nothing is changed. Another company's contact, or an id that never was one, is
+  plainly not found. `POST /contacts/update-many` says in its refusal that a contact may have been
+  merged.
+- **The change feed** records a change of the kept contact at every merge (the same trigger), and
+  each contact it reads lists `mergedContactIds`: the contacts merged into it, oldest merge first,
+  those merged into a contact merged into it later included. The kept contact's latest change is at
+  or after the merge, so a reader learns of it however the feed was compacted; the merged contact's
+  own changes go with it (ADR-224), so it is never read again.
+- **Also:** a worker that meets an event type it does not describe (one a newer release added, read
+  by a worker rolled back) fails the delivery without an attempt, to be replayed once fixed, instead
+  of sending a body without data.
+
+Not built: merging through the API, filters on merge events, and naming the kept contact in a
+`consent.changed` of the merged contact delivered after the merge.
+
+## ADR-226 Hiding customers' numbers from chosen roles (W-044) (2026-10-06)
+
+Context: every member who could read contacts or conversations saw customers' whole phone numbers. A
+company that lets agents or temporary staff answer customers may not want them to copy those
+numbers, and WATI masks them for its operator role (research W-044).
+
+Decision:
+
+- **A permission and a company setting.** `contacts.view_numbers` ("see customers' phone numbers
+  whole") is granted to every role that reads contacts, conversations, campaigns or orders (owner,
+  admin, supervisor, agent, marketer, analyst), so nothing changes until a company chooses. Owners
+  and administrators choose, in Settings → Security, the roles whose members see numbers masked:
+  supervisors, agents, marketers and analysts (`app.tenants.masked_number_roles`, migration 0152);
+  owners and administrators always see them whole. The member's context, built for every request,
+  leaves the permission out when every role of the member that grants it is masked, so a member who
+  also has another role sees numbers whole. Showing numbers to a role again needs a recent sign-in
+  (as dropping two-factor does); both changes are audited.
+- **Masked on the server.** A masked number keeps the plus, at most the first three digits and the
+  last two, a dot for every other digit and at least three hidden (`+919•••••••45`). The services
+  that give members contact data mask before anything leaves the server: contacts (list, contact
+  page, its WhatsApp identities, the suppression list), the inbox (list, conversation, transcript,
+  mentions), the CRM (deal and task cards, the contact panel, the contact picker), campaign
+  recipients and their CSV, segment samples, store orders, the automation test picker, and contact
+  exports. The contact page asks the suppression list by contact instead of handling numbers itself.
+- **No digit-by-digit search.** For a masked member, searching contacts, conversations or store
+  orders by digits matches a whole number only; part of a number finds nothing, so the hidden digits
+  cannot be found by narrowing searches. Checks that tell whether a number the member types exists
+  (adding a contact or a suppression, a campaign test send) stay: they confirm a number the member
+  already has and reveal no other.
+- **What a masked member cannot do:** replace a number they cannot see (refused, naming the
+  setting); they can still add a number to a contact without one, and change everything else.
+- **Not masked:** what customers sent (a number in a message, a contact card, a Flow answer, a saved
+  answer of a run), free text members write, the public API and webhooks (they serve integrations;
+  keys are created by owners and administrators), the company export (owners), and the merge pages
+  (owners and administrators). A segment's calling-code condition takes up to four digits, so
+  combined with other conditions it can tell a masked member a fourth leading digit.
+
+Not built: masking per member rather than per role, masking emails, masking customers' numbers in
+message content, and masking for API keys.
+
+## ADR-227 Merging contacts through the API (2026-10-06)
+
+Context: owners and administrators merge two contacts of the same person in the app (ADR-224), and
+integrations hear of merges (ADR-225), but an integration that finds duplicates itself (a CRM that
+knows a customer by phone and by WhatsApp user id) could not merge them.
+
+Decision:
+
+- **A `contacts.merge` scope** for `POST /contacts/{id}/merge` with `mergeContactId`: the contact
+  the body names is merged into the one the path names, through `app.merge_contacts`, as in the app
+  (the same moves, refusals, stricter consent and deletion). Merging deletes a contact, so only
+  members who may delete contacts grant the scope (`contacts.delete`: owners and administrators); it
+  is a writing scope, refused while the company is suspended or its plan has ended. A plan version
+  that chose its scopes (ADR-092) leaves it out until a new version includes it (migration 0153).
+- **Answers** the kept contact as it is now, the merged contact's id and the counts moved (200).
+  Refusals: 404 for a contact of no one or another company, and `contact_merged` with `mergedInto`
+  for one merged already; 409 for the same contact twice, an erased contact, or a message to the
+  merged contact being sent; 412 for two numbers, conversations on the same number, more than 50
+  tags between them or a campaign sent to both. With an `Idempotency-Key`, a retry answers the first
+  response; a retry without one learns where the first merge went from the 404.
+- **Recorded as the key's:** the audit log names the key; the merge record names no member, and an
+  opt-out the merge carries is recorded with actor `system` (the function reads no key).
+
+Not built: naming the key on the merge record and on the carried opt-out, merging many pairs in one
+call, and suggesting duplicates through the API.
+
+## ADR-228 Website buttons whose link ends with a value (2026-10-06)
+
+Context: a utility template usually carries a link of its own for each customer (an order to track,
+a booking to manage), but HyFib refused website buttons with a variable because the format of their
+example was not confirmed. Meta's official OpenAPI description shows it (research M-198): a `URL`
+button whose `url` ends with `{{1}}` is created with `example: ['summer2023']`, the value rather
+than a whole link, and a send gives a `button` component (`sub_type` `url`, `index`) whose one
+`text` parameter is the "suffix that is appended to the predefined prefix URL".
+
+Decision:
+
+- **The link:** a website button's link may end with one value, `{{1}}`, placed after the website's
+  address in full: an https link whose host is followed by `/`, `?` or `#`, without a user name, so
+  no value can change the website the button opens (checked by appending values that would lengthen
+  the host, put it after a user name or add a port). A value elsewhere in the link, another
+  variable, or a value right after the host is refused when a draft is saved; a synced template with
+  one is shown as not sendable. The editor asks for an example, which goes to Meta as
+  `example: [value]`; an example Meta's listing gives as a list or as text is kept as it is.
+- **The values:** a send gives the end of each such link, in the order of the buttons:
+  `params.buttons` from a contact's or a conversation's sender, `variables.buttons` through the API,
+  whose template list gives `links` (each button's text and link) and `variables.buttons` (how
+  many). A value holds no spaces or control characters, at most 1,000 characters, and must leave the
+  link on the template's website; it is refused with the button's name, through the API as 422
+  naming `variables.buttons.N` (or `messages.N.variables.buttons.N`). It is sent as given, without
+  percent-encoding, as a `button` component with `sub_type` `url`, the button's `index` and one
+  `text` parameter; button components follow the order of the buttons.
+- **What is kept:** the message keeps each link as sent beside its button's text, and the inbox
+  shows it as an https link opening in a new tab without the referrer.
+- **Where they are sent:** from a contact or a conversation and through the API, and the template
+  list marks them sendable. Campaigns, automations and store messages do not send them yet: the
+  campaign editor and store messages leave them out of their template lists, automations list them
+  with the reason, and each refuses one with the reason.
+
+Not built: values from campaigns, automations and store messages, a value elsewhere than at the end
+of a link, more than one variable in a link, and encoding values for a link (a value must already be
+fit for one).
+
+## ADR-229 Filling the ends of links from campaigns, automations and store messages (2026-10-06)
+
+Context: since ADR-228 a template's website button can end its link with a value given when sending,
+but only a member's send and the API gave one: campaigns, automations and store messages left such
+templates out, although a personal link (an offer, a booking, a parcel to track) is what they most
+often send.
+
+Decision:
+
+- **Campaigns** fill the end of each link from a source, as they fill variables: fixed text, the
+  contact's name or a custom field, with a fallback (`variables.buttons`, also through the API's
+  campaign drafts). A contact's value that cannot end the link (spaces or control characters, over
+  1,000 characters, or one that would change the website) counts as no value: the fallback is used
+  when it can, else the recipient is skipped with `missing_variable`, as for a variable without a
+  value. A fixed text or fallback that cannot end the link is a review problem before submitting.
+- **Automations:** a template step gives each link's end as text with placeholders (`links`;
+  versions saved before have none), counted with the variables in the checks. The end is kept as
+  rendered (white space is not collapsed); an empty one fails the run with `missing_variable`, and
+  one the link cannot take ends it as `send_blocked` with the detail `invalid_link` when the
+  template is queued.
+- **Store messages** fill each link's end from the order or the checkout, or fixed text, with a
+  fallback, as their variables (an order's tracking number to start with). An unusable value falls
+  back or skips the message with `missing_variable`; fixed text or a fallback a link cannot end with
+  is refused when the message is saved.
+- **Every send takes them:** `sendSpecFor` no longer has a caller that cannot give the ends of
+  links, so its option for them is removed and every caller is asked for `buttonParams`.
+
+Not built: a browser test of the three editors' link fields (their database tests cover the sends),
+encoding a value for a link, and a skip reason of its own for an unusable value.
+
+## ADR-230 Emailing members when a customer's reply is overdue (P3-06) (2026-10-06)
+
+Context: the inbox shows when each waiting customer's reply is due (the company's first-response
+target, counted in business hours when they are on) and turns it red once it is overdue, but only
+for members looking at the inbox. A customer waiting past the target while the member responsible is
+away from the screen waits on, unseen.
+
+Decision:
+
+- **When:** the worker's minute sweep finds open reply turns that may be overdue
+  (`ops.overdue_reply_turns`, a definer function giving ids only, for active companies with a
+  target) and works through each company's in the company's own scope. The due time is the inbox's
+  own (`replyDueAt`); a turn only ever waits for a member (an automation answering closes it, a
+  resolve closes it, a member's reply closes it), and it is locked while the sweep decides, so a
+  reply either waits for the sweep or is seen by it.
+- **Once per wait:** `app.overdue_reply_notices` (migration 0154) records each turn's notice:
+  `waiting` while business hours put its due time later than the target in absolute time (the sweep
+  looks again at that time), then `sent` or `skipped` for good (a guard trigger keeps them as they
+  are). A customer who writes again after a member's reply starts a new wait, noticed anew. A reply
+  due more than a day before the sweep saw it (the worker was down, the company suspended) is
+  skipped (`too_late`); turns are looked at only within 30 days of their start.
+- **Who:** the member the conversation is assigned to while they can see and answer it; else the
+  members of its team who can see and answer it; else the members who assign conversations (owners,
+  administrators, supervisors). A member who turned these emails off (a new kind, `reply_overdue`,
+  in Settings → Notifications, ADR-215) is not emailed, and nobody else is emailed in their place:
+  such a wait is skipped (`opted_out`), as one nobody can answer is (`no_one`).
+- **What:** one email per member per company in a sweep. For one conversation: the target, why it is
+  theirs (assigned, their team's, nobody's), since when the customer waits, and the conversation's
+  link; for several (business hours opening on a night's messages): how many, for what reasons, the
+  longest wait, and the inbox's list by longest wait. Never the customer's name, number or messages:
+  an email stays readable after its reader loses access.
+- **No setting of its own:** a company without a first-response target gets no emails; one with a
+  target gets them, and each member chooses theirs. Settings → Inbox says so beside the target.
+- **Migrations:** 0154 adds the notices (deleted with the company before its turns, exported with
+  the company, gone with their turn), the sweep function and the definer's reads, and the new kind
+  in the members' email choices; 0155 builds the index of open turns by start concurrently.
+
+Not built: in-app notices, a second email when a wait drags on, per-team targets and calendars,
+escalation to supervisors when the assignee does not answer, and a digest across sweeps.
+
+## ADR-231 Segment conditions on store orders (W-051) (2026-10-06)
+
+Context: companies with a connected Shopify or WooCommerce store keep a copy of its orders (P4-06b),
+and members see each contact's orders, but campaigns could not be aimed at contacts by what they
+bought: those who ordered twice, those who have not ordered in 90 days, those who spent ₹5,000.
+Segments only knew contacts' own data and messages.
+
+Decision:
+
+- **Two conditions:** `orders` counts a contact's orders (at least, or fewer than, a number from 1
+  to 10,000) and `spend` totals them in one currency (at least, or less than, an amount in the
+  currency's minor unit, ISO 4217 codes the runtime knows). Each can look at the last 1 to 3,650
+  days and at one of the company's stores; left out, every order and every store. They combine with
+  the other conditions under all/any, in saved segments, campaign audiences and API searches alike.
+- **Which orders:** matched to the contact by number (`customer_phone` against the contact's E.164
+  number, as the inbox's order panel matches them); a contact without a number has none. An order
+  counts unless the store marked it as a test, cancelled, deleted, or with a status of cancelled,
+  refunded, failed, trash or checkout-draft, or a payment status of refunded, voided or expired.
+  Spend adds the totals the store reported, in the condition's currency only: no conversion, and a
+  partial refund is not taken off.
+- **SQL:** a correlated count or sum over `app.commerce_store_orders` per contact, every value a
+  parameter, filtered by the company as well as by RLS so the existing
+  `(tenant_id, customer_phone, placed_at)` index serves it. No migration.
+- **Who:** previewing or saving a segment with such a condition, and giving a campaign draft such an
+  audience, needs `commerce.read` as well as the segment or campaign permission. A saved segment
+  with one shows members who cannot read store orders how many contacts it matches, never which.
+  Through the API the conditions need `orders.read` too, wherever a key gives them (searches,
+  changing matching contacts, segments, a segment's contacts, drafts' audiences), and a store named
+  must be the company's (another company's reads as one that does not exist).
+- **Builder:** the condition types appear when the member can read store orders and the company has
+  a store (spend also needs orders in some currency); the currency list is the currencies of the
+  company's orders, and amounts are typed in major units.
+
+Not built: products or categories bought, the first or last order date, average order value, refunds
+taken off spend, and orders matched by email. Contacts without a number never match an order
+condition.
+
+## ADR-232 Starter templates (W-070) (2026-10-06)
+
+Context: a member creating a company's first templates starts from an empty editor and has to learn
+Meta's form (numbered variables with examples, categories, buttons) before anything can be sent
+outside the 24-hour window. Most companies need the same few: order and shipping updates, reminders,
+payment notices, a welcome and an offer.
+
+Decision:
+
+- **Twelve starters, HyFib's own copy:** eight utility (order confirmation, shipping update,
+  delivery confirmation, appointment reminder with Confirm and Reschedule replies, booking
+  confirmation, payment reminder, payment received, request update) and four marketing (welcome,
+  back in stock, seasonal offer, cart reminder), in English, each with example values for its
+  variables (`templates/library.ts`). They hold no website or phone button, which need the company's
+  own address or number, and no body starts or ends with a variable (HyFib's rule for its starters,
+  not a verified Meta rule).
+- **Starting a draft:** the New template page lists them; choosing one fills the editor with its
+  name, category and content, which the member changes before saving as any draft. Nothing is
+  created until they save, and saving and submitting are the drafts' own (validation, Meta's review,
+  which decides the category).
+- **Opt-out button:** a marketing starter gets a quick reply carrying the company's first marketing
+  opt-out keyword (Settings → Messaging), when it fits a button; a customer's tap sends the keyword,
+  which HyFib already records as a marketing opt-out. Without one, the page asks the member to give
+  customers a way to stop offers.
+- **Checks:** a unit test passes every starter through the draft schema and checks, the round trip
+  through Meta's component format, and HyFib's starter rules. No migration, no new permission (the
+  page needs `templates.write`; it reads the keywords with `contacts.read`).
+
+Not built: starters in other languages, starters with media headers or website buttons, a gallery of
+other companies' approved templates, and starters through the API.
+
+## ADR-233 The setup checklist from the company's own data (W-026) (2026-10-06)
+
+Context: the overview's "Get started" list was written in phase 1: verifying an email (always done),
+two-factor authentication, inviting the team, and a WhatsApp number marked as not available until
+phase 2. Numbers have long been connectable, yet the step never showed one as connected, and nothing
+pointed new companies at templates, contacts or a reply target.
+
+Decision:
+
+- **Steps from data:** two-factor authentication (the member's own); a WhatsApp number (done while
+  one is active; a number to reconnect is said so); a template Meta approved (a draft is not
+  enough); a contact that is not erased; a teammate who is active or invited and not expired; a
+  first-response target. `createSetupChecklistService` reads them in one read-only transaction in
+  the company's scope, and `setupSteps` turns them into steps with links.
+- **What each member sees:** a step appears only to members who can read its data (`channels.read`,
+  `templates.read`, `contacts.read`, `members.read`; the target to those who set it,
+  `tenant.settings.manage`), and its fact is not even read for others. Links go to the page where
+  the step is taken; a member who cannot write templates is sent to the list, one who can to a new
+  draft with HyFib's starters (ADR-232).
+- **Honest about the deployment:** with no number and Meta's Embedded Signup not set up for the
+  deployment, the number step says so instead of pointing at a page that cannot connect one.
+- **Not a step:** Meta's business verification, which HyFib cannot read, and checking a member's
+  email, which every member has done. No migration.
+
+Not built: dismissing the checklist, steps for automations, campaigns or stores, and counting
+progress across members.
+
+## ADR-234 Moving deals between pipelines in the app (P4-04) (2026-10-06)
+
+Context: since P4-04 the CRM service has moved a deal to a stage of another pipeline (a value in a
+different currency must be cleared first) and recorded the move on the deal's timeline, but the app
+only offered the stages of the deal's own pipeline. A deal opened in the wrong pipeline had to be
+lost and created again, losing its history.
+
+Decision:
+
+- **The deal page offers it:** an open deal's page has "Move to another pipeline" for members with
+  `crm.write`: the company's other active pipelines that have a stage, each with its currency, and a
+  stage of the one chosen. The move is the service's own (`moveDeal` with the pipeline): the version
+  check, the pipeline and stage checks, the currency rule and the timeline entry ("Qualified → New
+  (another pipeline)").
+- **No new rule:** a deal keeps its value between pipelines of one currency; to move a deal with a
+  value to a pipeline in another currency, a member clears the value first, as the service's refusal
+  says. Archived pipelines and stages are not offered and are refused.
+- **Tests:** an integration test of a successful move (value kept, timeline entry, both boards) and
+  of the refusals (a stage of another pipeline, another company's pipeline, an archived pipeline);
+  the CRM e2e test moves its deal to a second rupee pipeline. No migration.
+
+Not built: moving deals in bulk, from the board, or through the API.
+
+## ADR-235 Exporting WhatsApp orders as CSV (P4-06a) (2026-10-06)
+
+Context: Commerce → Orders lists the carts customers send from the company's WhatsApp catalog, fifty
+at a time, but a company reconciling orders with its accounts or its warehouse had no way to take
+them out of HyFib. Campaign recipients and contacts already export as CSV.
+
+Decision:
+
+- **What:** one line per order the member can see (the inbox's visibility, as the list), newest
+  first, filtered by status as the list is: the order id and reference, when it was received, its
+  status and when that changed, when it was paid, the customer's name and number, the items ("2 ×
+  Blue kurta; 1 × sku-9", product names where the catalog gave them), how many items and how many
+  could not be read, the currency and the subtotal in its major unit (exact, from minor units), and
+  the customer's note. Times are UTC, ISO 8601.
+- **Who:** `commerce.read` and `contacts.export`, since the file carries customers' names, numbers
+  and notes (owners and administrators; marketers export contacts but see no conversations, so their
+  file is empty). Numbers are shown as the member may see them (ADR-226). An erased contact's orders
+  stay in the file as "Erased contact", with neither number nor note.
+- **How:** `exportOrders` streams batches of 500 by received time and id, formula-safe (`csvLine`),
+  through `GET /c/{slug}/commerce/orders/export`, which authorizes before the first byte; each
+  export is audited (`commerce.orders_exported`, with the status filter). No migration.
+
+Not built: order reports (totals by day or product), exports through the public API, and a choice of
+columns or time zone.
+
+## ADR-236 Form bodies for automation HTTP steps (P4-02) (2026-10-06)
+
+Context: an automation's "Call a web address" step sends a JSON body, its placeholders JSON-escaped.
+Many company systems (SMS gateways, older CRMs, payment and form endpoints) take
+`application/x-www-form-urlencoded` fields instead, and a JSON body could not reach them.
+
+Decision:
+
+- **A body format per step:** `bodyFormat` is `json` (the default, and what a step without it means,
+  so every saved automation is unchanged) or `form`. A form body is written as fields, `name=value`
+  joined by `&`, already URL-encoded (`%20` or `+` for a space), with placeholders for values, for
+  example `phone={{answer.phone}}&note=Hello%20there`.
+- **Encoding:** a placeholder's value is URL-encoded in a form body (`encodeURIComponent`), as it is
+  in the address, so a customer's text can neither add a field nor end one; in a JSON body it stays
+  JSON-escaped. A form body is sent as `application/x-www-form-urlencoded`: the runner adds the
+  header to the written-ahead request, and the egress client keeps it.
+- **Checks at publish:** a form body must be fields as above (each with a name, no stray spaces, a %
+  only starting an encoded character); a Content-Type header beside it is refused, since HyFib sets
+  it. A JSON body is checked as before.
+- **Editor:** "Body format" on the step (JSON or form fields), with an example for each. No
+  migration: the format lives in the automation's graph.
+
+Not built: multipart bodies, form bodies built field by field in the editor, and secrets in bodies
+(still header values only).
+
+## ADR-237 Exporting automation runs as CSV (P4-01) (2026-10-06)
+
+Context: the runs list shows fifty runs at a time with each run's automation, version, status, end
+reason, trigger, times and counts. A company measuring its automations (how many runs hand off, fail
+or finish, by version) had to read them page by page.
+
+Decision:
+
+- **What:** one line per run the list shows, newest first, with its filters (an automation, a
+  status, "active" for running and waiting): the run id, the automation's name, the version number,
+  live or test, the status, the end reason, the trigger, when it started and ended (UTC, ISO 8601),
+  and its step and message counts.
+- **No customer data:** neither the contact nor the conversation nor the answers a run captured, so
+  the export needs only `automations.read`, as the list does; analysts and marketers export what
+  they already see. Names are formula-neutralised (`csvLine`).
+- **How:** `exportRuns` streams batches of 500 by start time and id through
+  `GET /c/{slug}/automations/runs/export`, which checks the permission and the filters before the
+  first byte; each export is audited (`automation.runs_exported`, with its filters). No migration.
+
+Not built: exporting a run's steps or captured answers, and exports through the public API.
+
+## ADR-238 Setting a custom field on every contact a filter matches (P3-01) (2026-10-06)
+
+Context: bulk tag edits (ADR-213) change one tag on every contact the contacts page's filters match.
+Custom field values (a city, a plan, a renewal date) were still set one contact at a time, or by
+importing a CSV of the contacts again with the value in a column.
+
+Decision:
+
+- **From the contacts page, beside the bulk tag edit:** a member with `contacts.write` chooses one
+  of the company's custom fields and sets one value on every contact the filters match, or clears
+  the field on all of them, the number shown in the form. The member confirms first: each contact's
+  own value is replaced, which cannot be undone.
+- **The rules of bulk tag edits:** at most 10,000 matches; in one transaction the matching contacts
+  are locked and counted again, and a count other than the one shown refuses the edit; erased
+  contacts never match.
+- **The value is checked as one contact's edit checks it:** against the field's type (text up to 500
+  characters, a number, a real date, yes or no), and an empty value clears. A field must be the
+  company's own. Contacts that already have the value (or, clearing, have none) are left untouched;
+  the result counts the contacts changed and those left as they were.
+- **Each changed contact is a change,** in the contact feed and as a `contact.updated` webhook event
+  naming the field, as when one member edits it (the triggers on the contact's values). The audit
+  entry (`contacts.bulk_field_set`) holds the field's key, whether it was cleared, the counts and
+  which filters were used, never the value or the search text.
+- **No migration;** the API is unchanged.
+
+Not built: bulk changes of consent (each contact's consent needs its own provenance; an import
+carries an attestation), of names, emails or numbers (each contact's own), bulk edits from a segment
+or through the API, choosing contacts one by one, and undo.
+
+## ADR-239 Exporting deals as CSV (P4-04) (2026-10-06)
+
+Context: the board shows the open deals of one pipeline, at most 200 per stage, and the won and lost
+lists fifty at a time. A company reviewing its pipeline in a spreadsheet, or keeping its deals
+elsewhere as well, had no way to take them out.
+
+Decision:
+
+- **What:** one line per deal the view shows, all of them, newest first: the open deals of the
+  board's pipeline with its owner filter, or the won or lost deals. Each line holds the deal id,
+  title, pipeline, stage, status, currency, value (exact, in the currency's major unit), owner, the
+  contact's name and number, expected close date, when it was created, entered its stage and closed
+  (UTC, ISO 8601), the lost reason and its open tasks.
+- **Who:** deals carry customers' names and numbers, so the export needs `contacts.export` as well
+  as `crm.read`, as the orders export does (ADR-235): owners and administrators by default. Numbers
+  are shown as the member may see them (ADR-226); an erased contact is named as such, without a
+  number. Values are formula-neutralised (`csvLine`).
+- **How:** `exportDeals` streams batches of 500 by creation time (exact to the microsecond) and id
+  through `GET /c/{slug}/crm/export`, which checks the permissions and the filters (a status, a
+  pipeline of the company, an owner) before the first byte; each export is audited
+  (`crm.deals_exported`, with its filters). No migration.
+
+Not built: importing deals, exporting tasks, notes or timelines, and exports through the public API.
+
+## ADR-240 Keyword triggers that also match small typos (P4-01) (2026-10-06)
+
+Context: keyword triggers match whole words exactly (case, punctuation and Unicode forms aside).
+Customers type on phones: "refnud", "delivry" and "cancelation" started nothing, and the
+conversation waited for a person.
+
+Decision:
+
+- **Opt-in per trigger:** "Also start when a keyword is written with a small typo" (`typos` on the
+  keyword trigger, absent before, so every saved trigger reads as it did). It applies to both modes:
+  the message is a keyword, or contains one.
+- **What counts as a small typo:** per word of the keyword, a character inserted, deleted or
+  replaced, or two neighbours swapped (optimal string alignment distance, in characters rather than
+  UTF-16 units): one in words of 5 to 8 characters, two from 9. Shorter words ("menu", "help") have
+  too many neighbours and must match exactly, and so must any word with a digit, so an order number
+  is never taken for another. The first letter must match, which keeps "border" from starting
+  "order". Words are still whole: a typo never joins or splits them.
+- **A typo never beats a match without one:** triggers rank exact keyword, contained keyword,
+  keyword with typos, new conversation, any message; a run started by a typo is still a keyword
+  start. The builder warns when no keyword word allows a typo.
+- **No migration;** the trigger is part of the automation's JSON. The API does not expose keyword
+  triggers, so it is unchanged.
+
+Not built: typos in team routing keywords and in consent keywords (an opt-out matched by similarity
+would be a guess, so consent keywords stay whole-message matches in `consent/keywords.ts`), phonetic
+or transliteration matching (Hinglish spellings), and a per-trigger tolerance setting.
+
+## ADR-241 A notice of overdue replies in the inbox (P3-06) (2026-10-06)
+
+Context: the inbox marks each overdue reply in its list, and ADR-230 emails the member responsible.
+A member working in the inbox had to scan the list, and the marks were computed when the page
+loaded: a customer whose wait passed the target while the member read a thread stayed unmarked until
+something else refreshed the page.
+
+Decision:
+
+- **Where:** above the conversation list on the inbox, conversation and mentions pages, for members
+  with inbox access: "3 customers are waiting past the reply target, 1 of them assigned to you",
+  with a link to the open conversations by longest wait.
+- **Whose waits:** those of the open conversations the member can see, by the inbox's own rule (all
+  of them with `inbox.read_all`; the member's own and the unassigned ones with
+  `inbox.read_assigned`), each due as the list computes it (the first-response target, in business
+  hours when they are on). None without a target.
+- **Following the clock:** `waitingReplies` gives the page the due times of at most the 200 earliest
+  waits and whether each is the member's, nothing else (no customer, conversation or message); the
+  notice counts those past due every 10 seconds in the browser, so a wait turning overdue shows
+  without a reload, and live updates bring new waits. When more customers wait than came and all
+  that came are overdue, it says "at least". The first render uses the server's time, so the page
+  matches its HTML.
+- **No migration;** the API is unchanged.
+
+Not built: a notice outside the inbox (the navigation or other pages), a sound or browser
+notification, per-team targets, and presence of members.
+
+## ADR-242 Stage chances of winning and a weighted forecast on the CRM board (P4-04) (2026-10-06)
+
+Context: the board totals each stage's open deals at full value, so a pipeline full of early-stage
+deals looked as valuable as one about to close, and there was no figure for what the month was
+likely to bring.
+
+Decision:
+
+- **A chance per stage:** owners and administrators may give each stage, in Settings → Pipelines, a
+  whole-percentage chance of winning its deals (`crm_stages.win_percent`, 0 to 100, empty by
+  default; migration 0156). A new pipeline's stages take one with their names; saving a pipeline
+  without a stage's chance keeps it. Like the rest of a pipeline, it is a company setting
+  (`tenant.settings.manage`, the update audited as before).
+- **On the board:** each stage with a chance shows it and its open deals' value times it (rounded to
+  the minor unit). Above the columns, when any stage has a chance: the weighted pipeline (the sum
+  over stages with a chance) and the weighted value of the deals expected to close by the end of the
+  month in the company's time zone (a past expected date included), with the board's owner filter.
+  Stages that hold open deals but have no chance are left out and counted, so the figure never looks
+  complete when it is not.
+- **Additive:** a nullable column without a default; the account export includes it. The API is
+  unchanged.
+
+Not built: chances per deal, forecasts in Reports or by month further ahead, won and lost history to
+suggest chances, and the forecast through the API.
+
+## ADR-243 Members who have a conversation open (P3-06) (2026-10-06)
+
+Context: nothing told a member that a teammate was reading the same conversation, so two members
+could answer the same customer at once; the send-time collision warning only refused the second
+reply after it was written.
+
+Decision:
+
+- **Reports from the page:** while a conversation's page is open and visible, it reports to
+  `/api/c/<company>/inbox/<conversation>/presence` every 20 seconds, at once when it becomes visible
+  again, and says the member left (DELETE, kept alive past the page) when the member moves to
+  another conversation or leaves the page. The route takes the member's session and HyFib's own
+  origin only.
+- **What the member sees:** the answer names the other active members reported within 45 seconds
+  (two reports, so one late report does not hide anyone) who can see the conversation by the inbox's
+  rule now, first three by name and the rest counted ("Ravi also has this conversation open."). A
+  report that fails says so instead of showing nobody. A member reports and hears only about
+  conversations they can see; another company's conversation, or one they lost sight of, is not
+  found.
+- **Storage:** one row per member and conversation in `app.conversation_viewers` (migration 0157):
+  ids and a time, nothing about the customer, its time moved forward by each report. Leaving deletes
+  the member's row; the worker's minute sweep deletes rows not reported for an hour through
+  `ops.purge_conversation_viewers`, a definer function whose policies let it see only such rows. The
+  rows are deleted with the company and left out of the account export.
+
+Not built: who is typing a reply or a note, presence in the conversation list, and presence through
+the API or webhooks.
+
+## ADR-244 Automation steps that create a CRM task (P4-01, P4-04) (2026-10-06)
+
+Context: an automation could answer, ask, tag and hand over, but a conversation that ended with
+"please call me" left nothing in the CRM: someone had to read the run and create the task by hand.
+
+Decision:
+
+- **The step:** "Create a CRM task" (`create_task`) has a title (up to 200 characters, with the
+  placeholders of a message: the contact's name, the company, answers, order fields or the call's
+  inputs), the member it is for, and an optional due time 1 hour to 90 days after the step runs. The
+  title is filled in when the step runs, on one line. The run goes on to the next step.
+- **Who the task is for:** a chosen member, who must be an active member who can use the CRM when
+  the automation is published and when the step runs. During a run the conversation is unassigned (a
+  member taking it ends the run), so "the conversation's assignee" is not offered.
+- **Created as the automation:** a task records the automation that created it
+  (`crm_tasks.created_by_automation_id`; migration 0158 makes `created_by_membership_id` nullable
+  and checks that exactly one creator is set) and is about the run's contact; its `task_created`
+  activity has no member as actor and names the automation and the run, and the timeline says "by an
+  automation". No member is impersonated.
+- **When no task is created:** a member who left or can no longer use the CRM, an erased contact, or
+  a title whose placeholders filled in nothing: the step is logged as skipped with the reason (a new
+  step outcome, `skipped`; a created task is `created`), and the run goes on, so a change in the
+  team never stops a conversation with a customer. A test run creates its task too, like its other
+  changes.
+- **Permission:** publishing or testing an automation with a task step needs `crm.write`, as
+  creating a task does, as publishing marketing templates needs `campaigns.send`.
+- **Migrations:** 0158 adds the column and, NOT VALID, the creator check, the foreign key to the
+  automation and the run steps' outcome check with `created` and `skipped`; 0159 validates them
+  without blocking writes.
+
+Not built: steps that create deals, a reminder email for an automation's task, tasks for the
+conversation's team or in turn, and a link from the task to the run.
+
+## ADR-245 Automation steps that create a CRM deal (P4-01, P4-04) (2026-10-06)
+
+Context: after ADR-244 an automation could ask for a follow-up, but a customer who showed interest
+still reached the pipeline only when a member created the deal by hand.
+
+Decision:
+
+- **The step:** "Create a CRM deal" (`create_deal`) has a title (up to 120 characters, with the
+  placeholders of a message), a stage of an active pipeline, an optional value typed in the
+  pipeline's currency (read exactly by the CRM's money rules) and an optional owner. The deal is for
+  the run's contact and from the run's conversation, in the chosen stage, created by the automation
+  as tasks are (`crm_deals.created_by_automation_id`, migrations 0160 and 0161 with the same NOT
+  VALID then VALIDATE steps as 0158 and 0159). Its `deal_created` activity has no member actor and
+  names the automation and the run; the deal page says "by an automation".
+- **One open deal per pipeline:** no deal is created when the contact already has an open deal in
+  that pipeline, so a customer who asks twice is not counted twice; runs of the same contact in two
+  conversations take the contact's row lock one after the other.
+- **When the company changed:** an archived pipeline or stage, an erased contact, an open deal or an
+  empty title skips the step (logged as `skipped` with the reason); an owner who can no longer use
+  the CRM, or a value that is no longer an amount in the pipeline's currency, is left out of the
+  deal with a note. The run goes on in every case. Publishing checks the stage, the value and the
+  owner; publishing or testing needs `crm.write`, as for task steps.
+
+Not built: moving an existing deal from an automation, setting the expected close date, and choosing
+what happens when an open deal exists (update it, or create another).
+
+## ADR-246 Reminder emails for the tasks automations create (P4-01, P4-04) (2026-10-06)
+
+Context: a task an automation created (ADR-244) reached its member only through the CRM's task list,
+while a member creating a task can ask for a reminder email.
+
+Decision:
+
+- A task step may ask to email the member a reminder when the task is due (`remind`, only with a due
+  time; publishing refuses a reminder without one). The task is created with its reminder at the due
+  time and the `crm.reminder` job queued in the step's transaction, exactly as a member's task with
+  a reminder, so the reminder rules apply unchanged: it is sent once, only while the task is open
+  and the member can still use the CRM, and not when more than a day late. Versions saved before
+  have no `remind` and send no reminder. No migration.
+
+Not built: a reminder at another time than the due time, and reminders for the deals automations
+create.
+
+## ADR-247 An expected close date from deal steps (P4-01, P4-04) (2026-10-06)
+
+Context: the board's forecast of the month (ADR-242) counts deals by their expected close date,
+which deals created by automations (ADR-245) never had.
+
+Decision:
+
+- A deal step may expect the deal to close a number of days after the step runs (0 to 365,
+  `closeInDays`), counted on the company's calendar in its time zone (`localDateAfter`), so a step
+  run late in the evening in India counts from the Indian date. Versions saved before have no
+  expected date. No migration.
+
+Not built: a date from an answer or an order, and moving the date when the deal changes stage.
+
+## ADR-248 Automation steps that send a WhatsApp form (P4-01, P4-03) (2026-10-06)
+
+Context: a form (WhatsApp Flows, ADR-045) could be sent only by a member from a conversation, so an
+automation answering a customer could not hand them a form to fill in.
+
+Decision:
+
+- **The step:** "Send a form" (`send_flow`) sends one of the company's published forms in the
+  conversation the run answers, with a message (up to 1,024 characters, with the placeholders of a
+  message), an optional header and footer (60 characters each) and a button text (30), the limits of
+  a member's form. It is a session message like a text: it needs the 24-hour window, follows a
+  customer's reply in automations started by a store or the API, and counts against the run's
+  message budget.
+- **Sent like a member's form:** after a text's checks (an active number, an open window, a
+  WhatsApp number for the contact), the runner queues it through the send pipeline with a new flow
+  token recorded for the conversation and contact (`flow_sends`, with no member), so the customer's
+  answers are applied to the contact as the form maps them. The message is the bot's and names the
+  run.
+- **When the form or the plan changed:** publishing needs a form published at Meta (or throttled),
+  of the WhatsApp account of the automation's number when it has one; the run checks again when it
+  sends, and a form archived, no longer published or of another account than the number ends the run
+  with `send_blocked` (`flow_unavailable`), passing the conversation to people, as for a text that
+  cannot be sent. As in the inbox, the company's plan must include WhatsApp Flows: publishing or
+  testing such an automation is refused without it, and a run ends with `flows_not_in_plan` when the
+  plan no longer includes it. No migration.
+
+Not built: forms from campaigns and templates, a draft form sent by a test run, waiting for the
+form's answers before the run goes on, and branching on them.
+
+## ADR-249 Task and deal steps follow the plan's CRM (P4-01, P4-04) (2026-10-06)
+
+Context: a plan without the CRM takes away writing it (ADR-051: `crm.write` leaves the members'
+permissions; read access stays). Publishing a task or deal step needs `crm.write`, so a company
+without the CRM could not publish one, but an automation published before a change of plan kept
+creating tasks and deals that no member of the company could create any more.
+
+Decision:
+
+- Task and deal steps check the company's plan when they run: without the CRM the step creates
+  nothing, is logged as `skipped` with `crm_not_in_plan`, and the run goes on, as other CRM steps
+  that create nothing do, and as order messages are skipped when the plan leaves out commerce.
+- Publishing or testing such an automation says that the plan does not include the CRM, before the
+  permission check. No migration.
+
+Not built: a notice to the company when its automations skip steps after a change of plan.

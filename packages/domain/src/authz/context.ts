@@ -8,6 +8,7 @@ import {
   tenants,
   users,
   type Database,
+  type MaskableRole,
   type PlanModule,
   type TenantPlanStatus,
   type TenantRole,
@@ -25,6 +26,7 @@ import {
 import {
   ALLOWED_WHEN_SUSPENDED,
   ALLOWED_WITHOUT_MFA,
+  ROLE_PERMISSIONS,
   isPrivileged,
   permissionsForRoles,
   type Permission,
@@ -45,6 +47,8 @@ export interface TenantContext {
     locale: string;
     billingMode: 'direct_meta' | 'partner_billed';
     requireMfaAllMembers: boolean;
+    /** The roles whose members see customers' numbers masked (ADR-226). */
+    maskedNumberRoles: readonly MaskableRole[];
   };
   readonly user: { id: string; email: string; name: string; twoFactorEnabled: boolean };
   readonly membership: { id: string; roles: TenantRole[]; joinedAt: Date };
@@ -108,6 +112,7 @@ export async function resolveTenantContext(
           locale: tenants.locale,
           billingMode: tenants.billingMode,
           requireMfaAllMembers: tenants.requireMfaAllMembers,
+          maskedNumberRoles: tenants.maskedNumberRoles,
           membershipId: memberships.id,
           roles: memberships.roles,
           membershipStatus: memberships.status,
@@ -151,6 +156,9 @@ export async function resolveTenantContext(
     if (entitlements.modules.has(module)) continue;
     for (const permission of MODULE_WRITE_PERMISSIONS[module]) effective.delete(permission);
   }
+  // Customers' numbers whole only through a role the company does not mask (ADR-226).
+  if (!seesNumbersWhole(row.roles, row.maskedNumberRoles))
+    effective.delete('contacts.view_numbers');
   if (row.status !== 'active')
     effective = new Set([...effective].filter((p) => ALLOWED_WHEN_SUSPENDED.has(p)));
   if (mfaBlocking) effective = new Set([...effective].filter((p) => ALLOWED_WITHOUT_MFA.has(p)));
@@ -165,6 +173,7 @@ export async function resolveTenantContext(
       locale: row.locale,
       billingMode: row.billingMode,
       requireMfaAllMembers: row.requireMfaAllMembers,
+      maskedNumberRoles: row.maskedNumberRoles,
     },
     user: {
       id: input.userId,
@@ -187,6 +196,22 @@ export async function resolveTenantContext(
     correlationId: input.correlationId,
     scope: authorizedTenantScope(row.tenantId, input.userId),
   };
+}
+
+/**
+ * Whether a member with these roles sees customers' numbers whole when the company masks them for
+ * `masked` (ADR-226): through any role that grants it and is not masked. Owners and administrators
+ * cannot be masked.
+ */
+export function seesNumbersWhole(
+  roles: readonly TenantRole[],
+  masked: readonly MaskableRole[],
+): boolean {
+  return roles.some(
+    (role) =>
+      ROLE_PERMISSIONS[role].has('contacts.view_numbers') &&
+      !(masked as readonly TenantRole[]).includes(role),
+  );
 }
 
 export function can(ctx: TenantContext, permission: Permission): boolean {
@@ -228,6 +253,11 @@ export function assertCan(ctx: TenantContext, permission: Permission): void {
         `Your company's plan does not include ${PLAN_MODULE_LABELS[module]}. Ask HyFib to change the plan.`,
       );
     }
+    if (permission === 'contacts.view_numbers') throw new AppError('forbidden', NUMBERS_HIDDEN);
   }
   throw forbidden();
 }
+
+/** Why a member whose company masks customers' numbers cannot do what needs them whole. */
+export const NUMBERS_HIDDEN =
+  "Your company hides customers' phone numbers from your role, so this is unavailable. Ask an owner or administrator.";

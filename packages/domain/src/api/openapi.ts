@@ -38,6 +38,7 @@ import {
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
+  contactMergedPayloadSchema,
   contactsLeftOutSchema,
   messageContactsSchema,
   contactUpdatedPayloadSchema,
@@ -87,7 +88,9 @@ import {
   API_CONTACT_SEARCH_WINDOW,
   MAX_FIELD_FILTERS,
   apiContactFieldSchema,
+  apiContactMergeResultSchema,
   apiContactUpdateSchema,
+  apiMergeContactsSchema,
   apiUpdateManyContactsSchema,
 } from './contacts';
 import {
@@ -139,7 +142,21 @@ export const apiTemplateSchema = z.object({
   variables: z.object({
     header: z.number().int().describe('How many header values the template needs (0 or 1).'),
     body: z.number().int().describe('How many body values the template needs.'),
+    buttons: z
+      .number()
+      .int()
+      .describe('How many ends of links the template needs (0 to 2): one for each of its `links`.'),
   }),
+  links: z
+    .array(
+      z.object({
+        button: z.string().describe('The website button’s text.'),
+        url: z.string().describe('Its link, ending with {{1}} where the value a send gives goes.'),
+      }),
+    )
+    .describe(
+      'The template’s website buttons whose link ends with a value, in the order a send gives their values in `variables.buttons`; empty for other templates.',
+    ),
   headerMedia: z
     .enum(TEMPLATE_HEADER_MEDIA)
     .nullable()
@@ -722,7 +739,13 @@ export const apiErrorSchema = z.object({
       .string()
       .optional()
       .describe(
-        'A finer reason: automation_busy, automation_limit, automation_paused, automation_quota, automation_unavailable, channel_unavailable, conversation_assigned, idempotency_key_reused, ip_not_allowed, key_quota_exceeded, not_in_plan, quota_exceeded or window_closed.',
+        'A finer reason: automation_busy, automation_limit, automation_paused, automation_quota, automation_unavailable, channel_unavailable, contact_merged, conversation_assigned, idempotency_key_reused, ip_not_allowed, key_quota_exceeded, not_in_plan, quota_exceeded or window_closed.',
+      ),
+    mergedInto: z
+      .uuid()
+      .optional()
+      .describe(
+        'With reason contact_merged: the contact the requested one was merged into, as it is now (GET /contacts/{id}).',
       ),
     issues: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
   }),
@@ -792,6 +815,10 @@ const pageOf = (schema: string) =>
 
 const scopeNote = (...scopes: string[]) => `Scope: ${scopes.map((s) => `\`${s}\``).join(' or ')}.`;
 
+/** How a contact merged into another answers (ADR-225). */
+const MERGED_CONTACT_NOTE =
+  'A contact merged into another is not found: 404 with reason `contact_merged`, and `mergedInto` naming the contact it belongs to now.';
+
 const retrySchedule = WEBHOOK_RETRY_SECONDS.map((seconds) =>
   seconds < 3_600 ? `${seconds / 60} min` : `${seconds / 3_600} h`,
 ).join(', ');
@@ -845,7 +872,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listTemplates',
           summary: 'Approved templates that can be sent',
-          description: `${scopeNote('templates.read')} Approved utility and marketing templates that HyFib can send, with how many values their variables need and, for a header that is a photo, a video or a document, which file a send gives (\`headerMedia\`).`,
+          description: `${scopeNote('templates.read')} Approved utility and marketing templates that HyFib can send, with how many values their variables need, for a header that is a photo, a video or a document, which file a send gives (\`headerMedia\`), and the website buttons whose link ends with a value a send gives (\`links\`).`,
           responses: {
             '200': {
               description: 'The templates.',
@@ -977,7 +1004,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'searchContacts',
           summary: 'Contacts matching conditions, as segments find them, newest first',
-          description: `${scopeNote('contacts.read')} Finds contacts with segments' conditions and comparisons: the contact's name, custom field values, tags, consent, the day a contact was added (in the company's time zone), where it came from and its country calling code, whether it wrote in the last days (\`last_message\`, which also needs \`conversations.read\`) and what happened to a campaign's message to it (\`campaign\`, which also needs \`campaigns.read\`), matching all of them or any. Conditions can also be put in groups a contact matches together, all of a group's conditions or any (\`type\` \`group\`, with its own \`match\`), so a search can ask for all of some conditions and any of others: a group holds conditions, not groups, and a search holds at most ${SEGMENT_LIMITS.conditions} conditions in all, those in groups included. Answers as GET /contacts does: newest first, erased contacts left out, pages that never skip or repeat a contact. Each page reads at most ${API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US')} of the company's contacts: when the conditions leave out most of them, a page can hold fewer contacts than \`limit\`, or none, and still give a \`nextCursor\`; send the same conditions with it until it is \`null\`. A condition the company's fields do not allow, or a campaign it does not have, is refused, naming it (like \`conditions.1.key\`, or \`conditions.2.conditions.0.key\` in a group). It only reads, so no \`Idempotency-Key\` is needed.`,
+          description: `${scopeNote('contacts.read')} Finds contacts with segments' conditions and comparisons: the contact's name, custom field values, tags, consent, the day a contact was added (in the company's time zone), where it came from and its country calling code, whether it wrote in the last days (\`last_message\`, which also needs \`conversations.read\`), what happened to a campaign's message to it (\`campaign\`, which also needs \`campaigns.read\`), and the orders it placed in the company's stores or what they totalled in a currency (\`orders\` and \`spend\`, which also need \`orders.read\`), matching all of them or any. Conditions can also be put in groups a contact matches together, all of a group's conditions or any (\`type\` \`group\`, with its own \`match\`), so a search can ask for all of some conditions and any of others: a group holds conditions, not groups, and a search holds at most ${SEGMENT_LIMITS.conditions} conditions in all, those in groups included. Answers as GET /contacts does: newest first, erased contacts left out, pages that never skip or repeat a contact. Each page reads at most ${API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US')} of the company's contacts: when the conditions leave out most of them, a page can hold fewer contacts than \`limit\`, or none, and still give a \`nextCursor\`; send the same conditions with it until it is \`null\`. A condition the company's fields do not allow, or a campaign or store it does not have, is refused, naming it (like \`conditions.1.key\`, or \`conditions.2.conditions.0.key\` in a group). It only reads, so no \`Idempotency-Key\` is needed.`,
           requestBody: { required: true, content: json(ref('ContactSearch')) },
           responses: {
             '200': { description: 'A page of contacts.', content: pageOf('Contact') },
@@ -989,7 +1016,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'getContact',
           summary: 'A contact',
-          description: scopeNote('contacts.read'),
+          description: `${scopeNote('contacts.read')} ${MERGED_CONTACT_NOTE}`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           responses: {
             '200': { description: 'The contact.', content: json(dataOf(ref('Contact'))) },
@@ -999,7 +1026,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         patch: {
           operationId: 'updateContact',
           summary: 'Change a contact’s name, email, number, custom fields or tags',
-          description: `${scopeNote('contacts.write')} A field's value must have its type (GET /contact-fields); a refusal names \`fields.<key>\` and saves nothing. Tags are lower-cased, 50 at most per contact. A number changes only when it was typed for the contact, as members change it: one WhatsApp gave (the contact wrote to one of the company's numbers) is the contact's identity and is refused with 412, as is a number on the company's suppression list; a number another contact has is refused with 409, without naming that contact. POST /contacts/update-many changes numbers too; the same change for many contacts does not. What the contact already has changes nothing, so a retry is safe without an \`Idempotency-Key\`. Erased contacts are not found.`,
+          description: `${scopeNote('contacts.write')} A field's value must have its type (GET /contact-fields); a refusal names \`fields.<key>\` and saves nothing. Tags are lower-cased, 50 at most per contact. A number changes only when it was typed for the contact, as members change it: one WhatsApp gave (the contact wrote to one of the company's numbers) is the contact's identity and is refused with 412, as is a number on the company's suppression list; a number another contact has is refused with 409, without naming that contact. POST /contacts/update-many changes numbers too; the same change for many contacts does not. What the contact already has changes nothing, so a retry is safe without an \`Idempotency-Key\`. Erased contacts are not found. ${MERGED_CONTACT_NOTE}`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           requestBody: { required: true, content: json(ref('ContactUpdate')) },
           responses: {
@@ -1039,7 +1066,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           operationId: 'updateMatchingContacts',
           summary: 'Change the contacts a search finds, a page at a time',
           description: [
-            `Scopes: \`contacts.read\` and \`contacts.write\`; a \`last_message\` condition also needs \`conversations.read\`, and a \`campaign\` condition \`campaigns.read\`, as for POST /contacts/search. Takes a search's conditions, groups included, and a change: custom field values (\`fields\`) and tags (\`addTags\`, \`removeTags\`), the same for every contact.`,
+            `Scopes: \`contacts.read\` and \`contacts.write\`; a \`last_message\` condition also needs \`conversations.read\`, a \`campaign\` condition \`campaigns.read\`, and an \`orders\` or \`spend\` condition \`orders.read\`, as for POST /contacts/search. Takes a search's conditions, groups included, and a change: custom field values (\`fields\`) and tags (\`addTags\`, \`removeTags\`), the same for every contact.`,
             `Each call reads one page of the contacts POST /contacts/search finds with the same conditions (newest first, at most ${API_LIMITS.contactsPerChange} contacts, read in windows of ${API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US')}), changes each of them as PATCH /contacts/{id} changes one and answers them as they now are with \`nextCursor\`: send the same conditions and change with it until it is \`null\`. A page is found by the conditions as they are when it is read, so a contact the change takes out of the search is not read again.`,
             'A field the company does not have, a value of another type, or a contact the change would give more than 50 tags refuses the call (422, naming the part, as `change.fields.plan`), and nothing is changed. The page is read and changed in one transaction: when a contact on it is changed by someone else at the same moment, the call can be refused as a whole (409, changing nothing): send it again with the same cursor. What a contact already has changes nothing, and a contact the change took out of the search is not found again, so a call sent again after a lost answer is safe without an `Idempotency-Key`: the pages still reach every contact the search finds, each changed once. A call counts as one request against the rate and monthly limits.',
           ].join('\n\n'),
@@ -1114,7 +1141,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listContactChanges',
           summary: 'Contacts in the order they changed',
-          description: `${scopeNote('contacts.read')} Every contact whose name, number, email, custom field values, tags or consent changed, or that was added or erased, once, as it is now, in the order the changes were saved. Start without a cursor to read every contact the company has; keep \`nextCursor\` and ask again with it to read what changed since. No change is skipped: a change appears once every change saved before it has finished, and a contact changed again appears again. Read pages until \`hasMore\` is false, then ask again later with the last \`nextCursor\`. A cursor works only for the company that read it.`,
+          description: `${scopeNote('contacts.read')} Every contact whose name, number, email, custom field values, tags or consent changed, that was added or erased, or that another contact was merged into, once, as it is now, in the order the changes were saved. A merged contact is not read again: the contact it was merged into is, naming it in \`mergedContactIds\`. Start without a cursor to read every contact the company has; keep \`nextCursor\` and ask again with it to read what changed since. No change is skipped: a change appears once every change saved before it has finished, and a contact changed again appears again. Read pages until \`hasMore\` is false, then ask again later with the last \`nextCursor\`. A cursor works only for the company that read it.`,
           parameters: [
             {
               name: 'limit',
@@ -1156,7 +1183,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'recordConsent',
           summary: 'Record an opt-in or opt-out',
-          description: `${scopeNote('contacts.write')} Recorded with its evidence as consent from the API; marketing templates need the contact's marketing opt-in.`,
+          description: `${scopeNote('contacts.write')} Recorded with its evidence as consent from the API; marketing templates need the contact's marketing opt-in. ${MERGED_CONTACT_NOTE}`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           requestBody: { required: true, content: json(ref('Consent')) },
           responses: {
@@ -1165,6 +1192,25 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('Contact'))),
             },
             ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/contacts/{id}/merge': {
+        post: {
+          operationId: 'mergeContacts',
+          summary: 'Merge another contact of the same person into this one',
+          description: `${scopeNote('contacts.merge')} Everything of \`mergeContactId\` moves to the contact the path names: its WhatsApp identities, conversations, consent history, tags, deals, tasks and notes, orders, campaign sends, automation runs and Flow answers. The kept contact keeps its name, number, email and custom field values and takes the other's where it has none; an opt-out of either stands, and no opt-in is added. The merged contact is then deleted, which cannot be undone: its id answers 404 with reason \`contact_merged\` and \`mergedInto\`. Refused with 409 for the same contact twice, an erased contact, or a message to the merged contact being sent (try again in a minute), and with 412 when both have a phone number (a contact keeps one), both have a conversation on the same WhatsApp number, they have more than 50 tags between them, or both were sent the same campaign. Endpoints taking \`contact.merged\` are sent the merge. With an \`Idempotency-Key\`, a retry answers the first response. ${MERGED_CONTACT_NOTE}`,
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKeyOptional' },
+          ],
+          requestBody: { required: true, content: json(ref('ContactMerge')) },
+          responses: {
+            '200': {
+              description: 'The contact kept, the contact merged, and what moved.',
+              content: json(dataOf(ref('ContactMergeResult'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
           },
         },
       },
@@ -1181,6 +1227,7 @@ export function buildOpenApiDocument(serverUrl: string) {
             'A text, buttons, a list, products, media, a location or contacts can quote a message of the conversation with `replyTo`, its id from `GET /conversations/{id}/messages`, the `message.received` webhook or a send’s response: a message the contact sent, or one the business sent that WhatsApp accepted. A reaction (`type` `reaction`) puts one emoji on a message the contact sent in the last 30 days; reactions cannot be taken back through the API. A message of another conversation, or one that cannot be quoted or reacted to, is refused (422, `replyTo`).',
             'Media (`image`, `video`, `audio`, `document` or `sticker`) is sent from an https:// `link` that WhatsApp fetches when it sends the message, reachable from the internet without signing in; HyFib neither fetches nor keeps the media, and stores the link with the message. A photo, a video or a document may carry a `caption` of up to 1,024 characters; audio and stickers take none, and WhatsApp decides whether a file can be a sticker. A link WhatsApp cannot fetch, or media it does not accept, makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error. In place of a link, a photo, a video, audio or a document may name a file uploaded with `POST /media` for the number it is sent from in the last 30 days (`mediaId`); the file is sent as WhatsApp keeps it, a document under the name it was uploaded with.',
             'A template whose header is a photo, a video or a document (its `headerMedia` in GET /templates) needs the file in `headerMedia`: an https:// `link` that WhatsApp fetches when it sends the message, as for media below, shown without a caption. Documents must be PDF files. HyFib neither fetches nor keeps the file, and stores the link with the message. Other templates take no file (422, `headerMedia`). A file WhatsApp cannot fetch, or does not accept, makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
+            'A template whose website buttons’ links end with a value (its `links` in GET /templates) needs the end of each link in `variables.buttons`, in the order of `links`: it replaces the link’s {{1}}, holds no spaces and cannot change the website the button opens (422, naming the value, as `variables.buttons.0`). The message keeps the links as sent. Other templates take none.',
             'A location (`location`) is a place given by its `latitude` and `longitude` in decimal degrees, with its `name` and `address` if wanted, up to 1,000 characters each, all stored with the message. A location WhatsApp does not accept makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
             'Contacts (`contacts`) share 1 to 5 contact cards, as Meta’s spec describes them: each with a `name` (its `formattedName` and at least one other part) and, if wanted, `phones`, `emails`, `urls` and `addresses` (up to 5 of each, each with a `type` of HOME or WORK if wanted), an `org` and a `birthday` (YYYY-MM-DD); each text up to 256 characters, a link up to 2,000. Messages read back give them in `contacts`, as they give the cards customers share. A card WhatsApp does not accept makes the message fail: `GET /messages/{id}` and the `message.status` webhook report it with WhatsApp’s error.',
             'Buttons (up to 3) and lists (up to 10 rows) carry ids you choose: when the customer taps one, the `message.received` webhook gives it as `reply.id`, with `reply.type` (`button` or `list`). Ids cannot start with `w360`, which HyFib’s own buttons use.',
@@ -1260,7 +1307,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           description: [
             `${scopeNote('messages.send', 'messages.send_marketing')} Utility templates need \`messages.send\`, marketing templates \`messages.send_marketing\`. Sends the template to up to ${API_LIMITS.messagesPerSend} numbers, each with the values of its variables and each as POST /messages sends a template: the contact is created when new, and consent, the suppression list and the marketing frequency cap are checked for each. The call counts as one request against the rate and monthly limits, within the 64 KB a body may hold.`,
             'Each number is answered in its place, in the order given, with its message, queued, or with why it was not (the contact erased, opted out, on the suppression list or without the marketing opt-in the company asks for, or at the marketing frequency cap): a refused number changes nothing, a contact created for it included, and the others are still sent. Messages queued together may leave in any order.',
-            'Refused as a whole, sending nothing: a template or a WhatsApp number that cannot send (as for one message), a number that is not valid or given twice, values that do not fill the template’s variables, or a header file missing or given when the template takes none (422, naming the place, as `messages.3.variables` or `messages.3.headerMedia`). One call per `Idempotency-Key`: a retry answers as the first request did.',
+            'Refused as a whole, sending nothing: a template or a WhatsApp number that cannot send (as for one message), a number that is not valid or given twice, values that do not fill the template’s variables, the end of a link a button cannot open, or a header file missing or given when the template takes none (422, naming the place, as `messages.3.variables`, `messages.3.variables.buttons.0` or `messages.3.headerMedia`). One call per `Idempotency-Key`: a retry answers as the first request did.',
             'The call is one transaction holding the conversations it sends in until it ends. When it collides with another call taking several of them at the same moment in another order (another send to many numbers, say), it can be refused as a whole (409, sending nothing): send it again with the same `Idempotency-Key`.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],
@@ -1497,7 +1544,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'createCampaign',
           summary: 'Create a campaign draft',
-          description: `${scopeNote('campaigns.write')} A draft with the settings given, checked as members' drafts are: the number, template and segment must be the company's (a segment not archived), and conditions are checked by segments' rules (a field's comparisons by its type, a campaign of the company). Settings left out start as a member's new draft does: no number, template or audience, starting at once once submitted, in the company's time zone, sending for 24 hours. A draft sends nothing: a member submits it in the app, or a key submits it for a member's approval (POST /campaigns/{id}/submit), and it sends under the authority of a member allowed to send campaigns; a submission checks what a draft needs (an approved template of the number's WhatsApp account, every variable filled, an audience). Its history in the app names the key. One draft per \`Idempotency-Key\`: a retry answers with the draft as first created.`,
+          description: `${scopeNote('campaigns.write')} A draft with the settings given, checked as members' drafts are: the number, template and segment must be the company's (a segment not archived), and conditions are checked by segments' rules (a field's comparisons by its type, a campaign or store of the company; an \`orders\` or \`spend\` condition also needs \`orders.read\`). Settings left out start as a member's new draft does: no number, template or audience, starting at once once submitted, in the company's time zone, sending for 24 hours. A draft sends nothing: a member submits it in the app, or a key submits it for a member's approval (POST /campaigns/{id}/submit), and it sends under the authority of a member allowed to send campaigns; a submission checks what a draft needs (an approved template of the number's WhatsApp account, every variable filled, an audience). Its history in the app names the key. One draft per \`Idempotency-Key\`: a retry answers with the draft as first created.`,
           parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
           requestBody: { required: true, content: json(ref('CreateCampaign')) },
           responses: {
@@ -1683,7 +1730,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'createSegment',
           summary: 'Create a saved segment',
-          description: `${scopeNote('campaigns.write')} A segment with the name and conditions given, as members create them on the Segments page: each condition is checked as POST /contacts/search checks it (a custom field of the company and a comparison its type takes, a valid tag or date, a campaign of the company), and a problem is refused with 422 naming the condition, like \`definition.conditions.1.key\`. A name another segment of the company has, whatever its case, is refused with 409. Members see it on the Segments page; the audit names the key. One segment per \`Idempotency-Key\`: a retry answers with the segment as first created.`,
+          description: `${scopeNote('campaigns.write')} A segment with the name and conditions given, as members create them on the Segments page: each condition is checked as POST /contacts/search checks it (a custom field of the company and a comparison its type takes, a valid tag or date, a campaign or store of the company; an \`orders\` or \`spend\` condition also needs \`orders.read\`), and a problem is refused with 422 naming the condition, like \`definition.conditions.1.key\`. A name another segment of the company has, whatever its case, is refused with 409. Members see it on the Segments page; the audit names the key. One segment per \`Idempotency-Key\`: a retry answers with the segment as first created.`,
           parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
           requestBody: { required: true, content: json(ref('CreateSegment')) },
           responses: {
@@ -1750,7 +1797,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listSegmentContacts',
           summary: 'The contacts a saved segment holds now, newest first',
-          description: `${scopeNote('campaigns.read')} Also needs \`contacts.read\`, and \`conversations.read\` for a segment with a \`last_message\` condition, as POST /contacts/search does. The segment's conditions are read now as members' segment page and campaigns read them, with dates in the company's time zone, and its contacts answered as POST /contacts/search answers them: newest first, erased contacts left out, pages that never skip or repeat a contact. Each page reads at most ${API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US')} of the company's contacts, so a page can hold fewer contacts than \`limit\`, or none, and still give a \`nextCursor\`: follow it until it is \`null\`. A segment with a \`problem\` (GET /segments/{id}) is refused with 412 saying it; an archived segment and another company's are not found.`,
+          description: `${scopeNote('campaigns.read')} Also needs \`contacts.read\`, \`conversations.read\` for a segment with a \`last_message\` condition and \`orders.read\` for one with an \`orders\` or \`spend\` condition, as POST /contacts/search does. The segment's conditions are read now as members' segment page and campaigns read them, with dates in the company's time zone, and its contacts answered as POST /contacts/search answers them: newest first, erased contacts left out, pages that never skip or repeat a contact. Each page reads at most ${API_CONTACT_SEARCH_WINDOW.toLocaleString('en-US')} of the company's contacts, so a page can hold fewer contacts than \`limit\`, or none, and still give a \`nextCursor\`: follow it until it is \`null\`. A segment with a \`problem\` (GET /segments/{id}) is refused with 412 saying it; an archived segment and another company's are not found.`,
           parameters: [{ $ref: '#/components/parameters/Id' }, ...pageParams],
           responses: {
             '200': { description: 'A page of contacts.', content: pageOf('Contact') },
@@ -2347,6 +2394,12 @@ export function buildOpenApiDocument(serverUrl: string) {
         WEBHOOK_EVENT_INFO['contact.erased'].description,
         'WebhookContactErased',
       ),
+      'contact.merged': webhook(
+        'webhookContactMerged',
+        WEBHOOK_EVENT_INFO['contact.merged'].label,
+        `${WEBHOOK_EVENT_INFO['contact.merged'].description} One event per merge. The merged contact's id is no longer found: GET /contacts/{id} answers 404 with reason \`contact_merged\` and \`mergedInto\`, the contact it belongs to now. What the merge changed of the kept contact is sent as contact.updated; a contact.created or contact.updated of the merged contact not yet delivered is not sent.`,
+        'WebhookContactMerged',
+      ),
       'automation.run_started': webhook(
         'webhookAutomationRunStarted',
         WEBHOOK_EVENT_INFO['automation.run_started'].label,
@@ -2504,10 +2557,18 @@ export function buildOpenApiDocument(serverUrl: string) {
               oneOf: [ref('Contact'), { type: 'null' }],
               description: 'The contact as it is now; null once it was erased.',
             },
+            mergedContactIds: {
+              type: 'array',
+              items: { type: 'string', format: 'uuid' },
+              description:
+                'The contacts merged into this one, oldest merge first, including those merged into a contact that was merged into this one later: they no longer exist, and their records are this contact’s. Delete your copies.',
+            },
           },
-          required: ['id', 'erased', 'contact'],
+          required: ['id', 'erased', 'contact', 'mergedContactIds'],
         },
         Consent: jsonSchema(apiConsentSchema, 'input'),
+        ContactMerge: jsonSchema(apiMergeContactsSchema, 'input'),
+        ContactMergeResult: jsonSchema(apiContactMergeResultSchema),
         Template: jsonSchema(apiTemplateSchema),
         SendTemplate: jsonSchema(apiSendMessageSchema, 'input'),
         SendManyTemplates: jsonSchema(apiSendManyTemplatesSchema, 'input'),
@@ -2592,6 +2653,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookContactCreated: jsonSchema(contactCreatedPayloadSchema),
         WebhookContactUpdated: jsonSchema(contactUpdatedPayloadSchema),
         WebhookContactErased: jsonSchema(contactErasedPayloadSchema),
+        WebhookContactMerged: jsonSchema(contactMergedPayloadSchema),
         WebhookAutomationRunStarted: jsonSchema(automationRunStartedPayloadSchema),
         WebhookAutomationRunEnded: jsonSchema(automationRunEndedPayloadSchema),
         WebhookOrderReceived: jsonSchema(orderReceivedPayloadSchema),
@@ -2615,6 +2677,7 @@ export const API_ROUTES = [
   ['get', '/contacts/{id}'],
   ['patch', '/contacts/{id}'],
   ['post', '/contacts/{id}/consent'],
+  ['post', '/contacts/{id}/merge'],
   ['get', '/contact-fields'],
   ['post', '/contact-fields'],
   ['patch', '/contact-fields/{key}'],

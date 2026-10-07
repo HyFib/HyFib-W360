@@ -10,11 +10,14 @@ import {
   parseCodPayload,
   resolveStoreVariables,
   storeConsentAction,
+  storeLinkProblem,
+  storeVariablesSchema,
   storeMessageSendAt,
   variablesFit,
   type EnabledRule,
   type OrderMilestones,
   type StoreMessageEvent,
+  type StoreVariableSource,
 } from './messages-model';
 import {
   hasCustomerAccess,
@@ -219,6 +222,79 @@ describe('template variables', () => {
     });
   });
 
+  it('fills the ends of links from the order, using the fallback a link can take (ADR-229)', () => {
+    const links = [
+      { index: 0, text: 'Track', url: 'https://tara.example/track/{{1}}' },
+      { index: 1, text: 'Review', url: 'https://tara.example/review?o={{1}}' },
+    ];
+    const linked = (buttons: StoreVariableSource[]) => ({ header: [], body: [], buttons });
+    expect(
+      resolveStoreVariables(
+        linked([
+          { source: 'order', field: 'tracking_number' },
+          { source: 'static', value: 'wa' },
+        ]),
+        { subject: 'order', values },
+        links,
+      ),
+    ).toEqual({ ok: true, params: { header: [], body: [], buttons: ['AWB123', 'wa'] } });
+    // A value a link cannot end with (spaces), or none: the fallback when it can.
+    expect(
+      resolveStoreVariables(
+        linked([
+          { source: 'order', field: 'items_summary', fallback: 'latest' },
+          { source: 'order', field: 'status_url', fallback: 'orders' },
+        ]),
+        { subject: 'order', values },
+        links,
+      ),
+    ).toMatchObject({ params: { buttons: ['latest', 'orders'] } });
+    expect(
+      resolveStoreVariables(
+        linked([{ source: 'order', field: 'items_summary', fallback: 'a b' }]),
+        { subject: 'order', values },
+        links,
+      ),
+    ).toEqual({ ok: false, missing: 'buttons.1' });
+    // A checkout's field for an order's message, or no link for the value, is not filled.
+    expect(
+      resolveStoreVariables(
+        linked([{ source: 'checkout', field: 'customer_name' }]),
+        { subject: 'order', values },
+        links,
+      ),
+    ).toEqual({ ok: false, missing: 'buttons.1' });
+    expect(
+      resolveStoreVariables(linked([{ source: 'static', value: 'wa' }]), {
+        subject: 'order',
+        values,
+      }),
+    ).toEqual({ ok: false, missing: 'buttons.1' });
+    expect(variablesFit('cart_reminder', linked([{ source: 'order', field: 'order_name' }]))).toBe(
+      false,
+    );
+    // At most two, as a template has at most two website buttons.
+    expect(
+      storeVariablesSchema.safeParse({
+        buttons: ['a', 'b', 'c'].map((value) => ({ source: 'static', value })),
+      }).success,
+    ).toBe(false);
+    // Fixed text and fallbacks are checked when the message is saved.
+    expect(storeLinkProblem(linked([{ source: 'static', value: 'wa' }]), links)).toBeNull();
+    expect(storeLinkProblem(linked([{ source: 'static', value: 'w a' }]), links)).toBe(
+      'Track: The end of a link cannot contain spaces.',
+    );
+    expect(
+      storeLinkProblem(
+        linked([
+          { source: 'order', field: 'tracking_number' },
+          { source: 'order', field: 'order_name', fallback: 'no order' },
+        ]),
+        links,
+      ),
+    ).toBe('Review (fallback): The end of a link cannot contain spaces.');
+  });
+
   it('fills variables with fallbacks and names the first one it cannot fill', () => {
     expect(
       resolveStoreVariables(
@@ -228,12 +304,13 @@ describe('template variables', () => {
             { source: 'order', field: 'customer_name' },
             { source: 'order', field: 'status_url', fallback: 'our website' },
           ],
+          buttons: [],
         },
         { subject: 'order', values },
       ),
     ).toEqual({
       ok: true,
-      params: { header: ['Tara Tea'], body: ['Priya Customer', 'our website'] },
+      params: { header: ['Tara Tea'], body: ['Priya Customer', 'our website'], buttons: [] },
     });
     expect(
       resolveStoreVariables(
@@ -243,6 +320,7 @@ describe('template variables', () => {
             { source: 'order', field: 'order_name' },
             { source: 'order', field: 'status_url' },
           ],
+          buttons: [],
         },
         { subject: 'order', values },
       ),
@@ -254,6 +332,7 @@ describe('template variables', () => {
         {
           header: [{ source: 'order', field: 'customer_name' }],
           body: [{ source: 'order', field: 'customer_name' }],
+          buttons: [],
         },
         { subject: 'order', values: { ...values, customer_name: long } },
       ),
@@ -262,6 +341,7 @@ describe('template variables', () => {
       params: {
         header: ['x'.repeat(TEMPLATE_LIMITS.parameterValue - 1)],
         body: ['x'.repeat(TEMPLATE_LIMITS.parameterValue - 1)],
+        buttons: [],
       },
     });
   });
@@ -539,12 +619,14 @@ describe('cart reminders', () => {
         { source: 'checkout' as const, field: 'customer_name' as const },
         { source: 'checkout' as const, field: 'checkout_url' as const },
       ],
+      buttons: [],
     };
     expect(resolveStoreVariables(cart, { subject: 'checkout', values })).toEqual({
       ok: true,
       params: {
         header: [],
         body: ['Asha K', 'https://tara.example/checkouts/1/recover?key=k1'],
+        buttons: [],
       },
     });
     const orderValuesOf = orderValues({
@@ -569,6 +651,7 @@ describe('cart reminders', () => {
       variablesFit('cart_reminder', {
         header: [],
         body: [{ source: 'order', field: 'order_name' }],
+        buttons: [],
       }),
     ).toBe(false);
   });

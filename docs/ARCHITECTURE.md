@@ -90,8 +90,9 @@ session-level value. Scopes are branded TypeScript types created only by authori
 1. The proxy assigns a CSP nonce and correlation id.
 2. The page/action calls `requireTenant(slug)` (pages) or `tenantForAction(slug)` (actions):
    session → membership lookup in user scope → tenant status → effective permissions (role union,
-   minus suspended-blocked permissions, minus MFA-blocked permissions). Non-members and missing
-   companies both get 404.
+   minus `contacts.view_numbers` when the company masks every role of the member that grants it
+   (ADR-226), minus suspended-blocked permissions, minus MFA-blocked permissions). Non-members and
+   missing companies both get 404.
 3. The domain service asserts a permission, validates input with zod (`parseInput`, which also
    refuses the NUL character PostgreSQL text cannot hold, naming the field, ADR-130), and runs
    `db.run(ctx.scope)`. jsonb columns use `@w360/db`'s `jsonb` type, which writes half of an emoji
@@ -167,6 +168,13 @@ lists the kinds turned off (`EMAIL_NOTICE_KINDS` in `tenancy/email-preferences.t
 skips a member with `wantsEmail` before queueing, and the member's own list changes only through
 `app.set_own_email_opt_outs`. Security, sign-in and billing emails are not kinds.
 
+The overview's setup checklist (ADR-233): `createSetupChecklistService`
+(`tenancy/setup-checklist.ts`) reads, in one read-only transaction in the company's scope, only the
+facts the member's permissions cover (numbers by status, an approved template, a contact not erased,
+another active member or an unexpired invitation, the first-response target), and `setupSteps` turns
+them into steps with links. The page says whether the deployment can connect numbers (Embedded
+Signup configured).
+
 ## 6. Messaging pipeline **[built — verified against a local Graph stand-in; no live Meta traffic yet]**
 
 - **Ingestion:** `POST /api/webhooks/meta` reads the raw body with a hard 4 MB cap (Meta payloads can
@@ -235,12 +243,20 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`filterConditions`, at most 10,000, ordered by id) in one transaction, refuse a count other than
   the one the member saw, then insert the tag for those without it and below the tag cap, or delete
   it, recording one audit entry.
+  Bulk field edits (`bulkSetField`, ADR-238) take the same locks and count check (`lockMatching`),
+  check the value with `coerceFieldValue`, then update `attributes` only where the field's value
+  differs (`||` a one-key object, or `-` the key to clear), so the triggers of 0090 and 0091 capture
+  a change for exactly the contacts changed; one audit entry.
   Merging (`contacts/merge.ts`, ADR-224): `previewMerge` reads both contacts with their identities,
   conversations, consent and counts, and `planContactMerge` gives the result and the refusals;
   `mergeContacts` calls `app.merge_contacts` (SECURITY DEFINER), which takes the locks, checks
   again, moves every row naming the merged contact, records the stricter consent, deletes the merged
   contact and records the merge in `app.contact_merges`; the contact page follows a link to a merged
   contact through `mergedInto`.
+  Masking (`contacts/number-masking.ts`, ADR-226): `shownNumber(ctx, phone)` gives a number whole or
+  masked by the member's `contacts.view_numbers`; the contacts, inbox, CRM, campaign, segment, store
+  and consent services call it on every number they return to members, and their digit searches
+  match a whole number for masked members.
 - **Consent** (`packages/domain/src/consent`): append-only `consent_events`; a definer trigger
   maintains `contact_consents` (later wins, opt-out wins ties). Sources: keyword messages (matched
   in ingestion on newly stored text, button and interactive replies), member notes, import
@@ -255,6 +271,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   per-minute messaging sweep (`ops.template_sync_due`: requested, in review every 5 minutes, or
   older than 6 hours) and by members. The sweep lists the accounts asked for first, and their syncs,
   like members' refreshes, are queued at a higher pg-boss priority than routine ones (ADR-178).
+- **Starter templates (ADR-232):** `TEMPLATE_STARTERS` (`templates/library.ts`) holds HyFib's
+  starters as editor definitions; `starterDraft` gives a company's draft of one (its name, its
+  definition and, on a marketing starter, a quick reply with the company's first marketing opt-out
+  keyword). The New template page (`?starter=<key>`) passes it to `TemplateEditor` as its initial
+  state, keyed by the starter so a new choice starts afresh; saving goes through `createDraft` as
+  any draft.
 - **Template sends** reuse the Phase 2 pipeline: `queueTemplateMessage` writes the message and send
   intent (type `template`, rendered text stored for the thread, request body without secrets); the
   worker skips the 24-hour window check for templates but re-checks template approval, consent and
@@ -268,6 +290,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   all/any. They compile to parameterised SQL over `app.contacts`; erased contacts never match. A
   name condition compares the name with its surrounding spaces removed, a name of spaces only
   counted as none (ADR-143).
+  Conditions on store orders (ADR-231): `orders` and `spend` compile to a correlated `count(*)` or
+  `coalesce(sum(total_minor), 0)` over `app.commerce_store_orders` matched by
+  `customer_phone = contacts.phone_e164`, leaving out test, cancelled, deleted, refunded, voided,
+  failed, trash and draft orders, with the store and the period as parameters.
+  `assertCanUseDefinition` refuses them to a member without `commerce.read` in the preview, saving a
+  segment and a draft's audience; `preview` gives such a member a saved segment's count without its
+  sample.
 - **Campaign lifecycle** (`campaigns/service.ts`): draft → (pending_approval →) scheduled → running
   → completed, with paused and canceled. Submitting runs the readiness checks, freezes the audience
   (`campaign_recipients`, one row per contact, pending or skipped with a reason, no personal data)
@@ -406,6 +435,16 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `note-mention:<mention>`) only for an unread mention less than a day old, of an active member who
   can still see the conversation, with no newer unread mention of the member there; the email names
   the author and the unread count, never the note or the customer.
+  **Overdue reply emails** (`inbox/overdue-replies.ts`, ADR-230): the messaging sweep calls
+  `noticeOverdueReplies` after routing. `ops.overdue_reply_turns(now, limit)` (definer, ids only)
+  lists open turns of active companies with a target that started at least the target ago (within 30
+  days) without a notice, or whose `waiting` notice is due. Per company, in its scope, the turns are
+  locked (`FOR UPDATE`), each gets its due time from `replyDueAt`, and `app.overdue_reply_notices`
+  records `waiting` (with the due time), `skipped` (`too_late`, `no_one`, `opted_out`) or `sent`;
+  `responsibleMembers` picks the assignee, the team or the members with `inbox.assign`, and each
+  member gets one `tenant.notice` (`overdueReplyEmail`, dedupe key
+  `reply-overdue:<first turn>:<member>`). A company's failure is logged and retried by the next
+  sweep.
 - **Transcripts** (`messaging/transcript.ts`, `exportTranscript` in `messaging/inbox.ts`, ADR-212):
   an async generator checks `inbox.export` and that the member can see the conversation and writes
   the audit entry in one transaction, then yields the header and pages of 500 messages (keyset on
@@ -427,12 +466,33 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   and `remove_conversation_tag` effects and reads `RunFacts.conversationTags`, which `loadFacts`
   reads; `applyConversationEffect` in the runner applies them under the conversation lock the step
   holds.
+- **Automations that create CRM tasks** (ADR-244): `create_task` steps in `automations/graph.ts`
+  (checked against the company's active CRM members, `crmMemberIds`); the interpreter gives a
+  `create_task` effect with the rendered title; `applyTaskEffect` in the runner checks the contact
+  and the member and inserts the task with `created_by_automation_id`, adding a `task_created`
+  activity without an actor. A skipped task logs the step as `skipped`.
+- **Automations that create CRM deals** (ADR-245): `create_deal` steps (checked against the
+  company's active pipelines and stages, `crmPipelines`, and `dealValueMinor` for the value in the
+  pipeline's currency); `applyDealEffect` in the runner holds the contact for no key update,
+  re-checks the stage, skips a contact with an open deal in the pipeline, and inserts the deal with
+  `created_by_automation_id` and a `deal_created` activity without an actor.
+- **Automations that send a form** (ADR-248): `send_flow` steps (checked against the company's
+  forms, `flows`, by whether they can be sent and their WhatsApp account); the interpreter gives a
+  `send_flow` effect counted as a message; `queueBotMessage` runs a text's checks and `queueBotFlow`
+  checks the plan and the form again, then inserts the message, its send intent
+  (`buildFlowMessageRequest`) and a `flow_sends` row with a new token, as a member's send does.
 - **Read receipts and typing indicators** (`inbox/read-receipts.ts`, ADR-223): `markRead` in
   `messaging/inbox.ts` calls `queueReadReceipt` in its transaction; the composer calls
   `showTypingAction` at most every 20 seconds, which `showTyping` checks and queues; both sign a job
   (`message.read` or `message.typing`, the message's id as its reference) on the `message.read`
   queue. The worker's `messageReadHandler` verifies the envelope for the kind it claims and runs
   `sendReadReceipt`, which checks again and calls `GraphClient.markRead`.
+- **Presence** (`inbox/presence.ts`, `inbox/presence-service.ts`, ADR-243): the conversation page's
+  `ConversationPresence` posts to `/api/c/<company>/inbox/<conversation>/presence` every 20 seconds
+  while the page is visible and sends DELETE (keepalive) when it unmounts or on `pagehide`; `report`
+  checks the conversation's visibility, upserts the member's `conversation_viewers` row and names
+  the other active members reported within 45 seconds who can see it (`memberCanSee`). The minute
+  messaging sweep calls `purgeConversationViewers` (`ops.purge_conversation_viewers`).
 - **Files customers send** (`messaging/received-media.ts`, ADR-216): the route
   `/c/<company>/inbox/<conversation>/media/<message>` checks that the member can see the
   conversation and reads the message's media record and the receiving account's token in one
@@ -504,9 +564,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Dispatch** (`automations/dispatch.ts`, inside the ingestion transaction): an opt-out keyword
   stops the active run; a run waiting for a reply receives the message (`input_message_id`, a job
   keyed by the message); otherwise, in an unassigned conversation of an active company with no
-  active run, the best match starts (exact keyword, contained keyword, new conversation, any
-  message; then name order), subject to business-hours filters, cooldowns and 10 runs per
-  conversation per hour.
+  active run, the best match starts (exact keyword, contained keyword, keyword with small typos when
+  the trigger allows them (ADR-240: optimal string alignment per word in `inbox/keywords.ts`), new
+  conversation, any message; then name order), subject to business-hours filters, cooldowns and 10
+  runs per conversation per hour.
 - **Runner** (`automations/runner.ts`, queue `automation.run`, ADR-035): one transaction per step,
   conversation lock then run lock; checks the hand-off lock, resolve and the 7-day age; loads the
   pinned version's graph (cached: versions never change) and the contact facts; applies effects —
@@ -537,22 +598,22 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Builder** (`/c/{slug}/automations`, ADR-034): a structured step list with a generated diagram,
   live checks, an in-browser simulator (sends nothing and checks neither the window nor consent),
   publish, pause, archive and restore, test runs, versions and run pages.
-- **HTTP step** (migrations 0014 and 0015, ADR-042, ADR-043): "Call a web address" calls a company's own API
-  (GET, POST, PUT, PATCH, DELETE; JSON body; up to 10 headers; values saved from a JSON response by
-  path) and branches on success (2xx) or failure. Only domains on the company's list
-  (`http_allowed_domains`) can be called, over https through the egress guard
-  (`packages/core/src/egress.ts`: public addresses only, pinned DNS, no redirects, 64 KiB/256 KiB/10
-  s). Secrets (`http_secrets`) are encrypted, write-only, referenced as `{{secret.<name>}}` in header
-  values and sent only to the domain each was saved for. The runner writes the call ahead
-  (`automation_http_calls`, request encrypted) and waits up to two minutes; the `automation.http`
-  worker claims it, sends it outside any transaction and records the outcome; a call that may have
-  been received but has no result by the deadline is `unknown` and never retried. The minute sweep
-  re-signals queued calls whose job was lost (`ops.automation_http_calls_due`). Settings → Web
-  requests manages domains and secrets (`integrations.manage`); run pages list each call (method,
-  host, path, outcome).
+- **HTTP step** (migrations 0014 and 0015, ADR-042, ADR-043): "Call a web address" calls a company's
+  own API (GET, POST, PUT, PATCH, DELETE; a JSON body, or form fields since ADR-236; up to 10
+  headers; values saved from a JSON response by path) and branches on success (2xx) or failure. Only
+  domains on the company's list (`http_allowed_domains`) can be called, over https through the
+  egress guard (`packages/core/src/egress.ts`: public addresses only, pinned DNS, no redirects, 64
+  KiB/256 KiB/10 s). Secrets (`http_secrets`) are encrypted, write-only, referenced as
+  `{{secret.<name>}}` in header values and sent only to the domain each was saved for. The runner
+  writes the call ahead (`automation_http_calls`, request encrypted) and waits up to two minutes;
+  the `automation.http` worker claims it, sends it outside any transaction and records the outcome;
+  a call that may have been received but has no result by the deadline is `unknown` and never
+  retried. The minute sweep re-signals queued calls whose job was lost
+  (`ops.automation_http_calls_due`). Settings → Web requests manages domains and secrets
+  (`integrations.manage`); run pages list each call (method, host, path, outcome).
 - **Not built yet:** WhatsApp Flows steps (P4-03), catalog steps (P4-06), starting a run through the
-  public API (P5), fuzzy keyword matching, templates with media headers or variable buttons in
-  template steps, usage billing.
+  public API (P5), templates with media headers or variable buttons in template steps, usage
+  billing.
 
 ## 6F. CRM **[built — reminder emails verified through Mailpit only]**
 
@@ -577,8 +638,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   same contact run one after the other; deal writers then share the pipeline row before reading its
   stages, so a settings change (pipeline FOR UPDATE, count open deals, archive) never leaves an
   open deal in an archived stage or pipeline. A closed deal whose stage was removed reopens in the
-  pipeline's first stage. Moving a deal to another pipeline is supported by the service (a value in a
-  different currency must be cleared first) but not offered in the UI yet.
+  pipeline's first stage. A deal moves to a stage of another pipeline (a value in a different
+  currency must be cleared first); the deal page offers it as "Move to another pipeline" (ADR-234).
+  Forecasts (ADR-242): a stage's chance of winning (`crm_stages.win_percent`, migration 0156) weighs
+  its open deals on the board (`crm/forecast.ts`: `weigh`, `forecast`); the board's per-stage totals
+  add the value of deals expected to close by the month's end in the company's time (`monthEndIn`).
   Amounts are parsed and formatted by `crm/money.ts` (browser-safe, exact: no floats in parsing).
 - **Reminders** (ADR-041, queue `crm.reminder`): saving a reminder time schedules a delayed job keyed
   by task and time; the job locks the task and, when it is due, queues the email through the outbox
@@ -586,7 +650,7 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   reminders more than 30 seconds overdue. Reminders are skipped with a reason when the task closed,
   the assignee lost CRM access or they are more than a day late.
 - **Web** (`/c/{slug}/crm`): the board (a column per stage, a stage picker on each card, owner and
-  pipeline filters), won and lost lists (50 at a time, keyset on the millisecond), the deal page (stage, outcome, details, tasks, contact,
+  pipeline filters), won and lost lists (50 at a time, keyset on the millisecond), the deal page (stage, a move to another pipeline, outcome, details, tasks, contact,
   timeline with notes), the tasks page (mine or everyone's, open or closed, by assignee, edit), and
   Settings → Pipelines. The contact page and the inbox conversation page show the contact's deals,
   open tasks and timeline with forms to add a deal (tied to the conversation), a task or a note.
@@ -1097,6 +1161,21 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `mediaHeaders`, as the API's template list and `loadSendableTemplate` do; every other caller gets
   the reason. `buildTemplateSend` puts the link in the header's parameter and returns it, and
   `queueTemplateFor` keeps it as the content's `headerMedia`, which the inbox's bubble shows.
+- **Website buttons whose link ends with a value (ADR-228):** `linkPrefix`, `linkButtons` and
+  `linkValueProblem` (`templates/definition.ts`) read a `URL` button whose link ends with `{{1}}`.
+  `validateDefinition` requires the value after the website's address in full (`prefixFixesWebsite`
+  appends values that would change the link's origin) and an example, which `toMetaComponents` sends
+  as `example: [value]`. `sendSpecFor` asks every caller for `buttonParams`: the contact and
+  conversation sender (`queueTemplateMessage`), the API (`apiListTemplates`, `loadSendableTemplate`)
+  and, since ADR-229, campaigns (`variables.buttons`, resolved per recipient by `resolveVariables`
+  against the template's links, with `checkVariables` refusing fixed ends a link cannot take),
+  automations (a step's `links`, rendered by the interpreter and checked by `queueBotTemplate`,
+  which answers `invalid_link`) and store messages (`resolveStoreVariables` with the links,
+  `storeLinkProblem` when saved).
+  `linkValuesProblem` names the first value a link cannot end with; `buildTemplateSend` checks the
+  values again, adds one `button` component with `sub_type` `url` per value, ordered with the
+  quick-reply payloads by button, and keeps each link as sent in the rendered buttons (`url`), which
+  the template preview and the inbox's bubble show.
 - **Searching contacts (ADR-117):** `POST /contacts/search` (`api/contact-search.ts`) parses
   segments' conditions (`last_message` with `conversations.read` and `campaign` with
   `campaigns.read` since ADR-126, a named campaign checked to be the company's, `name` since
@@ -1111,6 +1190,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   campaigns named; `segmentCondition` checks each one as before, naming its place; and
   `contactSearchSql` joins the search's items by its `match`, compiling a group with
   `segmentConditionsSql` as a segment of its own and a single condition as a segment of one.
+- **Conditions on store orders (ADR-231):** `orders` and `spend` are parsed as segments hold them;
+  `assertOrderConditionScope` asks for `orders.read` in searches, segments, a segment's contacts and
+  drafts' audiences, `assertStoresExist` checks a named store is the company's, and
+  `segmentCondition` refuses a currency the runtime does not know.
 - **Changing the contacts a search finds (ADR-165):** `POST /contacts/update-matching`
   (`apiUpdateMatchingContacts`) reads one page through the search's own steps (`searchPage`, shared
   with `apiSearchContacts`), then `changeContactsAlike` (`api/contacts.ts`) checks the change's
@@ -1127,7 +1210,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   at its latest such row, joined to the contact for its current state; the cursor is sealed with the
   keyring and the company as associated data. `ops.compact_contact_changes` (minute sweep) walks the
   rows in the same order from `ops.contact_change_compaction` and deletes the rows each change
-  replaced.
+  replaced. Since 0150 (ADR-225) the trigger on `app.contact_merges` also records a change of the
+  kept contact, and the feed lists for each contact it reads the contacts merged into it
+  (`mergedContactIds`, from `app.contact_merges` in the page's snapshot); the contact endpoints
+  answer a merged contact's id with 404, reason `contact_merged` and `mergedInto`
+  (`apiContactNotFound`, `api/contact-view.ts`). Since ADR-227 `POST /contacts/{id}/merge`
+  (`apiMergeContacts`, scope `contacts.merge`) checks that both contacts exist in the key's company,
+  calls `app.merge_contacts` in the key's scope, audits as the key and answers the kept contact with
+  the counts moved; with an `Idempotency-Key` the claim and the stored response share the merge's
+  transaction.
 - **Defining contact fields (0092, ADR-115):** `contacts/field-definitions.ts` adds, renames and
   deletes a company's custom fields for both Settings (`contacts/service.ts`, by id) and the API
   (`api/contact-fields.ts`, by key, scope `contact_fields.manage`); callers check who may and audit
@@ -1514,7 +1605,11 @@ true`); the same key with another request (method, path and body hashed) answers
   contact (`api/contact-view.ts`, shared with the public API) and `erased`, an erased contact
   keeping its id, source and creation time only, and `contact.updated` with `changes` (null for
   events captured before 0096) and `tagsAdded` and `tagsRemoved` (null before 0129 and for an erased
-  contact).
+  contact). Since 0150 (ADR-225) a trigger on `app.contact_merges` captures `contact.merged` through
+  `app.capture_webhook_event` when a merge records itself: the kept contact, the merged one in the
+  detail, and no `captured_xact`, so the kept contact's `contact.updated` from the merge stays its
+  own event; its payload gives the contact `app.contact_merges` names for the merged one when it is
+  delivered. A type the builder does not describe fails its delivery without an attempt.
 - **Automation run events** (migrations 0055–0056, ADR-078): triggers on `app.automation_runs`
   capture `automation.run_started` when a live run is inserted and `automation.run_ended` when one
   moves from running or waiting to an ended status, through `app.capture_webhook_event` (the run and

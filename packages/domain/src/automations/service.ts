@@ -16,6 +16,7 @@ import {
   commerceStores,
   contactFields,
   conversations,
+  flows,
   desc,
   eq,
   gte,
@@ -35,14 +36,20 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { shownNumber } from '../contacts/number-masking';
 import { recordAudit, type RequestMeta } from '../audit';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { emitTenantEvent } from '../messaging/events';
 import { canSeeConversation, SERVICE_WINDOW_MS } from '../messaging/outbound';
 import { STORE_MESSAGE_EVENT_INFO } from '../stores/messages-model';
-import { renderPlaceholders, sendSpecFor } from '../templates/definition';
+import { linkButtons, renderPlaceholders, sendSpecFor } from '../templates/definition';
 import { parseInput } from '../validation';
+import { CSV_BOM, csvLine } from '../contacts/csv';
+import { crmMembers } from '../crm/common';
+import { loadPipelines } from '../crm/pipelines';
+import { SENDABLE_STATUSES } from '../flows/service';
+import { RUN_CSV_COLUMNS, runCsvLine, type RunCsvRow } from './runs-csv';
 import {
   apiInputValues,
   canonicalJson,
@@ -61,7 +68,7 @@ import {
   type TemplateReference,
 } from './graph';
 import { appendRunStep, endRun, endRunForHuman, lockActiveRun, signalAutomationRun } from './runs';
-import { assertLiveAutomationAvailable } from '../plans/entitlements';
+import { assertLiveAutomationAvailable, assertModule } from '../plans/entitlements';
 
 /**
  * Automations for the web tier. Drafts are edited freely (`automations.write`); publishing
@@ -124,6 +131,11 @@ const listRunsSchema = z.object({
   cursor: z.string().max(200).optional(),
 });
 
+/** A runs export's filters, as the list's (ADR-237). */
+const exportRunsSchema = listRunsSchema.omit({ cursor: true });
+/** Runs one batch of an export reads (ADR-237). */
+const RUN_EXPORT_BATCH = 500;
+
 export interface AutomationSummary {
   id: string;
   name: string;
@@ -170,12 +182,34 @@ export interface AutomationDetail {
     /** The company's templates, for template steps (HyFib sends approved utility or marketing ones). */
     templates: AutomationTemplateOption[];
     teams: { id: string; name: string }[];
+    /** Active members who can use the CRM, whom task steps may create tasks for (ADR-244). */
+    crmMembers: { id: string; name: string }[];
+    /** Active pipelines with their currency and active stages, for deal steps (ADR-245). */
+    crmPipelines: AutomationPipelineOption[];
+    /** The company's forms that are not archived, for form steps (ADR-248). */
+    flows: AutomationFlowOption[];
     fields: { key: string; label: string; type: string }[];
     /** Domains HTTP steps may call, and the secrets they may use (never their values). */
     allowedDomains: string[];
     secrets: { name: string; domain: string }[];
     allowInsecureHttp: boolean;
   };
+}
+
+/** A form a form step may send (ADR-248): only one published at Meta can be sent. */
+export interface AutomationFlowOption {
+  id: string;
+  name: string;
+  whatsappAccountId: string;
+  sendable: boolean;
+}
+
+/** An active pipeline a deal step may create deals in, with its active stages (ADR-245). */
+export interface AutomationPipelineOption {
+  id: string;
+  name: string;
+  currency: string;
+  stages: { id: string; name: string }[];
 }
 
 export interface AutomationTemplateOption extends TemplateReference {
@@ -304,6 +338,7 @@ function templateOption(t: TemplateRow): AutomationTemplateOption {
     unsupported: spec.supported ? null : spec.reason,
     headerParams: spec.supported ? spec.headerParams : 0,
     bodyParams: spec.supported ? spec.bodyParams : 0,
+    links: spec.supported ? linkButtons(spec.definition) : [],
     quickReplies: spec.supported
       ? spec.definition.buttons.flatMap((b, index) =>
           b.type === 'QUICK_REPLY' ? [{ index, title: b.text }] : [],
@@ -419,6 +454,39 @@ export function createAutomationService(deps: AutomationServiceDeps) {
     return {
       teamRows,
       fieldRows,
+      crmMembers: (await crmMembers(tx, tenantId)).map((m) => ({
+        id: m.membershipId,
+        name: m.name,
+      })),
+      flows: (
+        await tx
+          .select({
+            id: flows.id,
+            name: flows.name,
+            whatsappAccountId: flows.whatsappAccountId,
+            metaFlowId: flows.metaFlowId,
+            metaStatus: flows.metaStatus,
+          })
+          .from(flows)
+          .where(and(eq(flows.tenantId, tenantId), isNull(flows.archivedAt)))
+          .orderBy(asc(sql`lower(${flows.name})`))
+      ).map((f): AutomationFlowOption => ({
+        id: f.id,
+        name: f.name,
+        whatsappAccountId: f.whatsappAccountId,
+        sendable:
+          f.metaFlowId !== null &&
+          f.metaStatus !== null &&
+          SENDABLE_STATUSES.includes(f.metaStatus),
+      })),
+      crmPipelines: (await loadPipelines(tx, tenantId, { includeArchived: false })).map(
+        (p): AutomationPipelineOption => ({
+          id: p.id,
+          name: p.name,
+          currency: p.currency,
+          stages: p.stages.filter((st) => !st.archived).map((st) => ({ id: st.id, name: st.name })),
+        }),
+      ),
       domains: domainRows.map((d) => d.domain),
       secrets: secretRows,
       templates: templateRows.map(templateOption),
@@ -437,6 +505,19 @@ export function createAutomationService(deps: AutomationServiceDeps) {
   ): GraphReferences {
     return {
       teamIds: new Set(refs.teamRows.map((t) => t.id)),
+      crmMemberIds: new Set(refs.crmMembers.map((m) => m.id)),
+      flows: new Map(
+        refs.flows.map((f) => [
+          f.id,
+          { whatsappAccountId: f.whatsappAccountId, sendable: f.sendable },
+        ]),
+      ),
+      crmPipelines: new Map(
+        refs.crmPipelines.map((p) => [
+          p.id,
+          { currency: p.currency, stageIds: new Set(p.stages.map((st) => st.id)) },
+        ]),
+      ),
       fieldKeys: new Set(refs.fieldRows.map((f) => f.key)),
       allowedDomains: refs.domains,
       secrets: new Map(refs.secrets.map((r) => [r.name, r.domain])),
@@ -486,6 +567,31 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         `${action === 'publish' ? 'Publishing' : 'Testing'} an automation that sends marketing templates needs the campaign sending permission.`,
       );
     }
+  }
+
+  /**
+   * Publishing or testing a graph that creates CRM tasks or deals needs the CRM in the company's
+   * plan (ADR-249) and `crm.write`, as creating them in the CRM does (ADR-244, ADR-245).
+   */
+  function assertMayChangeCrm(
+    ctx: TenantContext,
+    graph: AutomationGraph,
+    action: 'publish' | 'test',
+  ) {
+    if (!graph.nodes.some((n) => n.type === 'create_task' || n.type === 'create_deal')) return;
+    assertModule(ctx.plan, 'crm');
+    if (can(ctx, 'crm.write')) return;
+    throw forbidden(
+      `${action === 'publish' ? 'Publishing' : 'Testing'} an automation that creates CRM tasks or deals needs the permission to edit the CRM.`,
+    );
+  }
+
+  /**
+   * Publishing or testing a graph that sends forms needs WhatsApp Flows in the company's plan, as
+   * sending a form in the inbox does (ADR-248).
+   */
+  function assertMaySendForms(ctx: TenantContext, graph: AutomationGraph) {
+    if (graph.nodes.some((n) => n.type === 'send_flow')) assertModule(ctx.plan, 'flows');
   }
 
   /** Parses and checks a draft; throws when it cannot be run. */
@@ -807,6 +913,9 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               })),
               templates: refs.templates,
               teams: teamRows,
+              crmMembers: refs.crmMembers,
+              crmPipelines: refs.crmPipelines,
+              flows: refs.flows,
               fields: fieldRows,
               allowedDomains: refs.domains,
               secrets: refs.secrets,
@@ -983,6 +1092,8 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         if (row.status === 'draft') await assertLiveAutomationAvailable(tx, ctx.tenant.id, row.id);
         const { trigger, graph } = await runnableDraft(tx, row);
         await assertMayUseTemplates(tx, ctx, graph, 'publish');
+        assertMayChangeCrm(ctx, graph, 'publish');
+        assertMaySendForms(ctx, graph);
         const sha = definitionSha({ trigger, graph, channelAccountId: row.draftChannelAccountId });
         if (row.activeVersionId) {
           const [current] = await tx
@@ -1184,6 +1295,8 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           throw new AppError('precondition_failed', 'Restore the automation before testing it.');
         const { trigger, graph } = await runnableDraft(tx, row);
         await assertMayUseTemplates(tx, ctx, graph, 'test');
+        assertMayChangeCrm(ctx, graph, 'test');
+        assertMaySendForms(ctx, graph);
         let storeOrderId: string | null = null;
         if (trigger.type === 'store_event') {
           // The steps send the order's customer details: seeing store orders needs both.
@@ -1408,6 +1521,95 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         },
         { accessMode: 'read only' },
       );
+    },
+
+    /**
+     * The runs the list shows as CSV (ADR-237), newest first, with its filters (an automation, a
+     * status), streamed in batches. No customer data, so `automations.read` is enough; audited
+     * before the first line.
+     */
+    async *exportRuns(
+      ctx: TenantContext,
+      input: unknown,
+      meta: RequestMeta = {},
+    ): AsyncGenerator<string> {
+      assertCan(ctx, 'automations.read');
+      const data = parseInput(exportRunsSchema, input ?? {});
+      await db.run(ctx.scope, (tx) =>
+        recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'automation.runs_exported',
+            subjectType: 'tenant',
+            subjectId: ctx.tenant.id,
+            metadata: { automationId: data.automationId ?? null, status: data.status ?? null },
+          },
+          meta,
+        ),
+      );
+      yield CSV_BOM + csvLine(RUN_CSV_COLUMNS);
+      let before: { at: Date; id: string } | null = null;
+      for (;;) {
+        const cursor: { at: Date; id: string } | null = before;
+        const rows: RunCsvRow[] = await db.run(
+          ctx.scope,
+          (tx) =>
+            tx
+              .select({
+                id: automationRuns.id,
+                automationName: automations.name,
+                versionNumber: automationVersions.number,
+                mode: automationRuns.mode,
+                status: automationRuns.status,
+                endReason: automationRuns.endReason,
+                triggerType: automationRuns.triggerType,
+                startedAt: automationRuns.startedAt,
+                endedAt: automationRuns.endedAt,
+                steps: automationRuns.stepCount,
+                messages: automationRuns.messageCount,
+              })
+              .from(automationRuns)
+              .innerJoin(
+                automations,
+                and(
+                  eq(automations.tenantId, automationRuns.tenantId),
+                  eq(automations.id, automationRuns.automationId),
+                ),
+              )
+              .innerJoin(
+                automationVersions,
+                and(
+                  eq(automationVersions.tenantId, automationRuns.tenantId),
+                  eq(automationVersions.id, automationRuns.versionId),
+                ),
+              )
+              .where(
+                and(
+                  eq(automationRuns.tenantId, ctx.tenant.id),
+                  data.automationId
+                    ? eq(automationRuns.automationId, data.automationId)
+                    : undefined,
+                  data.status === 'active'
+                    ? inArray(automationRuns.status, ['running', 'waiting'])
+                    : data.status
+                      ? eq(automationRuns.status, data.status)
+                      : undefined,
+                  cursor
+                    ? sql`(${automationRuns.startedAt}, ${automationRuns.id}) < (${cursor.at.toISOString()}::timestamptz, ${cursor.id}::uuid)`
+                    : undefined,
+                ),
+              )
+              .orderBy(desc(automationRuns.startedAt), desc(automationRuns.id))
+              .limit(RUN_EXPORT_BATCH),
+          { accessMode: 'read only' },
+        );
+        if (rows.length === 0) break;
+        yield rows.map(runCsvLine).join('');
+        const last = rows.at(-1);
+        if (!last || rows.length < RUN_EXPORT_BATCH) break;
+        before = { at: last.startedAt, id: last.id };
+      }
     },
 
     async getRun(ctx: TenantContext, runId: string): Promise<RunDetail> {
@@ -1757,7 +1959,11 @@ export function createAutomationService(deps: AutomationServiceDeps) {
              limit 50`);
           return rows.rows
             .filter((r) => canSeeConversation(ctx, r.assigned))
-            .map((r) => ({ id: r.id, label: r.name ?? r.phone ?? 'Unknown contact' }));
+            .map((r) => ({
+              id: r.id,
+              // The number as the member may see it (ADR-226).
+              label: r.name ?? shownNumber(ctx, r.phone) ?? 'Unknown contact',
+            }));
         },
         { accessMode: 'read only' },
       );

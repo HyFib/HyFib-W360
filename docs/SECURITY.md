@@ -65,7 +65,8 @@ modules the company's plan leaves out (`automations.write`, `automations.publish
 `flows.publish`, `crm.write`, `commerce.manage`; ADR-051), minus permissions blocked while the
 company is suspended, restricted (its plan expired or was canceled) or pending deletion (the same
 "allowed while suspended" column) or while required MFA is overdue (only `tenant.read` and
-`members.read` remain).
+`members.read` remain). A company can also take `contacts.view_numbers` from the roles it chooses
+(ADR-226).
 
 | Permission               | owner | admin | supervisor | agent | marketer | analyst | billing | Allowed while suspended |
 | ------------------------ | :---: | :---: | :--------: | :---: | :------: | :-----: | :-----: | :---------------------: |
@@ -92,6 +93,7 @@ company is suspended, restricted (its plan expired or was canceled) or pending d
 | `contacts.import`        |   ✓   |   ✓   |     ✓      |       |    ✓     |         |         |                         |
 | `contacts.export`        |   ✓   |   ✓   |            |       |    ✓     |         |         |            ✓            |
 | `contacts.delete`        |   ✓   |   ✓   |            |       |          |         |         |            ✓            |
+| `contacts.view_numbers`  |   ✓   |   ✓   |     ✓      |   ✓   |    ✓     |    ✓    |         |            ✓            |
 | `templates.read`         |   ✓   |   ✓   |     ✓      |   ✓   |    ✓     |    ✓    |         |            ✓            |
 | `templates.write`        |   ✓   |   ✓   |            |       |    ✓     |         |         |                         |
 | `templates.submit`       |   ✓   |   ✓   |            |       |    ✓     |         |         |                         |
@@ -140,14 +142,33 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   of `contact_id` alone, only inside the function (`w360.contact_merge`) and only for the definer
   role, which alone holds UPDATE on those columns. The opt-out of either contact stands; no opt-in
   is added. `app.contact_merges` holds ids, the member and counts, never personal data.
+- Integrations hear of a merge (ADR-225) through ids only: `contact.merged` names the merged
+  contact's id and gives the kept contact as the API describes it to the company's own endpoints,
+  the change feed lists merged contacts' ids, and a 404 for a merged contact names the kept
+  contact's id. The trigger runs as the merge (the definer role) and captures for the merging
+  company alone; the API reads `app.contact_merges` in the key's company scope, so another company's
+  merged contact is plainly not found.
+- Customers' numbers (ADR-226): a company's owners and administrators choose the roles (supervisor,
+  agent, marketer, analyst) whose members see them masked; the context leaves out
+  `contacts.view_numbers` for a member whose every role that grants it is masked, and the services
+  mask every number they give such a member (pages, server actions, CSV exports, the transcript)
+  before it leaves the server. Their digit searches match whole numbers only, so hidden digits
+  cannot be found by narrowing a search. Unmasking a role needs a recent sign-in; both changes are
+  audited. Message content, the public API, webhooks and the owners' company export are not masked.
 - Notice email choices (ADR-215): a member changes only their own, through
   `app.set_own_email_opt_outs` (SECURITY DEFINER, executable by the runtime role only), which takes
   the membership from the scope, never an argument; the runtime role has no update on memberships.
-  Only the five listed kinds can be turned off (a check constraint); security, sign-in and billing
-  emails cannot be. Each change is audited.
+  Only the listed kinds (six since overdue replies, ADR-230) can be turned off (a check constraint);
+  security, sign-in and billing emails cannot be. Each change is audited.
+- The overview's setup checklist (ADR-233) shows each step only to members who can read its data,
+  and reads no fact for the others; it gives whether something exists (an active number, an approved
+  template, a contact, a teammate, a target), never the records.
 - Bulk tag edits need `contacts.write`, match only the company's contacts that are not erased,
   change at most 10,000 at once and only the number the member was shown, and are audited
   (`contacts.bulk_tagged`: the tag, counts and the filters used, never the search text; ADR-213).
+- Bulk field edits (ADR-238) have the same rules, accept only the company's own fields and values of
+  the field's type, and are audited (`contacts.bulk_field_set`: the field's key, whether it was
+  cleared, counts and the filters used, never the value or the search text).
 - Campaigns: drafts and segments need `campaigns.write`; submitting needs `campaigns.write` and
   `campaigns.send`; approving (when the company requires it) needs `campaigns.approve` and a member
   other than the submitter; pausing, resuming, cancelling a started campaign, changing its caps and
@@ -155,6 +176,11 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   authority and the runner pauses the campaign if that member leaves or loses `campaigns.send`.
   Per-recipient lists need `contacts.read`; the per-recipient CSV export needs `contacts.export`.
   Campaign settings (approval, frequency cap, estimate currency) need `tenant.settings.manage`.
+- Segment conditions on store orders (ADR-231: how many orders a contact placed, what they spent)
+  need `commerce.read` as well to preview or save a segment and to give a campaign draft such an
+  audience. A saved segment with one shows members without `commerce.read` how many contacts it
+  matches, never which; a store it names must be the company's. They reveal whether a contact
+  matches, never an order's contents.
 - Rate cards are platform data: only platform administrators create, publish and withdraw them
   (platform audit log). The app role reads published and withdrawn cards; estimates and Billing →
   Usage and rates use published cards only.
@@ -173,6 +199,14 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   checks run again (active, can still see it, mention unread); the email names only who mentioned
   them, how many mentions are unread there and the conversation's link, never the note or the
   customer (ADR-211).
+  Overdue reply emails (ADR-230) go only to members who can see the conversation by the inbox's rule
+  (the assignee, the team's members, or those who assign conversations), checked when sent, and skip
+  members who turned them off. They carry the target, the reason, the time the customer started
+  waiting and a link where access is checked again; never the customer's name, number or messages.
+  The sweep's definer function returns ids only; the decisions run in each company's own scope.
+  The inbox's notice of overdue replies (ADR-241) reads the waits of conversations the member can
+  see by the same rule, and gives the page only due times and whether each conversation is the
+  member's.
   Transcripts need `inbox.export` (owners, administrators, supervisors) and sight of the
   conversation, are audited (`conversation.transcript_exported`, no content), are plain text so no
   spreadsheet runs a formula from them, and leave internal notes out (ADR-212).
@@ -190,6 +224,13 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   turns them on (audited). Typing needs `inbox.reply` and sight of the conversation; jobs carry only
   the message's id in a signed envelope, and the worker re-reads everything in the company's scope
   and uses the receiving account's token only towards Graph. Nothing is sent for an erased contact.
+  Presence (ADR-243) is reported through `/api/c/<company>/inbox/<conversation>/presence`, which
+  takes the member's session and HyFib's own origin only. A member reports and hears about only the
+  conversations they can see by the inbox's rule, and hears only of other active members who can see
+  the conversation now. Rows hold the membership, the conversation and a time (company scope and
+  row-level security; the runtime role may update only the time); they are deleted when the member
+  leaves and an hour after the last report, by a definer function whose policies show it only such
+  rows, and are not exported.
   Files customers send (ADR-216) are given only to members who can see the conversation, fetched for
   each request with the receiving account's token, which goes only to Graph and to the https address
   Graph returned (no user name or password, no redirects; the address is never stored or logged),
@@ -219,11 +260,35 @@ Phase 4 rules (automations, P4-01):
   can see (audited). Any member reply, template send, assignment or resolve also ends the run.
 - Run lists and logs show the conversation link, captured answers and message links only to members
   who can see that conversation; analysts and marketers see outcomes and step codes only.
+- Exporting runs (ADR-237) needs `automations.read`, as the list: the file holds each run's
+  automation, version, status, end reason, trigger, times and counts, never the contact, the
+  conversation or captured answers, and each export is audited (`automation.runs_exported`, with its
+  filters).
 - Automations start only in unassigned conversations of an active (not suspended) company, never
   after an opt-out keyword, and every bot message re-checks the channel, the 24-hour window and the
   contact's WhatsApp number when queued (a template step checks its template and the contact's
   consent instead of the window, P4-06e). Live runs send as the company's automation (no member
   actor on the send); test runs send under the tester's authority.
+- Task steps (ADR-244): publishing or testing an automation with one needs `crm.write`. The task is
+  for a chosen member who must be an active member who can use the CRM when the automation is
+  published and again when the step runs (otherwise the step is skipped and says why); it is about
+  the run's contact only, in the company's scope, never for an erased contact, and is recorded as
+  created by the automation, never by a member.
+- Deal steps (ADR-245): the same permission and member rules for the owner (a member who can no
+  longer use the CRM is left out); the deal is for the run's contact and conversation, in an active
+  stage of an active pipeline checked when publishing and again when the step runs, and is recorded
+  as created by the automation. A contact with an open deal in the pipeline gets no second one.
+- Task reminders (ADR-246) follow the CRM's reminder rules: one email to the task's member at the
+  due time, only while the task is open and the member can still use the CRM, carrying the task's
+  title and a link to the task list, never the conversation.
+- Form steps (ADR-248): only a form published at Meta, not archived and of the number's WhatsApp
+  account is sent, checked when publishing and again when the step runs, and only while the
+  company's plan includes WhatsApp Flows, as for a member's form. The send is the bot's (no member),
+  with a flow token HyFib issues for the conversation and contact, so the Flows endpoint and the
+  completion accept the answers exactly as for a member's form.
+- Task and deal steps need the CRM in the company's plan (ADR-249), as members' CRM writes do:
+  publishing or testing such an automation is refused without it, and a run skips the step
+  (`crm_not_in_plan`) and goes on.
 
 Phase 4 rules (automation web requests, P4-02):
 
@@ -239,6 +304,9 @@ Phase 4 rules (automation web requests, P4-02):
   belongs to another domain, that use secrets outside header values, or whose host contains
   placeholders. The worker re-checks the current domain list and secrets when it makes each call
   (removing a domain or secret takes effect on the next call).
+- Form bodies (ADR-236): placeholder values are URL-encoded in a form body, as in the address, so a
+  customer's text cannot add or end a field; a JSON body's values stay JSON-escaped. HyFib sets the
+  form's Content-Type itself and refuses a step's own beside a form body.
 - A company that allows a server which echoes request headers back exposes its secrets to anyone
   who can edit automations; the settings page says so. Automation editors cannot choose the host at
   run time and cannot place secrets in the address or body.
@@ -267,6 +335,10 @@ Phase 4 rules (CRM, P4-04):
   notes. The contact picker in the deal form uses the contact search (`contacts.read`).
 - Reports show deal counts, values, pipeline and stage names (never deal titles, notes or contacts)
   to `reports.read`, including analysts and marketers, like the other report sections.
+- Exporting deals (ADR-239) needs `crm.read` and `contacts.export`: the file holds the deals the
+  view shows with customers' names and numbers (masked as for the member, ADR-226),
+  formula-neutralised; an erased contact's deals carry no number. Each export is audited
+  (`crm.deals_exported`, with its filters).
 - While a company is suspended, `crm.read` stays available and `crm.write` does not; reminder jobs
   wait, and the sweep sends reminders after reactivation unless they are more than a day late.
 
@@ -335,6 +407,10 @@ Phase 4 rules (Commerce, P4-06a):
   (`commerce.catalog_sync_requested`, `commerce.order_status_changed`, `commerce.payment_requested`,
   `commerce.payment_link_cancel_requested`, `commerce.payment_account_saved`,
   `commerce.payment_account_removed`, with the order reference or key id, never secrets).
+- Exporting orders (ADR-235) needs `commerce.read` and `contacts.export`: the file holds the orders
+  of conversations the member can see, with customers' names, numbers (masked as for the member,
+  ADR-226) and notes, formula-neutralised; an erased contact's orders carry neither number nor note.
+  Each export is audited (`commerce.orders_exported`, with the status filter).
 - The company's key secret and webhook secret are sent once, stored as keyring ciphertexts bound to
   the company and account (`commerce-payments:<company>:<account>:<key|webhook>`), never returned
   to the browser or logged, and used only by the worker (keys) and the merchant webhook route
@@ -853,6 +929,10 @@ Phase 5 rules (Public API, P5-08):
   `contacts.read`, and `conversations.read` for a segment with a `last_message` condition, as a
   search with the same conditions does, so a segment never gives what a search could not; it reads
   in the key's company scope, erased contacts left out.
+- Conditions on store orders (ADR-231): `orders` and `spend` also need `orders.read` (granted with
+  `commerce.read`) in searches, changes to matching contacts, segments, a segment's contacts and
+  drafts' audiences, checked before anything is read; a store named must be the company's, another
+  company's answering as one that does not exist.
 - Media from links (ADR-194): a key with `messages.reply` sends a photo, a video, audio or a
   document by a link WhatsApp fetches, within the 24-hour window. HyFib never fetches the link, so
   it cannot be used to reach HyFib's network; it takes only https links with a host and no user name
@@ -886,6 +966,19 @@ Phase 5 rules (Public API, P5-08):
   template's checks are unchanged (the scope of its category, consent, the suppression list, the
   marketing cap); only the API sends these templates, and the link is kept with the message and
   redacted with it.
+- Website buttons whose link ends with a value (ADR-228): no value can change the website a button
+  opens. A link must name its https website in full before `{{1}}` (the host followed by `/`, `?` or
+  `#`, no user name), refused when a draft is saved and not sendable when synced otherwise; every
+  value is checked again when sent, by the sender, the API and `buildTemplateSend` (no spaces or
+  control characters, the template's origin kept). The link as sent is kept with the message and
+  redacted with it, and the inbox shows it as an https anchor in a new tab without the referrer.
+- Ends of links from customer data (ADR-229): campaigns, automations and store messages fill the end
+  of a link from contact fields, run inputs or order values, which customers or integrations may
+  have written. Each is checked when queued exactly as a member's value is (no spaces or control
+  characters, at most 1,000 characters, the template's website kept): an unusable value falls back
+  to the member's fallback, or skips the recipient or message, or fails the run; fixed ends and
+  fallbacks are checked when saved. A value can choose the path on the template's website, never
+  another website.
 - Following contact changes (ADR-114): `GET /contact-changes` reads the key's company's changes
   only (`contacts.read`, RLS and an explicit company filter). Its cursor, a database transaction id
   and a row id, is sealed with the keyring (AES-256-GCM) with the company in the associated data, so
@@ -895,6 +988,11 @@ Phase 5 rules (Public API, P5-08):
   (column grants: the runtime and definer roles insert only `tenant_id` and `contact_id`); only the
   compaction function, owned by the definer role and run by the worker, deletes rows across
   companies, and only rows a later change of the same contact replaced.
+- Merging contacts through the API (ADR-227): `contacts.merge` is granted only by members holding
+  `contacts.delete` (owners and administrators, who merge in the app), is a writing scope (refused
+  while the company is suspended or restricted) and can be left out by the plan. The merge runs
+  `app.merge_contacts` in the key's company scope, so another company's contact is not found; the
+  audit log names the key.
 - Defining contact fields (ADR-115): adding, renaming and deleting the company's custom fields needs
   `contact_fields.manage`, which only members holding `tenant.settings.manage` (owners and
   administrators, who define fields in Settings) grant, and an active company. Fields are named by

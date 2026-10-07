@@ -64,6 +64,8 @@ export default async function SegmentPage({
                 slug={ctx.tenant.slug}
                 fields={inputs.fields}
                 campaigns={inputs.campaigns}
+                stores={inputs.stores}
+                orderCurrencies={inputs.orderCurrencies}
                 existing={{
                   id: segment.id,
                   name: segment.name,

@@ -5,6 +5,7 @@ import {
   and,
   asc,
   campaigns,
+  commerceStores,
   contactFields,
   contacts,
   eq,
@@ -18,6 +19,8 @@ import {
   type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
+import { shownNumber } from '../contacts/number-masking';
+import { isCurrency } from '../crm/money';
 import { recordAudit, type RequestMeta } from '../audit';
 import { NUMBER_RE, normalizeTag, validDate } from '../contacts/fields';
 import { likePattern, parseInput } from '../validation';
@@ -72,6 +75,22 @@ export const CAMPAIGN_OUTCOMES = [
   'replied',
   'not_replied',
 ] as const;
+/** How an `orders` condition compares the store orders a contact placed (ADR-231). */
+export const ORDER_COUNT_COMPARISONS = ['at_least', 'fewer_than'] as const;
+/** How a `spend` condition compares what a contact spent on store orders in a currency (ADR-231). */
+export const SPEND_COMPARISONS = ['at_least', 'less_than'] as const;
+/** Bounds of the order conditions: orders counted, days back, an amount in minor units. */
+export const ORDER_CONDITION_LIMITS = {
+  count: { min: 1, max: 10_000 },
+  days: { min: 1, max: 3_650 },
+  amountMinor: { max: 1_000_000_000_000_000 },
+} as const;
+const orderDays = z.coerce
+  .number()
+  .int()
+  .min(ORDER_CONDITION_LIMITS.days.min)
+  .max(ORDER_CONDITION_LIMITS.days.max)
+  .optional();
 
 const conditionSchema = z.discriminatedUnion('type', [
   z.object({
@@ -115,6 +134,25 @@ const conditionSchema = z.discriminatedUnion('type', [
     campaignId: z.uuid(),
     outcome: z.enum(CAMPAIGN_OUTCOMES),
   }),
+  z.object({
+    type: z.literal('orders'),
+    op: z.enum(ORDER_COUNT_COMPARISONS),
+    count: z.coerce
+      .number()
+      .int()
+      .min(ORDER_CONDITION_LIMITS.count.min)
+      .max(ORDER_CONDITION_LIMITS.count.max),
+    days: orderDays,
+    storeId: z.uuid().optional(),
+  }),
+  z.object({
+    type: z.literal('spend'),
+    op: z.enum(SPEND_COMPARISONS),
+    currency: z.string().regex(/^[A-Z]{3}$/, 'Choose a currency'),
+    amountMinor: z.coerce.number().int().min(0).max(ORDER_CONDITION_LIMITS.amountMinor.max),
+    days: orderDays,
+    storeId: z.uuid().optional(),
+  }),
 ]);
 export type SegmentCondition = z.infer<typeof conditionSchema>;
 
@@ -126,6 +164,16 @@ export const segmentDefinitionSchema = z.object({
     .max(SEGMENT_LIMITS.conditions),
 });
 export type SegmentDefinition = z.infer<typeof segmentDefinitionSchema>;
+/** Whether a definition reads store orders, which needs `commerce.read` to save or preview. */
+export const readsStoreOrders = (def: SegmentDefinition): boolean =>
+  def.conditions.some((c) => c.type === 'orders' || c.type === 'spend');
+
+/** Refuses conditions on store orders to a member who cannot read them (ADR-231). */
+export function assertCanUseDefinition(ctx: TenantContext, def: SegmentDefinition): void {
+  if (readsStoreOrders(def) && !can(ctx, 'commerce.read')) {
+    throw new AppError('forbidden', 'Conditions on store orders need access to store orders.');
+  }
+}
 
 const FIELD_OPS: Record<ContactFieldType, ReadonlySet<FieldComparison>> = {
   text: new Set(['is_set', 'is_not_set', 'equals', 'not_equals', 'contains']),
@@ -208,6 +256,14 @@ export async function checkSegmentDefinition(
         .from(campaigns)
         .where(and(eq(campaigns.tenantId, tenantId), eq(campaigns.id, c.campaignId)));
       if (!row) return 'A condition refers to a campaign that does not exist.';
+    }
+    if (c.type === 'spend' && !isCurrency(c.currency)) return 'Choose a currency HyFib knows.';
+    if ((c.type === 'orders' || c.type === 'spend') && c.storeId) {
+      const [row] = await tx
+        .select({ id: commerceStores.id })
+        .from(commerceStores)
+        .where(and(eq(commerceStores.tenantId, tenantId), eq(commerceStores.id, c.storeId)));
+      if (!row) return 'A condition refers to a store that is no longer connected.';
     }
   }
   return null;
@@ -319,6 +375,26 @@ function conditionSql(
         where r.tenant_id = ${contacts.tenantId} and r.campaign_id = ${c.campaignId}
           and r.contact_id = ${contacts.id} and r.state = 'queued' and ${outcome})`;
     }
+    case 'orders':
+    case 'spend': {
+      // The contact's orders that count (ADR-231): matched by number, as the inbox matches them,
+      // and not marked by the store as a test, cancelled, refunded, voided, failed or deleted.
+      const counted = sql`from app.commerce_store_orders o
+        where o.tenant_id = ${contacts.tenantId} and o.customer_phone = ${contacts.phoneE164}
+          and not o.test and o.deleted_at is null and o.cancelled_at is null
+          and o.status not in ('cancelled', 'refunded', 'failed', 'trash', 'checkout-draft')
+          and coalesce(o.financial_status, '') not in ('refunded', 'voided', 'expired')
+          ${c.storeId ? sql`and o.store_id = ${c.storeId}::uuid` : sql``}
+          ${c.days ? sql`and o.placed_at > now() - make_interval(days => ${c.days})` : sql``}`;
+      if (c.type === 'orders') {
+        const placed = sql`(select count(*) ${counted})`;
+        return c.op === 'at_least' ? sql`${placed} >= ${c.count}` : sql`${placed} < ${c.count}`;
+      }
+      const spent = sql`(select coalesce(sum(o.total_minor), 0) ${counted} and o.currency = ${c.currency})`;
+      return c.op === 'at_least'
+        ? sql`${spent} >= ${c.amountMinor}`
+        : sql`${spent} < ${c.amountMinor}`;
+    }
   }
 }
 
@@ -418,19 +494,26 @@ export function createSegmentsService(deps: { db: Database; clock: Clock }) {
       .select({ count: sql<number>`count(*)::int` })
       .from(contacts)
       .where(where);
-    const sample = can(ctx, 'contacts.read')
-      ? await tx
-          .select({
-            id: contacts.id,
-            displayName: contacts.displayName,
-            phoneE164: contacts.phoneE164,
-          })
-          .from(contacts)
-          .where(where)
-          .orderBy(asc(contacts.createdAt), asc(contacts.id))
-          .limit(SEGMENT_LIMITS.previewSample)
-      : [];
-    return { count: counted?.count ?? 0, sample };
+    // Which contacts match conditions on store orders is order data (ADR-231): a member who cannot
+    // read store orders sees how many a saved segment matches, never which.
+    const sample =
+      can(ctx, 'contacts.read') && (!readsStoreOrders(def) || can(ctx, 'commerce.read'))
+        ? await tx
+            .select({
+              id: contacts.id,
+              displayName: contacts.displayName,
+              phoneE164: contacts.phoneE164,
+            })
+            .from(contacts)
+            .where(where)
+            .orderBy(asc(contacts.createdAt), asc(contacts.id))
+            .limit(SEGMENT_LIMITS.previewSample)
+        : [];
+    return {
+      count: counted?.count ?? 0,
+      // Numbers as the member may see them (ADR-226).
+      sample: sample.map((c) => ({ ...c, phoneE164: shownNumber(ctx, c.phoneE164) })),
+    };
   }
 
   return {
@@ -485,7 +568,11 @@ export function createSegmentsService(deps: { db: Database; clock: Clock }) {
       assertCan(ctx, 'campaigns.read');
       return db.run(
         ctx.scope,
-        async (tx) => preview(tx, ctx, await parseSegmentDefinition(tx, ctx.tenant.id, raw)),
+        async (tx) => {
+          const def = await parseSegmentDefinition(tx, ctx.tenant.id, raw);
+          assertCanUseDefinition(ctx, def);
+          return preview(tx, ctx, def);
+        },
         { accessMode: 'read only' },
       );
     },
@@ -496,6 +583,7 @@ export function createSegmentsService(deps: { db: Database; clock: Clock }) {
       try {
         return await db.run(ctx.scope, async (tx) => {
           const def = await parseSegmentDefinition(tx, ctx.tenant.id, data.definition);
+          assertCanUseDefinition(ctx, def);
           const id = uuidv7();
           await tx.insert(segments).values({
             id,
@@ -530,6 +618,7 @@ export function createSegmentsService(deps: { db: Database; clock: Clock }) {
       try {
         return await db.run(ctx.scope, async (tx) => {
           const def = await parseSegmentDefinition(tx, ctx.tenant.id, data.definition);
+          assertCanUseDefinition(ctx, def);
           const [row] = await tx
             .update(segments)
             .set({

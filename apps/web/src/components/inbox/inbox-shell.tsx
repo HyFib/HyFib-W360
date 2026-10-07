@@ -3,10 +3,11 @@ import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { Badge, Button, Input, Label, Select } from '@w360/ui';
 import { cn } from '@w360/ui/cn';
-import type { ConversationSummary } from '@w360/domain';
+import type { ConversationSummary, WaitingReply } from '@w360/domain';
 import { AvailabilityToggle } from '@/components/settings/team-editor';
 import { ConversationList } from './conversation-list';
 import { LiveEvents } from './live-events';
+import { OverdueNotice } from './overdue-notice';
 
 export interface InboxQuery {
   view: 'mine' | 'unassigned' | 'all';
@@ -55,6 +56,7 @@ export function InboxShell({
   filters,
   unreadMentions,
   available,
+  waiting,
   mentionsActive = false,
   list,
   children,
@@ -72,6 +74,8 @@ export function InboxShell({
   unreadMentions: number;
   /** The member's availability, or null when their role cannot take conversations. */
   available: boolean | null;
+  /** Reply due times of the customers waiting in conversations the member can see (ADR-241). */
+  waiting: { waits: WaitingReply[]; capped: boolean; renderedAt: string };
   /** The mentions page replaces the conversation list with its own. */
   mentionsActive?: boolean;
   list?: ReactNode;
@@ -94,6 +98,12 @@ export function InboxShell({
           />
         </div>
         {available !== null ? <AvailabilityToggle slug={slug} available={available} /> : null}
+        <OverdueNotice
+          href={`${base}${inboxQueryString({ view: 'all', status: 'open', order: 'waiting' })}`}
+          renderedAt={waiting.renderedAt}
+          waits={waiting.waits}
+          capped={waiting.capped}
+        />
         <nav aria-label="Inbox views" className="flex flex-wrap gap-1">
           {views.map((v) => (
             <Link

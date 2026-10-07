@@ -1,5 +1,960 @@
 # Progress
 
+## 2026-10-06 — Task and deal steps follow the plan's CRM (P4-01, P4-04, H-012, ADR-249)
+
+Status: **Implemented; its database test runs in CI only.** Found while adding the plan check to
+form steps (ADR-248): an automation published before a change of plan kept creating CRM tasks and
+deals without the CRM in the plan. No migration. The local PostgreSQL is unavailable, so the
+integration test below was written but not run here.
+
+### Completed
+
+- **Domain:** `applyTaskEffect` and `applyDealEffect` skip with `crm_not_in_plan` when the plan
+  leaves out the CRM; `assertMayChangeCrm` checks the plan before `crm.write`.
+- **Web:** the run page's reason.
+- **Tests:** integration (1 new in `automations.test.ts`: both steps skipped with the reason after a
+  change of plan, the run going on, publishing refused; the plan change is now a shared helper).
+  Written for CI; not run here. The runner and service checks are not unit-tested, so there are no
+  mutation checks.
+- **Docs:** ADR-249; SECURITY; DEPLOYMENT; BACKLOG P4-04; feature matrix H-012.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 1062 passed (113 files)                                       |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-06 — Automation steps that send a WhatsApp form (P4-01, P4-03, W-085, ADR-248)
+
+Status: **Implemented; its database and browser tests run in CI only.** Forms could be sent only by
+members. No migration. The local PostgreSQL is unavailable, so the integration and e2e tests below
+were written but not run here.
+
+### Completed
+
+- **Domain:** the `send_flow` step (graph, checks against the company's forms, the interpreter's
+  effect), `queueBotFlow` in the runner (the plan and the form checked again, the message, its send
+  intent and a `flow_sends` row with a new token), the WhatsApp Flows plan check for publishing and
+  testing, the company's forms among the editor's options.
+- **Web:** the step in the automation editor (form, message, header, footer, button), its line in
+  the simulator, and the run page's reasons.
+- **Tests:**
+  - Unit (5 new in `flow-step.test.ts`).
+  - Integration (4 new in `automations.test.ts`: the send with its token and request, a form no
+    longer published, publishing only a published form, a plan without WhatsApp Flows). Written for
+    CI; not run here.
+  - E2e (`flows.spec.ts`: after the form is published, an automation is built, simulated and
+    published, sends the form on WhatsApp and the answers are saved). Written for CI; not run here.
+- **Docs:** ADR-248; ARCHITECTURE; SECURITY; DEPLOYMENT; BACKLOG P4-01 and P4-03; feature matrix
+  W-085.
+- **Mutation checks:** 14/14 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 1062 passed (113 files)                                         |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 14/14 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- No forms from campaigns or templates, no draft forms from test runs, and no waiting for or
+  branching on a form's answers.
+
+## 2026-10-06 — An expected close date from deal steps (P4-01, P4-04, ADR-247)
+
+Status: **Implemented; its database and browser tests run in CI only.** No migration. The local
+PostgreSQL is unavailable, so the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Domain:** `closeInDays` on deal steps, `localDateAfter` in `crm/time.ts`, and `applyDealEffect`
+  setting `expected_close_on` from the company's time zone.
+- **Web:** "Expected to close after (days)" on the deal step, and its line in the simulator.
+- **Tests:** unit (1 new in `deal-step.test.ts`, with time zones, a year end, a leap day and a
+  daylight-saving change); integration (the date in the deal test); e2e (the date on the deal page).
+  The integration and e2e tests were written for CI; not run here.
+- **Docs:** ADR-247; DEPLOYMENT; BACKLOG P4-04; feature matrix H-012.
+- **Mutation checks:** 10/10 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 1057 passed (112 files)                                         |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 10/10 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+## 2026-10-06 — Reminder emails for the tasks automations create (P4-01, P4-04, ADR-246)
+
+Status: **Implemented; its database and browser tests run in CI only.** No migration. The local
+PostgreSQL is unavailable, so the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Domain:** `remind` on task steps (checked against a due time), the effect's `remind`, and
+  `applyTaskEffect` setting the reminder at the due time and queuing the `crm.reminder` job.
+- **Web:** "Email them a reminder when it is due" on the task step, and its line in the simulator.
+- **Tests:** unit (1 new in `task-step.test.ts`); integration (1 new in `automations.test.ts`: the
+  pending reminder at the due time and its job); e2e (the task step's reminder ticked and shown on
+  the task list). The integration and e2e tests were written for CI; not run here.
+- **Docs:** ADR-246; SECURITY; DEPLOYMENT; BACKLOG P4-04; feature matrix H-012.
+- **Mutation checks:** 6/6 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 1056 passed (112 files)                                         |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 6/6 deliberate regressions caught                               |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+## 2026-10-06 — Automation steps that create a CRM deal (P4-01, P4-04, H-012, ADR-245)
+
+Status: **Implemented; its database and browser tests run in CI only.** Automations could create
+tasks (ADR-244) but not deals. The local PostgreSQL is unavailable, so migrations 0160 and 0161 and
+the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0160 (`crm_deals.created_by_automation_id`, the creator check and the
+  foreign key, NOT VALID) and 0161 (validates them).
+- **Domain:** the `create_deal` step (graph, `dealValueMinor`, checks against `crmPipelines` and
+  `crmMemberIds`, the interpreter's effect), `applyDealEffect` in the runner, the CRM permission
+  check for task and deal steps, the company's pipelines among the editor's options, the deal page's
+  `createdByAutomation`, the export column.
+- **Web:** the step in the automation editor (title, pipeline, stage, value, owner), its line in the
+  simulator, the run page's reasons, and "by an automation" on the deal page.
+- **Tests:**
+  - Unit (5 new in `deal-step.test.ts`).
+  - Integration (3 new in `automations.test.ts`: the deal and its activity and page, one open deal
+    per pipeline, an owner left out, an archived pipeline skipped, publishing refused for a stage, a
+    value or an owner). Written for CI; not run here.
+  - E2e (`automations.spec.ts`: the task step's automation also creates a deal, checked on the board
+    and the deal page). Written for CI; not run here.
+- **Docs:** ADR-245; ARCHITECTURE; SECURITY; THREAT-MODEL T221; DATA-RETENTION; DEPLOYMENT; BACKLOG
+  P4-04; feature matrix H-012.
+- **Mutation checks:** 17/17 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                                     | Result                                                          |
+| ----------------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`          | clean                                                           |
+| `pnpm test` (unit)                                          | 1055 passed (112 files)                                         |
+| `pnpm test:integration`, `pnpm test:e2e`, `pnpm db:migrate` | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                                | passed                                                          |
+| Mutation checks                                             | 17/17 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes                       | no leaks found                                                  |
+
+### Known gaps
+
+- No step that moves a deal, no expected close date from a step, no choice to update an open deal
+  instead of skipping.
+
+## 2026-10-06 — Automation steps that create a CRM task (P4-01, P4-04, H-012, ADR-244)
+
+Status: **Implemented; its database and browser tests run in CI only.** Automations could not create
+CRM work. The local PostgreSQL is unavailable, so migrations 0158 and 0159 and the integration and
+e2e tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0158 (`crm_tasks.created_by_automation_id`, the creator check and the
+  foreign key to the automation, the run steps' outcomes `created` and `skipped`, all NOT VALID) and
+  0159 (validates them).
+- **Domain:** the `create_task` step (graph, checks against `crmMemberIds`, the interpreter's
+  effect), `applyTaskEffect` in the runner, the `crm.write` check on publishing and testing, the
+  company's CRM members among the editor's options, the export column.
+- **Web:** the step in the automation editor (title, member, due after hours), its line in the
+  simulator, the run page's outcomes and reasons, and "by an automation" on the CRM timeline.
+- **Tests:**
+  - Unit (5 new in `task-step.test.ts`).
+  - Integration (3 new in `automations.test.ts`: the task and its activity, a suspended member
+    skipped while the run goes on, publishing refused for a member without CRM access and for a
+    member who cannot edit the CRM). Written for CI; not run here.
+  - E2e (`automations.spec.ts`: a task step built, simulated, published and run, the task on the
+    owner's task list). Written for CI; not run here.
+- **Docs:** ADR-244; ARCHITECTURE; SECURITY; THREAT-MODEL T221; DATA-RETENTION; DEPLOYMENT; BACKLOG
+  P4-04; feature matrix H-012.
+- **Mutation checks:** 16/16 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                                     | Result                                                          |
+| ----------------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`          | clean                                                           |
+| `pnpm test` (unit)                                          | 1050 passed (111 files)                                         |
+| `pnpm test:integration`, `pnpm test:e2e`, `pnpm db:migrate` | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                                | passed                                                          |
+| Mutation checks                                             | 16/16 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes                       | no leaks found                                                  |
+
+### Known gaps
+
+- No steps that create deals, no reminder email for an automation's task, no tasks for a team or in
+  turn.
+
+## 2026-10-06 — Members who have a conversation open (P3-06, H-011, ADR-243)
+
+Status: **Implemented; its database and browser tests run in CI only.** Nothing told a member that a
+teammate had the same conversation open. The local PostgreSQL is unavailable, so migration 0157 and
+the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0157 (`app.conversation_viewers` with row-level security, its grants,
+  deletion step and policies; `ops.purge_conversation_viewers`, a definer function for the worker
+  that sees only rows not reported for an hour).
+- **Domain:** `inbox/presence.ts` (browser-safe: the 20- and 45-second constants and
+  `presenceText`), `inbox/presence-service.ts` (`report`, `leave`, `purgeConversationViewers`); the
+  inbox's `memberCanSee` is exported for it; the account export leaves the table out.
+- **Web:** the POST/DELETE route `/api/c/<company>/inbox/<conversation>/presence` (trusted origin,
+  the member's session) and `ConversationPresence` on the conversation page.
+- **Worker:** the minute messaging sweep purges rows not reported for an hour.
+- **Tests:**
+  - Unit (3 new in `presence.test.ts`).
+  - Integration (5 new in `presence.test.ts`: the window and one row per member, visibility and
+    suspended members, another company, leaving, the purge oldest first, row-level security; the
+    purge function in the isolation suite's list). Written for CI; not run here.
+  - E2e (`presence.spec.ts`: an owner and an agent see each other on the same conversation until the
+    agent leaves). Written for CI; not run here.
+- **Docs:** ADR-243; ARCHITECTURE; SECURITY; THREAT-MODEL T220; DATA-RETENTION; DEPLOYMENT; BACKLOG
+  P3-06; feature matrix H-011.
+- **Mutation checks:** 11/11 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                                     | Result                                                          |
+| ----------------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`          | clean                                                           |
+| `pnpm test` (unit)                                          | 1045 passed (110 files)                                         |
+| `pnpm test:integration`, `pnpm test:e2e`, `pnpm db:migrate` | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                                | passed                                                          |
+| Mutation checks                                             | 11/11 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes                       | no leaks found                                                  |
+
+### Known gaps
+
+- No typing presence, nothing in the conversation list, nothing through the API or webhooks.
+
+## 2026-10-06 — Stage chances and a weighted forecast on the CRM board (P4-04, ADR-242)
+
+Status: **Implemented; its database and browser tests run in CI only.** The board showed each
+stage's open deals at full value only. The local PostgreSQL is unavailable, so migration 0156 and
+the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0156 (`crm_stages.win_percent`, 0 to 100 or null, and its update grant);
+  the account export lists the column.
+- **Domain:** `crm/forecast.ts` (`weigh`, `forecast`), `monthEndIn` in `crm/time.ts`, chances in
+  `createPipelineSchema`, `updatePipelineSchema` (absent: kept) and `loadPipelines`, and the board's
+  weighted columns and forecast.
+- **Web:** a chance field per stage in the pipeline editor, the chances in the pipeline list, and
+  the board's weighted figures.
+- **Tests:**
+  - Unit (4 new in `forecast.test.ts`).
+  - Integration (1 new in `crm.test.ts`: weighted columns, the forecast with the month and the owner
+    filter, chances kept, refused beyond 100% and to agents, and set at creation). Written for CI;
+    not run here.
+  - E2e (`crm.spec.ts`: a 50% chance set at creation, listed, and weighing the deal on the board).
+    Written for CI; not run here.
+- **Docs:** ADR-242; ARCHITECTURE; DEPLOYMENT; BACKLOG P4-04; feature matrix H-012.
+- **Mutation checks:** 13/13 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                                     | Result                                                          |
+| ----------------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`          | clean                                                           |
+| `pnpm test` (unit)                                          | 1042 passed (109 files)                                         |
+| `pnpm test:integration`, `pnpm test:e2e`, `pnpm db:migrate` | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                                | passed                                                          |
+| Mutation checks                                             | 13/13 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes                       | no leaks found                                                  |
+
+### Known gaps
+
+- No chances per deal, no forecast in Reports or beyond this month, none through the API.
+
+## 2026-10-06 — A notice of overdue replies in the inbox (P3-06, ADR-241)
+
+Status: **Implemented; its database test runs in CI only.** Overdue replies were marked in the list
+only, as of the page's load. The local PostgreSQL is unavailable, so the integration test below was
+written but not run here.
+
+### Completed
+
+- **Domain:** `inbox/overdue-notice.ts` (browser-safe: `countOverdue`, `overdueNoticeText`,
+  `WAITING_REPLY_LIMIT`, exported as `@w360/domain/overdue-notice`) and `waitingReplies` in the
+  inbox service (the due times of the waits the member can see).
+- **Web:** `OverdueNotice` (a clock in 10-second steps through `useSyncExternalStore`, the server's
+  time first) in the inbox shell, fed by `loadInboxList`.
+- **Tests:**
+  - Unit (3 new in `overdue-notice.test.ts`).
+  - Integration (1 new in `overdue-replies.test.ts`: the due times in order, whose they are, an
+    agent's sight, a resolved conversation, a member without the inbox, another company, no target).
+    Written for CI; not run here.
+- **Docs:** ADR-241; SECURITY; BACKLOG P3-06; feature matrix H-011.
+- **Mutation checks:** 8/8 deliberate regressions caught on the count and the notice.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 1038 passed (108 files)                                       |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| Mutation checks                                    | 8/8 deliberate regressions caught on the count and the notice |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+### Known gaps
+
+- No browser test: a wait turns overdue a minute after it starts at the earliest, longer than an
+  end-to-end step should wait. No notice outside the inbox.
+
+## 2026-10-06 — Keyword triggers that also match small typos (P4-01, ADR-240)
+
+Status: **Implemented; its database test runs in CI only.** A keyword written with a typo started
+nothing. The local PostgreSQL is unavailable, so the integration test below was written but not run
+here.
+
+### Completed
+
+- **Domain:** `typoAllowance`, `withinEdits`, `matchesKeywordWithTypos` and `equalsKeywordWithTypos`
+  in `inbox/keywords.ts` (pure, usable in the browser); the keyword trigger's `typos`, its rank
+  below matches without typos (`matchTrigger`, ranks renumbered 0 to 4 and the run's trigger type
+  mapped in `dispatch.ts`), its description and a builder warning.
+- **Web:** the option under the keyword fields of the automation builder.
+- **Tests:**
+  - Unit (4 new in `keywords.test.ts`, 1 new in `interpreter.test.ts` with the renumbered ranks, 2
+    new in `api-trigger.test.ts`).
+  - Integration (1 new in `automations.test.ts`: a typo starts the automation that allows typos, as
+    a keyword start; a typo without the option starts nothing; a match without typos wins). Written
+    for CI; not run here.
+- **Docs:** ADR-240; ARCHITECTURE; BACKLOG P4-01; feature matrix W-078.
+- **Mutation checks:** 19 of 20 deliberate regressions caught (two only after tests were added; the
+  survivor removes a length shortcut that changes speed, not results).
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                                                                                                           |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                                                                                            |
+| `pnpm test` (unit)                                 | 1035 passed (107 files)                                                                                                                          |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it                                                                                    |
+| `pnpm build`                                       | passed                                                                                                                                           |
+| Mutation checks                                    | 19 of 20 deliberate regressions caught (two only after tests were added; the survivor removes a length shortcut that changes speed, not results) |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                                                                                                   |
+
+### Known gaps
+
+- No typos in team routing or consent keywords; no phonetic or transliteration matching; the
+  tolerance is fixed by word length.
+
+## 2026-10-06 — Exporting deals as CSV (P4-04, ADR-239)
+
+Status: **Implemented; its database tests run in CI only.** Deals could be read on the board (200
+per stage) or fifty at a time in the won and lost lists only. The local PostgreSQL is unavailable,
+so the integration tests below were written but not run here.
+
+### Completed
+
+- **Domain:** `crm/deals-csv.ts` (`DEAL_CSV_COLUMNS`, `dealCsvLine`), and `dealExportSchema` and
+  `exportDeals` in the deal operations (the view's filters, batches of 500 on an exact creation
+  time, the audit).
+- **Web:** `GET /c/{slug}/crm/export` and "Export CSV" on the CRM page, exporting the view shown
+  (the board's pipeline and owner filter, or the won or lost list).
+- **Tests:**
+  - Unit (4 new in `deals-csv.test.ts`).
+  - Integration (2 new in `crm.test.ts`: the lines, the filters, an unknown status, another
+    company's pipeline, agents and marketers refused, numbers masked for a masked member, the audit,
+    and 501 deals created at the same moment exported once each). Written for CI; not run here.
+- **Docs:** ADR-239; SECURITY; BACKLOG P4-04; feature matrix H-012.
+- **Mutation checks:** 12/12 deliberate regressions caught on the CSV lines and the request.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 1028 passed (106 files)                                              |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it        |
+| `pnpm build`                                       | passed                                                               |
+| Mutation checks                                    | 12/12 deliberate regressions caught on the CSV lines and the request |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                       |
+
+### Known gaps
+
+- No browser test of the download; no deal import; tasks, notes and timelines are not exported.
+
+## 2026-10-06 — Setting a custom field on every contact a filter matches (P3-01, ADR-238)
+
+Status: **Implemented; its database and browser tests run in CI only.** Bulk edits covered tags
+only. The local PostgreSQL is unavailable, so the integration and e2e tests below were written but
+not run here.
+
+### Completed
+
+- **Domain:** `contacts/bulk-fields.ts` (`BulkFieldResult`, `bulkFieldSummary`), `bulkFieldSchema`
+  and `bulkSetField` in the contacts service, with the locking and count check of bulk tag edits
+  shared as `lockMatching`.
+- **Web:** `BulkFieldForm` (a field, a value input of the field's type, Set and Clear, each
+  confirmed in a dialog) below the bulk tag form on the contacts page, and `bulkSetFieldAction`.
+- **Tests:**
+  - Unit (4 new in `bulk-fields.test.ts`).
+  - Integration (2 in `contacts.test.ts`, one new and one extended: typed values, clearing, only
+    changed contacts in the contact feed, an unknown field, a changed count, the 10,000 limit, an
+    analyst refused, another company, the audit entry). Written for CI; not run here.
+  - E2e (`contacts.spec.ts`: a field added in settings, set on the contacts a search finds after the
+    confirmation, and shown on the contact). Written for CI; not run here.
+- **Docs:** ADR-238; ARCHITECTURE; SECURITY; RUNBOOKS; BACKLOG P3-01; feature matrix W-049.
+- **Mutation checks:** 14/14 deliberate regressions caught on the summary and the request.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                             |
+| -------------------------------------------------- | ------------------------------------------------------------------ |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                              |
+| `pnpm test` (unit)                                 | 1024 passed (105 files)                                            |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them    |
+| `pnpm build`                                       | passed                                                             |
+| Mutation checks                                    | 14/14 deliberate regressions caught on the summary and the request |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                     |
+
+### Known gaps
+
+- No bulk consent, name, email or number edits; no bulk edits from a segment or through the API; no
+  undo.
+
+## 2026-10-06 — Exporting automation runs as CSV (P4-01, ADR-237)
+
+Status: **Implemented; its database test runs in CI only.** Runs could be read fifty at a time on
+screen only. The local PostgreSQL is unavailable, so the integration test below was written but not
+run here.
+
+### Completed
+
+- **Domain:** `automations/runs-csv.ts` (`RUN_CSV_COLUMNS`, `runCsvLine`) and `exportRuns` in the
+  automation service (the list's filters, batches of 500, the audit).
+- **Web:** `GET /c/{slug}/automations/runs/export` and "Export CSV" on the runs page, keeping its
+  filters.
+- **Tests:**
+  - Unit (2 new in `runs-csv.test.ts`).
+  - Integration (1 new in `automations.test.ts`: the line, no customer data, the filters, an unknown
+    status, an agent refused, the audit, another company). Written for CI; not run here.
+- **Docs:** ADR-237; SECURITY; BACKLOG P4-01; feature matrix H-026.
+- **Mutation checks:** 6/6 deliberate regressions caught on the CSV lines.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 104 files, 1020 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| Mutation checks                                    | 6/6 deliberate regressions caught on the CSV lines            |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+### Known gaps
+
+- No browser test of the download; a run's steps and answers are not exported.
+
+## 2026-10-06 — Form bodies for automation HTTP steps (P4-02, ADR-236)
+
+Status: **Implemented; its database test runs in CI only.** HTTP steps could only send JSON bodies.
+The local PostgreSQL is unavailable, so the integration test below was written but not run here.
+
+### Completed
+
+- **Domain:** `bodyFormat` on HTTP steps (`HTTP_BODY_FORMATS`), `formBodyProblem` and the
+  Content-Type refusal in the step's checks, `encodeFormValue`; the interpreter renders form values
+  URL-encoded and adds the form Content-Type.
+- **Web:** "Body format" on the HTTP step with an example per format.
+- **Tests:**
+  - Unit (2 new in `interpreter.test.ts`: the checks; the rendered request and its header).
+  - Integration (1 new in `automation-http.test.ts`: the body and header a local server receives).
+    Written for CI; not run here.
+- **Docs:** ADR-236; ARCHITECTURE; SECURITY; DEPLOYMENT; BACKLOG P4-02; feature matrix H-027.
+- **Mutation checks:** 9/9 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 103 files, 1018 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| Mutation checks                                    | 9/9 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+### Known gaps
+
+- No browser test of the editor's format choice; no multipart bodies.
+
+## 2026-10-06 — Exporting WhatsApp orders as CSV (P4-06a, ADR-235)
+
+Status: **Implemented; its database test runs in CI only.** Orders could be read fifty at a time on
+screen but not taken out of HyFib. The local PostgreSQL is unavailable, so the integration test
+below was written but not run here.
+
+### Completed
+
+- **Domain:** `commerce/orders-csv.ts` (`ORDER_CSV_COLUMNS`, `orderCsvLine`) and `exportOrders` in
+  the commerce service (permissions, the list's visibility and filter, batches of 500, the audit).
+- **Web:** `GET /c/{slug}/commerce/orders/export` (authorized before the first byte) and "Export
+  CSV" on Commerce → Orders for members who export contacts, keeping the status filter.
+- **Tests:**
+  - Unit (3 new in `orders-csv.test.ts`).
+  - Integration (1 new in `commerce.test.ts`: the lines, the filter, an unknown status, an agent
+    refused, the audit, an erased contact, another company). Written for CI; not run here.
+- **Docs:** ADR-235; SECURITY; THREAT-MODEL T219; BACKLOG P4-06a; feature matrix W-113.
+- **Mutation checks:** 9/9 deliberate regressions caught on the CSV lines.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 103 files, 1016 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| Mutation checks                                    | 9/9 deliberate regressions caught on the CSV lines            |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+### Known gaps
+
+- No browser test of the download; no order reports or API export.
+
+## 2026-10-06 — Moving deals between pipelines in the app (P4-04, ADR-234)
+
+Status: **Implemented; its database and browser tests run in CI only.** The service moved deals
+between pipelines, but the app did not offer it. The local PostgreSQL is unavailable, so the tests
+below were written but not run here.
+
+### Completed
+
+- **Web:** `PipelineMoveForm` on an open deal's page ("Move to another pipeline"): the company's
+  other active pipelines with stages, each with its currency, and a stage of the one chosen; the
+  service's refusal (another currency with a value) is shown.
+- **Tests:**
+  - Integration (1 new in `crm.test.ts`: a move keeping the value, the timeline entry and both
+    boards; a stage of another pipeline, another company's pipeline and an archived pipeline
+    refused). Written for CI; not run here.
+  - E2E: `crm.spec.ts` creates a second rupee pipeline and moves its deal there. Runs in CI.
+- **Docs:** ADR-234; ARCHITECTURE; BACKLOG P4-04; feature matrix H-012.
+- **Mutation checks:** none: no unit-tested code changed (the domain is unchanged).
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                       |
+| -------------------------------------------------- | ---------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                        |
+| `pnpm test` (unit)                                 | 102 files, 1013 tests passed |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here; CI runs them   |
+| `pnpm build`                                       | passed                       |
+| gitleaks 8.30.1 on the staged changes              | no leaks found               |
+
+### Known gaps
+
+- No move in bulk, from the board or through the API.
+
+## 2026-10-06 — The setup checklist from the company's data (W-026, ADR-233)
+
+Status: **Implemented; its database and browser tests run in CI only.** The overview's "Get started"
+list never showed a connected number and pointed nowhere past the team. The local PostgreSQL is
+unavailable, so the integration tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-233):** steps worked out from the company's data, each shown to members who can read
+  it, with links and honest notes; no migration.
+- **Domain:** `tenancy/setup-checklist.ts` (`setupSteps`, `createSetupChecklistService`).
+- **Web:** the overview lists the service's steps with how many are done; the runtime builds the
+  service.
+- **Tests:**
+  - Unit (4 new in `setup-checklist.test.ts`).
+  - Integration (3 in `setup-checklist.test.ts`, one taking a starter template through Meta's review
+    at the stand-in). Written for CI; not run here.
+  - E2E: `onboarding.spec.ts` checks a new company's steps and the team step done by an invitation.
+    Runs in CI.
+- **Docs:** ADR-233; ARCHITECTURE; SECURITY; BACKLOG P2-10; feature matrix W-026.
+- **Mutation checks:** 10/10 deliberate regressions caught, one after a survivor led to a stronger
+  test.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                                           |
+| -------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                            |
+| `pnpm test` (unit)                                 | 102 files, 1013 tests passed                                                     |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it                    |
+| `pnpm build`                                       | passed                                                                           |
+| Mutation checks                                    | 10/10 deliberate regressions caught, one after a survivor led to a stronger test |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                                   |
+
+### Known gaps
+
+- The checklist cannot be dismissed, and Meta's business verification is not a step.
+
+## 2026-10-06 — Starter templates (W-070, ADR-232)
+
+Status: **Implemented; its browser test runs in CI only.** Members started every template from an
+empty editor. The browser test needs the web app, the worker and the Graph stand-in, which run in
+CI.
+
+### Completed
+
+- **Design (ADR-232):** twelve starters in HyFib's own copy that fill the New template editor;
+  marketing ones get the company's marketing opt-out keyword as a button; no migration.
+- **Domain:** `templates/library.ts` (`TEMPLATE_STARTERS`, `findTemplateStarter`, `starterDraft`).
+- **Web:** the New template page lists the starters by category and fills the editor from
+  `?starter=<key>`, saying what the opt-out button does or that the starter has none;
+  `TemplateEditor` takes an initial draft.
+- **Tests:**
+  - Unit (4 new in `library.test.ts`).
+  - E2E (1 new in `templates.spec.ts`). Runs in CI.
+- **Docs:** ADR-232; ARCHITECTURE; BACKLOG P3-03; feature matrix W-070.
+- **Mutation checks:** 10/10 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                                 |
+| -------------------------------------------------- | ---------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                  |
+| `pnpm test` (unit)                                 | 101 files, 1009 tests passed                                           |
+| `pnpm test:e2e`                                    | not run here: it needs the web app, the worker and Mailpit; CI runs it |
+| `pnpm build`                                       | passed                                                                 |
+| Mutation checks                                    | 10/10 deliberate regressions caught                                    |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                         |
+
+### Known gaps
+
+- Starters are in English only and were not submitted to Meta: Meta's review and category decision
+  are untested here.
+
+## 2026-10-06 — Segments by store orders (W-051, ADR-231)
+
+Status: **Implemented; its database tests run in CI only.** Campaigns could not be aimed at contacts
+by what they bought from the company's stores. The local PostgreSQL is unavailable, so the
+integration tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-231):** `orders` and `spend` segment conditions over the company's store orders,
+  matched by number, with a period and a store; store order access needed to use them; keys need
+  `orders.read` too; no migration.
+- **Domain:** the conditions in `campaigns/segments.ts` (schema, checks, SQL,
+  `assertCanUseDefinition`, the preview without a sample for members without store access); campaign
+  drafts' audiences checked; the API's conditions, scope checks, store and currency checks in
+  `api/contact-search.ts`, `api/segments.ts` and `api/campaigns.ts`; `orderCurrencies` in the store
+  service; OpenAPI descriptions.
+- **Web:** the segment builder's "Store orders" and "Spent in stores" conditions (count or amount,
+  period, store, currency from the company's orders) in segments and campaign drafts.
+- **Tests:**
+  - Unit (8 new in `segments.test.ts` and `contact-search.test.ts`; counts of condition types
+    updated in the API reference tests).
+  - Integration (4 in `order-segments.test.ts`). Written for CI; not run here.
+- **Docs:** ADR-231; ARCHITECTURE; SECURITY; THREAT-MODEL T218; DEPLOYMENT; BACKLOG P3-04; feature
+  matrix W-051.
+- **Mutation checks:** 27/27 deliberate regressions caught on the unit-tested parts.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 100 files, 1005 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| Mutation checks                                    | 27/27 deliberate regressions caught on the unit-tested parts  |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+### Known gaps
+
+- No browser test (it needs a connected store with orders); partial refunds are not taken off spend;
+  contacts without a number never match; products bought and order dates are not conditions.
+
+## 2026-10-06 — Phase 3 follow-up: emails when a reply is overdue (P3-06, H-011, ADR-230)
+
+Status: **Implemented; its database tests run in CI only.** Nobody was told when a waiting
+customer's reply went past the company's first-response target unless they watched the inbox. The
+local PostgreSQL is unavailable, so the integration tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-230):** the minute sweep emails the member responsible once per wait (assignee, else
+  team, else those who assign), one email per member per sweep, waiting for business hours, skipping
+  waits due more than a day ago; a new email kind members can turn off.
+- **Database:** migration 0154 (`app.overdue_reply_notices` with its guard, deletion step and
+  export, `ops.overdue_reply_turns`, the definer's reads, `reply_overdue` in the email choices) and
+  0155 (the open-turn index, built concurrently).
+- **Domain:** `noticeOverdueReplies`, `responsibleMembers`, `overdueReplyEmail`, `targetText`;
+  `EMAIL_NOTICES.reply_overdue`; the worker's messaging sweep calls it after routing.
+- **Web:** Settings → Notifications lists the kind (from the domain); Settings → Inbox explains the
+  emails beside the target.
+- **Tests:**
+  - Unit (6 new in `overdue-replies.test.ts`; the email preference tests read the latest migration's
+    kinds and expect the new one).
+  - Integration (6 new in `overdue-replies.test.ts`; `email-preferences.test.ts` updated). Written
+    for CI; not run here.
+  - E2E: the notifications test expects six kinds. Runs in CI.
+- **Docs:** ADR-230; ARCHITECTURE; SECURITY; THREAT-MODEL T217; DATA-RETENTION; DEPLOYMENT;
+  RUNBOOKS; BACKLOG P3-06; feature matrix H-011.
+- **Mutation checks:** 17/17 deliberate regressions caught on the unit-tested parts.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 997 passed (100 files)                                        |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| Mutation checks                                    | 17/17 deliberate regressions caught on the unit-tested parts  |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+### Known gaps
+
+- No browser test of an overdue email (it would wait a real minute or more); no in-app notice; one
+  email per wait, never a reminder.
+
+## 2026-10-06 — Phase 3/4 follow-up: links filled by campaigns, automations and store messages (P3-03, P3-04, P4-01, P4-06c, ADR-229)
+
+Status: **Implemented; its database tests run in CI only.** Campaigns, automations and store
+messages could not send templates whose links end with a value. The local PostgreSQL is unavailable,
+so the integration tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-229):** sources for each link's end in campaigns and store messages, a step's
+  `links` in automations; unusable values fall back, skip or fail the run; every send asks for them.
+- **Domain:** `campaignVariablesSchema.buttons`, `resolveVariables` and `checkVariables` with the
+  links; the automation graph's `links`, the interpreter and `queueBotTemplate` (`invalid_link`);
+  `storeVariablesSchema.buttons`, `resolveStoreVariables`, `storeLinkProblem`; `sendSpecFor`'s
+  `linkValues` option removed; no migration.
+- **Web:** link rows in the campaign editor, the automation builder's template step and store
+  messages; the run log's `invalid_link`.
+- **Tests:**
+  - Unit (5 new: 2 in `variables.test.ts`, 2 in `automations/templates.test.ts`, 1 in
+    `messages-model.test.ts`; expectations updated where variables, steps and effects gained the
+    links).
+  - Integration (3 new: `campaigns.test.ts`, `api.test.ts` for an API-started automation,
+    `stores.test.ts` for a shipped order; store literals updated). Written for CI; not run here.
+- **Docs:** ADR-229; ARCHITECTURE; SECURITY; THREAT-MODEL T216; DEPLOYMENT; BACKLOG P3-03 and P5-08;
+  feature matrix W-059.
+- **Mutation checks:** 21/21 deliberate regressions caught on the unit-tested parts.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 991 passed (99 files)                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| Mutation checks                                    | 21/21 deliberate regressions caught on the unit-tested parts  |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+### Known gaps
+
+- No browser test of the three editors' link fields; an unusable value shares `missing_variable`
+  with a missing one; never exercised against Meta.
+
+## 2026-10-06 — Phase 3 follow-up: website buttons whose link ends with a value (P3-03, P5-08, ADR-228)
+
+Status: **Implemented; its database and browser tests run in CI only.** Templates could not carry a
+link of their own for each customer. The local PostgreSQL is unavailable, so the integration and
+browser tests below were written but not run here.
+
+### Completed
+
+- **Research (M-198):** the creation example and the send's button parameter in Meta's official
+  OpenAPI description.
+- **Design (ADR-228):** `{{1}}` at the end of a link whose website is named in full; values checked
+  against the template's website; sent from contacts, conversations and the API.
+- **Domain:** `linkPrefix`, `linkButtons`, `linkValueProblem`, `linkValuesProblem`;
+  `validateDefinition`, `toMetaComponents`, `fromMetaComponents`, `sendSpecFor` (`linkValues`,
+  `buttonParams`) and `buildTemplateSend`; the sender and the API take the values; no migration.
+- **Web:** the editor's example field, the sender's link fields and preview, the links in the
+  inbox's bubble.
+- **Tests:**
+  - Unit (6 new: 4 in `definition.test.ts`, 2 in `api.test.ts`; expectations updated where params
+    and the API's template gained the link values).
+  - Integration (2 new in `templates.test.ts`, 1 in `api.test.ts`; the draft refusals and the API's
+    template list updated; the Graph stand-in now checks a template's button parameters). Written
+    for CI; not run here.
+  - Browser (`templates.spec.ts` extended: the editor's website button with `{{1}}` and its example,
+    the inbox's sender filling the link, the request and the bubble). Written for CI; not run here.
+- **Docs:** ADR-228; research M-198; ARCHITECTURE; SECURITY; THREAT-MODEL T215; DEPLOYMENT; BACKLOG
+  P3-03 and P5-08; feature matrix W-059.
+- **Mutation checks:** 25/25 deliberate regressions caught on the unit-tested parts.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 986 passed (99 files)                                           |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 25/25 deliberate regressions caught on the unit-tested parts    |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Campaigns, automations and store messages do not send these templates yet; values are sent as
+  given (no encoding); never exercised against Meta.
+
+## 2026-10-06 — Phase 5 follow-up: merging contacts through the API (P5-08, P3-01, ADR-227)
+
+Status: **Implemented; its database tests run in CI only.** Integrations could not merge the
+duplicates they find. The local PostgreSQL is unavailable, so migration 0153 and the integration
+test below were written but not run here.
+
+### Completed
+
+- **Design (ADR-227):** a `contacts.merge` scope granted with `contacts.delete`;
+  `POST /contacts/{id}/merge`; answers, refusals and retries; recorded as the key's.
+- **Migration:** 0153 (the keys' and plans' scope checks with `contacts.merge`).
+- **Domain and web:** `apiMergeContacts` and its schemas; the route; the OpenAPI path and schemas.
+- **Tests:**
+  - Unit (2 new in `api.test.ts`; scope tests updated): the scope and its permission, the checks
+    before the database, the documentation.
+  - Integration (1 new in `contact-merges.test.ts`): a merge through the API, the scope refusal, the
+    replay, the 404 for a merged id, the audit, the function's refusals. Written for CI; not run
+    here.
+- **Docs:** ADR-227; ARCHITECTURE; SECURITY; THREAT-MODEL T214; DEPLOYMENT; BACKLOG P3-01 and P5-08;
+  feature matrix H-019.
+- **Mutation checks:** 8/8 deliberate regressions caught on the unit-tested parts.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 980 passed (99 files)                                           |
+| `pnpm test:integration`, migration 0153            | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 8/8 deliberate regressions caught on the unit-tested parts      |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- The merge record and a carried opt-out do not name the key (the audit log does); no bulk merges.
+
+## 2026-10-06 — Phase 3 follow-up: hiding customers' numbers (P3-01, W-044, ADR-226)
+
+Status: **Implemented; its database and browser tests run in CI only.** Every member who read
+contacts saw customers' whole numbers. The local PostgreSQL is unavailable, so migration 0152 and
+the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-226):** `contacts.view_numbers` for every role that reads contacts; the roles a
+  company masks (Settings → Security); masking in the services; searches by whole numbers only for
+  masked members; replacing a hidden number refused; unmasking needs a recent sign-in.
+- **Migration:** 0152 (`app.tenants.masked_number_roles` with its check and grant).
+- **Domain:** `contacts/number-masking.ts` (`maskPhoneNumber`, `shownNumber`, the schema); the
+  context and `assertCan`; masking in the contacts, inbox, CRM, campaign, segment, store, consent
+  and automation services; `suppressionsForContact`; `updateNumberMasking`.
+- **Web:** the Settings → Security section; the contact page keeps a masked number read-only.
+- **Tests:**
+  - Unit (6 new in `number-masking.test.ts`): the mask, who may see numbers, the role rule, the
+    schema, the refusal.
+  - Integration (3 new in `number-masking.test.ts`): each service as masked and unmasked members,
+    searches, exports, the refusal, the setting, its audit and step-up. Written for CI; not run
+    here.
+  - E2E (1 new in `number-masking.spec.ts`): an owner masks agents; an agent's contact pages show
+    the number masked and hold it nowhere whole. Written for CI; not run here.
+- **Docs:** ADR-226; ARCHITECTURE; SECURITY (permission matrix and rules); THREAT-MODEL T213;
+  DEPLOYMENT and RUNBOOKS; BACKLOG P3-01; feature matrix W-044 (implemented).
+- **Mutation checks:** 14/14 deliberate regressions caught on the unit-tested parts. The context's
+  removal of the permission and each service's masking need the database, so their regressions are
+  left to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 978 passed (99 files)                                           |
+| `pnpm test:integration`, e2e, migration 0152       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Mutation checks                                    | 14/14 deliberate regressions caught on the unit-tested parts    |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+### Known gaps
+
+- Masking per member; masking numbers inside message content; masking for API keys; a segment's
+  calling-code condition can reveal a fourth leading digit.
+
+## 2026-10-06 — Phase 5 follow-up: integrations hear of merges (P5-09, P5-08, ADR-225)
+
+Status: **Implemented; its database tests run in CI only.** A merge (ADR-224) deleted the merged
+contact without telling integrations. The local PostgreSQL is unavailable, so migrations 0150 and
+0151 and the integration tests below were written but not run here.
+
+### Completed
+
+- **Design (ADR-225):** a `contact.merged` webhook event giving the contact a merged one belongs to
+  when delivered; a `contact_merged` 404 with `mergedInto` on the contact endpoints; the change feed
+  recording the kept contact and listing `mergedContactIds`; unknown event types failing their
+  delivery without an attempt.
+- **Migrations:** 0150 (the event type in both checks, the capture trigger on `app.contact_merges`),
+  0151 (validates the events' type check).
+- **Domain:** the event in the webhook model, payloads and builder; `apiContactNotFound` for
+  `GET`/`PATCH /contacts/{id}` and `POST /contacts/{id}/consent`; `mergedInto` in API errors;
+  `mergedContactIds` in `apiContactChanges`; the OpenAPI document (the webhook, the error field and
+  reason, the endpoints, the feed).
+- **Tests:**
+  - Unit: the payload schema, the error body, the documentation of the webhook, the endpoints and
+    the feed, distinct event labels, an unknown event type built as no body.
+  - Integration: `webhook-events.test.ts` (capture and delivery across two merges, the kept
+    contact's own change, events of the merged contacts ending as gone); `contact-merges.test.ts`
+    (the 404s on each endpoint, other companies' and unknown ids, the feed's merged ids); the change
+    feed tests and the isolation suite updated. Written for CI; not run here.
+  - E2E: the change feed spec expects `mergedContactIds`. Written for CI; not run here.
+- **Docs:** ADR-225; ARCHITECTURE; SECURITY; THREAT-MODEL T212; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-09; feature matrix H-014 and H-019.
+- **Mutation checks:** 15/15 deliberate regressions caught on the unit-tested parts. The capture,
+  the payload's lookup, the 404s and the feed need the database, so their regressions are left to
+  the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-06)
+
+| Command                                                | Result                                                          |
+| ------------------------------------------------------ | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`     | clean                                                           |
+| `pnpm test` (unit)                                     | 972 passed (98 files)                                           |
+| `pnpm test:integration`, e2e, migrations 0150 and 0151 | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                           | passed                                                          |
+| Mutation checks                                        | 15/15 deliberate regressions caught on the unit-tested parts    |
+| gitleaks 8.30.1 on the staged changes                  | no leaks found                                                  |
+
+### Known gaps
+
+- Merging through the API; filters on merge events; a `consent.changed` of the merged contact
+  delivered after the merge still names its id.
+
 ## 2026-10-06 — Phase 3 follow-up: merging contacts (P3-01, H-019, ADR-224)
 
 Status: **Implemented; its database and browser tests run in CI only.** One person could be two

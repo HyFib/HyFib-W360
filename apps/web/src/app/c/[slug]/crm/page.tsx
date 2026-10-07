@@ -4,13 +4,13 @@ import { notFound } from 'next/navigation';
 import { isAppError } from '@w360/core';
 import { can } from '@w360/domain';
 import { formatMinor } from '@w360/domain/crm-money';
-import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
+import { Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
 import { NewDealForm, StageSelect } from '@/components/crm/deal-forms';
 import { CrmTabs } from '@/components/crm/crm-tabs';
 import { PageHeader } from '@/components/page-header';
 import { ModuleNotInPlan } from '@/components/plan-limit';
 import { contactLabel, DEAL_STATUS } from '@/lib/crm-labels';
-import { formatDateTime } from '@/lib/format';
+import { formatDate, formatDateTime } from '@/lib/format';
 import { crmLookups } from '@/server/crm';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
@@ -65,19 +65,44 @@ export default async function CrmPage({
     return s ? `${base}?${s}` : base;
   };
   const me = ctx.membership.id;
+  // The deals this view shows, all of them (ADR-239): deals carry customers' names and numbers.
+  const exportHref =
+    can(ctx, 'contacts.export') && (view !== 'board' || board !== null)
+      ? `${base}/export?${new URLSearchParams(
+          view === 'board' && board
+            ? {
+                status: 'open',
+                pipeline: board.pipeline.id,
+                ...(owner === 'all' ? {} : { owner }),
+              }
+            : { status: view },
+        ).toString()}`
+      : null;
+  const settings = can(ctx, 'tenant.settings.manage');
   return (
     <>
       <PageHeader
         title="CRM"
         description="Deals by stage, and the tasks that move them forward."
         actions={
-          can(ctx, 'tenant.settings.manage') ? (
-            <Link
-              href={`/c/${ctx.tenant.slug}/settings/pipelines`}
-              className="text-sm text-primary underline-offset-4 hover:underline"
-            >
-              Pipelines
-            </Link>
+          exportHref || settings ? (
+            <>
+              {exportHref ? (
+                <Button asChild variant="outline">
+                  <a href={exportHref} download>
+                    Export CSV
+                  </a>
+                </Button>
+              ) : null}
+              {settings ? (
+                <Link
+                  href={`/c/${ctx.tenant.slug}/settings/pipelines`}
+                  className="self-center text-sm text-primary underline-offset-4 hover:underline"
+                >
+                  Pipelines
+                </Link>
+              ) : null}
+            </>
           ) : null
         }
       />
@@ -164,6 +189,23 @@ export default async function CrmPage({
                 </nav>
                 <span className="text-muted-foreground">Values in {board.pipeline.currency}</span>
               </div>
+              {board.forecast.hasChances ? (
+                // Weighted by each stage's chance of winning (ADR-242). The month's end is a
+                // calendar date in the company's time already, so it is shown as written (UTC).
+                <p className="text-sm">
+                  <span className="font-medium">Weighted pipeline</span>{' '}
+                  {formatMinor(board.forecast.weightedMinor, board.pipeline.currency)}
+                  <span className="text-muted-foreground">
+                    {` · expected to close by ${formatDate(board.forecast.monthEnd, 'UTC')}: `}
+                  </span>
+                  {formatMinor(board.forecast.weightedMonthMinor, board.pipeline.currency)}
+                  {board.forecast.stagesWithoutChance > 0 ? (
+                    <span className="text-muted-foreground">
+                      {` · ${board.forecast.stagesWithoutChance} ${board.forecast.stagesWithoutChance === 1 ? 'stage' : 'stages'} with deals but no chance of winning left out`}
+                    </span>
+                  ) : null}
+                </p>
+              ) : null}
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 {board.columns.map((col) => (
                   <section
@@ -182,6 +224,14 @@ export default async function CrmPage({
                           : ''}
                         {col.deals.length < col.count ? ` · showing ${col.deals.length}` : ''}
                       </p>
+                      {col.stage.winPercent !== null ? (
+                        <p className="text-xs text-muted-foreground">
+                          {col.stage.winPercent}% chance
+                          {col.weightedMinor
+                            ? ` · weighted ${formatMinor(col.weightedMinor, board.pipeline.currency)}`
+                            : ''}
+                        </p>
+                      ) : null}
                     </header>
                     {col.deals.length === 0 ? (
                       <p className="text-xs text-muted-foreground">No deals.</p>
