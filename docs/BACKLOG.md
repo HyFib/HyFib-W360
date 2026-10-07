@@ -278,9 +278,11 @@ verification, app review, Embedded Signup configuration).
   run only in CI]** (ADR-257, no migration; recorded under P5-08). **[Reading tasks through the
   public API built; its database tests run only in CI]** (ADR-258, migrations 0173 and 0174;
   recorded under P5-08). **[Creating tasks through the public API built; its database tests run only
-  in CI]** (ADR-259, migrations 0175 and 0176; recorded under P5-08). **Remaining:** custom deal
-  fields, products on deals, deal import, CRM connectors (HubSpot, Salesforce, Zoho: integrations),
-  reminder emails through the production SMTP provider (release checklist).
+  in CI]** (ADR-259, migrations 0175 and 0176; recorded under P5-08). **[Changing tasks through the
+  public API built; its database tests run only in CI]** (ADR-260, no migration; recorded under
+  P5-08). **Remaining:** custom deal fields, products on deals, deal import, CRM connectors
+  (HubSpot, Salesforce, Zoho: integrations), reminder emails through the production SMTP provider
+  (release checklist).
 - **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad
   traffic yet_: click-to-chat links (a short link that counts clicks per link and company day
   without any visitor data and redirects to wa.me with a pre-filled message and an optional
@@ -821,8 +823,10 @@ verification, app review, Embedded Signup configuration).
   **[Creating CRM tasks built; its database tests run only in CI]** (ADR-259, migrations 0175 and
   0176: `tasks.write` creates tasks as members do, about a contact, a deal or nobody, with an
   assignee, notes, a due time and an emailed reminder, recorded as created through the API).
-  Remaining: changing tasks through the API,
-  call-to-action messages through the API, taking
+  **[Changing CRM tasks built; its database tests run only in CI]** (ADR-260: `PATCH /tasks/{id}`
+  edits an open task's details, completes, cancels and reopens tasks as members do, from an expected
+  version, recorded as done through the API; no migration).
+  Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),

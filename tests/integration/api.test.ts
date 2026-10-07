@@ -45,6 +45,7 @@ import {
   apiSendTemplate,
   apiUpdateConversation,
   apiUpdateDeal,
+  apiUpdateTask,
   apiUpdateManyConversations,
   apiUpdateMatchingConversations,
   apiUpdateOrder,
@@ -5289,8 +5290,211 @@ describe('CRM pipelines and deals (ADR-253)', () => {
     await expectAppError(
       keys.create(narrower, { name: 'Tasks', scopes: ['tasks.write'], expiresInDays: 30 }),
       'forbidden',
-      /Create CRM tasks/,
+      /Create and change CRM tasks/,
     );
+  });
+
+  it('change, complete, cancel and reopen tasks as members do, as the key (ADR-260)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const writer = await apiKey(c, ['tasks.write'], 'Order system');
+    const asha = await contactOf(owner, 'Asha');
+    const hours = (n: number) => new Date(Date.now() + n * 3_600_000);
+    const { id } = await crm().createTask(owner, {
+      title: 'Call Asha',
+      assigneeMembershipId: owner.membership.id,
+      contactId: asha,
+      dueAt: hours(48).toISOString(),
+      remindAt: hours(24).toISOString(),
+    });
+    const change = async (body: Record<string, unknown>) =>
+      apiUpdateTask(deps(), writer.ctx, id, body);
+    const jobAt = async (at: Date) =>
+      (
+        await fx.query<{ start_after: Date }>(
+          `SELECT start_after FROM pgboss.job WHERE name = $1 AND singleton_key = $2`,
+          [QUEUES.crmReminder.name, `${id}:${at.getTime()}`],
+        )
+      ).map((j) => j.start_after.getTime());
+
+    // Details from the version expected: a new reminder is pending and scheduled for its time.
+    const due = hours(72);
+    const remind = hours(36);
+    const edit = {
+      title: '  Call Asha back  ',
+      notes: 'About the renewal',
+      assigneeId: agent.membership.id,
+      dueAt: due.toISOString(),
+      remindAt: remind.toISOString(),
+    };
+    const edited = await change({ ...edit, expectedVersion: 1 });
+    expect(edited).toMatchObject({
+      title: 'Call Asha back',
+      notes: 'About the renewal',
+      assigneeId: agent.membership.id,
+      dueAt: due.toISOString(),
+      remindAt: remind.toISOString(),
+      reminderState: 'pending',
+      status: 'open',
+      version: 2,
+    });
+    expect(await jobAt(remind)).toEqual([remind.getTime()]);
+    // A retry changes nothing; one from the version it started at is refused.
+    expect(await change(edit)).toEqual(edited);
+    await expectAppError(change({ ...edit, expectedVersion: 1 }), 'conflict', /since version 1/);
+    // Blank notes are none, and a null reminder removes it.
+    expect(await change({ notes: '', remindAt: null })).toMatchObject({
+      notes: null,
+      remindAt: null,
+      reminderState: 'none',
+      version: 3,
+    });
+
+    // Done, then not cancelled or changed until reopened; a retry and unchanged details pass.
+    const done = await change({ status: 'done' });
+    expect(done).toMatchObject({ status: 'done', completedAt: expect.any(String), version: 4 });
+    expect(await change({ status: 'done', title: 'Call Asha back' })).toEqual(done);
+    await expectAppError(change({ status: 'cancelled' }), 'conflict', /already done/);
+    await expectAppError(change({ title: 'Call Asha again' }), 'conflict', /Reopen the task/);
+    // Reopened and changed in one request.
+    expect(await change({ status: 'open', title: 'Call Asha again' })).toMatchObject({
+      status: 'open',
+      title: 'Call Asha again',
+      completedAt: null,
+      version: 5,
+    });
+    // A reminder set and the task cancelled in one request: the reminder is skipped, unscheduled.
+    const soon = hours(2);
+    expect(await change({ remindAt: soon.toISOString(), status: 'cancelled' })).toMatchObject({
+      status: 'cancelled',
+      remindAt: soon.toISOString(),
+      reminderState: 'skipped',
+      reminderSkipReason: 'task_closed',
+      version: 6,
+    });
+    expect(await jobAt(soon)).toEqual([]);
+
+    // The member's creation and the key's reopening and closing are on the contact's timeline;
+    // every change is in the audit log as the key's, retries none.
+    const activities = await fx.query<{ kind: string; actor: string | null; key: string | null }>(
+      `SELECT kind, actor_membership_id AS actor, data->>'apiKeyId' AS key
+         FROM app.crm_activities WHERE task_id = $1 ORDER BY created_at`,
+      [id],
+    );
+    expect(activities).toEqual([
+      { kind: 'task_created', actor: owner.membership.id, key: null },
+      { kind: 'task_completed', actor: null, key: writer.id },
+      { kind: 'task_reopened', actor: null, key: writer.id },
+      { kind: 'task_cancelled', actor: null, key: writer.id },
+    ]);
+    const audits = await fx.query<{ actor_type: string; actor_id: string; changes: string[] }>(
+      `SELECT actor_type, actor_id, metadata->'changes' AS changes FROM app.audit_events
+        WHERE action = 'crm.task_updated' AND subject_id = $1 ORDER BY created_at`,
+      [id],
+    );
+    expect(audits.map((a) => a.changes)).toEqual([
+      ['title', 'notes', 'assignee', 'due', 'reminder'],
+      ['notes', 'reminder'],
+      ['status'],
+      ['status', 'title'],
+      ['reminder', 'status'],
+    ]);
+    expect(new Set(audits.map((a) => `${a.actor_type}:${a.actor_id}`))).toEqual(
+      new Set([`api_key:${writer.id}`]),
+    );
+
+    // A task about nobody is closed with no timeline entry, as members' are.
+    const solo = await crm().createTask(owner, {
+      title: 'Order brochures',
+      assigneeMembershipId: owner.membership.id,
+    });
+    expect((await apiUpdateTask(deps(), writer.ctx, solo.id, { status: 'done' })).status).toBe(
+      'done',
+    );
+    expect(
+      await fx.query('SELECT id FROM app.crm_activities WHERE task_id = $1', [solo.id]),
+    ).toEqual([]);
+  });
+
+  it('refuse task changes members are refused, and need the scope, an active company and the CRM (ADR-260)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const marketer = await fx.ctx(c, c.marketer);
+    const theirOwner = await fx.ctx(other, other.owner);
+    const writer = await apiKey(c, ['tasks.write']);
+    const asha = await contactOf(owner, 'Asha');
+    const { id } = await crm().createTask(owner, {
+      title: 'Call back',
+      assigneeMembershipId: owner.membership.id,
+    });
+    const theirs = await crm().createTask(theirOwner, {
+      title: 'Theirs',
+      assigneeMembershipId: theirOwner.membership.id,
+    });
+    const change = (body: Record<string, unknown>, task = id) =>
+      apiUpdateTask(deps(), writer.ctx, task, body);
+    const paths = (error: unknown) =>
+      isAppError(error) ? (error.issues ?? []).map((i) => i.path) : [];
+    const days = (n: number) => new Date(Date.now() + n * 86_400_000).toISOString();
+    const versionOf = async () =>
+      (
+        await fx.query<{ version: number }>('SELECT version FROM app.crm_tasks WHERE id = $1', [id])
+      )[0]!.version;
+
+    // Another company's task and an unknown one are not found.
+    await expectAppError(change({ status: 'done' }, theirs.id), 'not_found', /Task/);
+    await expectAppError(change({ status: 'done' }, uuidv7()), 'not_found', /Task/);
+    // Assignees who cannot use the CRM and times members are refused are named.
+    for (const [input, path] of [
+      [{ assigneeId: marketer.membership.id }, 'assigneeId'],
+      [{ assigneeId: theirOwner.membership.id }, 'assigneeId'],
+      [{ dueAt: days(6 * 365) }, 'dueAt'],
+      [{ remindAt: days(-1) }, 'remindAt'],
+      [{ remindAt: days(400) }, 'remindAt'],
+    ] as const) {
+      expect(paths(await expectAppError(change(input), 'validation_failed'))).toEqual([path]);
+    }
+    await expectAppError(change({ title: 'New', expectedVersion: 2 }), 'conflict', /version is 1/);
+    expect(await versionOf()).toBe(1);
+
+    // Erasing a contact deletes its tasks, so a key no longer finds them.
+    const ashas = await crm().createTask(owner, {
+      title: 'Call Asha',
+      assigneeMembershipId: owner.membership.id,
+      contactId: asha,
+    });
+    await contacts().eraseContact(owner, { contactId: asha, suppress: false });
+    await expectAppError(change({ status: 'done' }, ashas.id), 'not_found', /Task/);
+
+    // A key that only reads tasks, or one of a suspended company, changes none.
+    const reader = await apiKey(c, ['tasks.read', 'deals.write']);
+    await expectAppError(
+      apiUpdateTask(deps(), reader.ctx, id, { status: 'done' }),
+      'forbidden',
+      /tasks\.write/,
+    );
+    const suspended = {
+      ...writer.ctx,
+      tenant: { ...writer.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(
+      apiUpdateTask(deps(), suspended, id, { status: 'done' }),
+      'tenant_suspended',
+    );
+
+    // A plan without the CRM changes none; with it again, the task is completed.
+    await onPlan(c, []);
+    const error = await expectAppError(
+      change({ status: 'done' }),
+      'forbidden',
+      /does not include the CRM/,
+    );
+    expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    expect(await versionOf()).toBe(1);
+    await onPlan(c, ['crm']);
+    expect((await change({ status: 'done' })).status).toBe('done');
   });
 });
 

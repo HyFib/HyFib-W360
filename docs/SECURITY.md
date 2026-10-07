@@ -1055,6 +1055,13 @@ Phase 5 rules (Public API, P5-08):
   an erased contact or the wrong one. The task is recorded as created by the key (its creator
   column, the timeline and the audit log), and times follow the members' rule (unit tests;
   integration and e2e tests, run in CI only).
+- Changing CRM tasks (ADR-260): `PATCH /tasks/{id}` needs `tasks.write`, an active company and the
+  CRM in the company's plan; it reaches only the key's company's tasks (another company's answers
+  404 as an unknown one does) and never moves a task to another contact or deal. A new assignee must
+  be an active member of the key's company able to use the CRM, times follow the members' rule, a
+  closed task is reopened before it changes, and `expectedVersion` refuses a change to a task
+  changed since. Reopening and closing are on the timeline naming the key, and every change is in
+  the audit log as the key's (unit tests; integration and e2e tests, run in CI only).
 - Defining contact fields (ADR-115): adding, renaming and deleting the company's custom fields needs
   `contact_fields.manage`, which only members holding `tenant.settings.manage` (owners and
   administrators, who define fields in Settings) grant, and an active company. Fields are named by

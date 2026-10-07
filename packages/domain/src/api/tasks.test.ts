@@ -12,6 +12,8 @@ import {
   apiGetTask,
   apiListTasks,
   apiTaskListQuerySchema,
+  apiUpdateTask,
+  apiUpdateTaskSchema,
 } from './tasks';
 
 const TENANT = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
@@ -239,7 +241,7 @@ describe('creating CRM tasks through the API (ADR-259)', () => {
     expect(API_SCOPES).toContain('tasks.write');
     expect(API_SCOPE_KEYS.indexOf('tasks.write')).toBe(API_SCOPE_KEYS.indexOf('tasks.read') + 1);
     expect(API_SCOPE_INFO['tasks.write']).toMatchObject({
-      label: 'Create CRM tasks',
+      label: 'Create and change CRM tasks',
       permission: 'crm.write',
       writes: true,
     });
@@ -248,7 +250,8 @@ describe('creating CRM tasks through the API (ADR-259)', () => {
       "for one of the company's contacts or deals or for nobody",
       'an active member who can use the CRM',
       'a reminder emailed to the assignee',
-      'recorded as created through the API',
+      'change, complete, cancel and reopen them as members do',
+      'recorded as done through the API',
       "CRM in the company's plan",
     ]) {
       expect(API_SCOPE_INFO['tasks.write'].description).toContain(words);
@@ -402,5 +405,139 @@ describe('creating CRM tasks through the API (ADR-259)', () => {
     ]);
     expect(body.required).toEqual(['title', 'assigneeId']);
     expect(body.additionalProperties).toBe(false);
+  });
+});
+
+describe('changing CRM tasks through the API (ADR-260)', () => {
+  const deps = (db: Database) =>
+    ({ db, clock: { now: () => new Date() }, jobs: {}, signer: {} }) as unknown as Parameters<
+      typeof apiUpdateTask
+    >[0];
+
+  it('takes details and a status, at least one, and never another contact or deal', () => {
+    const parse = (input: unknown) => apiUpdateTaskSchema.safeParse(input);
+    const trimmed = parse({ title: '  Call back  ' });
+    expect(trimmed.success && trimmed.data).toEqual({ title: 'Call back' });
+    for (const status of TASK_STATUSES) expect(parse({ status }).success).toBe(true);
+    for (const input of [
+      { notes: 'About the renewal', assigneeId: OTHER },
+      { notes: null, dueAt: null, remindAt: null },
+      { notes: '' },
+      { dueAt: '2026-10-09T10:00:00+05:30', remindAt: '2026-10-08T09:30:00Z' },
+      { title: 'Call back', status: 'done', expectedVersion: 3 },
+      { status: 'open', remindAt: '2026-10-08T09:30:00Z' },
+    ]) {
+      expect(parse(input).success, JSON.stringify(input)).toBe(true);
+    }
+    for (const input of [
+      {},
+      { expectedVersion: 2 },
+      { status: 'closed' },
+      { title: '   ' },
+      { title: null },
+      { title: 'x'.repeat(201) },
+      { notes: 'y'.repeat(2001) },
+      { assigneeId: 'me' },
+      { assigneeId: null },
+      { dueAt: 'tomorrow' },
+      { remindAt: '2026-10-08' },
+      { status: 'done', expectedVersion: 0 },
+      { status: 'done', expectedVersion: 1.5 },
+      { contactId: TENANT },
+      { dealId: TENANT },
+    ]) {
+      expect(parse(input).success, JSON.stringify(input)).toBe(false);
+    }
+  });
+
+  it('need tasks.write, an active company and a task id, refused before anything is read', async () => {
+    const change = { status: 'done' };
+    expect(
+      await refusal(apiUpdateTask(deps(untouched), ctx(['tasks.read']), TENANT, change)),
+    ).toEqual(['forbidden', 'This API key does not have the tasks.write scope.', []]);
+    for (const status of ['suspended', 'restricted']) {
+      expect(
+        (
+          await refusal(
+            apiUpdateTask(deps(untouched), ctx(['tasks.write'], status), TENANT, change),
+          )
+        )[0],
+      ).toBe('tenant_suspended');
+    }
+    expect(
+      await refusal(apiUpdateTask(deps(untouched), ctx(['tasks.write']), 'not-an-id', change)),
+    ).toEqual(['not_found', 'Task not found.', []]);
+    expect(
+      (await refusal(apiUpdateTask(deps(untouched), ctx(['tasks.write']), TENANT, {})))[0],
+    ).toBe('validation_failed');
+    // A valid request reaches the database in a writing transaction.
+    const runs: unknown[] = [];
+    const db = {
+      run: (_scope: unknown, _fn: unknown, options?: unknown) => {
+        runs.push(options);
+        throw new Error('reached the database');
+      },
+    } as unknown as Database;
+    await expect(apiUpdateTask(deps(db), ctx(['tasks.write']), TENANT, change)).rejects.toThrow(
+      'reached the database',
+    );
+    expect(runs).toEqual([undefined]);
+  });
+
+  it('is described: the order of changes, the refusals, the version and the body', () => {
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      paths: Record<string, Record<string, Record<string, unknown>>>;
+      components: {
+        schemas: Record<string, { properties: Record<string, { description?: string }> }>;
+      };
+    };
+    expect(API_ROUTES).toContainEqual(['patch', '/tasks/{id}']);
+    const update = doc.paths['/tasks/{id}']?.patch as {
+      operationId: string;
+      description: string;
+      requestBody: { content: Record<string, { schema: unknown }> };
+      responses: Record<string, unknown>;
+    };
+    expect(update.operationId).toBe('updateTask');
+    expect(update.requestBody.content['application/json']?.schema).toEqual({
+      $ref: '#/components/schemas/UpdateTask',
+    });
+    expect(Object.keys(update.responses)).toEqual(
+      expect.arrayContaining(['200', '403', '404', '409', '422', '423']),
+    );
+    for (const words of [
+      'Scope: `tasks.write`.',
+      'in this order: `status` `open` reopens a closed task',
+      'a reminder skipped when it was closed is not brought back',
+      'a new reminder time, from now to a year ahead, is emailed to the assignee then',
+      '`status` `done` completes and `cancelled` cancels the open task, skipping a pending reminder',
+      'A task’s contact and deal do not change.',
+      'Only what differs is a change, so a retry changes nothing',
+      'until it is reopened (409)',
+      'With `expectedVersion`, a task changed since is refused with 409.',
+      'as done through the API, and the audit log names the key',
+      '(403, reason not_in_plan)',
+    ]) {
+      expect(update.description).toContain(words);
+    }
+    const body = doc.components.schemas.UpdateTask as unknown as {
+      properties: Record<string, unknown>;
+      required?: string[];
+      additionalProperties: boolean;
+    };
+    expect(Object.keys(body.properties)).toEqual([
+      'title',
+      'notes',
+      'assigneeId',
+      'dueAt',
+      'remindAt',
+      'status',
+      'expectedVersion',
+    ]);
+    expect(body.required ?? []).toEqual([]);
+    expect(body.additionalProperties).toBe(false);
+    expect(doc.components.schemas.Task?.properties.version?.description).toContain(
+      'PATCH /tasks/{id} takes it as `expectedVersion`',
+    );
   });
 });

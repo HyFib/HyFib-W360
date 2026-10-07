@@ -9835,3 +9835,30 @@ Decision:
 
 Not built: changing, completing, cancelling or reopening tasks through the API (members do it in the
 app), and task webhook events.
+
+## ADR-260 Changing CRM tasks through the public API (P5-08, P4-04) (2026-10-07)
+
+Context: after ADR-259 a key could add a task but not move it on: an order system that delivered
+could not mark its "confirm the delivery" task done, and a booking tool could not move a task's due
+time when the customer rebooked, so members closed and edited them by hand.
+
+Decision:
+
+- **`PATCH /api/v1/tasks/{id}` (`updateTask`)** with `tasks.write`, now labelled "Create and change
+  CRM tasks": in one transaction, with the task's contact (if any) and then its row locked as
+  members' changes lock them, `status` `open` reopens a closed task; the open task's title, notes,
+  assignee, due time and reminder time change; `status` `done` or `cancelled` closes the open task,
+  in that order, with the version moving on once. A task's contact and deal do not change, as for
+  members.
+- **The members' rules:** a closed task is not changed, or closed the other way, until it is
+  reopened (409); the assignee must be an active member able to use the CRM and the times follow
+  `taskTimeIssue` (422 naming the field); a new reminder time resets the reminder and schedules its
+  email, null removes it; closing skips a pending reminder (`task_closed`) and reopening does not
+  bring it back. Only what differs is a change, so a retry, or details equal to the task's, change
+  nothing, even on a closed task. With `expectedVersion`, a task changed since is refused with 409.
+- **Recorded as the key's:** reopening and closing a task about a contact are on its timeline
+  without a member actor, naming the key (the member who closed a task stays empty), and a
+  `crm.task_updated` audit row lists what changed. No migration.
+
+Not built: changing a task's contact or deal, deleting tasks (members cannot either), and task
+webhook events.

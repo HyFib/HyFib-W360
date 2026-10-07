@@ -1,5 +1,36 @@
 # Progress
 
+## 2026-10-07 — Changing CRM tasks through the public API (P5-08, P4-04, H-033, ADR-260)
+
+Status: **Implemented; its database and browser tests run in CI only.** Keys could create tasks
+(ADR-259) but not change them. No migration. The local PostgreSQL is unavailable, so the integration
+tests below were written but not run here.
+
+### Completed
+
+- **Domain:** `apiUpdateTask` and `apiUpdateTaskSchema` in `api/tasks.ts`; the scope's label and
+  description; the OpenAPI path, the `UpdateTask` schema and the task's `version` description.
+- **Web:** `PATCH /api/v1/tasks/{id}`.
+- **Tests:** unit (3 new in `tasks.test.ts`; the scope's wording updated); integration (2 new in
+  `api.test.ts`); e2e (the CRM test's key completes the task it added). Written for CI; the
+  integration and e2e tests were not run here.
+- **Docs:** ADR-260; ARCHITECTURE; SECURITY; THREAT-MODEL T229; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08
+  and P4-04; feature matrix W-134, H-033 and H-012.
+- **Mutation checks:** 15/15 deliberate regressions caught (one only after a test fix: its input was
+  refused for another reason).
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                                                                    |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                                                     |
+| `pnpm test` (unit)                                 | 1103 passed (117 files)                                                                                   |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it                                             |
+| `pnpm test:e2e`                                    | not run here; CI runs it                                                                                  |
+| `pnpm build`                                       | passed                                                                                                    |
+| Mutation checks                                    | 15/15 deliberate regressions caught (one only after a test fix: its input was refused for another reason) |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                                                            |
+
 ## 2026-10-07 — Creating CRM tasks through the public API (P5-08, P4-04, H-033, ADR-259)
 
 Status: **Implemented; its database and browser tests run in CI only.** Keys could read tasks

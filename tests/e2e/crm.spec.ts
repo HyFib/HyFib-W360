@@ -202,7 +202,7 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   await page.getByRole('checkbox', { name: /Read CRM deals/ }).check();
   await page.getByRole('checkbox', { name: /Create and change CRM deals/ }).check();
   await page.getByRole('checkbox', { name: /Read CRM tasks/ }).check();
-  await page.getByRole('checkbox', { name: /Create CRM tasks/ }).check();
+  await page.getByRole('checkbox', { name: /Create and change CRM tasks/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const tokenField = page.getByLabel('API key', { exact: true });
   await expect(tokenField).toBeVisible();
@@ -266,20 +266,31 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
     data: { title: 'Ask for a review', assigneeId: dealTasks[0]!.assigneeId, dealId: won[0]!.id },
   });
   expect(followUpRes.status()).toBe(201);
-  expect(((await followUpRes.json()) as { data: unknown }).data).toMatchObject({
+  const followUp = ((await followUpRes.json()) as { data: { id: string; version: number } }).data;
+  expect(followUp).toMatchObject({
     title: 'Ask for a review',
     status: 'open',
     dealId: won[0]!.id,
     contactId: won[0]!.contactId,
   });
+  // Then it marks the task done (ADR-260), from the version it read.
+  const doneRes = await request.patch(`/api/v1/tasks/${followUp.id}`, {
+    headers: auth,
+    data: { status: 'done', expectedVersion: followUp.version },
+  });
+  expect(doneRes.status()).toBe(200);
+  expect(((await doneRes.json()) as { data: unknown }).data).toMatchObject({
+    status: 'done',
+    version: followUp.version + 1,
+  });
   await page.goto(`/c/${slug}/crm/deals/${won[0]!.id}`);
   await expect(page.getByRole('heading', { name: 'Annual plan', level: 1 })).toBeVisible();
-  await expect(
-    page
-      .getByRole('list', { name: 'Timeline' })
-      .getByRole('listitem')
-      .filter({ hasText: 'Ask for a review' }),
-  ).toContainText('through the API');
+  const entries = page
+    .getByRole('list', { name: 'Timeline' })
+    .getByRole('listitem')
+    .filter({ hasText: 'Ask for a review' });
+  await expect(entries.filter({ hasText: 'Task added' })).toContainText('through the API');
+  await expect(entries.filter({ hasText: 'Task done' })).toContainText('through the API');
 
   // The key also creates a deal for the customer (ADR-254), in the pipeline's first stage, then
   // changes it as members do (ADR-255): a new value and the next stage. Its page says it came

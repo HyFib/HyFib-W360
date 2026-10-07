@@ -189,9 +189,9 @@ export const API_SCOPE_INFO: Record<
     writes: false,
   },
   'tasks.write': {
-    label: 'Create CRM tasks',
+    label: 'Create and change CRM tasks',
     description:
-      "Create tasks as members do on the Tasks page and the contact and deal pages: for one of the company's contacts or deals or for nobody, assigned to an active member who can use the CRM, with notes, a due time and a reminder emailed to the assignee, recorded as created through the API. Needs the CRM in the company's plan.",
+      "Create tasks as members do on the Tasks page and the contact and deal pages: for one of the company's contacts or deals or for nobody, assigned to an active member who can use the CRM, with notes, a due time and a reminder emailed to the assignee; and change, complete, cancel and reopen them as members do, recorded as done through the API. Needs the CRM in the company's plan.",
     permission: 'crm.write',
     writes: true,
   },

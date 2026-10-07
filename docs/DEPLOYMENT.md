@@ -661,6 +661,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    including it), and `POST /api/v1/tasks` with 405 (404 before 0173). Workers are not affected:
    they send a key's task reminders as members' ones.
 
+   ADR-260 has no migration. Until the web rollout ends, an old web server answers
+   `PATCH /api/v1/tasks/{id}` with 405 and describes the scope as creating tasks only; rolling web
+   servers back does the same. Workers are not affected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

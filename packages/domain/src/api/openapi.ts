@@ -108,7 +108,7 @@ import {
 } from './conversations';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
 import { apiCreateDealSchema, apiUpdateDealSchema } from './deals';
-import { apiCreateTaskSchema } from './tasks';
+import { apiCreateTaskSchema, apiUpdateTaskSchema } from './tasks';
 import { apiUpdateOrderSchema } from './orders';
 import {
   apiConsentSchema,
@@ -492,7 +492,9 @@ export const apiTaskSchema = z.object({
   version: z
     .number()
     .int()
-    .describe('Moves on when members edit, complete, cancel or reopen the task.'),
+    .describe(
+      'Moves on with every change of the task by members or keys; PATCH /tasks/{id} takes it as `expectedVersion`.',
+    ),
 });
 
 /** A member conversations can be assigned to (ADR-093). */
@@ -2317,6 +2319,17 @@ export function buildOpenApiDocument(serverUrl: string) {
             ...errors(401, 403, 404, 429, 500),
           },
         },
+        patch: {
+          operationId: 'updateTask',
+          summary: 'Change, complete, cancel or reopen a CRM task',
+          description: `${scopeNote('tasks.write')} As members do on the Tasks page, in this order: \`status\` \`open\` reopens a closed task (a reminder skipped when it was closed is not brought back); the title, the notes, the assignee (an active member able to use the CRM), the due time (within five years) and the reminder time of the open task change (a new reminder time, from now to a year ahead, is emailed to the assignee then, and null removes it); \`status\` \`done\` completes and \`cancelled\` cancels the open task, skipping a pending reminder. A task’s contact and deal do not change. Only what differs is a change, so a retry changes nothing; a closed task is not changed, or closed the other way, until it is reopened (409). With \`expectedVersion\`, a task changed since is refused with 409. Reopening and closing a task about a contact are on its timeline as done through the API, and the audit log names the key. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateTask')) },
+          responses: {
+            '200': { description: 'The task as it is now.', content: json(dataOf(ref('Task'))) },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
       },
       '/webhook-endpoints': {
         get: {
@@ -2970,6 +2983,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         UpdateDeal: jsonSchema(apiUpdateDealSchema, 'input'),
         Task: jsonSchema(apiTaskSchema),
         CreateTask: jsonSchema(apiCreateTaskSchema, 'input'),
+        UpdateTask: jsonSchema(apiUpdateTaskSchema, 'input'),
         CampaignWithResults: jsonSchema(apiCampaignDetailSchema),
         CampaignReview: jsonSchema(apiCampaignReviewSchema),
         CreateCampaign: jsonSchema(apiCreateCampaignSchema, 'input'),
@@ -3089,6 +3103,7 @@ export const API_ROUTES = [
   ['get', '/tasks'],
   ['post', '/tasks'],
   ['get', '/tasks/{id}'],
+  ['patch', '/tasks/{id}'],
   ['get', '/webhook-endpoints'],
   ['post', '/webhook-endpoints'],
   ['post', '/webhook-endpoints/replay-failed'],

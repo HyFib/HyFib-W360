@@ -10,6 +10,7 @@ import {
   exactTimestamp,
   sql,
   TASK_STATUSES,
+  type CrmActivityKind,
   type ReminderState,
   type TaskStatus,
 } from '@w360/db';
@@ -36,7 +37,8 @@ import { API_LIMITS } from './model';
  * automation), with the assignee, the contact and the deal by id only. The CRM timeline is never
  * read, nor the contact's name or number (`contacts.read` reads those). A key needs the CRM in the
  * company's plan. Erasing a contact deletes its tasks, so they are no longer read; a merge moves
- * them to the contact kept. With `tasks.write` a key creates tasks as members do (ADR-259).
+ * them to the contact kept. With `tasks.write` a key creates tasks as members do (ADR-259) and
+ * changes, completes, cancels and reopens them (ADR-260).
  */
 
 export const apiTaskListQuerySchema = z
@@ -58,21 +60,24 @@ export const apiTaskListQuerySchema = z
 
 const taskTime = z.iso.datetime({ offset: true });
 
+const taskTitle = z
+  .string()
+  .trim()
+  .min(1, 'Give the task a title.')
+  .max(200, 'A title is limited to 200 characters.');
+
+const taskNotes = z
+  .string()
+  .trim()
+  .max(2000, 'Notes are limited to 2000 characters.')
+  .nullable()
+  .describe('What the task is about, as members write it; empty or null for none.');
+
 /** What `POST /tasks` takes: a task as members create one, about a contact, a deal or nobody. */
 export const apiCreateTaskSchema = z
   .object({
-    title: z
-      .string()
-      .trim()
-      .min(1, 'Give the task a title.')
-      .max(200, 'A title is limited to 200 characters.'),
-    notes: z
-      .string()
-      .trim()
-      .max(2000, 'Notes are limited to 2000 characters.')
-      .nullable()
-      .optional()
-      .describe('What the task is about, as members write it.'),
+    title: taskTitle,
+    notes: taskNotes.optional(),
     assigneeId: z
       .uuid()
       .describe(
@@ -96,6 +101,49 @@ export const apiCreateTaskSchema = z
   })
   .strict();
 
+/**
+ * What `PATCH /tasks/{id}` takes (ADR-260): any of the task's details, as members edit an open task,
+ * and a status that completes, cancels or reopens it, from the version expected when one is given.
+ * A task's contact and deal do not change, as for members.
+ */
+export const apiUpdateTaskSchema = z
+  .object({
+    title: taskTitle.optional(),
+    notes: taskNotes.optional(),
+    assigneeId: z
+      .uuid()
+      .optional()
+      .describe('Another active member who can use the CRM to do the task (GET /members).'),
+    dueAt: taskTime
+      .nullable()
+      .optional()
+      .describe('When the task is due, within five years, or null for no due time.'),
+    remindAt: taskTime
+      .nullable()
+      .optional()
+      .describe(
+        'A new reminder time, from now to a year ahead, emailed to the assignee then, or null for none.',
+      ),
+    status: z
+      .enum(TASK_STATUSES)
+      .optional()
+      .describe(
+        '`done` completes and `cancelled` cancels the open task; `open` reopens a closed one.',
+      ),
+    expectedVersion: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe(
+        'Change the task only at this `version`: a task changed since is refused with 409 (read it again).',
+      ),
+  })
+  .strict()
+  .refine((change) => Object.keys(change).some((key) => key !== 'expectedVersion'), {
+    message: 'Give at least one change: a detail or `status`.',
+  });
+
 export interface ApiTask {
   id: string;
   title: string;
@@ -116,7 +164,7 @@ export interface ApiTask {
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
-  /** Moves on when members edit, complete, cancel or reopen the task. */
+  /** Moves on with every change; `PATCH /tasks/{id}` takes it as `expectedVersion` (ADR-260). */
   version: number;
 }
 
@@ -377,4 +425,199 @@ export async function apiCreateTask(
     if (claimed) await storeIdempotentResponse(tx, ctx, claimed, response);
     return { ...response, replayed: false };
   });
+}
+
+/**
+ * Changes one of the company's tasks as members do on the Tasks page (ADR-260), in one transaction
+ * with the task's contact (if any) and then its row locked, the order erasure takes them in: a closed
+ * task is reopened, the open task's title, notes, assignee, due time and reminder changed (a new
+ * reminder time resets the reminder and schedules it, as members' edits do), and the open task
+ * completed or cancelled (a pending reminder is then skipped), in that order, with the version moving
+ * on once. A task already as asked is answered as it is, so a retry changes nothing; a closed task is
+ * not changed, or closed the other way, until it is reopened. Reopening and closing are on the
+ * timeline of a task about a contact without a member actor, naming the key; the audit log records
+ * every change as the key's.
+ */
+export async function apiUpdateTask(
+  deps: Pick<OutboundDeps, 'db' | 'clock' | 'jobs' | 'signer'>,
+  ctx: ApiContext,
+  taskId: string,
+  input: unknown,
+): Promise<ApiTask> {
+  assertScope(ctx, 'tasks.write');
+  if (!z.uuid().safeParse(taskId).success) throw notFound('Task');
+  const data = parseInput(apiUpdateTaskSchema, input);
+  const now = deps.clock.now();
+  const task = await deps.db.run(ctx.scope, async (tx) => {
+    await assertCrmInPlan(tx, ctx.tenant.id);
+    const [ref] = await tx
+      .select({ contactId: crmTasks.contactId })
+      .from(crmTasks)
+      .where(and(eq(crmTasks.tenantId, ctx.tenant.id), eq(crmTasks.id, taskId)));
+    if (!ref) return null;
+    let contactFound = true;
+    if (ref.contactId) {
+      const [contact] = await tx
+        .select({ id: contacts.id })
+        .from(contacts)
+        .where(and(eq(contacts.tenantId, ctx.tenant.id), eq(contacts.id, ref.contactId)))
+        .for('key share');
+      contactFound = contact !== undefined;
+    }
+    const [current] = await tx
+      .select()
+      .from(crmTasks)
+      .where(and(eq(crmTasks.tenantId, ctx.tenant.id), eq(crmTasks.id, taskId)))
+      .for('update');
+    // Erasing the contact deleted the task between the reads.
+    if (!current) return null;
+    // A merge moved the task to another contact between the reads: its contact is not locked.
+    if (!contactFound || current.contactId !== ref.contactId) {
+      throw new AppError('conflict', 'The task moved to another contact meanwhile; try again.');
+    }
+    if (data.expectedVersion !== undefined && data.expectedVersion !== current.version) {
+      throw new AppError(
+        'conflict',
+        `The task changed since version ${data.expectedVersion}; its version is ${current.version}. Read it again.`,
+      );
+    }
+
+    const next = { ...current };
+    const changes: string[] = [];
+    const activities: CrmActivityKind[] = [];
+
+    if (data.status === 'open' && next.status !== 'open') {
+      // As members reopen a task: a reminder skipped when it was closed is not brought back.
+      Object.assign(next, { status: 'open', completedAt: null, completedByMembershipId: null });
+      activities.push('task_reopened');
+      changes.push('status');
+    }
+
+    // Only what differs is a change, so a retry of an edit changes nothing; a closed task is
+    // reopened before anything of it changes, as members' edits need an open task.
+    const notes = data.notes === undefined ? next.notes : data.notes || null;
+    const dueAt = data.dueAt === undefined ? next.dueAt : data.dueAt ? new Date(data.dueAt) : null;
+    const remindAt =
+      data.remindAt === undefined ? next.remindAt : data.remindAt ? new Date(data.remindAt) : null;
+    const dueChanged = (dueAt?.getTime() ?? null) !== (next.dueAt?.getTime() ?? null);
+    const remindChanged = (remindAt?.getTime() ?? null) !== (next.remindAt?.getTime() ?? null);
+    const assigneeId = data.assigneeId ?? next.assigneeMembershipId;
+    const details = [
+      ...(data.title !== undefined && data.title !== next.title ? ['title'] : []),
+      ...(notes !== next.notes ? ['notes'] : []),
+      ...(assigneeId !== next.assigneeMembershipId ? ['assignee'] : []),
+      ...(dueChanged ? ['due'] : []),
+      ...(remindChanged ? ['reminder'] : []),
+    ];
+    if (details.length > 0 && next.status !== 'open') {
+      throw new AppError('conflict', 'Reopen the task to change it (`status` `open`).');
+    }
+    const timeIssue = taskTimeIssue(dueChanged ? dueAt : null, remindAt, now, remindChanged);
+    if (timeIssue) throw invalidField(timeIssue.path, timeIssue.message);
+    if (
+      assigneeId !== next.assigneeMembershipId &&
+      !(await memberRefs(tx, ctx.tenant.id, [assigneeId])).get(assigneeId)?.active
+    ) {
+      throw invalidField(
+        'assigneeId',
+        'Give the id of an active member who can use the CRM (GET /members).',
+      );
+    }
+    Object.assign(next, {
+      title: data.title ?? next.title,
+      notes,
+      assigneeMembershipId: assigneeId,
+      dueAt,
+      ...(remindChanged
+        ? {
+            remindAt,
+            reminderState: remindAt ? 'pending' : 'none',
+            reminderDetail: null,
+            remindedAt: null,
+          }
+        : {}),
+    });
+    changes.push(...details);
+
+    if (data.status === 'done' || data.status === 'cancelled') {
+      if (next.status === 'open') {
+        Object.assign(next, {
+          status: data.status,
+          completedAt: now,
+          completedByMembershipId: null,
+          // A closed task sends no reminder, as when members close it.
+          ...(next.reminderState === 'pending'
+            ? { reminderState: 'skipped', reminderDetail: 'task_closed', remindedAt: now }
+            : {}),
+        });
+        activities.push(data.status === 'done' ? 'task_completed' : 'task_cancelled');
+        changes.push('status');
+      } else if (next.status !== data.status) {
+        throw new AppError(
+          'conflict',
+          `This task is already ${next.status}: reopen it first (\`status\` \`open\`).`,
+        );
+      }
+    }
+
+    if (changes.length > 0) {
+      await tx
+        .update(crmTasks)
+        .set({
+          title: next.title,
+          notes: next.notes,
+          assigneeMembershipId: next.assigneeMembershipId,
+          dueAt: next.dueAt,
+          remindAt: next.remindAt,
+          reminderState: next.reminderState,
+          reminderDetail: next.reminderDetail,
+          remindedAt: next.remindedAt,
+          status: next.status,
+          completedAt: next.completedAt,
+          completedByMembershipId: next.completedByMembershipId,
+          version: current.version + 1,
+        })
+        .where(and(eq(crmTasks.tenantId, ctx.tenant.id), eq(crmTasks.id, current.id)));
+      if (remindChanged && next.remindAt && next.reminderState === 'pending') {
+        await scheduleTaskReminder(deps, tx, {
+          tenantId: ctx.tenant.id,
+          taskId: current.id,
+          remindAt: next.remindAt,
+        });
+      }
+      if (current.contactId) {
+        for (const kind of activities) {
+          await addActivity(tx, {
+            tenantId: ctx.tenant.id,
+            contactId: current.contactId,
+            dealId: current.dealId,
+            taskId: current.id,
+            actorMembershipId: null,
+            kind,
+            data: { apiKeyId: ctx.key.id },
+            at: now,
+          });
+        }
+      }
+      await recordSystemAudit(
+        tx,
+        ctx.tenant.id,
+        {
+          action: 'crm.task_updated',
+          subjectType: 'crm_task',
+          subjectId: current.id,
+          correlationId: ctx.requestId,
+          metadata: { changes, status: next.status, source: 'api' },
+        },
+        apiActor(ctx),
+      );
+    }
+    const [row] = await tx
+      .select(taskColumns)
+      .from(crmTasks)
+      .where(and(eq(crmTasks.tenantId, ctx.tenant.id), eq(crmTasks.id, current.id)));
+    return row ? toApiTask(row) : null;
+  });
+  if (!task) throw notFound('Task');
+  return task;
 }

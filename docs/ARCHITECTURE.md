@@ -1480,6 +1480,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `runtime.outbound` carries the job queue and signer), adds a `task_created` activity without an
   actor naming the key for a task about a contact, and a `crm.task_created` audit row as the key,
   and answers the task as `GET /tasks/{id}` reads it.
+- **Changing CRM tasks through the API (ADR-260):** `PATCH /tasks/{id}` (`apiUpdateTask`,
+  `tasks.write`) checks the CRM in the plan, reads the task's contact, locks it (key share) and then
+  the task (for update; a merge that moved the task between the reads answers 409, and a task
+  erasure deleted answers 404), checks `expectedVersion`, then applies a reopen, the details that
+  differ (a closed task refused first, then `taskTimeIssue` and the assignee through `memberRefs`)
+  and a close to a working copy; when anything changed it writes the row once with the next version,
+  schedules a new pending reminder (`scheduleTaskReminder`), adds the reopen and close activities
+  without an actor naming the key for a task about a contact, and a `crm.task_updated` audit row
+  listing the changes, and answers the task as `GET /tasks/{id}` reads it.
 - **Numbers through the API (ADR-171):** `GET /channels` (`api/channels.ts`, `channels.read`) reads
   `channel_accounts` in the company oldest first on exact keyset cursors (`created_at`, `id`), with
   `status` as an equality, and gives the id, `display_phone_number`, `verified_name`, the status and

@@ -2163,6 +2163,15 @@ or a merge moved the deal while the task was being created (try again). 423 mean
 suspended or its plan has ended. A retry with the same `Idempotency-Key` answers the first task,
 even after its reminder time.
 
+**`PATCH /api/v1/tasks/{id}` answers 404, 409 or 422 (ADR-260).** 404 means the task is not one of
+the company's, or its contact was erased (erasure deletes a contact's tasks). 409 names the
+conflict: the task is closed (reopen it with `status` `open`, in the same request if wanted), it is
+already done or cancelled the other way, it changed since the `expectedVersion` given (read it
+again), or a merge moved it while it was being changed (try again). 422 names the field: an
+`assigneeId` who is not an active member able to use the CRM, a `dueAt` beyond five years, or a
+`remindAt` in the past or over a year ahead. A task's contact and deal cannot be changed: create a
+new task. A retry changes nothing.
+
 **`GET /api/v1/channels` answers 403, or a number shows no phone or name (ADR-171).** 403
 `forbidden` names the scope the key lacks, `channels.read` (keys keep the scopes they were created
 with: create a key with it); reason `not_in_plan` means the company's plan leaves the scope out
