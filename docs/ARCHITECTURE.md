@@ -1630,6 +1630,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `buildWebhookPayload` reads the survey with `satisfactionSurveyOf` (the conversation's contact and
   number joined) and gives it with `toApiSatisfactionSurvey` from `api/satisfaction-survey-view.ts`,
   shared with `GET /satisfaction-surveys`.
+- **Templates of every status through the API (ADR-294):** `api/message-templates.ts` reads
+  `app.message_templates` in the key's company scope, in read-only transactions:
+  `apiListMessageTemplates` (keyset pages on `(created_at, id)` descending, deleted templates only
+  when asked for, a number's WhatsApp Business account, a name) and `apiGetMessageTemplate` (with
+  the latest 50 rows of `app.template_status_events`); `toApiMessageTemplate` gives the content
+  through `sendSpecFor` with media headers, as `GET /templates` reads it, and the account's active
+  numbers.
 - **Many conversations at once (ADR-120):** `POST /conversations/update-many`
   (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
   transaction it locks the member first (as a suspension does before releasing its conversations),

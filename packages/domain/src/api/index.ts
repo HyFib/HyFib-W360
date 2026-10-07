@@ -28,6 +28,7 @@ export * from './business-hours';
 export * from './saved-replies';
 export * from './satisfaction-survey-view';
 export * from './satisfaction-surveys';
+export * from './message-templates';
 export * from './notes';
 export * from './tasks';
 export * from './message-changes';

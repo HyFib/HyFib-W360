@@ -11159,3 +11159,39 @@ Decision:
 
 Not built: the team, member and tag filters for this event, an event when a survey is sent or
 skipped, and a filter by score.
+
+## ADR-294 Message templates of every status through the public API (P5-08) (2026-10-07)
+
+Context: `GET /templates` lists the approved templates a send can use, with their variables
+(ADR-052). An integration that manages a company's templates, to learn whether Meta approved the one
+it waits for, why Meta rejected one or which were paused or disabled, could not read drafts,
+templates Meta was reviewing, rejected, paused or disabled ones, or their status changes: only the
+Templates page showed them.
+
+Decision:
+
+- **`GET /api/v1/message-templates`** (`listMessageTemplates`) lists the company's templates of
+  every status but deleted, as the Templates page lists them, newest first by when HyFib added them,
+  on exact keyset pages, with filters that combine: a status (`deleted` lists only the deleted
+  ones), a number (the templates of its WhatsApp Business account; another company's number, or an
+  unknown one, lists nothing) and a name.
+- **`GET /api/v1/message-templates/{id}`** (`getMessageTemplate`) reads one template of any status,
+  deleted included, with its latest 50 status changes newest first, as the template's page shows
+  them: each status with Meta's reason or HyFib's and where it came from (`submit`, `sync`, `send`
+  or `delete`), without the member who made it. Another company's template answers 404, as an
+  unknown one does.
+- **Each template** gives its status, Meta's rejection reason and quality rating as Meta gave them,
+  why HyFib could not submit it, whether it was added in HyFib or found at Meta, its version,
+  whether a send can use it now (approved, with content HyFib can send, as `GET /templates` decides:
+  a photo, video or document header counts, since a send gives its file), its content as the
+  template editor represents it, or null with the reason when HyFib cannot represent it
+  (authentication templates, named variables, other headers and buttons), the file its header takes,
+  and the active numbers of its WhatsApp Business account. Never Meta's template id or the raw
+  components Meta returned.
+- **No new scope:** keys with `templates.read`, granted with the members' `templates.read`, read
+  them; members with that permission see every template on the Templates page. `GET /templates`
+  keeps its meaning and shape, so integrations that send from that list never pick a template they
+  cannot send. Reads run in read-only transactions and work while the company is suspended.
+
+Not built: creating, changing, submitting and deleting templates through the API, template content
+HyFib cannot represent given raw, and the members who made each change.

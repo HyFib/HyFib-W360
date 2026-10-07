@@ -34,6 +34,7 @@ import {
   apiGetOrder,
   apiGetPipelineForecast,
   apiGetMessage,
+  apiGetMessageTemplate,
   apiGetNote,
   apiGetTask,
   apiGetTeam,
@@ -50,6 +51,7 @@ import {
   apiListDeals,
   apiListMembers,
   apiListMessages,
+  apiListMessageTemplates,
   apiListNotes,
   apiMessageChanges,
   apiListOrders,
@@ -9242,6 +9244,131 @@ describe('saved replies (ADR-291)', () => {
       }),
       'forbidden',
       /Manage saved replies/,
+    );
+  });
+});
+
+describe('message templates of every status (ADR-294)', () => {
+  const shipped: TemplateDefinition = {
+    category: 'UTILITY',
+    header: { type: 'none' },
+    body: { text: 'Hi {{1}}, your order has shipped.', examples: ['Asha'] },
+    footer: null,
+    buttons: [],
+  };
+
+  it('read drafts, approved, rejected and deleted templates with their review and history, as templates.read (ADR-294)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['templates.read']);
+    const templateDeps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock: systemClock };
+    const templates = createTemplatesService(templateDeps);
+    const graphDeps = { ...templateDeps, keyring: fx.keyring, graph: fx.graph };
+    const scope = authorizedTenantScope(c.tenant.id, null);
+    const stamp = Date.now().toString(36);
+
+    // A draft, an approved template, and one Meta rejects.
+    const { id: draftId } = await templates.createDraft(owner, {
+      whatsappAccountId: c.whatsappAccountId,
+      name: `mt_draft_${stamp}`,
+      language: 'en',
+      definition: shipped,
+    });
+    const approved = await approvedTemplate(c, shipped);
+    const { id: rejectedId } = await templates.createDraft(owner, {
+      whatsappAccountId: c.whatsappAccountId,
+      name: `mt_rejected_${stamp}`,
+      language: 'en',
+      definition: shipped,
+    });
+    await templates.submitTemplate(owner, rejectedId);
+    expect(await processTemplateSubmit(graphDeps, scope, rejectedId)).toBe('done');
+    const atMeta = fx.standIn.state.templates
+      .get(c.wabaId)
+      ?.find((t) => t.name === `mt_rejected_${stamp}`);
+    atMeta!.status = 'REJECTED';
+    atMeta!.rejected_reason = 'INVALID_FORMAT';
+    await syncTemplates(graphDeps, scope, c.whatsappAccountId);
+
+    // Newest first, each with its review, whether a send can use it, its content and number.
+    const listed = (await apiListMessageTemplates(deps(), reader.ctx, {})).data;
+    expect(listed.map((t) => [t.id, t.status, t.sendable])).toEqual([
+      [rejectedId, 'rejected', false],
+      [approved.id, 'approved', true],
+      [draftId, 'draft', false],
+    ]);
+    expect(listed[0]).toMatchObject({
+      rejectionReason: 'INVALID_FORMAT',
+      origin: 'local',
+      definition: shipped,
+      channels: [expect.objectContaining({ id: c.channelAccountId })],
+    });
+    expect(listed[2]).toMatchObject({ submittedAt: null, rejectionReason: null });
+
+    // Filters, exact pages.
+    expect(
+      (await apiListMessageTemplates(deps(), reader.ctx, { status: 'draft' })).data.map(
+        (t) => t.id,
+      ),
+    ).toEqual([draftId]);
+    expect(
+      (await apiListMessageTemplates(deps(), reader.ctx, { name: approved.name })).data.map(
+        (t) => t.id,
+      ),
+    ).toEqual([approved.id]);
+    expect(
+      (
+        await apiListMessageTemplates(deps(), reader.ctx, { channelId: c.channelAccountId })
+      ).data.map((t) => t.id),
+    ).toEqual([rejectedId, approved.id, draftId]);
+    expect(
+      (await apiListMessageTemplates(deps(), reader.ctx, { channelId: other.channelAccountId }))
+        .data,
+    ).toEqual([]);
+    const first = await apiListMessageTemplates(deps(), reader.ctx, { limit: '2' });
+    const second = await apiListMessageTemplates(deps(), reader.ctx, {
+      limit: '2',
+      cursor: first.nextCursor!,
+    });
+    expect([...first.data, ...second.data].map((t) => t.id)).toEqual([
+      rejectedId,
+      approved.id,
+      draftId,
+    ]);
+    expect(second.nextCursor).toBeNull();
+
+    // One template with its history; a deleted draft is read, and listed only when asked for.
+    const one = await apiGetMessageTemplate(deps(), reader.ctx, approved.id);
+    expect(one.history.map((h) => [h.status, h.source])).toEqual(
+      expect.arrayContaining([
+        ['submitting', 'submit'],
+        ['approved', 'sync'],
+      ]),
+    );
+    await templates.deleteTemplate(owner, draftId);
+    expect((await apiGetMessageTemplate(deps(), reader.ctx, draftId)).history[0]).toMatchObject({
+      status: 'deleted',
+      source: 'delete',
+    });
+    expect((await apiListMessageTemplates(deps(), reader.ctx, {})).data.map((t) => t.id)).toEqual([
+      rejectedId,
+      approved.id,
+    ]);
+    expect(
+      (await apiListMessageTemplates(deps(), reader.ctx, { status: 'deleted' })).data.map(
+        (t) => t.id,
+      ),
+    ).toEqual([draftId]);
+
+    // Another company's template is not found; a key that does not read templates reads nothing.
+    const theirs = await approvedTemplate(other, shipped);
+    await expectAppError(apiGetMessageTemplate(deps(), reader.ctx, theirs.id), 'not_found');
+    const sender = await apiKey(c, ['messages.send']);
+    await expectAppError(
+      apiListMessageTemplates(deps(), sender.ctx, {}),
+      'forbidden',
+      /templates\.read/,
     );
   });
 });

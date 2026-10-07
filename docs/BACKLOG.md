@@ -899,6 +899,10 @@ verification, app review, Embedded Signup configuration).
   (ADR-292, no migration: keys with `conversations.read` list the company's satisfaction surveys
   newest first on exact pages, skipped, asked or answered with the score, by conversation, status
   and time, without erased contacts' conversations).
+  **[Templates of every status through the public API built; its database tests run only in CI]**
+  (ADR-294, no migration: keys with `templates.read` list the company's templates newest first on
+  exact pages, drafts, those Meta reviews, rejected, paused, disabled and, when asked, deleted ones,
+  by status, number and name, and read each with its latest 50 status changes).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact
@@ -912,7 +916,8 @@ verification, app review, Embedded Signup configuration).
   **[Adding CRM notes built; its database tests run only in CI]** (ADR-268, migration 0184:
   `notes.write` adds a note to a contact's or a deal's timeline as members do, recorded as written
   through the API; notes are not read through the API).
-  Remaining: call-to-action messages through the API, taking
+  Remaining: creating, changing, submitting and deleting templates through the API,
+  call-to-action messages through the API, taking
   reactions back,
   changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),

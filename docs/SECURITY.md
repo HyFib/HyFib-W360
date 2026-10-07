@@ -1173,6 +1173,14 @@ Phase 5 rules (Public API, P5-08):
   score, the contact's name and number (null once erased) and the number, as the message events do;
   never the survey's question or labels, which the survey message holds (unit tests; an integration
   test, run in CI only).
+- Templates of every status (ADR-294): `GET /message-templates` and `GET /message-templates/{id}`
+  need `templates.read`, granted only by members who hold that permission, checked before any query;
+  they read under row security in the key's company, in read-only transactions, at most 100
+  templates a page and 50 status changes a template. Another company's template answers 404 as an
+  unknown one does, and another company's number lists nothing. They give Meta's reasons and HyFib's
+  submission errors as the Templates page shows them, never Meta's template id, the raw components,
+  the account's credentials or the members who made each change (unit tests; an integration test,
+  run in CI only).
 - Reading a deal's history (ADR-281): `GET /deals/{id}/history` needs `deals.read` and the CRM in
   the plan, checked before anything is read; it reads the key's company's deal only (another
   company's answers 404, as an unknown one does; an id that is not a UUID is refused before any

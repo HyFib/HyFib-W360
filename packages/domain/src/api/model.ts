@@ -60,7 +60,8 @@ export const API_SCOPE_INFO: Record<
   },
   'templates.read': {
     label: 'Read templates',
-    description: 'List approved templates and their variables.',
+    description:
+      "List approved templates and their variables, and read every template of the company, drafts and those Meta reviews included, with Meta's review and each template's latest status changes.",
     permission: 'templates.read',
     writes: false,
   },

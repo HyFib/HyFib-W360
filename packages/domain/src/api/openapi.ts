@@ -14,6 +14,7 @@ import {
   ORDER_STATUS_CHANGERS,
   REMINDER_STATES,
   TASK_STATUSES,
+  TEMPLATE_STATUSES,
   WEBHOOK_DELIVERY_STATES,
   type MessageStatus,
 } from '@w360/db';
@@ -80,6 +81,7 @@ import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
 import { MAX_TAGS_PER_CONVERSATION } from '../inbox/conversation-tags';
 import { TEMPLATE_HEADER_MEDIA } from '../templates/definition';
+import { MESSAGE_TEMPLATE_HISTORY } from './message-templates';
 import {
   apiStartAutomationSchema,
   apiStartManyAutomationRunsSchema,
@@ -828,6 +830,98 @@ export const apiSavedReplySchema = z.object({
   updatedAt: z.iso.datetime(),
 });
 
+/** A template's content as HyFib represents it (ADR-294). */
+const apiTemplateDefinitionSchema = z.object({
+  category: z.enum(['MARKETING', 'UTILITY']),
+  header: z.discriminatedUnion('type', [
+    z.object({ type: z.literal('none') }),
+    z.object({
+      type: z.literal('text'),
+      text: z.string().describe('With {{1}} where a send gives a value.'),
+      example: z.string().nullable().describe('The value Meta reviews it with.'),
+    }),
+  ]),
+  body: z.object({
+    text: z.string().describe('With {{1}}, {{2}}… where a send gives values.'),
+    examples: z.array(z.string()).describe('The values Meta reviews it with, in order.'),
+  }),
+  footer: z.string().nullable(),
+  buttons: z.array(
+    z.discriminatedUnion('type', [
+      z.object({ type: z.literal('QUICK_REPLY'), text: z.string() }),
+      z.object({
+        type: z.literal('URL'),
+        text: z.string(),
+        url: z.string().describe('Ending with {{1}} when a send gives the end of the link.'),
+        example: z.string().optional().describe('That end as Meta reviews it.'),
+      }),
+      z.object({ type: z.literal('PHONE_NUMBER'), text: z.string(), phoneNumber: z.string() }),
+    ]),
+  ),
+});
+
+/** A message template of any status (ADR-294). */
+export const apiMessageTemplateSchema = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  language: z.string(),
+  category: z.enum(['marketing', 'utility', 'authentication']),
+  status: z
+    .enum(TEMPLATE_STATUSES)
+    .describe(
+      '`draft`, `submitting` and `submit_failed` before Meta has it; then Meta’s review states (`pending`, `approved`, `rejected`, `paused`, `disabled`, …, `unknown` for one HyFib does not recognise); `pending_deletion` and `deleted` once deleted.',
+    ),
+  rejectionReason: z.string().nullable().describe('Meta’s reason for rejecting it.'),
+  qualityScore: z.string().nullable().describe('Meta’s quality rating of an approved template.'),
+  submitError: z
+    .string()
+    .nullable()
+    .describe('Why HyFib could not submit it, while its status is `submit_failed`.'),
+  origin: z
+    .enum(['local', 'synced'])
+    .describe('`local`: added in HyFib; `synced`: found at Meta, added in WhatsApp Manager.'),
+  version: z.number().int().describe('Changes with every change HyFib records.'),
+  sendable: z
+    .boolean()
+    .describe('Whether a send can use it now, as GET /templates lists the approved templates.'),
+  unsupportedReason: z
+    .string()
+    .nullable()
+    .describe('Why HyFib cannot send it or show its content, when it cannot.'),
+  definition: apiTemplateDefinitionSchema
+    .nullable()
+    .describe('Its content as HyFib represents it; null when HyFib cannot (`unsupportedReason`).'),
+  headerMedia: z
+    .enum(TEMPLATE_HEADER_MEDIA)
+    .nullable()
+    .describe('The file its header takes when sent, or null.'),
+  channels: z
+    .array(z.object({ id: z.uuid(), phone: z.string().nullable() }))
+    .describe('The active numbers of its WhatsApp Business account, which send it once approved.'),
+  submittedAt: z.iso.datetime().nullable(),
+  lastSyncedAt: z.iso.datetime().nullable().describe('When HyFib last read it from Meta.'),
+  createdAt: z.iso.datetime().describe('When HyFib added it.'),
+  updatedAt: z.iso.datetime(),
+});
+
+/** One message template with its latest status changes (ADR-294). */
+export const apiMessageTemplateDetailSchema = apiMessageTemplateSchema.extend({
+  history: z
+    .array(
+      z.object({
+        status: z.string(),
+        reason: z.string().nullable().describe('Meta’s reason, or HyFib’s, when one was given.'),
+        source: z
+          .enum(['submit', 'sync', 'send', 'delete'])
+          .describe(
+            '`submit`: sent for review; `sync`: read from Meta; `send`: refused by Meta on a send; `delete`.',
+          ),
+        occurredAt: z.iso.datetime(),
+      }),
+    )
+    .describe(`Its latest ${MESSAGE_TEMPLATE_HISTORY} status changes, newest first.`),
+});
+
 /** A closed day (ADR-290). */
 export const apiClosedDaySchema = z.object({
   id: z.uuid(),
@@ -1461,6 +1555,54 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf({ type: 'array', items: ref('Template') })),
             },
             ...errors(401, 403, 429, 500),
+          },
+        },
+      },
+      '/message-templates': {
+        get: {
+          operationId: 'listMessageTemplates',
+          summary: 'Templates of every status, newest first',
+          description: `${scopeNote('templates.read')} The company’s message templates as the Templates page lists them: drafts, those Meta is reviewing, approved, rejected, paused or disabled, and those found at Meta (\`origin\`), with Meta’s reasons and quality rating, whether a send can use each now (as GET /templates lists the approved ones) and its content as HyFib represents it, null for content HyFib cannot represent. Deleted templates are listed only when \`status\` asks for them. Newest first by when HyFib added them; pages never skip or repeat a template. Filters combine. template.status_changed webhooks say when a status changes.`,
+          parameters: [
+            ...pageParams,
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: [...TEMPLATE_STATUSES] },
+              description: 'Only the templates in this status; deleted ones are listed only so.',
+            },
+            {
+              name: 'channelId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description:
+                'Only the templates this number can send: its WhatsApp Business account’s.',
+            },
+            {
+              name: 'name',
+              in: 'query',
+              schema: { type: 'string', maxLength: 512 },
+              description: 'Only the templates of this name.',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of templates.', content: pageOf('MessageTemplate') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/message-templates/{id}': {
+        get: {
+          operationId: 'getMessageTemplate',
+          summary: 'A template of any status, with its history',
+          description: `${scopeNote('templates.read')} As GET /message-templates gives it, deleted ones included, with its latest ${MESSAGE_TEMPLATE_HISTORY} status changes, newest first, and what each came from. Another company’s template answers 404, as an unknown one does.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The template.',
+              content: json(dataOf(ref('MessageTemplateDetail'))),
+            },
+            ...errors(401, 403, 404, 429, 500),
           },
         },
       },
@@ -3957,6 +4099,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         UpdateBusinessHours: jsonSchema(apiUpdateBusinessHoursSchema, 'input'),
         ClosedDay: jsonSchema(apiClosedDaySchema),
         SatisfactionSurvey: jsonSchema(apiSatisfactionSurveySchema),
+        MessageTemplate: jsonSchema(apiMessageTemplateSchema),
+        MessageTemplateDetail: jsonSchema(apiMessageTemplateDetailSchema),
         SavedReply: jsonSchema(apiSavedReplySchema),
         CreateSavedReply: jsonSchema(apiCreateSavedReplySchema, 'input'),
         UpdateSavedReply: jsonSchema(apiUpdateSavedReplySchema, 'input'),
@@ -4047,6 +4191,8 @@ export function buildOpenApiDocument(serverUrl: string) {
 /** The routes the document describes: method and path template (checked by a unit test). */
 export const API_ROUTES = [
   ['get', '/templates'],
+  ['get', '/message-templates'],
+  ['get', '/message-templates/{id}'],
   ['get', '/channels'],
   ['get', '/contacts'],
   ['post', '/contacts'],

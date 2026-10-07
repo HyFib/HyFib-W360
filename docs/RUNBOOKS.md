@@ -2140,6 +2140,15 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**A template request answers 403, 404 or 422, or a template is not listed (ADR-294).** 403: the key
+lacks `templates.read` (its creator needed that permission). 404: another company's template, or an
+id that is none. 422: an unknown parameter or status, or a page size over 100. Deleted templates are
+listed only with `status=deleted`; `channelId` lists the templates of that number's WhatsApp
+Business account, and nothing for another company's number or an unknown one. A template added in
+WhatsApp Manager appears once HyFib reads the account's templates from Meta (Templates → Refresh
+from Meta). An approved template with `sendable` false has content HyFib cannot send
+(`unsupportedReason`).
+
 **An endpoint gets no `satisfaction_survey.answered` (ADR-293).** The event is sent only when a
 customer taps a button of a survey that was sent, the first time: a second tap, a skipped survey
 (Settings → Inbox's surveys off, the 24-hour window closed, the customer opted out) or a

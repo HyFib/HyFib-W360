@@ -935,6 +935,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    server answers Settings → Webhooks with an error for a company with an endpoint taking it: add it
    to endpoints once the rollout ends, and turn it off before rolling web servers back.
 
+   ADR-294 has no migration. Until the web rollout ends, an old web server answers
+   `GET /api/v1/message-templates` and `GET /api/v1/message-templates/{id}` with 404; rolling web
+   servers back does the same.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

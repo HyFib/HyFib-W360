@@ -1,5 +1,38 @@
 # Progress
 
+## 2026-10-07 — Message templates of every status through the public API (P5-08, H-033, W-059, ADR-294)
+
+Status: **Implemented; its database test runs in CI only.** Keys could list only the approved
+templates a send can use; an integration managing templates could not see drafts, Meta's review or
+the status changes. The local PostgreSQL is unavailable, so the integration test below was written
+but not run here. No migration.
+
+### Completed
+
+- **Domain:** `api/message-templates.ts` (`apiListMessageTemplates`, `apiGetMessageTemplate`,
+  `toApiMessageTemplate`, the query schema); the `templates.read` description; the OpenAPI paths,
+  parameters and `MessageTemplate`/`MessageTemplateDetail` components.
+- **Web:** `GET /api/v1/message-templates` and `GET /api/v1/message-templates/{id}`.
+- **Tests:** unit (`api/message-templates.test.ts`, 7: the scope, the parameters, what each template
+  gives, the conditions, the order, the pages, the history, refusals before any query, the OpenAPI
+  entries); integration (1 new in `api.test.ts`: drafts, approved, rejected and deleted templates
+  with their review and history through the Graph stand-in, the filters and pages, another company's
+  template and number, a key without the scope). Written for CI; the integration test was not run
+  here. No e2e test.
+- **Docs:** ADR-294; ARCHITECTURE; SECURITY; THREAT-MODEL T262; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-059.
+- **Mutation checks:** 40/40 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 131 files, 1247 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — A webhook event when a customer answers a satisfaction survey (P5-09, W-138, H-014, ADR-293)
 
 Status: **Implemented; its database test runs in CI only.** Integrations could read survey answers
