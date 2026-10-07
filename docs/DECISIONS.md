@@ -9594,6 +9594,13 @@ Decision:
 Not built: forecasts by owner or by month beyond the third, and history of past forecasts (nothing
 is stored).
 
+Amended (2026-10-07, found in review): whether a pipeline had a chance was read from the stages of
+its open deals only, so a pipeline whose only stage with a chance held no open deals showed no
+weighed values and said that none of its stages had a chance, unlike the board. It is now read from
+all the pipeline's active stages, with open deals or not: `forecastByMonth` takes their chances,
+which `dealReport` reads with the open pipeline in the same snapshot. Such a pipeline's forecast
+weighs, to 0 until a deal enters a stage with a chance. No migration.
+
 ## ADR-253 Reading CRM deals through the public API (P5-08, P4-04) (2026-10-07)
 
 Context: integrations could read a company's contacts, conversations, campaigns and orders through

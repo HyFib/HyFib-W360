@@ -365,6 +365,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   close month (`to_char(expected_close_on, 'YYYY-MM')`), and `forecastByMonth` in `crm/forecast.ts`
   puts them in this month (past dates included), the next two months, later and no date for the
   company's months (`forecastMonths`), weighing each stage's bucket once with the board's `weigh`.
+  Whether a pipeline has a chance is read from all its active stages (the open pipeline's rows,
+  with open deals or not), as the board reads it.
 - **Periods** (`reports/period.ts`): whole calendar days in the company's time zone, from local
   midnight to local midnight (daylight-saving days last 23 or 25 hours; a skipped midnight starts the
   day at its first real instant), at most 92 days; days are bucketed with `AT TIME ZONE` in SQL.

@@ -898,16 +898,18 @@ async function dealReport(
     currency: string;
     stage_id: string;
     stage_name: string;
+    win_percent: number | null;
     deals: number;
     value: string;
   }>(sql`
     select p.id as pipeline_id, p.name as pipeline_name, p.currency, s.id as stage_id,
-           s.name as stage_name, count(d.id)::int as deals, coalesce(sum(d.value_minor), 0)::text as value
+           s.name as stage_name, s.win_percent, count(d.id)::int as deals,
+           coalesce(sum(d.value_minor), 0)::text as value
       from app.crm_pipelines p
       join app.crm_stages s on s.tenant_id = p.tenant_id and s.pipeline_id = p.id and s.archived_at is null
       left join app.crm_deals d on d.tenant_id = s.tenant_id and d.stage_id = s.id and d.status = 'open'
      where p.tenant_id = ${tenantId} and p.archived_at is null
-     group by p.id, p.name, p.currency, p.position, s.id, s.name, s.position
+     group by p.id, p.name, p.currency, p.position, s.id, s.name, s.win_percent, s.position
      order by p.position, lower(p.name), s.position`);
   // The forecast (ADR-252): open deals in active stages by stage and expected close month.
   const byMonth = await tx.execute<{
@@ -963,6 +965,8 @@ async function dealReport(
               valueMinor: num(m.value),
             })),
           months,
+          // Every active stage's chance, with open deals or not, as the board reads them.
+          open.rows.filter((s) => s.pipeline_id === r.pipeline_id).map((s) => s.win_percent),
         ),
       };
       pipelines.push(pipeline);

@@ -106,7 +106,10 @@ export interface ForecastBucket {
 export interface MonthForecast {
   months: [string, string, string];
   buckets: ForecastBucket[];
-  /** Whether any of the deals is in a stage with a chance: without one there is nothing to weigh. */
+  /**
+   * Whether any active stage of the pipeline has a chance, with open deals or not, as on the board:
+   * without one there is nothing to weigh.
+   */
   hasChances: boolean;
   /** Deals counted in the buckets but left out of the weighted value: their stage has no chance. */
   dealsWithoutChance: number;
@@ -115,10 +118,13 @@ export interface MonthForecast {
 /**
  * A pipeline's open deals by expected close month (ADR-252). Each stage's value in a bucket is
  * weighed once, as the board weighs a stage's total, so this month's weighted value is the board's.
+ * `stageChances` are the chances of all the pipeline's active stages (the stages of `groups` among
+ * them), so a chance set only on a stage without open deals still counts, as on the board.
  */
 export function forecastByMonth(
   groups: readonly ForecastGroup[],
   months: [string, string, string],
+  stageChances: readonly (number | null)[],
 ): MonthForecast {
   const perStage = new Map<
     string,
@@ -143,7 +149,7 @@ export function forecastByMonth(
     valueMinor: 0,
     weightedMinor: 0,
   }));
-  let hasChances = false;
+  const hasChances = stageChances.some((chance) => chance !== null);
   let dealsWithoutChance = 0;
   for (const entry of perStage.values()) {
     const total = buckets[CLOSE_BUCKETS.indexOf(entry.bucket)] as ForecastBucket;
@@ -153,7 +159,6 @@ export function forecastByMonth(
       dealsWithoutChance += entry.deals;
       continue;
     }
-    hasChances = true;
     total.weightedMinor += weigh(entry.valueMinor, entry.winPercent);
   }
   return { months, buckets, hasChances, dealsWithoutChance };

@@ -1,5 +1,37 @@
 # Progress
 
+## 2026-10-07 — Review fix: the Reports forecast reads every stage's chance (P4-04, H-024, ADR-252)
+
+Status: **Implemented; its database test runs in CI only.** The Codex review of PR #38 found that
+the forecast in Reports read whether a pipeline had a chance of winning from its open deals' stages
+only: a pipeline whose only stage with a chance held no open deals showed dashes for the weighted
+values and said that no stage had a chance, while the board, which reads every active stage, weighed
+it. No migration. The local PostgreSQL is unavailable, so the integration test below was written but
+not run here.
+
+### Completed
+
+- **Domain:** `forecastByMonth` takes the chances of all the pipeline's active stages and has a
+  chance when any of them does; `dealReport` reads each stage's chance with the open pipeline, in
+  the same snapshot, and passes them.
+- **Tests:** unit (`forecast.test.ts`: a chance only on a stage without open deals, weighed to 0;
+  stages without chances; the board's agreement); integration (`crm.test.ts`: the ADR-252 test adds
+  a pipeline whose only chance is on a stage without deals, against the board). Written for CI; the
+  integration test was not run here.
+- **Docs:** ADR-252 (amended); ARCHITECTURE (CRM forecast).
+- **Mutation checks:** 5/5 deliberate regressions caught in `forecastByMonth`; the report's reading
+  of the stages' chances is checked by the integration test, which runs in CI only.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 122 files, 1173 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — A webhook event when an order's Payment Link changes status (P5-09, P4-06a, H-014, ADR-285)
 
 Status: **Implemented; its database tests run in CI only.** Integrations heard of orders waiting for
