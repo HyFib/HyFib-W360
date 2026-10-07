@@ -89,7 +89,8 @@ export default async function MessagingSettingsPage({
         <CardHeader>
           <CardTitle>Custom contact fields</CardTitle>
           <CardDescription>
-            Extra details stored on every contact. The key is also the CSV column name.
+            Extra details stored on every contact. The key is also the CSV column name; renaming a
+            field keeps its key.
           </CardDescription>
         </CardHeader>
         <CardContent>

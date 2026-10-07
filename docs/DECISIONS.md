@@ -9889,3 +9889,23 @@ Decision:
 
 Not built: events for edits, reassignments or sent reminders, and filters narrowing task events (by
 assignee, say).
+
+## ADR-262 Renaming contact fields in Settings (P3-01) (2026-10-07)
+
+Context: members added and deleted custom contact fields in Settings → Messaging, but a field named
+badly, or one whose meaning changed, could only be deleted with every contact's value and added
+again; keys could rename fields through the API (ADR-115), and the service always could, but no page
+offered it (ADR-115's Not built).
+
+Decision:
+
+- **A rename per field in Settings:** members who manage the company's settings (owners and
+  administrators, as for adding and deleting fields) rename a field in its row: its label, 1 to 80
+  characters as when it is added, through the same service function (`renameField`), which audits
+  `contact_field.renamed` with the key; the same label changes nothing.
+- **The key stays:** values are stored under the key, which is also the CSV column, the API's name
+  and what segments and webhook filters name, so a rename changes none of them, and the page says so
+  after saving. A rename sends no webhook and records no contact change (ADR-112, ADR-114). No
+  migration.
+
+Not built: changing a field's type (ADR-115 keeps it fixed), choices for a field, and field order.

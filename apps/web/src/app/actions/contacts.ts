@@ -200,6 +200,21 @@ export async function createFieldAction(
   });
 }
 
+/** Renames a custom field (ADR-262); its key, and so every value, CSV column and API name, stays. */
+export async function renameFieldAction(
+  slug: string,
+  fieldId: string,
+  label: unknown,
+): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { contacts } = await getRuntime();
+    await contacts.renameField(ctx, String(fieldId), String(label), await requestMeta());
+    refresh();
+    return null;
+  });
+}
+
 export async function deleteFieldAction(slug: string, fieldId: string): Promise<ActionResult> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);

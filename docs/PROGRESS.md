@@ -1,5 +1,30 @@
 # Progress
 
+## 2026-10-07 — Renaming contact fields in Settings (P3-01, W-048, ADR-262)
+
+Status: **Implemented; its browser test runs in CI only.** The service could rename fields (ADR-115)
+but no page offered it. No migration, and no domain change: the page calls the existing
+`renameField`.
+
+### Completed
+
+- **Web:** `renameFieldAction`; a Rename button and an inline form per field in Settings → Messaging
+  → Custom contact fields, saying after saving that the key stays; the card says so too.
+- **Tests:** e2e (the bulk-change contact fields test renames a field and reads its value under the
+  new label on the contact page and under its key through the API). Written for CI; not run here. No
+  unit-tested code changed, so no mutation checks.
+- **Docs:** ADR-262; BACKLOG P3-01; feature matrix W-048.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                   |
+| -------------------------------------------------- | ------------------------ |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                    |
+| `pnpm test` (unit)                                 | 1105 passed (117 files)  |
+| `pnpm test:e2e`                                    | not run here; CI runs it |
+| `pnpm build`                                       | passed                   |
+| gitleaks 8.30.1 on the staged changes              | no leaks found           |
+
 ## 2026-10-07 — Webhook events for CRM tasks (P5-09, P4-04, H-014, ADR-261)
 
 Status: **Implemented; its database tests run in CI only.** Integrations could read and change tasks
