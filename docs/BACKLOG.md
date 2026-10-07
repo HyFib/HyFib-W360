@@ -886,6 +886,11 @@ verification, app review, Embedded Signup configuration).
   0209: `PATCH /members/{id}` with the new `availability.write` scope, granted with `inbox.assign`,
   sets whether a member takes the conversations routing gives out, through the write Settings uses,
   which now locks the member's row; recorded as the key's).
+  **[Business hours through the public API built; its database tests run only in CI]** (ADR-290,
+  migration 0210: `business_hours.read` reads the week, whether the company is open now, and its
+  closed days a year at a time; `business_hours.manage`, granted with `tenant.settings.manage`, also
+  sets the week and adds and removes closed days, through the checks and writes Settings uses,
+  recorded as the key's).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact

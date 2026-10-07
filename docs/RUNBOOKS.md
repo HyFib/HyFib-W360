@@ -2140,6 +2140,18 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**A business hours request answers 403, 404, 409, 422 or 423, or `open` is not what a team expects
+(ADR-290).** 403 `forbidden` names the scope the key lacks: `business_hours.read` or
+`business_hours.manage` to read, `business_hours.manage` to change (granted by owners and
+administrators). 404 means the closed day is not one of the key's company's, or was opened again.
+409: the day is already marked closed. 422 names what is wrong: `days.<n>` for a day whose ranges
+overlap, end before they start or number more than 4, an opening time missing before the hours are
+turned on, or `to` before `from` or more than a year after it. 423 means the company is suspended or
+its plan has ended; reads still work. `open` follows the company's time zone (`timeZone`) and its
+closed days; while the hours are off, or have no opening time, it is always `true`, as automations'
+off-hours branches take it. The audit log has each change with the key, and Settings → Inbox shows
+it.
+
 **`PATCH /api/v1/members/{id}` answers 403, 404, 422 or 423, or a member made available gets no
 conversations (ADR-289).** 403 `forbidden` names the scope the key lacks, `availability.write`
 (granted by members who assign conversations), or with reason `not_in_plan` the company's plan

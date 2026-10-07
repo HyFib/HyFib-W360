@@ -1,5 +1,42 @@
 # Progress
 
+## 2026-10-07 — Business hours and closed days through the public API (P5-08, H-033, ADR-290)
+
+Status: **Implemented; its database tests run in CI only.** Only owners and administrators could
+read or set business hours and closed days, in Settings. The local PostgreSQL is unavailable, so the
+migration and the integration tests below were written but not run here; migration 0210 passed the
+pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0210 (the `business_hours.read` and `business_hours.manage` scopes in the
+  key and plan checks).
+- **Domain:** `checkDayRanges`, `scheduleIntervals`, `writeBusinessHours`, `writeAddClosedDay`,
+  `writeRemoveClosedDay` and `closedDayError` in `inbox/business-hours.ts`, now shared by Settings,
+  and `loadBusinessCalendar` giving the switch; `api/business-hours.ts` (`apiGetBusinessHours`,
+  `apiUpdateBusinessHours`, `apiListClosedDays`, `apiCreateClosedDay`, `apiDeleteClosedDay`,
+  `businessHoursStatus`, `closedDaySpan`); the scopes; the OpenAPI entries.
+- **Web:** `GET` and `PUT /api/v1/business-hours`, `GET` and
+  `POST /api/v1/business-hours/closed-days`, and `DELETE /api/v1/business-hours/closed-days/{id}`.
+- **Tests:** unit (`api/business-hours.test.ts`: the scopes, the week's checks, the open status, the
+  span of closed days, refusals before any query, the read-only snapshot, the OpenAPI entries; the
+  scope lists updated); integration (2 new in `api.test.ts`). Written for CI; the integration tests
+  were not run here. No e2e test.
+- **Docs:** ADR-290; ARCHITECTURE; SECURITY; THREAT-MODEL T258; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033.
+- **Mutation checks:** 23/23 deliberate regressions caught
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 128 files, 1217 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0210                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Setting members' availability through the public API (P5-08, H-033, W-038, ADR-289)
 
 Status: **Implemented; its database tests run in CI only.** Keys read whether members take

@@ -11017,3 +11017,46 @@ Decision:
 
 Not built: shifts or schedules kept in HyFib, availability per team, and webhook events when a
 member's availability changes.
+
+## ADR-290 Business hours and closed days through the public API (P5-08) (2026-10-07)
+
+Context: a company's business hours and closed days decide when reply-due timers run and which
+branch an automation's off-hours step takes, but only owners and administrators set them, in
+Settings → Inbox, and nothing outside the app could read them. A website chat or a chatbot that says
+whether someone will answer, a workforce tool that keeps the opening hours, or a company that loads
+each year's public holidays, had to copy them by hand and keep them in step.
+
+Decision:
+
+- **Two scopes:** `business_hours.read` ("Read business hours"), granted with `tenant.read`, the
+  permission members see the hours with, and `business_hours.manage` ("Manage business hours"), a
+  writing scope granted with `tenant.settings.manage`, the permission owners and administrators set
+  them with, which reads them too. Writes are refused while the company is suspended or restricted
+  (423); reads work then. Existing keys keep their scopes, and a plan version that chose its scopes
+  (ADR-092) leaves them out until a new version includes them (migration 0210 adds both to the scope
+  checks).
+- **`GET /api/v1/business-hours`** (`getBusinessHours`) gives the week in the company's time zone,
+  seven days Monday first, each with its opening ranges as `HH:MM` (24:00 is midnight), whether the
+  hours are turned on, and `open` now: within the hours and not on a closed day, or always while the
+  hours are off or have no opening time, as automations' off-hours branches take it; with `opensAt`
+  while closed (within a year) and `closesAt` while open (within 14 days).
+- **`PUT /api/v1/business-hours`** (`updateBusinessHours`) replaces the week and the switch, checked
+  as Settings checks them through the same rules (`checkDayRanges`, now shared with the text
+  Settings parses): at most 4 ranges a day, each ending after it starts and none overlapping (422
+  naming `days.<n>`), and an opening time before the hours are turned on (422). It writes through
+  `writeBusinessHours`, which Settings now uses too; the settings row's last editor is null for a
+  key, as for other key writes. A week and switch the company already has are answered as they are,
+  with no audit entry.
+- **Closed days:** `GET /api/v1/business-hours/closed-days` (`listClosedDays`) gives the closed days
+  from `from` to `to`, a year at most and from today in the company's time zone by default, in
+  order, so a read stays bounded however many past days a company kept; `POST` (`createClosedDay`)
+  marks a day closed (409 when it already is; once per `Idempotency-Key` when one is given) and
+  `DELETE /business-hours/closed-days/{id}` (`deleteClosedDay`) opens it again (404 when it is not
+  closed), through `writeAddClosedDay` and `writeRemoveClosedDay`, which Settings now uses too.
+- **Recorded as the key's:** the audit log records `inbox.business_hours_updated`,
+  `inbox.closed_day_added` and `inbox.closed_day_removed` as the key, with `source: 'api'`.
+  Reply-due timers and off-hours branches follow a change at once, as after one in Settings: timers
+  are worked out from the hours whenever they are read.
+
+Not built: hours per team or per WhatsApp number, holiday calendars imported from a feed, and
+webhook events when the hours or closed days change.

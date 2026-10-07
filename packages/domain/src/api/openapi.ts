@@ -132,6 +132,8 @@ import { API_NOTE_MAX_LENGTH, apiCreateNoteSchema } from './notes';
 import { apiCreatePipelineSchema, apiUpdatePipelineSchema } from './pipelines';
 import { apiCreateTeamSchema, apiUpdateTeamSchema } from './teams';
 import { apiUpdateMemberSchema } from './members';
+import { apiCreateClosedDaySchema, apiUpdateBusinessHoursSchema } from './business-hours';
+import { MAX_RANGES_PER_DAY } from '../inbox/business-hours';
 import { apiCreateTaskSchema, apiUpdateTaskSchema } from './tasks';
 import { apiUpdateOrderSchema } from './orders';
 import {
@@ -758,6 +760,52 @@ export const apiMemberAvailabilitySchema = z.object({
     .datetime()
     .nullable()
     .describe('When the member’s availability last changed; null when it was never set.'),
+});
+
+const apiTimeRangeSchema = z.object({
+  opens: z.string().describe('HH:MM in the company’s time zone.'),
+  closes: z.string().describe('HH:MM, after `opens`; 24:00 is midnight at the end of the day.'),
+});
+
+/** The company's business hours and whether it is open now (ADR-290). */
+export const apiBusinessHoursSchema = z.object({
+  enabled: z
+    .boolean()
+    .describe(
+      'Whether business hours are turned on; while they are off, the company counts as always open.',
+    ),
+  timeZone: z
+    .string()
+    .describe('The company’s time zone, like Asia/Kolkata, in which the hours and days are kept.'),
+  days: z
+    .array(z.array(apiTimeRangeSchema))
+    .length(7)
+    .describe(
+      'Seven days, Monday first, each with its opening ranges in order; none: closed all day.',
+    ),
+  open: z
+    .boolean()
+    .describe(
+      'Whether the company is open now: within its hours and not on a closed day, or always while the hours are off or have no opening time, as automations’ off-hours branches take it.',
+    ),
+  opensAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('While closed: when it next opens; null while open, or when not within a year.'),
+  closesAt: z.iso
+    .datetime()
+    .nullable()
+    .describe(
+      'While open by its hours: when this opening ends; null while closed, while the hours are off, or when it stays open for the next 14 days.',
+    ),
+  asOf: z.iso.datetime().describe('When `open`, `opensAt` and `closesAt` were worked out.'),
+});
+
+/** A closed day (ADR-290). */
+export const apiClosedDaySchema = z.object({
+  id: z.uuid(),
+  day: z.string().describe('YYYY-MM-DD in the company’s time zone.'),
+  name: z.string(),
 });
 
 /** A WhatsApp number of the company (ADR-171). */
@@ -2029,6 +2077,107 @@ export function buildOpenApiDocument(serverUrl: string) {
           responses: {
             '200': { description: 'A page of members.', content: pageOf('Member') },
             ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/business-hours': {
+        get: {
+          operationId: 'getBusinessHours',
+          summary: 'Business hours, and whether the company is open now',
+          description: `${scopeNote('business_hours.read', 'business_hours.manage')} The company’s weekly business hours in its time zone, as Settings → Inbox shows them, and whether it is open now (within its hours and not on a closed day), with when it next opens or closes. While the hours are off, or have no opening time, the company counts as always open, as reply-due timers and automations’ off-hours branches take it. Reading works while the company is suspended.`,
+          responses: {
+            '200': {
+              description: 'The business hours.',
+              content: json(dataOf(ref('BusinessHours'))),
+            },
+            ...errors(401, 403, 429, 500),
+          },
+        },
+        put: {
+          operationId: 'updateBusinessHours',
+          summary: 'Set the business hours',
+          description: `${scopeNote('business_hours.manage')} As owners and administrators save them in Settings → Inbox: \`days\` replaces the whole week, Monday first, each day with up to ${MAX_RANGES_PER_DAY} ranges that do not overlap (422 naming \`days.<n>\` otherwise), and \`enabled\` turns the hours on (422 without an opening time) or off. Reply-due timers and automations’ off-hours branches follow them. A week and switch the company already has are answered as they are, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
+          requestBody: { required: true, content: json(ref('UpdateBusinessHours')) },
+          responses: {
+            '200': {
+              description: 'The business hours now.',
+              content: json(dataOf(ref('BusinessHours'))),
+            },
+            ...errors(400, 401, 403, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/business-hours/closed-days': {
+        get: {
+          operationId: 'listClosedDays',
+          summary: 'Closed days, in order',
+          description: `${scopeNote('business_hours.read', 'business_hours.manage')} The days the company marked closed, from \`from\` to \`to\` (a year at most; from today in the company’s time zone by default), in order, with the span read. Closed days hold no business hours, so reply-due timers wait over them. Reading works while the company is suspended.`,
+          parameters: [
+            {
+              name: 'from',
+              in: 'query',
+              schema: { type: 'string', format: 'date' },
+              description:
+                'The first day, YYYY-MM-DD; today in the company’s time zone by default.',
+            },
+            {
+              name: 'to',
+              in: 'query',
+              schema: { type: 'string', format: 'date' },
+              description:
+                'The last day, YYYY-MM-DD, at most 365 days after `from`; that by default.',
+            },
+          ],
+          responses: {
+            '200': {
+              description: 'The closed days in the span.',
+              content: json({
+                type: 'object',
+                properties: {
+                  data: { type: 'array', items: ref('ClosedDay') },
+                  from: { type: 'string', format: 'date' },
+                  to: { type: 'string', format: 'date' },
+                },
+                required: ['data', 'from', 'to'],
+              }),
+            },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+        post: {
+          operationId: 'createClosedDay',
+          summary: 'Mark a day closed',
+          description: `${scopeNote('business_hours.manage')} As owners and administrators do in Settings → Inbox: the company is closed all that day, in its time zone, whatever its weekly hours (409 when the day is already marked closed). The audit log names the key. With an \`Idempotency-Key\`, a retry answers the first response.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateClosedDay')) },
+          responses: {
+            '201': { description: 'The closed day.', content: json(dataOf(ref('ClosedDay'))) },
+            ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/business-hours/closed-days/{id}': {
+        delete: {
+          operationId: 'deleteClosedDay',
+          summary: 'Open a closed day again',
+          description: `${scopeNote('business_hours.manage')} As owners and administrators do in Settings → Inbox: the day follows the weekly hours again. A day already opened again answers 404. The audit log names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'Opened again.',
+              content: json(
+                dataOf({
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string', format: 'uuid' },
+                    deleted: { const: true },
+                    day: { type: 'string', format: 'date' },
+                  },
+                  required: ['id', 'deleted', 'day'],
+                }),
+              ),
+            },
+            ...errors(401, 403, 404, 423, 429, 500),
           },
         },
       },
@@ -3669,6 +3818,10 @@ export function buildOpenApiDocument(serverUrl: string) {
         Channel: jsonSchema(apiChannelSchema),
         Member: jsonSchema(apiMemberSchema),
         MemberAvailability: jsonSchema(apiMemberAvailabilitySchema),
+        BusinessHours: jsonSchema(apiBusinessHoursSchema),
+        UpdateBusinessHours: jsonSchema(apiUpdateBusinessHoursSchema, 'input'),
+        ClosedDay: jsonSchema(apiClosedDaySchema),
+        CreateClosedDay: jsonSchema(apiCreateClosedDaySchema, 'input'),
         UpdateMember: jsonSchema(apiUpdateMemberSchema, 'input'),
         Team: jsonSchema(apiTeamSchema),
         TeamSettings: jsonSchema(apiTeamSettingsSchema),
@@ -3788,6 +3941,11 @@ export const API_ROUTES = [
   ['get', '/conversations/{id}/messages'],
   ['get', '/members'],
   ['patch', '/members/{id}'],
+  ['get', '/business-hours'],
+  ['put', '/business-hours'],
+  ['get', '/business-hours/closed-days'],
+  ['post', '/business-hours/closed-days'],
+  ['delete', '/business-hours/closed-days/{id}'],
   ['get', '/teams'],
   ['post', '/teams'],
   ['get', '/teams/{id}'],

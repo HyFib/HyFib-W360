@@ -13,6 +13,7 @@ import {
   RUN_BUDGETS,
   advanceAutomationRun,
   apiAddConversationNote,
+  apiCreateClosedDay,
   apiCreateContact,
   apiCreateDeal,
   apiCreateNote,
@@ -20,8 +21,10 @@ import {
   apiCreateTask,
   apiCreateTeam,
   apiDeleteTeam,
+  apiDeleteClosedDay,
   apiErrorResponse,
   apiGetAutomationRun,
+  apiGetBusinessHours,
   apiGetContact,
   apiGetConversation,
   apiGetDeal,
@@ -34,6 +37,7 @@ import {
   apiKeyReminderNotice,
   apiListAutomations,
   apiListChannels,
+  apiListClosedDays,
   apiListContacts,
   apiListConversationMessages,
   apiListConversationNotes,
@@ -54,6 +58,7 @@ import {
   apiSendMessage,
   apiSendTemplate,
   apiUpdateConversation,
+  apiUpdateBusinessHours,
   apiUpdateDeal,
   apiUpdatePipeline,
   apiUpdateTeam,
@@ -71,6 +76,7 @@ import {
   botButtonId,
   createApiKeysService,
   createAutomationService,
+  createBusinessHoursService,
   createCampaignsService,
   createCommerceService,
   createConsentService,
@@ -8798,6 +8804,162 @@ describe('assigning conversations (ADR-093)', () => {
       'forbidden',
       /Set members' availability/,
     );
+  });
+});
+
+describe('business hours (ADR-290)', () => {
+  const hours = () => createBusinessHoursService({ db: fx.dbs.app, clock: systemClock });
+  /** A day in a time zone, `offset` days from today, as YYYY-MM-DD. */
+  const localDay = (timeZone: string, offset: number) =>
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date(Date.now() + offset * 86_400_000));
+  const allDay = Array.from({ length: 7 }, () => [{ opens: '00:00', closes: '24:00' }]);
+
+  it('read and set business hours and closed days as Settings does, as the key (ADR-290)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['business_hours.read']);
+    const manager = await apiKey(c, ['business_hours.manage']);
+
+    // Nothing set: off, so the company counts as always open.
+    expect(await apiGetBusinessHours(deps(), reader.ctx)).toMatchObject({
+      enabled: false,
+      timeZone: owner.tenant.timezone,
+      days: [[], [], [], [], [], [], []],
+      open: true,
+      opensAt: null,
+      closesAt: null,
+    });
+
+    // Open all day every day: open now, with no closing within 14 days; Settings shows the week.
+    const set = await apiUpdateBusinessHours(deps(), manager.ctx, { enabled: true, days: allDay });
+    expect(set).toMatchObject({ enabled: true, days: allDay, open: true, closesAt: null });
+    expect((await hours().getBusinessHours(owner)).days).toEqual(Array(7).fill('00:00-24:00'));
+    // The same week again writes nothing.
+    expect(
+      await apiUpdateBusinessHours(deps(), manager.ctx, { enabled: true, days: allDay }),
+    ).toMatchObject({ enabled: true, days: allDay });
+
+    // Today closed, in the company's time zone: closed now, until midnight; once per key.
+    const today = localDay(owner.tenant.timezone, 0);
+    const request = { day: today, name: 'Stocktaking' };
+    const key = idem('closed-day-1', JSON.stringify(request));
+    const created = await apiCreateClosedDay(deps(), manager.ctx, request, key);
+    const again = await apiCreateClosedDay(deps(), manager.ctx, request, key);
+    expect([created.status, created.replayed, again.replayed]).toEqual([201, false, true]);
+    const closed = (created.body as { data: { id: string; day: string; name: string } }).data;
+    expect(closed).toMatchObject({ day: today, name: 'Stocktaking' });
+    const shut = await apiGetBusinessHours(deps(), reader.ctx);
+    expect([shut.open, shut.opensAt === null, shut.closesAt]).toEqual([false, false, null]);
+    await expectAppError(
+      apiCreateClosedDay(deps(), manager.ctx, { day: today, name: 'Again' }, null),
+      'conflict',
+      /already marked closed/,
+    );
+    expect((await apiListClosedDays(deps(), reader.ctx, {})).data).toEqual([closed]);
+    expect((await hours().getBusinessHours(owner)).holidays.map((h) => h.id)).toEqual([closed.id]);
+    expect(
+      await apiListClosedDays(deps(), reader.ctx, { from: '2020-01-01', to: '2020-12-31' }),
+    ).toEqual({ data: [], from: '2020-01-01', to: '2020-12-31' });
+
+    // Opened again: open now; opening it again is not found.
+    expect(await apiDeleteClosedDay(deps(), manager.ctx, closed.id)).toEqual({
+      id: closed.id,
+      deleted: true,
+      day: today,
+    });
+    expect((await apiGetBusinessHours(deps(), reader.ctx)).open).toBe(true);
+    await expectAppError(
+      apiDeleteClosedDay(deps(), manager.ctx, closed.id),
+      'not_found',
+      /Closed day/,
+    );
+
+    // Turned off: always open, the week kept.
+    expect(
+      await apiUpdateBusinessHours(deps(), manager.ctx, { enabled: false, days: allDay }),
+    ).toMatchObject({ enabled: false, open: true, days: allDay });
+
+    // The audit log names the key for each change, and only for changes.
+    const audits = await fx.query<{
+      action: string;
+      actor_type: string;
+      actor_id: string;
+      metadata: { source?: string };
+    }>(
+      `SELECT action, actor_type, actor_id, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action IN ('inbox.business_hours_updated',
+              'inbox.closed_day_added', 'inbox.closed_day_removed')
+        ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(audits.map((a) => [a.action, a.actor_type, a.actor_id, a.metadata.source])).toEqual([
+      ['inbox.business_hours_updated', 'api_key', manager.id, 'api'],
+      ['inbox.closed_day_added', 'api_key', manager.id, 'api'],
+      ['inbox.closed_day_removed', 'api_key', manager.id, 'api'],
+      ['inbox.business_hours_updated', 'api_key', manager.id, 'api'],
+    ]);
+  });
+
+  it('read with either scope, change only with business_hours.manage and an active company, granted as in Settings (ADR-290)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['business_hours.read']);
+    const manager = await apiKey(c, ['business_hours.manage']);
+    const theirOwner = await fx.ctx(other, other.owner);
+    await hours().addHoliday(theirOwner, {
+      day: localDay(theirOwner.tenant.timezone, 3),
+      name: 'Theirs',
+    });
+    const [theirs] = (await hours().getBusinessHours(theirOwner)).holidays;
+
+    // Another company's closed day is neither listed nor opened; an unknown one is not found.
+    expect((await apiListClosedDays(deps(), manager.ctx, {})).data).toEqual([]);
+    for (const id of [theirs!.id, uuidv7()]) {
+      await expectAppError(apiDeleteClosedDay(deps(), manager.ctx, id), 'not_found');
+    }
+
+    // A reading key changes nothing.
+    for (const write of [
+      () => apiUpdateBusinessHours(deps(), reader.ctx, { enabled: false, days: allDay }),
+      () => apiCreateClosedDay(deps(), reader.ctx, { day: localDay('UTC', 10), name: 'X' }, null),
+      () => apiDeleteClosedDay(deps(), reader.ctx, theirs!.id),
+    ]) {
+      await expectAppError(write(), 'forbidden', /business_hours\.manage/);
+    }
+
+    // A suspended company's keys read, and change nothing.
+    const suspended = (ctx: ApiContext): ApiContext => ({
+      ...ctx,
+      tenant: { ...ctx.tenant, status: 'suspended' as const },
+    });
+    expect((await apiGetBusinessHours(deps(), suspended(reader.ctx))).enabled).toBe(false);
+    expect((await apiListClosedDays(deps(), suspended(manager.ctx), {})).data).toEqual([]);
+    await expectAppError(
+      apiUpdateBusinessHours(deps(), suspended(manager.ctx), { enabled: true, days: allDay }),
+      'tenant_suspended',
+    );
+
+    // Granting needs the permissions members read and change business hours with.
+    for (const [scope, permission, label] of [
+      ['business_hours.read', 'tenant.read', /Read business hours/],
+      ['business_hours.manage', 'tenant.settings.manage', /Manage business hours/],
+    ] as const) {
+      const narrower: TenantContext = {
+        ...owner,
+        permissions: new Set([...owner.permissions].filter((p) => p !== permission)),
+      };
+      await expectAppError(
+        keys.create(narrower, { name: 'Hours', scopes: [scope], expiresInDays: 30 }),
+        'forbidden',
+        label,
+      );
+    }
   });
 });
 

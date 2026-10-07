@@ -1602,6 +1602,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the availability row `FOR UPDATE` and nothing written when it already holds the value, else the
   upsert and the `member.availability` tenant event. The API audits a change as the key and, when it
   made the member available, calls `routeWaitingConversations(tx, tenantId, 20)`, as Settings does.
+- **Business hours through the API (ADR-290):** `api/business-hours.ts` reads the week with
+  `loadBusinessCalendar` (which now also gives the switch, `turnedOn`) and works out `open`,
+  `opensAt` and `closesAt` with `businessHoursStatus` (`businessStatusAt` and `openPeriods`), in a
+  repeatable-read, read-only transaction. `PUT /business-hours` checks each day with
+  `checkDayRanges` and the week with `scheduleIntervals` (both shared with Settings' text parsing),
+  compares it with the stored week (`sameIntervals`), and writes through `writeBusinessHours`;
+  closed days go through `writeAddClosedDay` and `writeRemoveClosedDay`, with `closedDayError` for a
+  day already closed, all now shared with the members' `createBusinessHoursService`. `closedDaySpan`
+  bounds a read of closed days to a year.
 - **Many conversations at once (ADR-120):** `POST /conversations/update-many`
   (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
   transaction it locks the member first (as a suspension does before releasing its conversations),

@@ -37,6 +37,8 @@ export const API_SCOPE_KEYS = [
   'notes.write',
   'teams.manage',
   'availability.write',
+  'business_hours.read',
+  'business_hours.manage',
   'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
 
@@ -241,6 +243,20 @@ export const API_SCOPE_INFO: Record<
     description:
       "Set whether each of the company's members takes the conversations routing gives out, as members who assign conversations switch it in Settings → Teams, recorded in the audit log as done by the key. Only active members whose role answers conversations are made available, and making one available routes waiting conversations again.",
     permission: 'inbox.assign',
+    writes: true,
+  },
+  'business_hours.read': {
+    label: 'Read business hours',
+    description:
+      "Read the company's business hours, whether it is open now and when it next opens or closes, and its closed days, as members see them in Settings → Inbox.",
+    permission: 'tenant.read',
+    writes: false,
+  },
+  'business_hours.manage': {
+    label: 'Manage business hours',
+    description:
+      "Read and set the company's weekly business hours, turn them on or off, and add and remove closed days, as owners and administrators do in Settings → Inbox, recorded in the audit log as done by the key. Reply-due timers and automations' off-hours branches follow them.",
+    permission: 'tenant.settings.manage',
     writes: true,
   },
   'webhooks.manage': {

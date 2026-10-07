@@ -24,6 +24,7 @@ export * from './deals';
 export * from './pipelines';
 export * from './pipeline-forecast';
 export * from './teams';
+export * from './business-hours';
 export * from './notes';
 export * from './tasks';
 export * from './message-changes';

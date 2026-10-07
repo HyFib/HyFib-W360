@@ -90,8 +90,8 @@ describe("setting members' availability (ADR-289)", () => {
     expect(API_SCOPE_KEYS.indexOf('availability.write')).toBe(
       API_SCOPE_KEYS.indexOf('teams.manage') + 1,
     );
-    expect(API_SCOPE_KEYS.indexOf('webhooks.manage')).toBe(
-      API_SCOPE_KEYS.indexOf('availability.write') + 1,
+    expect(API_SCOPE_KEYS.indexOf('webhooks.manage')).toBeGreaterThan(
+      API_SCOPE_KEYS.indexOf('availability.write'),
     );
     expect(API_SCOPE_INFO['availability.write']).toMatchObject({
       label: "Set members' availability",
