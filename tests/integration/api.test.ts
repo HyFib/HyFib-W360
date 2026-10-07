@@ -4212,6 +4212,10 @@ describe('CRM pipelines and deals (ADR-253)', () => {
           winPercent: null,
         },
       ],
+      // Added in Settings, at its first version (ADR-286).
+      version: 1,
+      createdBy: 'member',
+      createdByApiKeyId: null,
       createdAt: expect.any(String),
     });
 
