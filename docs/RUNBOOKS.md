@@ -2128,6 +2128,14 @@ events, in the order the steps happened and possibly with the same `createdAt`; 
 and status its step left. An erased contact's deal is sent titled "Deal (contact erased)", without
 its contact's number or name or a lost reason.
 
+**A deal does not move to another pipeline through the API (ADR-257).** 409 with "This pipeline uses
+…; clear the deal's value (in …) before moving it" means the deal has a value in another currency:
+send `valueMinor` `null` in a request of its own, then move it (with a new value in the pipeline's
+currency if needed). 422 names `pipelineId` for a pipeline the company does not have, or `stageId`
+for a stage of another pipeline (GET /pipelines). 409 also means the pipeline is archived, the stage
+was removed, or the deal is closed (reopen it with `status` `open`, in the same request if wanted).
+The pipeline the deal is in, without a stage, changes nothing.
+
 **`GET /api/v1/channels` answers 403, or a number shows no phone or name (ADR-171).** 403
 `forbidden` names the scope the key lacks, `channels.read` (keys keep the scopes they were created
 with: create a key with it); reason `not_in_plan` means the company's plan leaves the scope out

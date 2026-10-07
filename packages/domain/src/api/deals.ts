@@ -120,10 +120,16 @@ export const apiUpdateDealSchema = z
     valueMinor: valueMinorSchema.optional(),
     ownerId: ownerIdSchema.optional(),
     expectedCloseOn: expectedCloseOnSchema.optional(),
+    pipelineId: z
+      .uuid()
+      .optional()
+      .describe(
+        'Moves the open deal to this active pipeline: to `stageId`, or the pipeline’s first active stage. A deal with a value moves only to a pipeline of its currency.',
+      ),
     stageId: z
       .uuid()
       .optional()
-      .describe('Moves the open deal to this active stage of its pipeline.'),
+      .describe('Moves the open deal to this active stage of its pipeline, or of `pipelineId`.'),
     status: z
       .enum(DEAL_STATUSES)
       .optional()
@@ -146,7 +152,7 @@ export const apiUpdateDealSchema = z
   })
   .strict()
   .refine((change) => Object.keys(change).some((key) => key !== 'expectedVersion'), {
-    message: 'Give at least one change: a detail, `stageId` or `status`.',
+    message: 'Give at least one change: a detail, `pipelineId`, `stageId` or `status`.',
   })
   .refine((change) => !change.lostReason || change.status === 'lost', {
     message: 'A lost reason goes with `status` `lost`.',
@@ -610,9 +616,10 @@ async function sharedActivePipeline(tx: Tx, tenantId: string, pipelineId: string
  * Changes one of the company's deals as members do on the board and the deal page (ADR-255), in one
  * transaction with the deal's contact and then its row locked (the order erasure takes them in): a
  * closed deal is reopened (in its stage, or the pipeline's first active one when its stage was
- * removed), the open deal moved to another active stage of its pipeline, its title, value, owner and
- * expected close date changed (not once its contact is erased), and the open deal closed as won or
- * lost, in that order, with the version moving on once. A deal already as asked is answered as it
+ * removed), the open deal moved to another active stage of its pipeline or to another active
+ * pipeline (ADR-257: to a stage of it or its first active one, a deal with a value only to a pipeline
+ * of its currency), its title, value, owner and expected close date changed (not once its contact is
+ * erased), and the open deal closed as won or lost, in that order, with the version moving on once. A deal already as asked is answered as it
  * is, so a retry changes nothing; a closed deal is not moved or closed the other way until it is
  * reopened. Each change is on the deal's timeline without a member actor, naming the key, and the
  * audit log records it as the key.
@@ -697,27 +704,64 @@ export async function apiUpdateDeal(
       changes.push('status');
     }
 
-    if (data.stageId !== undefined && data.stageId !== next.stageId) {
+    const pipelineId = data.pipelineId ?? next.pipelineId;
+    const otherPipeline = pipelineId !== next.pipelineId;
+    if (otherPipeline || (data.stageId !== undefined && data.stageId !== next.stageId)) {
       if (next.status !== 'open') {
         throw new AppError('conflict', 'Reopen the deal to move it (`status` `open`).');
       }
-      const stages = await sharedActivePipeline(tx, ctx.tenant.id, next.pipelineId);
-      const stage = stages.find((s) => s.id === data.stageId);
-      if (!stage) {
-        throw invalidField(
-          'stageId',
-          'Give the id of a stage of the deal’s pipeline (GET /pipelines).',
-        );
-      }
-      if (stage.archivedAt) {
-        throw new AppError('conflict', 'This stage was removed from the pipeline.');
+      let stageId: string;
+      if (otherPipeline) {
+        // Another pipeline (ADR-257), as members move deals: its stage, or its first active one,
+        // and the deal's value only in the currency it is in.
+        stageId = await entryStage(tx, ctx.tenant.id, pipelineId, data.stageId);
+        if (next.valueMinor !== null) {
+          const currencies = new Map(
+            (
+              await tx
+                .select({ id: crmPipelines.id, currency: crmPipelines.currency })
+                .from(crmPipelines)
+                .where(
+                  and(
+                    eq(crmPipelines.tenantId, ctx.tenant.id),
+                    inArray(crmPipelines.id, [next.pipelineId, pipelineId]),
+                  ),
+                )
+            ).map((row) => [row.id, row.currency]),
+          );
+          const from = currencies.get(next.pipelineId);
+          const to = currencies.get(pipelineId);
+          if (from !== to) {
+            throw new AppError(
+              'conflict',
+              `This pipeline uses ${to}; clear the deal's value (in ${from}) before moving it: \`valueMinor\` \`null\` in a request of its own.`,
+            );
+          }
+        }
+      } else {
+        const stages = await sharedActivePipeline(tx, ctx.tenant.id, next.pipelineId);
+        const stage = stages.find((s) => s.id === data.stageId);
+        if (!stage) {
+          throw invalidField(
+            'stageId',
+            'Give the id of a stage of the deal’s pipeline (GET /pipelines).',
+          );
+        }
+        if (stage.archivedAt) {
+          throw new AppError('conflict', 'This stage was removed from the pipeline.');
+        }
+        stageId = stage.id;
       }
       activities.push({
         kind: 'stage_changed',
-        data: { fromStageId: next.stageId, toStageId: stage.id },
+        data: {
+          fromStageId: next.stageId,
+          toStageId: stageId,
+          ...(otherPipeline ? { fromPipelineId: next.pipelineId, toPipelineId: pipelineId } : {}),
+        },
       });
-      Object.assign(next, { stageId: stage.id, stageEnteredAt: now });
-      changes.push('stage');
+      Object.assign(next, { pipelineId, stageId, stageEnteredAt: now });
+      changes.push(...(otherPipeline ? ['pipeline', 'stage'] : ['stage']));
     }
 
     const fields: string[] = [];
@@ -789,6 +833,7 @@ export async function apiUpdateDeal(
       await tx
         .update(crmDeals)
         .set({
+          pipelineId: next.pipelineId,
           stageId: next.stageId,
           stageEnteredAt: next.stageEnteredAt,
           status: next.status,

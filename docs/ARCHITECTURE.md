@@ -1457,6 +1457,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   working copy, collecting the members' activity kinds; when anything changed it writes the row once
   with the next version, adds the activities without an actor naming the key and a
   `crm.deal_updated` audit row, and answers the deal as `readApiDeal` reads it.
+- **Moving CRM deals to another pipeline through the API (ADR-257):** `pipelineId` on
+  `PATCH /deals/{id}` takes the move path for another pipeline: after any reopen, `entryStage`
+  (shared with `apiCreateDeal`) shares the target pipeline and finds the stage given or its first
+  active one, naming an unknown pipeline or stage and refusing an archived pipeline or a removed
+  stage; a deal with a value is refused unless both pipelines use one currency (read in one
+  statement; currencies never change). The row is written once with the new pipeline and stage, and
+  the `stage_changed` activity names `fromPipelineId` and `toPipelineId`, as members' moves record
+  them.
 - **Numbers through the API (ADR-171):** `GET /channels` (`api/channels.ts`, `channels.read`) reads
   `channel_accounts` in the company oldest first on exact keyset cursors (`created_at`, `id`), with
   `status` as an equality, and gives the id, `display_phone_number`, `verified_name`, the status and

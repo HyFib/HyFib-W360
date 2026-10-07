@@ -9737,3 +9737,30 @@ Decision:
 
 Not built: filters for deal events (by pipeline, stage, status or owner), events for deal edits,
 notes and tasks, and an end-to-end test of its own.
+
+## ADR-257 Moving CRM deals to another pipeline through the public API (P5-08, P4-04) (2026-10-07)
+
+Context: ADR-255 let a key move a deal only within its pipeline, though members move deals to
+another pipeline on the deal page (ADR-234): a booking that turns into a renewal, or a lead handed
+from sales to onboarding, still needed a member.
+
+Decision:
+
+- **`pipelineId` on `PATCH /deals/{id}`:** moves the open deal to another active pipeline of the
+  company, to `stageId` (an active stage of that pipeline) or, without it, the pipeline's first
+  active stage, as a deal created there would enter it. The pipeline it is in, without a stage,
+  changes nothing, so a retry changes nothing either. The move takes its place in the order of a
+  change: a reopen first, then the move, the details, and a close.
+- **The members' rules:** a closed deal is reopened before it moves (409); an unknown pipeline or
+  another company's is named (422, `pipelineId`), and so is a stage of another pipeline (`stageId`);
+  an archived pipeline and a removed stage are conflicts (409). A deal with a value moves only to a
+  pipeline of its currency (409), as members' moves do: its value is cleared in a request of its own
+  first (`valueMinor` `null`), since the move comes before the details in a change, and a new value
+  in the other currency can come with the move once the deal has none. The target pipeline is shared
+  while the deal moves, as for members.
+- **Recorded as members' moves are:** the timeline entry names both pipelines and the key, the audit
+  row lists `pipeline` and `stage` among what changed, and a `deal.stage_changed` webhook event
+  names the pipeline it left (ADR-256). No migration.
+
+Not built: moving deals between pipelines of different currencies in one request, and an end-to-end
+test of its own.

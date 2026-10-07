@@ -1032,6 +1032,12 @@ Phase 5 rules (Public API, P5-08):
   overwriting a change it did not see, and members' versions stop them overwriting a key's. Every
   change is on the timeline naming the key, and the audit log records it as the key (unit tests;
   integration and e2e tests, run in CI only).
+- Moving CRM deals to another pipeline (ADR-257): `pipelineId` reaches only the key's company's
+  active pipelines (another company's is not found, as an unknown one is, 422), with the stage
+  checked against that pipeline; a closed deal is reopened first, and a deal with a value moves only
+  to a pipeline of its currency, so a value is never read in another currency than the one it was
+  given in. The move is on the timeline and in the audit log as the key's (unit tests; integration
+  tests, run in CI only).
 - Defining contact fields (ADR-115): adding, renaming and deleting the company's custom fields needs
   `contact_fields.manage`, which only members holding `tenant.settings.manage` (owners and
   administrators, who define fields in Settings) grant, and an active company. Fields are named by

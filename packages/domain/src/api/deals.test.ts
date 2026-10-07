@@ -452,7 +452,10 @@ describe('changing CRM deals through the API (ADR-255)', () => {
         ? null
         : [parsed.error.issues[0]?.path, parsed.error.issues[0]?.message];
     };
-    expect(issue({})).toEqual([[], 'Give at least one change: a detail, `stageId` or `status`.']);
+    expect(issue({})).toEqual([
+      [],
+      'Give at least one change: a detail, `pipelineId`, `stageId` or `status`.',
+    ]);
     expect(issue({ expectedVersion: 2 })).toEqual(issue({}));
     for (const input of [{ lostReason: 'Budget cut' }, { status: 'won', lostReason: 'Budget' }]) {
       expect(issue(input)).toEqual([['lostReason'], 'A lost reason goes with `status` `lost`.']);
@@ -469,7 +472,6 @@ describe('changing CRM deals through the API (ADR-255)', () => {
       { title: 'Bigger plan', expectedVersion: 1.5 },
       { status: 'lost', lostReason: 'x'.repeat(201) },
       { contactId: TENANT },
-      { pipelineId: OTHER },
     ]) {
       expect(parse(input).success, JSON.stringify(input)).toBe(false);
     }
@@ -544,6 +546,7 @@ describe('changing CRM deals through the API (ADR-255)', () => {
       'valueMinor',
       'ownerId',
       'expectedCloseOn',
+      'pipelineId',
       'stageId',
       'status',
       'lostReason',
@@ -551,5 +554,45 @@ describe('changing CRM deals through the API (ADR-255)', () => {
     ]);
     expect(body.required ?? []).toEqual([]);
     expect(body.additionalProperties).toBe(false);
+  });
+});
+
+describe('moving CRM deals to another pipeline through the API (ADR-257)', () => {
+  it('takes a pipeline alone, with its stage or with a status, and only an id', () => {
+    const parse = (input: unknown) => apiUpdateDealSchema.safeParse(input);
+    for (const input of [
+      { pipelineId: OTHER },
+      { pipelineId: OTHER, stageId: TENANT },
+      { pipelineId: OTHER, status: 'won', expectedVersion: 2 },
+    ]) {
+      expect(parse(input).success, JSON.stringify(input)).toBe(true);
+    }
+    for (const input of [{ pipelineId: 'renewals' }, { pipelineId: null }]) {
+      expect(parse(input).success, JSON.stringify(input)).toBe(false);
+    }
+  });
+
+  it('is described: the stage it goes to and the currency it keeps', () => {
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      paths: Record<string, Record<string, { description: string }>>;
+      components: {
+        schemas: Record<string, { properties: Record<string, { description?: string }> }>;
+      };
+    };
+    expect(API_SCOPE_INFO['deals.write'].description).toContain('their stage or pipeline');
+    const description = doc.paths['/deals/{id}']?.patch?.description;
+    expect(description).toContain(
+      '`pipelineId` to another active pipeline, in `stageId` or that pipeline’s first active stage',
+    );
+    expect(description).toContain(
+      'a deal with a value moves only to a pipeline of its currency: clear the value in a request of its own first, 409 otherwise',
+    );
+    const properties = doc.components.schemas.UpdateDeal?.properties;
+    expect(properties?.pipelineId?.description).toBe(
+      'Moves the open deal to this active pipeline: to `stageId`, or the pipeline’s first active stage. A deal with a value moves only to a pipeline of its currency.',
+    );
+    expect(properties?.stageId?.description).toBe(
+      'Moves the open deal to this active stage of its pipeline, or of `pipelineId`.',
+    );
   });
 });

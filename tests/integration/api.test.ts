@@ -4643,6 +4643,167 @@ describe('CRM pipelines and deals (ADR-253)', () => {
     await onPlan(c, ['crm']);
     expect((await change(deal, { title: 'Renamed' })).title).toBe('Renamed');
   });
+
+  it('are moved to another pipeline as members move them, as the key (ADR-257)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const writer = await apiKey(c, ['deals.write'], 'Order system');
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New', 'Qualified']);
+    const renewals = await pipelineOf(owner, 'Renewals', 'INR', ['Due', 'Signed', 'Lapsed']);
+    const exports = await pipelineOf(owner, 'Exports', 'USD', ['Lead', 'Shipped']);
+    const theirs = await pipelineOf(await fx.ctx(other, other.owner), 'Theirs', 'INR', ['Open']);
+    const { id } = await crm().createDeal(owner, {
+      contactId: await contactOf(owner, 'Asha'),
+      pipelineId: sales.id,
+      stageId: sales.stages[1],
+      title: 'Annual plan',
+      value: '100',
+    });
+    const change = (input: Record<string, unknown>) => apiUpdateDeal(deps(), writer.ctx, id, input);
+    const paths = (error: unknown) =>
+      isAppError(error) ? (error.issues ?? []).map((i) => i.path) : [];
+    const versionOf = async () =>
+      (
+        await fx.query<{ version: number }>('SELECT version FROM app.crm_deals WHERE id = $1', [id])
+      )[0]?.version;
+    const versionOfPipeline = async (pipelineId: string) =>
+      (await crm().listPipelines(owner)).find((p) => p.id === pipelineId)!.version;
+
+    // To another pipeline of its currency: its first active stage when no stage is given, or the
+    // stage given. The pipeline it is in, without a stage, changes nothing.
+    expect(await change({ pipelineId: renewals.id })).toMatchObject({
+      pipelineId: renewals.id,
+      stageId: renewals.stages[0],
+      valueMinor: 10_000,
+      currency: 'INR',
+      version: 2,
+    });
+    expect(
+      await change({ pipelineId: sales.id, stageId: sales.stages[0], expectedVersion: 2 }),
+    ).toMatchObject({ pipelineId: sales.id, stageId: sales.stages[0], version: 3 });
+    expect((await change({ pipelineId: sales.id })).version).toBe(3);
+    // Recorded as members' moves are, naming both pipelines and the key, and audited.
+    const moves = async () =>
+      (await crm().getDeal(owner, id)).timeline
+        .filter((a) => a.kind === 'stage_changed')
+        .map((a) => [a.actor, a.data]);
+    expect(await moves()).toEqual([
+      [
+        null,
+        {
+          fromStageId: renewals.stages[0],
+          toStageId: sales.stages[0],
+          fromPipelineId: renewals.id,
+          toPipelineId: sales.id,
+          apiKeyId: writer.id,
+        },
+      ],
+      [
+        null,
+        {
+          fromStageId: sales.stages[1],
+          toStageId: renewals.stages[0],
+          fromPipelineId: sales.id,
+          toPipelineId: renewals.id,
+          apiKeyId: writer.id,
+        },
+      ],
+    ]);
+    const audits = await fx.query<{ actor_id: string; metadata: { changes: string[] } }>(
+      `SELECT actor_id, metadata FROM app.audit_events
+        WHERE action = 'crm.deal_updated' AND subject_id = $1 ORDER BY created_at, id`,
+      [id],
+    );
+    expect(audits.map((a) => [a.actor_id, a.metadata.changes])).toEqual([
+      [writer.id, ['pipeline', 'stage']],
+      [writer.id, ['pipeline', 'stage']],
+    ]);
+
+    // A deal with a value moves only to a pipeline of its currency, even with its value cleared in
+    // the same request (the move comes first).
+    for (const input of [
+      { pipelineId: exports.id },
+      { pipelineId: exports.id, valueMinor: null },
+    ]) {
+      await expectAppError(
+        change(input),
+        'conflict',
+        /^This pipeline uses USD; clear the deal's value \(in INR\) before moving it/,
+      );
+    }
+    expect(await versionOf()).toBe(3);
+
+    // A closed deal is reopened before it moves; reopened and moved in one request, it is reopened
+    // in its stage, then moved.
+    await change({ status: 'lost' });
+    await expectAppError(change({ pipelineId: renewals.id }), 'conflict', /Reopen the deal/);
+    expect(
+      await change({ status: 'open', pipelineId: renewals.id, stageId: renewals.stages[1] }),
+    ).toMatchObject({ status: 'open', pipelineId: renewals.id, stageId: renewals.stages[1] });
+    expect(
+      (await crm().getDeal(owner, id)).timeline.slice(0, 2).map((a) => [a.kind, a.data]),
+    ).toEqual([
+      [
+        'stage_changed',
+        {
+          fromStageId: sales.stages[0],
+          toStageId: renewals.stages[1],
+          fromPipelineId: sales.id,
+          toPipelineId: renewals.id,
+          apiKeyId: writer.id,
+        },
+      ],
+      ['deal_reopened', { apiKeyId: writer.id }],
+    ]);
+    // Cleared in a request of its own, it moves to the other currency's pipeline with a value in it.
+    await change({ valueMinor: null });
+    expect(
+      await change({ pipelineId: exports.id, stageId: exports.stages[1], valueMinor: 2_500 }),
+    ).toMatchObject({
+      pipelineId: exports.id,
+      stageId: exports.stages[1],
+      valueMinor: 2_500,
+      currency: 'USD',
+    });
+    const moved = await versionOf();
+
+    // An unknown pipeline, another company's and a stage of another pipeline are named; a stage
+    // members removed and an archived pipeline are conflicts; none changes the deal.
+    for (const pipelineId of [uuidv7(), theirs.id]) {
+      expect(
+        paths(await expectAppError(change({ pipelineId }), 'validation_failed', /pipelines/)),
+      ).toEqual(['pipelineId']);
+    }
+    expect(
+      paths(
+        await expectAppError(
+          change({ pipelineId: renewals.id, stageId: sales.stages[0] }),
+          'validation_failed',
+        ),
+      ),
+    ).toEqual(['stageId']);
+    await crm().updatePipeline(owner, {
+      id: renewals.id,
+      expectedVersion: await versionOfPipeline(renewals.id),
+      name: 'Renewals',
+      stages: [
+        { id: renewals.stages[0], name: 'Due' },
+        { id: renewals.stages[1], name: 'Signed' },
+      ],
+    });
+    await expectAppError(
+      change({ pipelineId: renewals.id, stageId: renewals.stages[2] }),
+      'conflict',
+      /removed/,
+    );
+    await crm().archivePipeline(owner, {
+      id: sales.id,
+      expectedVersion: await versionOfPipeline(sales.id),
+    });
+    await expectAppError(change({ pipelineId: sales.id }), 'conflict', /archived/);
+    expect(await versionOf()).toBe(moved);
+  });
 });
 
 describe('conversation reads (ADR-072)', () => {

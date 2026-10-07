@@ -641,6 +641,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    workers run), so before rolling workers back to such an image, turn the deal events off on the
    endpoints that take them. An old web server's Settings and API do not offer them.
 
+   ADR-257 has no migration. Until the web rollout ends, an old web server refuses `pipelineId` on
+   `PATCH /api/v1/deals/{id}` as an unknown field (422); rolling web servers back does the same.
+   Workers are not affected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back
