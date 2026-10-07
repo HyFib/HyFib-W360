@@ -186,7 +186,11 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   key, with its id, ADR-277), a key of the company's own only (a foreign key through the company's
   id), so an integration can ignore its own changes; a change that does not record its maker names
   nobody, never the maker of an earlier change, since the database clears a changer another
-  transaction recorded.
+  transaction recorded. A note's event (`note.created`, ADR-280) gives the note's id, deal id and
+  who wrote it (a member, never which, or a key by its id) with its contact as the API describes it,
+  never its text: endpoints take events without scopes, so a note's text is read only with
+  `notes.read`. Members and keys capture it as the runtime role in the company's scope; erasing a
+  contact deletes its notes, so their pending events are not delivered (`event_gone`).
 - Customers' numbers (ADR-226): a company's owners and administrators choose the roles (supervisor,
   agent, marketer, analyst) whose members see them masked; the context leaves out
   `contacts.view_numbers` for a member whose every role that grants it is masked, and the services

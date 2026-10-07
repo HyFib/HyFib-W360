@@ -18,6 +18,7 @@ import {
   CONVERSATION_STATUSES,
   conversations,
   CRM_CHANGERS,
+  crmActivities,
   crmDeals,
   crmPipelines,
   crmTasks,
@@ -27,6 +28,7 @@ import {
   messages,
   ORDER_STATUSES,
   ORDER_STATUS_CHANGERS,
+  sql,
   TASK_STATUSES,
   type OrderStatusChanger,
   type Tx,
@@ -35,6 +37,7 @@ import {
 import { apiContactColumns, apiContactSchema, toApiContact } from '../api/contact-view';
 import { campaignAnalytics, campaignResultsSchema, toCampaignResults } from '../campaigns/results';
 import { COMMERCE_LIMITS } from '../commerce/model';
+import { noteWriter } from '../crm/common';
 import { findAnsweredMessageId } from '../messaging/reply-context';
 import { WEBHOOK_MESSAGE_STATUSES, WEBHOOK_RUN_TRIGGERS } from './model';
 
@@ -762,6 +765,40 @@ export const taskStatusChangedPayloadSchema = envelope(
   webhookTaskDataSchema,
 );
 
+/**
+ * A CRM note as its event gives it (ADR-280): what it is about and who wrote it, as it is when the
+ * event is delivered. Never its text, which may hold anything a member wrote: GET /notes/{id} reads
+ * it with `notes.read` (ADR-279).
+ */
+const webhookNoteSchema = z.object({
+  id: z.uuid().describe('The note, as GET /notes/{id} reads it with `notes.read`.'),
+  dealId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The deal the note is about, as GET /deals/{id} reads it; null when it is about the contact only.',
+    ),
+  writtenBy: z
+    .enum(['member', 'api'])
+    .describe(
+      'Who wrote the note: a member on the contact or deal page (member, never which member) or an API key (api, named by apiKeyId).',
+    ),
+  apiKeyId: z
+    .uuid()
+    .nullable()
+    .describe('The API key that added the note, when writtenBy is api; null otherwise.'),
+  createdAt: z.iso.datetime().describe('When the note was added.'),
+});
+export const noteCreatedPayloadSchema = envelope(
+  'note.created',
+  z.object({
+    note: webhookNoteSchema,
+    contact: contactSchema.describe(
+      'The customer whose timeline holds the note, as it is now: the one it was added to, or the contact kept when a merge moved it.',
+    ),
+  }),
+);
+
 export const pingPayloadSchema = envelope(
   'ping',
   z.object({ endpointId: z.uuid(), message: z.string() }),
@@ -1168,6 +1205,33 @@ async function taskOf(tx: Tx, tenantId: string, taskId: string | null) {
   return row ?? null;
 }
 
+/**
+ * A CRM note with what its event gives (ADR-280), never its text, or null once it is gone (erasure
+ * deletes an erased contact's notes). Any other timeline entry is not a note.
+ */
+async function noteOf(tx: Tx, tenantId: string, noteId: string | null) {
+  if (!noteId || !z.uuid().safeParse(noteId).success) return null;
+  const [row] = await tx
+    .select({
+      id: crmActivities.id,
+      contactId: crmActivities.contactId,
+      dealId: crmActivities.dealId,
+      // Whether a member wrote it, never which: keys' notes have no member and name the key.
+      byMember: sql<boolean>`(${crmActivities.actorMembershipId} IS NOT NULL)`,
+      apiKeyId: sql<string | null>`(${crmActivities.data} ->> 'apiKeyId')`,
+      createdAt: crmActivities.createdAt,
+    })
+    .from(crmActivities)
+    .where(
+      and(
+        eq(crmActivities.tenantId, tenantId),
+        eq(crmActivities.id, noteId),
+        eq(crmActivities.kind, 'note'),
+      ),
+    );
+  return row ?? null;
+}
+
 /** A WhatsApp order with its items in cart order and its number, in the company. */
 async function orderOf(tx: Tx, tenantId: string, orderId: string | null) {
   if (!orderId || !z.uuid().safeParse(orderId).success) return null;
@@ -1538,6 +1602,25 @@ export async function buildWebhookPayload(
           ...(event.type === 'task.updated'
             ? { changes: detailChanges(event.detail, WEBHOOK_TASK_DETAIL_CHANGES) }
             : {}),
+        },
+      };
+    }
+    case 'note.created': {
+      // The note as it is now, without its text (GET /notes/{id} reads that with notes.read): a
+      // merge moves a note to the contact kept, which the payload then gives, and erasing a contact
+      // deletes its notes, so an erased contact's note is gone and its event sends nothing.
+      const note = await noteOf(tx, tenantId, str(event.detail.noteId));
+      if (!note) throw new WebhookEventGoneError();
+      return {
+        ...base,
+        data: {
+          note: {
+            id: note.id,
+            dealId: note.dealId,
+            ...noteWriter(note.byMember, note.apiKeyId),
+            createdAt: note.createdAt.toISOString(),
+          },
+          contact: await contactOf(tx, tenantId, note.contactId),
         },
       };
     }

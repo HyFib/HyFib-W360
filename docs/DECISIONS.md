@@ -10624,3 +10624,31 @@ Decision:
 
 Not built: which member wrote a note, reading the rest of the timeline, changing or deleting notes
 (members cannot either), webhook events for notes, and filtering notes by who wrote them.
+
+## ADR-280 A webhook event when a CRM note is added (P5-09, P4-04) (2026-10-07)
+
+Context: integrations hear of deals and tasks through webhooks (ADR-256, ADR-261) and read notes
+through the API since ADR-279, but to learn that a member wrote a note on a contact or a deal they
+had to poll `GET /notes`. ADR-268 and ADR-279 left webhook events for notes unbuilt.
+
+Decision:
+
+- **`note.created`** ("Note added") when a member adds a note on the contact or deal page or a key
+  through `POST /notes`, the only writers of notes. Notes are never changed, so no other note event
+  exists; a merge moving a note to the contact kept and erasure deleting an erased contact's notes
+  add none, so they send nothing.
+- **Captured as the task events are (0177):** an `AFTER INSERT` trigger on `app.crm_activities` for
+  notes only calls `app.capture_webhook_event` with the note's id in `detail` and its contact,
+  stamped when captured, and only when an active endpoint of the company takes the type. No endpoint
+  filter narrows it, so the capture function is unchanged (migration 0200; 0201 validates the
+  events' type check).
+- **Payload built when delivered, without the text:** the note's id, the deal it is about, who wrote
+  it (`writtenBy`: `member`, never which, or `api` with `apiKeyId`, as `GET /notes` gives it,
+  through one helper, `noteWriter`) and when, and its contact as the API describes it, the contact
+  kept once a merge has moved the note. Never the note's text, which may hold anything a member
+  wrote: endpoints take events without scopes, so the text stays behind `notes.read` (ADR-279), as a
+  task's notes stay behind `tasks.read` (ADR-261). Erasing a contact deletes its notes, so a
+  delivery whose note is gone fails without an attempt (`event_gone`).
+
+Not built: the note's text in the payload, which member wrote it, filters narrowing note events (by
+deal, contact tag or writer), and events for the rest of the timeline.

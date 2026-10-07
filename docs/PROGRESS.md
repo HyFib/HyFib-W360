@@ -1,5 +1,39 @@
 # Progress
 
+## 2026-10-07 — A webhook event when a CRM note is added (P5-09, P4-04, H-014, ADR-280)
+
+Status: **Implemented; its database tests run in CI only.** Integrations read notes through the API
+(ADR-279) but had to poll to learn that one was added. The local PostgreSQL is unavailable, so the
+migrations and the integration tests below were written but not run here; migrations 0200 and 0201
+passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migrations 0200 (the endpoints' and events' type checks with `note.created`, the
+  events' NOT VALID; the `AFTER INSERT` trigger on `app.crm_activities` for notes and its function)
+  and 0201 (validating the events' type check).
+- **Domain:** `note.created` ("Note added") in the event list; its payload (`noteOf`,
+  `noteCreatedPayloadSchema`) without the note's text; `noteWriter` (`crm/common.ts`), shared by
+  `GET /notes` and the event; the OpenAPI webhook entry.
+- **Web:** no change of its own: Settings → Webhooks lists the event, as it lists every event.
+- **Tests:** unit (`webhooks.test.ts`: the event's label, the payload schema without the text, the
+  OpenAPI wording; the event lists updated there and in `api.test.ts`); integration (2 new in
+  `webhook-events.test.ts`). Written for CI; the integration tests were not run here. No e2e test:
+  the e2e suite is near its time limit.
+- **Docs:** ADR-280; ARCHITECTURE; SECURITY; THREAT-MODEL T248; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix W-138 and H-014.
+- **Mutation checks:** 17/17 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 121 files, 1151 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Reading CRM notes through the public API (P5-08, P4-04, H-033, ADR-279)
 
 Status: **Implemented; its database tests run in CI only.** Keys added notes to the CRM timeline but

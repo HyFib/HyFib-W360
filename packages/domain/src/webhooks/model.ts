@@ -65,6 +65,7 @@ export const WEBHOOK_EVENT_KEYS = [
   'task.updated',
   'task.assignee_changed',
   'task.status_changed',
+  'note.created',
 ] as const satisfies readonly WebhookEventType[];
 
 export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; description: string }> =
@@ -186,6 +187,11 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
     'task.status_changed': {
       label: 'Task done, cancelled or reopened',
       description: 'A CRM task was completed, cancelled or reopened: by a member or an API key.',
+    },
+    'note.created': {
+      label: 'Note added',
+      description:
+        'A note was added to a CRM contact’s or deal’s timeline: by a member or an API key.',
     },
   };
 

@@ -191,6 +191,19 @@ export async function addActivity(
   return id;
 }
 
+/** Who wrote a CRM note: a member on the contact or deal page, or a key through the API. */
+export type NoteWriter = 'member' | 'api';
+
+/**
+ * Who wrote a note (ADR-279), as the API and the note's webhook event (ADR-280) give it: a member,
+ * never which, or a key by the id its note names. A member's note names no key.
+ */
+export const noteWriter = (
+  byMember: boolean,
+  apiKeyId: string | null,
+): { writtenBy: NoteWriter; apiKeyId: string | null } =>
+  byMember ? { writtenBy: 'member', apiKeyId: null } : { writtenBy: 'api', apiKeyId };
+
 /** Who changes a deal or a task: a member, an automation's run or an API key (named). */
 export type CrmChange = Exclude<CrmChanger, 'api'> | { apiKeyId: string };
 

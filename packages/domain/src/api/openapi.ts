@@ -49,6 +49,7 @@ import {
   taskUpdatedPayloadSchema,
   taskAssigneeChangedPayloadSchema,
   taskStatusChangedPayloadSchema,
+  noteCreatedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
@@ -3057,6 +3058,12 @@ export function buildOpenApiDocument(serverUrl: string) {
         `${WEBHOOK_EVENT_INFO['task.status_changed'].description} task.status and task.previousStatus are the change (open, done or cancelled); the rest is the task when the event is delivered. Editing its title, notes, due time or reminder sends task.updated, and giving it to another member task.assignee_changed. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookTaskStatusChanged',
       ),
+      'note.created': webhook(
+        'webhookNoteCreated',
+        WEBHOOK_EVENT_INFO['note.created'].label,
+        `${WEBHOOK_EVENT_INFO['note.created'].description} The note is the note when the event is delivered: the deal it is about, who wrote it (\`note.writtenBy\`: a member, never which, or an API key, named by note.apiKeyId, so an integration that adds notes through the API can tell its own from members’), and its contact, the contact kept when a merge has moved it. Never the note’s text, which may hold anything a member wrote: read the note with GET /notes/{id} (\`notes.read\`). Notes are never changed, so no other note event is sent; erasing a contact deletes its notes, so the events of an erased contact’s notes are no longer delivered. No endpoint filter narrows it.`,
+        'WebhookNoteCreated',
+      ),
       ping: webhook(
         'webhookPing',
         'Test event',
@@ -3306,6 +3313,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookTaskUpdated: jsonSchema(taskUpdatedPayloadSchema),
         WebhookTaskAssigneeChanged: jsonSchema(taskAssigneeChangedPayloadSchema),
         WebhookTaskStatusChanged: jsonSchema(taskStatusChangedPayloadSchema),
+        WebhookNoteCreated: jsonSchema(noteCreatedPayloadSchema),
         WebhookPing: jsonSchema(pingPayloadSchema),
       },
     },

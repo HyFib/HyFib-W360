@@ -2702,7 +2702,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         event,
       ).toEqual([b, a]);
     }
-    // Consent, contact, template, deal and task events happen on no number.
+    // Consent, contact, template, deal, task and note events happen on no number.
     expect(WEBHOOK_EVENT_KEYS.filter((e) => !WEBHOOK_CHANNEL_EVENTS.some((c) => c === e))).toEqual([
       'consent.changed',
       'template.status_changed',
@@ -2719,6 +2719,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'task.updated',
       'task.assignee_changed',
       'task.status_changed',
+      'note.created',
     ]);
     const refused = apiCreateWebhookEndpointSchema.safeParse({
       ...base,

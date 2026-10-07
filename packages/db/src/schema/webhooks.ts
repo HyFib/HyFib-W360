@@ -36,6 +36,7 @@ export const WEBHOOK_EVENT_TYPES = [
   'task.updated',
   'task.assignee_changed',
   'task.status_changed',
+  'note.created',
 ] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
 

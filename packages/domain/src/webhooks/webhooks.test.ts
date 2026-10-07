@@ -97,6 +97,7 @@ import {
   webhookStageText,
 } from './model';
 import {
+  noteCreatedPayloadSchema,
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
   buildWebhookPayload,
@@ -1692,6 +1693,7 @@ describe('the OpenAPI document', () => {
       'task.updated',
       'task.assignee_changed',
       'task.status_changed',
+      'note.created',
     ]);
     const schemas = doc.components.schemas as Record<string, unknown>;
     const parameters = doc.components.parameters as Record<string, { name: string }>;
@@ -2627,6 +2629,7 @@ describe('number filters (ADR-170)', () => {
       'task.updated': taskUpdatedPayloadSchema,
       'task.assignee_changed': taskAssigneeChangedPayloadSchema,
       'task.status_changed': taskStatusChangedPayloadSchema,
+      'note.created': noteCreatedPayloadSchema,
     } satisfies Record<(typeof WEBHOOK_EVENT_KEYS)[number], unknown>;
     for (const type of WEBHOOK_EVENT_KEYS) {
       const onANumber = WEBHOOK_CHANNEL_EVENTS.some((t) => t === type);
@@ -4063,5 +4066,69 @@ describe('run end reason filters (ADR-192)', () => {
       'send_blocked',
       'send_failed',
     ]);
+  });
+});
+
+describe('the event of a CRM note (ADR-280)', () => {
+  it('is one event, on no number, that no filter narrows, labelled as Settings lists it', () => {
+    expect(WEBHOOK_EVENT_INFO['note.created']).toEqual({
+      label: 'Note added',
+      description:
+        'A note was added to a CRM contact’s or deal’s timeline: by a member or an API key.',
+    });
+    for (const takes of [
+      webhookTakesChannelEvents,
+      webhookTakesTaskEvents,
+      webhookTakesPipelineEvents,
+      webhookTakesTeamEvents,
+    ]) {
+      expect(takes(['note.created']), takes.name).toBe(false);
+    }
+  });
+
+  it('gives the note without its text: what it is about, who wrote it and its contact now', () => {
+    const data = noteCreatedPayloadSchema.shape.data.shape;
+    expect(Object.keys(data)).toEqual(['note', 'contact']);
+    const note = data.note.shape;
+    expect(Object.keys(note)).toEqual(['id', 'dealId', 'writtenBy', 'apiKeyId', 'createdAt']);
+    expect(note.writtenBy.options).toEqual(['member', 'api']);
+    expect(note.writtenBy.description).toContain('(member, never which member)');
+    expect(note.apiKeyId.description).toContain('when writtenBy is api; null otherwise');
+    expect(note.id.description).toContain('GET /notes/{id}');
+    expect(data.contact.description).toContain('the contact kept when a merge moved it');
+    const id = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
+    const body = (writtenBy: string, apiKeyId: string | null) => ({
+      id,
+      type: 'note.created',
+      createdAt: '2026-10-07T10:00:00.000Z',
+      data: {
+        note: { id, dealId: null, writtenBy, apiKeyId, createdAt: '2026-10-07T10:00:00.000Z' },
+        contact: { id, phone: '+919845012345', name: 'Asha' },
+      },
+    });
+    expect(noteCreatedPayloadSchema.safeParse(body('member', null)).success).toBe(true);
+    expect(noteCreatedPayloadSchema.safeParse(body('api', id)).success).toBe(true);
+    expect(noteCreatedPayloadSchema.safeParse(body('automation', null)).success).toBe(false);
+    const withoutContact = {
+      ...body('member', null),
+      data: { note: body('member', null).data.note },
+    };
+    expect(noteCreatedPayloadSchema.safeParse(withoutContact).success).toBe(false);
+  });
+
+  it('is described: never the text, read with notes.read, never changed, gone with erasure', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const described = doc.webhooks['note.created'].post.description;
+    for (const words of [
+      'A note was added to a CRM contact’s or deal’s timeline: by a member or an API key.',
+      'who wrote it (`note.writtenBy`: a member, never which, or an API key, named by note.apiKeyId',
+      'the contact kept when a merge has moved it',
+      'Never the note’s text, which may hold anything a member wrote: read the note with GET /notes/{id} (`notes.read`).',
+      'Notes are never changed, so no other note event is sent',
+      'erasing a contact deletes its notes, so the events of an erased contact’s notes are no longer delivered',
+      'No endpoint filter narrows it.',
+    ]) {
+      expect(described).toContain(words);
+    }
   });
 });

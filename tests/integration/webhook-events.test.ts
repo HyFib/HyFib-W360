@@ -17,6 +17,7 @@ import {
 import {
   advanceAutomationRun,
   apiCreateDeal,
+  apiCreateNote,
   apiCreateTask,
   apiGetCampaign,
   apiStartAutomationRun,
@@ -53,6 +54,7 @@ import {
   dealStatusChangedPayloadSchema,
   messageReceivedPayloadSchema,
   messageStatusPayloadSchema,
+  noteCreatedPayloadSchema,
   orderReceivedPayloadSchema,
   orderStatusChangedPayloadSchema,
   processCommerceSync,
@@ -5566,5 +5568,159 @@ describe('task events (ADR-261)', () => {
     await expect(set(`changed_by = 'api', changed_by_api_key_id = '${uuidv7()}'`)).rejects.toThrow(
       /crm_tasks_changed_by_api_key_fk/,
     );
+  });
+});
+
+describe('note events (ADR-280)', () => {
+  const crm = () =>
+    createCrmService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
+
+  /** A contact a member adds, with a number; its id and number. */
+  async function newContact(owner: TenantContext, name: string) {
+    const phone = `+${waId()}`;
+    const { id } = await contactsService().createContact(owner, { displayName: name, phone });
+    return { id, phone };
+  }
+
+  /** The company's note events in the order they were captured, with their delivery counts. */
+  const noteEventsOf = (c: Company) =>
+    fx.query<EventRow & { occurred_at: Date }>(
+      `SELECT e.id, e.type, e.status, e.detail, e.conversation_id, e.contact_id, e.occurred_at,
+              (SELECT count(*)::int FROM app.webhook_deliveries d
+                WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id) AS deliveries
+         FROM app.webhook_events e
+        WHERE e.tenant_id = $1 AND e.type = 'note.created' ORDER BY e.occurred_at, e.id`,
+      [c.tenant.id],
+    );
+
+  it('sends each note members and keys add, without its text, to the endpoints that take it', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const svc = crm();
+    const asha = await newContact(owner, 'Asha');
+    const { id: pipelineId } = await svc.createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New'],
+    });
+    const [pipeline] = (await svc.listPipelines(owner)).filter((p) => p.id === pipelineId);
+    const { id: dealId } = await svc.createDeal(owner, {
+      contactId: asha.id,
+      pipelineId,
+      stageId: pipeline!.stages[0]!.id,
+      title: 'Annual plan',
+    });
+
+    // While no endpoint takes the event, a note captures nothing.
+    await svc.addNote(owner, { contactId: asha.id, body: 'Before any endpoint' });
+    expect(await noteEventsOf(c)).toEqual([]);
+
+    const hook = await addEndpoint(c, ['note.created']);
+    const tasksOnly = await addEndpoint(c, ['task.created']);
+
+    // A member's note on the contact and one on the deal, then a key's on the deal.
+    const onContact = await svc.addNote(owner, {
+      contactId: asha.id,
+      body: 'Ring 98450 12345 after Diwali',
+    });
+    const onDeal = await svc.addNote(owner, { dealId, body: 'Wants a discount' });
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Call centre', scopes: ['notes.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    const response = await apiCreateNote(
+      { db: fx.dbs.app, clock: systemClock },
+      key,
+      { body: 'Sent the quote', dealId },
+      null,
+    );
+    const byKey = (response.body as { data: { id: string } }).data.id;
+
+    // One event per note, in order, for the endpoint taking it only, naming the note and its
+    // contact.
+    const events = await noteEventsOf(c);
+    expect(
+      events.map((e) => [e.status, e.detail, e.conversation_id, e.contact_id, e.deliveries]),
+    ).toEqual([
+      [null, { noteId: onContact.id }, null, asha.id, 1],
+      [null, { noteId: onDeal.id }, null, asha.id, 1],
+      [null, { noteId: byKey }, null, asha.id, 1],
+    ]);
+
+    // Built when delivered: the deal, who wrote each (a key by its id, a member never by name) and
+    // the contact; never the text.
+    await deliverDue(c);
+    const bodies = new Map(bodiesAt(hook.path).map((b) => [b.id, b]));
+    expect([...bodies.keys()].sort()).toEqual(events.map((e) => e.id).sort());
+    const delivered = events.map((e) => bodies.get(e.id)!);
+    for (const body of delivered) {
+      expect(noteCreatedPayloadSchema.safeParse(body).success).toBe(true);
+      const sent = JSON.stringify(body);
+      for (const hidden of ['98450', 'discount', 'quote', owner.membership.id]) {
+        expect(sent).not.toContain(hidden);
+      }
+      expect(body.data.contact).toEqual({ id: asha.id, phone: asha.phone, name: 'Asha' });
+    }
+    expect(delivered.map((b) => b.createdAt)).toEqual(
+      events.map((e) => e.occurred_at.toISOString()),
+    );
+    const note = { createdAt: expect.any(String) };
+    expect(delivered.map((b) => b.data.note)).toEqual([
+      { id: onContact.id, dealId: null, writtenBy: 'member', apiKeyId: null, ...note },
+      { id: onDeal.id, dealId, writtenBy: 'member', apiKeyId: null, ...note },
+      { id: byKey, dealId, writtenBy: 'api', apiKeyId: key.key.id, ...note },
+    ]);
+    expect(bodiesAt(tasksOnly.path)).toEqual([]);
+  });
+
+  it('gives a moved note with the contact kept, and sends nothing for a note erasure deleted', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const svc = crm();
+    const hook = await addEndpoint(c, ['note.created']);
+
+    // A customer who wrote by WhatsApp user id gets a note, and is merged into a contact a member
+    // added: the merge moves the note without adding one, so nothing more is captured.
+    const merged = await writesByUserId(c);
+    const moved = await svc.addNote(owner, { contactId: merged, body: 'Wrote from a new phone' });
+    const kept = await newContact(owner, 'Asha');
+    await createContactMergeService({ db: fx.dbs.app, clock: systemClock }).mergeContacts(owner, {
+      keepContactId: kept.id,
+      mergeContactId: merged,
+    });
+    expect((await noteEventsOf(c)).map((e) => [e.detail, e.contact_id])).toEqual([
+      [{ noteId: moved.id }, merged],
+    ]);
+    await deliverDue(c);
+    expect(bodiesAt(hook.path).map((b) => b.data)).toEqual([
+      {
+        note: {
+          id: moved.id,
+          dealId: null,
+          writtenBy: 'member',
+          apiKeyId: null,
+          createdAt: expect.any(String),
+        },
+        contact: { id: kept.id, phone: kept.phone, name: 'Asha' },
+      },
+    ]);
+
+    // A note whose contact is erased before its event is delivered is gone: the delivery fails
+    // without an attempt and nothing is sent.
+    const ravi = await newContact(owner, 'Ravi');
+    await svc.addNote(owner, { contactId: ravi.id, body: 'Lives at 12 Park Street' });
+    await contactsService().eraseContact(owner, { contactId: ravi.id, suppress: false });
+    await deliverDue(c);
+    expect(
+      await fx.query(
+        `SELECT d.state, d.attempts, d.last_error FROM app.webhook_deliveries d
+           JOIN app.webhook_events e ON e.tenant_id = d.tenant_id AND e.id = d.event_id
+          WHERE e.tenant_id = $1 AND e.contact_id = $2`,
+        [c.tenant.id, ravi.id],
+      ),
+    ).toEqual([{ state: 'failed', attempts: 0, last_error: 'event_gone' }]);
+    expect(bodiesAt(hook.path)).toHaveLength(1);
   });
 });

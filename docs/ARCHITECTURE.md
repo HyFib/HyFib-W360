@@ -1795,6 +1795,12 @@ true`); the same key with another request (method, path and body hashed) answers
   captured, an addition's from its creator. `GET /deals` and `GET /tasks` read the latest changer
   (ADR-278); a member's save of a task that changes nothing the events report records no changer
   (`taskDetailsChanged`, `crm/tasks.ts`).
+- **Note events** (migrations 0200–0201, ADR-280): `crm_activities_webhook_note`, an `AFTER INSERT`
+  trigger on `app.crm_activities` for kind `note`, captures `note.created`
+  (`app.webhook_capture_note()`) with the note id in `detail` and its contact; members' `addNote`
+  and keys' `apiCreateNote` are the only writers. Its payload (`noteOf`) gives the note without its
+  body, who wrote it through `noteWriter` (`crm/common.ts`, shared with `GET /notes`) and its
+  contact as it is now; a note gone (erasure) fails the delivery as `event_gone`.
 - **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
   notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
   SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same

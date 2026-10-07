@@ -2792,6 +2792,16 @@ left it. One API request that changes details and completes the task sends the c
 status `open`, then the completion; one that also gives the task to another member sends the change
 of details before the change of assignee, and one that reopens it sends the reopening first.
 
+**A receiver misses a note, or a note's event fails as gone (ADR-280).** Endpoints that take
+`note.created` ("Note added") are sent one event per note a member adds on a contact or deal page or
+a key adds through `POST /notes`; notes are never changed, merges and erasure add none, and notes
+added while no endpoint took the type were not recorded and are not sent later (read them with
+`GET /notes` and `createdSince`). The payload never carries the note's text: read it with
+`GET /notes/{id}` and a key holding `notes.read`. `note.writtenBy` says `member` or `api`, with
+`note.apiKeyId` for a key's note, so an integration that adds notes skips its own. A delivery that
+failed with `event_gone` belonged to a note erasure deleted with its contact; a note moved by a
+merge is sent with the contact kept.
+
 **An integration acts on its own deal or task changes, or ignores someone else's (ADR-277).** Every
 deal and task event's `deal.changedBy` or `task.changedBy` says who made the change it reports:
 `member` (never which), `automation`, or `api` with `apiKeyId`, the key's id; for an addition, who

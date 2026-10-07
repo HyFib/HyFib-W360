@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { AppError, notFound } from '@w360/core';
 import { and, contacts, crmActivities, crmDeals, desc, eq, exactTimestamp, sql } from '@w360/db';
 import { recordSystemAudit } from '../audit';
-import { addActivity } from '../crm/common';
+import { addActivity, noteWriter, type NoteWriter } from '../crm/common';
 import type { OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import { apiContactNotFound } from './contact-view';
@@ -77,7 +77,7 @@ export const apiCrmNoteListQuerySchema = z
   .strict();
 
 /** Who wrote a note: a member on the contact or deal page, or a key through the API. */
-export type ApiNoteWriter = 'member' | 'api';
+export type ApiNoteWriter = NoteWriter;
 
 /** A note as `POST /notes` answers it and `GET /notes` reads it. */
 export interface ApiNote {
@@ -123,8 +123,7 @@ export const toApiNote = (row: NoteRow): ApiNote => ({
   body: row.body,
   contactId: row.contactId,
   dealId: row.dealId,
-  writtenBy: row.byMember ? 'member' : 'api',
-  apiKeyId: row.byMember ? null : row.apiKeyId,
+  ...noteWriter(row.byMember, row.apiKeyId),
   createdAt: row.createdAt.toISOString(),
 });
 

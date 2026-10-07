@@ -1064,6 +1064,10 @@ verification, app review, Embedded Signup configuration).
   0196 and 0197: every deal and task event's `changedBy` names the member (never which), automation
   or key (`apiKeyId`) that made the change, recorded with the change and cleared when another
   transaction recorded it, so an integration can ignore its own changes).
+  **[Note events built; their database tests run only in CI]** (ADR-280, migrations 0200 and 0201:
+  `note.created` for every note a member or a key adds, with who wrote it (a key by its id, never
+  which member), the deal and the contact, never the text, which `notes.read` reads; merges and
+  erasure send none).
   Remaining: filters for other event types (task events by their deal's pipeline, stage or owner,
   among them) and on a message's or contact's values (such as a field's value, contact events by
   tag, or the key that started a run), other authentication (headers computed per delivery, other
