@@ -2140,6 +2140,15 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**A template draft request answers 403, 404, 409, 412 or 422 (ADR-295).** 403: the key lacks
+`templates.write` (its creator needed that permission). 404: another company's number or template,
+or an id that is none. 409: the account has a template of that name and language (a deleted draft
+Meta never received is used again instead), `expectedVersion` is not the draft's version (read it
+again), or the draft is already deleted. 412: Meta has the template, or it is being submitted:
+change or delete it on the Templates page. 422: the content breaks the editor's rules; `issues`
+gives each problem's path. 423: the company is suspended or its plan has ended. A change that leaves
+the content as it is answers it without a new version.
+
 **A template request answers 403, 404 or 422, or a template is not listed (ADR-294).** 403: the key
 lacks `templates.read` (its creator needed that permission). 404: another company's template, or an
 id that is none. 422: an unknown parameter or status, or a page size over 100. Deleted templates are

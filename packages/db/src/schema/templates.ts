@@ -51,6 +51,8 @@ export const messageTemplates = appSchema.table('message_templates', {
     .default('local'),
   version: integer('version').notNull().default(0),
   createdByUserId: text('created_by_user_id'),
+  /** The key that added it through the API (ADR-295); neither for a template found at Meta. */
+  createdByApiKeyId: uuid('created_by_api_key_id'),
   submittedAt: tz('submitted_at'),
   lastSyncedAt: tz('last_synced_at'),
   createdAt: tz('created_at').notNull().defaultNow(),

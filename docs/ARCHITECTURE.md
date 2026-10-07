@@ -1637,6 +1637,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the latest 50 rows of `app.template_status_events`); `toApiMessageTemplate` gives the content
   through `sendSpecFor` with media headers, as `GET /templates` reads it, and the account's active
   numbers.
+- **Template drafts through the API (ADR-295):** `api/message-template-drafts.ts` adds, changes and
+  deletes drafts with `templates.write` through the writes the Templates page now shares in
+  `templates/service.ts` (`writeCreateTemplateDraft` with the author, `writeUpdateTemplateDraft`,
+  `writeDeleteLocalTemplate`, `isEditableDraft`, `templateNameError`); the number's
+  `whatsapp_account_id` picks the account; an unchanged content is found with `canonicalJson` of the
+  components; answers are read with `readApiMessageTemplate` from `api/message-templates.ts`.
+  `message_templates.created_by_api_key_id` (0216) names the key.
 - **Many conversations at once (ADR-120):** `POST /conversations/update-many`
   (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
   transaction it locks the member first (as a suspension does before releasing its conversations),

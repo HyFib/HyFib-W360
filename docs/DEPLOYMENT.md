@@ -945,6 +945,16 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    step. Only the database changes: workers and web servers of any version keep working, and stored
    events and payloads are unchanged.
 
+   Migration 0216 (ADR-295) replaces the API keys' and plans' scope checks (validated at once: one
+   row per key and per plan version) with `templates.write` and a bound of 64 scopes, adds
+   `message_templates.created_by_api_key_id` with its foreign key and the author check (NOT VALID;
+   0217 validates them while writes go on), and grants the runtime role the update of both author
+   columns. Until the web rollout ends, an old web server answers Settings → API keys with an error
+   for a company with a key holding `templates.write`, answers `POST /api/v1/message-templates` and
+   `PATCH` and `DELETE /api/v1/message-templates/{id}` with 405, gives templates without
+   `createdBy`, and uses a deleted draft again under its earlier author; rolling web servers back
+   does the same.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

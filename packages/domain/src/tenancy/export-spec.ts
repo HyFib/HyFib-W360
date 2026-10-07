@@ -1259,6 +1259,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'origin',
       'version',
       'created_by_user_id',
+      'created_by_api_key_id',
       'submitted_at',
       'last_synced_at',
       'created_at',

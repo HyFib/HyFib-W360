@@ -11,6 +11,7 @@ export type { ApiScope } from '@w360/db';
 export const API_SCOPE_KEYS = [
   'channels.read',
   'templates.read',
+  'templates.write',
   'contacts.read',
   'contacts.write',
   'contacts.merge',
@@ -64,6 +65,13 @@ export const API_SCOPE_INFO: Record<
       "List approved templates and their variables, and read every template of the company, drafts and those Meta reviews included, with Meta's review and each template's latest status changes.",
     permission: 'templates.read',
     writes: false,
+  },
+  'templates.write': {
+    label: 'Write templates',
+    description:
+      'Add template drafts, change their content and delete drafts Meta never received, as members who write templates do on the Templates page, recorded as added through the API and in the audit log as done by the key. Submitting drafts to Meta and deleting templates Meta has are not part of it.',
+    permission: 'templates.write',
+    writes: true,
   },
   'contacts.read': {
     label: 'Read contacts',

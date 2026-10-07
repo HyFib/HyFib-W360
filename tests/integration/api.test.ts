@@ -18,12 +18,14 @@ import {
   apiCreateSavedReply,
   apiCreateContact,
   apiCreateDeal,
+  apiCreateMessageTemplate,
   apiCreateNote,
   apiCreatePipeline,
   apiCreateTask,
   apiCreateTeam,
   apiDeleteTeam,
   apiDeleteClosedDay,
+  apiDeleteMessageTemplate,
   apiDeleteSavedReply,
   apiErrorResponse,
   apiGetAutomationRun,
@@ -65,6 +67,7 @@ import {
   apiSendTemplate,
   apiUpdateConversation,
   apiUpdateBusinessHours,
+  apiUpdateMessageTemplate,
   apiUpdateSavedReply,
   apiUpdateDeal,
   apiUpdatePipeline,
@@ -9373,6 +9376,238 @@ describe('message templates of every status (ADR-294)', () => {
       apiListMessageTemplates(deps(), sender.ctx, {}),
       'forbidden',
       /templates\.read/,
+    );
+  });
+});
+
+describe('template drafts through the API (ADR-295)', () => {
+  const shipped: TemplateDefinition = {
+    category: 'UTILITY',
+    header: { type: 'none' },
+    body: { text: 'Hi {{1}}, your order has shipped.', examples: ['Asha'] },
+    footer: null,
+    buttons: [],
+  };
+  const delayed: TemplateDefinition = {
+    ...shipped,
+    body: { text: 'Hi {{1}}, your order is delayed.', examples: ['Asha'] },
+  };
+  type Detail = { id: string; status: string; version: number };
+  const auditOf = (id: string) =>
+    fx.query<{ actor_type: string; actor_id: string | null; action: string; metadata: unknown }>(
+      `SELECT actor_type, actor_id, action, metadata FROM app.audit_events
+        WHERE subject_type = 'template' AND subject_id = $1 ORDER BY occurred_at, id`,
+      [id],
+    );
+
+  it('adds, changes and deletes drafts as the key, through the writes of the Templates page (ADR-295)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const writer = await apiKey(c, ['templates.write']);
+    const reader = await apiKey(c, ['templates.read']);
+    const templates = createTemplatesService({
+      db: fx.dbs.app,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      clock: systemClock,
+    });
+    const name = `api_draft_${Date.now().toString(36)}`;
+    const draft = { channelId: c.channelAccountId, name, language: 'en', definition: shipped };
+
+    // Added for the number's account as the key's, once per Idempotency-Key.
+    const added = await apiCreateMessageTemplate(
+      deps(),
+      writer.ctx,
+      draft,
+      idem('draft-1', JSON.stringify(draft)),
+    );
+    expect(added).toMatchObject({
+      status: 201,
+      replayed: false,
+      body: {
+        data: {
+          name,
+          status: 'draft',
+          origin: 'local',
+          createdBy: 'api',
+          createdByApiKeyId: writer.id,
+          version: 0,
+          definition: shipped,
+          channels: [expect.objectContaining({ id: c.channelAccountId })],
+          history: [],
+        },
+      },
+    });
+    const id = (added.body as { data: Detail }).data.id;
+    expect(
+      await apiCreateMessageTemplate(
+        deps(),
+        writer.ctx,
+        draft,
+        idem('draft-1', JSON.stringify(draft)),
+      ),
+    ).toMatchObject({ replayed: true, body: added.body });
+    expect(
+      await fx.query(
+        `SELECT whatsapp_account_id, created_by_user_id, created_by_api_key_id
+           FROM app.message_templates WHERE id = $1`,
+        [id],
+      ),
+    ).toEqual([
+      {
+        whatsapp_account_id: c.whatsappAccountId,
+        created_by_user_id: null,
+        created_by_api_key_id: writer.id,
+      },
+    ]);
+    // The name and language are the account's: taken, in the API and on the Templates page.
+    await expectAppError(
+      apiCreateMessageTemplate(deps(), writer.ctx, draft, null),
+      'conflict',
+      /already exists/,
+    );
+    await expectAppError(
+      templates.createDraft(owner, {
+        whatsappAccountId: c.whatsappAccountId,
+        name,
+        language: 'en',
+        definition: shipped,
+      }),
+      'conflict',
+      /already exists/,
+    );
+
+    // Changed from its version, as the Templates page edits it; the same content writes nothing.
+    const changed = await apiUpdateMessageTemplate(deps(), writer.ctx, id, {
+      definition: delayed,
+      expectedVersion: 0,
+    });
+    expect(changed).toMatchObject({ id, status: 'draft', version: 1, definition: delayed });
+    expect(
+      await apiUpdateMessageTemplate(deps(), writer.ctx, id, { definition: delayed }),
+    ).toMatchObject({
+      version: 1,
+    });
+    await expectAppError(
+      apiUpdateMessageTemplate(deps(), writer.ctx, id, { definition: shipped, expectedVersion: 0 }),
+      'conflict',
+    );
+    const page = await templates.getTemplate(owner, id);
+    expect(page).toMatchObject({ editable: true, definition: delayed });
+    expect((await auditOf(id)).map((a) => [a.actor_type, a.actor_id, a.action])).toEqual([
+      ['api_key', writer.id, 'template.draft_saved'],
+      ['api_key', writer.id, 'template.draft_saved'],
+    ]);
+
+    // Deleted as the Templates page deletes drafts: listed as deleted, and its name free again.
+    expect(await apiDeleteMessageTemplate(deps(), writer.ctx, id)).toEqual({ id, deleted: true });
+    expect(await apiGetMessageTemplate(deps(), reader.ctx, id)).toMatchObject({
+      status: 'deleted',
+      history: [expect.objectContaining({ status: 'deleted', source: 'delete' })],
+    });
+    await expectAppError(apiDeleteMessageTemplate(deps(), writer.ctx, id), 'conflict');
+    await expectAppError(
+      apiUpdateMessageTemplate(deps(), writer.ctx, id, { definition: shipped }),
+      'precondition_failed',
+    );
+    expect((await auditOf(id)).at(-1)).toMatchObject({
+      actor_type: 'api_key',
+      action: 'template.deleted',
+      metadata: { name, language: 'en', source: 'api' },
+    });
+    // A member adds it again: the same template, now the member's.
+    const again = await templates.createDraft(owner, {
+      whatsappAccountId: c.whatsappAccountId,
+      name,
+      language: 'en',
+      definition: shipped,
+    });
+    expect(again.id).toBe(id);
+    expect(await apiGetMessageTemplate(deps(), reader.ctx, id)).toMatchObject({
+      status: 'draft',
+      createdBy: 'member',
+      createdByApiKeyId: null,
+    });
+  });
+
+  it('leaves templates Meta has to the Templates page, and writes only with templates.write in an active company (ADR-295)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const writer = await apiKey(c, ['templates.write']);
+    const reader = await apiKey(c, ['templates.read']);
+
+    // A template Meta has is neither changed nor deleted through the API.
+    const approved = await approvedTemplate(c, shipped);
+    await expectAppError(
+      apiUpdateMessageTemplate(deps(), writer.ctx, approved.id, { definition: delayed }),
+      'precondition_failed',
+      /Meta has not received/,
+    );
+    await expectAppError(
+      apiDeleteMessageTemplate(deps(), writer.ctx, approved.id),
+      'precondition_failed',
+      /Templates page/,
+    );
+    expect(await apiGetMessageTemplate(deps(), reader.ctx, approved.id)).toMatchObject({
+      status: 'approved',
+    });
+
+    // Another company's number and template are not found; nothing is added for them.
+    await expectAppError(
+      apiCreateMessageTemplate(
+        deps(),
+        writer.ctx,
+        { channelId: other.channelAccountId, name: 'theirs', language: 'en', definition: shipped },
+        null,
+      ),
+      'not_found',
+    );
+    const theirs = await approvedTemplate(other, shipped);
+    for (const write of [
+      () => apiUpdateMessageTemplate(deps(), writer.ctx, theirs.id, { definition: delayed }),
+      () => apiDeleteMessageTemplate(deps(), writer.ctx, theirs.id),
+    ]) {
+      await expectAppError(write(), 'not_found');
+    }
+
+    // A key that reads templates writes none; a suspended company's keys write none.
+    await expectAppError(
+      apiCreateMessageTemplate(
+        deps(),
+        reader.ctx,
+        { channelId: c.channelAccountId, name: 'mine', language: 'en', definition: shipped },
+        null,
+      ),
+      'forbidden',
+      /templates\.write/,
+    );
+    const suspended: ApiContext = {
+      ...writer.ctx,
+      tenant: { ...writer.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(
+      apiCreateMessageTemplate(
+        deps(),
+        suspended,
+        { channelId: c.channelAccountId, name: 'mine', language: 'en', definition: shipped },
+        null,
+      ),
+      'tenant_suspended',
+    );
+    expect((await apiListMessageTemplates(deps(), reader.ctx, { status: 'draft' })).data).toEqual(
+      [],
+    );
+
+    // Granting it needs the permission members write templates with.
+    const owner = await fx.ctx(c, c.owner);
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'templates.write')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Templates', scopes: ['templates.write'], expiresInDays: 30 }),
+      'forbidden',
+      /Write templates/,
     );
   });
 });

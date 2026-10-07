@@ -81,6 +81,10 @@ import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
 import { MAX_TAGS_PER_CONVERSATION } from '../inbox/conversation-tags';
 import { TEMPLATE_HEADER_MEDIA } from '../templates/definition';
+import {
+  apiCreateMessageTemplateSchema,
+  apiUpdateMessageTemplateSchema,
+} from './message-template-drafts';
 import { MESSAGE_TEMPLATE_HISTORY } from './message-templates';
 import {
   apiStartAutomationSchema,
@@ -880,6 +884,11 @@ export const apiMessageTemplateSchema = z.object({
   origin: z
     .enum(['local', 'synced'])
     .describe('`local`: added in HyFib; `synced`: found at Meta, added in WhatsApp Manager.'),
+  createdBy: z
+    .enum(['member', 'api'])
+    .nullable()
+    .describe('Who added it in HyFib: a member (never which) or a key; null when found at Meta.'),
+  createdByApiKeyId: z.uuid().nullable().describe('The key that added it, when a key did.'),
   version: z.number().int().describe('Changes with every change HyFib records.'),
   sendable: z
     .boolean()
@@ -1590,6 +1599,20 @@ export function buildOpenApiDocument(serverUrl: string) {
             ...errors(401, 403, 422, 429, 500),
           },
         },
+        post: {
+          operationId: 'createMessageTemplate',
+          summary: 'Add a template draft',
+          description: `${scopeNote('templates.write')} A draft as members add one on the Templates page, for the WhatsApp Business account of one of the company’s numbers (\`channelId\`; 404 for another company’s number or an unknown one): a name of lower-case letters, digits and underscores and a language code, unique together in the account (409 otherwise; a deleted draft Meta never received is used again), and its content, checked as the template editor checks it (422 with the problems otherwise). It stays a draft: it is submitted to Meta on the Templates page. The audit log names the key, and the template gives \`createdBy: "api"\`. With an \`Idempotency-Key\`, a retry answers the first response.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateMessageTemplate')) },
+          responses: {
+            '201': {
+              description: 'The draft.',
+              content: json(dataOf(ref('MessageTemplateDetail'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
       },
       '/message-templates/{id}': {
         get: {
@@ -1603,6 +1626,42 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('MessageTemplateDetail'))),
             },
             ...errors(401, 403, 404, 429, 500),
+          },
+        },
+        patch: {
+          operationId: 'updateMessageTemplate',
+          summary: 'Change a draft’s content',
+          description: `${scopeNote('templates.write')} Sets a draft’s whole content as members save it on the Templates page, checked as when adding one: only a draft Meta never received (\`draft\` or \`submit_failed\`; 412 otherwise), from \`expectedVersion\` when given (409 for another version). Its name and language stay. Content the draft already has answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise it becomes a \`draft\` again, its version moves on and the audit log names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateMessageTemplate')) },
+          responses: {
+            '200': {
+              description: 'The draft now.',
+              content: json(dataOf(ref('MessageTemplateDetail'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
+          },
+        },
+        delete: {
+          operationId: 'deleteMessageTemplate',
+          summary: 'Delete a draft',
+          description: `${scopeNote('templates.write')} Deletes a draft Meta never received, as members do on the Templates page: it is then listed with \`status=deleted\`, and its name and language can be used again. One being submitted, or one Meta has, answers 412 (delete those on the Templates page); one already deleted answers 409. The audit log names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'Deleted.',
+              content: json(
+                dataOf({
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string', format: 'uuid' },
+                    deleted: { const: true },
+                  },
+                  required: ['id', 'deleted'],
+                }),
+              ),
+            },
+            ...errors(401, 403, 404, 409, 412, 423, 429, 500),
           },
         },
       },
@@ -4101,6 +4160,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         SatisfactionSurvey: jsonSchema(apiSatisfactionSurveySchema),
         MessageTemplate: jsonSchema(apiMessageTemplateSchema),
         MessageTemplateDetail: jsonSchema(apiMessageTemplateDetailSchema),
+        CreateMessageTemplate: jsonSchema(apiCreateMessageTemplateSchema, 'input'),
+        UpdateMessageTemplate: jsonSchema(apiUpdateMessageTemplateSchema, 'input'),
         SavedReply: jsonSchema(apiSavedReplySchema),
         CreateSavedReply: jsonSchema(apiCreateSavedReplySchema, 'input'),
         UpdateSavedReply: jsonSchema(apiUpdateSavedReplySchema, 'input'),
@@ -4192,7 +4253,10 @@ export function buildOpenApiDocument(serverUrl: string) {
 export const API_ROUTES = [
   ['get', '/templates'],
   ['get', '/message-templates'],
+  ['post', '/message-templates'],
   ['get', '/message-templates/{id}'],
+  ['patch', '/message-templates/{id}'],
+  ['delete', '/message-templates/{id}'],
   ['get', '/channels'],
   ['get', '/contacts'],
   ['post', '/contacts'],

@@ -1,5 +1,45 @@
 # Progress
 
+## 2026-10-07 — Template drafts through the public API (P5-08, H-033, W-059, ADR-295)
+
+Status: **Implemented; its database tests run in CI only.** Keys could read every template (ADR-294)
+but not add one: a company keeping its templates elsewhere typed each draft into the editor. The
+local PostgreSQL is unavailable, so the migrations and the integration tests below were written but
+not run here; migrations 0216 and 0217 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migrations 0216 (`templates.write` in the scope checks, which now allow 64 scopes;
+  `message_templates.created_by_api_key_id` with its foreign key and author check; the update grant
+  on both author columns) and 0217 (validating them).
+- **Domain:** `api/message-template-drafts.ts` (`apiCreateMessageTemplate`,
+  `apiUpdateMessageTemplate`, `apiDeleteMessageTemplate` and their schemas); the Templates page's
+  draft writes shared from `templates/service.ts`; `readApiMessageTemplate` and `createdBy` in
+  `api/message-templates.ts`; the scope; the OpenAPI operations and input components; the export of
+  the new column.
+- **Web:** `POST /api/v1/message-templates`, `PATCH` and `DELETE /api/v1/message-templates/{id}`.
+- **Tests:** unit (`api/message-template-drafts.test.ts`, 10: the scope, the parameters, refusals
+  before any query, each operation's reads and writes, the author, the reuse of a deleted draft, the
+  conflicts, the OpenAPI entries; the API scope tests and the template read tests updated);
+  integration (2 new in `api.test.ts`). Written for CI; the integration tests were not run here. No
+  e2e test.
+- **Docs:** ADR-295; ARCHITECTURE; SECURITY; THREAT-MODEL T263; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-059.
+- **Mutation checks:** 43/44 deliberate regressions caught (one after a test was improved); the
+  survivor is equivalent: the database's one-author check keeps a template from naming both a member
+  and a key.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 132 files, 1257 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migrations 0216 and 0217         | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Review fix: deal and task events matched against the owner and assignee at their step (P5-09, P4-04, H-014, ADR-275, ADR-276)
 
 Status: **Implemented; its database tests run in CI only.** The Codex review of PR #39 found that

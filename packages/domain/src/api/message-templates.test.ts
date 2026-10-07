@@ -76,6 +76,8 @@ const row = (overrides: Partial<Row> = {}): Row => ({
   qualityScore: 'GREEN',
   submitError: null,
   origin: 'local',
+  createdByUserId: 'member-user',
+  createdByApiKeyId: null,
   version: 3,
   submittedAt: CREATED,
   lastSyncedAt: UPDATED,
@@ -210,6 +212,8 @@ describe('message templates of every status through the API (ADR-294)', () => {
       qualityScore: 'GREEN',
       submitError: null,
       origin: 'local',
+      createdBy: 'member',
+      createdByApiKeyId: null,
       version: 3,
       sendable: true,
       unsupportedReason: null,
@@ -231,12 +235,14 @@ describe('message templates of every status through the API (ADR-294)', () => {
     }
     // Content HyFib cannot represent: listed with its status and why, without content.
     const authentication = toApiMessageTemplate(
-      row({ category: 'AUTHENTICATION', origin: 'synced' }),
+      row({ category: 'AUTHENTICATION', origin: 'synced', createdByUserId: null }),
       numbers,
     );
     expect(authentication).toMatchObject({
       category: 'authentication',
       origin: 'synced',
+      createdBy: null,
+      createdByApiKeyId: null,
       sendable: false,
       definition: null,
       unsupportedReason: 'Authentication templates are not supported yet.',

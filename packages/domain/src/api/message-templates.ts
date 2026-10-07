@@ -48,6 +48,9 @@ export interface ApiMessageTemplate {
   submitError: string | null;
   /** `local`: added in HyFib; `synced`: found at Meta, added in WhatsApp Manager. */
   origin: 'local' | 'synced';
+  /** Who added it in HyFib: a member (never which) or a key (ADR-295); null when found at Meta. */
+  createdBy: 'member' | 'api' | null;
+  createdByApiKeyId: string | null;
   /** Changes with every change HyFib records. */
   version: number;
   /** Whether a send can use it now: as GET /templates lists the approved templates. */
@@ -65,6 +68,9 @@ export interface ApiMessageTemplate {
   createdAt: string;
   updatedAt: string;
 }
+
+/** A template with its latest status changes, newest first. */
+export type ApiMessageTemplateDetail = ApiMessageTemplate & { history: ApiMessageTemplateChange[] };
 
 /** A change of a template's status, newest first. */
 export interface ApiMessageTemplateChange {
@@ -105,6 +111,8 @@ const templateColumns = {
   qualityScore: messageTemplates.qualityScore,
   submitError: messageTemplates.submitError,
   origin: messageTemplates.origin,
+  createdByUserId: messageTemplates.createdByUserId,
+  createdByApiKeyId: messageTemplates.createdByApiKeyId,
   version: messageTemplates.version,
   submittedAt: messageTemplates.submittedAt,
   lastSyncedAt: messageTemplates.lastSyncedAt,
@@ -125,6 +133,8 @@ type TemplateRow = {
   qualityScore: string | null;
   submitError: string | null;
   origin: 'local' | 'synced';
+  createdByUserId: string | null;
+  createdByApiKeyId: string | null;
   version: number;
   submittedAt: Date | null;
   lastSyncedAt: Date | null;
@@ -149,6 +159,8 @@ export function toApiMessageTemplate(
     qualityScore: row.qualityScore,
     submitError: row.submitError,
     origin: row.origin,
+    createdBy: row.createdByApiKeyId ? 'api' : row.createdByUserId ? 'member' : null,
+    createdByApiKeyId: row.createdByApiKeyId,
     version: row.version,
     sendable: row.status === 'approved' && spec.supported,
     unsupportedReason: spec.supported ? null : spec.reason,
@@ -234,6 +246,44 @@ export async function apiListMessageTemplates(
   );
 }
 
+/** A template of any status as the API gives it, with its latest status changes, or null. */
+export async function readApiMessageTemplate(
+  tx: Tx,
+  tenantId: string,
+  templateId: string,
+): Promise<ApiMessageTemplateDetail | null> {
+  const [row] = await tx
+    .select(templateColumns)
+    .from(messageTemplates)
+    .where(and(eq(messageTemplates.tenantId, tenantId), eq(messageTemplates.id, templateId)));
+  if (!row) return null;
+  const history = await tx
+    .select({
+      status: templateStatusEvents.status,
+      reason: templateStatusEvents.reason,
+      source: templateStatusEvents.source,
+      occurredAt: templateStatusEvents.occurredAt,
+    })
+    .from(templateStatusEvents)
+    .where(
+      and(
+        eq(templateStatusEvents.tenantId, tenantId),
+        eq(templateStatusEvents.templateId, templateId),
+      ),
+    )
+    .orderBy(desc(templateStatusEvents.occurredAt), desc(templateStatusEvents.id))
+    .limit(MESSAGE_TEMPLATE_HISTORY);
+  return {
+    ...toApiMessageTemplate(row, await activeNumbers(tx, tenantId)),
+    history: history.map((h) => ({
+      status: h.status,
+      reason: h.reason,
+      source: h.source,
+      occurredAt: h.occurredAt.toISOString(),
+    })),
+  };
+}
+
 /**
  * One of the company's templates, of any status, deleted included, with its latest status changes;
  * another company's answers 404, as an unknown one does.
@@ -242,47 +292,14 @@ export async function apiGetMessageTemplate(
   deps: Pick<OutboundDeps, 'db'>,
   ctx: ApiContext,
   templateId: string,
-): Promise<ApiMessageTemplate & { history: ApiMessageTemplateChange[] }> {
+): Promise<ApiMessageTemplateDetail> {
   assertScope(ctx, 'templates.read');
   if (!z.uuid().safeParse(templateId).success) throw notFound('Template');
   const found = await deps.db.run(
     ctx.scope,
-    async (tx) => {
-      const [row] = await tx
-        .select(templateColumns)
-        .from(messageTemplates)
-        .where(
-          and(eq(messageTemplates.tenantId, ctx.tenant.id), eq(messageTemplates.id, templateId)),
-        );
-      if (!row) return null;
-      const history = await tx
-        .select({
-          status: templateStatusEvents.status,
-          reason: templateStatusEvents.reason,
-          source: templateStatusEvents.source,
-          occurredAt: templateStatusEvents.occurredAt,
-        })
-        .from(templateStatusEvents)
-        .where(
-          and(
-            eq(templateStatusEvents.tenantId, ctx.tenant.id),
-            eq(templateStatusEvents.templateId, templateId),
-          ),
-        )
-        .orderBy(desc(templateStatusEvents.occurredAt), desc(templateStatusEvents.id))
-        .limit(MESSAGE_TEMPLATE_HISTORY);
-      return { row, history, numbers: await activeNumbers(tx, ctx.tenant.id) };
-    },
+    (tx) => readApiMessageTemplate(tx, ctx.tenant.id, templateId),
     { accessMode: 'read only' },
   );
   if (!found) throw notFound('Template');
-  return {
-    ...toApiMessageTemplate(found.row, found.numbers),
-    history: found.history.map((h) => ({
-      status: h.status,
-      reason: h.reason,
-      source: h.source,
-      occurredAt: h.occurredAt.toISOString(),
-    })),
-  };
+  return found;
 }

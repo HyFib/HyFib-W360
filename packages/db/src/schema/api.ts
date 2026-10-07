@@ -8,6 +8,7 @@ const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' 
 export const API_SCOPES = [
   'channels.read',
   'templates.read',
+  'templates.write',
   'contacts.read',
   'contacts.write',
   'contacts.merge',

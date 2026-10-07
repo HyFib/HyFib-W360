@@ -11214,3 +11214,52 @@ Decision:
 
 Not built: creating, changing, submitting and deleting templates through the API, template content
 HyFib cannot represent given raw, and the members who made each change.
+
+## ADR-295 Template drafts through the public API (P5-08) (2026-10-07)
+
+Context: ADR-294 lets keys read every template with Meta's review, but a company that keeps its
+templates in another system (a marketing tool, a translation workflow) still typed each draft into
+the template editor by hand. Members with `templates.write` add drafts, change them and delete
+drafts Meta never received on the Templates page; submission to Meta and deletion there need
+`templates.submit` as well.
+
+Decision:
+
+- **A `templates.write` scope** ("Write templates"), granted only by members who hold
+  `templates.write` (owners and administrators, who create keys, do), writing, so refused while the
+  company is suspended or restricted. Existing keys and plans that chose their scopes do not gain
+  it. With it the API has 33 scopes, and a key or plan may hold up to 64 (the database checks
+  counted up to 32).
+- **`POST /api/v1/message-templates`** (`createMessageTemplate`) adds a draft as the template editor
+  saves one: the number (`channelId`) chooses the WhatsApp Business account, since the API names
+  numbers and never Meta's account ids (another company's number, or an unknown one, answers 404);
+  the name and language are unique in the account (409), and a deleted draft Meta never received
+  under them is used again, as on the Templates page; the content is checked as the editor checks it
+  (422 with each problem's path). Once per `Idempotency-Key` when one is given. It answers the
+  template as `GET /message-templates/{id}` reads it.
+- **`PATCH /api/v1/message-templates/{id}`** (`updateMessageTemplate`) sets a draft's whole content,
+  as the editor saves it: only a draft Meta never received (`draft` or `submit_failed`, 412
+  otherwise), from `expectedVersion` when given (409 for another version). Content the draft already
+  has, compared with sorted keys as the database gives its components back, writes nothing and adds
+  no audit entry, so a retry needs no key; otherwise the draft becomes a `draft` again and its
+  version moves on. Its name and language stay.
+- **`DELETE /api/v1/message-templates/{id}`** (`deleteMessageTemplate`) deletes a draft Meta never
+  received, as the Templates page does, with its status change; one being submitted, or one Meta
+  has, answers 412, and one already deleted 409.
+- **Shared writes:** the Templates page's draft writes are now functions both use
+  (`writeCreateTemplateDraft`, `writeUpdateTemplateDraft`, `writeDeleteLocalTemplate`,
+  `isEditableDraft`), so their rules hold for keys; a name and language taken by another addition at
+  the same moment now answer with the same message as one taken before (409), on the page too.
+- **Who added it:** `message_templates.created_by_api_key_id` names the key, and a template's
+  `createdBy` (`member`, never which, or `api` with `createdByApiKeyId`; null for one found at Meta)
+  says so through the API. A deleted draft used again names whoever added it again. The audit log
+  names the key (`template.draft_saved`, `template.deleted`, with `source: api`); status changes
+  made by a key name no member.
+- **Migrations 0216 and 0217:** 0216 replaces the scope checks of keys and plans (with the new scope
+  and the bound of 64, validated at once), adds the column with its composite foreign key to the
+  company's keys and a check that a template names at most one author (both NOT VALID), and lets the
+  runtime role update both author columns; 0217 validates them.
+
+Not built: submitting drafts to Meta and deleting templates Meta has through the API (they need
+`templates.submit`), drafts with media headers or named variables (the editor has neither), and
+changing a draft's name or language.

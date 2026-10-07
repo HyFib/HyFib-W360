@@ -622,11 +622,11 @@ Phase 5 rules (Public API, P5-08):
 
 - Members with `developer.manage` (owners and administrators) create, rotate and revoke the
   company's API keys; a key belongs to the company, not to its author. Each scope needs the
-  permission a member needs for the same work: `templates.read`, `contacts.read`, `contacts.write`,
-  `inbox.reply` for `messages.send` (utility templates) and `messages.reply` (text replies,
-  ADR-070), `campaigns.send` for `messages.send_marketing`, `inbox.read_all` for
-  `conversations.read` (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075),
-  `teams.manage` (ADR-287) and `saved_replies.manage` (ADR-291), `inbox.assign` for
+  permission a member needs for the same work: `templates.read`, `templates.write` (ADR-295),
+  `contacts.read`, `contacts.write`, `inbox.reply` for `messages.send` (utility templates) and
+  `messages.reply` (text replies, ADR-070), `campaigns.send` for `messages.send_marketing`,
+  `inbox.read_all` for `conversations.read` (ADR-072), `inbox.supervise` for `conversations.write`
+  (ADR-075), `teams.manage` (ADR-287) and `saved_replies.manage` (ADR-291), `inbox.assign` for
   `availability.write` (ADR-289), `automations.publish` for `automations.start` (ADR-077),
   `tenant.settings.manage` for `contact_fields.manage` (ADR-115), `pipelines.manage` (ADR-286) and
   `business_hours.manage` (ADR-290), `tenant.read` for `business_hours.read` (ADR-290),
@@ -1181,6 +1181,14 @@ Phase 5 rules (Public API, P5-08):
   submission errors as the Templates page shows them, never Meta's template id, the raw components,
   the account's credentials or the members who made each change (unit tests; an integration test,
   run in CI only).
+- Template drafts (ADR-295): `POST /message-templates` and `PATCH` and
+  `DELETE /message-templates/{id}` need `templates.write`, granted only by members who hold it,
+  checked before any query and refused while the company is suspended or restricted; they write
+  under row security in the key's company, through the Templates page's writes and checks. The
+  number that picks the account is looked up in the key's company (another company's answers 404), a
+  key changes and deletes only drafts Meta never received (412 otherwise), and nothing reaches Meta:
+  submission and deletion at Meta stay with members who hold `templates.submit`. The audit log names
+  the key (unit tests; integration tests, run in CI only).
 - Reading a deal's history (ADR-281): `GET /deals/{id}/history` needs `deals.read` and the CRM in
   the plan, checked before anything is read; it reads the key's company's deal only (another
   company's answers 404, as an unknown one does; an id that is not a UUID is refused before any

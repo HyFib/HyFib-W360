@@ -903,6 +903,10 @@ verification, app review, Embedded Signup configuration).
   (ADR-294, no migration: keys with `templates.read` list the company's templates newest first on
   exact pages, drafts, those Meta reviews, rejected, paused, disabled and, when asked, deleted ones,
   by status, number and name, and read each with its latest 50 status changes).
+  **[Template drafts through the public API built; their database tests run only in CI]** (ADR-295,
+  migrations 0216 and 0217: `templates.write` adds drafts for a number's account, changes their
+  content from a version and deletes drafts Meta never received, through the Templates page's
+  writes, recorded as the key's).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact
@@ -916,7 +920,7 @@ verification, app review, Embedded Signup configuration).
   **[Adding CRM notes built; its database tests run only in CI]** (ADR-268, migration 0184:
   `notes.write` adds a note to a contact's or a deal's timeline as members do, recorded as written
   through the API; notes are not read through the API).
-  Remaining: creating, changing, submitting and deleting templates through the API,
+  Remaining: submitting templates to Meta and deleting templates Meta has through the API,
   call-to-action messages through the API, taking
   reactions back,
   changing a field's type,
