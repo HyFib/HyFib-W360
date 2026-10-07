@@ -107,6 +107,8 @@ import {
   dealUpdatedPayloadSchema,
   WEBHOOK_DEAL_DETAIL_CHANGES,
   taskCreatedPayloadSchema,
+  taskUpdatedPayloadSchema,
+  WEBHOOK_TASK_DETAIL_CHANGES,
   taskAssigneeChangedPayloadSchema,
   taskStatusChangedPayloadSchema,
   consentChangedPayloadSchema,
@@ -1398,6 +1400,34 @@ describe('webhook payload schemas', () => {
       ).toBe(true);
     }
     expect(taskAssigneeChangedPayloadSchema.safeParse(created).success).toBe(false);
+    // A change of details names what changed, once each, in its order, open or closed (ADR-276).
+    const updated = { ...created, type: 'task.updated' };
+    for (const changes of [
+      ['title'],
+      ['notes'],
+      ['dueAt'],
+      ['remindAt'],
+      ['title', 'notes', 'dueAt', 'remindAt'],
+    ]) {
+      for (const status of TASK_STATUSES) {
+        expect(
+          taskUpdatedPayloadSchema.safeParse({
+            ...updated,
+            data: { ...created.data, task: { ...task, status }, changes },
+          }).success,
+          `${JSON.stringify(changes)} ${status}`,
+        ).toBe(true);
+      }
+    }
+    for (const changes of [[], ['assignee'], ['status'], ['reminder'], ['due'], undefined]) {
+      expect(
+        taskUpdatedPayloadSchema.safeParse({ ...updated, data: { ...created.data, changes } })
+          .success,
+        JSON.stringify(changes),
+      ).toBe(false);
+    }
+    expect(WEBHOOK_TASK_DETAIL_CHANGES).toEqual(['title', 'notes', 'dueAt', 'remindAt']);
+    expect(taskUpdatedPayloadSchema.safeParse(created).success).toBe(false);
     // An unknown status or creator, an id or time that is not one, a field left out, or another
     // type is not described; a task always has an assignee.
     for (const change of [
@@ -1421,22 +1451,35 @@ describe('webhook payload schemas', () => {
     }
     expect(taskStatusChangedPayloadSchema.safeParse(created).success).toBe(false);
     expect(taskCreatedPayloadSchema.safeParse({ ...created, data: { task } }).success).toBe(false);
-    // A task is sent without its notes, which GET /tasks/{id} reads.
-    expect(Object.keys(taskCreatedPayloadSchema.shape.data.shape.task.shape)).toEqual([
-      'id',
-      'title',
-      'status',
-      'previousStatus',
-      'dueAt',
-      'assigneeId',
-      'previousAssigneeId',
-      'dealId',
-      'createdBy',
-      'createdAt',
+    // A task is sent without its notes or reminder, which GET /tasks/{id} reads, even when they
+    // are what changed.
+    for (const schema of [taskCreatedPayloadSchema, taskUpdatedPayloadSchema]) {
+      expect(Object.keys(schema.shape.data.shape.task.shape)).toEqual([
+        'id',
+        'title',
+        'status',
+        'previousStatus',
+        'dueAt',
+        'assigneeId',
+        'previousAssigneeId',
+        'dealId',
+        'createdBy',
+        'createdAt',
+      ]);
+    }
+    expect(Object.keys(taskUpdatedPayloadSchema.shape.data.shape)).toEqual([
+      'task',
+      'contact',
+      'changes',
     ]);
     // The database takes exactly the events the API describes, in its order.
     expect([...WEBHOOK_EVENT_TYPES]).toEqual([...WEBHOOK_EVENT_KEYS]);
     expect(WEBHOOK_EVENT_INFO['task.created'].label).toBe('Task added');
+    expect(WEBHOOK_EVENT_INFO['task.updated']).toEqual({
+      label: 'Task details',
+      description:
+        'A CRM task’s title, notes, due time or reminder changed: by a member or an API key.',
+    });
     expect(WEBHOOK_EVENT_INFO['task.assignee_changed']).toEqual({
       label: 'Task assignee',
       description: 'A CRM task was given to another member: by a member or an API key.',
@@ -1600,6 +1643,7 @@ describe('the OpenAPI document', () => {
       'deal.owner_changed',
       'deal.status_changed',
       'task.created',
+      'task.updated',
       'task.assignee_changed',
       'task.status_changed',
     ]);
@@ -1719,7 +1763,7 @@ describe('the OpenAPI document', () => {
     for (const words of [
       'by a member or an API key',
       'task.status and task.previousStatus are the change (open, done or cancelled)',
-      'Editing a task’s other details or its reminder sends nothing; giving it to another member sends task.assignee_changed.',
+      'Editing its title, notes, due time or reminder sends task.updated, and giving it to another member task.assignee_changed.',
       'the latest change is the one with the latest createdAt',
     ]) {
       expect(text('task.status_changed')).toContain(words);
@@ -1729,14 +1773,30 @@ describe('the OpenAPI document', () => {
     for (const words of [
       'by a member or an API key',
       'task.assigneeId and task.previousAssigneeId are the change',
-      'reopened, given to another member, closed',
+      'reopened, details changed, given to another member, closed',
       'for the member the task left as well as for the one it was given to',
     ]) {
       expect(reassigned).toContain(words);
     }
+    // A change of details (ADR-276).
+    const edited = doc.webhooks['task.updated'].post.description;
+    for (const words of [
+      'title, notes, due time or reminder changed: by a member or an API key',
+      'changes names what changed (title, notes, dueAt, remindAt), never the values before',
+      'its notes and reminder are never sent: read them with GET /tasks/{id} (`tasks.read`)',
+      'reopened, details changed, given to another member, closed',
+      'Assignees an endpoint names narrow it as the other task events',
+    ]) {
+      expect(edited).toContain(words);
+    }
     expect(
       Object.keys(doc.components.schemas).filter((name) => name.startsWith('WebhookTask')),
-    ).toEqual(['WebhookTaskCreated', 'WebhookTaskAssigneeChanged', 'WebhookTaskStatusChanged']);
+    ).toEqual([
+      'WebhookTaskCreated',
+      'WebhookTaskUpdated',
+      'WebhookTaskAssigneeChanged',
+      'WebhookTaskStatusChanged',
+    ]);
   });
 
   it('builds no body for an event type it does not know, before reading anything', async () => {
@@ -2443,6 +2503,7 @@ describe('number filters (ADR-170)', () => {
       'deal.owner_changed': dealOwnerChangedPayloadSchema,
       'deal.status_changed': dealStatusChangedPayloadSchema,
       'task.created': taskCreatedPayloadSchema,
+      'task.updated': taskUpdatedPayloadSchema,
       'task.assignee_changed': taskAssigneeChangedPayloadSchema,
       'task.status_changed': taskStatusChangedPayloadSchema,
     } satisfies Record<(typeof WEBHOOK_EVENT_KEYS)[number], unknown>;
@@ -3246,9 +3307,10 @@ describe('task assignee filters (ADR-266)', () => {
     ).toBe('Choose members from the list.');
   });
 
-  it('apply to the three task events, whose payloads give the assignee, and to no other event', () => {
+  it('apply to the four task events, whose payloads give the assignee, and to no other event', () => {
     expect(WEBHOOK_TASK_EVENTS).toEqual([
       'task.created',
+      'task.updated',
       'task.assignee_changed',
       'task.status_changed',
     ]);
@@ -3260,6 +3322,7 @@ describe('task assignee filters (ADR-266)', () => {
     expect(webhookTakesTaskEvents(['deal.created', 'task.status_changed'])).toBe(true);
     for (const schema of [
       taskCreatedPayloadSchema,
+      taskUpdatedPayloadSchema,
       taskAssigneeChangedPayloadSchema,
       taskStatusChangedPayloadSchema,
     ]) {
@@ -3275,6 +3338,7 @@ describe('task assignee filters (ADR-266)', () => {
   it('are kept only while the endpoint takes a task event: given, kept, or cleared', () => {
     expect(webhookTaskAssigneeIdsFor(['task.created'], [asha], null)).toEqual([asha]);
     expect(webhookTaskAssigneeIdsFor(['task.status_changed'], undefined, [dev])).toEqual([dev]);
+    expect(webhookTaskAssigneeIdsFor(['task.updated'], [asha], null)).toEqual([asha]);
     expect(webhookTaskAssigneeIdsFor(['task.created'], null, [dev])).toBeNull();
     expect(webhookTaskAssigneeIdsFor(['task.status_changed'], undefined, null)).toBeNull();
     expect(

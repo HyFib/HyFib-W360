@@ -714,6 +714,20 @@ const webhookTaskDataSchema = z.object({
 });
 
 export const taskCreatedPayloadSchema = envelope('task.created', webhookTaskDataSchema);
+
+/** The details of a task whose change task.updated reports (ADR-276), as its payload names them. */
+export const WEBHOOK_TASK_DETAIL_CHANGES = ['title', 'notes', 'dueAt', 'remindAt'] as const;
+export const taskUpdatedPayloadSchema = envelope(
+  'task.updated',
+  webhookTaskDataSchema.extend({
+    changes: z
+      .array(z.enum(WEBHOOK_TASK_DETAIL_CHANGES))
+      .min(1)
+      .describe(
+        'What the change changed, once each and in this order: `title`, `notes`, `dueAt` (the due time, set, changed or cleared) and `remindAt` (the reminder time, likewise). Names only: the task carries its title and due time as they are when the event is delivered, and GET /tasks/{id} reads its notes and reminder.',
+      ),
+  }),
+);
 export const taskAssigneeChangedPayloadSchema = envelope(
   'task.assignee_changed',
   webhookTaskDataSchema,
@@ -754,10 +768,13 @@ export interface StoredWebhookEvent {
 
 const str = (value: unknown): string | null => (typeof value === 'string' ? value : null);
 
-/** The details a deal.updated event captured as changed (ADR-275), in the payload's order. */
-const dealDetailChanges = (detail: Record<string, unknown>) => {
+/**
+ * The details a deal.updated (ADR-275) or task.updated (ADR-276) event captured as changed, among
+ * the names its payload knows, in the payload's order.
+ */
+const detailChanges = <T extends string>(detail: Record<string, unknown>, names: readonly T[]) => {
   const captured = Array.isArray(detail.changes) ? detail.changes : [];
-  return WEBHOOK_DEAL_DETAIL_CHANGES.filter((name) => captured.includes(name));
+  return names.filter((name) => captured.includes(name));
 };
 
 /** Who changed an order's status, as its event captured it (ADR-270); null when not recorded. */
@@ -1438,15 +1455,18 @@ export async function buildWebhookPayload(
           },
           conversation: deal.conversationId ? { id: deal.conversationId } : null,
           contact: await contactOf(tx, tenantId, deal.contactId),
-          ...(event.type === 'deal.updated' ? { changes: dealDetailChanges(event.detail) } : {}),
+          ...(event.type === 'deal.updated'
+            ? { changes: detailChanges(event.detail, WEBHOOK_DEAL_DETAIL_CHANGES) }
+            : {}),
         },
       };
     }
     case 'task.created':
+    case 'task.updated':
     case 'task.assignee_changed':
     case 'task.status_changed': {
-      // The status, and the one before it, as captured, and for a change of assignee the
-      // assignees; the rest as it is now. Erasing a contact deletes its tasks, so an erased
+      // The status, and the one before it, as captured, for a change of assignee the assignees,
+      // and for a change of details the names of what changed; the rest as it is now. Erasing a contact deletes its tasks, so an erased
       // contact's task is gone and its events send nothing.
       const task = await taskOf(tx, tenantId, str(event.detail.taskId));
       if (!task) throw new WebhookEventGoneError();
@@ -1468,6 +1488,9 @@ export async function buildWebhookPayload(
             createdAt: task.createdAt.toISOString(),
           },
           contact: await contactOf(tx, tenantId, task.contactId),
+          ...(event.type === 'task.updated'
+            ? { changes: detailChanges(event.detail, WEBHOOK_TASK_DETAIL_CHANGES) }
+            : {}),
         },
       };
     }

@@ -10469,3 +10469,46 @@ Decision:
 
 Not built: the values before a change, edits of a lost reason, a deal's notes or its contact's
 details as deal events, and who made a change in the payload.
+
+## ADR-276 A webhook event when a CRM task's details change (P5-09, P4-04) (2026-10-07)
+
+Context: task events (ADR-261, ADR-274) told integrations of tasks added, given to another member,
+completed, cancelled or reopened, but a change of a task's title, notes, due time or reminder sent
+nothing: a receiver keeping tasks in step (a calendar, a to-do list, a call-back queue) learnt of a
+moved due time only from the task's next event, if one came, or by reading every task again. ADR-274
+left events for other edits of a task unbuilt.
+
+Decision:
+
+- **`task.updated`** ("Task details") is captured by the task trigger (`app.webhook_capture_task`,
+  replaced in place; its update trigger now also fires on `title`, `notes`, `due_at` and
+  `remind_at`) when an update changes any of them: a member editing an open task, or a key changing
+  `title`, `notes`, `dueAt` or `remindAt` (`PATCH /tasks/{id}`, ADR-260). Automations set details
+  only on the tasks they add (`task.created`), merges move a task to another contact without
+  changing them, erasure deletes an erased contact's tasks, and sending or skipping a reminder
+  changes its state, never its time, so none of them sends it; an edit that changes nothing sends
+  none.
+- **What changed, not the values:** the payload is the task events' one with `changes`, naming the
+  details the change changed, once each and in the order `title`, `notes`, `dueAt`, `remindAt`; the
+  task is the task when the event is delivered, so a task changed again since gives its latest title
+  and due time. The values before a change are never sent, and neither are the notes or the
+  reminder, which the payload does not carry (ADR-261): a receiver told they changed reads them with
+  GET /tasks/{id} (`tasks.read`). Who made the change is not sent.
+- **Its place among one change's steps:** one update that also reopens, gives away or closes the
+  task captures each in the order the API's steps run (ADR-260): reopened, details changed, given to
+  another member, closed, each stamped with `clock_timestamp()`; a key clearing the due time and
+  completing the task in one request sends the change with status `open`, then the completion.
+  Members edit only an open task, its details and assignee together, so their edits send the change
+  of details before the change of assignee. `task.assignee_changed`'s and `task.status_changed`'s
+  descriptions name the new event.
+- **Filters:** it is a task event for the assignee list (ADR-266), matched by the member the task is
+  assigned to as the change left it; the list stays while an endpoint takes any of the four task
+  events, and its refusal names the four as Settings lists them. No definer function changes these
+  columns (erasure deletes tasks and merges change their contact), so no role gains a read.
+- **Migrations 0194 and 0195:** 0194 replaces the endpoints' event check (25 types) and their
+  assignee list's check (validated at once: at most 10 endpoints per company), the events' type
+  check (NOT VALID; 0195 validates it while captures go on), the trigger and its function, and
+  replaces `app.capture_webhook_event` with the same signature (keeping 0192's filters).
+
+Not built: the values before a change, the notes or the reminder in the payload, who made a change,
+and task events by their deal's pipeline, stage or owner.

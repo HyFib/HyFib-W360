@@ -1,5 +1,41 @@
 # Progress
 
+## 2026-10-07 — A webhook event when a task's details change (P5-09, P4-04, H-014, ADR-276)
+
+Status: **Implemented; its database tests run in CI only.** Task events said when a task was added,
+given to another member, completed, cancelled or reopened, but not when its title, notes, due time
+or reminder changed. The local PostgreSQL is unavailable, so the migrations and the integration test
+below were written but not run here; migrations 0194 and 0195 passed the pglast parse check (syntax
+only).
+
+### Completed
+
+- **Database:** migrations 0194 (the endpoints' event and assignee list checks, the events' type
+  check NOT VALID, the task trigger and its function, `app.capture_webhook_event` with the new type
+  among the task events) and 0195 (validating the type check).
+- **Domain:** `task.updated` ("Task details") in the registry and the assignee list's events, its
+  payload with `changes` (one helper now reads the changes of deal and task events), the refusal
+  naming the four task events, the OpenAPI entries (and the step order and wording of
+  `task.assignee_changed` and `task.status_changed`) and the API's field descriptions.
+- **Web:** no change: Settings → Webhooks lists the event from the registry.
+- **Tests:** unit (the task payload, registry, assignee list and OpenAPI tests extended in
+  `webhooks.test.ts`, the API field descriptions and schema in `api.test.ts`); integration (1 new in
+  `webhook-events.test.ts`, and the assignee refusal's wording in `webhooks.test.ts`). Written for
+  CI; the integration tests were not run here. No e2e test: the e2e suite is near its time limit.
+- **Docs:** ADR-276; ARCHITECTURE; SECURITY; THREAT-MODEL T244; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix W-138, H-014 and the CRM row.
+- **Mutation checks:** 21/21 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 120 files, 1139 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — A webhook event when a deal's details change (P5-09, P4-04, H-014, ADR-275)
 
 Status: **Implemented; its database tests run in CI only.** Deal events said when a deal was added,

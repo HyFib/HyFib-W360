@@ -1769,6 +1769,13 @@ true`); the same key with another request (method, path and body hashed) answers
   `detail`, between a reopening and a close made by the same update. Its payload (`taskOf`) gives
   `assigneeId` and `previousAssigneeId` as captured, where the other task events give the assignee
   when delivered and `previousAssigneeId` null.
+- **Task detail events** (migrations 0194–0195, ADR-276): the task update trigger, now also on
+  `title`, `notes`, `due_at` and `remind_at`, captures `task.updated` when an update changes any of
+  them (members editing an open task, keys through `apiUpdateTask`; a reminder sent or skipped
+  changes `reminder_state` and `reminded_at` only), with the task id and the names of the changed
+  details in `detail`, between a reopening and a change of assignee made by the same update. Its
+  payload (`taskOf`) adds `changes` to the task as it is when delivered, which carries neither its
+  notes nor its reminder.
 - **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
   notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
   SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same

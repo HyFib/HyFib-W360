@@ -2053,7 +2053,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     );
     // A change of assignee is a task event, and reaches both assignees (ADR-274).
     expect(JSON.stringify(given.taskAssigneeIds)).toContain(
-      'task.created, task.assignee_changed or task.status_changed',
+      'task.created, task.updated, task.assignee_changed or task.status_changed',
     );
     expect(JSON.stringify(given.taskAssigneeIds)).toContain(
       'task.assignee_changed reaches the endpoints of the member the task left as well as of the one it was given to',
@@ -2062,7 +2062,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'task.assignee_changed also by the member it left',
     );
     expect(JSON.stringify(answered.properties.taskAssigneeIds)).toContain(
-      '(task.created, task.assignee_changed, task.status_changed)',
+      '(task.created, task.updated, task.assignee_changed, task.status_changed)',
     );
     expect(doc.info.description).toContain(
       'a change of assignee reaching the endpoints of the member it left as well',
@@ -2071,6 +2071,14 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       apiCreateWebhookEndpointSchema.parse({
         ...tasks,
         events: ['task.assignee_changed'],
+        taskAssigneeIds: [dev],
+      }).taskAssigneeIds,
+    ).toEqual([dev]);
+    // So is a change of details (ADR-276).
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...tasks,
+        events: ['task.updated'],
         taskAssigneeIds: [dev],
       }).taskAssigneeIds,
     ).toEqual([dev]);
@@ -2708,6 +2716,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'deal.owner_changed',
       'deal.status_changed',
       'task.created',
+      'task.updated',
       'task.assignee_changed',
       'task.status_changed',
     ]);

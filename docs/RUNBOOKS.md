@@ -2132,8 +2132,8 @@ without its contact's number or name or a lost reason.
 **An integration misses a task change, or a task event fails as gone (ADR-261).** Endpoints that
 take `task.created` or `task.status_changed` are sent one event per task added and per completion,
 cancellation or reopening, whoever made it; edits of its title, notes, due time or reminder send
-nothing (read the task with GET /tasks/{id}), and neither do reminders being sent, merges and
-erasure; a change of its assignee sends `task.assignee_changed` to the endpoints that take it
+`task.updated` to the endpoints that take it (ADR-276), and reminders being sent, merges and erasure
+send nothing; a change of its assignee sends `task.assignee_changed` to the endpoints that take it
 (ADR-274). Changes made while no endpoint took the type were not recorded and are not sent later. A
 delivery that failed with `event_gone` belonged to a task that no longer exists: erasing a contact
 deletes its tasks. Payloads never carry a task's notes.
@@ -2765,6 +2765,19 @@ naming pipelines, stages or owners hear it by the deal's as the change left them
 that changes details and closes the deal sends the change first, with status `open`, then the close;
 one that also gives the deal to another owner sends the change of details before the change of
 owner.
+
+**A receiver misses a change of a task's details, or doubts one (ADR-276).** Endpoints that take
+`task.updated` ("Task details") are sent one event each time a member editing a task or a key
+changes its title, notes, due time or reminder time. An edit that changes nothing sends nothing,
+automations set details only on the tasks they add (`task.created`), merges and reminders being sent
+or skipped keep them, erasure deletes the task, and changes made while no endpoint took the type
+were not recorded and are not sent later. `changes` names what changed (`title`, `notes`, `dueAt`,
+`remindAt`); the task is the task when the event is delivered, so read its title and due time there,
+and its notes and reminder with GET /tasks/{id} (`tasks.read`): the payload never carries them, nor
+the values before. An endpoint naming assignees hears it by the member the task has as the change
+left it. One API request that changes details and completes the task sends the change first, with
+status `open`, then the completion; one that also gives the task to another member sends the change
+of details before the change of assignee, and one that reopens it sends the reopening first.
 
 **A receiver misses the conversations of a tagged customer (ADR-267).** An endpoint can take the
 message and conversation events of the conversations whose contact has chosen tags only. The

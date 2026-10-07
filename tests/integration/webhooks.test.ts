@@ -4127,7 +4127,7 @@ describe('task assignee filters (ADR-266)', () => {
       );
     };
     const needsTheEvents =
-      /only for an endpoint that receives Task added, Task assignee or Task done, cancelled or reopened/;
+      /only for an endpoint that receives Task added, Task details, Task assignee or Task done, cancelled or reopened/;
     await refused(['deal.created', 'message.received'], [agent], needsTheEvents);
     await refused(['task.created'], [], /at least one member/);
     await refused(['task.created'], ['agent@example.com'], /from the list/, 'taskAssigneeIds.0');

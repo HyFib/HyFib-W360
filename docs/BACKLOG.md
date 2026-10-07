@@ -1044,6 +1044,11 @@ verification, app review, Embedded Signup configuration).
   or API keys, and for erasure's retitling, naming what changed, never the values before; the
   pipeline, stage and owner lists narrow it; one change that also moves, reopens, closes or gives
   the deal away sends each event in the order the steps happen).
+  **[Task detail events built; their database tests run only in CI]** (ADR-276, migrations 0194 and
+  0195: `task.updated` for every change of a task's title, notes, due time or reminder by members or
+  API keys, naming what changed, never the values or the notes; the assignee list narrows it; one
+  change that also reopens, closes or gives the task away sends each event in the order the steps
+  happen).
   Remaining: filters for other event types (task events by their deal's pipeline, stage or owner,
   among them) and on a message's or contact's values (such as a field's value, contact events by
   tag, or the key that started a run), other authentication (headers computed per delivery, other

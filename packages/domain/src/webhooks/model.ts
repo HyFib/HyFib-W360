@@ -62,6 +62,7 @@ export const WEBHOOK_EVENT_KEYS = [
   'deal.owner_changed',
   'deal.status_changed',
   'task.created',
+  'task.updated',
   'task.assignee_changed',
   'task.status_changed',
 ] as const satisfies readonly WebhookEventType[];
@@ -172,6 +173,11 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
     'task.created': {
       label: 'Task added',
       description: 'A CRM task was added: by a member, an automation or an API key.',
+    },
+    'task.updated': {
+      label: 'Task details',
+      description:
+        'A CRM task’s title, notes, due time or reminder changed: by a member or an API key.',
     },
     'task.assignee_changed': {
       label: 'Task assignee',
@@ -958,12 +964,13 @@ export const webhookStageText = (stage: {
 /**
  * The events of a CRM task, which an endpoint can take for chosen assignees (ADR-266): a task's
  * events belong to the member it is assigned to when they happen, and a change of assignee
- * (ADR-274) to the member it left as well. Tasks are assigned to the members
- * who can own deals, so an assignee is chosen and stored as a deal owner is (`WebhookOwnerChoice`,
- * `WebhookEndpointOwner`, `webhookOwnerText`).
+ * (ADR-274) to the member it left as well; a change of details (ADR-276) is one of them. Tasks are
+ * assigned to the members who can own deals, so an assignee is chosen and stored as a deal owner
+ * is (`WebhookOwnerChoice`, `WebhookEndpointOwner`, `webhookOwnerText`).
  */
 export const WEBHOOK_TASK_EVENTS = [
   'task.created',
+  'task.updated',
   'task.assignee_changed',
   'task.status_changed',
 ] as const satisfies readonly WebhookEventType[];

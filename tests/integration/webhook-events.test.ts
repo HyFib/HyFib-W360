@@ -67,6 +67,7 @@ import {
   taskAssigneeChangedPayloadSchema,
   taskCreatedPayloadSchema,
   taskStatusChangedPayloadSchema,
+  taskUpdatedPayloadSchema,
   WEBHOOK_EVENT_KEYS,
   type AutomationTrigger,
   type CatalogSyncDeps,
@@ -5198,5 +5199,144 @@ describe('task events (ADR-261)', () => {
     expect(bodiesAt(owners.path).map((b) => [b.type, taskIn(b).status])).toEqual([
       ['task.status_changed', 'done'],
     ]);
+  });
+
+  it('sends a change of details naming what changed, to the endpoints of the task’s assignee, in its place among one request’s steps (ADR-276)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const svc = crm();
+    /** An endpoint of the company taking the events given, with the filters given. */
+    const add = async (eventTypes: WebhookEventType[], filters: Record<string, unknown>) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        ...filters,
+      });
+      return { ...created, path };
+    };
+    const everyone = await add(
+      ['task.updated', 'task.assignee_changed', 'task.status_changed'],
+      {},
+    );
+    const agents = await add(['task.updated'], { taskAssigneeIds: [agent.membership.id] });
+    // An endpoint without the new event hears none of the edits.
+    const others = await add(TASK_EVENTS, {});
+    const jaya = await newContact(owner, 'Jaya');
+
+    // Members edit the agent's task: its title and due time, then its notes, then its reminder;
+    // an edit that changes nothing sends nothing; then its title with its assignee.
+    const due = new Date(Date.now() + 86_400_000).toISOString();
+    const remind = new Date(Date.now() + 3_600_000).toISOString();
+    const { id: taskId } = await svc.createTask(owner, {
+      title: 'Call Jaya',
+      assigneeMembershipId: agent.membership.id,
+      contactId: jaya.id,
+    });
+    const edit = (
+      expectedVersion: number,
+      title: string,
+      notes: string | null,
+      dueAt: string | null,
+      remindAt: string | null,
+      assigneeMembershipId: string,
+    ) =>
+      svc.updateTask(owner, {
+        id: taskId,
+        expectedVersion,
+        title,
+        notes,
+        dueAt,
+        remindAt,
+        assigneeMembershipId,
+      });
+    const notes = 'Ask about the renewal';
+    await edit(1, 'Call Jaya today', null, due, null, agent.membership.id);
+    await edit(2, 'Call Jaya today', notes, due, null, agent.membership.id);
+    await edit(3, 'Call Jaya today', notes, due, remind, agent.membership.id);
+    await edit(4, 'Call Jaya today', notes, due, remind, agent.membership.id);
+    await edit(5, 'Call Jaya now', notes, due, remind, owner.membership.id);
+    const changesOf = (e: EventRow) => (e.detail.changes as string[] | undefined) ?? null;
+    expect(
+      (await taskEventsOf(c)).map((e) => [e.type, e.status, changesOf(e), e.deliveries]),
+    ).toEqual([
+      ['task.created', 'open', null, 1],
+      ['task.updated', 'open', ['title', 'dueAt'], 2],
+      ['task.updated', 'open', ['notes'], 2],
+      ['task.updated', 'open', ['remindAt'], 2],
+      // The details changed before the assignee: the task is the owner's as the edit leaves it, so
+      // the agent's endpoint does not take the change of title.
+      ['task.updated', 'open', ['title'], 1],
+      ['task.assignee_changed', 'open', null, 1],
+    ]);
+
+    // A key clears the due time and completes the task in one request: the change, with status
+    // open, then the completion; then it reopens the task, retitles it and gives it back to the
+    // agent in another: reopened, details changed, given.
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Task sync', scopes: ['tasks.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    const apiDeps = { db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer };
+    await apiUpdateTask(apiDeps, key, taskId, { dueAt: null, status: 'done' });
+    await apiUpdateTask(apiDeps, key, taskId, {
+      status: 'open',
+      title: 'Call Jaya again',
+      assigneeId: agent.membership.id,
+    });
+    const events = await taskEventsOf(c);
+    expect(events.slice(6).map((e) => [e.type, e.status, changesOf(e), e.deliveries])).toEqual([
+      ['task.updated', 'open', ['dueAt'], 1],
+      ['task.status_changed', 'done', null, 2],
+      ['task.status_changed', 'open', null, 2],
+      // The agent's again as the request leaves it.
+      ['task.updated', 'open', ['title'], 2],
+      ['task.assignee_changed', 'open', null, 1],
+    ]);
+
+    // Delivered, each change names what it changed and gives the task as it is then, without its
+    // notes or reminder.
+    await deliverDue(c);
+    const bodies = bodiesById(everyone.path);
+    expect(bodies.size).toBe(10);
+    for (const event of events.filter((e) => e.type === 'task.updated')) {
+      const body = bodies.get(event.id);
+      expect(body?.data.changes, event.id).toEqual(changesOf(event));
+      expect(taskUpdatedPayloadSchema.safeParse(body).success, event.id).toBe(true);
+      expect(taskIn(body)).toMatchObject({
+        id: taskId,
+        title: 'Call Jaya again',
+        status: 'open',
+        previousStatus: null,
+        dueAt: null,
+        assigneeId: agent.membership.id,
+        previousAssigneeId: null,
+      });
+      expect(Object.keys(taskIn(body))).not.toContain('notes');
+      expect(Object.keys(taskIn(body))).not.toContain('remindAt');
+      expect(body?.data.contact).toEqual({ id: jaya.id, phone: jaya.phone, name: 'Jaya' });
+    }
+    // The agent's endpoint hears the changes made while the task was the agent's, in any order.
+    const byText = (a: unknown, b: unknown) => JSON.stringify(a).localeCompare(JSON.stringify(b));
+    expect(
+      bodiesAt(agents.path)
+        .map((b) => [b.type, b.data.changes])
+        .sort(byText),
+    ).toEqual(
+      [
+        ['task.updated', ['title', 'dueAt']],
+        ['task.updated', ['notes']],
+        ['task.updated', ['remindAt']],
+        ['task.updated', ['title']],
+      ].sort(byText),
+    );
+    expect(
+      bodiesAt(others.path)
+        .map((b) => b.type)
+        .sort(),
+    ).toEqual(['task.created', 'task.status_changed', 'task.status_changed']);
   });
 });

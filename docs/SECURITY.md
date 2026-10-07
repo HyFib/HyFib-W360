@@ -178,7 +178,10 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   company's own members (the assignee's foreign key goes through the company's id), never who made
   the change, and reaches the endpoints naming either member, so an endpoint following a member
   hears a task leave them; automations, erasure and merges never change an assignee, so they send
-  none.
+  none. A change of details (`task.updated`, ADR-276) names which of the title, notes, due time and
+  reminder changed, never their values, and the task it gives carries neither its notes nor its
+  reminder, so a change of notes is named without a word of them; members and keys capture it as the
+  runtime role, in the company's scope, since no definer function changes these columns.
 - Customers' numbers (ADR-226): a company's owners and administrators choose the roles (supervisor,
   agent, marketer, analyst) whose members see them masked; the context leaves out
   `contacts.view_numbers` for a member whose every role that grants it is masked, and the services
