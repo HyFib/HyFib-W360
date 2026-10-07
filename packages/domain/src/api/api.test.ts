@@ -1962,6 +1962,21 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(JSON.stringify(given.ownerIds)).toContain(
       "A deal's event belongs to the member who owns the deal when the event happens",
     );
+    // A change of owner is a deal event, and reaches both owners (ADR-269).
+    expect(JSON.stringify(given.ownerIds)).toContain(
+      'deal.owner_changed reaches the endpoints of the owner the deal left as well as of the one it was given to',
+    );
+    for (const field of ['pipelineIds', 'stageIds', 'ownerIds'] as const) {
+      expect(JSON.stringify(given[field]), field).toContain(
+        'deal.created, deal.stage_changed, deal.owner_changed or deal.status_changed',
+      );
+    }
+    expect(JSON.stringify(answered.properties.ownerIds)).toContain(
+      'deal.owner_changed also by the owner it left',
+    );
+    expect(doc.info.description).toContain(
+      'a change of owner reaching the endpoints of the owner it left as well',
+    );
     expect(doc.info.description).toContain(
       "or the deals' owners (its `ownerIds`): then those of the deals the members own when the event happens only",
     );
@@ -2588,6 +2603,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'contact.merged',
       'deal.created',
       'deal.stage_changed',
+      'deal.owner_changed',
       'deal.status_changed',
       'task.created',
       'task.status_changed',

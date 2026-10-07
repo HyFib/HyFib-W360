@@ -47,6 +47,7 @@ import {
   createTemplatesService,
   createWebhooksService,
   dealCreatedPayloadSchema,
+  dealOwnerChangedPayloadSchema,
   dealStageChangedPayloadSchema,
   dealStatusChangedPayloadSchema,
   messageReceivedPayloadSchema,
@@ -4479,8 +4480,8 @@ describe('deal events (ADR-256)', () => {
     const agentsProposals = await add([agent.membership.id], [proposal]);
     const jaya = await newContact(owner, 'Jaya');
 
-    // The agent's deal is added in New and moved to Proposal; then it is given to the owner, which
-    // sends nothing, and won: the owner's by then.
+    // The agent's deal is added in New and moved to Proposal; then it is given to the owner (these
+    // endpoints do not take deal.owner_changed, ADR-269), and won: the owner's by then.
     const { id: theirs } = await svc.createDeal(owner, {
       contactId: jaya.id,
       pipelineId: s.salesId,
@@ -4530,6 +4531,91 @@ describe('deal events (ADR-256)', () => {
     }
     // Contact events are not narrowed by owners.
     expect(bodiesAt(agents.path).filter((b) => b.type === 'contact.created')).toHaveLength(1);
+  });
+
+  it('sends a change of owner with both owners, to the endpoints of either owner and of the deal’s pipeline, in its place among one request’s steps (ADR-269)', async () => {
+    const s = await crmCompany();
+    const { c, owner } = s;
+    const agent = await fx.ctx(c, c.agent);
+    const svc = crm();
+    /** An endpoint of the company taking the events given, with the filters given. */
+    const add = async (eventTypes: WebhookEventType[], filters: Record<string, unknown>) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        ...filters,
+      });
+      return { ...created, path };
+    };
+    const everyone = await add(['deal.owner_changed', 'deal.status_changed'], {});
+    const agents = await add(['deal.owner_changed'], { ownerIds: [agent.membership.id] });
+    await add(['deal.owner_changed'], { pipelineIds: [s.renewalsId] });
+    const jaya = await newContact(owner, 'Jaya');
+
+    // The agent's deal in Sales is given to the owner, left without one, and given back; a change
+    // of its title alone sends nothing, and no endpoint takes its addition.
+    const { id: dealId } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: s.salesId,
+      stageId: s.sales[0],
+      title: 'Annual plan',
+      ownerMembershipId: agent.membership.id,
+    });
+    const change = (version: number, title: string, ownerMembershipId: string | null) =>
+      svc.updateDeal(owner, {
+        id: dealId,
+        expectedVersion: version,
+        title,
+        value: '',
+        ownerMembershipId,
+        expectedCloseOn: null,
+      });
+    await change(1, 'Annual plan', owner.membership.id);
+    await change(2, 'Annual plan', null);
+    await change(3, 'Annual plan', agent.membership.id);
+    await change(4, 'Annual plan 2027', agent.membership.id);
+    const owners = (e: EventRow) => [e.detail.ownerId ?? null, e.detail.previousOwnerId ?? null];
+    // The agent's endpoint hears the deal leave the agent and come back; the Renewals one nothing.
+    expect((await dealEventsOf(c)).map((e) => [e.type, ...owners(e), e.deliveries])).toEqual([
+      ['deal.owner_changed', owner.membership.id, agent.membership.id, 2],
+      ['deal.owner_changed', null, owner.membership.id, 1],
+      ['deal.owner_changed', agent.membership.id, null, 2],
+    ]);
+
+    // A key gives the deal to the owner and wins it in one request: given, then won.
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'CRM sync', scopes: ['deals.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    await apiUpdateDeal({ db: fx.dbs.app, clock: systemClock }, key, dealId, {
+      ownerId: owner.membership.id,
+      status: 'won',
+    });
+    const events = await dealEventsOf(c);
+    expect(events.slice(3).map((e) => [e.type, e.status, ...owners(e), e.deliveries])).toEqual([
+      ['deal.owner_changed', 'open', owner.membership.id, agent.membership.id, 2],
+      ['deal.status_changed', 'won', null, null, 1],
+    ]);
+
+    // Delivered, each gives both owners as the change left them, whoever owns the deal by then.
+    await deliverDue(c);
+    const bodies = bodiesById(everyone.path);
+    expect(bodies.size).toBe(5);
+    for (const event of events.filter((e) => e.type === 'deal.owner_changed')) {
+      const deal = dealIn(bodies.get(event.id));
+      expect([deal?.ownerId, deal?.previousOwnerId], event.id).toEqual(owners(event));
+      expect(dealOwnerChangedPayloadSchema.safeParse(bodies.get(event.id)).success).toBe(true);
+    }
+    const won = dealIn(bodies.get(events[4]!.id));
+    expect([won?.status, won?.previousStatus, won?.previousOwnerId]).toEqual(['won', 'open', null]);
+    expect(bodiesAt(agents.path).map((b) => b.type)).toEqual([
+      'deal.owner_changed',
+      'deal.owner_changed',
+      'deal.owner_changed',
+    ]);
   });
 });
 

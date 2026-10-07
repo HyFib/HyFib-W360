@@ -590,6 +590,12 @@ const webhookDealSchema = z.object({
   previousStatus: dealStatusSchema
     .nullable()
     .describe('deal.status_changed: the status before it. Null for other events.'),
+  previousOwnerId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'deal.owner_changed: the member who owned the deal before, or null when it had no owner. Null for other events.',
+    ),
   valueMinor: z
     .number()
     .int()
@@ -602,7 +608,7 @@ const webhookDealSchema = z.object({
     .uuid()
     .nullable()
     .describe(
-      'The member who owns the deal when the event is delivered (an id from GET /members).',
+      'The member who owns the deal (an id from GET /members): for deal.owner_changed, the one it was given to, or null when it was left without one; for other events, its owner when the event is delivered.',
     ),
   expectedCloseOn: z.iso.date().nullable(),
   lostReason: z
@@ -627,6 +633,7 @@ const webhookDealDataSchema = z.object({
 
 export const dealCreatedPayloadSchema = envelope('deal.created', webhookDealDataSchema);
 export const dealStageChangedPayloadSchema = envelope('deal.stage_changed', webhookDealDataSchema);
+export const dealOwnerChangedPayloadSchema = envelope('deal.owner_changed', webhookDealDataSchema);
 export const dealStatusChangedPayloadSchema = envelope(
   'deal.status_changed',
   webhookDealDataSchema,
@@ -1343,12 +1350,15 @@ export async function buildWebhookPayload(
     }
     case 'deal.created':
     case 'deal.stage_changed':
+    case 'deal.owner_changed':
     case 'deal.status_changed': {
-      // The stage, pipeline and status, and those before them, as captured; the rest as it is now,
-      // so an erased contact's deal is sent as erasure left it.
+      // The stage, pipeline and status, and those before them, as captured, and for a change of
+      // owner the owners; the rest as it is now, so an erased contact's deal is sent as erasure left
+      // it.
       const deal = await dealOf(tx, tenantId, str(event.detail.dealId));
       if (!deal) throw new WebhookEventGoneError();
       const moved = event.type === 'deal.stage_changed';
+      const owned = event.type === 'deal.owner_changed';
       return {
         ...base,
         data: {
@@ -1362,9 +1372,10 @@ export async function buildWebhookPayload(
             previousPipelineId: moved ? str(event.detail.previousPipelineId) : null,
             previousStatus:
               event.type === 'deal.status_changed' ? str(event.detail.previousStatus) : null,
+            previousOwnerId: owned ? str(event.detail.previousOwnerId) : null,
             valueMinor: deal.valueMinor,
             currency: deal.currency,
-            ownerId: deal.ownerId,
+            ownerId: owned ? str(event.detail.ownerId) : deal.ownerId,
             expectedCloseOn: deal.expectedCloseOn,
             lostReason: deal.lostReason,
             createdBy: deal.apiKeyId ? 'api' : deal.automationId ? 'automation' : 'member',

@@ -1011,7 +1011,7 @@ export const webhookPipelineIdsSchema = z
   .nullable();
 
 export const WEBHOOK_PIPELINES_NEED_THE_EVENTS =
-  'Choose pipelines only for an endpoint that receives Deal added, Deal stage or Deal won, lost or reopened.';
+  'Choose pipelines only for an endpoint that receives Deal added, Deal stage, Deal owner or Deal won, lost or reopened.';
 
 export const WEBHOOK_PIPELINES_NOT_FOUND = 'Choose pipelines of this company.';
 
@@ -1064,7 +1064,7 @@ export const webhookStageIdsSchema = z
   .nullable();
 
 export const WEBHOOK_STAGES_NEED_THE_EVENTS =
-  'Choose stages only for an endpoint that receives Deal added, Deal stage or Deal won, lost or reopened.';
+  'Choose stages only for an endpoint that receives Deal added, Deal stage, Deal owner or Deal won, lost or reopened.';
 
 export const WEBHOOK_STAGES_NOT_FOUND = 'Choose stages of this company.';
 
@@ -1117,7 +1117,7 @@ export const webhookOwnerIdsSchema = z
   .nullable();
 
 export const WEBHOOK_OWNERS_NEED_THE_EVENTS =
-  'Choose deal owners only for an endpoint that receives Deal added, Deal stage or Deal won, lost or reopened.';
+  'Choose deal owners only for an endpoint that receives Deal added, Deal stage, Deal owner or Deal won, lost or reopened.';
 
 /** Deal owners (ADR-265) and task assignees (ADR-266) are chosen from the same members. */
 export const WEBHOOK_CRM_MEMBERS_NOT_FOUND =

@@ -102,6 +102,7 @@ import {
   campaignStatusChangedPayloadSchema,
   dealCreatedPayloadSchema,
   dealStageChangedPayloadSchema,
+  dealOwnerChangedPayloadSchema,
   dealStatusChangedPayloadSchema,
   taskCreatedPayloadSchema,
   taskStatusChangedPayloadSchema,
@@ -1161,6 +1162,7 @@ describe('webhook payload schemas', () => {
       previousStageId: null,
       previousPipelineId: null,
       previousStatus: null,
+      previousOwnerId: null,
       valueMinor: 250_050,
       currency: 'INR',
       ownerId: base.id,
@@ -1190,6 +1192,22 @@ describe('webhook payload schemas', () => {
         createdBy,
       ).toBe(true);
     }
+    // A deal given to another member, from one or from nobody, or left without an owner (ADR-269).
+    for (const [ownerId, previousOwnerId] of [
+      [base.id, base.id],
+      [base.id, null],
+      [null, base.id],
+    ]) {
+      expect(
+        dealOwnerChangedPayloadSchema.safeParse({
+          ...created,
+          type: 'deal.owner_changed',
+          data: { ...created.data, deal: { ...deal, ownerId, previousOwnerId } },
+        }).success,
+        JSON.stringify([ownerId, previousOwnerId]),
+      ).toBe(true);
+    }
+    expect(dealOwnerChangedPayloadSchema.safeParse(created).success).toBe(false);
     // Every status a deal can reach, from every other one, with a lost deal's reason.
     for (const status of DEAL_STATUSES) {
       for (const previousStatus of DEAL_STATUSES) {
@@ -1240,6 +1258,8 @@ describe('webhook payload schemas', () => {
       { expectedCloseOn: '31/12/2026' },
       { stageId: 'stage-1' },
       { previousPipelineId: undefined },
+      { previousOwnerId: undefined },
+      { previousOwnerId: 'asha' },
     ]) {
       expect(
         dealCreatedPayloadSchema.safeParse({
@@ -1484,6 +1504,7 @@ describe('the OpenAPI document', () => {
       'campaign.status_changed',
       'deal.created',
       'deal.stage_changed',
+      'deal.owner_changed',
       'deal.status_changed',
       'task.created',
       'task.status_changed',
@@ -1541,7 +1562,21 @@ describe('the OpenAPI document', () => {
     );
     expect(
       Object.keys(doc.components.schemas).filter((name) => name.startsWith('WebhookDeal')),
-    ).toEqual(['WebhookDealCreated', 'WebhookDealStageChanged', 'WebhookDealStatusChanged']);
+    ).toEqual([
+      'WebhookDealCreated',
+      'WebhookDealStageChanged',
+      'WebhookDealOwnerChanged',
+      'WebhookDealStatusChanged',
+    ]);
+    const owned = doc.webhooks['deal.owner_changed'].post.description;
+    for (const words of [
+      'by a member or an API key',
+      'deal.ownerId and deal.previousOwnerId are the change (null for no owner)',
+      'reopened, moved, given to another owner, closed',
+      'for the owner the deal left as well as for the one it was given to',
+    ]) {
+      expect(owned).toContain(words);
+    }
   });
 
   it('describes the task events: the change, what is never sent and what sends nothing (ADR-261)', () => {
@@ -2269,6 +2304,7 @@ describe('number filters (ADR-170)', () => {
       'campaign.status_changed': campaignStatusChangedPayloadSchema,
       'deal.created': dealCreatedPayloadSchema,
       'deal.stage_changed': dealStageChangedPayloadSchema,
+      'deal.owner_changed': dealOwnerChangedPayloadSchema,
       'deal.status_changed': dealStatusChangedPayloadSchema,
       'task.created': taskCreatedPayloadSchema,
       'task.status_changed': taskStatusChangedPayloadSchema,
@@ -2864,10 +2900,11 @@ describe('pipeline filters (ADR-263)', () => {
     );
   });
 
-  it('apply to the three deal events, whose payloads give the pipeline and the one a move left, and to no other event', () => {
+  it('apply to the four deal events, whose payloads give the pipeline and the one a move left, and to no other event', () => {
     expect(WEBHOOK_PIPELINE_EVENTS).toEqual([
       'deal.created',
       'deal.stage_changed',
+      'deal.owner_changed',
       'deal.status_changed',
     ]);
     for (const type of WEBHOOK_EVENT_KEYS) {
@@ -2879,6 +2916,7 @@ describe('pipeline filters (ADR-263)', () => {
     for (const schema of [
       dealCreatedPayloadSchema,
       dealStageChangedPayloadSchema,
+      dealOwnerChangedPayloadSchema,
       dealStatusChangedPayloadSchema,
     ]) {
       const deal = schema.shape.data.shape.deal.shape;
@@ -2942,6 +2980,7 @@ describe('stage filters (ADR-264)', () => {
     for (const schema of [
       dealCreatedPayloadSchema,
       dealStageChangedPayloadSchema,
+      dealOwnerChangedPayloadSchema,
       dealStatusChangedPayloadSchema,
     ]) {
       const deal = schema.shape.data.shape.deal.shape;
@@ -3005,10 +3044,14 @@ describe('owner filters (ADR-265)', () => {
     for (const schema of [
       dealCreatedPayloadSchema,
       dealStageChangedPayloadSchema,
+      dealOwnerChangedPayloadSchema,
       dealStatusChangedPayloadSchema,
     ]) {
       expect('ownerId' in schema.shape.data.shape.deal.shape).toBe(true);
     }
+    expect('previousOwnerId' in dealOwnerChangedPayloadSchema.shape.data.shape.deal.shape).toBe(
+      true,
+    );
     for (const type of WEBHOOK_PIPELINE_EVENTS) {
       expect(WEBHOOK_OWNERS_NEED_THE_EVENTS).toContain(WEBHOOK_EVENT_INFO[type].label);
     }

@@ -1,5 +1,43 @@
 # Progress
 
+## 2026-10-07 — A webhook event when a CRM deal's owner changes (P5-09, P4-04, H-014, ADR-269)
+
+Status: **Implemented; its database tests run in CI only.** Giving a deal to another member sent
+nothing, so a receiver following a member's deals learnt of it only from the deal's next event. The
+local PostgreSQL is unavailable, so the migrations and the integration test below were written but
+not run here; both migrations were parsed with libpg_query (pglast), which checks their syntax only.
+
+### Completed
+
+- **Database:** migration 0185 (the endpoints' event check and their deal lists' checks with
+  `deal.owner_changed`, the events' type check NOT VALID, the deal trigger and its function
+  capturing the owner change, `app.capture_webhook_event` matching the owner a deal left as well)
+  and 0186 (validates the events' type check).
+- **Domain:** the event (`deal.owner_changed`, "Deal owner"), its payload
+  (`dealOwnerChangedPayloadSchema`: `deal.previousOwnerId`, and `deal.ownerId` as captured), the
+  deal events' list for the pipeline, stage and owner filters, the messages and descriptions, and
+  the OpenAPI entries (`webhookDealOwnerChanged`, `WebhookDealOwnerChanged`).
+- **Web:** the "Deal owners" help in Settings → Webhooks says a change of owner reaches the member
+  it left as well; the event's checkbox comes from the registry.
+- **Tests:** unit (new assertions in `webhooks.test.ts` and `api.test.ts`); integration (1 in
+  `webhook-events.test.ts`). Written for CI; the integration test was not run here. No e2e test:
+  Settings lists the event from the registry the unit tests check, and the e2e suite is near its
+  time limit.
+- **Docs:** ADR-269; ARCHITECTURE; SECURITY; THREAT-MODEL T237; DEPLOYMENT (with an old web server's
+  Settings → Webhooks error for an endpoint taking an event it does not know, added for 0150, 0171
+  and 0177 too); RUNBOOKS; BACKLOG P5-09 and P4-04; feature matrix W-138, H-012 and H-014.
+- **Mutation checks:** 16/16 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 118 files, 1129 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Adding notes to the CRM timeline through the public API (P5-08, P4-04, H-033, ADR-268)
 
 Status: **Implemented; its database tests run in CI only.** Keys read and changed deals and tasks

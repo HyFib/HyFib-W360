@@ -2120,13 +2120,14 @@ asks for the deal as it already is changes nothing and answers 200. The timeline
 
 **An integration misses a deal change, or hears two at once (ADR-256).** Endpoints that take
 `deal.created`, `deal.stage_changed` or `deal.status_changed` are sent one event per deal added and
-per change of a deal's stage or status, whoever made it; edits of its title, value, owner or
-expected date send nothing (read the deal with GET /deals/{id}), and neither do erasure and merges.
-Changes made while no endpoint took the type were not recorded and are not sent later. A deal
-reopened in another stage (its own was removed), or moved and closed by one API request, sends two
-events, in the order the steps happened and possibly with the same `createdAt`; each gives the stage
-and status its step left. An erased contact's deal is sent titled "Deal (contact erased)", without
-its contact's number or name or a lost reason.
+per change of a deal's stage or status, whoever made it; edits of its title, value or expected date
+send nothing (read the deal with GET /deals/{id}), and neither do erasure and merges; a change of
+its owner sends `deal.owner_changed` to the endpoints that take it (ADR-269). Changes made while no
+endpoint took the type were not recorded and are not sent later. A deal reopened in another stage
+(its own was removed), or moved and closed by one API request, sends two events, in the order the
+steps happened and possibly with the same `createdAt`; each gives the stage and status its step
+left. An erased contact's deal is sent titled "Deal (contact erased)", without its contact's number
+or name or a lost reason.
 
 **An integration misses a task change, or a task event fails as gone (ADR-261).** Endpoints that
 take `task.created` or `task.status_changed` are sent one event per task added and per completion,
@@ -2694,13 +2695,26 @@ the deals chosen members own only. The endpoints list shows them ("Members whose
 sent: …"), and the API answers `ownerIds` (null takes every deal's). A deal's events go by its owner
 when each happens: a deal without an owner, or owned by someone else at the time, is not queued for
 the endpoint, and events no endpoint takes are not recorded, so there is nothing to replay. Changing
-a deal's owner sends nothing; the deal's next event goes by its new owner. The payload's
-`deal.ownerId` is the owner when it is delivered, so a deal given away meanwhile can name someone
-else. With pipelines or stages chosen too, an event must pass every list. A member who left stays on
-a list, "(no longer uses the CRM)", matching the deals they still own; give those deals another
-owner. To take more, tick members under "Deal owners" on the endpoint's page or choose "Every deal’s
-events", or `PATCH /webhook-endpoints/{id}` with `ownerIds` (null for every deal). Removing every
-deal event clears the list.
+a deal's owner sends `deal.owner_changed` to the endpoints of the owner it left as well as of the
+new one, if they take it (ADR-269); the deal's later events go by its new owner. The payload's
+`deal.ownerId` is the owner when it is delivered (for `deal.owner_changed`, the owner the change
+gave), so a deal given away meanwhile can name someone else. With pipelines or stages chosen too, an
+event must pass every list. A member who left stays on a list, "(no longer uses the CRM)", matching
+the deals they still own; give those deals another owner. To take more, tick members under "Deal
+owners" on the endpoint's page or choose "Every deal’s events", or `PATCH /webhook-endpoints/{id}`
+with `ownerIds` (null for every deal). Removing every deal event clears the list.
+
+**A receiver misses a deal's change of owner, or doubts one (ADR-269).** Endpoints that take
+`deal.owner_changed` ("Deal owner") are sent one event each time a member gives a deal to another
+member or leaves it without an owner on the deal page, or a key changes its `ownerId`. Automations
+set an owner only on the deals they add (`deal.created`), and erasure and merges keep the owner, so
+they send nothing; changes made while no endpoint took the type were not recorded and are not sent
+later. `deal.ownerId` and `deal.previousOwnerId` are the change (null for no owner): compare them,
+not the owner the deal has now (GET /deals/{id}). An endpoint with owners chosen hears it for the
+owner the deal left as well as for the one it was given to, and with pipelines or stages chosen too,
+the deal's pipeline and stage must pass them. One API request that gives the deal to another owner
+and closes it sends the owner change first, with status `open`, then the close; one that reopens or
+moves it sends those first. Who made the change is not sent: the deal's timeline records it.
 
 **A receiver misses the tasks of a member it follows (ADR-266).** An endpoint can take the events of
 the tasks assigned to chosen members only. The endpoints list shows them ("Members whose tasks’

@@ -58,6 +58,7 @@ export const WEBHOOK_EVENT_KEYS = [
   'campaign.status_changed',
   'deal.created',
   'deal.stage_changed',
+  'deal.owner_changed',
   'deal.status_changed',
   'task.created',
   'task.status_changed',
@@ -150,6 +151,11 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       label: 'Deal stage',
       description:
         'A CRM deal moved to another stage of its pipeline, or to another pipeline: by a member, an automation or an API key.',
+    },
+    'deal.owner_changed': {
+      label: 'Deal owner',
+      description:
+        'A CRM deal was given to another member, or left without an owner: by a member or an API key.',
     },
     'deal.status_changed': {
       label: 'Deal won, lost or reopened',
@@ -827,14 +833,16 @@ export function webhookTakesCampaignEvents(eventTypes: readonly WebhookEventType
 }
 
 /**
- * The events of a CRM deal, which an endpoint can take for chosen pipelines (ADR-263) and stages
- * (ADR-264): a deal's event belongs to the pipeline and stage it gives (`deal.pipelineId` and
- * `deal.stageId`, as the event's step left the deal), and a move to the pipeline and stage it left
- * as well.
+ * The events of a CRM deal, which an endpoint can take for chosen pipelines (ADR-263), stages
+ * (ADR-264) and owners (ADR-265): a deal's event belongs to the pipeline and stage it gives
+ * (`deal.pipelineId` and `deal.stageId`, as the event's step left the deal), and a move to the
+ * pipeline and stage it left as well; to the deal's owner when it happens, and a change of owner
+ * (ADR-269) to the owner it left as well.
  */
 export const WEBHOOK_PIPELINE_EVENTS = [
   'deal.created',
   'deal.stage_changed',
+  'deal.owner_changed',
   'deal.status_changed',
 ] as const satisfies readonly WebhookEventType[];
 

@@ -40,6 +40,7 @@ import {
   campaignStatusChangedPayloadSchema,
   dealCreatedPayloadSchema,
   dealStageChangedPayloadSchema,
+  dealOwnerChangedPayloadSchema,
   dealStatusChangedPayloadSchema,
   taskCreatedPayloadSchema,
   taskStatusChangedPayloadSchema,
@@ -823,19 +824,19 @@ export const apiWebhookEndpointSchema = z.object({
     .array(z.uuid())
     .nullable()
     .describe(
-      "The CRM pipelines whose deals' events (deal.created, deal.stage_changed, deal.status_changed) the endpoint receives, by the pipeline an event gives (deal.stage_changed also by the pipeline a move to another pipeline left); null receives every pipeline's. Other events are not narrowed.",
+      "The CRM pipelines whose deals' events (deal.created, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the pipeline an event gives (deal.stage_changed also by the pipeline a move to another pipeline left); null receives every pipeline's. Other events are not narrowed.",
     ),
   stageIds: z
     .array(z.uuid())
     .nullable()
     .describe(
-      "The CRM stages whose deals' events (deal.created, deal.stage_changed, deal.status_changed) the endpoint receives, by the stage an event gives (deal.stage_changed also by the stage the deal left); null receives every stage's. With pipelineIds too, an event must pass both. Other events are not narrowed.",
+      "The CRM stages whose deals' events (deal.created, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the stage an event gives (deal.stage_changed also by the stage the deal left); null receives every stage's. With pipelineIds too, an event must pass both. Other events are not narrowed.",
     ),
   ownerIds: z
     .array(z.uuid())
     .nullable()
     .describe(
-      "The members whose deals' events (deal.created, deal.stage_changed, deal.status_changed) the endpoint receives, by the deal's owner when an event happens; a deal without an owner is on no list. null receives every deal's. With pipelineIds or stageIds too, an event must pass them all. Other events are not narrowed.",
+      "The members whose deals' events (deal.created, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the deal's owner when an event happens (deal.owner_changed also by the owner it left); a deal without an owner is on no list. null receives every deal's. With pipelineIds or stageIds too, an event must pass them all. Other events are not narrowed.",
     ),
   taskAssigneeIds: z
     .array(z.uuid())
@@ -1068,7 +1069,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         '',
         `POST /messages needs an \`Idempotency-Key\` header: a retry with the same key and body returns the first response (header \`Idempotent-Replayed: true\`) and never sends twice; responses are kept ${API_LIMITS.idempotencyHours} hours. Delivery itself follows WhatsApp: read the status with GET /messages/{id}.`,
         '',
-        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact, template, deal and task event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens, or members (its \`assigneeIds\`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens, or contact tags (its \`contactTags\`): then those of the conversations whose contact has any of the tags when the event happens only. And it can name templates (its \`templateIds\`): then it receives the statuses of the messages sent with them and their changes only, or campaigns (its \`campaignIds\`): then the statuses of the messages they sent and their changes only. And it can name CRM pipelines (its \`pipelineIds\`): then it receives the events of those pipelines' deals only, by the pipeline an event gives, a move to another pipeline reaching the endpoints of the pipeline it left as well, or stages (its \`stageIds\`): then those of the deals in those stages only, a move reaching the endpoints of the stage it left as well, or the deals' owners (its \`ownerIds\`): then those of the deals the members own when the event happens only; with more than one of these, an event must pass them all. And it can name the members whose tasks it takes (its \`taskAssigneeIds\`): then it receives the events of the tasks assigned to them when the event happens only.`,
+        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact, template, deal and task event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens, or members (its \`assigneeIds\`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens, or contact tags (its \`contactTags\`): then those of the conversations whose contact has any of the tags when the event happens only. And it can name templates (its \`templateIds\`): then it receives the statuses of the messages sent with them and their changes only, or campaigns (its \`campaignIds\`): then the statuses of the messages they sent and their changes only. And it can name CRM pipelines (its \`pipelineIds\`): then it receives the events of those pipelines' deals only, by the pipeline an event gives, a move to another pipeline reaching the endpoints of the pipeline it left as well, or stages (its \`stageIds\`): then those of the deals in those stages only, a move reaching the endpoints of the stage it left as well, or the deals' owners (its \`ownerIds\`): then those of the deals the members own when the event happens only, a change of owner reaching the endpoints of the owner it left as well; with more than one of these, an event must pass them all. And it can name the members whose tasks it takes (its \`taskAssigneeIds\`): then it receives the events of the tasks assigned to them when the event happens only.`,
       ].join('\n'),
     },
     servers: [{ url: serverUrl }],
@@ -2843,6 +2844,12 @@ export function buildOpenApiDocument(serverUrl: string) {
         `${WEBHOOK_EVENT_INFO['deal.stage_changed'].description} deal.stageId and deal.previousStageId are the move, with deal.previousPipelineId when it moved to another pipeline, and deal.status is its status as it moved; the rest is the deal when the event is delivered. One change can also reopen or close the deal, and then sends deal.status_changed as well, in the order the steps happen (a closed deal never moves): a deal reopened in another stage, because its stage was removed, is reopened and then moved; a deal one request moves and closes is moved and then closed. Each event gives the deal as its step left it; the two can have the same createdAt. Deliveries are not ordered: the latest move is the one with the latest createdAt.`,
         'WebhookDealStageChanged',
       ),
+      'deal.owner_changed': webhook(
+        'webhookDealOwnerChanged',
+        WEBHOOK_EVENT_INFO['deal.owner_changed'].label,
+        `${WEBHOOK_EVENT_INFO['deal.owner_changed'].description} deal.ownerId and deal.previousOwnerId are the change (null for no owner), with the stage, pipeline and status the deal had; the rest is the deal when the event is delivered. One change can also move, reopen or close the deal, and then sends deal.stage_changed and deal.status_changed as well, in the order the steps happen: reopened, moved, given to another owner, closed; each event gives the deal as its step left it, and they can have the same createdAt. An endpoint that names owners (its \`ownerIds\`) receives it for the owner the deal left as well as for the one it was given to. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        'WebhookDealOwnerChanged',
+      ),
       'deal.status_changed': webhook(
         'webhookDealStatusChanged',
         WEBHOOK_EVENT_INFO['deal.status_changed'].label,
@@ -3101,6 +3108,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookCampaignStatusChanged: jsonSchema(campaignStatusChangedPayloadSchema),
         WebhookDealCreated: jsonSchema(dealCreatedPayloadSchema),
         WebhookDealStageChanged: jsonSchema(dealStageChangedPayloadSchema),
+        WebhookDealOwnerChanged: jsonSchema(dealOwnerChangedPayloadSchema),
         WebhookDealStatusChanged: jsonSchema(dealStatusChangedPayloadSchema),
         WebhookTaskCreated: jsonSchema(taskCreatedPayloadSchema),
         WebhookTaskStatusChanged: jsonSchema(taskStatusChangedPayloadSchema),

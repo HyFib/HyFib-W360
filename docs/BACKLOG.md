@@ -291,7 +291,8 @@ verification, app review, Embedded Signup configuration).
   tests run only in CI]** (ADR-264, migration 0180; recorded under P5-09). **[Owner filters for deal
   webhook events built; their database tests run only in CI]** (ADR-265, migration 0181; recorded
   under P5-09). **[Assignee filters for task webhook events built; their database tests run only in
-  CI]** (ADR-266, migration 0182; recorded under P5-09).
+  CI]** (ADR-266, migration 0182; recorded under P5-09). **[Deal owner webhook events built; their
+  database tests run only in CI]** (ADR-269, migrations 0185 and 0186; recorded under P5-09).
   **Remaining:** custom deal fields, products on deals, deal import, CRM connectors (HubSpot,
   Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
   checklist).
@@ -984,7 +985,8 @@ verification, app review, Embedded Signup configuration).
   migrations 0171 and 0172: `deal.created`, `deal.stage_changed` and `deal.status_changed` for every
   deal added, moved, won, lost or reopened, by members, automations or API keys; one change of both
   the stage and the status sends both, in the order the steps happen, each with the deal as its step
-  left it; erasure, merges and edits of a deal's details send nothing; no filter narrows them).
+  left it; erasure, merges and edits of a deal's title, value or expected date send nothing; no
+  filter narrows them).
   **[CRM task events built; their database tests run only in CI]** (ADR-261, migrations 0177 and
   0178: `task.created` for every task added, by members, automations or API keys, and
   `task.status_changed` for every completion, cancellation and reopening; never a task's notes;
@@ -1010,6 +1012,11 @@ verification, app review, Embedded Signup configuration).
   has any of 1 to 50 tags when the events happen; tags are compared as contacts carry them, and one
   no contact has yet may be named; with numbers, teams or members too, an event must pass every
   list).
+  **[Deal owner events built; their database tests run only in CI]** (ADR-269, migrations 0185 and
+  0186: `deal.owner_changed` for every deal given to another member or left without an owner, by
+  members or API keys, with both owners; an endpoint naming owners hears it for the owner the deal
+  left as well; one change that also moves or closes the deal sends each event in the order the
+  steps happen; automations, erasure and merges send none).
   Remaining: filters for other event types (task events by their deal's pipeline, stage or owner,
   among them) and on a message's or contact's values (such as a field's value, contact events by
   tag, or the key that started a run), other authentication (headers computed per delivery, other

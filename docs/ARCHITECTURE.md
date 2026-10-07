@@ -1724,6 +1724,13 @@ true`); the same key with another request (method, path and body hashed) answers
   title, value in minor units, pipeline currency, owner id, expected date, lost reason and creator
   (member, automation or key) as they are then; the conversation the deal was created from and the
   contact.
+- **Deal owner events** (migrations 0185–0186, ADR-269): the deal update trigger, now also on
+  `owner_membership_id`, captures `deal.owner_changed` when an update changes the owner (members on
+  the deal page, keys through `apiUpdateDeal`; the runner's deal steps set an owner only on the
+  deals they add), with the deal, stage and pipeline ids and the new and previous owner ids in
+  `detail`, between a move and a close made by the same update. Its payload (`dealOf`) gives
+  `ownerId` and `previousOwnerId` as captured, where the other deal events give the owner when
+  delivered and `previousOwnerId` null.
 - **Task events** (migrations 0177–0178, ADR-261): triggers on `app.crm_tasks` capture
   `task.created` when a task is inserted (members, the runner's task steps, keys) and
   `task.status_changed` when an update changes its status (members, keys through `apiUpdateTask`),
@@ -1973,7 +1980,9 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   taking the event names owners, and matches it against the list after the pipeline and stage
   filters. Settings (radio buttons and checkboxes under "Deal owners", the members who can own
   deals) and the API (`ownerIds`) set it; the services check the members a list adds (active, with
-  CRM access), and members it held stay; a change that drops every deal event clears it.
+  CRM access), and members it held stay; a change that drops every deal event clears it. For
+  `deal.owner_changed` (ADR-269) it also matches the `previousOwnerId` the trigger stores, so the
+  endpoints of the owner a deal left hear the change too.
 - **Task assignee filters** (migration 0182, ADR-266): `task_assignee_ids` on an endpoint lists the
   members whose tasks' events it takes, null for every task's; a check keeps it to 1 to 50 ids and
   to endpoints taking a task event. `app.capture_webhook_event` (replaced with the same signature)

@@ -499,7 +499,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    endpoint takes `contact.merged` before every worker can describe it. A worker from before it
    cannot describe the event and fails its company's delivery run each time it claims one, so before
    rolling workers back to such an image, turn the event off on the endpoints that take it; newer
-   workers fail only that delivery (`payload_failed`, replayable).
+   workers fail only that delivery (`payload_failed`, replayable). Until the web rollout ends, an
+   old web server answers Settings → Webhooks with an error for a company with an endpoint taking
+   `contact.merged` (it has no label for it): add it to endpoints once the rollout ends, and turn it
+   off before rolling web servers back to such an image.
 
    Migration 0152 (ADR-226) adds `app.tenants.masked_number_roles` (an empty list, without rewriting
    the table) with a check that reads the companies once under the migration's lock, and the runtime
@@ -639,7 +642,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    endpoint takes the deal events before every worker can describe them. A worker from before it
    fails each deal event's delivery without an attempt (`payload_failed`; replay it once newer
    workers run), so before rolling workers back to such an image, turn the deal events off on the
-   endpoints that take them. An old web server's Settings and API do not offer them.
+   endpoints that take them. An old web server's Settings and API do not offer them, and until the
+   web rollout ends an old server answers Settings → Webhooks with an error for a company with an
+   endpoint taking one (it has no label for them): add them to endpoints once the rollout ends, and
+   turn them off before rolling web servers back to such an image.
 
    ADR-257 has no migration. Until the web rollout ends, an old web server refuses `pipelineId` on
    `PATCH /api/v1/deals/{id}` as an unknown field (422); rolling web servers back does the same.
@@ -671,7 +677,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    every worker can describe them. A worker from before it fails each task event's delivery without
    an attempt (`payload_failed`; replay it once newer workers run), so before rolling workers back
    to such an image, turn the task events off on the endpoints that take them. An old web server's
-   Settings and API do not offer them.
+   Settings and API do not offer them, and until the web rollout ends an old server answers Settings
+   → Webhooks with an error for a company with an endpoint taking one (it has no label for them):
+   add them to endpoints once the rollout ends, and turn them off before rolling web servers back to
+   such an image.
 
    Migration 0179 (ADR-263) adds `pipeline_ids` to `app.webhook_endpoints` with a check validated by
    reading the table, and replaces `app.capture_webhook_event` (keeping 0138's filters) with the
@@ -717,6 +726,19 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    know `notes.write`: until the web rollout ends, an old server answers Settings → API keys with an
    error for a company with a key holding it (and the platform plan pages for a plan version
    including it), and `POST /api/v1/notes` with 404. Workers are not affected.
+
+   Migration 0185 (ADR-269) replaces the endpoints' event check and the checks of their pipeline,
+   stage and owner lists (validated at once: at most 10 endpoints per company), the events' type
+   check (NOT VALID; 0186 validates it while captures go on), the deal trigger (now also on owner
+   changes) and its function, and `app.capture_webhook_event` (keeping 0183's filters) with the same
+   signature. Workers roll out before web servers, so no endpoint takes `deal.owner_changed` before
+   every worker can describe it. A worker from before it fails each owner change's delivery without
+   an attempt (`payload_failed`; replay it once newer workers run), so before rolling workers back
+   to such an image, turn the event off on the endpoints that take it. An old web server's Settings
+   and API do not offer it, and until the web rollout ends an old server answers Settings → Webhooks
+   with an error for a company with an endpoint taking it (it has no label for it): add it to
+   endpoints once the rollout ends, and turn it off before rolling web servers back to such an
+   image.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

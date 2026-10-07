@@ -1450,7 +1450,7 @@ function StageChoices({
 const CRM_MEMBER_WORDS = {
   owners: {
     legend: 'Deal owners',
-    help: 'A deal’s events belong to the member who owns the deal when they happen; a deal without an owner belongs to no one. With pipelines or stages chosen too, an event must pass them all. Task and other events are sent whichever owners are chosen.',
+    help: 'A deal’s events belong to the member who owns the deal when they happen, and a change of owner to the member it left as well; a deal without an owner belongs to no one. With pipelines or stages chosen too, an event must pass them all. Task and other events are sent whichever owners are chosen.',
     every: 'Every deal’s events',
     everyHelp: 'Including deals without an owner, and members who join later.',
     only: 'Only those of the deals the members ticked own',

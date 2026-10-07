@@ -10188,3 +10188,44 @@ Decision:
 
 Not built: reading notes or the timeline through the API, changing or deleting notes (members cannot
 either), notes on tasks, mentions in notes, and webhook events for notes.
+
+## ADR-269 A webhook event when a CRM deal's owner changes (P5-09, P4-04) (2026-10-07)
+
+Context: deal events (ADR-256) told integrations of deals added, moved, won, lost or reopened, and
+an endpoint could take the deals of chosen members (ADR-265), but giving a deal to another member
+sent nothing: a receiver following a member's deals (a CRM kept in step, a commission sheet, a
+team's dashboard) learnt that a deal had left or reached them only from the deal's next event, if
+one came.
+
+Decision:
+
+- **`deal.owner_changed`** ("Deal owner") is captured by the deal trigger
+  (`app.webhook_capture_deal`, replaced in place; its update trigger now also fires on
+  `owner_membership_id`) when an update changes a deal's owner: a member giving the deal to another
+  member, or leaving it without one, on the deal page, or a key changing `ownerId`
+  (`PATCH /deals/{id}`, ADR-255). Automations set an owner only on the deals they add
+  (`deal.created`), and erasure and merges keep the owner, so they send none.
+- **The change, not the deal now:** the payload is the deal events' one with a new field,
+  `deal.previousOwnerId` (the owner before, null when it had none; null in the other deal events),
+  and its `deal.ownerId` is the owner the change gave (null when it left the deal without one)
+  rather than the owner at delivery, so a receiver reads the change even when the deal has changed
+  hands again since. The stage, pipeline and status are those the deal had at the change; the rest
+  is the deal at delivery. Who made the change is not sent; the deal's timeline records it.
+- **Its place among one change's steps:** one update that also reopens, moves or closes the deal
+  captures each in the order members' and keys' steps run (ADR-255): reopened, moved, given to
+  another owner, closed, each with the deal as its step left it, stamped with `clock_timestamp()`; a
+  key giving a deal away and winning it in one request sends the owner change with status `open`,
+  then the close.
+- **Filters:** it is a deal event for the pipeline, stage and owner lists (ADR-263 to ADR-265),
+  matched by the pipeline and stage the deal has; an endpoint naming owners receives it for the
+  owner the deal left as well as for the one it was given to, as `conversation.assignment_changed`
+  reaches both members (ADR-181), so a receiver hears a deal leave the members it follows. The lists
+  stay while an endpoint takes any of the four deal events; no number, team or member filter narrows
+  it.
+- **Migrations 0185 and 0186:** 0185 replaces the endpoints' event check and their three deal lists'
+  checks (validated at once: at most 10 endpoints per company), the events' type check (NOT VALID;
+  0186 validates it while captures go on), the trigger and its function, and
+  `app.capture_webhook_event` with the same signature (keeping 0183's filters).
+
+Not built: events for other edits of a deal (its title, value or expected date), who made a change
+in the payload, and task events by their deal's owner.
