@@ -3657,7 +3657,7 @@ describe('pipeline filters (ADR-263)', () => {
       expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(pipelineIds)).toBe(path);
     };
     const needsTheEvents =
-      /only for an endpoint that receives Deal added, Deal stage or Deal won, lost or reopened/;
+      /only for an endpoint that receives Deal added, Deal stage, Deal owner or Deal won, lost or reopened/;
     // Task events are no pipeline's, even those of a deal's tasks.
     await refused(['task.created', 'task.status_changed'], [sales], needsTheEvents);
     await refused(['deal.created'], [], /at least one pipeline/);
@@ -3825,7 +3825,7 @@ describe('stage filters (ADR-264)', () => {
       expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(stageIds)).toBe(path);
     };
     const needsTheEvents =
-      /only for an endpoint that receives Deal added, Deal stage or Deal won, lost or reopened/;
+      /only for an endpoint that receives Deal added, Deal stage, Deal owner or Deal won, lost or reopened/;
     await refused(['task.created', 'contact.created'], [proposal], needsTheEvents);
     await refused(['deal.created'], [], /at least one stage/);
     await refused(['deal.created'], ['Proposal'], /from the list/, 'stageIds.0');
@@ -3977,7 +3977,7 @@ describe('owner filters (ADR-265)', () => {
       expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(ownerIds)).toBe(path);
     };
     const needsTheEvents =
-      /only for an endpoint that receives Deal added, Deal stage or Deal won, lost or reopened/;
+      /only for an endpoint that receives Deal added, Deal stage, Deal owner or Deal won, lost or reopened/;
     await refused(['task.created', 'message.received'], [agent], needsTheEvents);
     await refused(['deal.created'], [], /at least one member/);
     await refused(['deal.created'], ['agent@example.com'], /from the list/, 'ownerIds.0');
@@ -4087,12 +4087,13 @@ describe('owner filters (ADR-265)', () => {
       { id: agent, name: 'Agent' },
       { id: owner.membership.id, name: 'Owner' },
     ]);
-    // A suspended member cannot own deals, so is not offered.
-    await setMember(agent, `status = 'suspended'`);
-    expect((await webhooks().ownerChoices(owner)).map((m) => m.id)).toEqual([owner.membership.id]);
+    // Developers only: refused before the agent is suspended, whose company no longer resolves then.
     for (const user of [c.agent, c.marketer]) {
       await expectAppError(webhooks().ownerChoices(await fx.ctx(c, user)), 'forbidden');
     }
+    // A suspended member cannot own deals, so is not offered.
+    await setMember(agent, `status = 'suspended'`);
+    expect((await webhooks().ownerChoices(owner)).map((m) => m.id)).toEqual([owner.membership.id]);
   });
 });
 

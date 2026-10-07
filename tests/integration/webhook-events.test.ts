@@ -3796,6 +3796,7 @@ describe('deal events (ADR-256)', () => {
       previousStageId: null,
       previousPipelineId: null,
       previousStatus: 'open',
+      previousOwnerId: null,
       valueMinor: 250_050,
       currency: 'INR',
       ownerId: agent.membership.id,

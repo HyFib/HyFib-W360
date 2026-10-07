@@ -4846,7 +4846,7 @@ describe('CRM pipelines and deals (ADR-253)', () => {
     ]);
     const audits = await fx.query<{ actor_id: string; metadata: { changes: string[] } }>(
       `SELECT actor_id, metadata FROM app.audit_events
-        WHERE action = 'crm.deal_updated' AND subject_id = $1 ORDER BY created_at, id`,
+        WHERE action = 'crm.deal_updated' AND subject_id = $1 ORDER BY occurred_at, id`,
       [id],
     );
     expect(audits.map((a) => [a.actor_id, a.metadata.changes])).toEqual([
@@ -5498,7 +5498,7 @@ describe('CRM pipelines and deals (ADR-253)', () => {
     ]);
     const audits = await fx.query<{ actor_type: string; actor_id: string; changes: string[] }>(
       `SELECT actor_type, actor_id, metadata->'changes' AS changes FROM app.audit_events
-        WHERE action = 'crm.task_updated' AND subject_id = $1 ORDER BY created_at`,
+        WHERE action = 'crm.task_updated' AND subject_id = $1 ORDER BY occurred_at, id`,
       [id],
     );
     expect(audits.map((a) => a.changes)).toEqual([
