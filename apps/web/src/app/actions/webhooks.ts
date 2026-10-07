@@ -70,6 +70,8 @@ export async function createWebhookEndpointAction(
     stageIds: string[] | null;
     /** The members whose deals' events it takes (ADR-265); null takes every deal's. */
     ownerIds: string[] | null;
+    /** The members whose tasks' events it takes (ADR-266); null takes every task's. */
+    taskAssigneeIds: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /** Its OAuth client (ADR-173); null: none. */
@@ -138,6 +140,8 @@ export async function updateWebhookEndpointAction(
     stageIds: string[] | null;
     /** The members whose deals' events it takes (ADR-265); null takes every deal's. */
     ownerIds: string[] | null;
+    /** The members whose tasks' events it takes (ADR-266); null takes every task's. */
+    taskAssigneeIds: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /**

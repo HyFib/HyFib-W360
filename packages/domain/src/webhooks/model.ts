@@ -619,6 +619,8 @@ export const WEBHOOK_LIMITS = {
   stages: 50,
   /** The members an endpoint can choose to take the events of the deals they own (ADR-265). */
   owners: 50,
+  /** The members an endpoint can choose to take the events of their assigned tasks (ADR-266). */
+  taskAssignees: 50,
   /**
    * An endpoint's OAuth client (ADR-173): its identifier, secret and scope, short enough that the
    * Basic header stays within what the egress client sends, and the longest token kept.
@@ -928,6 +930,22 @@ export const webhookStageText = (stage: {
   if (stage.removed) return `${text} (removed)`;
   return stage.pipelineArchived ? `${text} (archived pipeline)` : text;
 };
+
+/**
+ * The events of a CRM task, which an endpoint can take for chosen assignees (ADR-266): a task's
+ * events belong to the member it is assigned to when they happen. Tasks are assigned to the members
+ * who can own deals, so an assignee is chosen and stored as a deal owner is (`WebhookOwnerChoice`,
+ * `WebhookEndpointOwner`, `webhookOwnerText`).
+ */
+export const WEBHOOK_TASK_EVENTS = [
+  'task.created',
+  'task.status_changed',
+] as const satisfies readonly WebhookEventType[];
+
+/** Whether an endpoint with these events takes task events, and can choose assignees. */
+export function webhookTakesTaskEvents(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_TASK_EVENTS.some((type) => eventTypes.includes(type));
+}
 
 /**
  * Where an endpoint gets OAuth access tokens and as which client (ADR-173); its secret is never

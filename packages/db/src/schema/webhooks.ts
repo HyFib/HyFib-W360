@@ -234,6 +234,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   ownerIds: uuid('owner_ids').array(),
   /**
+   * The members (memberships) whose tasks' events it takes (migration 0182, ADR-266), by the task's
+   * assignee when the event happens; null takes every task's. Set only while a task event is among
+   * its events.
+   */
+  taskAssigneeIds: uuid('task_assignee_ids').array(),
+  /**
    * The consent changes it takes as `consent.changed` (ADR-189), by purpose and action; null takes
    * every change. Set only while `consent.changed` is among its events.
    */

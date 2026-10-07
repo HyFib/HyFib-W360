@@ -1,5 +1,42 @@
 # Progress
 
+## 2026-10-07 — Choosing the members whose task events an endpoint receives (P5-09, P4-04, H-014, ADR-266)
+
+Status: **Implemented; its database tests run in CI only.** Endpoints could choose the deals of
+chosen members but received every member's tasks. The local PostgreSQL is unavailable, so the
+migration and the integration tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0182 (`task_assignee_ids` on `app.webhook_endpoints` with its check and
+  column grant, and `app.capture_webhook_event` reading the task's assignee when an endpoint names
+  assignees).
+- **Domain:** the list's schema and rules (`webhookTaskAssigneeIdsSchema`,
+  `webhookTaskAssigneeIdsFor`, `assertWebhookTaskAssignees`, sharing the deal owners' check of the
+  members a list adds), the task events' set (`WEBHOOK_TASK_EVENTS`, `webhookTakesTaskEvents`), the
+  named list in Settings' view, create and update in Settings and the API (`taskAssigneeIds`), the
+  audits, the OpenAPI entries and the export.
+- **Web:** "Task assignees" in the endpoint form (every task's events, or the members ticked, one
+  who left kept while named; the deal owners' fieldset, with its own words) and the endpoints list
+  naming them.
+- **Tests:** unit (3 new in `webhooks.test.ts`, 1 in `api.test.ts`); integration (1 in
+  `webhook-events.test.ts`, 1 in `webhooks.test.ts`, 1 in `api-webhook-endpoints.test.ts`, and the
+  API's endpoint shape). Written for CI; the integration tests were not run here. No e2e test: the
+  form is the deal owners', and the e2e suite is near its time limit.
+- **Docs:** ADR-266; ARCHITECTURE; SECURITY; THREAT-MODEL T234; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09
+  and P4-04; feature matrix W-138 and H-014.
+- **Mutation checks:** 22/22 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 117 files, 1122 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Choosing the members whose deal events an endpoint receives (P5-09, P4-04, H-014, ADR-265)
 
 Status: **Implemented; its database tests run in CI only.** Endpoints could choose pipelines and

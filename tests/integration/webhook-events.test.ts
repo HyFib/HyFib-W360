@@ -4841,4 +4841,74 @@ describe('task events (ADR-261)', () => {
       ]),
     ).toEqual([{ event_types: [...WEBHOOK_EVENT_KEYS] }]);
   });
+
+  it('sends an endpoint that names task assignees only the events of the tasks assigned to them when the events happen (ADR-266)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const svc = crm();
+    /** An endpoint of the company taking the task events of the assignees given. */
+    const add = async (taskAssigneeIds: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: [...TASK_EVENTS, 'contact.created'],
+        taskAssigneeIds,
+      });
+      return { ...created, path };
+    };
+    const agents = await add([agent.membership.id]);
+    const everyone = await add(null);
+    const jaya = await newContact(owner, 'Jaya');
+
+    // The agent's task is added; then it is given to the owner, which sends nothing, and completed:
+    // the owner's by then. The owner's own task is not the agent's either.
+    const { id: theirs } = await svc.createTask(owner, {
+      title: 'Call Jaya',
+      assigneeMembershipId: agent.membership.id,
+      contactId: jaya.id,
+    });
+    await svc.updateTask(owner, {
+      id: theirs,
+      expectedVersion: 1,
+      title: 'Call Jaya',
+      notes: null,
+      dueAt: null,
+      remindAt: null,
+      assigneeMembershipId: owner.membership.id,
+    });
+    await svc.completeTask(owner, { id: theirs, expectedVersion: 2 });
+    const { id: ownTask } = await svc.createTask(owner, {
+      title: 'Order brochures',
+      assigneeMembershipId: owner.membership.id,
+    });
+
+    // The addition is captured for both endpoints; the rest for the one taking every task only.
+    expect(
+      (await taskEventsOf(c)).map((e) => [e.type, e.detail.taskId, e.status, e.deliveries]),
+    ).toEqual([
+      ['task.created', theirs, 'open', 2],
+      ['task.status_changed', theirs, 'done', 1],
+      ['task.created', ownTask, 'open', 1],
+    ]);
+    await deliverDue(c);
+    const tasksAt = (path: string) =>
+      bodiesAt(path)
+        .filter((b) => b.type.startsWith('task.'))
+        .map((b) => [b.type, taskIn(b).id])
+        .sort();
+    expect(tasksAt(agents.path)).toEqual([['task.created', theirs]]);
+    expect(tasksAt(everyone.path)).toEqual(
+      [
+        ['task.created', theirs],
+        ['task.status_changed', theirs],
+        ['task.created', ownTask],
+      ].sort(),
+    );
+    // The payload gives the assignee when it is delivered: the owner, since the task was given away.
+    const [added] = bodiesAt(agents.path).filter((b) => b.type === 'task.created');
+    expect(taskIn(added).assigneeId).toBe(owner.membership.id);
+    // Contact events are not narrowed by assignees.
+    expect(bodiesAt(agents.path).filter((b) => b.type === 'contact.created')).toHaveLength(1);
+  });
 });

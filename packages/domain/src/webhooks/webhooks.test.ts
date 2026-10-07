@@ -52,6 +52,7 @@ import {
   WEBHOOK_RUN_END_REASONS_BY_END,
   WEBHOOK_CAMPAIGN_EVENTS,
   WEBHOOK_PIPELINE_EVENTS,
+  WEBHOOK_TASK_EVENTS,
   WEBHOOK_TEAM_EVENTS,
   WEBHOOK_TEMPLATE_EVENTS,
   WEBHOOK_EVENT_INFO,
@@ -84,6 +85,7 @@ import {
   webhookTakesCampaignEvents,
   webhookTakesChannelEvents,
   webhookTakesPipelineEvents,
+  webhookTakesTaskEvents,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   webhookTeamText,
@@ -192,6 +194,9 @@ import {
   webhookOwnerIdsFor,
   webhookOwnerIdsSchema,
   WEBHOOK_OWNERS_NEED_THE_EVENTS,
+  webhookTaskAssigneeIdsFor,
+  webhookTaskAssigneeIdsSchema,
+  WEBHOOK_TASK_ASSIGNEES_NEED_THE_EVENTS,
   webhookTemplateStatusesFor,
   webhookTemplateStatusesSchema,
 } from './service';
@@ -3019,6 +3024,66 @@ describe('owner filters (ADR-265)', () => {
     expect(webhookOwnerText({ id: asha, name: null, active: false })).toBe(
       'Unknown member (no longer uses the CRM)',
     );
+  });
+});
+
+describe('task assignee filters (ADR-266)', () => {
+  const asha = 'e6f7a8b9-c0d1-4c4d-8e5f-6a7b8c9d0e1f';
+  const dev = 'f7a8b9c0-d1e2-4d5e-9f6a-7b8c9d0e1f2a';
+
+  it('take 1 to 50 members, once each and in lower case, in the order given; null takes every task', () => {
+    expect(webhookTaskAssigneeIdsSchema.parse([dev, asha.toUpperCase(), dev, asha])).toEqual([
+      dev,
+      asha,
+    ]);
+    expect(webhookTaskAssigneeIdsSchema.parse(null)).toBeNull();
+    const ids = Array.from(
+      { length: WEBHOOK_LIMITS.taskAssignees + 1 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(WEBHOOK_LIMITS.taskAssignees).toBe(50);
+    expect(webhookTaskAssigneeIdsSchema.parse(ids.slice(1))).toEqual(ids.slice(1));
+    for (const refused of [[], ids, ['asha@example.com'], [asha, null], asha, [42]]) {
+      expect(webhookTaskAssigneeIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookTaskAssigneeIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one member, or take every task.',
+    );
+    expect(webhookTaskAssigneeIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 50 members.',
+    );
+    expect(
+      webhookTaskAssigneeIdsSchema.safeParse(['asha@example.com']).error?.issues[0]?.message,
+    ).toBe('Choose members from the list.');
+  });
+
+  it('apply to the two task events, whose payloads give the assignee, and to no other event', () => {
+    expect(WEBHOOK_TASK_EVENTS).toEqual(['task.created', 'task.status_changed']);
+    for (const type of WEBHOOK_EVENT_KEYS) {
+      expect(webhookTakesTaskEvents([type]), type).toBe(type.startsWith('task.'));
+    }
+    // Deal events are not a task's, even of a deal with tasks.
+    expect(webhookTakesTaskEvents(['deal.created', 'deal.status_changed'])).toBe(false);
+    expect(webhookTakesTaskEvents(['deal.created', 'task.status_changed'])).toBe(true);
+    for (const schema of [taskCreatedPayloadSchema, taskStatusChangedPayloadSchema]) {
+      expect('assigneeId' in schema.shape.data.shape.task.shape).toBe(true);
+    }
+    // The refusal names the events as Settings lists them.
+    for (const type of WEBHOOK_TASK_EVENTS) {
+      expect(WEBHOOK_TASK_ASSIGNEES_NEED_THE_EVENTS).toContain(WEBHOOK_EVENT_INFO[type].label);
+    }
+  });
+
+  it('are kept only while the endpoint takes a task event: given, kept, or cleared', () => {
+    expect(webhookTaskAssigneeIdsFor(['task.created'], [asha], null)).toEqual([asha]);
+    expect(webhookTaskAssigneeIdsFor(['task.status_changed'], undefined, [dev])).toEqual([dev]);
+    expect(webhookTaskAssigneeIdsFor(['task.created'], null, [dev])).toBeNull();
+    expect(webhookTaskAssigneeIdsFor(['task.status_changed'], undefined, null)).toBeNull();
+    expect(
+      webhookTaskAssigneeIdsFor(['deal.created', 'contact.created'], [asha], [dev]),
+    ).toBeNull();
   });
 });
 

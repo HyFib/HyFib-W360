@@ -53,6 +53,7 @@ import {
   webhookTakesChannelEvents,
   webhookTakesFieldChanges,
   webhookTakesPipelineEvents,
+  webhookTakesTaskEvents,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   webhookTeamText,
@@ -1445,12 +1446,35 @@ function StageChoices({
   );
 }
 
+/** What the members' fieldset says for deal owners (ADR-265) and task assignees (ADR-266). */
+const CRM_MEMBER_WORDS = {
+  owners: {
+    legend: 'Deal owners',
+    help: 'A deal’s events belong to the member who owns the deal when they happen; a deal without an owner belongs to no one. With pipelines or stages chosen too, an event must pass them all. Task and other events are sent whichever owners are chosen.',
+    every: 'Every deal’s events',
+    everyHelp: 'Including deals without an owner, and members who join later.',
+    only: 'Only those of the deals the members ticked own',
+    idPart: 'owner',
+  },
+  taskAssignees: {
+    legend: 'Task assignees',
+    help: 'A task’s events belong to the member it is assigned to when they happen. Deal and other events are sent whichever assignees are chosen.',
+    every: 'Every task’s events',
+    everyHelp: 'Including those of members who join later.',
+    only: 'Only those of the tasks assigned to the members ticked',
+    idPart: 'task-assignee',
+  },
+} as const;
+
 /**
- * The members whose deals' events an endpoint takes (ADR-265): every deal's, or those of the deals
- * the members ticked own when the events happen. Members who can own deals are offered; one the
- * endpoint already names who no longer can stays listed, ticked, until it is unticked.
+ * The members whose deals' events (ADR-265) or tasks' events (ADR-266) an endpoint takes, as `kind`
+ * says: every deal's or task's, or those of the deals the members ticked own, or of the tasks
+ * assigned to them, when the events happen. Members who can own deals and be assigned tasks are
+ * offered; one the endpoint already names who no longer can stays listed, ticked, until it is
+ * unticked.
  */
-function OwnerChoices({
+function CrmMemberChoices({
+  kind,
   prefix,
   choices,
   stored,
@@ -1459,6 +1483,7 @@ function OwnerChoices({
   chosen,
   onChange,
 }: {
+  kind: keyof typeof CRM_MEMBER_WORDS;
   prefix: string;
   choices: WebhookOwnerChoice[];
   /** The members the endpoint names now, so one who left stays listed until saved without. */
@@ -1474,40 +1499,35 @@ function OwnerChoices({
       .filter((m) => !choices.some((c) => c.id === m.id))
       .map((m) => ({ id: m.id, text: webhookOwnerText(m) })),
   ];
+  const words = CRM_MEMBER_WORDS[kind];
   return (
     <fieldset className="grid gap-2">
-      <legend className="mb-1 text-sm font-medium">Deal owners</legend>
-      <p className="text-xs text-muted-foreground">
-        A deal’s events belong to the member who owns the deal when they happen; a deal without an
-        owner belongs to no one. With pipelines or stages chosen too, an event must pass them all.
-        Task and other events are sent whichever owners are chosen.
-      </p>
+      <legend className="mb-1 text-sm font-medium">{words.legend}</legend>
+      <p className="text-xs text-muted-foreground">{words.help}</p>
       <label className="flex items-start gap-2 text-sm">
         <input
           type="radio"
-          name={`${prefix}-owners`}
+          name={`${prefix}-${words.idPart}s`}
           className="mt-1"
           checked={every}
           onChange={() => onEveryChange(true)}
         />
         <span>
-          Every deal’s events
-          <span className="block text-xs text-muted-foreground">
-            Including deals without an owner, and members who join later.
-          </span>
+          {words.every}
+          <span className="block text-xs text-muted-foreground">{words.everyHelp}</span>
         </span>
       </label>
       <label className="flex items-start gap-2 text-sm">
         <input
           type="radio"
-          name={`${prefix}-owners`}
+          name={`${prefix}-${words.idPart}s`}
           className="mt-1"
           checked={!every}
           disabled={listed.length === 0}
           onChange={() => onEveryChange(false)}
         />
         <span>
-          Only those of the deals the members ticked own
+          {words.only}
           {listed.length === 0 ? (
             <span className="block text-xs text-muted-foreground">No member uses the CRM yet.</span>
           ) : null}
@@ -1516,7 +1536,7 @@ function OwnerChoices({
       {!every ? (
         <div className="ml-6 grid max-h-64 gap-1 overflow-y-auto">
           {listed.map((m) => {
-            const id = `${prefix}-owner-${m.id}`;
+            const id = `${prefix}-${words.idPart}-${m.id}`;
             return (
               <div key={m.id} className="flex items-center gap-2">
                 <Checkbox
@@ -2010,6 +2030,8 @@ export function WebhookEndpointForm({
     stages: WebhookEndpointStage[] | null;
     /** The members whose deals it takes (ADR-265), with whether they can own deals; null: all. */
     owners: WebhookEndpointOwner[] | null;
+    /** The members whose tasks it takes (ADR-266), with whether they can be assigned; null: all. */
+    taskAssignees: WebhookEndpointOwner[] | null;
     /** The members it names (ADR-181), with whether they still take conversations; null: all. */
     assignees: WebhookEndpointAssignee[] | null;
     oauth: WebhookEndpointOAuth | null;
@@ -2028,7 +2050,10 @@ export function WebhookEndpointForm({
   pipelineChoices: WebhookPipelineChoice[];
   /** The stages in use of the pipelines the company uses, which an endpoint can choose (ADR-264). */
   stageChoices: WebhookStageChoice[];
-  /** The company's members who can own deals, whom an endpoint can choose (ADR-265). */
+  /**
+   * The company's members who can own deals and be assigned tasks, whom an endpoint can choose as
+   * deal owners (ADR-265) and task assignees (ADR-266).
+   */
   ownerChoices: WebhookOwnerChoice[];
   /** The company's members who take conversations, whom an endpoint can choose (ADR-181). */
   assigneeChoices: WebhookAssigneeChoice[];
@@ -2099,6 +2124,10 @@ export function WebhookEndpointForm({
   const [stageIds, setStageIds] = useState<string[]>(endpoint?.stages?.map((st) => st.id) ?? []);
   const [everyOwner, setEveryOwner] = useState(!endpoint?.owners);
   const [ownerIds, setOwnerIds] = useState<string[]>(endpoint?.owners?.map((m) => m.id) ?? []);
+  const [everyTaskAssignee, setEveryTaskAssignee] = useState(!endpoint?.taskAssignees);
+  const [taskAssigneeIds, setTaskAssigneeIds] = useState<string[]>(
+    endpoint?.taskAssignees?.map((m) => m.id) ?? [],
+  );
   const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
   const [everyField, setEveryField] = useState(!endpoint?.contactFields);
   const [fieldKeys, setFieldKeys] = useState<string[]>(
@@ -2235,6 +2264,9 @@ export function WebhookEndpointForm({
         // Every deal's events unless the owners ticked are chosen (ADR-265).
         const chosenOwners =
           webhookTakesPipelineEvents(eventTypes) && !everyOwner ? ownerIds : null;
+        // Every task's events unless the assignees ticked are chosen (ADR-266).
+        const chosenTaskAssignees =
+          webhookTakesTaskEvents(eventTypes) && !everyTaskAssignee ? taskAssigneeIds : null;
         // Every conversation's events unless the members ticked are chosen (ADR-181).
         const chosenAssignees =
           webhookTakesTeamEvents(eventTypes) && !everyAssignee ? assigneeIds : null;
@@ -2264,6 +2296,7 @@ export function WebhookEndpointForm({
           pipelineIds: chosenPipelines,
           stageIds: chosenStages,
           ownerIds: chosenOwners,
+          taskAssigneeIds: chosenTaskAssignees,
           assigneeIds: chosenAssignees,
         };
         const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
@@ -2338,6 +2371,8 @@ export function WebhookEndpointForm({
               setStageIds([]);
               setEveryOwner(true);
               setOwnerIds([]);
+              setEveryTaskAssignee(true);
+              setTaskAssigneeIds([]);
               setEveryAssignee(true);
               setAssigneeIds([]);
               setEveryField(true);
@@ -2519,7 +2554,8 @@ export function WebhookEndpointForm({
         />
       ) : null}
       {webhookTakesPipelineEvents(eventTypes) ? (
-        <OwnerChoices
+        <CrmMemberChoices
+          kind="owners"
           prefix={prefix}
           choices={ownerChoices}
           stored={endpoint?.owners ?? []}
@@ -2527,6 +2563,18 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryOwner}
           chosen={ownerIds}
           onChange={setOwnerIds}
+        />
+      ) : null}
+      {webhookTakesTaskEvents(eventTypes) ? (
+        <CrmMemberChoices
+          kind="taskAssignees"
+          prefix={prefix}
+          choices={ownerChoices}
+          stored={endpoint?.taskAssignees ?? []}
+          every={everyTaskAssignee}
+          onEveryChange={setEveryTaskAssignee}
+          chosen={taskAssigneeIds}
+          onChange={setTaskAssigneeIds}
         />
       ) : null}
       <fieldset className="grid gap-2">

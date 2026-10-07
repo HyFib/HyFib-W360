@@ -66,6 +66,7 @@ import {
   webhookTakesFieldChanges,
   webhookTakesPipelineEvents,
   webhookRunEndTakesReason,
+  webhookTakesTaskEvents,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   type WebhookAssigneeChoice,
@@ -1117,7 +1118,9 @@ export const webhookOwnerIdsSchema = z
 export const WEBHOOK_OWNERS_NEED_THE_EVENTS =
   'Choose deal owners only for an endpoint that receives Deal added, Deal stage or Deal won, lost or reopened.';
 
-export const WEBHOOK_OWNERS_NOT_FOUND = 'Choose active members of this company who use the CRM.';
+/** Deal owners (ADR-265) and task assignees (ADR-266) are chosen from the same members. */
+export const WEBHOOK_CRM_MEMBERS_NOT_FOUND =
+  'Choose active members of this company who use the CRM.';
 
 /**
  * The owners an endpoint keeps after it is added or changed: every deal (null) unless it takes a
@@ -1134,25 +1137,75 @@ export function webhookOwnerIdsFor(
 }
 
 /**
- * Refuses members a list adds to an endpoint unless each can own deals now: a member of the
- * company, active, with access to the CRM (ADR-265), as deal owners are chosen. Members the list
- * already held may have left or lost the access since, and stay: they match the deals they still
- * own. `tx` is in the company's scope.
+ * Refuses members a list (`field`) adds to an endpoint unless each can own deals and be assigned
+ * tasks now: a member of the company, active, with access to the CRM, as deal owners and task
+ * assignees are chosen. Members the list already held may have left or lost the access since, and
+ * stay: they match the deals they still own and the tasks still assigned to them. `tx` is in the
+ * company's scope.
  */
-export async function assertWebhookOwners(
+async function assertWebhookCrmMembers(
   tx: Tx,
   tenantId: string,
+  field: 'ownerIds' | 'taskAssigneeIds',
   ids: readonly string[] | null | undefined,
-  held: readonly string[] | null = null,
+  held: readonly string[] | null,
 ): Promise<void> {
   const added = (ids ?? []).filter((id) => !held?.includes(id));
   if (added.length === 0) return;
   const refs = await memberRefs(tx, tenantId, added);
   const index = (ids ?? []).findIndex((id) => added.includes(id) && !refs.get(id)?.active);
   if (index === -1) return;
-  throw new AppError('validation_failed', WEBHOOK_OWNERS_NOT_FOUND, {
-    issues: [{ path: `ownerIds.${index}`, message: WEBHOOK_OWNERS_NOT_FOUND }],
+  throw new AppError('validation_failed', WEBHOOK_CRM_MEMBERS_NOT_FOUND, {
+    issues: [{ path: `${field}.${index}`, message: WEBHOOK_CRM_MEMBERS_NOT_FOUND }],
   });
+}
+
+/** Refuses deal owners a list adds unless each can own deals now (ADR-265). */
+export async function assertWebhookOwners(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+  held: readonly string[] | null = null,
+): Promise<void> {
+  await assertWebhookCrmMembers(tx, tenantId, 'ownerIds', ids, held);
+}
+
+/**
+ * The members whose tasks' events an endpoint takes (ADR-266), each once; null takes every task's,
+ * including those of members who join later.
+ */
+export const webhookTaskAssigneeIdsSchema = z
+  .array(z.uuid({ error: 'Choose members from the list.' }))
+  .min(1, 'Choose at least one member, or take every task.')
+  .max(WEBHOOK_LIMITS.taskAssignees, `Choose at most ${WEBHOOK_LIMITS.taskAssignees} members.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_TASK_ASSIGNEES_NEED_THE_EVENTS =
+  'Choose task assignees only for an endpoint that receives Task added or Task done, cancelled or reopened.';
+
+/**
+ * The assignees an endpoint keeps after it is added or changed: every task (null) unless it takes a
+ * task event; then those given, or else the ones it had.
+ */
+export function webhookTaskAssigneeIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesTaskEvents(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/** Refuses task assignees a list adds unless tasks can be assigned to each now (ADR-266). */
+export async function assertWebhookTaskAssignees(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+  held: readonly string[] | null = null,
+): Promise<void> {
+  await assertWebhookCrmMembers(tx, tenantId, 'taskAssigneeIds', ids, held);
 }
 
 /**
@@ -1385,6 +1438,11 @@ const endpointFields = z.object({
    */
   ownerIds: webhookOwnerIdsSchema.optional(),
   /**
+   * Given, the members whose tasks' events it takes (null: every task's, ADR-266); left out, they
+   * stay.
+   */
+  taskAssigneeIds: webhookTaskAssigneeIdsSchema.optional(),
+  /**
    * Given, the members whose assigned conversations' events it takes (null: every conversation's,
    * ADR-181); left out, they stay.
    */
@@ -1521,6 +1579,12 @@ const ownersNeedTheEvents = {
     !data.ownerIds || webhookTakesPipelineEvents(data.eventTypes),
   options: { path: ['ownerIds'], message: WEBHOOK_OWNERS_NEED_THE_EVENTS },
 };
+/** Task assignees are chosen only for an endpoint that takes task events (ADR-266). */
+const taskAssigneesNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; taskAssigneeIds?: unknown }) =>
+    !data.taskAssigneeIds || webhookTakesTaskEvents(data.eventTypes),
+  options: { path: ['taskAssigneeIds'], message: WEBHOOK_TASK_ASSIGNEES_NEED_THE_EVENTS },
+};
 /** Members are chosen only for an endpoint that takes events of conversations (ADR-181). */
 const assigneesNeedTheEvents = {
   check: (data: { eventTypes: WebhookEventType[]; assigneeIds?: unknown }) =>
@@ -1549,6 +1613,7 @@ const endpointSchema = endpointFields
   .refine(pipelinesNeedTheEvents.check, pipelinesNeedTheEvents.options)
   .refine(stagesNeedTheEvents.check, stagesNeedTheEvents.options)
   .refine(ownersNeedTheEvents.check, ownersNeedTheEvents.options)
+  .refine(taskAssigneesNeedTheEvents.check, taskAssigneesNeedTheEvents.options)
   .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options);
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointFields
@@ -1574,6 +1639,7 @@ const updateSchema = endpointFields
   .refine(pipelinesNeedTheEvents.check, pipelinesNeedTheEvents.options)
   .refine(stagesNeedTheEvents.check, stagesNeedTheEvents.options)
   .refine(ownersNeedTheEvents.check, ownersNeedTheEvents.options)
+  .refine(taskAssigneesNeedTheEvents.check, taskAssigneesNeedTheEvents.options)
   .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
@@ -1671,6 +1737,11 @@ export interface WebhookEndpointView {
    * deals now; null takes every deal's.
    */
   owners: WebhookEndpointOwner[] | null;
+  /**
+   * The members whose tasks' events it takes (ADR-266), as stored, named, with whether tasks can be
+   * assigned to them now; null takes every task's.
+   */
+  taskAssignees: WebhookEndpointOwner[] | null;
   /**
    * The members whose assigned conversations' events it takes (ADR-181), as stored, named, with
    * whether conversations can still be assigned to them; null takes every conversation's.
@@ -1914,6 +1985,7 @@ export async function lockWebhookEndpoint(
       pipelineIds: webhookEndpoints.pipelineIds,
       stageIds: webhookEndpoints.stageIds,
       ownerIds: webhookEndpoints.ownerIds,
+      taskAssigneeIds: webhookEndpoints.taskAssigneeIds,
       assigneeIds: webhookEndpoints.assigneeIds,
       headerNames: webhookEndpoints.headerNames,
       oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
@@ -1974,6 +2046,7 @@ export async function insertWebhookEndpoint(
     pipelineIds: string[] | null;
     stageIds: string[] | null;
     ownerIds: string[] | null;
+    taskAssigneeIds: string[] | null;
     assigneeIds: string[] | null;
     /** Its OAuth client (ADR-173), checked by `checkedWebhookOAuth` with nothing stored. */
     oauth: CheckedWebhookOAuth | null;
@@ -2023,6 +2096,7 @@ export async function insertWebhookEndpoint(
     pipelineIds: input.pipelineIds,
     stageIds: input.stageIds,
     ownerIds: input.ownerIds,
+    taskAssigneeIds: input.taskAssigneeIds,
     assigneeIds: input.assigneeIds,
     ...webhookOAuthColumns(keyring, tenantId, id, input.oauth, NO_WEBHOOK_OAUTH),
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
@@ -2421,6 +2495,7 @@ export function createWebhooksService(deps: {
               pipelineIds: webhookEndpoints.pipelineIds,
               stageIds: webhookEndpoints.stageIds,
               ownerIds: webhookEndpoints.ownerIds,
+              taskAssigneeIds: webhookEndpoints.taskAssigneeIds,
               assigneeIds: webhookEndpoints.assigneeIds,
               oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
               oauthClientId: webhookEndpoints.oauthClientId,
@@ -2567,12 +2642,17 @@ export function createWebhooksService(deps: {
                     and(eq(crmStages.tenantId, ctx.tenant.id), inArray(crmStages.id, stageIds)),
                   );
           const stageById = new Map(namedStages.map((st) => [st.id, st]));
-          // The deal owners endpoints chose (ADR-265), and whether they can own deals now.
-          const ownerById = await memberRefs(
+          // The deal owners (ADR-265) and task assignees (ADR-266) endpoints chose, and whether
+          // they can own deals and be assigned tasks now.
+          const crmMemberById = await memberRefs(
             tx,
             ctx.tenant.id,
-            rows.flatMap((r) => r.ownerIds ?? []),
+            rows.flatMap((r) => [...(r.ownerIds ?? []), ...(r.taskAssigneeIds ?? [])]),
           );
+          const crmMember = (id: string): WebhookEndpointOwner => {
+            const member = crmMemberById.get(id);
+            return { id, name: member?.name ?? null, active: member?.active ?? false };
+          };
           // The members endpoints chose (ADR-181), and whether they still take conversations.
           const assigneeIds = [...new Set(rows.flatMap((r) => r.assigneeIds ?? []))];
           const namedAssignees =
@@ -2628,6 +2708,7 @@ export function createWebhooksService(deps: {
               pipelineIds: chosenPipelines,
               stageIds: chosenStages,
               ownerIds: chosenOwners,
+              taskAssigneeIds: chosenTaskAssignees,
               assigneeIds: chosenAssignees,
               contactFieldKeys: chosenFields,
               oauthTokenUrl,
@@ -2693,12 +2774,8 @@ export function createWebhooksService(deps: {
                         };
                   })
                 : null,
-              owners: chosenOwners
-                ? chosenOwners.map((id): WebhookEndpointOwner => {
-                    const owner = ownerById.get(id);
-                    return { id, name: owner?.name ?? null, active: owner?.active ?? false };
-                  })
-                : null,
+              owners: chosenOwners ? chosenOwners.map(crmMember) : null,
+              taskAssignees: chosenTaskAssignees ? chosenTaskAssignees.map(crmMember) : null,
               contactFields: chosenFields
                 ? chosenFields.map((key): WebhookEndpointField => ({
                     key,
@@ -2903,8 +2980,9 @@ export function createWebhooksService(deps: {
     },
 
     /**
-     * The members an endpoint can choose to take the events of the deals they own (ADR-265): those
-     * who can own deals (active, with access to the CRM), by name.
+     * The members an endpoint can choose to take the events of the deals they own (ADR-265) or of the
+     * tasks assigned to them (ADR-266): those who can own deals and be assigned tasks (active, with
+     * access to the CRM), by name.
      */
     async ownerChoices(ctx: TenantContext): Promise<WebhookOwnerChoice[]> {
       assertCan(ctx, 'developer.manage');
@@ -3045,6 +3123,12 @@ export function createWebhooksService(deps: {
         await assertWebhookStages(tx, ctx.tenant.id, stageIds);
         const ownerIds = webhookOwnerIdsFor(data.eventTypes, data.ownerIds, null);
         await assertWebhookOwners(tx, ctx.tenant.id, ownerIds);
+        const taskAssigneeIds = webhookTaskAssigneeIdsFor(
+          data.eventTypes,
+          data.taskAssigneeIds,
+          null,
+        );
+        await assertWebhookTaskAssignees(tx, ctx.tenant.id, taskAssigneeIds);
         const assigneeIds = webhookAssigneeIdsFor(data.eventTypes, data.assigneeIds, null);
         await assertWebhookAssignees(tx, ctx.tenant.id, assigneeIds);
         const oauth = data.oauth
@@ -3082,6 +3166,7 @@ export function createWebhooksService(deps: {
           pipelineIds,
           stageIds,
           ownerIds,
+          taskAssigneeIds,
           assigneeIds,
           oauth,
           creator: { userId: ctx.user.id },
@@ -3119,6 +3204,7 @@ export function createWebhooksService(deps: {
               ...(pipelineIds ? { pipelineIds } : {}),
               ...(stageIds ? { stageIds } : {}),
               ...(ownerIds ? { ownerIds } : {}),
+              ...(taskAssigneeIds ? { taskAssigneeIds } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
               ...(oauth ? { oauthTokenHost: oauth.host } : {}),
             },
@@ -3287,6 +3373,20 @@ export function createWebhooksService(deps: {
         if (data.ownerIds !== undefined) {
           await assertWebhookOwners(tx, ctx.tenant.id, ownerIds, endpoint.ownerIds);
         }
+        const taskAssigneeIds = webhookTaskAssigneeIdsFor(
+          data.eventTypes,
+          data.taskAssigneeIds,
+          endpoint.taskAssigneeIds,
+        );
+        // And the assignees it adds: those it held may have left since (ADR-266).
+        if (data.taskAssigneeIds !== undefined) {
+          await assertWebhookTaskAssignees(
+            tx,
+            ctx.tenant.id,
+            taskAssigneeIds,
+            endpoint.taskAssigneeIds,
+          );
+        }
         const assigneeIds = webhookAssigneeIdsFor(
           data.eventTypes,
           data.assigneeIds,
@@ -3333,6 +3433,7 @@ export function createWebhooksService(deps: {
             pipelineIds,
             stageIds,
             ownerIds,
+            taskAssigneeIds,
             assigneeIds,
             ...(data.headers
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
@@ -3381,6 +3482,7 @@ export function createWebhooksService(deps: {
               ...(pipelineIds ? { pipelineIds } : {}),
               ...(stageIds ? { stageIds } : {}),
               ...(ownerIds ? { ownerIds } : {}),
+              ...(taskAssigneeIds ? { taskAssigneeIds } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
               ...webhookOAuthAudit(oauth, endpoint),
             },

@@ -295,6 +295,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.owners.map(webhookOwnerText).join(', ')}
                       </p>
                     ) : null}
+                    {e.taskAssignees ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Members whose tasks’ events are sent:{' '}
+                        {e.taskAssignees.map(webhookOwnerText).join(', ')}
+                      </p>
+                    ) : null}
                     {e.teams ? (
                       <p className="text-xs text-muted-foreground">
                         Teams whose conversations’ events are sent:{' '}

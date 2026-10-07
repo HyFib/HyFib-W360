@@ -4096,6 +4096,146 @@ describe('owner filters (ADR-265)', () => {
   });
 });
 
+describe('task assignee filters (ADR-266)', () => {
+  const setMember = (membershipId: string, change: string) =>
+    fx.query(`UPDATE app.memberships SET ${change} WHERE id = $1`, [membershipId]);
+
+  it('are refused without a task event, empty, over 50 or naming a member who cannot be assigned tasks; named in Settings, a member who left included; kept by a change that leaves them out and cleared with the events; the database keeps them to those events', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const ownerId = owner.membership.id;
+    const agent = (await fx.ctx(c, c.agent)).membership.id;
+    // A marketer cannot use the CRM, and another company's member is not this one's.
+    const marketer = (await fx.ctx(c, c.marketer)).membership.id;
+    const other = await fx.company();
+    const elsewhere = (await fx.ctx(other, other.agent)).membership.id;
+    const url = 'https://hooks.example.com/in';
+    const refused = async (
+      eventTypes: string[],
+      taskAssigneeIds: unknown,
+      message: RegExp,
+      path = 'taskAssigneeIds',
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes, taskAssigneeIds }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(taskAssigneeIds)).toBe(
+        path,
+      );
+    };
+    const needsTheEvents =
+      /only for an endpoint that receives Task added or Task done, cancelled or reopened/;
+    await refused(['deal.created', 'message.received'], [agent], needsTheEvents);
+    await refused(['task.created'], [], /at least one member/);
+    await refused(['task.created'], ['agent@example.com'], /from the list/, 'taskAssigneeIds.0');
+    await refused(
+      ['task.created'],
+      Array.from({ length: 51 }, () => uuidv7()),
+      /at most 50/,
+    );
+    const notAssignable = /active members of this company who use the CRM/;
+    await refused(['task.status_changed'], [agent, marketer], notAssignable, 'taskAssigneeIds.1');
+    await refused(['task.created'], [elsewhere], notAssignable, 'taskAssigneeIds.0');
+    await refused(['task.created'], [uuidv7()], notAssignable, 'taskAssigneeIds.0');
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['task.created', 'deal.created'],
+      taskAssigneeIds: [agent, ownerId.toUpperCase(), agent],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { taskAssigneeIds?: unknown; ownerIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => a.metadata.taskAssigneeIds);
+    expect(await audits('webhook.endpoint_created')).toEqual([[agent, ownerId]]);
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.taskAssignees;
+    expect(await current()).toEqual([
+      { id: agent, name: 'Agent', active: true },
+      { id: ownerId, name: 'Owner', active: true },
+    ]);
+    // Deal owners are a list of their own: none were chosen.
+    expect((await webhooks().list(owner)).find((e) => e.id === created.id)?.owners).toBeNull();
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['task.created', 'deal.created'],
+        ...fields,
+      });
+    // The agent is suspended: kept, named as no longer able to be assigned tasks, and kept by a
+    // change that gives the list again; adding the marketer is refused.
+    await setMember(agent, `status = 'suspended'`);
+    expect(await current()).toEqual([
+      { id: agent, name: 'Agent', active: false },
+      { id: ownerId, name: 'Owner', active: true },
+    ]);
+    await change({ description: 'kept' });
+    await change({ taskAssigneeIds: [agent, ownerId] });
+    expect((await current())?.map((m) => m.id)).toEqual([agent, ownerId]);
+    await expectAppError(
+      change({ taskAssigneeIds: [agent, marketer] }),
+      'validation_failed',
+      notAssignable,
+    );
+    await change({ taskAssigneeIds: [ownerId] });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [agent, ownerId],
+      [agent, ownerId],
+      [ownerId],
+    ]);
+    // Dropped, the suspended agent cannot be added back until they can be assigned tasks again.
+    await expectAppError(change({ taskAssigneeIds: [agent] }), 'validation_failed', notAssignable);
+    await setMember(agent, `status = 'active'`);
+    await change({ taskAssigneeIds: [agent] });
+    await change({ taskAssigneeIds: null });
+    expect(await current()).toBeNull();
+    await change({ taskAssigneeIds: [ownerId] });
+    // Either task event keeps the list.
+    await change({ eventTypes: ['task.status_changed', 'contact.created'] });
+    expect((await current())?.map((m) => m.id)).toEqual([ownerId]);
+    // The database refuses an empty list, more than 50, a missing id or a list of lists from an
+    // endpoint taking a task event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET task_assignee_ids = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    const many = `ARRAY[${Array.from({ length: 51 }, () => `'${uuidv7()}'`).join(',')}]::uuid[]`;
+    for (const bad of [
+      `'{}'`,
+      many,
+      `ARRAY['${ownerId}', NULL]::uuid[]`,
+      `ARRAY[ARRAY['${ownerId}'::uuid], ARRAY['${agent}'::uuid]]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_task_assignee_ids/);
+    }
+    await change({ eventTypes: ['deal.created', 'deal.status_changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['deal.created'], taskAssigneeIds: [ownerId] }),
+      'validation_failed',
+      needsTheEvents,
+    );
+    // …and any list for an endpoint that takes none.
+    await expect(setInDatabase(`ARRAY['${ownerId}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_task_assignee_ids/,
+    );
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'task_assignee_ids',
+                                   'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('consent change filters (ADR-189)', () => {
   it('are refused without consent.changed, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to the event', async () => {
     const c = await fx.company();

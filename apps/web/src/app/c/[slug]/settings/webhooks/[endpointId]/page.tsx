@@ -224,6 +224,7 @@ export default async function WebhookEndpointPage({
               pipelines: endpoint.pipelines,
               stages: endpoint.stages,
               owners: endpoint.owners,
+              taskAssignees: endpoint.taskAssignees,
               assignees: endpoint.assignees,
               oauth: endpoint.oauth,
             }}

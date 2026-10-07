@@ -1722,11 +1722,11 @@ true`); the same key with another request (method, path and body hashed) answers
   `task.created` when a task is inserted (members, the runner's task steps, keys) and
   `task.status_changed` when an update changes its status (members, keys through `apiUpdateTask`),
   through `app.capture_webhook_event`: the task id, and the status before a change, in `detail`,
-  with the task's contact and no conversation, so no filter narrows them, stamped with
-  `clock_timestamp()`. Edits, reminders and merges leave the status, and erasure deletes the row, so
-  they capture nothing. Their payloads are built when delivered (`taskOf`): the statuses as
-  captured; the title, due time, assignee id, deal id and creator as they are then, and the contact
-  or null; never the notes.
+  with the task's contact and no conversation, so no number, team, member or deal filter narrows
+  them (assignees do, ADR-266), stamped with `clock_timestamp()`. Edits, reminders and merges leave
+  the status, and erasure deletes the row, so they capture nothing. Their payloads are built when
+  delivered (`taskOf`): the statuses as captured; the title, due time, assignee id, deal id and
+  creator as they are then, and the contact or null; never the notes.
 - **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
   notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
   SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same
@@ -1968,6 +1968,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   filters. Settings (radio buttons and checkboxes under "Deal owners", the members who can own
   deals) and the API (`ownerIds`) set it; the services check the members a list adds (active, with
   CRM access), and members it held stay; a change that drops every deal event clears it.
+- **Task assignee filters** (migration 0182, ADR-266): `task_assignee_ids` on an endpoint lists the
+  members whose tasks' events it takes, null for every task's; a check keeps it to 1 to 50 ids and
+  to endpoints taking a task event. `app.capture_webhook_event` (replaced with the same signature)
+  reads the task's `assignee_membership_id` by the detail's `taskId` only when an active endpoint of
+  the company taking the event names assignees, and matches it against the list. Settings (radio
+  buttons and checkboxes under "Task assignees", the members who can own deals, who are those tasks
+  are assigned to) and the API (`taskAssigneeIds`) set it; the services check the members a list
+  adds as they check deal owners, and members it held stay; a change that drops both task events
+  clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and

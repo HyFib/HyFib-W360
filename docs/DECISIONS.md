@@ -10055,3 +10055,48 @@ Decision:
 
 Not built: an event when a deal's owner changes, task events by their deal's pipeline, stage or
 owner, or by their assignee, and owners chosen per event type (one list serves the three events).
+
+## ADR-266 Choosing the members whose task events a webhook endpoint receives (P5-09, P4-04) (2026-10-07)
+
+Context: task events (ADR-261) reached every endpoint that took them, whoever the task was assigned
+to; a receiver that serves some members (one member's own task list in another tool, a team lead's
+board) had to read `task.assigneeId` to drop the rest. ADR-265 left task events by assignee unbuilt.
+
+Decision:
+
+- **A list of task assignees per endpoint,** for the two task events: null receives every task's, as
+  before; a list holds 1 to 50 members of the company, by membership id (as `GET /members` lists
+  them), in the order given with repeats merged. A task's event counts when the member it is
+  assigned to when the event happens is listed; every task has an assignee. Reassigning a task sends
+  no event, so there is no assignee left to reach; the payload's `task.assigneeId` is the assignee
+  when it is delivered, which a later change can make differ. Deal events and every other event are
+  not narrowed, and the deal filters (ADR-263 to ADR-265) do not narrow task events. Chosen in
+  Settings → Webhooks ("Task assignees": every task's events, or only those of the tasks assigned to
+  the members ticked), shown on the endpoint as "Members whose tasks’ events are sent: …", and
+  through the API as `taskAssigneeIds` on `POST /webhook-endpoints` and `PATCH
+/webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Members who can be assigned tasks** are those who can own deals (active, with access to the CRM,
+  `assertCrmMember`'s rule), so the choices, the check of the members a list adds and the label are
+  the deal owners' (ADR-265), shared. Members a list already holds may have left, been suspended or
+  lost the access since, and stay, matching the tasks still assigned to them; Settings names them
+  "(no longer uses the CRM)" and the API keeps them in `taskAssigneeIds`.
+- **Only while a task event is taken:** a list given for an endpoint that takes neither is refused
+  (`taskAssigneeIds`; 422 through the API). A change that drops both clears it, and a `PATCH` that
+  leaves it out keeps it; Settings always sends it. A check in the database holds the same rule
+  (null, or 1 to 50 ids in one dimension without a null, with a task event).
+- **Applied at capture:** `app.capture_webhook_event` reads the task's assignee from `app.crm_tasks`
+  by the task the trigger stores in the event's detail, only when an active endpoint of the company
+  that takes the event names assignees (as it reads a deal's owner, ADR-265), and matches it against
+  each endpoint's list. The task trigger runs as whoever changes the task, in the company's scope.
+  No event is written when no endpoint takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `taskAssigneeIds` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0182:** `task_assignee_ids uuid[]` on `app.webhook_endpoints` with the check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role, and `app.capture_webhook_event` replaced with the same signature (0181's, with the
+  assignee), so its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: task events by their deal's pipeline, stage or owner, an event when a task is reassigned,
+and assignees chosen per event type (one list serves the two events).

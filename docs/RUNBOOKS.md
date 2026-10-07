@@ -2690,6 +2690,19 @@ owner. To take more, tick members under "Deal owners" on the endpoint's page or 
 events", or `PATCH /webhook-endpoints/{id}` with `ownerIds` (null for every deal). Removing every
 deal event clears the list.
 
+**A receiver misses the tasks of a member it follows (ADR-266).** An endpoint can take the events of
+the tasks assigned to chosen members only. The endpoints list shows them ("Members whose tasks’
+events are sent: …"), and the API answers `taskAssigneeIds` (null takes every task's). A task's
+events go by its assignee when each happens: a task assigned to someone else at the time is not
+queued for the endpoint, and events no endpoint takes are not recorded, so there is nothing to
+replay. Reassigning a task sends nothing; the task's next event goes by its new assignee. The
+payload's `task.assigneeId` is the assignee when it is delivered, so a task given away meanwhile can
+name someone else. A member who left stays on a list, "(no longer uses the CRM)", matching the tasks
+still assigned to them; assign those tasks to someone else. To take more, tick members under "Task
+assignees" on the endpoint's page or choose "Every task’s events", or `PATCH
+/webhook-endpoints/{id}` with `taskAssigneeIds` (null for every task). Removing both task events
+clears the list.
+
 **A receiver misses a run's events (ADR-183).** An endpoint can take the run events of the runs
 started by chosen triggers only. The endpoints list shows them ("Automation runs started by: …"),
 and the API answers `runTriggers` (null takes every run). A run's events go by what started it, as

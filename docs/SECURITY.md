@@ -163,8 +163,9 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   creator and its contact as the API describes it, never its notes (free text members write;
   `tasks.read` reads them). The triggers run as whoever changes the task, so an event is captured
   for that company alone, and only when one of its active endpoints takes it; erasing a contact
-  deletes its tasks, so their pending events are not delivered (`event_gone`). No filter narrows
-  task events, which Settings and the OpenAPI document say.
+  deletes its tasks, so their pending events are not delivered (`event_gone`). No number, team,
+  member or deal filter narrows task events, which Settings and the OpenAPI document say; an
+  endpoint's list of assignees does (ADR-266).
 - Customers' numbers (ADR-226): a company's owners and administrators choose the roles (supervisor,
   agent, marketer, analyst) whose members see them masked; the context leaves out
   `contacts.view_numbers` for a member whose every role that grants it is masked, and the services
@@ -1371,6 +1372,13 @@ Phase 5 rules (outgoing webhooks, P5-09):
   narrows what one endpoint receives and never adds an event or a delivery for another endpoint or
   company. The choices name members who can own deals to members with `developer.manage` only.
   Audited with the list (unit tests; integration tests, run in CI only).
+- An endpoint can take the events of the tasks assigned to chosen members only (ADR-266), chosen the
+  same way. A list may add only members of the endpoint's company who can be assigned tasks (active,
+  with access to the CRM, checked in its scope, as deal owners are), is kept only while the endpoint
+  takes a task event (a database check too, which also refuses a null entry), and is applied in
+  `app.capture_webhook_event` to the assignee it reads from the task in the company's scope: it
+  narrows what one endpoint receives and never adds an event or a delivery for another endpoint or
+  company. Audited with the list (unit tests; integration tests, run in CI only).
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

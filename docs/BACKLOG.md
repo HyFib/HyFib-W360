@@ -289,6 +289,8 @@ verification, app review, Embedded Signup configuration).
   **[Stage filters for deal webhook events built; their database and browser tests run only in
   CI]** (ADR-264, migration 0180; recorded under P5-09). **[Owner filters for deal webhook events
   built; their database tests run only in CI]** (ADR-265, migration 0181; recorded under P5-09).
+  **[Assignee filters for task webhook events built; their database tests run only in CI]**
+  (ADR-266, migration 0182; recorded under P5-09).
   **Remaining:** custom deal fields, products on deals, deal import, CRM connectors (HubSpot,
   Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
   checklist).
@@ -995,11 +997,15 @@ verification, app review, Embedded Signup configuration).
   0181: an endpoint takes the events of the deals 1 to 50 chosen members own when the events happen;
   a list adds only members who can own deals and keeps those who left; with pipelines or stages too,
   an event must pass every list).
-  Remaining: filters for other event types (task events by their deal's pipeline, stage or owner, or
-  by assignee, among them) and on a message's or contact's values (such as by tag or a field's
-  value, or the key that started a run), other authentication (headers computed per delivery, other
-  OAuth grants), mutual TLS, fixed egress addresses, events for store orders, Payment Links and each
-  step of a run, `createdAt` finer than the millisecond, load tests.
+  **[Assignee filters for task events built; their database tests run only in CI]** (ADR-266,
+  migration 0182: an endpoint takes the events of the tasks assigned to 1 to 50 chosen members when
+  the events happen; a list adds only members who can be assigned tasks and keeps those who left;
+  deal and other events are not narrowed).
+  Remaining: filters for other event types (task events by their deal's pipeline, stage or owner,
+  among them) and on a message's or contact's values (such as by tag or a field's value, or the key
+  that started a run), other authentication (headers computed per delivery, other OAuth grants),
+  mutual TLS, fixed egress addresses, events for store orders, Payment Links and each step of a run,
+  `createdAt` finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,
