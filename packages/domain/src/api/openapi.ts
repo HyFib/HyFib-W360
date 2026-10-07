@@ -116,7 +116,14 @@ import {
   apiUpdateMatchingConversationsSchema,
 } from './conversations';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
-import { apiCreateDealSchema, apiUpdateDealSchema } from './deals';
+import {
+  API_DEAL_HISTORY_DETAILS,
+  API_DEAL_HISTORY_TYPES,
+  apiCreateDealSchema,
+  apiUpdateDealSchema,
+  type ApiDealHistoryDetail,
+  type ApiDealHistoryType,
+} from './deals';
 import { API_NOTE_MAX_LENGTH, apiCreateNoteSchema } from './notes';
 import { apiCreateTaskSchema, apiUpdateTaskSchema } from './tasks';
 import { apiUpdateOrderSchema } from './orders';
@@ -467,6 +474,81 @@ export const apiDealSchema = z.object({
     .uuid()
     .nullable()
     .describe('The API key that made the latest change, when changedBy is api; null otherwise.'),
+});
+
+/** One change of a CRM deal, as its history gives it (ADR-281). */
+export const apiDealHistoryEntrySchema = z.object({
+  id: z.uuid().describe('The change, on the deal’s timeline.'),
+  type: z
+    .enum(Object.values(API_DEAL_HISTORY_TYPES) as [ApiDealHistoryType, ...ApiDealHistoryType[]])
+    .describe(
+      'What changed: the deal was added (created), its title, value or expected close date changed (updated), it moved to another stage or pipeline (stage_changed), it was given to another owner or left without one (owner_changed), or it was won, lost or reopened.',
+    ),
+  createdAt: z.iso.datetime().describe('When the change was made.'),
+  changedBy: z
+    .enum(CRM_CHANGERS)
+    .nullable()
+    .describe(
+      'Who made the change: a member (member, never which member), an automation’s run (automation) or an API key (api, named by changedByApiKeyId). Null when HyFib did not record who.',
+    ),
+  changedByApiKeyId: z
+    .uuid()
+    .nullable()
+    .describe('The API key that made the change, when changedBy is api; null otherwise.'),
+  stageId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'created: the stage the deal was added in; stage_changed: the stage it moved to. Null for other changes.',
+    ),
+  pipelineId: z.uuid().nullable().describe('The pipeline of stageId, when there is one.'),
+  previousStageId: z
+    .uuid()
+    .nullable()
+    .describe('stage_changed: the stage the deal left. Null for other changes.'),
+  previousPipelineId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The pipeline of previousStageId: another pipeline than pipelineId when the deal moved to another pipeline.',
+    ),
+  ownerId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'owner_changed: the member the deal was given to, or null when it was left without an owner. Null for other changes.',
+    ),
+  previousOwnerId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'owner_changed: the member who owned the deal before, or null. Null for other changes.',
+    ),
+  changes: z
+    .array(
+      z.enum(
+        Object.values(API_DEAL_HISTORY_DETAILS) as [
+          ApiDealHistoryDetail,
+          ...ApiDealHistoryDetail[],
+        ],
+      ),
+    )
+    .nullable()
+    .describe(
+      'updated: what changed, in this order: `title`, `valueMinor` and `expectedCloseOn`; names only, never the title or date before. Null for other changes.',
+    ),
+  valueMinor: z
+    .number()
+    .int()
+    .nullable()
+    .describe(
+      'created and won: the deal’s value then, in the pipeline currency’s minor units; updated: the new value, when the value changed (null when it was cleared). Null otherwise.',
+    ),
+  previousValueMinor: z
+    .number()
+    .int()
+    .nullable()
+    .describe('updated: the value before, when the value changed. Null otherwise.'),
 });
 
 /**
@@ -2422,6 +2504,24 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/deals/{id}/history': {
+        get: {
+          operationId: 'listDealHistory',
+          summary: 'A CRM deal’s history, newest first',
+          description: [
+            `${scopeNote('deals.read')} The changes the deal events report, as the deal’s timeline keeps them: the deal added, its title, value or expected close date changed, moved to another stage or pipeline, given to another owner, won, lost or reopened, by members, automations and API keys, newest first; pages never skip or repeat a change. Each says who made it (\`changedBy\`, never which member, with the key for one made through the API), so an integration can rebuild how a deal moved, and skip its own changes. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+            'Notes and the deal’s tasks are never given here (`GET /notes` and `GET /tasks` read them), nor the title, date or lost reason before a change. Erasing a contact deletes its timeline, so an erased contact’s deal has no history; a merge keeps the deal’s.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }, ...pageParams],
+          responses: {
+            '200': {
+              description: 'A page of the deal’s changes.',
+              content: pageOf('DealHistoryEntry'),
+            },
+            ...errors(401, 403, 404, 422, 429, 500),
+          },
+        },
+      },
       '/tasks': {
         get: {
           operationId: 'listTasks',
@@ -3256,6 +3356,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         UpdateOrder: jsonSchema(apiUpdateOrderSchema, 'input'),
         Pipeline: jsonSchema(apiPipelineSchema),
         Deal: jsonSchema(apiDealSchema),
+        DealHistoryEntry: jsonSchema(apiDealHistoryEntrySchema),
         CreateDeal: jsonSchema(apiCreateDealSchema, 'input'),
         UpdateDeal: jsonSchema(apiUpdateDealSchema, 'input'),
         Task: jsonSchema(apiTaskSchema),
@@ -3388,6 +3489,7 @@ export const API_ROUTES = [
   ['post', '/deals'],
   ['get', '/deals/{id}'],
   ['patch', '/deals/{id}'],
+  ['get', '/deals/{id}/history'],
   ['get', '/tasks'],
   ['post', '/tasks'],
   ['get', '/tasks/{id}'],

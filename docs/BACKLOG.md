@@ -278,7 +278,10 @@ verification, app review, Embedded Signup configuration).
   browser tests run only in CI]** (ADR-255, no migration; recorded under P5-08). **[Deal webhook
   events built; their database tests run only in CI]** (ADR-256, migrations 0171 and 0172; recorded
   under P5-09). **[Moving deals to another pipeline through the public API built; its database tests
-  run only in CI]** (ADR-257, no migration; recorded under P5-08). **[Reading tasks through the
+  run only in CI]** (ADR-257, no migration; recorded under P5-08).
+  **[A deal's history through the public API built; its database tests run only in CI]** (ADR-281,
+  no migration; recorded under P5-08).
+  **[Reading tasks through the
   public API built; its database tests run only in CI]** (ADR-258, migrations 0173 and 0174;
   recorded under P5-08). **[Creating tasks through the public API built; its database tests run only
   in CI]** (ADR-259, migrations 0175 and 0176; recorded under P5-08). **[Changing tasks through the
@@ -848,6 +851,10 @@ verification, app review, Embedded Signup configuration).
   `pipelineId` on `PATCH /deals/{id}` moves an open deal to another active pipeline, to `stageId` or
   its first active stage, a deal with a value only to a pipeline of its currency, as members move
   deals; no migration).
+  **[Reading a deal's history built; its database tests run only in CI]** (ADR-281:
+  `GET /deals/{id}/history` with `deals.read` gives the changes the deal events report, newest first
+  on exact pages, each with who made it, a key by its id and never which member; never notes or
+  tasks; no migration).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact

@@ -2118,6 +2118,15 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**`GET /api/v1/deals/{id}/history` answers 403, 404 or 422, or leaves a change out (ADR-281).** 403
+`forbidden` names the scope the key lacks, `deals.read`, or with reason `not_in_plan` the company's
+plan leaves out the CRM or the scope. 404 means the id is not one of the company's deals. 422 names
+the parameter: `limit` beyond 1 to 100, or a parameter the history does not take. The history gives
+the changes the deal events report, newest first: notes and the deal's tasks are read with
+`GET /notes` and `GET /tasks`, and a deal of an erased contact has no history, since erasure deletes
+the timeline. `changedBy` null means HyFib did not record who made a change; a member is never
+named.
+
 **An integration misses a deal change, or hears two at once (ADR-256).** Endpoints that take
 `deal.created`, `deal.stage_changed` or `deal.status_changed` are sent one event per deal added and
 per change of a deal's stage or status, whoever made it; edits of its title, value or expected date

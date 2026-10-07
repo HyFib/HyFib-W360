@@ -1079,6 +1079,12 @@ Phase 5 rules (Public API, P5-08):
   to a pipeline of its currency, so a value is never read in another currency than the one it was
   given in. The move is on the timeline and in the audit log as the key's (unit tests; integration
   tests, run in CI only).
+- Reading a deal's history (ADR-281): `GET /deals/{id}/history` needs `deals.read` and the CRM in
+  the plan, checked before anything is read; it reads the key's company's deal only (another
+  company's answers 404, as an unknown one does; an id that is not a UUID is refused before any
+  query), in a read-only transaction, and only the deal kinds of its timeline: never notes, tasks,
+  the contact's details or which member made a change (a key by its id). Erased contacts' timelines
+  are deleted, so their deals have no history (unit tests; integration tests, run in CI only).
 - Reading CRM tasks (ADR-258): `GET /tasks` and `GET /tasks/{id}` need `tasks.read`, granted only
   with `crm.read`, and the CRM in the company's plan, both checked before a task is read. They read
   in the key's company only (row security and an explicit company condition): another company's task

@@ -1,5 +1,35 @@
 # Progress
 
+## 2026-10-07 — A CRM deal's history through the public API (P5-08, P4-04, H-033, ADR-281)
+
+Status: **Implemented; its database tests run in CI only.** Keys read a deal as it is and heard each
+change as it happened, but could not learn how a deal got where it is. No migration. The local
+PostgreSQL is unavailable, so the integration test below was written but not run here.
+
+### Completed
+
+- **Domain:** `apiListDealHistory` and `toApiDealHistoryEntry` (`api/deals.ts`), the entry's OpenAPI
+  schema (`DealHistoryEntry`, its type and change names built from the domain's lists) and
+  `GET /deals/{id}/history`.
+- **Web:** `GET /api/v1/deals/{id}/history`.
+- **Tests:** unit (`api/deals.test.ts`: the kinds and names, every entry type and maker, data of the
+  wrong shape, the query, refusals before any read, the OpenAPI entries); integration (1 new in
+  `api.test.ts`). Written for CI; the integration test was not run here. No e2e test: the e2e suite
+  is near its time limit.
+- **Docs:** ADR-281; ARCHITECTURE; SECURITY; THREAT-MODEL T249; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08
+  and P4-04; feature matrix H-033.
+- **Mutation checks:** 25/25 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 121 files, 1155 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — A webhook event when a CRM note is added (P5-09, P4-04, H-014, ADR-280)
 
 Status: **Implemented; its database tests run in CI only.** Integrations read notes through the API

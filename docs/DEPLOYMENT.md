@@ -844,6 +844,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    no label for it): add it to endpoints once the rollout ends, and turn it off before rolling web
    servers back to such an image.
 
+   ADR-281 has no migration. Until the web rollout ends, an old web server answers
+   `GET /api/v1/deals/{id}/history` with 404; rolling web servers back does the same. Workers are
+   not affected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -32,6 +32,7 @@ import {
   apiListConversationMessages,
   apiListConversationNotes,
   apiListConversations,
+  apiListDealHistory,
   apiListDeals,
   apiListMembers,
   apiListMessages,
@@ -5985,6 +5986,171 @@ describe('CRM pipelines and deals (ADR-253)', () => {
     await contacts().eraseContact(owner, { contactId: asha, suppress: false });
     expect(await idsOf({})).toEqual([moved.id, called.id]);
     await expectAppError(apiGetNote(deps(), reader.ctx, met.id), 'not_found', /Note/);
+  });
+
+  it('read a deal’s history, newest first on exact pages, each change with who made it (ADR-281)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const theirOwner = await fx.ctx(other, other.owner);
+    const reader = await apiKey(c, ['deals.read'], 'Deal history');
+    const writer = await apiKey(c, ['deals.write', 'notes.write'], 'Order system');
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New', 'Qualified']);
+    const renewals = await pipelineOf(owner, 'Renewals', 'INR', ['Due']);
+    const asha = await contactOf(owner, 'Asha');
+    // A second apart, so the history is in the order the changes were made.
+    const start = Date.now() - 60_000;
+    const second = (n: number) => new Date(start + n * 1000);
+    const crmAt = (n: number) =>
+      createCrmService({
+        db: fx.dbs.app,
+        clock: at(second(n)),
+        jobs: fx.jobs(),
+        signer: fx.signer,
+      });
+    const { id } = await crmAt(1).createDeal(owner, {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan',
+      value: '100',
+    });
+    // The key changes its details, moves it on and gives it to the agent; a member moves it to the
+    // other pipeline and loses it; the key reopens and wins it.
+    const change = (n: number, input: Record<string, unknown>) =>
+      apiUpdateDeal(deps(at(second(n))), writer.ctx, id, input);
+    await change(2, { title: 'Bigger plan', valueMinor: 25_000 });
+    await change(3, { stageId: sales.stages[1] });
+    await change(4, { ownerId: agent.membership.id });
+    await crmAt(5).moveDeal(owner, {
+      id,
+      expectedVersion: 4,
+      pipelineId: renewals.id,
+      stageId: renewals.stages[0],
+    });
+    await crmAt(6).closeDeal(owner, { id, expectedVersion: 5, outcome: 'lost' });
+    await change(7, { status: 'open' });
+    await change(8, { status: 'won' });
+    // A note on the deal and a task about it are on its timeline, never in its history.
+    await apiCreateNote(deps(at(second(9))), writer.ctx, { body: 'Signed', dealId: id }, null);
+    await crmAt(10).createTask(owner, {
+      title: 'Send the invoice',
+      assigneeMembershipId: owner.membership.id,
+      dealId: id,
+    });
+
+    const history = (query: Record<string, string | null | undefined> = {}) =>
+      apiListDealHistory(deps(), reader.ctx, id, query);
+    const none = {
+      stageId: null,
+      pipelineId: null,
+      previousStageId: null,
+      previousPipelineId: null,
+      ownerId: null,
+      previousOwnerId: null,
+      changes: null,
+      valueMinor: null,
+      previousValueMinor: null,
+    };
+    const byMember = { changedBy: 'member', changedByApiKeyId: null };
+    const byKey = { changedBy: 'api', changedByApiKeyId: writer.id };
+    const when = (n: number) => ({ id: expect.any(String), createdAt: second(n).toISOString() });
+    const all = await history();
+    expect(all).toEqual({
+      data: [
+        { ...when(8), type: 'won', ...byKey, ...none, valueMinor: 25_000 },
+        { ...when(7), type: 'reopened', ...byKey, ...none },
+        { ...when(6), type: 'lost', ...byMember, ...none },
+        {
+          ...when(5),
+          type: 'stage_changed',
+          ...byMember,
+          ...none,
+          stageId: renewals.stages[0],
+          pipelineId: renewals.id,
+          previousStageId: sales.stages[1],
+          previousPipelineId: sales.id,
+        },
+        {
+          ...when(4),
+          type: 'owner_changed',
+          ...byKey,
+          ...none,
+          ownerId: agent.membership.id,
+          previousOwnerId: null,
+        },
+        {
+          ...when(3),
+          type: 'stage_changed',
+          ...byKey,
+          ...none,
+          stageId: sales.stages[1],
+          pipelineId: sales.id,
+          previousStageId: sales.stages[0],
+          previousPipelineId: sales.id,
+        },
+        {
+          ...when(2),
+          type: 'updated',
+          ...byKey,
+          ...none,
+          changes: ['title', 'valueMinor'],
+          valueMinor: 25_000,
+          previousValueMinor: 10_000,
+        },
+        {
+          ...when(1),
+          type: 'created',
+          ...byMember,
+          ...none,
+          stageId: sales.stages[0],
+          pipelineId: sales.id,
+          valueMinor: 10_000,
+        },
+      ],
+      nextCursor: null,
+    });
+    // Never which member made a change.
+    for (const member of [owner.membership.id]) {
+      expect(JSON.stringify(all)).not.toContain(member);
+    }
+
+    // Pages of three never skip or repeat a change.
+    const ids: string[] = [];
+    let cursor: string | null | undefined;
+    do {
+      const page = await history({ limit: '3', cursor });
+      expect(page.data.length).toBeLessThanOrEqual(3);
+      ids.push(...page.data.map((e) => e.id));
+      cursor = page.nextCursor;
+    } while (cursor && ids.length < 20);
+    expect(ids).toEqual(all.data.map((e) => e.id));
+
+    // Another company's deal and an unknown one are not found; a key without the scope reads none,
+    // nor a company without the CRM.
+    const theirSales = await pipelineOf(theirOwner, 'Theirs', 'INR', ['Open']);
+    const theirDeal = await crm().createDeal(theirOwner, {
+      contactId: await contactOf(theirOwner, 'Mira'),
+      pipelineId: theirSales.id,
+      stageId: theirSales.stages[0],
+      title: 'Theirs',
+    });
+    for (const dealId of [theirDeal.id, uuidv7()]) {
+      await expectAppError(apiListDealHistory(deps(), reader.ctx, dealId, {}), 'not_found', /Deal/);
+    }
+    await expectAppError(
+      apiListDealHistory(deps(), writer.ctx, id, {}),
+      'forbidden',
+      /deals\.read/,
+    );
+    await onPlan(c, []);
+    await expectAppError(history(), 'forbidden', /does not include the CRM/);
+    await onPlan(c, ['crm']);
+
+    // Erasing the contact deletes its timeline: the deal is kept, without a history.
+    await contacts().eraseContact(owner, { contactId: asha, suppress: false });
+    expect(await history()).toEqual({ data: [], nextCursor: null });
   });
 
   it('read notes with the scope and the CRM in the plan only, granted with crm.read (ADR-279)', async () => {

@@ -10652,3 +10652,32 @@ Decision:
 
 Not built: the note's text in the payload, which member wrote it, filters narrowing note events (by
 deal, contact tag or writer), and events for the rest of the timeline.
+
+## ADR-281 Reading a CRM deal's history through the public API (P5-08, P4-04) (2026-10-07)
+
+Context: keys read a deal as it is now (ADR-253) and hear each change as it happens (ADR-256,
+ADR-269, ADR-275), but an integration that starts later, or whose receiver missed events, could not
+learn how a deal got where it is: when it moved through each stage, who gave it to its owner, when
+it was lost and reopened. The deal page shows that history from the timeline; the API did not.
+
+Decision:
+
+- **`GET /deals/{id}/history`** with `deals.read`: the deal's own timeline entries of the changes
+  its events report, `created`, `updated` (title, value or expected close date), `stage_changed`
+  (another stage or pipeline), `owner_changed`, `won`, `lost` and `reopened`, newest first on exact
+  keyset pages. Each gives who made it (`changedBy`: `member`, never which; `automation`; or `api`
+  with `changedByApiKeyId`; null when no maker was recorded), the stage and its pipeline (`created`,
+  `stage_changed`, with the stage and pipeline left), the owners (`owner_changed`), what changed and
+  the value before and after (`updated`, named as `deal.updated` names them), and the value of a
+  deal added or won. The CRM must be in the plan (403, reason `not_in_plan`).
+- **Only the deal's changes:** notes and the deal's tasks' entries are never given (`GET /notes`,
+  `GET /tasks` read them), nor the title, date or lost reason before a change, which the timeline
+  does not keep. Erasing a contact deletes its timeline, so an erased contact's deal has no history;
+  a merge keeps a deal's, which moves with it.
+- **One mapping, unit-tested:** `toApiDealHistoryEntry` reads each row's data as members',
+  automations' and keys' writers record it (ADR-250, ADR-251, ADR-254, ADR-255, ADR-257), reading
+  data of another shape as nothing, and each stage's pipeline is read with the page (stages are
+  archived, never deleted or moved). No migration: the timeline's deal index serves the reads.
+
+Not built: which member made a change, the history of a contact's timeline or of a task, values
+before a change of title or date, and filters by type or time.

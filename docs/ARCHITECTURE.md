@@ -1474,6 +1474,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   statement; currencies never change). The row is written once with the new pipeline and stage, and
   the `stage_changed` activity names `fromPipelineId` and `toPipelineId`, as members' moves record
   them.
+- **A deal's history through the API (ADR-281):** `GET /deals/{id}/history` (`apiListDealHistory`,
+  `deals.read`) checks the CRM in the plan and the deal in the company, then reads its
+  `crm_activities` of the deal kinds (`API_DEAL_HISTORY_TYPES`) newest first on exact keyset cursors
+  (`crm_activities_deal_idx`), in a read-only transaction, with each named stage's pipeline in a
+  second query. `toApiDealHistoryEntry` maps a row's data to the entry and its maker from the row's
+  member actor (never which), `automationId` or `apiKeyId`.
 - **CRM tasks through the API (ADR-258):** `GET /tasks` and `GET /tasks/{id}` (`api/tasks.ts`,
   `tasks.read`) check the CRM in the plan first (`assertCrmInPlan`, shared with the deal reads).
   Tasks are read in the company newest first by `created_at` on exact keyset cursors

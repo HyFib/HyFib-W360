@@ -5,18 +5,29 @@ import { ROLE_PERMISSIONS } from '../authz/permissions';
 import type { ApiContext } from './context';
 import { MAX_DEAL_MINOR } from '../crm/money';
 import {
+  API_DEAL_HISTORY_DETAILS,
+  API_DEAL_HISTORY_TYPES,
   apiCreateDeal,
   apiCreateDealSchema,
+  apiDealHistoryQuerySchema,
   apiDealListQuerySchema,
   apiGetDeal,
+  apiListDealHistory,
   apiListDeals,
   apiListPipelines,
   apiPipelineListQuerySchema,
   apiUpdateDeal,
   apiUpdateDealSchema,
+  toApiDealHistoryEntry,
+  type DealHistoryRow,
 } from './deals';
 import { API_SCOPE_INFO } from './model';
-import { API_ROUTES, apiDealSchema, buildOpenApiDocument } from './openapi';
+import {
+  API_ROUTES,
+  apiDealHistoryEntrySchema,
+  apiDealSchema,
+  buildOpenApiDocument,
+} from './openapi';
 
 const TENANT = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
 const OTHER = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';
@@ -607,6 +618,249 @@ describe('moving CRM deals to another pipeline through the API (ADR-257)', () =>
     );
     expect(properties?.stageId?.description).toBe(
       'Moves the open deal to this active stage of its pipeline, or of `pipelineId`.',
+    );
+  });
+});
+
+describe('a CRM deal’s history through the API (ADR-281)', () => {
+  const at = new Date('2026-10-07T10:00:00.000Z');
+  const stage = (n: number) => `0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f${String(10 + n)}`;
+  const pipelineOf = (stageId: string | null) =>
+    stageId === stage(1) || stageId === stage(2) ? 'sales' : stageId ? 'renewals' : null;
+  const entry = (kind: DealHistoryRow['kind'], data: Record<string, unknown>, byMember = false) =>
+    toApiDealHistoryEntry({ id: OTHER, kind, data, byMember, createdAt: at }, pipelineOf);
+  const none = {
+    stageId: null,
+    pipelineId: null,
+    previousStageId: null,
+    previousPipelineId: null,
+    ownerId: null,
+    previousOwnerId: null,
+    changes: null,
+    valueMinor: null,
+    previousValueMinor: null,
+  };
+
+  it('names the changes deal events report, never notes or tasks, as the events do', () => {
+    expect(API_DEAL_HISTORY_TYPES).toEqual({
+      deal_created: 'created',
+      deal_updated: 'updated',
+      stage_changed: 'stage_changed',
+      owner_changed: 'owner_changed',
+      deal_won: 'won',
+      deal_lost: 'lost',
+      deal_reopened: 'reopened',
+    });
+    expect(API_DEAL_HISTORY_DETAILS).toEqual({
+      title: 'title',
+      value: 'valueMinor',
+      expected_close_on: 'expectedCloseOn',
+    });
+    expect(apiDealHistoryEntrySchema.shape.type.options).toEqual(
+      Object.values(API_DEAL_HISTORY_TYPES),
+    );
+    expect(apiDealHistoryEntrySchema.shape.changes.unwrap().element.options).toEqual(
+      Object.values(API_DEAL_HISTORY_DETAILS),
+    );
+  });
+
+  it('gives each change with who made it: a member never by name, an automation or a key', () => {
+    // Added by a member in a stage of the sales pipeline, with a value.
+    expect(entry('deal_created', { stageId: stage(1), valueMinor: 10_000 }, true)).toEqual({
+      id: OTHER,
+      type: 'created',
+      createdAt: '2026-10-07T10:00:00.000Z',
+      changedBy: 'member',
+      changedByApiKeyId: null,
+      ...none,
+      stageId: stage(1),
+      pipelineId: 'sales',
+      valueMinor: 10_000,
+    });
+    // Its details changed by a key: the names in the events' order, the value before and after.
+    const writer = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f09';
+    expect(
+      entry('deal_updated', {
+        fields: ['expected_close_on', 'title', 'value'],
+        valueFrom: 10_000,
+        valueTo: 25_000,
+        apiKeyId: writer,
+      }),
+    ).toEqual({
+      id: OTHER,
+      type: 'updated',
+      createdAt: '2026-10-07T10:00:00.000Z',
+      changedBy: 'api',
+      changedByApiKeyId: writer,
+      ...none,
+      changes: ['title', 'valueMinor', 'expectedCloseOn'],
+      valueMinor: 25_000,
+      previousValueMinor: 10_000,
+    });
+    // A title alone says nothing of values; a value cleared is null after it.
+    expect(
+      entry('deal_updated', { fields: ['title'], valueFrom: 1, valueTo: 2 }, true),
+    ).toMatchObject({ changes: ['title'], valueMinor: null, previousValueMinor: null });
+    expect(
+      entry('deal_updated', { fields: ['value'], valueFrom: 500, valueTo: null }),
+    ).toMatchObject({ changes: ['valueMinor'], valueMinor: null, previousValueMinor: 500 });
+    // Moved by an automation's run to another pipeline, both stages with their pipelines.
+    expect(
+      entry('stage_changed', {
+        fromStageId: stage(2),
+        toStageId: stage(3),
+        automationId: 'a',
+        runId: 'r',
+      }),
+    ).toEqual({
+      id: OTHER,
+      type: 'stage_changed',
+      createdAt: '2026-10-07T10:00:00.000Z',
+      changedBy: 'automation',
+      changedByApiKeyId: null,
+      ...none,
+      stageId: stage(3),
+      pipelineId: 'renewals',
+      previousStageId: stage(2),
+      previousPipelineId: 'sales',
+    });
+    // Given to another owner, and left without one.
+    expect(entry('owner_changed', { from: 'm1', to: 'm2' }, true)).toMatchObject({
+      ...none,
+      ownerId: 'm2',
+      previousOwnerId: 'm1',
+    });
+    expect(entry('owner_changed', { from: 'm2', to: null }, true)).toMatchObject({
+      ownerId: null,
+      previousOwnerId: 'm2',
+    });
+    // Won with its value, lost and reopened with nothing more.
+    expect(entry('deal_won', { valueMinor: 30_000, apiKeyId: writer })).toMatchObject({
+      type: 'won',
+      changedBy: 'api',
+      valueMinor: 30_000,
+    });
+    expect(entry('deal_lost', {}, true)).toEqual({
+      id: OTHER,
+      type: 'lost',
+      createdAt: '2026-10-07T10:00:00.000Z',
+      changedBy: 'member',
+      changedByApiKeyId: null,
+      ...none,
+    });
+    expect(entry('deal_reopened', { apiKeyId: writer })).toMatchObject({
+      type: 'reopened',
+      ...none,
+    });
+    // A member's change names no key, whatever its data holds; nobody recorded names nobody.
+    expect(entry('deal_lost', { apiKeyId: writer }, true)).toMatchObject({
+      changedBy: 'member',
+      changedByApiKeyId: null,
+    });
+    expect(entry('deal_lost', {})).toMatchObject({ changedBy: null, changedByApiKeyId: null });
+    // Data of the wrong shape is read as nothing.
+    expect(entry('deal_created', { stageId: 7, valueMinor: '100' }, true)).toMatchObject({
+      stageId: null,
+      pipelineId: null,
+      valueMinor: null,
+    });
+    expect(entry('deal_won', { valueMinor: 1.5 }, true)).toMatchObject({ valueMinor: null });
+    expect(entry('deal_updated', { fields: 'title' }, true)).toMatchObject({ changes: [] });
+  });
+
+  it('pages and nothing else, and refuses keys without the scope and bad ids before reading', async () => {
+    expect(apiDealHistoryQuerySchema.safeParse({}).data).toEqual({ limit: 50 });
+    expect(apiDealHistoryQuerySchema.safeParse({ limit: '100', cursor: 'c' }).data).toEqual({
+      limit: 100,
+      cursor: 'c',
+    });
+    for (const query of [{ limit: '0' }, { limit: '101' }, { type: 'won' }, { since: 'now' }]) {
+      expect(apiDealHistoryQuerySchema.safeParse(query).success, JSON.stringify(query)).toBe(false);
+    }
+    expect(
+      await refusal(apiListDealHistory({ db: untouched }, ctx(['tasks.read']), TENANT, {})),
+    ).toEqual(['forbidden', 'This API key does not have the deals.read scope.', []]);
+    expect(
+      (await refusal(apiListDealHistory({ db: untouched }, ctx(['deals.read']), 'deal-1', {})))[0],
+    ).toBe('not_found');
+    expect(
+      (
+        await refusal(
+          apiListDealHistory({ db: untouched }, ctx(['deals.read']), TENANT, { limit: '0' }),
+        )
+      )[2],
+    ).toEqual(['limit']);
+    // A suspended company reads it too, in a read-only transaction.
+    const { db, runs } = reached();
+    await expect(
+      apiListDealHistory({ db }, ctx(['deals.read'], 'suspended'), TENANT, {}),
+    ).rejects.toThrow('reached the database');
+    expect(runs).toEqual([{ accessMode: 'read only' }]);
+  });
+
+  it('is described: who made each change, what is never given, erasure and merges', () => {
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      paths: Record<string, Record<string, Record<string, unknown>>>;
+      components: {
+        schemas: Record<string, { properties: Record<string, unknown>; required: string[] }>;
+      };
+    };
+    expect(API_ROUTES).toContainEqual(['get', '/deals/{id}/history']);
+    const history = doc.paths['/deals/{id}/history']?.get as {
+      operationId: string;
+      description: string;
+      parameters: { name?: string; $ref?: string }[];
+      responses: Record<string, unknown>;
+    };
+    expect(history.operationId).toBe('listDealHistory');
+    expect(history.parameters.map((p) => p.name ?? p.$ref)).toEqual([
+      '#/components/parameters/Id',
+      'limit',
+      'cursor',
+    ]);
+    expect(Object.keys(history.responses)).toEqual([
+      '200',
+      '401',
+      '403',
+      '404',
+      '422',
+      '429',
+      '500',
+    ]);
+    for (const words of [
+      'Scope: `deals.read`.',
+      'the deal added, its title, value or expected close date changed, moved to another stage or pipeline, given to another owner, won, lost or reopened, by members, automations and API keys, newest first; pages never skip or repeat a change',
+      'says who made it (`changedBy`, never which member, with the key for one made through the API)',
+      '(403, reason not_in_plan)',
+      'Notes and the deal’s tasks are never given here',
+      'nor the title, date or lost reason before a change',
+      'Erasing a contact deletes its timeline, so an erased contact’s deal has no history; a merge keeps the deal’s.',
+    ]) {
+      expect(history.description).toContain(words);
+    }
+    const schema = doc.components.schemas.DealHistoryEntry!;
+    expect(Object.keys(schema.properties)).toEqual([
+      'id',
+      'type',
+      'createdAt',
+      'changedBy',
+      'changedByApiKeyId',
+      'stageId',
+      'pipelineId',
+      'previousStageId',
+      'previousPipelineId',
+      'ownerId',
+      'previousOwnerId',
+      'changes',
+      'valueMinor',
+      'previousValueMinor',
+    ]);
+    expect(schema.required).toEqual(Object.keys(schema.properties));
+    expect(apiDealHistoryEntrySchema.shape.changedBy.description).toContain(
+      'a member (member, never which member)',
+    );
+    expect(apiDealHistoryEntrySchema.shape.changes.description).toContain(
+      'names only, never the title or date before',
     );
   });
 });
