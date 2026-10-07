@@ -275,6 +275,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       campaignIds: null,
       pipelineIds: null,
       stageIds: null,
+      ownerIds: null,
       assigneeIds: null,
       oauth: null,
       apiKeyId: key.id,
@@ -2618,6 +2619,101 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(await api().update(key.ctx, id, { stageIds: null })).toMatchObject({ stageIds: null });
     expect(await issueOf(api().update(key.ctx, id, { stageIds: [] }))).toMatchObject({
       path: 'stageIds',
+    });
+  });
+
+  it("choose the members whose deals' events an endpoint receives, kept by changes that leave them out, a member who left included, and cleared with the events (ADR-265)", async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const owner = await fx.ctx(c, c.owner);
+    const ownerId = owner.membership.id;
+    const agent = (await fx.ctx(c, c.agent)).membership.id;
+    const marketer = (await fx.ctx(c, c.marketer)).membership.id;
+    const other = await fx.company();
+    const elsewhere = (await fx.ctx(other, other.agent)).membership.id;
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    const refusals = [
+      [['task.created'], [agent], 'ownerIds'],
+      [['deal.created'], [], 'ownerIds'],
+      [['deal.created'], [agent, 'agent@example.com'], 'ownerIds.1'],
+      [['deal.stage_changed'], [agent, marketer], 'ownerIds.1'],
+      [['deal.status_changed'], [elsewhere], 'ownerIds.0'],
+    ] as const;
+    for (const [index, [events, ownerIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, ownerIds },
+            idem(`owners-bad-${index}`, JSON.stringify(ownerIds)),
+          ),
+        ),
+        JSON.stringify(ownerIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'owners-1', {
+      url: receiverUrl(),
+      events: ['deal.created', 'contact.created'],
+      ownerIds: [agent, ownerId.toUpperCase(), agent],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.ownerIds).toEqual([agent, ownerId]);
+    expect((await api().get(key.ctx, id)).ownerIds).toEqual([agent, ownerId]);
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { ownerIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => a.metadata.ownerIds);
+    expect(await audits('webhook.endpoint_created')).toEqual([[agent, ownerId]]);
+    // The agent leaves the company: kept, and Settings says they no longer use the CRM.
+    await fx.query(`UPDATE app.memberships SET status = 'removed' WHERE id = $1`, [agent]);
+    expect((await settings().list(owner)).find((e) => e.id === id)?.owners).toEqual([
+      { id: agent, name: 'Agent', active: false },
+      { id: ownerId, name: 'Owner', active: true },
+    ]);
+    expect(await api().update(key.ctx, id, { description: 'Deals of two' })).toMatchObject({
+      ownerIds: [agent, ownerId],
+    });
+    // Given again, a list keeps a member it held; one it adds must own deals now.
+    expect(await api().update(key.ctx, id, { ownerIds: [agent, ownerId] })).toMatchObject({
+      ownerIds: [agent, ownerId],
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { ownerIds: [ownerId, marketer] })),
+    ).toMatchObject({ path: 'ownerIds.1' });
+    expect(await api().update(key.ctx, id, { ownerIds: [ownerId] })).toMatchObject({
+      ownerIds: [ownerId],
+    });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [agent, ownerId],
+      [agent, ownerId],
+      [ownerId],
+    ]);
+    // Any deal event keeps the list; events without one clear it.
+    expect(await api().update(key.ctx, id, { events: ['deal.stage_changed'] })).toMatchObject({
+      ownerIds: [ownerId],
+    });
+    expect(await api().update(key.ctx, id, { events: ['contact.created'] })).toMatchObject({
+      events: ['contact.created'],
+      ownerIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { ownerIds: [ownerId] }))).toMatchObject({
+      path: 'ownerIds',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['deal.created'], ownerIds: [ownerId] }),
+    ).toMatchObject({ ownerIds: [ownerId] });
+    expect(await api().update(key.ctx, id, { ownerIds: null })).toMatchObject({ ownerIds: null });
+    expect(await issueOf(api().update(key.ctx, id, { ownerIds: [] }))).toMatchObject({
+      path: 'ownerIds',
     });
   });
 

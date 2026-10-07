@@ -41,6 +41,7 @@ import {
   webhookChannelText,
   webhookFieldText,
   webhookOAuthText,
+  webhookOwnerText,
   webhookPipelineText,
   webhookReplayAllSummary,
   webhookReplaySummary,
@@ -68,6 +69,7 @@ import {
   type WebhookEndpointCampaign,
   type WebhookEndpointField,
   type WebhookEndpointOAuth,
+  type WebhookEndpointOwner,
   type WebhookEndpointPipeline,
   type WebhookEndpointStage,
   type WebhookEndpointTeam,
@@ -77,6 +79,7 @@ import {
   type WebhookMessageSender,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
+  type WebhookOwnerChoice,
   type WebhookPipelineChoice,
   type WebhookReplayPeriod,
   type WebhookStageChoice,
@@ -1442,6 +1445,105 @@ function StageChoices({
   );
 }
 
+/**
+ * The members whose deals' events an endpoint takes (ADR-265): every deal's, or those of the deals
+ * the members ticked own when the events happen. Members who can own deals are offered; one the
+ * endpoint already names who no longer can stays listed, ticked, until it is unticked.
+ */
+function OwnerChoices({
+  prefix,
+  choices,
+  stored,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  choices: WebhookOwnerChoice[];
+  /** The members the endpoint names now, so one who left stays listed until saved without. */
+  stored: readonly WebhookEndpointOwner[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const listed = [
+    ...choices.map((c) => ({ id: c.id, text: c.name })),
+    ...stored
+      .filter((m) => !choices.some((c) => c.id === m.id))
+      .map((m) => ({ id: m.id, text: webhookOwnerText(m) })),
+  ];
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Deal owners</legend>
+      <p className="text-xs text-muted-foreground">
+        A deal’s events belong to the member who owns the deal when they happen; a deal without an
+        owner belongs to no one. With pipelines or stages chosen too, an event must pass them all.
+        Task and other events are sent whichever owners are chosen.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-owners`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every deal’s events
+          <span className="block text-xs text-muted-foreground">
+            Including deals without an owner, and members who join later.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-owners`}
+          className="mt-1"
+          checked={!every}
+          disabled={listed.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only those of the deals the members ticked own
+          {listed.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">No member uses the CRM yet.</span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid max-h-64 gap-1 overflow-y-auto">
+          {listed.map((m) => {
+            const id = `${prefix}-owner-${m.id}`;
+            return (
+              <div key={m.id} className="flex items-center gap-2">
+                <Checkbox
+                  id={id}
+                  checked={chosen.includes(m.id)}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? listed
+                            .filter((l) => l.id === m.id || chosen.includes(l.id))
+                            .map((l) => l.id)
+                        : chosen.filter((x) => x !== m.id),
+                    )
+                  }
+                />
+                <Label htmlFor={id} className="font-normal break-all">
+                  {m.text}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
 function EventChoices({
   prefix,
   chosen,
@@ -1862,6 +1964,7 @@ export function WebhookEndpointForm({
   campaignChoices,
   pipelineChoices,
   stageChoices,
+  ownerChoices,
   assigneeChoices,
   contactFieldChoices,
   atLimit = false,
@@ -1905,6 +2008,8 @@ export function WebhookEndpointForm({
     pipelines: WebhookEndpointPipeline[] | null;
     /** The CRM stages it names (ADR-264), with their pipelines; null for every one. */
     stages: WebhookEndpointStage[] | null;
+    /** The members whose deals it takes (ADR-265), with whether they can own deals; null: all. */
+    owners: WebhookEndpointOwner[] | null;
     /** The members it names (ADR-181), with whether they still take conversations; null: all. */
     assignees: WebhookEndpointAssignee[] | null;
     oauth: WebhookEndpointOAuth | null;
@@ -1923,6 +2028,8 @@ export function WebhookEndpointForm({
   pipelineChoices: WebhookPipelineChoice[];
   /** The stages in use of the pipelines the company uses, which an endpoint can choose (ADR-264). */
   stageChoices: WebhookStageChoice[];
+  /** The company's members who can own deals, whom an endpoint can choose (ADR-265). */
+  ownerChoices: WebhookOwnerChoice[];
   /** The company's members who take conversations, whom an endpoint can choose (ADR-181). */
   assigneeChoices: WebhookAssigneeChoice[];
   /** The company's custom fields, which an endpoint can choose (ADR-184). */
@@ -1990,6 +2097,8 @@ export function WebhookEndpointForm({
   );
   const [everyStage, setEveryStage] = useState(!endpoint?.stages);
   const [stageIds, setStageIds] = useState<string[]>(endpoint?.stages?.map((st) => st.id) ?? []);
+  const [everyOwner, setEveryOwner] = useState(!endpoint?.owners);
+  const [ownerIds, setOwnerIds] = useState<string[]>(endpoint?.owners?.map((m) => m.id) ?? []);
   const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
   const [everyField, setEveryField] = useState(!endpoint?.contactFields);
   const [fieldKeys, setFieldKeys] = useState<string[]>(
@@ -2123,6 +2232,9 @@ export function WebhookEndpointForm({
         // Every stage's deals unless the stages ticked are chosen (ADR-264).
         const chosenStages =
           webhookTakesPipelineEvents(eventTypes) && !everyStage ? stageIds : null;
+        // Every deal's events unless the owners ticked are chosen (ADR-265).
+        const chosenOwners =
+          webhookTakesPipelineEvents(eventTypes) && !everyOwner ? ownerIds : null;
         // Every conversation's events unless the members ticked are chosen (ADR-181).
         const chosenAssignees =
           webhookTakesTeamEvents(eventTypes) && !everyAssignee ? assigneeIds : null;
@@ -2151,6 +2263,7 @@ export function WebhookEndpointForm({
           campaignIds: chosenCampaigns,
           pipelineIds: chosenPipelines,
           stageIds: chosenStages,
+          ownerIds: chosenOwners,
           assigneeIds: chosenAssignees,
         };
         const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
@@ -2223,6 +2336,8 @@ export function WebhookEndpointForm({
               setPipelineIds([]);
               setEveryStage(true);
               setStageIds([]);
+              setEveryOwner(true);
+              setOwnerIds([]);
               setEveryAssignee(true);
               setAssigneeIds([]);
               setEveryField(true);
@@ -2401,6 +2516,17 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryStage}
           chosen={stageIds}
           onChange={setStageIds}
+        />
+      ) : null}
+      {webhookTakesPipelineEvents(eventTypes) ? (
+        <OwnerChoices
+          prefix={prefix}
+          choices={ownerChoices}
+          stored={endpoint?.owners ?? []}
+          every={everyOwner}
+          onEveryChange={setEveryOwner}
+          chosen={ownerIds}
+          onChange={setOwnerIds}
         />
       ) : null}
       <fieldset className="grid gap-2">

@@ -3949,6 +3949,153 @@ describe('stage filters (ADR-264)', () => {
   });
 });
 
+describe('owner filters (ADR-265)', () => {
+  const setMember = (membershipId: string, change: string) =>
+    fx.query(`UPDATE app.memberships SET ${change} WHERE id = $1`, [membershipId]);
+
+  it('are refused without a deal event, empty, over 50 or naming a member who cannot own deals; named in Settings, a member who left included; kept by a change that leaves them out and cleared with the events; the database keeps them to those events', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const ownerId = owner.membership.id;
+    const agent = (await fx.ctx(c, c.agent)).membership.id;
+    // A marketer cannot use the CRM, and another company's member is not this one's.
+    const marketer = (await fx.ctx(c, c.marketer)).membership.id;
+    const other = await fx.company();
+    const elsewhere = (await fx.ctx(other, other.agent)).membership.id;
+    const url = 'https://hooks.example.com/in';
+    const refused = async (
+      eventTypes: string[],
+      ownerIds: unknown,
+      message: RegExp,
+      path = 'ownerIds',
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes, ownerIds }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(ownerIds)).toBe(path);
+    };
+    const needsTheEvents =
+      /only for an endpoint that receives Deal added, Deal stage or Deal won, lost or reopened/;
+    await refused(['task.created', 'message.received'], [agent], needsTheEvents);
+    await refused(['deal.created'], [], /at least one member/);
+    await refused(['deal.created'], ['agent@example.com'], /from the list/, 'ownerIds.0');
+    await refused(
+      ['deal.created'],
+      Array.from({ length: 51 }, () => uuidv7()),
+      /at most 50/,
+    );
+    const notOwners = /active members of this company who use the CRM/;
+    await refused(['deal.stage_changed'], [agent, marketer], notOwners, 'ownerIds.1');
+    await refused(['deal.status_changed'], [elsewhere], notOwners, 'ownerIds.0');
+    await refused(['deal.created'], [uuidv7()], notOwners, 'ownerIds.0');
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['deal.created', 'contact.created'],
+      ownerIds: [agent, ownerId.toUpperCase(), agent],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { ownerIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => a.metadata.ownerIds);
+    expect(await audits('webhook.endpoint_created')).toEqual([[agent, ownerId]]);
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.owners;
+    expect(await current()).toEqual([
+      { id: agent, name: 'Agent', active: true },
+      { id: ownerId, name: 'Owner', active: true },
+    ]);
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['deal.created', 'contact.created'],
+        ...fields,
+      });
+    // The agent is suspended: kept, named as no longer able to own deals, and kept by a change
+    // that gives the list again; adding the marketer is refused.
+    await setMember(agent, `status = 'suspended'`);
+    expect(await current()).toEqual([
+      { id: agent, name: 'Agent', active: false },
+      { id: ownerId, name: 'Owner', active: true },
+    ]);
+    await change({ description: 'kept' });
+    await change({ ownerIds: [agent, ownerId] });
+    expect((await current())?.map((m) => m.id)).toEqual([agent, ownerId]);
+    await expectAppError(change({ ownerIds: [agent, marketer] }), 'validation_failed', notOwners);
+    await change({ ownerIds: [ownerId] });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [agent, ownerId],
+      [agent, ownerId],
+      [ownerId],
+    ]);
+    // Dropped, the suspended agent cannot be added back until they can own deals again.
+    await expectAppError(change({ ownerIds: [agent] }), 'validation_failed', notOwners);
+    await setMember(agent, `status = 'active'`);
+    await change({ ownerIds: [agent] });
+    await change({ ownerIds: null });
+    expect(await current()).toBeNull();
+    await change({ ownerIds: [ownerId] });
+    // Any deal event keeps the list.
+    await change({ eventTypes: ['deal.stage_changed', 'task.created'] });
+    expect((await current())?.map((m) => m.id)).toEqual([ownerId]);
+    // The database refuses an empty list, more than 50, a missing id or a list of lists from an
+    // endpoint taking a deal event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET owner_ids = ${value} WHERE id = $1`, [created.id]);
+    const many = `ARRAY[${Array.from({ length: 51 }, () => `'${uuidv7()}'`).join(',')}]::uuid[]`;
+    for (const bad of [
+      `'{}'`,
+      many,
+      `ARRAY['${ownerId}', NULL]::uuid[]`,
+      `ARRAY[ARRAY['${ownerId}'::uuid], ARRAY['${agent}'::uuid]]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_owner_ids/);
+    }
+    await change({ eventTypes: ['task.created', 'task.status_changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['task.created'], ownerIds: [ownerId] }),
+      'validation_failed',
+      needsTheEvents,
+    );
+    // …and any list for an endpoint that takes none.
+    await expect(setInDatabase(`ARRAY['${ownerId}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_owner_ids/,
+    );
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'owner_ids', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('offer the members who can own deals, by name, to developers only', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = (await fx.ctx(c, c.agent)).membership.id;
+    await fx.company();
+    expect(await webhooks().ownerChoices(owner)).toEqual([
+      { id: agent, name: 'Agent' },
+      { id: owner.membership.id, name: 'Owner' },
+    ]);
+    // A suspended member cannot own deals, so is not offered.
+    await setMember(agent, `status = 'suspended'`);
+    expect((await webhooks().ownerChoices(owner)).map((m) => m.id)).toEqual([owner.membership.id]);
+    for (const user of [c.agent, c.marketer]) {
+      await expectAppError(webhooks().ownerChoices(await fx.ctx(c, user)), 'forbidden');
+    }
+  });
+});
+
 describe('consent change filters (ADR-189)', () => {
   it('are refused without consent.changed, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to the event', async () => {
     const c = await fx.company();

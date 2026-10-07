@@ -1599,6 +1599,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'campaign_ids',
       'pipeline_ids',
       'stage_ids',
+      'owner_ids',
       'assignee_ids',
       'oauth_token_url',
       'oauth_client_id',

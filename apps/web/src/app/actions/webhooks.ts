@@ -68,6 +68,8 @@ export async function createWebhookEndpointAction(
     pipelineIds: string[] | null;
     /** The CRM stages whose deals' events it takes (ADR-264); null takes every one's. */
     stageIds: string[] | null;
+    /** The members whose deals' events it takes (ADR-265); null takes every deal's. */
+    ownerIds: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /** Its OAuth client (ADR-173); null: none. */
@@ -134,6 +136,8 @@ export async function updateWebhookEndpointAction(
     pipelineIds: string[] | null;
     /** The CRM stages whose deals' events it takes (ADR-264); null takes every one's. */
     stageIds: string[] | null;
+    /** The members whose deals' events it takes (ADR-265); null takes every deal's. */
+    ownerIds: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /**

@@ -1,5 +1,41 @@
 # Progress
 
+## 2026-10-07 — Choosing the members whose deal events an endpoint receives (P5-09, P4-04, H-014, ADR-265)
+
+Status: **Implemented; its database tests run in CI only.** Endpoints could choose pipelines and
+stages but received every member's deals. The local PostgreSQL is unavailable, so the migration and
+the integration tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0181 (`owner_ids` on `app.webhook_endpoints` with its check and column
+  grant, and `app.capture_webhook_event` reading the deal's owner when an endpoint names owners).
+- **Domain:** the list's schema, rules and check of the members a list adds
+  (`webhookOwnerIdsSchema`, `webhookOwnerIdsFor`, `assertWebhookOwners`), the choices
+  (`ownerChoices`), the named list in Settings' view (with whether each member can still own deals),
+  create and update in Settings and the API (`ownerIds`), the audits, the OpenAPI entries and the
+  export.
+- **Web:** "Deal owners" in the endpoint form (every deal's events, or the members ticked, one who
+  left kept while named) and the endpoints list naming them.
+- **Tests:** unit (3 new in `webhooks.test.ts`, 1 in `api.test.ts`); integration (1 in
+  `webhook-events.test.ts`, 2 in `webhooks.test.ts`, 1 in `api-webhook-endpoints.test.ts`, and the
+  API's endpoint shape). Written for CI; the integration tests were not run here. No e2e test: the
+  form is the stages' and pipelines' (covered by `webhook-deals.spec.ts`), and the e2e suite is near
+  its time limit.
+- **Docs:** ADR-265; ARCHITECTURE; SECURITY; THREAT-MODEL T233; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09
+  and P4-04; feature matrix W-138 and H-014.
+- **Mutation checks:** 22/22 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 1118 passed (117 files)                                       |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Choosing the CRM stages whose deal events an endpoint receives (P5-09, P4-04, H-014, ADR-264)
 
 Status: **Implemented; its database and browser tests run in CI only.** Endpoints could choose

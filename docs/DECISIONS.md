@@ -10007,3 +10007,51 @@ Decision:
 
 Not built: deal events by owner, task events by their deal's pipeline or stage, and stages chosen
 per event type (one list serves the three events).
+
+## ADR-265 Choosing the members whose deal events a webhook endpoint receives (P5-09, P4-04) (2026-10-07)
+
+Context: an endpoint can take the deal events of chosen pipelines and stages (ADR-263, ADR-264), but
+a receiver that serves some members (a sales representative's own alerts, a team lead's dashboard)
+was sent every member's deals and had to read `deal.ownerId` to drop the rest. ADR-256 and ADR-263
+left filters by owner unbuilt; it is the last of the deal filters P5-09 listed.
+
+Decision:
+
+- **A list of deal owners per endpoint,** for the three deal events: null receives every deal's, as
+  before; a list holds 1 to 50 members of the company, by membership id (as `GET /members` lists
+  them), in the order given with repeats merged. A deal's event counts when the member who owns the
+  deal when the event happens is listed, so a deal without an owner is on no list. Changing a deal's
+  owner sends no event, so there is no owner left to reach, unlike pipelines and stages; the
+  payload's `deal.ownerId` is the owner when it is delivered, which a later change can make differ.
+  With lists of pipelines or stages too, an event must pass them all. Task events and every other
+  event are not narrowed. Chosen in Settings → Webhooks ("Deal owners": every deal's events, or only
+  those of the deals the members ticked own), shown on the endpoint as "Members whose deals’ events
+  are sent: …", and through the API as `ownerIds` on `POST /webhook-endpoints` and `PATCH
+/webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Members who can own deals:** a list may add only active members with access to the CRM, as deal
+  owners are chosen (`assertCrmMember`'s rule); members it already holds may have left, been
+  suspended or lost the access since, and stay, matching the deals they still own; Settings names
+  them "(no longer uses the CRM)" and the API keeps them in `ownerIds`. Memberships are kept, so a
+  list never names one that is gone.
+- **Only while a deal event is taken:** a list given for an endpoint that takes none is refused
+  (`ownerIds`; 422 through the API). A change that drops all three clears it, and a `PATCH` that
+  leaves it out keeps it; Settings always sends it. A check in the database holds the same rule
+  (null, or 1 to 50 ids in one dimension without a null, with a deal event).
+- **Applied at capture:** `app.capture_webhook_event` reads the deal's owner from `app.crm_deals` by
+  the deal the trigger stores in the event's detail, only when an active endpoint of the company
+  that takes the event names owners (as it reads a conversation's team and member, ADR-174,
+  ADR-181), and matches it against each endpoint's list, after the pipeline and stage filters. The
+  deal trigger runs as whoever changes the deal, in the company's scope. No event is written when no
+  endpoint takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `ownerIds` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. The choices list the members who can own deals by name to
+  members with `developer.manage`, as the member choices of ADR-181 do.
+- **Migration 0181:** `owner_ids uuid[]` on `app.webhook_endpoints` with the check, validated at
+  once (a company has at most 10 endpoints), an update grant on the column for the runtime role, and
+  `app.capture_webhook_event` replaced with the same signature (0180's, with the owner), so its
+  owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: an event when a deal's owner changes, task events by their deal's pipeline, stage or
+owner, or by their assignee, and owners chosen per event type (one list serves the three events).

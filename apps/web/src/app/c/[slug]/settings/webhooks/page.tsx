@@ -25,6 +25,7 @@ import {
   webhookFieldText,
   webhookOAuthText,
   webhookHost,
+  webhookOwnerText,
   webhookPipelineText,
   webhookStageText,
   webhookTeamText,
@@ -67,6 +68,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
     campaignChoices,
     pipelineChoices,
     stageChoices,
+    ownerChoices,
     assigneeChoices,
     contactFieldChoices,
   ] = await Promise.all([
@@ -78,6 +80,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
     webhooks.campaignChoices(ctx),
     webhooks.pipelineChoices(ctx),
     webhooks.stageChoices(ctx),
+    webhooks.ownerChoices(ctx),
     webhooks.assigneeChoices(ctx),
     webhooks.contactFieldChoices(ctx),
   ]);
@@ -286,6 +289,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.stages.map(webhookStageText).join(', ')}
                       </p>
                     ) : null}
+                    {e.owners ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Members whose deals’ events are sent:{' '}
+                        {e.owners.map(webhookOwnerText).join(', ')}
+                      </p>
+                    ) : null}
                     {e.teams ? (
                       <p className="text-xs text-muted-foreground">
                         Teams whose conversations’ events are sent:{' '}
@@ -423,6 +432,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
             campaignChoices={campaignChoices}
             pipelineChoices={pipelineChoices}
             stageChoices={stageChoices}
+            ownerChoices={ownerChoices}
             assigneeChoices={assigneeChoices}
             contactFieldChoices={contactFieldChoices}
             atLimit={endpoints.length >= WEBHOOK_LIMITS.endpoints}

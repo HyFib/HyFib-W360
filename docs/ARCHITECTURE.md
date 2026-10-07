@@ -1710,9 +1710,9 @@ true`); the same key with another request (method, path and body hashed) answers
   update changes its stage or status (members through the CRM service, the runner's deal steps, keys
   through `apiUpdateDeal`), through `app.capture_webhook_event`: the deal, stage and pipeline ids,
   and the stage, pipeline or status before a change, in `detail`, with the contact and no
-  conversation, so no number, team or member filter narrows them (pipelines and stages do, ADR-263
-  and ADR-264). One update that changes both captures both in the order the rules allow (reopened
-  then moved, or moved then closed), each with the deal as its step left it, stamped with
+  conversation, so no number, team or member filter narrows them (pipelines, stages and owners do,
+  ADR-263 to ADR-265). One update that changes both captures both in the order the rules allow
+  (reopened then moved, or moved then closed), each with the deal as its step left it, stamped with
   `clock_timestamp()`. Erasure and merges change neither column, so they capture nothing. Their
   payloads are built when delivered (`dealOf`): the stage, pipeline and statuses as captured; the
   title, value in minor units, pipeline currency, owner id, expected date, lost reason and creator
@@ -1960,6 +1960,14 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   checkboxes under "Stages", the stages in use of the pipelines in use, named with their pipeline)
   and the API (`stageIds`) set it; the services check the stages of a list given, removed ones
   allowed; a change that drops every deal event clears it.
+- **Owner filters** (migration 0181, ADR-265): `owner_ids` on an endpoint lists the members whose
+  deals' events it takes, null for every deal's; a check keeps it to 1 to 50 ids and to endpoints
+  taking a deal event. `app.capture_webhook_event` (replaced with the same signature) reads the
+  deal's `owner_membership_id` by the detail's `dealId` only when an active endpoint of the company
+  taking the event names owners, and matches it against the list after the pipeline and stage
+  filters. Settings (radio buttons and checkboxes under "Deal owners", the members who can own
+  deals) and the API (`ownerIds`) set it; the services check the members a list adds (active, with
+  CRM access), and members it held stay; a change that drops every deal event clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and

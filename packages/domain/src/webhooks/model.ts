@@ -617,6 +617,8 @@ export const WEBHOOK_LIMITS = {
   pipelines: 50,
   /** The CRM stages an endpoint can choose to take the deals' events of (ADR-264). */
   stages: 50,
+  /** The members an endpoint can choose to take the events of the deals they own (ADR-265). */
+  owners: 50,
   /**
    * An endpoint's OAuth client (ADR-173): its identifier, secret and scope, short enough that the
    * Basic header stays within what the egress client sends, and the longest token kept.
@@ -887,6 +889,33 @@ export interface WebhookEndpointStage {
   /** Its pipeline is archived: no open deal, none until the pipeline is restored. */
   pipelineArchived: boolean;
 }
+
+/**
+ * A member who can own deals (active, with access to the CRM), whom an endpoint can choose to take
+ * the events of the deals they own (ADR-265). A deal's events belong to its owner when they happen.
+ */
+export interface WebhookOwnerChoice {
+  id: string;
+  name: string;
+}
+
+/** A member an endpoint takes the events of the deals they own (ADR-265), as stored. */
+export interface WebhookEndpointOwner {
+  id: string;
+  /** Null only for a membership the company no longer had, which cannot happen: they are kept. */
+  name: string | null;
+  /**
+   * Whether the member can own deals now. One who left, was suspended or removed, or lost access to
+   * the CRM stays chosen, and matches only the deals they still own.
+   */
+  active: boolean;
+}
+
+/** A deal owner as Settings → Webhooks lists them. */
+export const webhookOwnerText = (owner: WebhookEndpointOwner): string => {
+  const name = owner.name ?? 'Unknown member';
+  return owner.active ? name : `${name} (no longer uses the CRM)`;
+};
 
 /** A stage as Settings → Webhooks names it: its pipeline and name. */
 export const webhookStageText = (stage: {

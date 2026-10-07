@@ -4457,6 +4457,80 @@ describe('deal events (ADR-256)', () => {
     // Contact events are not narrowed by stages.
     expect(bodiesAt(proposals.path).filter((b) => b.type === 'contact.created')).toHaveLength(1);
   });
+
+  it('sends an endpoint that names deal owners only the events of the deals they own when the events happen, and with stages too only what passes both (ADR-265)', async () => {
+    const s = await crmCompany();
+    const { c, owner } = s;
+    const agent = await fx.ctx(c, c.agent);
+    const svc = crm();
+    const proposal = s.sales[2]!;
+    /** An endpoint of the company taking the deal events of the owners and stages given. */
+    const add = async (ownerIds: string[] | null, stageIds: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: [...DEAL_EVENTS, 'contact.created'],
+        ownerIds,
+        stageIds,
+      });
+      return { ...created, path };
+    };
+    const agents = await add([agent.membership.id], null);
+    const agentsProposals = await add([agent.membership.id], [proposal]);
+    const jaya = await newContact(owner, 'Jaya');
+
+    // The agent's deal is added in New and moved to Proposal; then it is given to the owner, which
+    // sends nothing, and won: the owner's by then.
+    const { id: theirs } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: s.salesId,
+      stageId: s.sales[0],
+      title: 'Annual plan',
+      ownerMembershipId: agent.membership.id,
+    });
+    await svc.moveDeal(owner, { id: theirs, expectedVersion: 1, stageId: proposal });
+    await svc.updateDeal(owner, {
+      id: theirs,
+      expectedVersion: 2,
+      title: 'Annual plan',
+      value: '',
+      ownerMembershipId: owner.membership.id,
+      expectedCloseOn: null,
+    });
+    await svc.closeDeal(owner, { id: theirs, expectedVersion: 3, outcome: 'won' });
+    // A deal of nobody's and one of the owner's are not the agent's.
+    for (const ownerMembershipId of [null, owner.membership.id]) {
+      await svc.createDeal(owner, {
+        contactId: jaya.id,
+        pipelineId: s.salesId,
+        stageId: proposal,
+        title: 'Walk-in order',
+        ownerMembershipId,
+      });
+    }
+
+    // Only the agent's two events are captured: the addition for one endpoint, the move for both.
+    expect(
+      (await dealEventsOf(c)).map((e) => [e.type, e.detail.dealId, e.detail.stageId, e.deliveries]),
+    ).toEqual([
+      ['deal.created', theirs, s.sales[0], 1],
+      ['deal.stage_changed', theirs, proposal, 2],
+    ]);
+    await deliverDue(c);
+    const typesAt = (path: string) =>
+      bodiesAt(path)
+        .filter((b) => b.type.startsWith('deal.'))
+        .map((b) => b.type)
+        .sort();
+    expect(typesAt(agents.path)).toEqual(['deal.created', 'deal.stage_changed']);
+    expect(typesAt(agentsProposals.path)).toEqual(['deal.stage_changed']);
+    // The payload gives the owner when it is delivered: the owner, since the deal was given away.
+    for (const body of bodiesAt(agents.path).filter((b) => b.type.startsWith('deal.'))) {
+      expect(dealIn(body).ownerId).toBe(owner.membership.id);
+    }
+    // Contact events are not narrowed by owners.
+    expect(bodiesAt(agents.path).filter((b) => b.type === 'contact.created')).toHaveLength(1);
+  });
 });
 
 describe('task events (ADR-261)', () => {

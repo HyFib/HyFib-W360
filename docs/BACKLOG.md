@@ -287,7 +287,8 @@ verification, app review, Embedded Signup configuration).
   0177 and 0178; recorded under P5-09). **[Pipeline filters for deal webhook events built; their
   database and browser tests run only in CI]** (ADR-263, migration 0179; recorded under P5-09).
   **[Stage filters for deal webhook events built; their database and browser tests run only in
-  CI]** (ADR-264, migration 0180; recorded under P5-09).
+  CI]** (ADR-264, migration 0180; recorded under P5-09). **[Owner filters for deal webhook events
+  built; their database tests run only in CI]** (ADR-265, migration 0181; recorded under P5-09).
   **Remaining:** custom deal fields, products on deals, deal import, CRM connectors (HubSpot,
   Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
   checklist).
@@ -990,8 +991,12 @@ verification, app review, Embedded Signup configuration).
   (ADR-264, migration 0180: an endpoint takes the deal events of 1 to 50 of the company's stages,
   removed ones included; a move reaches the endpoints of the stage it left as well; with pipelines
   too, an event must pass both).
-  Remaining: filters for other event types (deal events by owner, task events by their deal's
-  pipeline or stage, among them) and on a message's or contact's values (such as by tag or a field's
+  **[Owner filters for deal events built; their database tests run only in CI]** (ADR-265, migration
+  0181: an endpoint takes the events of the deals 1 to 50 chosen members own when the events happen;
+  a list adds only members who can own deals and keeps those who left; with pipelines or stages too,
+  an event must pass every list).
+  Remaining: filters for other event types (task events by their deal's pipeline, stage or owner, or
+  by assignee, among them) and on a message's or contact's values (such as by tag or a field's
   value, or the key that started a run), other authentication (headers computed per delivery, other
   OAuth grants), mutual TLS, fixed egress addresses, events for store orders, Payment Links and each
   step of a run, `createdAt` finer than the millisecond, load tests.

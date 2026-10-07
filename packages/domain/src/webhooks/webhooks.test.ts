@@ -77,6 +77,7 @@ import {
   webhookReplaySummary,
   webhookChannelText,
   webhookOAuthText,
+  webhookOwnerText,
   webhookPipelineText,
   webhookRetryDelaySeconds,
   webhookTakesAutomationRuns,
@@ -188,6 +189,9 @@ import {
   webhookStageIdsFor,
   webhookStageIdsSchema,
   WEBHOOK_STAGES_NEED_THE_EVENTS,
+  webhookOwnerIdsFor,
+  webhookOwnerIdsSchema,
+  WEBHOOK_OWNERS_NEED_THE_EVENTS,
   webhookTemplateStatusesFor,
   webhookTemplateStatusesSchema,
 } from './service';
@@ -2958,6 +2962,62 @@ describe('stage filters (ADR-264)', () => {
     );
     expect(webhookStageText({ ...stage, pipelineArchived: true })).toBe(
       'Sales: Proposal (archived pipeline)',
+    );
+  });
+});
+
+describe('owner filters (ADR-265)', () => {
+  const asha = 'e6f7a8b9-c0d1-4c4d-8e5f-6a7b8c9d0e1f';
+  const dev = 'f7a8b9c0-d1e2-4d5e-9f6a-7b8c9d0e1f2a';
+
+  it('take 1 to 50 members, once each and in lower case, in the order given; null takes every deal', () => {
+    expect(webhookOwnerIdsSchema.parse([dev, asha.toUpperCase(), dev, asha])).toEqual([dev, asha]);
+    expect(webhookOwnerIdsSchema.parse(null)).toBeNull();
+    const ids = Array.from(
+      { length: WEBHOOK_LIMITS.owners + 1 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(WEBHOOK_LIMITS.owners).toBe(50);
+    expect(webhookOwnerIdsSchema.parse(ids.slice(1))).toEqual(ids.slice(1));
+    for (const refused of [[], ids, ['asha@example.com'], [asha, null], asha, [42]]) {
+      expect(webhookOwnerIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(false);
+    }
+    expect(webhookOwnerIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one member, or take every deal.',
+    );
+    expect(webhookOwnerIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 50 members.',
+    );
+    expect(webhookOwnerIdsSchema.safeParse(['asha@example.com']).error?.issues[0]?.message).toBe(
+      'Choose members from the list.',
+    );
+  });
+
+  it('apply to the deal events, whose payloads give the owner, and are kept only while one is taken', () => {
+    for (const schema of [
+      dealCreatedPayloadSchema,
+      dealStageChangedPayloadSchema,
+      dealStatusChangedPayloadSchema,
+    ]) {
+      expect('ownerId' in schema.shape.data.shape.deal.shape).toBe(true);
+    }
+    for (const type of WEBHOOK_PIPELINE_EVENTS) {
+      expect(WEBHOOK_OWNERS_NEED_THE_EVENTS).toContain(WEBHOOK_EVENT_INFO[type].label);
+    }
+    expect(webhookOwnerIdsFor(['deal.created'], [asha], null)).toEqual([asha]);
+    expect(webhookOwnerIdsFor(['deal.stage_changed'], undefined, [dev])).toEqual([dev]);
+    expect(webhookOwnerIdsFor(['deal.status_changed'], null, [dev])).toBeNull();
+    expect(webhookOwnerIdsFor(['deal.created'], undefined, null)).toBeNull();
+    expect(webhookOwnerIdsFor(['task.created', 'contact.created'], [asha], [dev])).toBeNull();
+  });
+
+  it('name an owner, one who no longer uses the CRM as such', () => {
+    expect(webhookOwnerText({ id: asha, name: 'Asha', active: true })).toBe('Asha');
+    expect(webhookOwnerText({ id: asha, name: 'Asha', active: false })).toBe(
+      'Asha (no longer uses the CRM)',
+    );
+    expect(webhookOwnerText({ id: asha, name: null, active: false })).toBe(
+      'Unknown member (no longer uses the CRM)',
     );
   });
 });
