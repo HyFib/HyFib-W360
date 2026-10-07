@@ -1644,6 +1644,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `whatsapp_account_id` picks the account; an unchanged content is found with `canonicalJson` of the
   components; answers are read with `readApiMessageTemplate` from `api/message-templates.ts`.
   `message_templates.created_by_api_key_id` (0216) names the key.
+- **Template submission and deletion at Meta through the API (ADR-296):** `apiSubmitMessageTemplate`
+  in `api/message-template-drafts.ts` submits with `templates.submit`, and
+  `apiDeleteMessageTemplate` deletes a template Meta has with it too, through the writes the
+  Templates page now shares in `templates/service.ts` (`writeSubmitTemplate`, `templateDeletion`,
+  `writeDeleteTemplateAtMeta`, `enqueueTemplateJob`): each queues its `template.submit` or
+  `template.delete` job in the write's transaction, signed for the company with no member, and the
+  template workers run it as before.
 - **Many conversations at once (ADR-120):** `POST /conversations/update-many`
   (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
   transaction it locks the member first (as a suspension does before releasing its conversations),

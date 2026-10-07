@@ -1,5 +1,41 @@
 # Progress
 
+## 2026-10-07 — Template submission and deletion at Meta through the public API (P5-08, H-033, W-059, ADR-296)
+
+Status: **Implemented; its database tests run in CI only.** Keys could add and change drafts
+(ADR-295) but each waited for a member to submit it, and only members deleted templates Meta has.
+The local PostgreSQL is unavailable, so the migration and the integration tests below were written
+but not run here; migration 0218 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0218 (`templates.submit` in the scope checks of keys and plans).
+- **Domain:** `apiSubmitMessageTemplate` and the deletion of templates Meta has in
+  `api/message-template-drafts.ts`; the Templates page's submission and deletion shared from
+  `templates/service.ts` (`writeSubmitTemplate`, `templateDeletion`, `writeDeleteTemplateAtMeta`,
+  `enqueueTemplateJob`); the scope; the OpenAPI operation and the deletion's answer.
+- **Web:** `POST /api/v1/message-templates/{id}/submit`; `DELETE /api/v1/message-templates/{id}`
+  deletes templates Meta has too.
+- **Tests:** unit (6 new in `api/message-template-drafts.test.ts`: the scope, refusals before any
+  query, the reads, writes and queued job of a submission and of a deletion at Meta, in their
+  transaction, as the key and as a member, the refusals, the OpenAPI entries; the ADR-295 tests and
+  the API scope tests updated); integration (3 new in `api.test.ts`, the ADR-295 tests updated).
+  Written for CI; the integration tests were not run here. No e2e test.
+- **Docs:** ADR-296; ARCHITECTURE; SECURITY; THREAT-MODEL T264; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-059.
+- **Mutation checks:** 52/52 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 132 files, 1263 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0218                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Template drafts through the public API (P5-08, H-033, W-059, ADR-295)
 
 Status: **Implemented; its database tests run in CI only.** Keys could read every template (ADR-294)

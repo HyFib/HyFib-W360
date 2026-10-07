@@ -11263,3 +11263,46 @@ Decision:
 Not built: submitting drafts to Meta and deleting templates Meta has through the API (they need
 `templates.submit`), drafts with media headers or named variables (the editor has neither), and
 changing a draft's name or language.
+
+## ADR-296 Template submission and deletion at Meta through the public API (P5-08) (2026-10-07)
+
+Context: ADR-295 lets keys add and change drafts, but each draft still waited for a member to submit
+it on the Templates page, and a template Meta has could be deleted only there. Members submit drafts
+with `templates.submit` and delete a template Meta has with `templates.write` and
+`templates.submit`. Submission is write-ahead and Meta's listing is the source of truth (ADR-019); a
+deletion whose job runs out of retries ends where the company sees it (ADR-111).
+
+Decision:
+
+- **A `templates.submit` scope** ("Submit templates"), granted only by members who hold
+  `templates.submit` (owners, administrators and marketers do), writing, so refused while the
+  company is suspended or restricted. Existing keys and plans that chose their scopes do not gain
+  it. With it the API has 34 scopes.
+- **`POST /api/v1/message-templates/{id}/submit`** (`submitMessageTemplate`) submits a draft as the
+  Templates page does: only a draft Meta never received (`draft` or `submit_failed`; 412 otherwise,
+  as for one submitted already), with content HyFib can send, checked again as the editor checks it
+  (422), for a connected WhatsApp Business account (412). In one transaction the template becomes
+  `submitting` (its version moves on and its submission error is cleared), its status change is
+  recorded and the create request is queued; the worker sends it and records Meta's answer as for
+  members, and the sync settles a lost answer (ADR-019). It answers the template, `submitting`, once
+  per `Idempotency-Key` when one is given; without one, a second submission answers 412. No body: it
+  submits the content the draft has.
+- **`DELETE /api/v1/message-templates/{id}`** also deletes a template Meta has when the key holds
+  `templates.submit` too (403 naming it otherwise), as the Templates page does: in one transaction
+  the template becomes `pending_deletion`, with its status change, and the request to Meta is
+  queued. Meta's answer makes it `deleted`; a refusal gives it back the status Meta lists, with a
+  `delete_failed` change (ADR-111). The answer gives `status` (`deleted`, or `pending_deletion`
+  while Meta deletes it), and `deleted` says whether it is deleted now. One being submitted answers
+  412, and one already deleted, or being deleted, 409, as before.
+- **Shared writes:** the Templates page's submission and deletion are now `writeSubmitTemplate`,
+  `templateDeletion` and `writeDeleteTemplateAtMeta`, with `enqueueTemplateJob`, so the page and
+  keys share their checks, status changes and queued requests. A key's job is signed for the company
+  with no member (the template workers already run jobs without one), and its status changes name no
+  member. The audit log names the key (`template.submitted` with the category, `template.deleted`,
+  with `source: api`).
+- **Migration 0218** replaces the scope checks of keys and plans with the new scope, validated at
+  once.
+
+Not built: changing a template Meta has (members change it in WhatsApp Manager), submitting many
+drafts in one call, and a webhook event for `submitting` or `submit_failed` (template.status_changed
+reports Meta's decisions).

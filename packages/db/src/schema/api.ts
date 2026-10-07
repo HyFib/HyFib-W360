@@ -9,6 +9,7 @@ export const API_SCOPES = [
   'channels.read',
   'templates.read',
   'templates.write',
+  'templates.submit',
   'contacts.read',
   'contacts.write',
   'contacts.merge',

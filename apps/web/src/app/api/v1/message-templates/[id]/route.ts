@@ -8,7 +8,8 @@ import { handleApiRequest } from '@/server/api';
 
 /**
  * GET /api/v1/message-templates/{id}: one template of any status, with its history (ADR-294);
- * PATCH changes a draft's content and DELETE deletes a draft Meta never received (ADR-295).
+ * PATCH changes a draft's content and DELETE deletes a draft Meta never received (ADR-295), or,
+ * with templates.submit, a template Meta has (ADR-296).
  */
 export const dynamic = 'force-dynamic';
 

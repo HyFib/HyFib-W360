@@ -623,17 +623,17 @@ Phase 5 rules (Public API, P5-08):
 - Members with `developer.manage` (owners and administrators) create, rotate and revoke the
   company's API keys; a key belongs to the company, not to its author. Each scope needs the
   permission a member needs for the same work: `templates.read`, `templates.write` (ADR-295),
-  `contacts.read`, `contacts.write`, `inbox.reply` for `messages.send` (utility templates) and
-  `messages.reply` (text replies, ADR-070), `campaigns.send` for `messages.send_marketing`,
-  `inbox.read_all` for `conversations.read` (ADR-072), `inbox.supervise` for `conversations.write`
-  (ADR-075), `teams.manage` (ADR-287) and `saved_replies.manage` (ADR-291), `inbox.assign` for
-  `availability.write` (ADR-289), `automations.publish` for `automations.start` (ADR-077),
-  `tenant.settings.manage` for `contact_fields.manage` (ADR-115), `pipelines.manage` (ADR-286) and
-  `business_hours.manage` (ADR-290), `tenant.read` for `business_hours.read` (ADR-290),
-  `campaigns.read` and `campaigns.write` for the scopes of the same names (ADR-125, ADR-186),
-  `campaigns.send` for `campaigns.stop` (ADR-128) and `campaigns.resume` (ADR-176), `commerce.read`
-  for `orders.read` (ADR-167), `inbox.reply` for `orders.write` (ADR-168) and
-  `orders.request_payment` (ADR-283), `channels.read` for the scope of the same name (ADR-171),
+  `templates.submit` (ADR-296), `contacts.read`, `contacts.write`, `inbox.reply` for `messages.send`
+  (utility templates) and `messages.reply` (text replies, ADR-070), `campaigns.send` for
+  `messages.send_marketing`, `inbox.read_all` for `conversations.read` (ADR-072), `inbox.supervise`
+  for `conversations.write` (ADR-075), `teams.manage` (ADR-287) and `saved_replies.manage`
+  (ADR-291), `inbox.assign` for `availability.write` (ADR-289), `automations.publish` for
+  `automations.start` (ADR-077), `tenant.settings.manage` for `contact_fields.manage` (ADR-115),
+  `pipelines.manage` (ADR-286) and `business_hours.manage` (ADR-290), `tenant.read` for
+  `business_hours.read` (ADR-290), `campaigns.read` and `campaigns.write` for the scopes of the same
+  names (ADR-125, ADR-186), `campaigns.send` for `campaigns.stop` (ADR-128) and `campaigns.resume`
+  (ADR-176), `commerce.read` for `orders.read` (ADR-167), `inbox.reply` for `orders.write` (ADR-168)
+  and `orders.request_payment` (ADR-283), `channels.read` for the scope of the same name (ADR-171),
   `crm.read` for `deals.read` (ADR-253), `tasks.read` (ADR-258) and `notes.read` (ADR-279), and
   `crm.write` for `deals.write` (ADR-254, ADR-255), `tasks.write` (ADR-259) and `notes.write`
   (ADR-268). Nobody grants a key more than they hold, and rotating needs the same. A key keeps the
@@ -1186,9 +1186,18 @@ Phase 5 rules (Public API, P5-08):
   checked before any query and refused while the company is suspended or restricted; they write
   under row security in the key's company, through the Templates page's writes and checks. The
   number that picks the account is looked up in the key's company (another company's answers 404), a
-  key changes and deletes only drafts Meta never received (412 otherwise), and nothing reaches Meta:
-  submission and deletion at Meta stay with members who hold `templates.submit`. The audit log names
-  the key (unit tests; integration tests, run in CI only).
+  key changes and deletes only drafts Meta never received (412 otherwise), and nothing reaches Meta
+  without `templates.submit` (ADR-296). The audit log names the key (unit tests; integration tests,
+  run in CI only).
+- Template submission and deletion at Meta (ADR-296): `POST /message-templates/{id}/submit` needs
+  `templates.submit`, and deleting a template Meta has needs it as well as `templates.write`, each
+  granted only by members who hold it and refused while the company is suspended or restricted. The
+  template is read and locked under row security in the key's company (another company's answers
+  404); only a draft Meta never received is submitted, for a connected account, its content checked
+  again. The status change and the request to Meta are written in one transaction; the job is signed
+  for the company with no member, and the worker checks its signature, kind and company before it
+  calls Meta with the account's stored credential, which keys never see. The audit log names the key
+  (unit tests; integration tests, run in CI only).
 - Reading a deal's history (ADR-281): `GET /deals/{id}/history` needs `deals.read` and the CRM in
   the plan, checked before anything is read; it reads the key's company's deal only (another
   company's answers 404, as an unknown one does; an id that is not a UUID is refused before any

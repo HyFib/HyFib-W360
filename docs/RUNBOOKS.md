@@ -2140,14 +2140,28 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**A template submission or deletion at Meta answers 403, 404, 409, 412 or 422, or a template stays
+`submitting` or `pending_deletion` (ADR-296).** 403: the key lacks `templates.submit` (its creator
+needed that permission), or, deleting, `templates.write`. 404: another company's template, or an id
+that is none. 409: the template is already deleted, or being deleted. 412: it is not a draft Meta
+never received (submitted already: a retry without the first `Idempotency-Key` is refused), its
+WhatsApp Business account needs reconnecting, or, deleting, it is being submitted. 422: its content
+breaks the editor's rules. 423: the company is suspended or its plan has ended. A template stays
+`submitting` until the worker has Meta's answer: `submitError` says when HyFib waits for Meta to
+confirm it, and the sync adopts it or fails it after 10 minutes (ADR-019). One stays
+`pending_deletion` until Meta answers; a refusal gives it back the status Meta lists, with a
+`delete_failed` change, and the sweep ends a deletion whose job ran out of retries (ADR-111). The
+worker logs each `template job` with its outcome.
+
 **A template draft request answers 403, 404, 409, 412 or 422 (ADR-295).** 403: the key lacks
-`templates.write` (its creator needed that permission). 404: another company's number or template,
-or an id that is none. 409: the account has a template of that name and language (a deleted draft
-Meta never received is used again instead), `expectedVersion` is not the draft's version (read it
-again), or the draft is already deleted. 412: Meta has the template, or it is being submitted:
-change or delete it on the Templates page. 422: the content breaks the editor's rules; `issues`
-gives each problem's path. 423: the company is suspended or its plan has ended. A change that leaves
-the content as it is answers it without a new version.
+`templates.write` (its creator needed that permission), or, deleting a template Meta has,
+`templates.submit` (ADR-296). 404: another company's number or template, or an id that is none. 409:
+the account has a template of that name and language (a deleted draft Meta never received is used
+again instead), `expectedVersion` is not the draft's version (read it again), or the draft is
+already deleted. 412: the template is being submitted, or, to change it, Meta has it (change it in
+WhatsApp Manager). 422: the content breaks the editor's rules; `issues` gives each problem's path.
+423: the company is suspended or its plan has ended. A change that leaves the content as it is
+answers it without a new version.
 
 **A template request answers 403, 404 or 422, or a template is not listed (ADR-294).** 403: the key
 lacks `templates.read` (its creator needed that permission). 404: another company's template, or an

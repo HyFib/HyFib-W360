@@ -12,6 +12,7 @@ export const API_SCOPE_KEYS = [
   'channels.read',
   'templates.read',
   'templates.write',
+  'templates.submit',
   'contacts.read',
   'contacts.write',
   'contacts.merge',
@@ -69,8 +70,15 @@ export const API_SCOPE_INFO: Record<
   'templates.write': {
     label: 'Write templates',
     description:
-      'Add template drafts, change their content and delete drafts Meta never received, as members who write templates do on the Templates page, recorded as added through the API and in the audit log as done by the key. Submitting drafts to Meta and deleting templates Meta has are not part of it.',
+      'Add template drafts, change their content and delete drafts Meta never received, as members who write templates do on the Templates page, recorded as added through the API and in the audit log as done by the key. Deleting templates Meta has also needs the scope that submits them to Meta.',
     permission: 'templates.write',
+    writes: true,
+  },
+  'templates.submit': {
+    label: 'Submit templates',
+    description:
+      'Submit template drafts to Meta for review and, with the scope that writes templates, delete templates Meta has, which can then no longer be sent, as members who submit templates do on the Templates page, in the audit log as done by the key.',
+    permission: 'templates.submit',
     writes: true,
   },
   'contacts.read': {

@@ -298,6 +298,161 @@ export async function writeDeleteLocalTemplate(
   });
 }
 
+/** Queues a template job, signed for the company and who asked: a member, or none for a key. */
+async function enqueueTemplateJob(
+  tx: Tx | null,
+  deps: Pick<TemplateDeps, 'jobs' | 'signer'>,
+  kind: 'template.submit' | 'template.delete' | 'template.sync',
+  tenantId: string,
+  actorUserId: string | null,
+  ref: string,
+  singletonKey: string,
+  priority?: number,
+) {
+  const queue =
+    kind === 'template.submit'
+      ? QUEUES.templateSubmit.name
+      : kind === 'template.delete'
+        ? QUEUES.templateDelete.name
+        : QUEUES.templateSync.name;
+  await deps.jobs.enqueue(tx, queue, deps.signer.sign({ kind, tenantId, actorUserId, ref }), {
+    singletonKey,
+    ...(priority !== undefined ? { priority } : {}),
+  });
+  // A job already waiting under the key stands for this one, at the priority asked (ADR-178).
+  if (priority !== undefined) await deps.jobs.raisePriority(tx, queue, singletonKey, priority);
+}
+
+/** The company's WhatsApp Business account (404 for none). */
+async function templateAccount(tx: Tx, tenantId: string, whatsappAccountId: string) {
+  const [waba] = await tx
+    .select({
+      id: whatsappAccounts.id,
+      status: whatsappAccounts.status,
+      name: whatsappAccounts.name,
+    })
+    .from(whatsappAccounts)
+    .where(
+      and(eq(whatsappAccounts.tenantId, tenantId), eq(whatsappAccounts.id, whatsappAccountId)),
+    );
+  if (!waba) throw notFound('WhatsApp account');
+  return waba;
+}
+
+/**
+ * Submits a locked draft to Meta for review, as the Templates page and the API do (ADR-296): only a
+ * draft Meta never received (412), whose content HyFib can send and Meta would take, for a
+ * connected account (412). It is marked `submitting` before Meta hears of it (write-ahead), with
+ * its status change, and the create request is queued. `actorUserId` is the member, null for a key.
+ */
+export async function writeSubmitTemplate(
+  tx: Tx,
+  deps: Pick<TemplateDeps, 'jobs' | 'signer'>,
+  tenantId: string,
+  row: Pick<
+    typeof messageTemplates.$inferSelect,
+    'id' | 'status' | 'providerTemplateId' | 'category' | 'components' | 'whatsappAccountId'
+  >,
+  actorUserId: string | null,
+  at: Date,
+): Promise<void> {
+  if (!isEditableDraft(row)) {
+    throw new AppError('precondition_failed', 'This template has already been sent to Meta.');
+  }
+  const def = fromMetaComponents(row.category, row.components);
+  if (!def) throw new AppError('unsupported', 'This template cannot be submitted from HyFib.');
+  assertValidDefinition(def);
+  const waba = await templateAccount(tx, tenantId, row.whatsappAccountId);
+  if (waba.status !== 'connected') {
+    throw new AppError(
+      'precondition_failed',
+      'Reconnect this WhatsApp account before submitting templates.',
+    );
+  }
+  const [updated] = await tx
+    .update(messageTemplates)
+    .set({
+      status: 'submitting',
+      submittedAt: at,
+      submitError: null,
+      version: sql`${messageTemplates.version} + 1`,
+    })
+    .where(and(eq(messageTemplates.tenantId, tenantId), eq(messageTemplates.id, row.id)))
+    .returning({ version: messageTemplates.version });
+  await insertStatusEvent(tx, tenantId, {
+    templateId: row.id,
+    status: 'submitting',
+    source: 'submit',
+    actorUserId,
+    at,
+  });
+  await enqueueTemplateJob(
+    tx,
+    deps,
+    'template.submit',
+    tenantId,
+    actorUserId,
+    row.id,
+    `${row.id}:${updated?.version ?? 0}`,
+  );
+}
+
+/**
+ * How a locked template is deleted, as the Templates page and the API delete it (ADR-296): `local`
+ * for one Meta never received, `meta` for one Meta has, which also needs `templates.submit`. One
+ * already deleted, or being deleted, answers 409; one being submitted, 412.
+ */
+export function templateDeletion(row: {
+  status: TemplateStatus;
+  providerTemplateId: string | null;
+}): 'local' | 'meta' {
+  if (row.status === 'deleted' || row.status === 'pending_deletion') {
+    throw new AppError('conflict', 'This template is already deleted.');
+  }
+  if (row.status === 'submitting') {
+    throw new AppError(
+      'precondition_failed',
+      'Wait until Meta confirms the submission before deleting.',
+    );
+  }
+  return row.providerTemplateId === null ? 'local' : 'meta';
+}
+
+/**
+ * Deletes a locked template Meta has, as the Templates page and the API do (ADR-296): it is
+ * `pending_deletion`, with its status change, until the queued request to Meta settles it. The
+ * caller checks it may be deleted (`templateDeletion`).
+ */
+export async function writeDeleteTemplateAtMeta(
+  tx: Tx,
+  deps: Pick<TemplateDeps, 'jobs' | 'signer'>,
+  tenantId: string,
+  templateId: string,
+  actorUserId: string | null,
+  at: Date,
+): Promise<void> {
+  await tx
+    .update(messageTemplates)
+    .set({ status: 'pending_deletion', version: sql`${messageTemplates.version} + 1` })
+    .where(and(eq(messageTemplates.tenantId, tenantId), eq(messageTemplates.id, templateId)));
+  await insertStatusEvent(tx, tenantId, {
+    templateId,
+    status: 'pending_deletion',
+    source: 'delete',
+    actorUserId,
+    at,
+  });
+  await enqueueTemplateJob(
+    tx,
+    deps,
+    'template.delete',
+    tenantId,
+    actorUserId,
+    templateId,
+    `${templateId}:delete`,
+  );
+}
+
 export function createTemplatesService(deps: TemplateDeps) {
   const { db, clock } = deps;
 
@@ -312,46 +467,8 @@ export function createTemplatesService(deps: TemplateDeps) {
     return row;
   }
 
-  async function connectedWaba(tx: Tx, ctx: TenantContext, whatsappAccountId: string) {
-    const [waba] = await tx
-      .select({
-        id: whatsappAccounts.id,
-        status: whatsappAccounts.status,
-        name: whatsappAccounts.name,
-      })
-      .from(whatsappAccounts)
-      .where(
-        and(
-          eq(whatsappAccounts.tenantId, ctx.tenant.id),
-          eq(whatsappAccounts.id, whatsappAccountId),
-        ),
-      );
-    if (!waba) throw notFound('WhatsApp account');
-    return waba;
-  }
-
-  async function enqueue(
-    tx: Tx | null,
-    kind: 'template.submit' | 'template.delete' | 'template.sync',
-    tenantId: string,
-    actorUserId: string | null,
-    ref: string,
-    singletonKey: string,
-    priority?: number,
-  ) {
-    const queue =
-      kind === 'template.submit'
-        ? QUEUES.templateSubmit.name
-        : kind === 'template.delete'
-          ? QUEUES.templateDelete.name
-          : QUEUES.templateSync.name;
-    await deps.jobs.enqueue(tx, queue, deps.signer.sign({ kind, tenantId, actorUserId, ref }), {
-      singletonKey,
-      ...(priority !== undefined ? { priority } : {}),
-    });
-    // A job already waiting under the key stands for this one, at the priority asked (ADR-178).
-    if (priority !== undefined) await deps.jobs.raisePriority(tx, queue, singletonKey, priority);
-  }
+  const connectedWaba = (tx: Tx, ctx: TenantContext, whatsappAccountId: string) =>
+    templateAccount(tx, ctx.tenant.id, whatsappAccountId);
 
   return {
     async listTemplates(
@@ -510,40 +627,7 @@ export function createTemplatesService(deps: TemplateDeps) {
       assertCan(ctx, 'templates.submit');
       await db.run(ctx.scope, async (tx) => {
         const row = await loadForUpdate(tx, ctx, templateId);
-        if (!isEditableDraft(row)) {
-          throw new AppError('precondition_failed', 'This template has already been sent to Meta.');
-        }
-        const def = fromMetaComponents(row.category, row.components);
-        if (!def)
-          throw new AppError('unsupported', 'This template cannot be submitted from HyFib.');
-        assertValidDefinition(def);
-        const waba = await connectedWaba(tx, ctx, row.whatsappAccountId);
-        if (waba.status !== 'connected') {
-          throw new AppError(
-            'precondition_failed',
-            'Reconnect this WhatsApp account before submitting templates.',
-          );
-        }
-        const now = clock.now();
-        const [updated] = await tx
-          .update(messageTemplates)
-          .set({
-            status: 'submitting',
-            submittedAt: now,
-            submitError: null,
-            version: sql`${messageTemplates.version} + 1`,
-          })
-          .where(
-            and(eq(messageTemplates.tenantId, ctx.tenant.id), eq(messageTemplates.id, templateId)),
-          )
-          .returning({ version: messageTemplates.version });
-        await insertStatusEvent(tx, ctx.tenant.id, {
-          templateId,
-          status: 'submitting',
-          source: 'submit',
-          actorUserId: ctx.user.id,
-          at: now,
-        });
+        await writeSubmitTemplate(tx, deps, ctx.tenant.id, row, ctx.user.id, clock.now());
         await recordAudit(
           tx,
           ctx,
@@ -554,14 +638,6 @@ export function createTemplatesService(deps: TemplateDeps) {
             metadata: { name: row.name, language: row.language, category: row.category },
           },
           meta,
-        );
-        await enqueue(
-          tx,
-          'template.submit',
-          ctx.tenant.id,
-          ctx.user.id,
-          templateId,
-          `${templateId}:${updated?.version ?? 0}`,
         );
       });
     },
@@ -575,43 +651,11 @@ export function createTemplatesService(deps: TemplateDeps) {
       await db.run(ctx.scope, async (tx) => {
         const row = await loadForUpdate(tx, ctx, templateId);
         const now = clock.now();
-        if (row.status === 'deleted' || row.status === 'pending_deletion') {
-          throw new AppError('conflict', 'This template is already deleted.');
-        }
-        if (row.status === 'submitting') {
-          throw new AppError(
-            'precondition_failed',
-            'Wait until Meta confirms the submission before deleting.',
-          );
-        }
-        if (row.providerTemplateId === null) {
+        if (templateDeletion(row) === 'local') {
           await writeDeleteLocalTemplate(tx, ctx.tenant.id, templateId, ctx.user.id, now);
         } else {
           assertCan(ctx, 'templates.submit');
-          await tx
-            .update(messageTemplates)
-            .set({ status: 'pending_deletion', version: sql`${messageTemplates.version} + 1` })
-            .where(
-              and(
-                eq(messageTemplates.tenantId, ctx.tenant.id),
-                eq(messageTemplates.id, templateId),
-              ),
-            );
-          await insertStatusEvent(tx, ctx.tenant.id, {
-            templateId,
-            status: 'pending_deletion',
-            source: 'delete',
-            actorUserId: ctx.user.id,
-            at: now,
-          });
-          await enqueue(
-            tx,
-            'template.delete',
-            ctx.tenant.id,
-            ctx.user.id,
-            templateId,
-            `${templateId}:delete`,
-          );
+          await writeDeleteTemplateAtMeta(tx, deps, ctx.tenant.id, templateId, ctx.user.id, now);
         }
         await recordAudit(
           tx,
@@ -638,8 +682,9 @@ export function createTemplatesService(deps: TemplateDeps) {
         }
         await requestSyncTx(tx, ctx.tenant.id, whatsappAccountId, clock.now());
         // A member waits for it, so it goes before the sweep's routine syncs (ADR-178).
-        await enqueue(
+        await enqueueTemplateJob(
           tx,
+          deps,
           'template.sync',
           ctx.tenant.id,
           null,

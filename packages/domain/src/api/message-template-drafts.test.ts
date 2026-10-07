@@ -2,15 +2,24 @@ import { getTableName } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
 import { isAppError } from '@w360/core';
+import { QUEUES } from '@w360/contracts';
 import { API_SCOPES, type Database, type SQL, type Tx } from '@w360/db';
 import { ROLE_PERMISSIONS } from '../authz/permissions';
+import type { JobSigner } from '../jobs/envelope';
+import type { JobQueue } from '../jobs/queue';
 import { toMetaComponents, type TemplateDefinition } from '../templates/definition';
-import { templateNameError, writeCreateTemplateDraft } from '../templates/service';
+import {
+  templateNameError,
+  writeCreateTemplateDraft,
+  writeDeleteTemplateAtMeta,
+  writeSubmitTemplate,
+} from '../templates/service';
 import type { ApiContext } from './context';
 import {
   apiCreateMessageTemplate,
   apiCreateMessageTemplateSchema,
   apiDeleteMessageTemplate,
+  apiSubmitMessageTemplate,
   apiUpdateMessageTemplate,
   apiUpdateMessageTemplateSchema,
 } from './message-template-drafts';
@@ -40,6 +49,15 @@ const untouched = {
   },
 } as unknown as Database;
 const clock = { now: () => NOW };
+/** A job queue and signer that fail the test if anything is queued. */
+const offline = {
+  jobs: {
+    enqueue: () => {
+      throw new Error('queued a job');
+    },
+  } as unknown as JobQueue,
+  signer: {} as JobSigner,
+};
 
 /** The code, message and paths of a refusal. */
 async function refusal(promise: Promise<unknown>) {
@@ -59,9 +77,11 @@ const text = (query: SQL) => {
 };
 
 /**
- * A transaction whose reads answer, in order, with `answers` (when awaited, locked or limited), and
- * that records each step: reads with their table, conditions and lock or limit, inserts and
- * updates, with SQL values as text. A read beyond the answers fails the test.
+ * A transaction whose reads answer, in order, with `answers` (when awaited, locked or limited, and
+ * an update when it returns rows), and that records each step: reads with their table, conditions
+ * and lock or limit, inserts and updates, with SQL values as text, and the jobs queued, whether in
+ * the transaction, with their queue, signed envelope and options. A read beyond the answers fails
+ * the test.
  */
 function recorder(answers: unknown[][]) {
   const queue = [...answers];
@@ -115,13 +135,27 @@ function recorder(answers: unknown[][]) {
     update: (table: Parameters<typeof getTableName>[0]) => ({
       set: (values: Record<string, unknown>) => ({
         where: (condition: SQL) => {
-          steps.push(['update', getTableName(table), plain(values), text(condition)]);
-          return Promise.resolve();
+          const step: unknown[] = ['update', getTableName(table), plain(values), text(condition)];
+          steps.push(step);
+          return {
+            then: (resolve: (rows: undefined) => void) => resolve(undefined),
+            returning: () => {
+              step.push('returning');
+              return Promise.resolve(next());
+            },
+          };
         },
       }),
     }),
   } as unknown as Tx;
-  return { tx, steps, unread: () => queue.length };
+  const jobs = {
+    enqueue: (jobTx: unknown, name: string, envelope: unknown, options: unknown) => {
+      steps.push(['enqueue', jobTx === tx, name, envelope, options]);
+      return Promise.resolve('job-1');
+    },
+  } as unknown as JobQueue;
+  const signer = { sign: (input: unknown) => ({ signed: input }) } as unknown as JobSigner;
+  return { tx, steps, unread: () => queue.length, jobs, signer };
 }
 
 /** A database whose transactions run on `tx`. */
@@ -189,7 +223,7 @@ describe('template drafts through the API (ADR-295)', () => {
       'Add template drafts, change their content and delete drafts Meta never received',
       'as members who write templates do on the Templates page',
       'recorded as added through the API and in the audit log as done by the key',
-      'Submitting drafts to Meta and deleting templates Meta has are not part of it.',
+      'Deleting templates Meta has also needs the scope that submits them to Meta.',
     ]) {
       expect(API_SCOPE_INFO['templates.write'].description).toContain(words);
     }
@@ -206,7 +240,7 @@ describe('template drafts through the API (ADR-295)', () => {
       for (const write of [
         () => apiCreateMessageTemplate({ db: untouched, clock }, key, draft, null),
         () => apiUpdateMessageTemplate({ db: untouched }, key, TEMPLATE, { definition: shipped }),
-        () => apiDeleteMessageTemplate({ db: untouched, clock }, key, TEMPLATE),
+        () => apiDeleteMessageTemplate({ db: untouched, clock, ...offline }, key, TEMPLATE),
       ]) {
         expect((await refusal(write()))[0]).toBe(
           key.tenant.status === 'active' ? 'forbidden' : 'tenant_suspended',
@@ -222,7 +256,7 @@ describe('template drafts through the API (ADR-295)', () => {
     for (const write of [
       () =>
         apiUpdateMessageTemplate({ db: untouched }, key, 'order_shipped', { definition: shipped }),
-      () => apiDeleteMessageTemplate({ db: untouched, clock }, key, 'order_shipped'),
+      () => apiDeleteMessageTemplate({ db: untouched, clock, ...offline }, key, 'order_shipped'),
     ]) {
       expect(await refusal(write())).toEqual(['not_found', 'Template not found.', []]);
     }
@@ -547,10 +581,9 @@ describe('template drafts through the API (ADR-295)', () => {
       language: 'en',
     };
     const run = recorder([[draft]]);
-    expect(await apiDeleteMessageTemplate({ db: on(run.tx), clock }, key, TEMPLATE)).toEqual({
-      id: TEMPLATE,
-      deleted: true,
-    });
+    expect(
+      await apiDeleteMessageTemplate({ db: on(run.tx), clock, ...run }, key, TEMPLATE),
+    ).toEqual({ id: TEMPLATE, deleted: true, status: 'deleted' });
     expect(run.steps).toEqual([
       ['read', 'message_templates', THIS_TEMPLATE, 'update'],
       [
@@ -595,20 +628,23 @@ describe('template drafts through the API (ADR-295)', () => {
         { ...draft, status: 'submitting' },
         ['precondition_failed', 'Wait until Meta confirms the submission before deleting.', []],
       ],
+      // One Meta has needs templates.submit too (ADR-296).
       [
         { ...draft, status: 'approved', providerTemplateId: '1234567890' },
-        ['precondition_failed', 'Meta has this template: delete it on the Templates page.', []],
+        ['forbidden', 'This API key does not have the templates.submit scope.', []],
       ],
     ] as const) {
       const refused = recorder([[row]]);
       expect(
-        await refusal(apiDeleteMessageTemplate({ db: on(refused.tx), clock }, key, TEMPLATE)),
+        await refusal(
+          apiDeleteMessageTemplate({ db: on(refused.tx), clock, ...refused }, key, TEMPLATE),
+        ),
       ).toEqual(expected);
       expect(refused.steps).toHaveLength(1);
     }
     const none = recorder([[]]);
     expect(
-      await refusal(apiDeleteMessageTemplate({ db: on(none.tx), clock }, key, TEMPLATE)),
+      await refusal(apiDeleteMessageTemplate({ db: on(none.tx), clock, ...none }, key, TEMPLATE)),
     ).toEqual(['not_found', 'Template not found.', []]);
   });
 
@@ -630,7 +666,7 @@ describe('template drafts through the API (ADR-295)', () => {
       'Scope: `templates.write`.',
       'for the WhatsApp Business account of one of the company’s numbers',
       '409 otherwise; a deleted draft Meta never received is used again',
-      'It stays a draft: it is submitted to Meta on the Templates page.',
+      'It stays a draft until it is submitted to Meta (POST /message-templates/{id}/submit, or on the Templates page).',
       'With an `Idempotency-Key`, a retry answers the first response.',
     ]) {
       expect(create?.description).toContain(words);
@@ -646,7 +682,9 @@ describe('template drafts through the API (ADR-295)', () => {
     }
     const remove = doc.paths['/message-templates/{id}']?.delete;
     expect(remove?.operationId).toBe('deleteMessageTemplate');
-    expect(remove?.description).toContain('One being submitted, or one Meta has, answers 412');
+    expect(remove?.description).toContain(
+      'One being submitted answers 412; one already deleted, or being deleted, 409.',
+    );
     expect(doc.components.schemas.CreateMessageTemplate?.required).toEqual([
       'channelId',
       'name',
@@ -654,5 +692,342 @@ describe('template drafts through the API (ADR-295)', () => {
       'definition',
     ]);
     expect(doc.components.schemas.UpdateMessageTemplate?.required).toEqual(['definition']);
+  });
+});
+
+describe('submitting templates and deleting those Meta has, through the API (ADR-296)', () => {
+  /** A draft as the submission locks it. */
+  const draft = {
+    id: TEMPLATE,
+    status: 'draft' as const,
+    providerTemplateId: null,
+    category: 'UTILITY' as const,
+    components: toMetaComponents(shipped),
+    whatsappAccountId: ACCOUNT,
+    name: 'order_shipped',
+    language: 'en',
+  };
+  const connected = [{ id: ACCOUNT, status: 'connected', name: 'Acme' }];
+  const THIS_ACCOUNT = `("app"."whatsapp_accounts"."tenant_id" = "${TENANT}" and "app"."whatsapp_accounts"."id" = "${ACCOUNT}")`;
+
+  it('needs templates.submit, a scope the database accepts after templates.write, granted with the members’ templates.submit', async () => {
+    expect(API_SCOPES.indexOf('templates.submit')).toBe(API_SCOPES.indexOf('templates.write') + 1);
+    expect(API_SCOPE_KEYS.indexOf('templates.submit')).toBe(
+      API_SCOPE_KEYS.indexOf('templates.write') + 1,
+    );
+    expect(API_SCOPE_INFO['templates.submit']).toMatchObject({
+      label: 'Submit templates',
+      permission: 'templates.submit',
+      writes: true,
+    });
+    for (const words of [
+      'Submit template drafts to Meta for review',
+      'with the scope that writes templates, delete templates Meta has, which can then no longer be sent',
+      'as members who submit templates do on the Templates page, in the audit log as done by the key.',
+    ]) {
+      expect(API_SCOPE_INFO['templates.submit'].description).toContain(words);
+    }
+    for (const role of ['owner', 'admin', 'marketer'] as const) {
+      expect(ROLE_PERMISSIONS[role].has('templates.submit')).toBe(true);
+    }
+    expect(ROLE_PERMISSIONS.agent.has('templates.submit')).toBe(false);
+
+    for (const key of [ctx(['templates.write']), ctx(['templates.submit'], 'restricted')]) {
+      expect(
+        (
+          await refusal(
+            apiSubmitMessageTemplate({ db: untouched, clock, ...offline }, key, TEMPLATE, null),
+          )
+        ).slice(0, 2),
+      ).toEqual(
+        key.tenant.status === 'active'
+          ? ['forbidden', 'This API key does not have the templates.submit scope.']
+          : [
+              'tenant_suspended',
+              "The company's plan has ended, so the API cannot change data or send messages.",
+            ],
+      );
+    }
+    expect(
+      await refusal(
+        apiSubmitMessageTemplate(
+          { db: untouched, clock, ...offline },
+          ctx(['templates.submit']),
+          'order_shipped',
+          null,
+        ),
+      ),
+    ).toEqual(['not_found', 'Template not found.', []]);
+  });
+
+  it('marks a draft submitting before Meta hears of it, queues the request in its transaction, as the key’s, and answers it', async () => {
+    for (const status of ['draft', 'submit_failed'] as const) {
+      const run = recorder([
+        [{ ...draft, status }],
+        connected,
+        [{ version: 4 }],
+        ...detailReads({ status: 'submitting', version: 4, submittedAt: NOW }),
+      ]);
+      const response = await apiSubmitMessageTemplate(
+        { db: on(run.tx), clock, ...run },
+        ctx(['templates.submit']),
+        TEMPLATE,
+        null,
+      );
+      expect(run.steps.slice(0, 6)).toEqual([
+        ['read', 'message_templates', THIS_TEMPLATE, 'update'],
+        ['read', 'whatsapp_accounts', THIS_ACCOUNT],
+        [
+          'update',
+          'message_templates',
+          { status: 'submitting', submittedAt: NOW, submitError: null, version: VERSION_PLUS_ONE },
+          THIS_TEMPLATE,
+          'returning',
+        ],
+        [
+          'insert',
+          'template_status_events',
+          {
+            id: expect.any(String),
+            tenantId: TENANT,
+            templateId: TEMPLATE,
+            status: 'submitting',
+            reason: null,
+            source: 'submit',
+            actorUserId: null,
+            occurredAt: NOW,
+          },
+        ],
+        [
+          'enqueue',
+          true,
+          QUEUES.templateSubmit.name,
+          {
+            signed: {
+              kind: 'template.submit',
+              tenantId: TENANT,
+              actorUserId: null,
+              ref: TEMPLATE,
+            },
+          },
+          { singletonKey: `${TEMPLATE}:4` },
+        ],
+        [
+          'insert',
+          'audit_events',
+          expect.objectContaining({
+            tenantId: TENANT,
+            actorType: 'api_key',
+            actorId: CALLER,
+            action: 'template.submitted',
+            subjectType: 'template',
+            subjectId: TEMPLATE,
+            correlationId: 'req-1',
+            metadata: { name: 'order_shipped', language: 'en', category: 'UTILITY', source: 'api' },
+          }),
+        ],
+      ]);
+      expect(response).toMatchObject({
+        status: 200,
+        replayed: false,
+        body: { data: { id: TEMPLATE, status: 'submitting', version: 4 } },
+      });
+      expect(run.unread()).toBe(0);
+    }
+  });
+
+  it('refuses a template Meta has or that is being submitted, content HyFib cannot send or Meta would not take, and an account not connected, changing nothing', async () => {
+    const key = ctx(['templates.submit']);
+    const sent = ['precondition_failed', 'This template has already been sent to Meta.', []];
+    for (const [answers, expected] of [
+      [[[{ ...draft, status: 'submitting' }]], sent],
+      [[[{ ...draft, status: 'pending', providerTemplateId: '1234567890' }]], sent],
+      [[[{ ...draft, status: 'submit_failed', providerTemplateId: '1234567890' }]], sent],
+      [
+        [
+          [
+            {
+              ...draft,
+              components: [{ type: 'HEADER', format: 'IMAGE' }, ...toMetaComponents(shipped)],
+            },
+          ],
+        ],
+        ['unsupported', 'This template cannot be submitted from HyFib.', []],
+      ],
+      [
+        [
+          [
+            {
+              ...draft,
+              components: toMetaComponents({
+                ...shipped,
+                body: { text: 'Hi {{1}}.', examples: [] },
+              }),
+            },
+          ],
+        ],
+        ['validation_failed', 'Body: give an example value for every variable.', ['body.examples']],
+      ],
+      [
+        [[draft], [{ ...connected[0], status: 'disconnected' }]],
+        ['precondition_failed', 'Reconnect this WhatsApp account before submitting templates.', []],
+      ],
+      [
+        [[draft], []],
+        ['not_found', 'WhatsApp account not found.', []],
+      ],
+      [[[]], ['not_found', 'Template not found.', []]],
+    ] as const) {
+      const run = recorder(answers as unknown as unknown[][]);
+      expect(
+        await refusal(
+          apiSubmitMessageTemplate({ db: on(run.tx), clock, ...run }, key, TEMPLATE, null),
+        ),
+      ).toEqual(expected);
+      expect(run.steps.every((step) => step[0] === 'read')).toBe(true);
+      expect(run.unread()).toBe(0);
+    }
+  });
+
+  it('submits as the member on the Templates page, the member named on the change and the job', async () => {
+    const run = recorder([connected, [{ version: 1 }]]);
+    await writeSubmitTemplate(run.tx, run, TENANT, draft, 'user-1', NOW);
+    expect(run.steps[2]?.[2]).toMatchObject({ status: 'submitting', actorUserId: 'user-1' });
+    expect(run.steps[3]).toEqual([
+      'enqueue',
+      true,
+      QUEUES.templateSubmit.name,
+      {
+        signed: { kind: 'template.submit', tenantId: TENANT, actorUserId: 'user-1', ref: TEMPLATE },
+      },
+      { singletonKey: `${TEMPLATE}:1` },
+    ]);
+  });
+
+  it('deletes a template Meta has with templates.submit too: pending deletion, the request queued in its transaction', async () => {
+    const key = ctx(['templates.write', 'templates.submit']);
+    for (const status of ['approved', 'rejected', 'paused'] as const) {
+      const row = {
+        status,
+        providerTemplateId: '1234567890',
+        name: 'order_shipped',
+        language: 'en',
+      };
+      const run = recorder([[row]]);
+      expect(
+        await apiDeleteMessageTemplate({ db: on(run.tx), clock, ...run }, key, TEMPLATE),
+      ).toEqual({ id: TEMPLATE, deleted: false, status: 'pending_deletion' });
+      expect(run.steps).toEqual([
+        ['read', 'message_templates', THIS_TEMPLATE, 'update'],
+        [
+          'update',
+          'message_templates',
+          { status: 'pending_deletion', version: VERSION_PLUS_ONE },
+          THIS_TEMPLATE,
+        ],
+        [
+          'insert',
+          'template_status_events',
+          {
+            id: expect.any(String),
+            tenantId: TENANT,
+            templateId: TEMPLATE,
+            status: 'pending_deletion',
+            reason: null,
+            source: 'delete',
+            actorUserId: null,
+            occurredAt: NOW,
+          },
+        ],
+        [
+          'enqueue',
+          true,
+          QUEUES.templateDelete.name,
+          {
+            signed: {
+              kind: 'template.delete',
+              tenantId: TENANT,
+              actorUserId: null,
+              ref: TEMPLATE,
+            },
+          },
+          { singletonKey: `${TEMPLATE}:delete` },
+        ],
+        [
+          'insert',
+          'audit_events',
+          expect.objectContaining({
+            actorType: 'api_key',
+            actorId: CALLER,
+            action: 'template.deleted',
+            subjectId: TEMPLATE,
+            correlationId: 'req-1',
+            metadata: { name: 'order_shipped', language: 'en', source: 'api' },
+          }),
+        ],
+      ]);
+    }
+    // A draft Meta never received needs no more than templates.write, as before.
+    const local = recorder([
+      [
+        {
+          status: 'submit_failed',
+          providerTemplateId: null,
+          name: 'order_shipped',
+          language: 'en',
+        },
+      ],
+    ]);
+    expect(
+      await apiDeleteMessageTemplate({ db: on(local.tx), clock, ...local }, key, TEMPLATE),
+    ).toEqual({ id: TEMPLATE, deleted: true, status: 'deleted' });
+    expect(local.steps.some((step) => step[0] === 'enqueue')).toBe(false);
+    // A member deleting one on the Templates page is named on the change and the job.
+    const member = recorder([]);
+    await writeDeleteTemplateAtMeta(member.tx, member, TENANT, TEMPLATE, 'user-1', NOW);
+    expect(member.steps[1]?.[2]).toMatchObject({ actorUserId: 'user-1' });
+    expect(member.steps[2]?.[3]).toEqual({
+      signed: { kind: 'template.delete', tenantId: TENANT, actorUserId: 'user-1', ref: TEMPLATE },
+    });
+  });
+
+  it('is described: the scope, the drafts it takes, Meta’s answer, the retry; and deletion at Meta', () => {
+    expect(API_ROUTES).toContainEqual(['post', '/message-templates/{id}/submit']);
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      paths: Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            description: string;
+            responses: Record<string, { content: unknown }>;
+          }
+        >
+      >;
+    };
+    const submit = doc.paths['/message-templates/{id}/submit']?.post;
+    expect(submit?.operationId).toBe('submitMessageTemplate');
+    for (const words of [
+      'Scope: `templates.submit`.',
+      'only a draft Meta never received (`draft` or `submit_failed`; 412 otherwise, as for one submitted already)',
+      'whose WhatsApp Business account is connected (412 otherwise)',
+      'It is `submitting` until HyFib has Meta’s answer',
+      '`submit_failed`, with `submitError` saying why, when Meta did not take it',
+      'With an `Idempotency-Key`, a retry answers the first response; without one, submitting it again is refused with 412.',
+    ]) {
+      expect(submit?.description).toContain(words);
+    }
+    const remove = doc.paths['/message-templates/{id}']?.delete;
+    for (const words of [
+      'One Meta has also needs `templates.submit` (403 naming it otherwise)',
+      'it is `pending_deletion` until Meta answers, then `deleted`',
+      'back to the status Meta reports, with a `delete_failed` change in its history',
+    ]) {
+      expect(remove?.description).toContain(words);
+    }
+    expect(JSON.stringify(remove?.responses['200']?.content)).toContain(
+      '"status":{"type":"string","enum":["deleted","pending_deletion"]}',
+    );
   });
 });

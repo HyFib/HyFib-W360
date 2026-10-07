@@ -907,6 +907,10 @@ verification, app review, Embedded Signup configuration).
   migrations 0216 and 0217: `templates.write` adds drafts for a number's account, changes their
   content from a version and deletes drafts Meta never received, through the Templates page's
   writes, recorded as the key's).
+  **[Template submission and deletion at Meta through the public API built; their database tests run
+  only in CI]** (ADR-296, migration 0218: `templates.submit` submits drafts to Meta for review and,
+  with `templates.write`, deletes templates Meta has, through the Templates page's writes, the
+  requests to Meta queued with the change).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact
@@ -920,8 +924,7 @@ verification, app review, Embedded Signup configuration).
   **[Adding CRM notes built; its database tests run only in CI]** (ADR-268, migration 0184:
   `notes.write` adds a note to a contact's or a deal's timeline as members do, recorded as written
   through the API; notes are not read through the API).
-  Remaining: submitting templates to Meta and deleting templates Meta has through the API,
-  call-to-action messages through the API, taking
+  Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),

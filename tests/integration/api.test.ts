@@ -13,6 +13,7 @@ import {
   CRM_LIMITS,
   RUN_BUDGETS,
   advanceAutomationRun,
+  authorizeJob,
   apiAddConversationNote,
   apiCreateClosedDay,
   apiCreateSavedReply,
@@ -26,6 +27,7 @@ import {
   apiDeleteTeam,
   apiDeleteClosedDay,
   apiDeleteMessageTemplate,
+  apiSubmitMessageTemplate,
   apiDeleteSavedReply,
   apiErrorResponse,
   apiGetAutomationRun,
@@ -110,6 +112,7 @@ import {
   outboxAad,
   processCommerceSync,
   processSendIntent,
+  processTemplateDelete,
   processTemplateSubmit,
   purgeApiIdempotencyKeys,
   queueTemplateMessage,
@@ -9500,7 +9503,11 @@ describe('template drafts through the API (ADR-295)', () => {
     ]);
 
     // Deleted as the Templates page deletes drafts: listed as deleted, and its name free again.
-    expect(await apiDeleteMessageTemplate(deps(), writer.ctx, id)).toEqual({ id, deleted: true });
+    expect(await apiDeleteMessageTemplate(deps(), writer.ctx, id)).toEqual({
+      id,
+      deleted: true,
+      status: 'deleted',
+    });
     expect(await apiGetMessageTemplate(deps(), reader.ctx, id)).toMatchObject({
       status: 'deleted',
       history: [expect.objectContaining({ status: 'deleted', source: 'delete' })],
@@ -9536,7 +9543,8 @@ describe('template drafts through the API (ADR-295)', () => {
     const writer = await apiKey(c, ['templates.write']);
     const reader = await apiKey(c, ['templates.read']);
 
-    // A template Meta has is neither changed nor deleted through the API.
+    // A template Meta has is not changed through the API, nor deleted without templates.submit
+    // (ADR-296).
     const approved = await approvedTemplate(c, shipped);
     await expectAppError(
       apiUpdateMessageTemplate(deps(), writer.ctx, approved.id, { definition: delayed }),
@@ -9545,8 +9553,8 @@ describe('template drafts through the API (ADR-295)', () => {
     );
     await expectAppError(
       apiDeleteMessageTemplate(deps(), writer.ctx, approved.id),
-      'precondition_failed',
-      /Templates page/,
+      'forbidden',
+      /templates\.submit/,
     );
     expect(await apiGetMessageTemplate(deps(), reader.ctx, approved.id)).toMatchObject({
       status: 'approved',
@@ -9608,6 +9616,276 @@ describe('template drafts through the API (ADR-295)', () => {
       keys.create(narrower, { name: 'Templates', scopes: ['templates.write'], expiresInDays: 30 }),
       'forbidden',
       /Write templates/,
+    );
+  });
+});
+
+describe('template submission and deletion at Meta through the API (ADR-296)', () => {
+  const shipped: TemplateDefinition = {
+    category: 'UTILITY',
+    header: { type: 'none' },
+    body: { text: 'Hi {{1}}, your order has shipped.', examples: ['Asha'] },
+    footer: null,
+    buttons: [],
+  };
+  type Detail = { id: string; status: string; version: number };
+  const graphDeps = () => ({ ...deps(), keyring: fx.keyring, graph: fx.graph });
+  /** The jobs queued for a template under a singleton key, as the worker receives them. */
+  const queued = (queue: string, singletonKey: string) =>
+    fx.query<{ data: unknown }>(
+      `SELECT data FROM pgboss.job WHERE name = $1 AND singleton_key = $2`,
+      [queue, singletonKey],
+    );
+  const auditOf = (id: string) =>
+    fx.query<{ actor_type: string; actor_id: string | null; action: string; metadata: unknown }>(
+      `SELECT actor_type, actor_id, action, metadata FROM app.audit_events
+        WHERE subject_type = 'template' AND subject_id = $1 ORDER BY occurred_at, id`,
+      [id],
+    );
+  /** The worker's check of a queued job, then its run, as the template handlers do. */
+  async function runJob(kind: 'template.submit' | 'template.delete', data: unknown) {
+    const auth = await authorizeJob({ db: fx.dbs.app, signer: fx.signer }, data, {
+      expectedKind: kind,
+      requireActiveTenant: true,
+      requireActiveActor: false,
+    });
+    if (auth.outcome !== 'authorized' || !auth.scope) {
+      throw new Error(`the job is not authorized: ${auth.outcome}`);
+    }
+    return kind === 'template.submit'
+      ? processTemplateSubmit(graphDeps(), auth.scope, auth.envelope.ref)
+      : processTemplateDelete(graphDeps(), auth.scope, auth.envelope.ref);
+  }
+
+  it('submits a draft as the key, write-ahead, once per Idempotency-Key, and follows Meta’s review', async () => {
+    const c = await fx.company();
+    const writer = await apiKey(c, ['templates.write']);
+    const submitter = await apiKey(c, ['templates.submit']);
+    const reader = await apiKey(c, ['templates.read']);
+    const name = `api_submit_${Date.now().toString(36)}`;
+    const added = await apiCreateMessageTemplate(
+      deps(),
+      writer.ctx,
+      { channelId: c.channelAccountId, name, language: 'en', definition: shipped },
+      null,
+    );
+    const id = (added.body as { data: Detail }).data.id;
+
+    const submitted = await apiSubmitMessageTemplate(
+      deps(),
+      submitter.ctx,
+      id,
+      idem('submit-1', 'submit'),
+    );
+    expect(submitted).toMatchObject({
+      status: 200,
+      replayed: false,
+      body: {
+        data: {
+          id,
+          status: 'submitting',
+          version: 1,
+          createdBy: 'api',
+          createdByApiKeyId: writer.id,
+          history: [{ status: 'submitting', reason: null, source: 'submit' }],
+        },
+      },
+    });
+    expect(
+      await apiSubmitMessageTemplate(deps(), submitter.ctx, id, idem('submit-1', 'submit')),
+    ).toMatchObject({ replayed: true, body: submitted.body });
+    // Without a key, a second submission is refused: Meta has it, or is about to.
+    await expectAppError(
+      apiSubmitMessageTemplate(deps(), submitter.ctx, id, null),
+      'precondition_failed',
+      /already been sent to Meta/,
+    );
+    await expectAppError(
+      apiUpdateMessageTemplate(deps(), writer.ctx, id, { definition: shipped }),
+      'precondition_failed',
+    );
+    // Nothing reached Meta yet: one request is queued, signed for the company, by no member.
+    expect(fx.standIn.state.templates.get(c.wabaId)?.some((t) => t.name === name) ?? false).toBe(
+      false,
+    );
+    const jobs = await queued(QUEUES.templateSubmit.name, `${id}:1`);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.data).toMatchObject({
+      kind: 'template.submit',
+      tenantId: c.tenant.id,
+      actorUserId: null,
+      ref: id,
+    });
+
+    // The worker sends it to Meta, which reviews it; the sync reads Meta's decision.
+    expect(await runJob('template.submit', jobs[0]?.data)).toBe('done');
+    const create = fx.standIn.state.requests
+      .filter((r) => r.method === 'POST' && r.path.endsWith('/message_templates'))
+      .at(-1);
+    expect(create?.body).toMatchObject({ name, language: 'en', category: 'UTILITY' });
+    expect(await apiGetMessageTemplate(deps(), reader.ctx, id)).toMatchObject({
+      status: 'pending',
+    });
+    const atMeta = fx.standIn.state.templates.get(c.wabaId)?.find((t) => t.name === name);
+    if (!atMeta) throw new Error('the template did not reach the stand-in');
+    atMeta.status = 'APPROVED';
+    await syncTemplates(graphDeps(), authorizedTenantScope(c.tenant.id, null), c.whatsappAccountId);
+    const approved = await apiGetMessageTemplate(deps(), reader.ctx, id);
+    expect(approved).toMatchObject({ status: 'approved', sendable: true });
+    expect(approved.history.map((h) => h.status)).toEqual(['approved', 'pending', 'submitting']);
+    expect(
+      (await auditOf(id)).map((a) => [a.actor_type, a.actor_id, a.action, a.metadata]),
+    ).toEqual([
+      ['api_key', writer.id, 'template.draft_saved', { name, language: 'en', source: 'api' }],
+      [
+        'api_key',
+        submitter.id,
+        'template.submitted',
+        { name, language: 'en', category: 'UTILITY', source: 'api' },
+      ],
+    ]);
+  });
+
+  it('deletes a template Meta has with templates.submit too, waiting for Meta, and takes Meta’s refusal back', async () => {
+    const c = await fx.company();
+    const writer = await apiKey(c, ['templates.write']);
+    const deleter = await apiKey(c, ['templates.write', 'templates.submit']);
+    const reader = await apiKey(c, ['templates.read']);
+    const { id, name } = await approvedTemplate(c, shipped);
+
+    // Without templates.submit nothing changes.
+    await expectAppError(
+      apiDeleteMessageTemplate(deps(), writer.ctx, id),
+      'forbidden',
+      /templates\.submit/,
+    );
+    expect(await apiGetMessageTemplate(deps(), reader.ctx, id)).toMatchObject({
+      status: 'approved',
+    });
+    expect(await queued(QUEUES.templateDelete.name, `${id}:delete`)).toEqual([]);
+
+    // Meta refuses the first deletion: the sync gives the template back its status.
+    expect(await apiDeleteMessageTemplate(deps(), deleter.ctx, id)).toEqual({
+      id,
+      deleted: false,
+      status: 'pending_deletion',
+    });
+    await expectAppError(apiDeleteMessageTemplate(deps(), deleter.ctx, id), 'conflict');
+    const [first] = await queued(QUEUES.templateDelete.name, `${id}:delete`);
+    expect(first?.data).toMatchObject({ kind: 'template.delete', actorUserId: null, ref: id });
+    fx.standIn.state.templateDeleteError = {
+      status: 400,
+      code: 100,
+      message: 'Template cannot be deleted',
+    };
+    try {
+      expect(await runJob('template.delete', first?.data)).toBe('done');
+    } finally {
+      fx.standIn.state.templateDeleteError = null;
+    }
+    await syncTemplates(graphDeps(), authorizedTenantScope(c.tenant.id, null), c.whatsappAccountId);
+    const refused = await apiGetMessageTemplate(deps(), reader.ctx, id);
+    expect(refused.status).toBe('approved');
+    expect(refused.history.slice(0, 3).map((h) => [h.status, h.source])).toEqual([
+      ['approved', 'sync'],
+      ['delete_failed', 'delete'],
+      ['pending_deletion', 'delete'],
+    ]);
+
+    // Asked again, Meta deletes it. A worker would have taken the first job (run here directly),
+    // so it no longer waits under the key.
+    await fx.query(`DELETE FROM pgboss.job WHERE name = $1 AND singleton_key = $2`, [
+      QUEUES.templateDelete.name,
+      `${id}:delete`,
+    ]);
+    expect(await apiDeleteMessageTemplate(deps(), deleter.ctx, id)).toMatchObject({
+      status: 'pending_deletion',
+    });
+    const [second] = await queued(QUEUES.templateDelete.name, `${id}:delete`);
+    expect(await runJob('template.delete', second?.data)).toBe('done');
+    expect(await apiGetMessageTemplate(deps(), reader.ctx, id)).toMatchObject({
+      status: 'deleted',
+      sendable: false,
+    });
+    expect(fx.standIn.state.templates.get(c.wabaId)?.some((t) => t.name === name)).toBe(false);
+    expect(
+      (await auditOf(id)).filter((a) => a.action === 'template.deleted').map((a) => a.actor_id),
+    ).toEqual([deleter.id, deleter.id]);
+  });
+
+  it('refuses what the Templates page refuses, and submits nothing for a key or company that may not', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const writer = await apiKey(c, ['templates.write']);
+    const submitter = await apiKey(c, ['templates.submit']);
+    const added = await apiCreateMessageTemplate(
+      deps(),
+      writer.ctx,
+      {
+        channelId: c.channelAccountId,
+        name: `api_refused_${Date.now().toString(36)}`,
+        language: 'en',
+        definition: shipped,
+      },
+      null,
+    );
+    const id = (added.body as { data: Detail }).data.id;
+
+    // An account to reconnect first.
+    await fx.query(`UPDATE app.whatsapp_accounts SET status = 'needs_reconnect' WHERE id = $1`, [
+      c.whatsappAccountId,
+    ]);
+    try {
+      await expectAppError(
+        apiSubmitMessageTemplate(deps(), submitter.ctx, id, idem('submit-r', 'r')),
+        'precondition_failed',
+        /Reconnect this WhatsApp account/,
+      );
+    } finally {
+      await fx.query(`UPDATE app.whatsapp_accounts SET status = 'connected' WHERE id = $1`, [
+        c.whatsappAccountId,
+      ]);
+    }
+    // Another company's template, a key without the scope, a suspended company.
+    const theirs = await approvedTemplate(other, shipped);
+    await expectAppError(
+      apiSubmitMessageTemplate(deps(), submitter.ctx, theirs.id, null),
+      'not_found',
+    );
+    await expectAppError(
+      apiSubmitMessageTemplate(deps(), writer.ctx, id, null),
+      'forbidden',
+      /templates\.submit/,
+    );
+    const suspended: ApiContext = {
+      ...submitter.ctx,
+      tenant: { ...submitter.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(apiSubmitMessageTemplate(deps(), suspended, id, null), 'tenant_suspended');
+    // None of it changed the draft, queued a request or used the Idempotency-Key.
+    expect(
+      await fx.query(`SELECT status, version FROM app.message_templates WHERE id = $1`, [id]),
+    ).toEqual([{ status: 'draft', version: 0 }]);
+    expect(
+      await fx.query(`SELECT 1 FROM pgboss.job WHERE name = $1 AND data->>'ref' = $2`, [
+        QUEUES.templateSubmit.name,
+        id,
+      ]),
+    ).toEqual([]);
+    expect(
+      await apiSubmitMessageTemplate(deps(), submitter.ctx, id, idem('submit-r', 'r')),
+    ).toMatchObject({ status: 200, replayed: false, body: { data: { status: 'submitting' } } });
+
+    // Granting it needs the permission members submit templates with.
+    const owner = await fx.ctx(c, c.owner);
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'templates.submit')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Submit', scopes: ['templates.submit'], expiresInDays: 30 }),
+      'forbidden',
+      /Submit templates/,
     );
   });
 });

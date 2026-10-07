@@ -8,11 +8,14 @@ import { templateDefinitionSchema, toMetaComponents } from '../templates/definit
 import {
   assertValidDefinition,
   isEditableDraft,
+  templateDeletion,
   templateLanguageSchema,
   templateNameError,
   templateNameSchema,
   writeCreateTemplateDraft,
   writeDeleteLocalTemplate,
+  writeDeleteTemplateAtMeta,
+  writeSubmitTemplate,
   writeUpdateTemplateDraft,
 } from '../templates/service';
 import { parseInput } from '../validation';
@@ -28,8 +31,8 @@ import { readApiMessageTemplate, type ApiMessageTemplateDetail } from './message
 /**
  * Template drafts through the public API (ADR-295): keys with `templates.write` add drafts, change
  * their content and delete drafts Meta never received, through the writes the Templates page uses,
- * recorded as the key's. Submitting a draft to Meta and deleting a template Meta has are not part of
- * it.
+ * recorded as the key's. With `templates.submit`, keys also submit drafts to Meta and delete
+ * templates Meta has (ADR-296), through the Templates page's writes too.
  */
 
 /** What `POST /message-templates` takes: a draft as the template editor saves one. */
@@ -198,14 +201,77 @@ export async function apiUpdateMessageTemplate(
 }
 
 /**
- * Deletes a draft Meta never received, as members do on the Templates page. One being submitted,
- * or one Meta has, answers 412; one already deleted answers 409, as on the Templates page.
+ * Submits a draft to Meta for review, as members do on the Templates page (ADR-296): only a draft
+ * Meta never received (412 otherwise, as for one submitted already), for a connected account (412).
+ * It is `submitting` until the queued request has Meta's answer. Answers it; once per
+ * `Idempotency-Key` when one is given.
  */
-export async function apiDeleteMessageTemplate(
-  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+export async function apiSubmitMessageTemplate(
+  deps: Pick<OutboundDeps, 'db' | 'jobs' | 'signer' | 'clock'>,
   ctx: ApiContext,
   id: string,
-): Promise<{ id: string; deleted: true }> {
+  idempotency: IdempotencyInput | null,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'templates.submit');
+  if (!isUuid(id)) throw notFound('Template');
+  const now = deps.clock.now();
+  return deps.db.run(ctx.scope, async (tx) => {
+    // Claimed in the submission's transaction, so a refused one leaves the key unused.
+    let claimed: string | null = null;
+    if (idempotency) {
+      const claim = await claimIdempotencyKey(tx, ctx, idempotency, now);
+      if ('replay' in claim) return claim.replay;
+      claimed = claim.claimed;
+    }
+    const [row] = await tx
+      .select({
+        id: messageTemplates.id,
+        status: messageTemplates.status,
+        providerTemplateId: messageTemplates.providerTemplateId,
+        category: messageTemplates.category,
+        components: messageTemplates.components,
+        whatsappAccountId: messageTemplates.whatsappAccountId,
+        name: messageTemplates.name,
+        language: messageTemplates.language,
+      })
+      .from(messageTemplates)
+      .where(and(eq(messageTemplates.tenantId, ctx.tenant.id), eq(messageTemplates.id, id)))
+      .for('update');
+    if (!row) throw notFound('Template');
+    await writeSubmitTemplate(tx, deps, ctx.tenant.id, row, null, now);
+    await recordSystemAudit(
+      tx,
+      ctx.tenant.id,
+      {
+        action: 'template.submitted',
+        subjectType: 'template',
+        subjectId: id,
+        correlationId: ctx.requestId,
+        metadata: {
+          name: row.name,
+          language: row.language,
+          category: row.category,
+          source: 'api',
+        },
+      },
+      apiActor(ctx),
+    );
+    const response = { status: 200, body: { data: await readDetail(tx, ctx.tenant.id, id) } };
+    if (claimed) await storeIdempotentResponse(tx, ctx, claimed, response);
+    return { ...response, replayed: false };
+  });
+}
+
+/**
+ * Deletes a template as members do on the Templates page: a draft Meta never received at once, and
+ * one Meta has, with `templates.submit` too (ADR-296), through a request to Meta it waits for as
+ * `pending_deletion`. One being submitted answers 412; one already deleted, or being deleted, 409.
+ */
+export async function apiDeleteMessageTemplate(
+  deps: Pick<OutboundDeps, 'db' | 'jobs' | 'signer' | 'clock'>,
+  ctx: ApiContext,
+  id: string,
+): Promise<{ id: string; deleted: boolean; status: 'deleted' | 'pending_deletion' }> {
   assertScope(ctx, 'templates.write');
   if (!isUuid(id)) throw notFound('Template');
   return deps.db.run(ctx.scope, async (tx) => {
@@ -220,22 +286,14 @@ export async function apiDeleteMessageTemplate(
       .where(and(eq(messageTemplates.tenantId, ctx.tenant.id), eq(messageTemplates.id, id)))
       .for('update');
     if (!row) throw notFound('Template');
-    if (row.status === 'deleted' || row.status === 'pending_deletion') {
-      throw new AppError('conflict', 'This template is already deleted.');
+    const now = deps.clock.now();
+    const atMeta = templateDeletion(row) === 'meta';
+    if (atMeta) {
+      assertScope(ctx, 'templates.submit');
+      await writeDeleteTemplateAtMeta(tx, deps, ctx.tenant.id, id, null, now);
+    } else {
+      await writeDeleteLocalTemplate(tx, ctx.tenant.id, id, null, now);
     }
-    if (row.status === 'submitting') {
-      throw new AppError(
-        'precondition_failed',
-        'Wait until Meta confirms the submission before deleting.',
-      );
-    }
-    if (row.providerTemplateId !== null) {
-      throw new AppError(
-        'precondition_failed',
-        'Meta has this template: delete it on the Templates page.',
-      );
-    }
-    await writeDeleteLocalTemplate(tx, ctx.tenant.id, id, null, deps.clock.now());
     await recordSystemAudit(
       tx,
       ctx.tenant.id,
@@ -248,6 +306,8 @@ export async function apiDeleteMessageTemplate(
       },
       apiActor(ctx),
     );
-    return { id, deleted: true };
+    return atMeta
+      ? { id, deleted: false, status: 'pending_deletion' }
+      : { id, deleted: true, status: 'deleted' };
   });
 }

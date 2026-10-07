@@ -880,7 +880,9 @@ export const apiMessageTemplateSchema = z.object({
   submitError: z
     .string()
     .nullable()
-    .describe('Why HyFib could not submit it, while its status is `submit_failed`.'),
+    .describe(
+      'Why HyFib could not submit it, while its status is `submit_failed`; while it is `submitting`, that HyFib is waiting for Meta to confirm it.',
+    ),
   origin: z
     .enum(['local', 'synced'])
     .describe('`local`: added in HyFib; `synced`: found at Meta, added in WhatsApp Manager.'),
@@ -1602,7 +1604,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'createMessageTemplate',
           summary: 'Add a template draft',
-          description: `${scopeNote('templates.write')} A draft as members add one on the Templates page, for the WhatsApp Business account of one of the company’s numbers (\`channelId\`; 404 for another company’s number or an unknown one): a name of lower-case letters, digits and underscores and a language code, unique together in the account (409 otherwise; a deleted draft Meta never received is used again), and its content, checked as the template editor checks it (422 with the problems otherwise). It stays a draft: it is submitted to Meta on the Templates page. The audit log names the key, and the template gives \`createdBy: "api"\`. With an \`Idempotency-Key\`, a retry answers the first response.`,
+          description: `${scopeNote('templates.write')} A draft as members add one on the Templates page, for the WhatsApp Business account of one of the company’s numbers (\`channelId\`; 404 for another company’s number or an unknown one): a name of lower-case letters, digits and underscores and a language code, unique together in the account (409 otherwise; a deleted draft Meta never received is used again), and its content, checked as the template editor checks it (422 with the problems otherwise). It stays a draft until it is submitted to Meta (POST /message-templates/{id}/submit, or on the Templates page). The audit log names the key, and the template gives \`createdBy: "api"\`. With an \`Idempotency-Key\`, a retry answers the first response.`,
           parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
           requestBody: { required: true, content: json(ref('CreateMessageTemplate')) },
           responses: {
@@ -1644,24 +1646,49 @@ export function buildOpenApiDocument(serverUrl: string) {
         },
         delete: {
           operationId: 'deleteMessageTemplate',
-          summary: 'Delete a draft',
-          description: `${scopeNote('templates.write')} Deletes a draft Meta never received, as members do on the Templates page: it is then listed with \`status=deleted\`, and its name and language can be used again. One being submitted, or one Meta has, answers 412 (delete those on the Templates page); one already deleted answers 409. The audit log names the key.`,
+          summary: 'Delete a template',
+          description: `${scopeNote('templates.write')} Deletes a template as members do on the Templates page. A draft Meta never received is deleted at once: it is then listed with \`status=deleted\`, and its name and language can be used again. One Meta has also needs \`templates.submit\` (403 naming it otherwise): HyFib asks Meta to delete it, and it is \`pending_deletion\` until Meta answers, then \`deleted\`, when it can no longer be sent (messages already sent are not affected), or, when Meta refuses, back to the status Meta reports, with a \`delete_failed\` change in its history. One being submitted answers 412; one already deleted, or being deleted, 409. The audit log names the key.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           responses: {
             '200': {
-              description: 'Deleted.',
+              description: 'Deleted, or being deleted at Meta.',
               content: json(
                 dataOf({
                   type: 'object',
                   properties: {
                     id: { type: 'string', format: 'uuid' },
-                    deleted: { const: true },
+                    deleted: {
+                      type: 'boolean',
+                      description: 'Whether it is deleted now: false while Meta deletes it.',
+                    },
+                    status: { type: 'string', enum: ['deleted', 'pending_deletion'] },
                   },
-                  required: ['id', 'deleted'],
+                  required: ['id', 'deleted', 'status'],
                 }),
               ),
             },
             ...errors(401, 403, 404, 409, 412, 423, 429, 500),
+          },
+        },
+      },
+      '/message-templates/{id}/submit': {
+        post: {
+          operationId: 'submitMessageTemplate',
+          summary: 'Submit a draft to Meta for review',
+          description: [
+            `${scopeNote('templates.submit')} Submits a draft as members do on the Templates page: only a draft Meta never received (\`draft\` or \`submit_failed\`; 412 otherwise, as for one submitted already), whose WhatsApp Business account is connected (412 otherwise), its content checked again as the template editor checks it (422). It is \`submitting\` until HyFib has Meta’s answer, then as Meta reports it: \`pending\` while Meta reviews it, then \`approved\` or \`rejected\` with Meta’s reason, which GET /message-templates/{id} gives and template.status_changed webhook events report; or \`submit_failed\`, with \`submitError\` saying why, when Meta did not take it, to be changed and submitted again. Its content no longer changes once Meta has it. The audit log names the key.`,
+            'With an `Idempotency-Key`, a retry answers the first response; without one, submitting it again is refused with 412.',
+          ].join('\n\n'),
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKeyOptional' },
+          ],
+          responses: {
+            '200': {
+              description: 'The template, being submitted.',
+              content: json(dataOf(ref('MessageTemplateDetail'))),
+            },
+            ...errors(400, 401, 403, 404, 412, 422, 423, 429, 500),
           },
         },
       },
@@ -4257,6 +4284,7 @@ export const API_ROUTES = [
   ['get', '/message-templates/{id}'],
   ['patch', '/message-templates/{id}'],
   ['delete', '/message-templates/{id}'],
+  ['post', '/message-templates/{id}/submit'],
   ['get', '/channels'],
   ['get', '/contacts'],
   ['post', '/contacts'],
