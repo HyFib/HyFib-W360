@@ -914,6 +914,10 @@ verification, app review, Embedded Signup configuration).
   **[Reports through the public API built; their database tests run only in CI]** (ADR-297,
   migration 0219: `reports.read` reads the numbers the Reports page shows for a period, by the
   page's reader in one snapshot, with members by id and name).
+  **[Flows and their responses through the public API built; their database tests run only in CI]**
+  (ADR-298, migrations 0220 and 0221: `flows.read` lists the company's flows and the forms customers
+  completed with them, newest first on exact pages; who completed them and what they typed only with
+  `contacts.read`).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact

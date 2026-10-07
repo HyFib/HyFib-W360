@@ -1,5 +1,39 @@
 # Progress
 
+## 2026-10-07 — WhatsApp Flows and their responses through the public API (P5-08, H-033, W-085, ADR-298)
+
+Status: **Implemented; its database tests run in CI only.** Keys read contacts and messages but not
+the company's flows or the forms customers completed with them, which only the Flows page showed.
+The local PostgreSQL is unavailable, so the migrations and the integration test below were written
+but not run here; migrations 0220 and 0221 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0220 (`flows.read` in the scope checks of keys and plans); 0221
+  (`flow_responses_received_idx`, built concurrently).
+- **Domain:** `api/flows.ts` (`apiListFlows`, `apiListFlowResponses`, their query and item schemas,
+  `apiJsonValueSchema` for answers, which the OpenAPI document names `JsonValue`); `activeNumbers`
+  shared from `api/message-templates.ts`; the scope; the OpenAPI operations and components.
+- **Web:** `GET /api/v1/flows`, `GET /api/v1/flow-responses`.
+- **Tests:** unit (`api/flows.test.ts`, 4: the scopes and queries, the flows' pages with their
+  numbers, the responses' pages with who and what only with `contacts.read` in the key and the plan,
+  the OpenAPI entries); integration (1 new in `api.test.ts`). Written for CI; the integration test
+  was not run here. No e2e test.
+- **Docs:** ADR-298; ARCHITECTURE; SECURITY; THREAT-MODEL T266; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-085.
+- **Mutation checks:** 46/46 deliberate regressions caught, one after a test was added.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 134 files, 1272 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migrations 0220 and 0221         | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — The Reports page's numbers through the public API (P5-08, H-033, W-157, ADR-297)
 
 Status: **Implemented; its database tests run in CI only.** Keys read the records but not the

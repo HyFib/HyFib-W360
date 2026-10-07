@@ -968,6 +968,14 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    with an error for a company with a key holding `reports.read`, and answers `GET /api/v1/reports`
    with 404; rolling web servers back does the same. Workers are unaffected.
 
+   Migration 0220 (ADR-298) replaces the API keys' and plans' scope checks with `flows.read`
+   (validated at once); 0221 builds `flow_responses_received_idx` concurrently, outside a
+   transaction (if it fails, drop the INVALID index with
+   `DROP INDEX CONCURRENTLY app.flow_responses_received_idx;` and run the migrations again). Until
+   the web rollout ends, an old web server answers Settings → API keys with an error for a company
+   with a key holding `flows.read`, and answers `GET /api/v1/flows` and `GET /api/v1/flow-responses`
+   with 404; rolling web servers back does the same. Workers are unaffected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -12,6 +12,7 @@ import {
   MAX_SAVED_REPLIES,
   CRM_LIMITS,
   RUN_BUDGETS,
+  STARTER_FLOW_JSON,
   advanceAutomationRun,
   authorizeJob,
   apiAddConversationNote,
@@ -49,6 +50,8 @@ import {
   apiListClosedDays,
   apiListSavedReplies,
   apiListContacts,
+  apiListFlowResponses,
+  apiListFlows,
   apiListConversationMessages,
   apiListConversationNotes,
   apiListConversations,
@@ -97,6 +100,7 @@ import {
   createContactsService,
   createCrmService,
   createCsatService,
+  createFlowsService,
   createInboxService,
   createPlanAdminService,
   createReportsService,
@@ -10006,6 +10010,181 @@ describe('reports through the API (ADR-297)', () => {
       keys.create(narrower, { name: 'BI', scopes: ['reports.read'], expiresInDays: 30 }),
       'forbidden',
       /Read reports/,
+    );
+  });
+});
+
+describe('WhatsApp Flows and their responses through the API (ADR-298)', () => {
+  /** The customer completes a form: an nfm_reply message with its answers (M-166). */
+  const completion = (c: Company, from: string, answers: Record<string, unknown>, at: number) =>
+    fx.deliver(
+      fx.messagesBody(c, {
+        messages: [
+          {
+            waId: from,
+            type: 'interactive',
+            timestamp: Math.floor(at / 1000),
+            extra: {
+              interactive: {
+                type: 'nfm_reply',
+                nfm_reply: { name: 'flow', body: 'Sent', response_json: JSON.stringify(answers) },
+              },
+            },
+          },
+        ],
+      }),
+    );
+  const flowsOf = () =>
+    createFlowsService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      appBaseUrl: 'https://app.example.test',
+      allowInsecureHttp: true,
+    });
+
+  it('list the flows and the forms customers completed, newest first on exact pages, who and what only with contacts.read', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['flows.read']);
+    const full = await apiKey(c, ['flows.read', 'contacts.read']);
+    const { id: flowId } = await flowsOf().create(owner, {
+      whatsappAccountId: c.whatsappAccountId,
+      name: 'Lead form',
+      categories: ['LEAD_GENERATION'],
+      json: STARTER_FLOW_JSON,
+    });
+    await flowsOf().create(await fx.ctx(other, other.owner), {
+      whatsappAccountId: other.whatsappAccountId,
+      name: 'Their form',
+      categories: ['OTHER'],
+      json: STARTER_FLOW_JSON,
+    });
+
+    // The flow, not yet created at Meta, with the number that can send it; none archived.
+    const listed = await apiListFlows(deps(), reader.ctx, {});
+    expect(listed).toEqual({
+      data: [
+        expect.objectContaining({
+          id: flowId,
+          name: 'Lead form',
+          status: null,
+          categories: ['LEAD_GENERATION'],
+          answerMapping: [],
+          channels: [expect.objectContaining({ id: c.channelAccountId })],
+          archived: false,
+        }),
+      ],
+      nextCursor: null,
+    });
+    expect([...listed.data[0]!.answerKeys].sort()).toEqual(['email', 'full_name']);
+    expect((await apiListFlows(deps(), reader.ctx, { archived: 'true' })).data).toEqual([]);
+
+    // A form the company sent completed by its contact, then one whose token matched none.
+    const priya = '919811100401';
+    await inbound(c, priya, [{ text: 'I would like a quote' }]);
+    const conv = await conversationOf(c, priya);
+    const [asked] = await fx.query<{ id: string }>(
+      `SELECT id FROM app.messages WHERE conversation_id = $1 LIMIT 1`,
+      [conv.id],
+    );
+    const token = Buffer.from(uuidv7()).toString('base64url').slice(0, 43);
+    await fx.query(
+      `INSERT INTO app.flow_sends (id, tenant_id, flow_id, conversation_id, contact_id, message_id,
+         token, mode, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'published', now() + interval '1 day')`,
+      [uuidv7(), c.tenant.id, flowId, conv.id, conv.contact_id, asked!.id, token],
+    );
+    const now = Date.now();
+    await completion(
+      c,
+      priya,
+      { flow_token: token, full_name: 'Priya Sharma', email: 'priya@example.test' },
+      now - 60_000,
+    );
+    await completion(c, priya, { flow_token: 'unused', note: 'Call me' }, now - 30_000);
+    await completion(other, '919811100402', { flow_token: 'unused', note: 'Theirs' }, now);
+
+    // Without contacts.read, who completed a form and what they typed stay out.
+    const hidden = { contactId: null, conversationId: null, messageId: null, answers: null };
+    const plain = await apiListFlowResponses(deps(), reader.ctx, {});
+    expect(plain.data).toEqual([
+      expect.objectContaining({ ...hidden, flowId: null, applied: [] }),
+      expect.objectContaining({ ...hidden, flowId }),
+    ]);
+    expect(plain.nextCursor).toBeNull();
+    const withAnswers = await apiListFlowResponses(deps(), full.ctx, {});
+    expect(withAnswers.data).toEqual([
+      expect.objectContaining({
+        id: plain.data[0]!.id,
+        contactId: conv.contact_id,
+        conversationId: conv.id,
+        answers: { note: 'Call me' },
+      }),
+      expect.objectContaining({
+        id: plain.data[1]!.id,
+        contactId: conv.contact_id,
+        conversationId: conv.id,
+        answers: { full_name: 'Priya Sharma', email: 'priya@example.test' },
+      }),
+    ]);
+    // Each response's message is the customer's form message in its conversation.
+    const [completed] = await fx.query<{ conversation_id: string; direction: string }>(
+      `SELECT conversation_id, direction FROM app.messages WHERE id = $1`,
+      [withAnswers.data[1]!.messageId],
+    );
+    expect(completed).toEqual({ conversation_id: conv.id, direction: 'inbound' });
+
+    // Exact pages, and filters that combine.
+    const first = await apiListFlowResponses(deps(), reader.ctx, { limit: '1' });
+    expect(first.data.map((r) => r.id)).toEqual([plain.data[0]!.id]);
+    const second = await apiListFlowResponses(deps(), reader.ctx, {
+      limit: '1',
+      cursor: first.nextCursor!,
+    });
+    expect(second).toEqual({ data: [plain.data[1]], nextCursor: null });
+    expect(
+      (await apiListFlowResponses(deps(), reader.ctx, { flowId })).data.map((r) => r.id),
+    ).toEqual([plain.data[1]!.id]);
+    expect(
+      (await apiListFlowResponses(deps(), full.ctx, { contactId: conv.contact_id })).data,
+    ).toHaveLength(2);
+    expect(
+      (
+        await apiListFlowResponses(deps(), full.ctx, {
+          contactId: conv.contact_id,
+          receivedSince: new Date(now + 60_000).toISOString(),
+        })
+      ).data,
+    ).toEqual([]);
+    await expectAppError(
+      apiListFlowResponses(deps(), reader.ctx, { contactId: conv.contact_id }),
+      'forbidden',
+      /contacts\.read/,
+    );
+
+    // Read while the company is suspended too; another key reads nothing; granting needs flows.read.
+    const suspended: ApiContext = {
+      ...reader.ctx,
+      tenant: { ...reader.ctx.tenant, status: 'suspended' as const },
+    };
+    expect((await apiListFlowResponses(deps(), suspended, {})).data).toHaveLength(2);
+    const contactsOnly = await apiKey(c, ['contacts.read']);
+    await expectAppError(
+      apiListFlowResponses(deps(), contactsOnly.ctx, {}),
+      'forbidden',
+      /flows\.read/,
+    );
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'flows.read')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Forms', scopes: ['flows.read'], expiresInDays: 30 }),
+      'forbidden',
+      /Read flows/,
     );
   });
 });

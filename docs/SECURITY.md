@@ -634,10 +634,11 @@ Phase 5 rules (Public API, P5-08):
   names (ADR-125, ADR-186), `campaigns.send` for `campaigns.stop` (ADR-128) and `campaigns.resume`
   (ADR-176), `commerce.read` for `orders.read` (ADR-167), `inbox.reply` for `orders.write` (ADR-168)
   and `orders.request_payment` (ADR-283), `channels.read` for the scope of the same name (ADR-171),
-  `reports.read` for the scope of the same name (ADR-297), `crm.read` for `deals.read` (ADR-253),
-  `tasks.read` (ADR-258) and `notes.read` (ADR-279), and `crm.write` for `deals.write` (ADR-254,
-  ADR-255), `tasks.write` (ADR-259) and `notes.write` (ADR-268). Nobody grants a key more than they
-  hold, and rotating needs the same. A key keeps the scopes it was created with.
+  `reports.read` for the scope of the same name (ADR-297), `flows.read` for the scope of the same
+  name (ADR-298), `crm.read` for `deals.read` (ADR-253), `tasks.read` (ADR-258) and `notes.read`
+  (ADR-279), and `crm.write` for `deals.write` (ADR-254, ADR-255), `tasks.write` (ADR-259) and
+  `notes.write` (ADR-268). Nobody grants a key more than they hold, and rotating needs the same. A
+  key keeps the scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -1204,6 +1205,13 @@ Phase 5 rules (Public API, P5-08):
   security in the key's company, in one read-only snapshot, and holds counts and the names of
   members, campaigns, automations, pipelines and stages: never a message, a contact, a conversation,
   a member's role or email (unit tests; integration tests, run in CI only).
+- Flows (ADR-298): `GET /flows` and `GET /flow-responses` need `flows.read`, granted only by members
+  who hold it, checked before any query, as is the query. Both read under row security in the key's
+  company, read only, on bounded pages, and never select the Flow JSON, the data endpoint, keys or
+  flow tokens. Who completed a form (its contact, conversation and message) and what they typed are
+  given only when the key and the plan hold `contacts.read`, as members see them; without it the
+  contact filter is refused before any query, so a key cannot learn which forms a contact completed
+  (unit tests; integration tests, run in CI only).
 - Reading a deal's history (ADR-281): `GET /deals/{id}/history` needs `deals.read` and the CRM in
   the plan, checked before anything is read; it reads the key's company's deal only (another
   company's answers 404, as an unknown one does; an id that is not a UUID is refused before any

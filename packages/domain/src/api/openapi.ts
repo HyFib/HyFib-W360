@@ -138,6 +138,7 @@ import { API_NOTE_MAX_LENGTH, apiCreateNoteSchema } from './notes';
 import { apiCreatePipelineSchema, apiUpdatePipelineSchema } from './pipelines';
 import { apiPipelineForecastSchema } from './pipeline-forecast';
 import { apiReportSchema } from './reports';
+import { apiFlowResponseSchema, apiFlowSchema, apiJsonValueSchema } from './flows';
 import { MAX_PERIOD_DAYS, PERIOD_PRESETS } from '../reports/period';
 import { apiCreateTeamSchema, apiUpdateTeamSchema } from './teams';
 import { apiUpdateMemberSchema } from './members';
@@ -1378,7 +1379,11 @@ export const apiErrorSchema = z.object({
 });
 
 function jsonSchema(schema: z.ZodType, io: 'input' | 'output' = 'output') {
-  const { $schema: _ignored, ...rest } = z.toJSONSchema(schema, { io }) as Record<string, unknown>;
+  const { $schema: _ignored, ...rest } = z.toJSONSchema(schema, {
+    io,
+    // Any JSON value (a form's answers) is the JsonValue component; nothing else is unnamed.
+    unrepresentable: (ctx) => (ctx.zodSchema === apiJsonValueSchema ? ref('JsonValue') : 'throw'),
+  }) as Record<string, unknown>;
   return rest;
 }
 
@@ -2305,6 +2310,61 @@ export function buildOpenApiDocument(serverUrl: string) {
           ],
           responses: {
             '200': { description: 'A page of surveys.', content: pageOf('SatisfactionSurvey') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/flows': {
+        get: {
+          operationId: 'listFlows',
+          summary: 'WhatsApp Flows, newest first',
+          description: `${scopeNote('flows.read')} The company’s WhatsApp Flows, the forms members send in chats, as the Flows page lists them: those in use, or archived ones with \`archived=true\`, newest first on pages that never skip or repeat a flow. Each with Meta’s status, the keys of its answers, where each answer goes on the contact and the numbers that can send it. Never the Flow JSON or its data endpoint.`,
+          parameters: [
+            ...pageParams,
+            {
+              name: 'archived',
+              in: 'query',
+              schema: { type: 'string', enum: ['true', 'false'] },
+              description: '`true`: only archived flows; otherwise only those in use.',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of flows.', content: pageOf('Flow') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/flow-responses': {
+        get: {
+          operationId: 'listFlowResponses',
+          summary: 'Completed forms, newest first',
+          description: [
+            `${scopeNote('flows.read')} The forms customers completed with the company’s flows, newest first by when they were received, on pages that never skip or repeat one, by flow, contact and time; filters combine. Each with what each mapped answer did to the contact. Erasing a contact deletes its responses.`,
+            `Who completed a form (\`contactId\`, \`conversationId\` and \`messageId\`, the customer’s message that completed it) and what they typed (\`answers\`) are given only to keys with \`contacts.read\` too, as members see them on the Flows page only with that permission: other keys get null and may not filter by contact. A form whose token matched no form HyFib sent has no flow (\`flowId\` null) and changed no contact.`,
+          ].join('\n\n'),
+          parameters: [
+            ...pageParams,
+            {
+              name: 'flowId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only this flow’s responses.',
+            },
+            {
+              name: 'contactId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only this contact’s responses; needs `contacts.read` too.',
+            },
+            {
+              name: 'receivedSince',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description: 'Only the responses received at or after this time.',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of responses.', content: pageOf('FlowResponse') },
             ...errors(401, 403, 422, 429, 500),
           },
         },
@@ -4175,6 +4235,20 @@ export function buildOpenApiDocument(serverUrl: string) {
         ClosedDay: jsonSchema(apiClosedDaySchema),
         SatisfactionSurvey: jsonSchema(apiSatisfactionSurveySchema),
         Report: jsonSchema(apiReportSchema),
+        Flow: jsonSchema(apiFlowSchema),
+        FlowResponse: jsonSchema(apiFlowResponseSchema),
+        JsonValue: {
+          description:
+            'Any JSON value: text, a number, true or false, null, a list of JSON values or an object of them.',
+          anyOf: [
+            { type: 'string' },
+            { type: 'number' },
+            { type: 'boolean' },
+            { type: 'null' },
+            { type: 'array', items: ref('JsonValue') },
+            { type: 'object', additionalProperties: ref('JsonValue') },
+          ],
+        },
         MessageTemplate: jsonSchema(apiMessageTemplateSchema),
         MessageTemplateDetail: jsonSchema(apiMessageTemplateDetailSchema),
         CreateMessageTemplate: jsonSchema(apiCreateMessageTemplateSchema, 'input'),
@@ -4309,6 +4383,8 @@ export const API_ROUTES = [
   ['get', '/conversations/{id}/messages'],
   ['get', '/satisfaction-surveys'],
   ['get', '/reports'],
+  ['get', '/flows'],
+  ['get', '/flow-responses'],
   ['get', '/members'],
   ['patch', '/members/{id}'],
   ['get', '/business-hours'],

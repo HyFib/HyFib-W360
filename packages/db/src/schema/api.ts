@@ -24,6 +24,7 @@ export const API_SCOPES = [
   'campaigns.stop',
   'campaigns.resume',
   'automations.start',
+  'flows.read',
   'orders.read',
   'orders.write',
   'orders.request_payment',

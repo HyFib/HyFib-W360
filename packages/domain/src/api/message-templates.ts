@@ -177,7 +177,7 @@ export function toApiMessageTemplate(
 }
 
 /** The company's active numbers, with their WhatsApp Business accounts. */
-function activeNumbers(tx: Tx, tenantId: string) {
+export function activeNumbers(tx: Tx, tenantId: string) {
   return tx
     .select({
       id: channelAccounts.id,

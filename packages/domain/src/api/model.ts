@@ -27,6 +27,7 @@ export const API_SCOPE_KEYS = [
   'campaigns.stop',
   'campaigns.resume',
   'automations.start',
+  'flows.read',
   'orders.read',
   'orders.write',
   'orders.request_payment',
@@ -179,6 +180,13 @@ export const API_SCOPE_INFO: Record<
       'Start published automations made to start through the API, for one contact at a time with the inputs they need, and read and stop the runs keys started. They message contacts who have not written first, with templates.',
     permission: 'automations.publish',
     writes: true,
+  },
+  'flows.read': {
+    label: 'Read flows',
+    description:
+      "List the company's WhatsApp Flows, the forms members send in chats, and the forms customers completed with them, newest first. Who completed them and what they typed are given only to keys that also hold the scope that reads contacts, as members see them.",
+    permission: 'flows.read',
+    writes: false,
   },
   'orders.read': {
     label: 'Read WhatsApp orders',

@@ -1657,6 +1657,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   company's time zone (read from `tenants`); `toApiReport` maps it (ISO times, members by id and
   name, the forecast through `toApiPipelineForecast`), and `apiReportSchema` describes it in the
   OpenAPI document.
+- **Flows through the API (ADR-298):** `api/flows.ts` lists with `flows.read` the company's flows
+  (`apiListFlows`: in use or archived, keyset pages on `created_at, id`, each flow's numbers from
+  `activeNumbers`, shared with the template endpoints) and completed forms (`apiListFlowResponses`:
+  keyset pages on `received_at, id`, served by `flow_responses_received_idx` from migration 0221),
+  each in one read-only transaction. A response's contact, conversation, message and answers are
+  mapped only when the key and the plan hold `contacts.read` (`hasScope`), as the Flows service
+  gives them to members only with that permission.
 - **Many conversations at once (ADR-120):** `POST /conversations/update-many`
   (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
   transaction it locks the member first (as a suspension does before releasing its conversations),

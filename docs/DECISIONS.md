@@ -11344,3 +11344,42 @@ Decision:
 
 Not built: reading one section alone, periods longer than 92 days (read several), and the CSV
 exports through the API.
+
+## ADR-298 WhatsApp Flows and their responses through the public API (P5-08) (2026-10-07)
+
+Context: members with `flows.read` see on the Flows page the company's WhatsApp Flows (ADR-045), the
+forms members send in chats, with Meta's status, the answers each returns and where they go on the
+contact, and each flow's completed forms; only members who also hold `contacts.read` see who
+completed them and what they typed. A company that follows completed forms up elsewhere (a CRM, a
+spreadsheet, its own systems) could read them only on the page: keys read contacts and messages, not
+which forms customers completed or what their answers did to the contact.
+
+Decision:
+
+- **A `flows.read` scope** ("Read flows"), granted only by members who hold `flows.read` (owners,
+  administrators, supervisors, marketers and analysts do), reading, so a suspended or restricted
+  company's keys read flows as its members do. Existing keys and plans that chose their scopes do
+  not gain it. With it the API has 36 scopes.
+- **`GET /api/v1/flows`** (`listFlows`) lists the flows in use, or the archived ones with
+  `archived=true`, newest first on exact keyset pages, each with Meta's status (lower case; null
+  before HyFib has created it at Meta), its categories, the keys of its answers, where each answer
+  goes on the contact (`name`, `email` or `field:<custom field key>`) and the company's active
+  numbers that can send it (its WhatsApp Business account's). Never the Flow JSON, its data endpoint
+  or keys.
+- **`GET /api/v1/flow-responses`** (`listFlowResponses`) lists completed forms newest first by when
+  they were received, on exact keyset pages, by flow, contact and time, each with what each mapped
+  answer did to the contact (`applied`, `missing`, `invalid` with the reason, `skipped`). A form
+  whose token matched no form HyFib sent has no flow and changed no contact. Erasing a contact
+  deletes its responses, as before.
+- **Who and what only with `contacts.read`:** a response's contact, conversation and message (who
+  completed it) and its answers (what they typed) are given only when the key and the plan also hold
+  `contacts.read`, as the page shows them only to members with that permission; other keys get null,
+  and their `contactId` filter is refused (403). Answers are given as the form returned them, each
+  any JSON value (`JsonValue` in the OpenAPI document); the outcomes name fields, never the values
+  typed.
+- **Migrations:** 0220 replaces the scope checks of keys and plans with the new scope, validated at
+  once; 0221 builds `flow_responses_received_idx` concurrently, so pages of all of a company's
+  responses, and of those since a time, read an index.
+
+Not built: reading one flow or one response by id, the Flow JSON, and creating, publishing or
+sending flows through the API.

@@ -2140,6 +2140,21 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**A flows or flow-responses request answers 403 or 422, or a response has no contact or answers
+(ADR-298).** 403: the key lacks `flows.read` (its creator needed that permission), or the plan
+leaves it out (reason `not_in_plan`); filtering responses by `contactId` needs `contacts.read` too.
+422: a filter is not one the endpoint takes (`archived` is `true` or `false`; `flowId` and
+`contactId` are UUIDs; `receivedSince` is an ISO 8601 date and time) or the cursor is not one it
+gave. `contactId`, `conversationId`, `messageId` and `answers` are null for a key without
+`contacts.read` (in the key or the plan), as the Flows page hides who completed a form and what they
+typed from members without that permission. `flowId` is null for a form whose token matched no form
+HyFib sent: it changed no contact. A flow missing from the list is archived (`archived=true`); the
+responses of an erased contact are deleted.
+
+**Migration 0221 failed.** It builds `app.flow_responses_received_idx` concurrently. If it failed,
+an INVALID index can remain: run `DROP INDEX CONCURRENTLY app.flow_responses_received_idx;` and run
+the migrations again.
+
 **A report request answers 403 or 422, or its numbers differ from the Reports page (ADR-297).** 403:
 the key lacks `reports.read` (its creator needed that permission), or the plan leaves it out (reason
 `not_in_plan`). 422: the period is not one the page takes: a preset, or `custom` with `from` and
