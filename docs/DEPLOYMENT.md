@@ -758,6 +758,126 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `GET /api/v1/contact-tags` and `GET /api/v1/conversation-tags` with 404; rolling web servers back
    does the same. Workers are not affected.
 
+   Migration 0189 (ADR-273) adds `conversation_tags` to `app.webhook_endpoints` with a check
+   validated by reading the table, grants the definer role a read of `app.conversation_tags.tag`,
+   and replaces `app.capture_webhook_event` (keeping 0185's filters) with the same signature; every
+   endpoint starts with none. Web servers of this release need it, as their reads of endpoints name
+   the column; workers do not read it. Web servers from before it neither show nor change the
+   column: until the web rollout ends, an old server's change that drops every event of a
+   conversation from an endpoint with a list of conversation tags fails on the check, and its other
+   changes keep it.
+
+   Migration 0190 (ADR-274) replaces the endpoints' event check and the check of their assignee
+   lists (validated at once: at most 10 endpoints per company), the events' type check (NOT VALID;
+   0191 validates it while captures go on), the task trigger (now also on assignee changes) and its
+   function, and `app.capture_webhook_event` (keeping 0189's filters) with the same signature.
+   Workers roll out before web servers, so no endpoint takes `task.assignee_changed` before every
+   worker can describe it. A worker from before it fails each assignee change's delivery without an
+   attempt (`payload_failed`; replay it once newer workers run), so before rolling workers back to
+   such an image, turn the event off on the endpoints that take it. An old web server's Settings and
+   API do not offer it, and until the web rollout ends an old server answers Settings → Webhooks
+   with an error for a company with an endpoint taking it (it has no label for it): add it to
+   endpoints once the rollout ends, and turn it off before rolling web servers back to such an
+   image.
+
+   Migration 0192 (ADR-275) replaces the endpoints' event check and the checks of their pipeline,
+   stage and owner lists (validated at once: at most 10 endpoints per company), the events' type
+   check (NOT VALID; 0193 validates it while captures go on), the deal trigger (now also on its
+   title, value and expected close date) and its function, grants the definer role a read of a
+   deal's id and owner, and replaces `app.capture_webhook_event` (keeping 0190's filters) with the
+   same signature. Workers roll out before web servers, so no endpoint takes `deal.updated` before
+   every worker can describe it. A worker from before it fails each delivery of the event without an
+   attempt (`payload_failed`; replay it once newer workers run), so before rolling workers back to
+   such an image, turn the event off on the endpoints that take it. An old web server's Settings and
+   API do not offer it, and until the web rollout ends an old server answers Settings → Webhooks
+   with an error for a company with an endpoint taking it (it has no label for it): add it to
+   endpoints once the rollout ends, and turn it off before rolling web servers back to such an
+   image.
+
+   Migration 0194 (ADR-276) replaces the endpoints' event check and the check of their assignee list
+   (validated at once: at most 10 endpoints per company), the events' type check (NOT VALID; 0195
+   validates it while captures go on), the task trigger (now also on its title, notes, due time and
+   reminder time) and its function, and replaces `app.capture_webhook_event` (keeping 0192's
+   filters) with the same signature. Workers roll out before web servers, so no endpoint takes
+   `task.updated` before every worker can describe it. A worker from before it fails each delivery
+   of the event without an attempt (`payload_failed`; replay it once newer workers run), so before
+   rolling workers back to such an image, turn the event off on the endpoints that take it. An old
+   web server's Settings and API do not offer it, and until the web rollout ends an old server
+   answers Settings → Webhooks with an error for a company with an endpoint taking it (it has no
+   label for it): add it to endpoints once the rollout ends, and turn it off before rolling web
+   servers back to such an image.
+
+   Migration 0196 (ADR-277) adds who changed a deal or task (`changed_by`, `changed_by_api_key_id`,
+   `changed_xact`) to `app.crm_deals` and `app.crm_tasks`, nullable, so neither table is rewritten,
+   with their foreign keys and checks NOT VALID (0197 validates them while the tables stay
+   writable), the runtime role's grants, the trigger that clears a changer another transaction
+   recorded, and the deal and task capture functions with the same signatures. Until the rollout
+   ends, changes made by web servers and workers from before it record nobody, so their events name
+   nobody (`changedBy` null), and a delivery an older worker builds has no `changedBy` or `apiKeyId`
+   at all; rolling back leaves the columns, which older code neither reads nor writes.
+
+   ADR-278 has no migration. Until the web rollout ends, an old web server answers deals and tasks
+   without `changedBy` and `changedByApiKeyId`, and for 24 hours after it a retried `POST /deals` or
+   `POST /tasks` whose first answer an old server stored replays that answer, without them; rolling
+   web servers back does the same. Workers are not affected.
+
+   Migration 0198 (ADR-279) widens the API keys' and plan versions' scope checks again for
+   `notes.read`, with the same brief locks, validated at once; 0199 builds
+   `crm_activities_notes_idx` concurrently, outside a transaction (if it fails, drop the INVALID
+   index with `DROP INDEX CONCURRENTLY app.crm_activities_notes_idx;` and run the migrations again).
+   Web servers from before it do not know `notes.read`: until the web rollout ends, an old server
+   answers Settings → API keys with an error for a company with a key holding it (and the platform
+   plan pages for a plan version including it), `GET /api/v1/notes` with 405 and
+   `GET /api/v1/notes/{id}` with 404, and for 24 hours after it a retried `POST /notes` whose first
+   answer an old server stored replays that answer, without `writtenBy` and `apiKeyId`. Workers are
+   not affected.
+
+   Migration 0200 (ADR-280) replaces the endpoints' event check (validated at once: at most 10
+   endpoints per company) and the events' type check (NOT VALID; 0201 validates it while captures go
+   on), and adds the note trigger on `app.crm_activities` and its function;
+   `app.capture_webhook_event` is unchanged. Workers roll out before web servers, so no endpoint
+   takes `note.created` before every worker can describe it. A worker from before it fails each
+   delivery of the event without an attempt (`payload_failed`; replay it once newer workers run), so
+   before rolling workers back to such an image, turn the event off on the endpoints that take it.
+   An old web server's Settings and API do not offer it, and until the web rollout ends an old
+   server answers Settings → Webhooks with an error for a company with an endpoint taking it (it has
+   no label for it): add it to endpoints once the rollout ends, and turn it off before rolling web
+   servers back to such an image.
+
+   ADR-281 has no migration. Until the web rollout ends, an old web server answers
+   `GET /api/v1/deals/{id}/history` with 404; rolling web servers back does the same. Workers are
+   not affected.
+
+   ADR-282 has no migration. Until the web rollout ends, an old web server answers deals and tasks
+   without `createdBy` and `createdByApiKeyId`, and for 24 hours after it a retried `POST /deals` or
+   `POST /tasks` whose first answer an old server stored replays that answer, without them; rolling
+   web servers back does the same. Workers send the same events as before.
+
+   Migration 0202 (ADR-283) widens the API keys' and plan versions' scope checks again for
+   `orders.request_payment`, with the same brief locks, validated at once, and adds
+   `commerce_payment_links.created_by_api_key_id` with its foreign key and the creator check NOT
+   VALID, so the table is not read under the lock, letting a link have no member; 0203 validates
+   both, reading the table without blocking its writes. Workers before web servers: an older worker
+   sends a key's link message as a member's without naming the member, so do not roll workers back
+   while keys have open links. Until the web rollout ends, an old web server answers Settings → API
+   keys with an error for a company with a key holding the new scope, and the new endpoints with 404
+   Not Found.
+
+   ADR-284 has no migration. Until the web rollout ends, an old web server answers
+   `GET /api/v1/orders/{id}/payment-links` with 404; rolling web servers back does the same. Workers
+   are not affected.
+
+   Migration 0204 (ADR-285) replaces the endpoints' event and number checks (validated at once: at
+   most 10 endpoints per company) and the events' type check (NOT VALID; 0205 validates it while
+   captures go on), adds the trigger on `app.commerce_payment_links` and its function, and replaces
+   `app.capture_webhook_event` with the same signature (0194's, with the event among those of a
+   number). Workers roll out before web servers, so no endpoint takes the event before every worker
+   can describe it. A worker from before it fails each delivery of the event without an attempt
+   (`payload_failed`; replay it once newer workers run), so before rolling workers back to such an
+   image, turn the event off on the endpoints that take it. Until the web rollout ends, an old web
+   server answers Settings → Webhooks with an error for a company with an endpoint taking it: add it
+   to endpoints once the rollout ends, and turn it off before rolling web servers back.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

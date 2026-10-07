@@ -365,6 +365,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   close month (`to_char(expected_close_on, 'YYYY-MM')`), and `forecastByMonth` in `crm/forecast.ts`
   puts them in this month (past dates included), the next two months, later and no date for the
   company's months (`forecastMonths`), weighing each stage's bucket once with the board's `weigh`.
+  Whether a pipeline has a chance is read from all its active stages (the open pipeline's rows,
+  with open deals or not), as the board reads it.
 - **Periods** (`reports/period.ts`): whole calendar days in the company's time zone, from local
   midnight to local midnight (daylight-saving days last 23 or 25 hours; a skipped midnight starts the
   day at its first real instant), at most 92 days; days are bucketed with `AT TIME ZONE` in SQL.
@@ -1442,6 +1444,22 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`commerce/service.ts`), shared with members' `setOrderStatus`, writes the status, its time and
   the next version, and the trigger of 0063 captures `order.status_changed`, naming the key
   (ADR-270). The answer is read as `GET /orders/{id}` reads it (`readApiOrder`).
+- **Payment requests through the API (ADR-283):** `POST /orders/{id}/request-payment`
+  (`apiRequestOrderPayment`, `orders.request_payment`) claims the `Idempotency-Key` in the request's
+  transaction, checks Commerce in the plan, locks the order's row and checks its status, then calls
+  `writePaymentRequest` (`commerce/service.ts`, shared with members' `requestPayment`): the cart,
+  amount and account checks, the link written ahead with `created_by_api_key_id`, the order moved to
+  `awaiting_payment` with `orderStatusChangedBy({ apiKeyId })`, and the `commerce.link` job without
+  an actor. `POST /orders/{id}/cancel-payment` (`apiCancelOrderPayment`) locks the order and calls
+  `writePaymentLinkCancel`, shared with members' `cancelPaymentLink`. The worker sends a key's link
+  message with `sender_type` `api` and the key (`queueLinkMessage`), and the order page reads
+  `throughApi`.
+- **An order's Payment Links through the API (ADR-284):** `GET /orders/{id}/payment-links`
+  (`apiListOrderPaymentLinks`, `orders.read`) checks Commerce in the plan and the order in the
+  company, then reads its `commerce_payment_links` newest first on exact keyset cursors
+  (`created_at`, `id`; `commerce_payment_links_order_idx`) in a read-only transaction.
+  `toApiPaymentLink` gives `notSentReason` only while no message was queued and `requestedBy` from
+  `created_by_api_key_id`; `short_url`, `provider_link_id` and `reference` are never selected.
 - **CRM pipelines and deals through the API (ADR-253):** `GET /pipelines`, `GET /deals` and
   `GET /deals/{id}` (`api/deals.ts`, `deals.read`) check the CRM in the plan first
   (`loadEntitlements`, reason `not_in_plan`). Pipelines are read oldest first on exact keyset
@@ -1449,7 +1467,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   snapshot. Deals are read in the company joined to their pipeline (its currency), newest first by
   `created_at` on exact keyset cursors (`crm_deals_list_idx`), the filters as plain equalities
   (`ownerId` `none` as a null owner) and `updated_at >= updatedSince`; `toApiDeal` gives ids in
-  place of the contact, conversation and owner.
+  place of the contact, conversation and owner, since ADR-278 who made its latest change
+  (`changedBy`, `changedByApiKeyId`, read from the columns of ADR-277), and since ADR-282 who added
+  it (`createdBy`, `createdByApiKeyId`: `crmCreatedBy` reads `created_by_api_key_id` and
+  `created_by_automation_id`, never the member's id).
 - **Creating CRM deals through the API (ADR-254):** `POST /deals` (`apiCreateDeal`, `deals.write`)
   claims the `Idempotency-Key` in the deal's transaction, checks the CRM in the plan, locks the
   contact (key share; `apiContactNotFound` for a missing or erased one), shares the pipeline and
@@ -1473,12 +1494,21 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   statement; currencies never change). The row is written once with the new pipeline and stage, and
   the `stage_changed` activity names `fromPipelineId` and `toPipelineId`, as members' moves record
   them.
+- **A deal's history through the API (ADR-281):** `GET /deals/{id}/history` (`apiListDealHistory`,
+  `deals.read`) checks the CRM in the plan and the deal in the company, then reads its
+  `crm_activities` of the deal kinds (`API_DEAL_HISTORY_TYPES`) newest first on exact keyset cursors
+  (`crm_activities_deal_idx`), in a read-only transaction, with each named stage's pipeline in a
+  second query. `toApiDealHistoryEntry` maps a row's data to the entry and its maker from the row's
+  member actor (never which), `automationId` or `apiKeyId`.
 - **CRM tasks through the API (ADR-258):** `GET /tasks` and `GET /tasks/{id}` (`api/tasks.ts`,
   `tasks.read`) check the CRM in the plan first (`assertCrmInPlan`, shared with the deal reads).
   Tasks are read in the company newest first by `created_at` on exact keyset cursors
   (`crm_tasks_list_idx`), the filters as plain equalities and `updated_at >= updatedSince`;
   `toApiTask` gives ids in place of the assignee, contact and deal, and `reminder_detail` as
-  `reminderSkipReason`. The creator and the member who closed a task are never selected.
+  `reminderSkipReason`. The member who created or closed a task is never selected. Since ADR-278
+  `toApiTask` gives who made its latest change (`changedBy`, `changedByApiKeyId`, read from the
+  columns of ADR-277), and since ADR-282 who added it (`createdBy`, `createdByApiKeyId`, from the
+  key and automation creator columns by `crmCreatedBy`), a member never by name.
 - **Creating CRM tasks through the API (ADR-259):** `POST /tasks` (`apiCreateTask`, `tasks.write`)
   claims the `Idempotency-Key` in the task's transaction, then checks the times with `taskTimeIssue`
   (the members' rule, naming the field), the CRM in the plan and the assignee with `memberRefs`; a
@@ -1503,6 +1533,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `apiContactNotFound` for a missing or erased contact given alone, 409 for a deal's contact erased
   or merged away), adds a `note` activity (`addActivity`) without an actor naming the key, and a
   `crm.note_added` audit row as the key without the text, and answers the note.
+- **Reading CRM notes through the API (ADR-279):** `GET /notes` and `GET /notes/{id}`
+  (`api/notes.ts`, `notes.read`) check the CRM in the plan first (`assertCrmInPlan`), then read
+  `crm_activities` of kind `note` in the company newest first by `created_at` on exact keyset
+  cursors (`crm_activities_notes_idx`, migration 0199), the contact and deal filters as plain
+  equalities and `created_at >= createdSince`, in read-only transactions. `toApiNote` gives
+  `writtenBy` from whether the activity has a member actor (never which member) and the key from its
+  data; any other timeline entry is never selected.
 - **Numbers through the API (ADR-171):** `GET /channels` (`api/channels.ts`, `channels.read`) reads
   `channel_accounts` in the company oldest first on exact keyset cursors (`created_at`, `id`), with
   `status` as an equality, and gives the id, `display_phone_number`, `verified_name`, the status and
@@ -1746,15 +1783,60 @@ true`); the same key with another request (method, path and body hashed) answers
   `detail`, between a move and a close made by the same update. Its payload (`dealOf`) gives
   `ownerId` and `previousOwnerId` as captured, where the other deal events give the owner when
   delivered and `previousOwnerId` null.
+- **Deal detail events** (migrations 0192–0193, ADR-275): the deal update trigger, now also on
+  `title`, `value_minor` and `expected_close_on`, captures `deal.updated` when an update changes any
+  of them (members on the deal page, keys through `apiUpdateDeal`, and erasure retitling an erased
+  contact's deals, as the definer role, which may read a deal's id and owner for the owner filter),
+  with the deal, stage and pipeline ids and the names of the changed details in `detail`, between a
+  move and a change of owner made by the same update. Its payload (`dealOf`) adds `changes` to the
+  deal as it is when delivered.
 - **Task events** (migrations 0177–0178, ADR-261): triggers on `app.crm_tasks` capture
   `task.created` when a task is inserted (members, the runner's task steps, keys) and
   `task.status_changed` when an update changes its status (members, keys through `apiUpdateTask`),
   through `app.capture_webhook_event`: the task id, and the status before a change, in `detail`,
   with the task's contact and no conversation, so no number, team, member or deal filter narrows
   them (assignees do, ADR-266), stamped with `clock_timestamp()`. Edits, reminders and merges leave
-  the status, and erasure deletes the row, so they capture nothing. Their payloads are built when
-  delivered (`taskOf`): the statuses as captured; the title, due time, assignee id, deal id and
-  creator as they are then, and the contact or null; never the notes.
+  the status, and erasure deletes the row, so they capture no status change. Their payloads are
+  built when delivered (`taskOf`): the statuses as captured; the title, due time, assignee id, deal
+  id and creator as they are then, and the contact or null; never the notes.
+- **Task assignee events** (migrations 0190–0191, ADR-274): the task update trigger, now also on
+  `assignee_membership_id`, captures `task.assignee_changed` when an update changes the assignee
+  (members editing an open task, keys through `apiUpdateTask`; the runner's task steps set an
+  assignee only on the tasks they add), with the task id and the new and previous assignee ids in
+  `detail`, between a reopening and a close made by the same update. Its payload (`taskOf`) gives
+  `assigneeId` and `previousAssigneeId` as captured, where the other task events give the assignee
+  when delivered and `previousAssigneeId` null.
+- **Task detail events** (migrations 0194–0195, ADR-276): the task update trigger, now also on
+  `title`, `notes`, `due_at` and `remind_at`, captures `task.updated` when an update changes any of
+  them (members editing an open task, keys through `apiUpdateTask`; a reminder sent or skipped
+  changes `reminder_state` and `reminded_at` only), with the task id and the names of the changed
+  details in `detail`, between a reopening and a change of assignee made by the same update. Its
+  payload (`taskOf`) adds `changes` to the task as it is when delivered, which carries neither its
+  notes nor its reminder.
+- **Who changed a deal or task** (migrations 0196–0197, ADR-277): `changed_by`,
+  `changed_by_api_key_id` and `changed_xact` on `app.crm_deals` and `app.crm_tasks`, written with
+  each change by every writer through `crmChangedBy` (`crm/common.ts`); `app.crm_changer()`, a
+  trigger before each change the events report, clears a changer another transaction recorded. The
+  deal and task capture functions put the changer and the key in the `detail` of every event an
+  update captures, and the payloads (`dealOf`, `taskOf`) give `changedBy` and `apiKeyId` as
+  captured, an addition's from its creator (`crmCreatedBy`, which the API's deals and tasks share
+  since ADR-282). `GET /deals` and `GET /tasks` read the latest changer (ADR-278); a member's save
+  of a task that changes nothing the events report records no changer (`taskDetailsChanged`,
+  `crm/tasks.ts`).
+- **Note events** (migrations 0200–0201, ADR-280): `crm_activities_webhook_note`, an `AFTER INSERT`
+  trigger on `app.crm_activities` for kind `note`, captures `note.created`
+  (`app.webhook_capture_note()`) with the note id in `detail` and its contact; members' `addNote`
+  and keys' `apiCreateNote` are the only writers. Its payload (`noteOf`) gives the note without its
+  body, who wrote it through `noteWriter` (`crm/common.ts`, shared with `GET /notes`) and its
+  contact as it is now; a note gone (erasure) fails the delivery as `event_gone`.
+- **Payment Link events** (migrations 0204–0205, ADR-285): `commerce_payment_links_webhook_status`,
+  an `AFTER UPDATE OF status` trigger on `app.commerce_payment_links`, captures
+  `payment_link.status_changed` (`app.webhook_capture_payment_link()`) with the link, its order and
+  the status before it in `detail`, the order's conversation and contact, and the order's number for
+  the number filter, which `app.capture_webhook_event` now applies to the event. Its payload
+  (`paymentLinkOf`) reads the link with `paymentLinkColumns` and gives it through `toApiPaymentLink`
+  (`api/payment-link-view.ts`, shared with `GET /orders/{id}/payment-links`), with the order's
+  reference and status now, never `short_url`, `provider_link_id` or `reference`.
 - **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
   notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
   SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same
@@ -2005,8 +2087,9 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   the company taking the event names assignees, and matches it against the list. Settings (radio
   buttons and checkboxes under "Task assignees", the members who can own deals, who are those tasks
   are assigned to) and the API (`taskAssigneeIds`) set it; the services check the members a list
-  adds as they check deal owners, and members it held stay; a change that drops both task events
-  clears it.
+  adds as they check deal owners, and members it held stay; a change that drops every task event
+  clears it. For `task.assignee_changed` (ADR-274) it also matches the `previousAssigneeId` the
+  trigger stores, so the endpoints of the member a task left hear the change too.
 - **Contact tag filters** (migration 0183, ADR-267): `contact_tags` on an endpoint lists the contact
   tags whose conversations' message and conversation events it takes, null for every conversation's;
   a check keeps it to 1 to 50 tags in `app.contact_tags`' form and to endpoints taking such an
@@ -2016,6 +2099,16 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   (radio buttons and a text field under "Contact tags", tags separated by commas) and the API
   (`contactTags`) set it; the services read the tags as contacts carry them (`normalizeTag`) and
   check nothing else, as any tag may be named; a change that drops the events clears it.
+- **Conversation tag filters** (migration 0189, ADR-273): `conversation_tags` on an endpoint lists
+  the conversation tags whose message and conversation events it takes, null for every
+  conversation's; a check keeps it to 1 to 50 tags in `app.conversation_tags`' form and to endpoints
+  taking such an event. `app.capture_webhook_event` (replaced with the same signature) reads the
+  conversation's own tags only when an active endpoint of the company taking the event names them,
+  and creates a delivery only for endpoints whose list is null or shares a tag with them; the
+  definer role reads the tag column for the events its erasure captures. Settings (radio buttons and
+  a text field under "Conversation tags", tags separated by commas) and the API (`conversationTags`)
+  set it; the services read the tags as conversations carry them (`normalizeTag`) and check nothing
+  else, as any tag may be named; a change that drops the events clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and

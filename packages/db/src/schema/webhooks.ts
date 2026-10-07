@@ -26,13 +26,18 @@ export const WEBHOOK_EVENT_TYPES = [
   'automation.run_ended',
   'order.received',
   'order.status_changed',
+  'payment_link.status_changed',
   'campaign.status_changed',
   'deal.created',
+  'deal.updated',
   'deal.stage_changed',
   'deal.owner_changed',
   'deal.status_changed',
   'task.created',
+  'task.updated',
+  'task.assignee_changed',
   'task.status_changed',
+  'note.created',
 ] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
 
@@ -217,6 +222,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * conversation's. Set only while one of those events is among its events.
    */
   contactTags: text('contact_tags').array(),
+  /**
+   * The conversation tags whose message and conversation events it takes (migration 0189,
+   * ADR-273), by the tags the conversation has when the event happens; null takes every
+   * conversation's. Set only while one of those events is among its events.
+   */
+  conversationTags: text('conversation_tags').array(),
   /**
    * The campaigns whose messages' statuses and changes it takes (ADR-185); null takes every
    * campaign's. Set only while `message.status` or `campaign.status_changed` is among its events.

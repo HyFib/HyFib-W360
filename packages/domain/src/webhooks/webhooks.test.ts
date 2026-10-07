@@ -1,5 +1,6 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { isAppError, Keyring } from '@w360/core';
 import {
   ACTIVE_RUN_STATUSES,
@@ -11,9 +12,11 @@ import {
   CHANNEL_STATUSES,
   CONTACT_SOURCES,
   CONVERSATION_STATUSES,
+  CRM_CHANGERS,
   DEAL_STATUSES,
   MESSAGE_TYPES,
   ORDER_STATUSES,
+  PAYMENT_LINK_STATUSES,
   TASK_STATUSES,
   TEMPLATE_STATUSES,
   WEBHOOK_EVENT_TYPES,
@@ -96,15 +99,23 @@ import {
   webhookStageText,
 } from './model';
 import {
+  noteCreatedPayloadSchema,
+  paymentLinkStatusChangedPayloadSchema,
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
   buildWebhookPayload,
+  capturedCrmChanger,
   campaignStatusChangedPayloadSchema,
   dealCreatedPayloadSchema,
   dealStageChangedPayloadSchema,
   dealOwnerChangedPayloadSchema,
   dealStatusChangedPayloadSchema,
+  dealUpdatedPayloadSchema,
+  WEBHOOK_DEAL_DETAIL_CHANGES,
   taskCreatedPayloadSchema,
+  taskUpdatedPayloadSchema,
+  WEBHOOK_TASK_DETAIL_CHANGES,
+  taskAssigneeChangedPayloadSchema,
   taskStatusChangedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
@@ -201,6 +212,9 @@ import {
   webhookContactTagsFor,
   webhookContactTagsSchema,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
+  webhookConversationTagsFor,
+  webhookConversationTagsSchema,
+  WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS,
   webhookTemplateStatusesFor,
   webhookTemplateStatusesSchema,
 } from './service';
@@ -1212,6 +1226,8 @@ describe('webhook payload schemas', () => {
       lostReason: null,
       createdBy: 'member',
       createdAt: base.createdAt,
+      changedBy: 'member',
+      apiKeyId: null,
     };
     const person = { id: base.id, phone: '+919876543210', name: 'Jaya' };
     const created = {
@@ -1250,6 +1266,46 @@ describe('webhook payload schemas', () => {
       ).toBe(true);
     }
     expect(dealOwnerChangedPayloadSchema.safeParse(created).success).toBe(false);
+    // A change of details names what changed, once each, in its order (ADR-275).
+    const updated = { ...created, type: 'deal.updated' };
+    for (const changes of [
+      ['title'],
+      ['valueMinor'],
+      ['expectedCloseOn'],
+      ['title', 'valueMinor', 'expectedCloseOn'],
+    ]) {
+      expect(
+        dealUpdatedPayloadSchema.safeParse({ ...updated, data: { ...created.data, changes } })
+          .success,
+        JSON.stringify(changes),
+      ).toBe(true);
+    }
+    for (const changes of [[], ['owner'], ['lostReason'], undefined]) {
+      expect(
+        dealUpdatedPayloadSchema.safeParse({ ...updated, data: { ...created.data, changes } })
+          .success,
+        JSON.stringify(changes),
+      ).toBe(false);
+    }
+    expect(WEBHOOK_DEAL_DETAIL_CHANGES).toEqual(['title', 'valueMinor', 'expectedCloseOn']);
+    expect(dealUpdatedPayloadSchema.safeParse(created).success).toBe(false);
+    // Who made what the event reports, as captured (ADR-277): each kind, the key for a key's
+    // change, or nobody when the change did not record it (erasure's retitling).
+    expect(CRM_CHANGERS).toEqual(['member', 'automation', 'api']);
+    for (const [changedBy, apiKeyId] of [
+      ['member', null],
+      ['automation', null],
+      ['api', base.id],
+      [null, null],
+    ]) {
+      expect(
+        dealUpdatedPayloadSchema.safeParse({
+          ...updated,
+          data: { ...created.data, deal: { ...deal, changedBy, apiKeyId }, changes: ['title'] },
+        }).success,
+        String(changedBy),
+      ).toBe(true);
+    }
     // Every status a deal can reach, from every other one, with a lost deal's reason.
     for (const status of DEAL_STATUSES) {
       for (const previousStatus of DEAL_STATUSES) {
@@ -1302,6 +1358,10 @@ describe('webhook payload schemas', () => {
       { previousPipelineId: undefined },
       { previousOwnerId: undefined },
       { previousOwnerId: 'asha' },
+      { changedBy: 'erasure' },
+      { changedBy: undefined },
+      { apiKeyId: 'key-1' },
+      { apiKeyId: undefined },
     ]) {
       expect(
         dealCreatedPayloadSchema.safeParse({
@@ -1326,9 +1386,12 @@ describe('webhook payload schemas', () => {
       previousStatus: null,
       dueAt: base.createdAt,
       assigneeId: base.id,
+      previousAssigneeId: null,
       dealId: null,
       createdBy: 'member',
       createdAt: base.createdAt,
+      changedBy: 'member',
+      apiKeyId: null,
     };
     const person = { id: base.id, phone: '+919876543210', name: 'Jaya' };
     const created = { ...base, type: 'task.created', data: { task, contact: person } };
@@ -1356,15 +1419,61 @@ describe('webhook payload schemas', () => {
         ).toBe(true);
       }
     }
+    // A task given to another member, open or closed (ADR-274).
+    for (const status of TASK_STATUSES) {
+      expect(
+        taskAssigneeChangedPayloadSchema.safeParse({
+          ...created,
+          type: 'task.assignee_changed',
+          data: { ...created.data, task: { ...task, status, previousAssigneeId: base.id } },
+        }).success,
+        status,
+      ).toBe(true);
+    }
+    expect(taskAssigneeChangedPayloadSchema.safeParse(created).success).toBe(false);
+    // A change of details names what changed, once each, in its order, open or closed (ADR-276).
+    const updated = { ...created, type: 'task.updated' };
+    for (const changes of [
+      ['title'],
+      ['notes'],
+      ['dueAt'],
+      ['remindAt'],
+      ['title', 'notes', 'dueAt', 'remindAt'],
+    ]) {
+      for (const status of TASK_STATUSES) {
+        expect(
+          taskUpdatedPayloadSchema.safeParse({
+            ...updated,
+            data: { ...created.data, task: { ...task, status }, changes },
+          }).success,
+          `${JSON.stringify(changes)} ${status}`,
+        ).toBe(true);
+      }
+    }
+    for (const changes of [[], ['assignee'], ['status'], ['reminder'], ['due'], undefined]) {
+      expect(
+        taskUpdatedPayloadSchema.safeParse({ ...updated, data: { ...created.data, changes } })
+          .success,
+        JSON.stringify(changes),
+      ).toBe(false);
+    }
+    expect(WEBHOOK_TASK_DETAIL_CHANGES).toEqual(['title', 'notes', 'dueAt', 'remindAt']);
+    expect(taskUpdatedPayloadSchema.safeParse(created).success).toBe(false);
     // An unknown status or creator, an id or time that is not one, a field left out, or another
-    // type is not described.
+    // type is not described; a task always has an assignee.
     for (const change of [
       { status: 'closed' },
       { previousStatus: 'won' },
       { createdBy: 'import' },
       { assigneeId: 'agent-1' },
+      { assigneeId: null },
+      { previousAssigneeId: 'agent-1' },
+      { previousAssigneeId: undefined },
       { dueAt: '2026-10-09' },
       { dealId: undefined },
+      { changedBy: 'erasure' },
+      { changedBy: undefined },
+      { apiKeyId: 'key-1' },
     ]) {
       expect(
         taskCreatedPayloadSchema.safeParse({
@@ -1376,21 +1485,55 @@ describe('webhook payload schemas', () => {
     }
     expect(taskStatusChangedPayloadSchema.safeParse(created).success).toBe(false);
     expect(taskCreatedPayloadSchema.safeParse({ ...created, data: { task } }).success).toBe(false);
-    // A task is sent without its notes, which GET /tasks/{id} reads.
-    expect(Object.keys(taskCreatedPayloadSchema.shape.data.shape.task.shape)).toEqual([
-      'id',
-      'title',
-      'status',
-      'previousStatus',
-      'dueAt',
-      'assigneeId',
-      'dealId',
-      'createdBy',
-      'createdAt',
+    // A task is sent without its notes or reminder, which GET /tasks/{id} reads, even when they
+    // are what changed.
+    for (const schema of [taskCreatedPayloadSchema, taskUpdatedPayloadSchema]) {
+      expect(Object.keys(schema.shape.data.shape.task.shape)).toEqual([
+        'id',
+        'title',
+        'status',
+        'previousStatus',
+        'dueAt',
+        'assigneeId',
+        'previousAssigneeId',
+        'dealId',
+        'createdBy',
+        'createdAt',
+        'changedBy',
+        'apiKeyId',
+      ]);
+    }
+    // A key's change names the key; a change that did not record its maker names nobody (ADR-277).
+    for (const [changedBy, apiKeyId] of [
+      ['api', base.id],
+      [null, null],
+    ]) {
+      expect(
+        taskStatusChangedPayloadSchema.safeParse({
+          ...created,
+          type: 'task.status_changed',
+          data: { ...created.data, task: { ...task, status: 'done', changedBy, apiKeyId } },
+        }).success,
+        String(changedBy),
+      ).toBe(true);
+    }
+    expect(Object.keys(taskUpdatedPayloadSchema.shape.data.shape)).toEqual([
+      'task',
+      'contact',
+      'changes',
     ]);
     // The database takes exactly the events the API describes, in its order.
     expect([...WEBHOOK_EVENT_TYPES]).toEqual([...WEBHOOK_EVENT_KEYS]);
     expect(WEBHOOK_EVENT_INFO['task.created'].label).toBe('Task added');
+    expect(WEBHOOK_EVENT_INFO['task.updated']).toEqual({
+      label: 'Task details',
+      description:
+        'A CRM task’s title, notes, due time or reminder changed: by a member or an API key.',
+    });
+    expect(WEBHOOK_EVENT_INFO['task.assignee_changed']).toEqual({
+      label: 'Task assignee',
+      description: 'A CRM task was given to another member: by a member or an API key.',
+    });
     expect(WEBHOOK_EVENT_INFO['task.status_changed']).toEqual({
       label: 'Task done, cancelled or reopened',
       description: 'A CRM task was completed, cancelled or reopened: by a member or an API key.',
@@ -1543,13 +1686,18 @@ describe('the OpenAPI document', () => {
       'automation.run_ended',
       'order.received',
       'order.status_changed',
+      'payment_link.status_changed',
       'campaign.status_changed',
       'deal.created',
+      'deal.updated',
       'deal.stage_changed',
       'deal.owner_changed',
       'deal.status_changed',
       'task.created',
+      'task.updated',
+      'task.assignee_changed',
       'task.status_changed',
+      'note.created',
     ]);
     const schemas = doc.components.schemas as Record<string, unknown>;
     const parameters = doc.components.parameters as Record<string, { name: string }>;
@@ -1606,6 +1754,7 @@ describe('the OpenAPI document', () => {
       Object.keys(doc.components.schemas).filter((name) => name.startsWith('WebhookDeal')),
     ).toEqual([
       'WebhookDealCreated',
+      'WebhookDealUpdated',
       'WebhookDealStageChanged',
       'WebhookDealOwnerChanged',
       'WebhookDealStatusChanged',
@@ -1614,10 +1763,20 @@ describe('the OpenAPI document', () => {
     for (const words of [
       'by a member or an API key',
       'deal.ownerId and deal.previousOwnerId are the change (null for no owner)',
-      'reopened, moved, given to another owner, closed',
+      'reopened, moved, details changed, given to another owner, closed',
       'for the owner the deal left as well as for the one it was given to',
     ]) {
       expect(owned).toContain(words);
+    }
+    // A change of details (ADR-275).
+    const edited = doc.webhooks['deal.updated'].post.description;
+    for (const words of [
+      'by a member or an API key, or by its contact’s erasure, which retitles it',
+      'changes names what changed (title, valueMinor, expectedCloseOn), never the values before',
+      'reopened, moved, details changed, given to another owner, closed',
+      'Pipelines, stages and owners an endpoint names narrow it as the other deal events',
+    ]) {
+      expect(edited).toContain(words);
     }
   });
 
@@ -1641,6 +1800,81 @@ describe('the OpenAPI document', () => {
     );
   });
 
+  it('reads who changed a deal or a task as its event captured it, naming a key only for a key’s change (ADR-277)', () => {
+    const key = '0192a1b2-0000-7000-8000-00000000000c';
+    expect(capturedCrmChanger({ changedBy: 'api', apiKeyId: key })).toEqual({
+      changedBy: 'api',
+      apiKeyId: key,
+    });
+    expect(capturedCrmChanger({ changedBy: 'member', apiKeyId: null })).toEqual({
+      changedBy: 'member',
+      apiKeyId: null,
+    });
+    expect(capturedCrmChanger({ changedBy: 'automation', apiKeyId: key })).toEqual({
+      changedBy: 'automation',
+      apiKeyId: null,
+    });
+    // Nobody: a change that did not record its maker, an event from before, or a maker unknown.
+    for (const detail of [
+      { changedBy: null, apiKeyId: null },
+      {},
+      { changedBy: 'erasure' },
+      { changedBy: 'payment_link', apiKeyId: key },
+    ]) {
+      expect(capturedCrmChanger(detail), JSON.stringify(detail)).toEqual({
+        changedBy: null,
+        apiKeyId: null,
+      });
+    }
+    expect(capturedCrmChanger({ changedBy: 'api', apiKeyId: 42 })).toEqual({
+      changedBy: 'api',
+      apiKeyId: null,
+    });
+  });
+
+  it('describes who changed a deal or a task: a member, an automation or a key it names (ADR-277)', () => {
+    const deal = dealUpdatedPayloadSchema.shape.data.shape.deal.shape;
+    const task = taskUpdatedPayloadSchema.shape.data.shape.task.shape;
+    for (const shape of [deal, task]) {
+      expect(shape.changedBy.unwrap().options).toEqual(['member', 'automation', 'api']);
+      expect(shape.changedBy.description).toContain('never which member');
+      expect(shape.changedBy.description).toContain('as it was captured');
+      expect(shape.apiKeyId.description).toContain('when changedBy is api');
+    }
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    expect(doc.webhooks['deal.created'].post.description).toContain(
+      "Every deal event's deal.changedBy says who made what it reports, as captured: a member, an automation or an API key, which deal.apiKeyId names, so an integration that changes deals through the API can tell its own changes",
+    );
+    expect(doc.webhooks['task.created'].post.description).toContain(
+      "Every task event's task.changedBy says who made what it reports, as captured: a member, an automation (which only adds tasks) or an API key, which task.apiKeyId names",
+    );
+    expect(deal.changedBy.description).toContain('for deal.created, who added the deal');
+    expect(deal.changedBy.description).toContain('such as erasure retitling the deal');
+    expect(task.changedBy.description).toContain('for task.created, who added the task');
+    // Every deal and task event carries them.
+    for (const schema of [
+      dealCreatedPayloadSchema,
+      dealStageChangedPayloadSchema,
+      dealOwnerChangedPayloadSchema,
+      dealStatusChangedPayloadSchema,
+    ]) {
+      expect(Object.keys(schema.shape.data.shape.deal.shape).slice(-2)).toEqual([
+        'changedBy',
+        'apiKeyId',
+      ]);
+    }
+    for (const schema of [
+      taskCreatedPayloadSchema,
+      taskAssigneeChangedPayloadSchema,
+      taskStatusChangedPayloadSchema,
+    ]) {
+      expect(Object.keys(schema.shape.data.shape.task.shape).slice(-2)).toEqual([
+        'changedBy',
+        'apiKeyId',
+      ]);
+    }
+  });
+
   it('describes the task events: the change, what is never sent and what sends nothing (ADR-261)', () => {
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const text = (type: 'task.created' | 'task.status_changed') =>
@@ -1656,14 +1890,40 @@ describe('the OpenAPI document', () => {
     for (const words of [
       'by a member or an API key',
       'task.status and task.previousStatus are the change (open, done or cancelled)',
-      'Editing a task’s details or its reminder sends nothing.',
+      'Editing its title, notes, due time or reminder sends task.updated, and giving it to another member task.assignee_changed.',
       'the latest change is the one with the latest createdAt',
     ]) {
       expect(text('task.status_changed')).toContain(words);
     }
+    // A change of assignee (ADR-274).
+    const reassigned = doc.webhooks['task.assignee_changed'].post.description;
+    for (const words of [
+      'by a member or an API key',
+      'task.assigneeId and task.previousAssigneeId are the change',
+      'reopened, details changed, given to another member, closed',
+      'for the member the task left as well as for the one it was given to',
+    ]) {
+      expect(reassigned).toContain(words);
+    }
+    // A change of details (ADR-276).
+    const edited = doc.webhooks['task.updated'].post.description;
+    for (const words of [
+      'title, notes, due time or reminder changed: by a member or an API key',
+      'changes names what changed (title, notes, dueAt, remindAt), never the values before',
+      'its notes and reminder are never sent: read them with GET /tasks/{id} (`tasks.read`)',
+      'reopened, details changed, given to another member, closed',
+      'Assignees an endpoint names narrow it as the other task events',
+    ]) {
+      expect(edited).toContain(words);
+    }
     expect(
       Object.keys(doc.components.schemas).filter((name) => name.startsWith('WebhookTask')),
-    ).toEqual(['WebhookTaskCreated', 'WebhookTaskStatusChanged']);
+    ).toEqual([
+      'WebhookTaskCreated',
+      'WebhookTaskUpdated',
+      'WebhookTaskAssigneeChanged',
+      'WebhookTaskStatusChanged',
+    ]);
   });
 
   it('builds no body for an event type it does not know, before reading anything', async () => {
@@ -2345,6 +2605,7 @@ describe('number filters (ADR-170)', () => {
       'automation.run_ended',
       'order.received',
       'order.status_changed',
+      'payment_link.status_changed',
       'campaign.status_changed',
     ]);
     const payloads = {
@@ -2363,13 +2624,18 @@ describe('number filters (ADR-170)', () => {
       'automation.run_ended': automationRunEndedPayloadSchema,
       'order.received': orderReceivedPayloadSchema,
       'order.status_changed': orderStatusChangedPayloadSchema,
+      'payment_link.status_changed': paymentLinkStatusChangedPayloadSchema,
       'campaign.status_changed': campaignStatusChangedPayloadSchema,
       'deal.created': dealCreatedPayloadSchema,
+      'deal.updated': dealUpdatedPayloadSchema,
       'deal.stage_changed': dealStageChangedPayloadSchema,
       'deal.owner_changed': dealOwnerChangedPayloadSchema,
       'deal.status_changed': dealStatusChangedPayloadSchema,
       'task.created': taskCreatedPayloadSchema,
+      'task.updated': taskUpdatedPayloadSchema,
+      'task.assignee_changed': taskAssigneeChangedPayloadSchema,
       'task.status_changed': taskStatusChangedPayloadSchema,
+      'note.created': noteCreatedPayloadSchema,
     } satisfies Record<(typeof WEBHOOK_EVENT_KEYS)[number], unknown>;
     for (const type of WEBHOOK_EVENT_KEYS) {
       const onANumber = WEBHOOK_CHANNEL_EVENTS.some((t) => t === type);
@@ -2962,9 +3228,10 @@ describe('pipeline filters (ADR-263)', () => {
     );
   });
 
-  it('apply to the four deal events, whose payloads give the pipeline and the one a move left, and to no other event', () => {
+  it('apply to the five deal events, whose payloads give the pipeline and the one a move left, and to no other event', () => {
     expect(WEBHOOK_PIPELINE_EVENTS).toEqual([
       'deal.created',
+      'deal.updated',
       'deal.stage_changed',
       'deal.owner_changed',
       'deal.status_changed',
@@ -2977,6 +3244,7 @@ describe('pipeline filters (ADR-263)', () => {
     expect(webhookTakesPipelineEvents(['task.created', 'deal.status_changed'])).toBe(true);
     for (const schema of [
       dealCreatedPayloadSchema,
+      dealUpdatedPayloadSchema,
       dealStageChangedPayloadSchema,
       dealOwnerChangedPayloadSchema,
       dealStatusChangedPayloadSchema,
@@ -3041,6 +3309,7 @@ describe('stage filters (ADR-264)', () => {
   it('apply to the deal events, whose payloads give the stage and the one a move left, and are kept only while one is taken', () => {
     for (const schema of [
       dealCreatedPayloadSchema,
+      dealUpdatedPayloadSchema,
       dealStageChangedPayloadSchema,
       dealOwnerChangedPayloadSchema,
       dealStatusChangedPayloadSchema,
@@ -3105,6 +3374,7 @@ describe('owner filters (ADR-265)', () => {
   it('apply to the deal events, whose payloads give the owner, and are kept only while one is taken', () => {
     for (const schema of [
       dealCreatedPayloadSchema,
+      dealUpdatedPayloadSchema,
       dealStageChangedPayloadSchema,
       dealOwnerChangedPayloadSchema,
       dealStatusChangedPayloadSchema,
@@ -3167,16 +3437,27 @@ describe('task assignee filters (ADR-266)', () => {
     ).toBe('Choose members from the list.');
   });
 
-  it('apply to the two task events, whose payloads give the assignee, and to no other event', () => {
-    expect(WEBHOOK_TASK_EVENTS).toEqual(['task.created', 'task.status_changed']);
+  it('apply to the four task events, whose payloads give the assignee, and to no other event', () => {
+    expect(WEBHOOK_TASK_EVENTS).toEqual([
+      'task.created',
+      'task.updated',
+      'task.assignee_changed',
+      'task.status_changed',
+    ]);
     for (const type of WEBHOOK_EVENT_KEYS) {
       expect(webhookTakesTaskEvents([type]), type).toBe(type.startsWith('task.'));
     }
     // Deal events are not a task's, even of a deal with tasks.
     expect(webhookTakesTaskEvents(['deal.created', 'deal.status_changed'])).toBe(false);
     expect(webhookTakesTaskEvents(['deal.created', 'task.status_changed'])).toBe(true);
-    for (const schema of [taskCreatedPayloadSchema, taskStatusChangedPayloadSchema]) {
+    for (const schema of [
+      taskCreatedPayloadSchema,
+      taskUpdatedPayloadSchema,
+      taskAssigneeChangedPayloadSchema,
+      taskStatusChangedPayloadSchema,
+    ]) {
       expect('assigneeId' in schema.shape.data.shape.task.shape).toBe(true);
+      expect('previousAssigneeId' in schema.shape.data.shape.task.shape).toBe(true);
     }
     // The refusal names the events as Settings lists them.
     for (const type of WEBHOOK_TASK_EVENTS) {
@@ -3187,6 +3468,7 @@ describe('task assignee filters (ADR-266)', () => {
   it('are kept only while the endpoint takes a task event: given, kept, or cleared', () => {
     expect(webhookTaskAssigneeIdsFor(['task.created'], [asha], null)).toEqual([asha]);
     expect(webhookTaskAssigneeIdsFor(['task.status_changed'], undefined, [dev])).toEqual([dev]);
+    expect(webhookTaskAssigneeIdsFor(['task.updated'], [asha], null)).toEqual([asha]);
     expect(webhookTaskAssigneeIdsFor(['task.created'], null, [dev])).toBeNull();
     expect(webhookTaskAssigneeIdsFor(['task.status_changed'], undefined, null)).toBeNull();
     expect(
@@ -3305,6 +3587,52 @@ describe('contact tag filters (ADR-267)', () => {
     ).toBeNull();
     expect(WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS).toBe(
       'Choose contact tags only for an endpoint that receives message or conversation events.',
+    );
+  });
+});
+
+describe('conversation tag filters (ADR-273)', () => {
+  it('take 1 to 50 tags as conversations carry them, once each, in the order given; null takes every conversation', () => {
+    expect(
+      webhookConversationTagsSchema.parse(['Refund', ' urgent ', 'refund', 'Delivery   Delay']),
+    ).toEqual(['refund', 'urgent', 'delivery delay']);
+    expect(webhookConversationTagsSchema.parse(null)).toBeNull();
+    const tags = Array.from({ length: WEBHOOK_LIMITS.conversationTags + 1 }, (_, i) => `tag ${i}`);
+    expect(WEBHOOK_LIMITS.conversationTags).toBe(50);
+    expect(webhookConversationTagsSchema.parse(tags.slice(1))).toEqual(tags.slice(1));
+    const refusal = (given: unknown) => {
+      const issue = webhookConversationTagsSchema.safeParse(given).error?.issues[0];
+      return issue && [issue.path.join('.'), issue.message];
+    };
+    expect(refusal([])).toEqual(['', 'Give at least one tag, or take every conversation.']);
+    expect(refusal(tags)).toEqual(['', 'Give at most 50 tags.']);
+    expect(refusal(['refund', 'a,b'])).toEqual([
+      '1',
+      'Tags cannot contain commas or control characters.',
+    ]);
+    expect(refusal(['refund', 'urgent', '   '])).toEqual(['2', 'Tags cannot be empty.']);
+    expect(refusal(['x'.repeat(41)])).toEqual(['0', 'Tags are limited to 40 characters.']);
+    expect(refusal(['refund', 42])).toEqual(['1', 'Give tags as text.']);
+    expect(webhookConversationTagsSchema.parse(['x'.repeat(40)])).toEqual(['x'.repeat(40)]);
+    expect(webhookConversationTagsSchema.safeParse('refund').success).toBe(false);
+  });
+
+  it('apply to the events of a conversation only, and are kept only while one is taken: given, kept, or cleared', () => {
+    for (const type of WEBHOOK_EVENT_KEYS) {
+      expect(webhookConversationTagsFor([type], ['refund'], null), type).toEqual(
+        (WEBHOOK_TEAM_EVENTS as readonly string[]).includes(type) ? ['refund'] : null,
+      );
+    }
+    expect(
+      webhookConversationTagsFor(['conversation.assignment_changed'], undefined, ['refund']),
+    ).toEqual(['refund']);
+    expect(webhookConversationTagsFor(['message.status'], null, ['refund'])).toBeNull();
+    expect(webhookConversationTagsFor(['message.received'], undefined, null)).toBeNull();
+    expect(
+      webhookConversationTagsFor(['deal.created', 'contact.created'], ['refund'], ['urgent']),
+    ).toBeNull();
+    expect(WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS).toBe(
+      'Choose conversation tags only for an endpoint that receives message or conversation events.',
     );
   });
 });
@@ -3744,5 +4072,188 @@ describe('run end reason filters (ADR-192)', () => {
       'send_blocked',
       'send_failed',
     ]);
+  });
+});
+
+describe('the event of a CRM note (ADR-280)', () => {
+  it('is one event, on no number, that no filter narrows, labelled as Settings lists it', () => {
+    expect(WEBHOOK_EVENT_INFO['note.created']).toEqual({
+      label: 'Note added',
+      description:
+        'A note was added to a CRM contact’s or deal’s timeline: by a member or an API key.',
+    });
+    for (const takes of [
+      webhookTakesChannelEvents,
+      webhookTakesTaskEvents,
+      webhookTakesPipelineEvents,
+      webhookTakesTeamEvents,
+    ]) {
+      expect(takes(['note.created']), takes.name).toBe(false);
+    }
+  });
+
+  it('gives the note without its text: what it is about, who wrote it and its contact now', () => {
+    const data = noteCreatedPayloadSchema.shape.data.shape;
+    expect(Object.keys(data)).toEqual(['note', 'contact']);
+    const note = data.note.shape;
+    expect(Object.keys(note)).toEqual(['id', 'dealId', 'writtenBy', 'apiKeyId', 'createdAt']);
+    expect(note.writtenBy.options).toEqual(['member', 'api']);
+    expect(note.writtenBy.description).toContain('(member, never which member)');
+    expect(note.apiKeyId.description).toContain('when writtenBy is api; null otherwise');
+    expect(note.id.description).toContain('GET /notes/{id}');
+    expect(data.contact.description).toContain('the contact kept when a merge moved it');
+    const id = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
+    const body = (writtenBy: string, apiKeyId: string | null) => ({
+      id,
+      type: 'note.created',
+      createdAt: '2026-10-07T10:00:00.000Z',
+      data: {
+        note: { id, dealId: null, writtenBy, apiKeyId, createdAt: '2026-10-07T10:00:00.000Z' },
+        contact: { id, phone: '+919845012345', name: 'Asha' },
+      },
+    });
+    expect(noteCreatedPayloadSchema.safeParse(body('member', null)).success).toBe(true);
+    expect(noteCreatedPayloadSchema.safeParse(body('api', id)).success).toBe(true);
+    expect(noteCreatedPayloadSchema.safeParse(body('automation', null)).success).toBe(false);
+    const withoutContact = {
+      ...body('member', null),
+      data: { note: body('member', null).data.note },
+    };
+    expect(noteCreatedPayloadSchema.safeParse(withoutContact).success).toBe(false);
+  });
+
+  it('is described: never the text, read with notes.read, never changed, gone with erasure', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const described = doc.webhooks['note.created'].post.description;
+    for (const words of [
+      'A note was added to a CRM contact’s or deal’s timeline: by a member or an API key.',
+      'who wrote it (`note.writtenBy`: a member, never which, or an API key, named by note.apiKeyId',
+      'the contact kept when a merge has moved it',
+      'Never the note’s text, which may hold anything a member wrote: read the note with GET /notes/{id} (`notes.read`).',
+      'Notes are never changed, so no other note event is sent',
+      'erasing a contact deletes its notes, so the events of an erased contact’s notes are no longer delivered',
+      'No endpoint filter narrows it.',
+    ]) {
+      expect(described).toContain(words);
+    }
+  });
+});
+
+describe('the event of a Payment Link (ADR-285)', () => {
+  it('is one event on the order’s number, labelled as Settings lists it', () => {
+    expect(WEBHOOK_EVENT_INFO['payment_link.status_changed']).toEqual({
+      label: 'Payment Link status',
+      description:
+        'A Payment Link for a WhatsApp order was created at Razorpay (sent in the chat or not), partly paid, paid, expired or cancelled, or Razorpay could not create it.',
+    });
+    expect(webhookTakesChannelEvents(['payment_link.status_changed'])).toBe(true);
+    for (const takes of [
+      webhookTakesTaskEvents,
+      webhookTakesPipelineEvents,
+      webhookTakesTeamEvents,
+    ]) {
+      expect(takes(['payment_link.status_changed']), takes.name).toBe(false);
+    }
+  });
+
+  it('gives the link as the API reads it, with the change, its order, conversation, contact and number', () => {
+    const data = paymentLinkStatusChangedPayloadSchema.shape.data.shape;
+    expect(Object.keys(data)).toEqual([
+      'paymentLink',
+      'order',
+      'conversation',
+      'contact',
+      'channel',
+    ]);
+    const link = data.paymentLink.shape;
+    expect(Object.keys(link)).toEqual([
+      'id',
+      'orderId',
+      'status',
+      'amountMinor',
+      'amountPaidMinor',
+      'currency',
+      'expiresAt',
+      'paidAt',
+      'cancelRequestedAt',
+      'messageId',
+      'notSentReason',
+      'error',
+      'requestedBy',
+      'requestedByApiKeyId',
+      'createdAt',
+      'checkedAt',
+      'previousStatus',
+    ]);
+    expect(link.status.description).toContain(
+      'The status this event reports, as the worker wrote it',
+    );
+    expect(link.previousStatus.options).toEqual([...PAYMENT_LINK_STATUSES]);
+    expect(Object.keys(data.order.shape)).toEqual(['id', 'reference', 'status']);
+    expect(data.order.shape.status.description).toContain(
+      'order.status_changed reports its changes',
+    );
+    // Never the link's address or Razorpay's ids.
+    expect(JSON.stringify(z.toJSONSchema(paymentLinkStatusChangedPayloadSchema))).not.toMatch(
+      /"(url|shortUrl|reference_id|providerLinkId|paymentId)"/,
+    );
+    const id = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
+    const at = '2026-10-07T10:00:00.000Z';
+    const body = (status: string, previousStatus: string) => ({
+      id,
+      type: 'payment_link.status_changed',
+      createdAt: at,
+      data: {
+        paymentLink: {
+          id,
+          orderId: id,
+          status,
+          amountMinor: 3000,
+          amountPaidMinor: 0,
+          currency: 'INR',
+          expiresAt: at,
+          paidAt: null,
+          cancelRequestedAt: null,
+          messageId: null,
+          notSentReason: 'The link was created but not sent: the WhatsApp number is not active.',
+          error: null,
+          requestedBy: 'api',
+          requestedByApiKeyId: id,
+          createdAt: at,
+          checkedAt: at,
+          previousStatus,
+        },
+        order: { id, reference: 'K7M2QX9P', status: 'awaiting_payment' },
+        conversation: { id },
+        contact: { id, phone: '+919845012345', name: 'Asha' },
+        channel: { id, phone: '+91 80 4567 8901' },
+      },
+    });
+    expect(
+      paymentLinkStatusChangedPayloadSchema.safeParse(body('created', 'creating')).success,
+    ).toBe(true);
+    expect(
+      paymentLinkStatusChangedPayloadSchema.safeParse(body('paid', 'partially_paid')).success,
+    ).toBe(true);
+    expect(paymentLinkStatusChangedPayloadSchema.safeParse(body('refunded', 'paid')).success).toBe(
+      false,
+    );
+  });
+
+  it('is described: the change as written, the link as the API reads it, never its address', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const described = doc.webhooks['payment_link.status_changed'].post.description;
+    for (const words of [
+      'A Payment Link for a WhatsApp order was created at Razorpay (sent in the chat or not), partly paid, paid, expired or cancelled, or Razorpay could not create it.',
+      'paymentLink.status and paymentLink.previousStatus are the change, as the worker wrote it',
+      'the rest is the link as GET /orders/{id}/payment-links reads it when the event is delivered',
+      'why it was not sent (notSentReason)',
+      'who asked for it (a member, never which, or an API key by its id)',
+      'Never the link’s address or Razorpay’s ids.',
+      'Only a link Razorpay reports paid marks the order paid, which order.status_changed reports.',
+      'an endpoint that names numbers receives it for those numbers only',
+    ]) {
+      expect(described).toContain(words);
+    }
   });
 });

@@ -27,10 +27,12 @@ export const API_SCOPE_KEYS = [
   'automations.start',
   'orders.read',
   'orders.write',
+  'orders.request_payment',
   'deals.read',
   'deals.write',
   'tasks.read',
   'tasks.write',
+  'notes.read',
   'notes.write',
   'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
@@ -157,14 +159,21 @@ export const API_SCOPE_INFO: Record<
   'orders.read': {
     label: 'Read WhatsApp orders',
     description:
-      "List the orders customers send from the company's WhatsApp catalog and read each one's items, total, note and status, with its conversation and contact ids. Also find contacts, and build segments and campaign audiences, by how many orders they placed in the company's connected stores and what they spent there. Never Payment Links or payment ids. Needs Commerce in the company's plan.",
+      "List the orders customers send from the company's WhatsApp catalog and read each one's items, total, note and status, with its conversation and contact ids. Also find contacts, and build segments and campaign audiences, by how many orders they placed in the company's connected stores and what they spent there. Also read each order's Payment Links, with their status, amounts and whether they were sent, never their address or Razorpay's ids. Needs Commerce in the company's plan.",
     permission: 'commerce.read',
     writes: false,
   },
   'orders.write': {
     label: 'Confirm, fulfil and cancel WhatsApp orders',
     description:
-      "Move the company's WhatsApp orders on as members do: confirm or cancel a received order, fulfil or cancel a confirmed one, fulfil a paid one. Never payments: members ask for and cancel Payment Links in the app. Needs Commerce in the company's plan.",
+      "Move the company's WhatsApp orders on as members do: confirm or cancel a received order, fulfil or cancel a confirmed one, fulfil a paid one. Never payments: asking customers to pay with Payment Links is a scope of its own. Needs Commerce in the company's plan.",
+    permission: 'inbox.reply',
+    writes: true,
+  },
+  'orders.request_payment': {
+    label: 'Ask customers to pay WhatsApp orders',
+    description:
+      "Ask a customer to pay a received or confirmed order with a Payment Link from the company's own Razorpay account, sent in the order's conversation as members ask for payment on the order page, and cancel an order's open link. Payment statuses still come only from Razorpay. Needs Commerce in the company's plan and its Razorpay account checked.",
     permission: 'inbox.reply',
     writes: true,
   },
@@ -195,6 +204,13 @@ export const API_SCOPE_INFO: Record<
       "Create tasks as members do on the Tasks page and the contact and deal pages: for one of the company's contacts or deals or for nobody, assigned to an active member who can use the CRM, with notes, a due time and a reminder emailed to the assignee; and change, complete, cancel and reopen them as members do, recorded as done through the API. Needs the CRM in the company's plan.",
     permission: 'crm.write',
     writes: true,
+  },
+  'notes.read': {
+    label: 'Read CRM notes',
+    description:
+      "List the notes on the CRM timelines of the company's contacts and deals, with their text, the contact and deal each is about, and whether a member or a key wrote it (a key by its id), and read each one. Never which member wrote a note, or the rest of the timeline. Needs the CRM in the company's plan.",
+    permission: 'crm.read',
+    writes: false,
   },
   'notes.write': {
     label: 'Add notes to the CRM timeline',

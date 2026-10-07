@@ -826,8 +826,10 @@ async function queueLinkMessage(
     content: { text, paymentLinkId: link.id },
     status: 'queued',
     statusRank: STATUS_RANK.queued,
-    senderType: 'agent',
-    senderMembershipId: link.createdByMembershipId,
+    // Sent as whoever asked for the payment: the member, or the key (ADR-283).
+    ...(link.createdByApiKeyId
+      ? { senderType: 'api' as const, apiKeyId: link.createdByApiKeyId }
+      : { senderType: 'agent' as const, senderMembershipId: link.createdByMembershipId }),
     clientKey: `paylink-${link.id}`,
   });
   await tx.insert(sendIntents).values({

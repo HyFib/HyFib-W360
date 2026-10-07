@@ -161,7 +161,11 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   member the deal left and of the one it was given to, both the company's own members (the owner's
   foreign key goes through the company's id), never who made the change, and reaches the endpoints
   naming either member, so an endpoint following a member hears a deal leave them; automations,
-  erasure and merges never change an owner, so they send none.
+  erasure and merges never change an owner, so they send none. A change of details (`deal.updated`,
+  ADR-275) names which of the title, value and expected close date changed, never their values
+  before, and gives the deal as it is when delivered, so erasure's retitling replaces a title that
+  may name the person; its capture during erasure runs as the definer role, which may read a deal's
+  id and owner beyond what erasure already read, nothing more.
 - Integrations hear of CRM tasks (ADR-261) through the company's own endpoints only: `task.created`
   and `task.status_changed` give the task's title, statuses, due time, assignee and deal ids, its
   creator and its contact as the API describes it, never its notes (free text members write;
@@ -169,7 +173,28 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   for that company alone, and only when one of its active endpoints takes it; erasing a contact
   deletes its tasks, so their pending events are not delivered (`event_gone`). No number, team,
   member or deal filter narrows task events, which Settings and the OpenAPI document say; an
-  endpoint's list of assignees does (ADR-266).
+  endpoint's list of assignees does (ADR-266). A change of assignee (`task.assignee_changed`,
+  ADR-274) gives the ids of the member the task left and of the one it was given to, both the
+  company's own members (the assignee's foreign key goes through the company's id), never who made
+  the change, and reaches the endpoints naming either member, so an endpoint following a member
+  hears a task leave them; automations, erasure and merges never change an assignee, so they send
+  none. A change of details (`task.updated`, ADR-276) names which of the title, notes, due time and
+  reminder changed, never their values, and the task it gives carries neither its notes nor its
+  reminder, so a change of notes is named without a word of them; members and keys capture it as the
+  runtime role, in the company's scope, since no definer function changes these columns. Deal and
+  task events name who made each change (`changedBy`: a member, never which; an automation; or a
+  key, with its id, ADR-277), a key of the company's own only (a foreign key through the company's
+  id), so an integration can ignore its own changes; a change that does not record its maker names
+  nobody, never the maker of an earlier change, since the database clears a changer another
+  transaction recorded. A note's event (`note.created`, ADR-280) gives the note's id, deal id and
+  who wrote it (a member, never which, or a key by its id) with its contact as the API describes it,
+  never its text: endpoints take events without scopes, so a note's text is read only with
+  `notes.read`. Members and keys capture it as the runtime role in the company's scope; erasing a
+  contact deletes its notes, so their pending events are not delivered (`event_gone`). A Payment
+  Link's event (`payment_link.status_changed`, ADR-285) gives the link as
+  `GET /orders/{id}/payment-links` reads it (who asked: a member never by name, or a key by its id),
+  never its address or Razorpay's ids; the commerce worker captures it as the runtime role in the
+  company's scope, and an endpoint that names numbers hears it only for its order's number.
 - Customers' numbers (ADR-226): a company's owners and administrators choose the roles (supervisor,
   agent, marketer, analyst) whose members see them masked; the context leaves out
   `contacts.view_numbers` for a member whose every role that grants it is masked, and the services
@@ -605,10 +630,11 @@ Phase 5 rules (Public API, P5-08):
   `contact_fields.manage` (ADR-115), `campaigns.read` and `campaigns.write` for the scopes of the
   same names (ADR-125, ADR-186), `campaigns.send` for `campaigns.stop` (ADR-128) and
   `campaigns.resume` (ADR-176), `commerce.read` for `orders.read` (ADR-167), `inbox.reply` for
-  `orders.write` (ADR-168), `channels.read` for the scope of the same name (ADR-171), `crm.read` for
-  `deals.read` (ADR-253) and `tasks.read` (ADR-258), and `crm.write` for `deals.write` (ADR-254,
-  ADR-255), `tasks.write` (ADR-259) and `notes.write` (ADR-268). Nobody grants a key more than they
-  hold, and rotating needs the same. A key keeps the scopes it was created with.
+  `orders.write` (ADR-168) and `orders.request_payment` (ADR-283), `channels.read` for the scope of
+  the same name (ADR-171), `crm.read` for `deals.read` (ADR-253), `tasks.read` (ADR-258) and
+  `notes.read` (ADR-279), and `crm.write` for `deals.write` (ADR-254, ADR-255), `tasks.write`
+  (ADR-259) and `notes.write` (ADR-268). Nobody grants a key more than they hold, and rotating needs
+  the same. A key keeps the scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -789,7 +815,7 @@ Phase 5 rules (Public API, P5-08):
   company's order answers 404 as an unknown one does, an id that is not a UUID is refused before any
   query, and every filter is typed (a status from the list, UUIDs, the reference's eight-capital
   pattern, an ISO time). Orders name the contact, conversation and number by id only, never the
-  customer's number or name, the Payment Link or Razorpay's payment ids; an erased contact's orders
+  customer's number or name, a Payment Link's address or Razorpay's ids; an erased contact's orders
   are read without the note erasure clears (unit tests; integration and e2e tests, run in CI only).
   An order names who made its latest status change (ADR-271) as `order.status_changed` does: a
   member never by name, a key by its id, HyFib's Payment Link, or nobody when nothing was recorded,
@@ -802,6 +828,24 @@ Phase 5 rules (Public API, P5-08):
   waiting for payment is left to members, and a paid order is never cancelled. The change is audited
   as the key and moves the order's version on, so a member's page opened before it is refused as
   stale (unit tests; integration and e2e tests, run in CI only).
+- Asking for payment (ADR-283): `POST /orders/{id}/request-payment` and
+  `POST /orders/{id}/cancel-payment` need `orders.request_payment`, granted only with `inbox.reply`
+  (a key with `orders.write` alone asks for nothing), checked before anything is read and refused
+  while the company is suspended or restricted, and Commerce in the company's plan. They act on an
+  order of the key's company only (row security and an explicit company condition; another company's
+  order answers 404), with its row locked, through the members' checks: a received or confirmed
+  order, the whole cart, an amount in rupees within the bounds, and the company's own Razorpay
+  account checked, whose keys only the worker uses. They never mark an order paid: only a link
+  fetched from Razorpay does. The link names the key as its creator (a database check holds exactly
+  one creator), its message is sent as the key, and both requests are audited as the key (unit
+  tests; integration tests, run in CI only).
+- Reading Payment Links (ADR-284): `GET /orders/{id}/payment-links` needs `orders.read`, granted
+  only with `commerce.read` (with which members see the links on the order page), and Commerce in
+  the company's plan, both checked before a link is read. It reads in the key's company only (row
+  security and an explicit company condition; another company's order answers 404 as an unknown one
+  does), in a read-only transaction, and never gives a link's address, its id or reference at
+  Razorpay, or payment ids; who asked is a member never by name, or a key of the company's own by
+  its id (unit tests; integration tests, run in CI only).
 - Reading numbers (ADR-171): `GET /channels` needs `channels.read`, granted only with the permission
   of the same name, checked before anything is read. It reads in the key's company only (row
   security and an explicit company condition), takes a page and a status from the list and nothing
@@ -1033,7 +1077,12 @@ Phase 5 rules (Public API, P5-08):
   `none`, an ISO time). Deals name the contact, conversation and owner by id only, never the
   customer's number or name, notes, tasks or the timeline; an erased contact's deals are read
   renamed and without the lost reason, as erasure leaves them (unit tests; integration and e2e
-  tests, run in CI only).
+  tests, run in CI only). A deal names who made its latest change (ADR-278) as the deal events do
+  (ADR-277): a member never by name, an automation, a key of the company's own by its id, or nobody
+  when nothing was recorded, never an earlier change's maker (the database clears it). It names who
+  added it (ADR-282) as `deal.created` does: a member never by name, an automation's run never by
+  which automation, or a key of the company's own by its id (unit tests; integration tests, run in
+  CI only).
 - Creating CRM deals (ADR-254): `POST /deals` needs `deals.write`, granted only with `crm.write`, an
   active company and the CRM in the plan, all checked before a deal is written. The contact,
   pipeline, stage and owner must be the key's company's (row security and explicit company
@@ -1055,14 +1104,25 @@ Phase 5 rules (Public API, P5-08):
   to a pipeline of its currency, so a value is never read in another currency than the one it was
   given in. The move is on the timeline and in the audit log as the key's (unit tests; integration
   tests, run in CI only).
+- Reading a deal's history (ADR-281): `GET /deals/{id}/history` needs `deals.read` and the CRM in
+  the plan, checked before anything is read; it reads the key's company's deal only (another
+  company's answers 404, as an unknown one does; an id that is not a UUID is refused before any
+  query), in a read-only transaction, and only the deal kinds of its timeline: never notes, tasks,
+  the contact's details or which member made a change (a key by its id). Erased contacts' timelines
+  are deleted, so their deals have no history (unit tests; integration tests, run in CI only).
 - Reading CRM tasks (ADR-258): `GET /tasks` and `GET /tasks/{id}` need `tasks.read`, granted only
   with `crm.read`, and the CRM in the company's plan, both checked before a task is read. They read
   in the key's company only (row security and an explicit company condition): another company's task
   answers 404 as an unknown one does, an id that is not a UUID is refused before any query, and
   every filter is typed (a status from the list, UUIDs, an ISO time). Tasks name the assignee,
-  contact and deal by id only, never the customer's number or name, the timeline, or who created or
-  closed them; erasing a contact deletes its tasks, so they are no longer read (unit tests;
-  integration and e2e tests, run in CI only).
+  contact and deal by id only, never the customer's number or name, the timeline, or which member
+  created or closed them; erasing a contact deletes its tasks, so they are no longer read (unit
+  tests; integration and e2e tests, run in CI only). A task names who made its latest change
+  (ADR-278) as the task events do: a member never by name, or a key of the company's own by its id,
+  or nobody, never an earlier change's maker; a member's save that changes nothing records no one.
+  It names who added it (ADR-282) as `task.created` does: a member never by name, an automation's
+  run never by which automation, or a key of the company's own by its id (unit tests; integration
+  tests, run in CI only).
 - Creating CRM tasks (ADR-259): `POST /tasks` needs `tasks.write`, granted only with `crm.write`, an
   active company and the CRM in the company's plan. The assignee must be an active member of the
   key's company able to use the CRM; a deal or contact is found in the key's company only (another
@@ -1083,7 +1143,16 @@ Phase 5 rules (Public API, P5-08):
   only (another company's is named or not found, as an unknown one is), and a note on a deal is
   always on the deal's contact, locked against erasure and merges until the note is in, so a note
   never lands on an erased contact or the wrong one. The note is recorded as the key's (the timeline
-  and the audit log, which never holds its text), and notes are never read through the API (unit
+  and the audit log, which never holds its text), and notes are read only with `notes.read`
+  (ADR-279) (unit tests; integration tests, run in CI only).
+- Reading CRM notes (ADR-279): `GET /notes` and `GET /notes/{id}` need `notes.read`, granted only
+  with `crm.read`, and the CRM in the company's plan, both checked before a note is read. They read
+  notes of the key's company only (row security and an explicit company condition) in read-only
+  transactions: another company's note and any timeline entry that is not a note answer 404 as an
+  unknown one does, an id that is not a UUID is refused before any query, and every filter is typed
+  (UUIDs, an ISO time). A note gives its text and its contact and deal by id, and says whether a
+  member or a key wrote it, a key by its id, never which member; never the contact's name or number
+  or the rest of the timeline. Erasing a contact deletes its notes, so they are no longer read (unit
   tests; integration tests, run in CI only).
 - Listing the tags in use (ADR-272): `GET /contact-tags` needs `contacts.read` and
   `GET /conversation-tags` `conversations.read`, both checked before anything is read. They group
@@ -1407,6 +1476,16 @@ Phase 5 rules (outgoing webhooks, P5-09):
   scope: it narrows what one endpoint receives and never adds an event or a delivery for another
   endpoint or company. Tags name no rows, so naming one reveals nothing about the company's
   contacts. Audited with the list (unit tests; integration tests, run in CI only).
+- An endpoint can take the message and conversation events of the conversations that have chosen
+  tags only (ADR-273), chosen the same way and kept apart from contact tags. A list holds tags in
+  the form conversations carry them (the services normalise them; a database check holds the form,
+  the count and the events, and refuses a null entry), is kept only while the endpoint takes such an
+  event, and is applied in `app.capture_webhook_event` to the conversation's tags, read in the
+  company's scope: it narrows what one endpoint receives and never adds an event or a delivery for
+  another endpoint or company. The definer role gains only a read of the tag column, its rows
+  limited to the current company by its existing policy. Tags name no rows, so naming one reveals
+  nothing about the company's conversations. Audited with the list (unit tests; integration tests,
+  run in CI only).
 - Conversation and contact events (ADR-074) follow the same rules. Conversation events name the
   member and the team by id only (ADR-094), the ids the API gives `conversations.read` keys
   (ADR-093): names are read through `GET /members` and `GET /teams` with such a key, and no email or

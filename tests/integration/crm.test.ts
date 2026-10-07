@@ -1250,6 +1250,38 @@ describe('crm erasure, reports and isolation', () => {
       version: 1,
       available: true,
     });
+
+    // Only a stage without open deals has a chance (found in review): the pipeline has one all the
+    // same, as on the board, so its forecast weighs (to 0) instead of saying no stage has one.
+    const { id: renewalsId } = await svc.createPipeline(owner, {
+      name: 'Renewals',
+      currency: 'INR',
+      stages: ['Open', 'Likely'],
+    });
+    const [renewals] = (await svc.listPipelines(owner)).filter((p) => p.id === renewalsId);
+    const [opened, likely] = renewals!.stages;
+    await svc.updatePipeline(owner, {
+      id: renewalsId,
+      expectedVersion: renewals!.version,
+      name: 'Renewals',
+      stages: [
+        { id: opened!.id, name: 'Open' },
+        { id: likely!.id, name: 'Likely', winPercent: 70 },
+      ],
+    });
+    await svc.createDeal(owner, {
+      contactId,
+      pipelineId: renewalsId,
+      stageId: opened!.id,
+      title: 'Renewal',
+      value: '700',
+      expectedCloseOn: null,
+    });
+    const later = await reports.getReport(owner, { preset: 'last_7_days' });
+    const renewalsForecast = later.deals.pipelines.find((p) => p.id === renewalsId)!.forecast;
+    expect(renewalsForecast).toMatchObject({ hasChances: true, dealsWithoutChance: 1 });
+    expect(renewalsForecast.buckets.map((b) => b.weightedMinor)).toEqual([0, 0, 0, 0, 0]);
+    expect((await svc.board(owner, { pipelineId: renewalsId }))!.forecast.hasChances).toBe(true);
   });
 
   it('keeps pipelines, deals and tasks inside their company', async () => {

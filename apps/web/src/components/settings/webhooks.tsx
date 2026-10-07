@@ -1458,7 +1458,7 @@ const CRM_MEMBER_WORDS = {
   },
   taskAssignees: {
     legend: 'Task assignees',
-    help: 'A task’s events belong to the member it is assigned to when they happen. Deal and other events are sent whichever assignees are chosen.',
+    help: 'A task’s events belong to the member it is assigned to when they happen, and a change of assignee to the member it left as well. Deal and other events are sent whichever assignees are chosen.',
     every: 'Every task’s events',
     everyHelp: 'Including those of members who join later.',
     only: 'Only those of the tasks assigned to the members ticked',
@@ -1621,6 +1621,79 @@ function ContactTagChoices({
             id={`${prefix}-contact-tags`}
             label="Tags"
             description={`Separate tags with commas, up to ${WEBHOOK_LIMITS.contactTags}. A tag no contact has yet matches nothing until one has it.`}
+          >
+            {(aria) => (
+              <Input
+                {...aria}
+                autoComplete="off"
+                value={text}
+                onChange={(e) => onTextChange(e.target.value)}
+              />
+            )}
+          </Field>
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
+/**
+ * The conversation tags whose events an endpoint takes (ADR-273): every conversation's, or those of
+ * the conversations that have any of the tags given when the events happen. Tags are typed separated
+ * by commas, as in the inbox; the service reads them as conversations carry them.
+ */
+function ConversationTagChoices({
+  prefix,
+  every,
+  onEveryChange,
+  text,
+  onTextChange,
+}: {
+  prefix: string;
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  text: string;
+  onTextChange: (next: string) => void;
+}) {
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Conversation tags</legend>
+      <p className="text-xs text-muted-foreground">
+        Message and conversation events belong to the tags the conversation has when they happen.
+        With numbers, teams, members or contact tags chosen too, an event must pass them all. Other
+        events are sent whichever tags are given.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-conversation-tags-every`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every conversation’s events
+          <span className="block text-xs text-muted-foreground">
+            Including conversations without tags.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-conversation-tags-every`}
+          className="mt-1"
+          checked={!every}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>Only the events of the conversations that have any of these tags</span>
+      </label>
+      {!every ? (
+        <div className="ml-6">
+          <Field
+            id={`${prefix}-conversation-tags`}
+            label="Tags"
+            description={`Separate tags with commas, up to ${WEBHOOK_LIMITS.conversationTags}. A tag no conversation has yet matches nothing until one has it.`}
           >
             {(aria) => (
               <Input
@@ -2109,6 +2182,8 @@ export function WebhookEndpointForm({
     assignees: WebhookEndpointAssignee[] | null;
     /** The contact tags it names (ADR-267); null for every conversation. */
     contactTags: string[] | null;
+    /** The conversation tags it names (ADR-273); null for every conversation. */
+    conversationTags: string[] | null;
     oauth: WebhookEndpointOAuth | null;
   };
   /** The company's published automations, which an endpoint can choose (ADR-145). */
@@ -2213,6 +2288,10 @@ export function WebhookEndpointForm({
   );
   const [everyContactTag, setEveryContactTag] = useState(!endpoint?.contactTags);
   const [contactTagsText, setContactTagsText] = useState(endpoint?.contactTags?.join(', ') ?? '');
+  const [everyConversationTag, setEveryConversationTag] = useState(!endpoint?.conversationTags);
+  const [conversationTagsText, setConversationTagsText] = useState(
+    endpoint?.conversationTags?.join(', ') ?? '',
+  );
   const [headers, setHeaders] = useState<HeaderRow[]>([]);
   // Changing an endpoint keeps its headers unless they are given again.
   const [replaceHeaders, setReplaceHeaders] = useState(false);
@@ -2355,6 +2434,14 @@ export function WebhookEndpointForm({
                 .map((tag) => tag.trim())
                 .filter((tag) => tag !== '')
             : null;
+        // Every conversation's events unless conversation tags are given (ADR-273).
+        const chosenConversationTags =
+          webhookTakesTeamEvents(eventTypes) && !everyConversationTag
+            ? conversationTagsText
+                .split(',')
+                .map((tag) => tag.trim())
+                .filter((tag) => tag !== '')
+            : null;
         const input = {
           url,
           description,
@@ -2384,6 +2471,7 @@ export function WebhookEndpointForm({
           taskAssigneeIds: chosenTaskAssignees,
           assigneeIds: chosenAssignees,
           contactTags: chosenContactTags,
+          conversationTags: chosenConversationTags,
         };
         const done = (r: { ok: true } | { ok: false; code: string; message: string }) => {
           setBusy(false);
@@ -2463,6 +2551,8 @@ export function WebhookEndpointForm({
               setAssigneeIds([]);
               setEveryContactTag(true);
               setContactTagsText('');
+              setEveryConversationTag(true);
+              setConversationTagsText('');
               setEveryField(true);
               setFieldKeys([]);
               setHeaders([]);
@@ -2626,6 +2716,15 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryContactTag}
           text={contactTagsText}
           onTextChange={setContactTagsText}
+        />
+      ) : null}
+      {webhookTakesTeamEvents(eventTypes) ? (
+        <ConversationTagChoices
+          prefix={prefix}
+          every={everyConversationTag}
+          onEveryChange={setEveryConversationTag}
+          text={conversationTagsText}
+          onTextChange={setConversationTagsText}
         />
       ) : null}
       {webhookTakesPipelineEvents(eventTypes) ? (

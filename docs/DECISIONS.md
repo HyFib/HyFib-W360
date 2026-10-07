@@ -9594,6 +9594,13 @@ Decision:
 Not built: forecasts by owner or by month beyond the third, and history of past forecasts (nothing
 is stored).
 
+Amended (2026-10-07, found in review): whether a pipeline had a chance was read from the stages of
+its open deals only, so a pipeline whose only stage with a chance held no open deals showed no
+weighed values and said that none of its stages had a chance, unlike the board. It is now read from
+all the pipeline's active stages, with open deals or not: `forecastByMonth` takes their chances,
+which `dealReport` reads with the open pipeline in the same snapshot. Such a pipeline's forecast
+weighs, to 0 until a deal enters a stage with a chance. No migration.
+
 ## ADR-253 Reading CRM deals through the public API (P5-08, P4-04) (2026-10-07)
 
 Context: integrations could read a company's contacts, conversations, campaigns and orders through
@@ -10332,3 +10339,501 @@ Decision:
 Not built: renaming, merging or deleting tags through the API (members cannot either), tags across
 both lists in one call, other orders (by count), and tags of contacts or conversations matching a
 filter.
+
+## ADR-273 Choosing the conversation tags whose events a webhook endpoint receives (P5-09) (2026-10-07)
+
+Context: an endpoint taking message or conversation events could be narrowed by numbers, teams and
+members and, since ADR-267, by the tags of the conversation's contact. Members tag the conversations
+themselves (ADR-220: "refund", "follow up"), automations tag them (ADR-222) and keys change their
+tags (ADR-221), but a receiver that handles some conversations (a refunds desk, a courier system for
+delivery questions) was sent every conversation's events and had to read each conversation to drop
+the rest. ADR-267 left events of a conversation by its own tags unbuilt.
+
+Decision:
+
+- **A list of conversation tags per endpoint,** for the events of a conversation
+  (`message.received`, `message.status`, `conversation.status_changed`,
+  `conversation.assignment_changed`, `conversation.team_changed`): null receives every
+  conversation's, as before; a list holds 1 to 50 tags as conversations carry them (`normalizeTag`,
+  as contact tags: trimmed, spaces inside collapsed, lower case, 1 to 40 characters, no comma or
+  control character), in the order given with repeats merged. Such an event counts when its
+  conversation has any of the listed tags when the event happens, as the transaction that captures
+  it sees the conversation's tags: a tag put on later counts from the next event on, and one taken
+  off no longer does. With numbers, teams, members or contact tags too, an event must pass them all;
+  contact tags and conversation tags are separate lists. Deal, task, order, contact and other events
+  are not narrowed. Chosen in Settings → Webhooks ("Conversation tags": every conversation's events,
+  or only those of the conversations that have any of the tags typed, separated by commas), shown on
+  the endpoint as "Conversation tags whose events are sent: …", and through the API as
+  `conversationTags` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every
+  endpoint the API answers; `GET /conversation-tags` (ADR-272) lists the tags in use.
+- **Tags are labels:** a list may name a tag no conversation has yet, which matches nothing until a
+  conversation gets it, so nothing is checked against the company's conversations; a tag no
+  conversation carries any more stays listed until it is taken off.
+- **Only while an event of a conversation is taken:** a list given for an endpoint that takes none
+  is refused (`conversationTags`; 422 through the API). A change that drops them all clears it, and
+  a `PATCH` that leaves it out keeps it; Settings always sends it. A check in the database holds the
+  same rule and the tags' form (null, or 1 to 50 tags in one dimension without a null, each as
+  `app.conversation_tags` allows a tag, with an event of a conversation).
+- **Applied at capture:** `app.capture_webhook_event` reads the conversation's tags only when an
+  active endpoint of the company that takes the event names conversation tags, and creates a
+  delivery only for the endpoints whose list is null or shares a tag with them. The triggers run as
+  whoever changes messages and conversations: the runtime role reads the tags in the company's
+  scope, and the definer role, whose erasure cancels a contact's unsent messages before it deletes
+  their conversations' tags, is granted a read of the tag column (its rows are the current
+  company's, by its existing policy). No event is written when no endpoint takes it, and stored
+  events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `conversationTags` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0189:** `conversation_tags text[]` on `app.webhook_endpoints` with the check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role, a select grant on `app.conversation_tags.tag` for the definer role, and
+  `app.capture_webhook_event` replaced with the same signature (0185's, with the conversation's
+  tags), so its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: every listed tag required rather than any, tags to leave out, contact events by tag
+(ADR-267), an event when a conversation is tagged or untagged, and other values of a conversation.
+
+## ADR-274 A webhook event when a CRM task's assignee changes (P5-09, P4-04) (2026-10-07)
+
+Context: task events (ADR-261) told integrations of tasks added, completed, cancelled or reopened,
+and an endpoint could take the tasks of chosen members (ADR-266), but giving a task to another
+member sent nothing: a receiver following a member's tasks (their list in another tool, a team
+lead's board) learnt that a task had left or reached them only from the task's next event, if one
+came. ADR-266 left an event when a task is reassigned unbuilt.
+
+Decision:
+
+- **`task.assignee_changed`** ("Task assignee") is captured by the task trigger
+  (`app.webhook_capture_task`, replaced in place; its update trigger now also fires on
+  `assignee_membership_id`) when an update changes a task's assignee: a member giving the task to
+  another member by editing it, or a key changing `assigneeId` (`PATCH /tasks/{id}`, ADR-260).
+  Automations set an assignee only on the tasks they add (`task.created`), and erasure and merges
+  keep it, so they send none; a task always has an assignee.
+- **The change, not the task now:** the payload is the task events' one with a new field,
+  `task.previousAssigneeId` (the assignee before; null in the other task events), and its
+  `task.assigneeId` is the member the change gave rather than the assignee at delivery, so a
+  receiver reads the change even when the task has changed hands again since. The status is the one
+  the task had at the change; the rest is the task at delivery. Who made the change is not sent.
+- **Its place among one change's steps:** one update that also reopens or closes the task captures
+  each in the order the API's steps run (ADR-260): reopened, given to another member, closed, each
+  with the task as its step left it, stamped with `clock_timestamp()`; a key giving a task away and
+  completing it in one request sends the change of assignee with status `open`, then the completion.
+  Members change the assignee of an open task only, by editing it.
+- **Filters:** it is a task event for the assignee lists (ADR-266): an endpoint naming assignees
+  receives it for the member the task left as well as for the one it was given to, as
+  `deal.owner_changed` reaches both owners (ADR-269), so a receiver hears a task leave the members
+  it follows. The lists stay while an endpoint takes any of the three task events, and a list given
+  without one is refused naming the three as Settings lists them; no number, team, member or deal
+  filter narrows it.
+- **Migrations 0190 and 0191:** 0190 replaces the endpoints' event check and the check of their
+  assignee lists (validated at once: at most 10 endpoints per company), the events' type check (NOT
+  VALID; 0191 validates it while captures go on), the trigger and its function, and
+  `app.capture_webhook_event` with the same signature (keeping 0189's filters).
+
+Not built: events for other edits of a task (its title, notes, due time or reminder), who made a
+change in the payload, and task events by their deal's pipeline, stage or owner.
+
+## ADR-275 A webhook event when a CRM deal's details change (P5-09, P4-04) (2026-10-07)
+
+Context: deal events (ADR-256, ADR-269) told integrations of deals added, moved, given to another
+owner, won, lost or reopened, but a change of a deal's title, value or expected close date sent
+nothing: a receiver keeping deals in step (a CRM, a forecast sheet) learnt of a new value only from
+the deal's next event, if one came, or by reading every deal again. ADR-269 left events for other
+edits of a deal unbuilt.
+
+Decision:
+
+- **`deal.updated`** ("Deal details") is captured by the deal trigger (`app.webhook_capture_deal`,
+  replaced in place; its update trigger now also fires on `title`, `value_minor` and
+  `expected_close_on`) when an update changes any of them: a member editing the deal, or a key
+  changing `title`, `valueMinor` or `expectedCloseOn` (`PATCH /deals/{id}`, ADR-255). Erasure
+  retitles an erased contact's deals "Deal (contact erased)", which sends it too, so a receiver
+  replaces a title that may name the person. Automations set details only on the deals they add
+  (`deal.created`), and merges keep them, so they send none; an edit that changes nothing sends
+  none.
+- **What changed, not the values:** the payload is the deal events' one with `changes`, naming the
+  details the change changed, once each and in the order `title`, `valueMinor`, `expectedCloseOn`;
+  the deal is the deal when the event is delivered, so a deal changed again since gives its latest
+  details, and the values before a change are never sent (a title can name a person; the deal's
+  timeline keeps a value's change for members). Who made the change is not sent.
+- **Its place among one change's steps:** one update that also reopens, moves, gives away or closes
+  the deal captures each in the order members' and keys' steps run (ADR-255): reopened, moved,
+  details changed, given to another owner, closed, each stamped with `clock_timestamp()`; a key
+  clearing a value and winning the deal in one request sends the change of details with status
+  `open`, then the win. `deal.owner_changed`'s description names the new step.
+- **Filters:** it is a deal event for the pipeline, stage and owner lists (ADR-263 to ADR-265),
+  matched by the pipeline, stage and owner the deal has as the change left it; the lists stay while
+  an endpoint takes any of the five deal events, and their refusals name the five as Settings lists
+  them. Erasure's capture runs as the definer role, which now reads a deal's id and owner (a column
+  grant) so that an endpoint naming owners can be matched; its rows are those its existing policy on
+  deals gives it.
+- **Migrations 0192 and 0193:** 0192 replaces the endpoints' event check and their three deal lists'
+  checks (validated at once: at most 10 endpoints per company), the events' type check (NOT VALID;
+  0193 validates it while captures go on), the trigger and its function, grants the definer role the
+  read, and replaces `app.capture_webhook_event` with the same signature (keeping 0190's filters).
+
+Not built: the values before a change, edits of a lost reason, a deal's notes or its contact's
+details as deal events, and who made a change in the payload.
+
+## ADR-276 A webhook event when a CRM task's details change (P5-09, P4-04) (2026-10-07)
+
+Context: task events (ADR-261, ADR-274) told integrations of tasks added, given to another member,
+completed, cancelled or reopened, but a change of a task's title, notes, due time or reminder sent
+nothing: a receiver keeping tasks in step (a calendar, a to-do list, a call-back queue) learnt of a
+moved due time only from the task's next event, if one came, or by reading every task again. ADR-274
+left events for other edits of a task unbuilt.
+
+Decision:
+
+- **`task.updated`** ("Task details") is captured by the task trigger (`app.webhook_capture_task`,
+  replaced in place; its update trigger now also fires on `title`, `notes`, `due_at` and
+  `remind_at`) when an update changes any of them: a member editing an open task, or a key changing
+  `title`, `notes`, `dueAt` or `remindAt` (`PATCH /tasks/{id}`, ADR-260). Automations set details
+  only on the tasks they add (`task.created`), merges move a task to another contact without
+  changing them, erasure deletes an erased contact's tasks, and sending or skipping a reminder
+  changes its state, never its time, so none of them sends it; an edit that changes nothing sends
+  none.
+- **What changed, not the values:** the payload is the task events' one with `changes`, naming the
+  details the change changed, once each and in the order `title`, `notes`, `dueAt`, `remindAt`; the
+  task is the task when the event is delivered, so a task changed again since gives its latest title
+  and due time. The values before a change are never sent, and neither are the notes or the
+  reminder, which the payload does not carry (ADR-261): a receiver told they changed reads them with
+  GET /tasks/{id} (`tasks.read`). Who made the change is not sent.
+- **Its place among one change's steps:** one update that also reopens, gives away or closes the
+  task captures each in the order the API's steps run (ADR-260): reopened, details changed, given to
+  another member, closed, each stamped with `clock_timestamp()`; a key clearing the due time and
+  completing the task in one request sends the change with status `open`, then the completion.
+  Members edit only an open task, its details and assignee together, so their edits send the change
+  of details before the change of assignee. `task.assignee_changed`'s and `task.status_changed`'s
+  descriptions name the new event.
+- **Filters:** it is a task event for the assignee list (ADR-266), matched by the member the task is
+  assigned to as the change left it; the list stays while an endpoint takes any of the four task
+  events, and its refusal names the four as Settings lists them. No definer function changes these
+  columns (erasure deletes tasks and merges change their contact), so no role gains a read.
+- **Migrations 0194 and 0195:** 0194 replaces the endpoints' event check (25 types) and their
+  assignee list's check (validated at once: at most 10 endpoints per company), the events' type
+  check (NOT VALID; 0195 validates it while captures go on), the trigger and its function, and
+  replaces `app.capture_webhook_event` with the same signature (keeping 0192's filters).
+
+Not built: the values before a change, the notes or the reminder in the payload, who made a change,
+and task events by their deal's pipeline, stage or owner.
+
+## ADR-277 Saying who changed a CRM deal or task in its webhook events (P5-09, P4-04) (2026-10-07)
+
+Context: integrations change deals and tasks through the API (ADR-254, ADR-255, ADR-259, ADR-260)
+and hear every change through the deal and task events (ADR-256, ADR-261, ADR-269, ADR-274 to
+ADR-276), their own included: like an order system before ADR-270, a CRM kept in step with HyFib
+could not tell a change it made from a member's or an automation's, so it either acted on its own
+echoes, and could loop, or ignored changes it needed. ADR-269 and ADR-274 to ADR-276 left who made a
+change unbuilt.
+
+Decision:
+
+- **`changedBy` and `apiKeyId`** on the deal or task of every deal and task event: `member` (never
+  which member), `automation` (an automation's run, which moves and closes deals, ADR-250 and
+  ADR-251, and adds deals and tasks) or `api` with the key's id; for `deal.created` and
+  `task.created`, who added it, read from its creator. Null for a change HyFib did not record the
+  maker of: erasure retitling a deal, changes made by servers from before this release, and events
+  captured before it. An integration ignores the events whose `apiKeyId` is its own key's, as for
+  orders (ADR-270).
+- **Recorded with the change:** `app.crm_deals` and `app.crm_tasks` gain `changed_by`,
+  `changed_by_api_key_id` (a foreign key to the company's keys through the company's id) and
+  `changed_xact`, written in the same statement as the change by every writer: members' deal and
+  task services, keys' `apiUpdateDeal` and `apiUpdateTask`, and the runner's deal steps, through one
+  helper (`crmChangedBy`). A check keeps the changer to the three values and the key to `api`. The
+  company data export carries the changer and the key, not the transaction.
+- **Never the previous changer:** a trigger before each change the events report (a deal's stage,
+  status, owner, title, value or expected close date; a task's status, assignee, title, notes, due
+  time or reminder time) clears the changer unless `changed_xact` is the transaction making the
+  change, as ADR-270 does for orders, so a change that does not record its maker names nobody.
+  Writes of nothing the events report (a reminder sent, a merge moving a deal or task to another
+  contact) keep it and send nothing.
+- **In the event, as captured:** the deal and task triggers put the changer and the key in the
+  `detail` of every event an update captures, after the trigger above; the payload gives them as
+  captured, whoever changes the deal or task later. Each deal and task event's description says so.
+  The deal and task pages, the timeline and the audit log are unchanged (they name the member,
+  automation or key already), and who last changed a deal or task is not read through the API.
+- **Migrations 0196 and 0197:** 0196 adds the columns to both tables (nullable, so neither is
+  rewritten), the foreign keys and checks NOT VALID, the runtime role's grants to update them, the
+  trigger function and its two triggers, and the deal and task capture functions with the same
+  signatures; 0197 validates the foreign keys and checks while the tables stay writable.
+
+Not built: which member made a change, who last changed a deal or task through `GET /deals` and
+`GET /tasks`, and naming erasure as the maker of its retitling.
+
+## ADR-278 Reading who last changed a CRM deal or task through the public API (P5-08) (2026-10-07)
+
+Context: ADR-277 recorded who makes each change of a deal or task and sent it in the deal and task
+events, but an integration that polls `GET /deals` or `GET /tasks` with `updatedSince` instead of
+taking webhooks (or that catches up after its receiver was down) still could not tell the deals and
+tasks it changed last from those members or automations did, as order systems can since ADR-271;
+ADR-277 left reading it through the API unbuilt. A member saving a task's details unchanged also
+recorded the member as its changer, though nothing the task events report had changed.
+
+Decision:
+
+- **`changedBy` and `changedByApiKeyId`** on the API's deal (`GET /deals`, `GET /deals/{id}` and the
+  answers of `POST /deals` and `PATCH /deals/{id}`) and task (`GET /tasks`, `GET /tasks/{id}` and
+  the answers of `POST /tasks` and `PATCH /tasks/{id}`): who made the latest change of what the deal
+  or task events report, `member` (never which member), `automation` (deals only: automations only
+  add tasks) or `api` with the key's id, read from the columns ADR-277 added. Null while the deal or
+  task is as it was added (`deal.created` and `task.created` say who added it), and when HyFib did
+  not record who made the latest change (erasure retitling a deal, or a server from before ADR-277);
+  never the maker of an earlier change, since the database clears a changer another transaction
+  recorded.
+- **A save that changes nothing names nobody new:** a member's save of a task's details records the
+  member only when it changes something the task events report (`taskDetailsChanged`: the title,
+  notes, due time, reminder time or assignee); a save changing nothing still moves the version on,
+  as before, and keeps the latest changer. Members' deal saves already wrote nothing when nothing
+  changed, and keys' changes and the runner's deal steps write only with a change.
+- **The same as the events:** a deal or task and its events agree, the events giving each change's
+  maker as captured and the deal or task the latest one's; `GET /deals` and `GET /tasks` describe
+  the fields and why an integration reads them.
+- **No migration, no new scope and no new filter:** the columns are read as the deal's or task's
+  other columns are, in the key's company scope, with `deals.read` or `tasks.read`; listing deals or
+  tasks by who changed them is not offered (an integration skips its own key's as it pages).
+
+Not built: which member made a change, filtering deals or tasks by who changed them, who added a
+deal or task through the API, and the history of a deal's or task's changes through the API.
+
+## ADR-279 Reading CRM notes through the public API (P5-08, P4-04) (2026-10-07)
+
+Context: keys add notes to the CRM timeline (ADR-268), and read deals and tasks (ADR-253, ADR-258),
+but no key could read a note: a CRM or help desk kept in step with HyFib could not copy the notes
+members write on the contact and deal pages, nor read back its own, and ADR-268 left reading notes
+unbuilt. Notes hold what members write about customers, so reading them is a scope of its own rather
+than part of `deals.read` or `tasks.read`.
+
+Decision:
+
+- **`notes.read`**, a reading scope granted with `crm.read` (as `deals.read` and `tasks.read`), for
+  **`GET /notes`** and **`GET /notes/{id}`**: the notes on the timelines of the company's contacts
+  and deals, members' and keys', newest first by when they were added, on exact keyset pages,
+  filtered by contact (its deals' notes included), deal and `createdSince`. Each note gives its
+  text, its contact and deal by id, **`writtenBy`** (`member` or `api`) and **`apiKeyId`** for a
+  key's note: never which member wrote it, as conversation notes (ADR-084), tasks (ADR-258) and the
+  deal and task events (ADR-277) never name the member. `POST /notes` answers the same fields. The
+  CRM must be in the plan (403, reason `not_in_plan`); a suspended company's keys still read, as for
+  deals and tasks.
+- **Only notes:** the rest of the timeline (stage moves, closings, task entries) is never read, and
+  the id of any other timeline entry answers 404, as an unknown one does. Erasing a contact deletes
+  its notes, so they are no longer read; a merge moves the merged contact's notes to the contact
+  kept, so a note's `contactId` changes (`contact.merged` and `GET /contact-changes` say when).
+  Notes are never changed otherwise, so `createdSince` catches up, overlapping a little as the other
+  lists ask, since a note carries the time it began to be saved.
+- **Migrations 0198 and 0199:** 0198 replaces the keys' and plan versions' scope checks with
+  `notes.read` (existing keys and plan versions that chose their scopes gain nothing); 0199 builds
+  `crm_activities_notes_idx` on `(tenant_id, created_at DESC, id DESC)` for notes only,
+  concurrently, outside a transaction, so the list never reads the rest of a company's timeline. The
+  contact and deal filters use the timeline's existing indexes.
+
+Not built: which member wrote a note, reading the rest of the timeline, changing or deleting notes
+(members cannot either), webhook events for notes, and filtering notes by who wrote them.
+
+## ADR-280 A webhook event when a CRM note is added (P5-09, P4-04) (2026-10-07)
+
+Context: integrations hear of deals and tasks through webhooks (ADR-256, ADR-261) and read notes
+through the API since ADR-279, but to learn that a member wrote a note on a contact or a deal they
+had to poll `GET /notes`. ADR-268 and ADR-279 left webhook events for notes unbuilt.
+
+Decision:
+
+- **`note.created`** ("Note added") when a member adds a note on the contact or deal page or a key
+  through `POST /notes`, the only writers of notes. Notes are never changed, so no other note event
+  exists; a merge moving a note to the contact kept and erasure deleting an erased contact's notes
+  add none, so they send nothing.
+- **Captured as the task events are (0177):** an `AFTER INSERT` trigger on `app.crm_activities` for
+  notes only calls `app.capture_webhook_event` with the note's id in `detail` and its contact,
+  stamped when captured, and only when an active endpoint of the company takes the type. No endpoint
+  filter narrows it, so the capture function is unchanged (migration 0200; 0201 validates the
+  events' type check).
+- **Payload built when delivered, without the text:** the note's id, the deal it is about, who wrote
+  it (`writtenBy`: `member`, never which, or `api` with `apiKeyId`, as `GET /notes` gives it,
+  through one helper, `noteWriter`) and when, and its contact as the API describes it, the contact
+  kept once a merge has moved the note. Never the note's text, which may hold anything a member
+  wrote: endpoints take events without scopes, so the text stays behind `notes.read` (ADR-279), as a
+  task's notes stay behind `tasks.read` (ADR-261). Erasing a contact deletes its notes, so a
+  delivery whose note is gone fails without an attempt (`event_gone`).
+
+Not built: the note's text in the payload, which member wrote it, filters narrowing note events (by
+deal, contact tag or writer), and events for the rest of the timeline.
+
+## ADR-281 Reading a CRM deal's history through the public API (P5-08, P4-04) (2026-10-07)
+
+Context: keys read a deal as it is now (ADR-253) and hear each change as it happens (ADR-256,
+ADR-269, ADR-275), but an integration that starts later, or whose receiver missed events, could not
+learn how a deal got where it is: when it moved through each stage, who gave it to its owner, when
+it was lost and reopened. The deal page shows that history from the timeline; the API did not.
+
+Decision:
+
+- **`GET /deals/{id}/history`** with `deals.read`: the deal's own timeline entries of the changes
+  its events report, `created`, `updated` (title, value or expected close date), `stage_changed`
+  (another stage or pipeline), `owner_changed`, `won`, `lost` and `reopened`, newest first on exact
+  keyset pages. Each gives who made it (`changedBy`: `member`, never which; `automation`; or `api`
+  with `changedByApiKeyId`; null when no maker was recorded), the stage and its pipeline (`created`,
+  `stage_changed`, with the stage and pipeline left), the owners (`owner_changed`), what changed and
+  the value before and after (`updated`, named as `deal.updated` names them), and the value of a
+  deal added or won. The CRM must be in the plan (403, reason `not_in_plan`).
+- **Only the deal's changes:** notes and the deal's tasks' entries are never given (`GET /notes`,
+  `GET /tasks` read them), nor the title, date or lost reason before a change, which the timeline
+  does not keep. Erasing a contact deletes its timeline, so an erased contact's deal has no history;
+  a merge keeps a deal's, which moves with it.
+- **One mapping, unit-tested:** `toApiDealHistoryEntry` reads each row's data as members',
+  automations' and keys' writers record it (ADR-250, ADR-251, ADR-254, ADR-255, ADR-257), reading
+  data of another shape as nothing, and each stage's pipeline is read with the page (stages are
+  archived, never deleted or moved). No migration: the timeline's deal index serves the reads.
+
+Not built: which member made a change, the history of a contact's timeline or of a task, values
+before a change of title or date, and filters by type or time.
+
+## ADR-282 Reading who added a CRM deal or task through the public API (P5-08) (2026-10-07)
+
+Context: `deal.created` and `task.created` say who added a deal or task, and since ADR-278 the API
+says who made a deal's or task's latest change, but a deal or task read through the API did not say
+who added it: an integration that polls `GET /deals` or `GET /tasks` instead of taking webhooks (or
+catches up after its receiver was down) could tell the ones it added from those members or
+automations added only by keeping every id it was answered. ADR-253, ADR-258 and ADR-278 left it
+unbuilt.
+
+Decision:
+
+- **`createdBy` and `createdByApiKeyId`** on the API's deal (`GET /deals`, `GET /deals/{id}` and the
+  answers of `POST /deals` and `PATCH /deals/{id}`) and task (`GET /tasks`, `GET /tasks/{id}` and
+  the answers of `POST /tasks` and `PATCH /tasks/{id}`): who added it, `member` (never which
+  member), `automation` (an automation's run, never which automation) or `api` with the key's id.
+  Never null: the database keeps exactly one creator for each deal and task (`crm_deals_creator`,
+  `crm_tasks_creator`), and the automation or key it names stays with it (a key is deleted only with
+  its company, after its deals and tasks; an automation that ran is archived, never deleted).
+- **The same as the events:** one function, `crmCreatedBy` (`crm/common.ts`), reads the creator for
+  the API's deals and tasks and for the `deal.created` and `task.created` payloads (`createdBy`,
+  with the key as `apiKeyId`), so a deal or task and its addition's event always agree.
+- **No migration, no new scope and no filter:** the creator columns are read with the deal's or
+  task's other columns, in the key's company scope, with `deals.read` or `tasks.read`; listing deals
+  or tasks by who added them is not offered (an integration skips its own key's as it pages). A
+  retried `POST /deals` or `POST /tasks` whose first answer was stored before the release replays
+  that answer, without the fields.
+
+Not built: which member or automation added a deal or task, filtering by who added them, and who
+completed or cancelled a task, beyond its latest change.
+
+## ADR-283 Asking for payment of a WhatsApp order through the public API (P5-08, P4-06a) (2026-10-07)
+
+Context: since ADR-168 an order system confirms, fulfils and cancels through the API the orders
+customers send from the company's WhatsApp catalog, but asking the customer to pay still needed a
+member on the order page: a web shop or ERP that decides when an order is ready to be paid had to
+ask someone to request payment. ADR-168 left asking for payment and cancelling a Payment Link
+through the API unbuilt.
+
+Decision:
+
+- **A new writing scope, `orders.request_payment`** ("Ask customers to pay WhatsApp orders"),
+  granted with `inbox.reply`, which members ask for payment with (and `commerce.read`, which every
+  role with `inbox.reply` has): a key that only moves orders on (`orders.write`) never asks for
+  money. Like every writing scope it is refused while the company is suspended or restricted (423).
+  Existing keys keep their scopes, and a plan version that chose its scopes (ADR-092) leaves it out
+  until a new version includes it.
+- **`POST /api/v1/orders/{id}/request-payment`** (`requestOrderPayment`), as members ask on the
+  order page and through the same write, `writePaymentRequest` (`commerce/service.ts`), which
+  members' requests now use too: a received or confirmed order (409 otherwise, naming its status),
+  its whole cart read, its total in rupees from ₹1 to the most HyFib asks for in one link, and the
+  company's Razorpay account checked (412 otherwise, as members are told). The link is written ahead
+  with the key as its creator; the worker creates it once in the company's own Razorpay account and
+  sends it in the order's conversation, as the key (`sender_type` `api`), while the customer service
+  window is open. The order waits for payment, recorded as the key's change (`order.status_changed`
+  names the key, ADR-270), until Razorpay reports the link paid or ended. It answers the order as
+  `GET /orders/{id}` reads it. With an `Idempotency-Key` a retry answers the first response (claimed
+  in the request's transaction, so a refused request leaves the key unused); without one, asking
+  again for an order waiting for payment is refused (409).
+- **`POST /api/v1/orders/{id}/cancel-payment`** (`cancelOrderPayment`), as members cancel a link and
+  through the same write, `writePaymentLinkCancel`: the worker cancels the open link at Razorpay,
+  and the order goes back to `confirmed` once Razorpay reports it cancelled, or is marked `paid` if
+  the customer paid first. Asking again while it is being cancelled changes nothing; an order
+  without an open link is refused (409, naming its status).
+- **Payment stays Razorpay's:** neither endpoint marks an order paid; only a link fetched from
+  Razorpay does (ADR-046). `PATCH /orders/{id}` still refuses an order waiting for payment, now
+  pointing to the cancel endpoint.
+- **Recorded as the key's:** `created_by_api_key_id` on `app.commerce_payment_links` (a link names
+  exactly one creator, a member or a key: `commerce_payment_links_creator`), the audit entries
+  `commerce.payment_requested` and `commerce.payment_link_cancel_requested` as the key with
+  `source: 'api'`, the link's message sent as the key, and "Requested … through the API" on the
+  order page. The company data export carries the column.
+- **Commerce in the plan** is checked before the order is read (403, reason `not_in_plan`); another
+  company's order and an unknown id answer 404, and an id that is not a UUID is refused before any
+  query.
+- **Migrations 0202 and 0203:** 0202 replaces the key and plan scope checks with ones that also
+  accept the scope, validated at once (one row per key and per plan version), adds the column with
+  its foreign key to the company's keys and the creator check NOT VALID, and lets a link have no
+  member; 0203 validates both.
+
+Not built: reading an order's Payment Links through the API (their status, address, amount paid, or
+why a link was not sent), Payment Link webhook events, refunds, links for an amount other than the
+order's total, and asking for payment of store orders.
+
+## ADR-284 Reading an order's Payment Links through the public API (P5-08, P4-06a) (2026-10-07)
+
+Context: since ADR-283 a key asks the customer to pay an order and cancels its link, but an
+integration could follow only the order's status: it could not tell whether the link reached the
+customer (the customer service window may have closed, and members then copy it from the order
+page), what was paid of a partly paid link, when it expires, or why Razorpay could not create it,
+all of which members see on the order page. ADR-167 kept Payment Links out of the API, and ADR-283
+left reading them unbuilt.
+
+Decision:
+
+- **`GET /api/v1/orders/{id}/payment-links`** (`listOrderPaymentLinks`) with `orders.read` and
+  Commerce in the plan (403, reason `not_in_plan`): the order's links, newest first by when they
+  were asked for, on exact keyset pages, as the order page lists them. Each gives its status
+  (creating, created, partially_paid, paid, expired, cancelled or failed), the amount and the amount
+  paid in minor units, its expiry, when it was paid and when its cancellation was asked for, the
+  message that sent it in the chat or why it was not sent (`notSentReason`, as the order page says
+  it, null once it was sent), what went wrong at Razorpay, who asked (`requestedBy`: `member`, never
+  which member, or `api` with `requestedByApiKeyId`) and when HyFib last read it from Razorpay.
+  Another company's order and an unknown id answer 404, and an id that is not a UUID is refused
+  before any query.
+- **Never the link's address or Razorpay's ids** (the link's id and reference at Razorpay, and
+  payment ids), as webhooks never carry them (ADR-085): HyFib sends the link in the chat, members
+  copy it from the order page, and the company's Razorpay account reports its payments. Only
+  Razorpay's report marks a link paid, and with it the order.
+- **No new scope and no migration:** `orders.read` already reads orders (granted with
+  `commerce.read`, with which members see the links on the order page); one read-only transaction
+  per call, served by `commerce_payment_links_order_idx`. A call counts as one request.
+
+Not built: a link's address through the API, the links of many orders in one call, filters by
+status, and Payment Link webhook events.
+
+## ADR-285 A webhook event when an order's Payment Link changes status (P5-09, P4-06a) (2026-10-07)
+
+Context: `order.status_changed` reports an order waiting for payment, paid, or back to confirmed,
+but not what happened to its Payment Link in between: whether it reached the customer (the customer
+service window may have closed), a part payment, or why Razorpay could not create it. Since ADR-284
+an integration could read that from `GET /orders/{id}/payment-links`, but only by polling. P5-09
+left Payment Link events unbuilt, and ADR-284 listed them as not built.
+
+Decision:
+
+- **`payment_link.status_changed`** ("Payment Link status") whenever the commerce worker writes a
+  link's new status from what it did at Razorpay or what Razorpay reported: `created` (open, sent in
+  the chat or not), `partially_paid`, `paid`, `expired`, `cancelled`, or `failed` when Razorpay
+  could not create it. Asking for payment writes a `creating` link and asking to cancel only marks
+  it, so neither sends an event of its own here (`order.status_changed` reports the order waiting
+  for payment).
+- **Captured as the order events are:** an `AFTER UPDATE OF status` trigger on
+  `app.commerce_payment_links` (the worker, as the runtime role in the company's scope, is the only
+  writer of a link's status) calls `app.capture_webhook_event` with the link, its order and the
+  status before it in `detail`, the order's conversation and contact, stamped when captured, and
+  only when an active endpoint of the company takes the type (migration 0204; 0205 validates the
+  events' type check).
+- **On the order's number:** like the order events, it happens on the order's WhatsApp number, so an
+  endpoint that names numbers (ADR-170) hears it for those numbers only: the trigger passes the
+  order's number, and the capture function and the endpoints' number check now list the event.
+- **Payload built when delivered:** the link as `GET /orders/{id}/payment-links` reads it
+  (`toApiPaymentLink`, now in `api/payment-link-view.ts`, shared by both), with `status` and
+  `previousStatus` as captured; the order's id, reference and status now; the conversation, the
+  contact as the API describes it, and the number. Never the link's address or Razorpay's ids. Links
+  are kept until the company is deleted, so a delivery always finds its link.
+
+Not built: an event when payment is asked for or a cancellation asked (the order's events report the
+first), filters by link status, the link's address in the payload, and events for refunds.

@@ -23,6 +23,7 @@ import {
   apiGetDeal,
   apiGetOrder,
   apiGetMessage,
+  apiGetNote,
   apiGetTask,
   apiKeyReminderNotice,
   apiListAutomations,
@@ -31,9 +32,11 @@ import {
   apiListConversationMessages,
   apiListConversationNotes,
   apiListConversations,
+  apiListDealHistory,
   apiListDeals,
   apiListMembers,
   apiListMessages,
+  apiListNotes,
   apiMessageChanges,
   apiListOrders,
   apiListPipelines,
@@ -91,6 +94,7 @@ import {
   type ApiContext,
   type ApiConversation,
   type ApiDeal,
+  type ApiNote,
   type ApiTask,
   type ApiKeyReminderDeps,
   type ApiKeysService,
@@ -3893,7 +3897,7 @@ describe('WhatsApp orders (ADR-167)', () => {
       await expectAppError(
         change(waiting.id, { status }),
         'conflict',
-        /members cancel its Payment Link in the app first\. This order's status is awaiting_payment\.$/,
+        /cancel its Payment Link first, with POST \/orders\/\{id\}\/cancel-payment or in the app\. This order's status is awaiting_payment\.$/,
       );
     }
     await expectAppError(change(paid.id, { status: 'cancelled' }), 'conflict', /status is paid\.$/);
@@ -4215,6 +4219,10 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       createdAt: stored!.created_at.toISOString(),
       updatedAt: expect.any(String),
       version: 1,
+      changedBy: null,
+      changedByApiKeyId: null,
+      createdBy: 'member',
+      createdByApiKeyId: null,
     });
     expect(await apiGetDeal(deps(), reader.ctx, first.id)).toEqual(last.data[0]);
     expect((await apiGetDeal(deps(), reader.ctx, third.id)).currency).toBe('USD');
@@ -4390,6 +4398,8 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       closedAt: null,
     });
     expect(await apiGetDeal(deps(), reader.ctx, deal.id)).toEqual(deal);
+    // Who added it, as the API answers and reads it (ADR-282): the key.
+    expect([deal.createdBy, deal.createdByApiKeyId]).toEqual(['api', writer.id]);
 
     // Recorded as the key's: its creator, its page and timeline, and the audit log.
     const [row] = await fx.query<{
@@ -4656,6 +4666,15 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       ['api_key', writer.id, ['status', 'stage']],
       ['api_key', writer.id, ['value', 'status']],
     ]);
+
+    // Who made the latest change, as the API answers and reads it (ADR-278): the key's, then a
+    // member's.
+    expect([edited.changedBy, edited.changedByApiKeyId]).toEqual(['api', writer.id]);
+    expect([won.changedBy, won.changedByApiKeyId]).toEqual(['api', writer.id]);
+    const reader = await apiKey(c, ['deals.read']);
+    await crm().reopenDeal(owner, { id, expectedVersion: 6 });
+    const read = await apiGetDeal(deps(), reader.ctx, id);
+    expect([read.changedBy, read.changedByApiKeyId]).toEqual(['member', null]);
   });
 
   it('refuse changes members are refused, and need the scope, an active company and the CRM (ADR-255)', async () => {
@@ -5009,6 +5028,10 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       createdAt: stored!.created_at.toISOString(),
       updatedAt: stored!.updated_at.toISOString(),
       version: 1,
+      changedBy: null,
+      changedByApiKeyId: null,
+      createdBy: 'member',
+      createdByApiKeyId: null,
     });
     expect(await apiGetTask(deps(), reader.ctx, first.id)).toEqual(last.data[0]);
     // A task about a deal is about its contact too; one about nobody names neither.
@@ -5191,6 +5214,8 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       version: 1,
     });
     expect(await apiGetTask(deps(), reader.ctx, task.id)).toEqual(task);
+    // Who added it, as the API answers and reads it (ADR-282): the key.
+    expect([task.createdBy, task.createdByApiKeyId]).toEqual(['api', writer.id]);
     // Its reminder is scheduled for the time given, as members' reminders are.
     const [job] = await fx.query<{ start_after: Date }>(
       `SELECT start_after FROM pgboss.job WHERE name = $1 AND singleton_key = $2`,
@@ -5523,6 +5548,31 @@ describe('CRM pipelines and deals (ADR-253)', () => {
     expect(
       await fx.query('SELECT id FROM app.crm_activities WHERE task_id = $1', [solo.id]),
     ).toEqual([]);
+
+    // Who made the latest change, as the API reads it (ADR-278): the key's, then a member's.
+    const reader = await apiKey(c, ['tasks.read']);
+    const read = async (taskId: string) => {
+      const { changedBy, changedByApiKeyId } = await apiGetTask(deps(), reader.ctx, taskId);
+      return [changedBy, changedByApiKeyId];
+    };
+    expect(await read(id)).toEqual(['api', writer.id]);
+    expect(await read(solo.id)).toEqual(['api', writer.id]);
+    await crm().reopenTask(owner, { id: solo.id, expectedVersion: 2 });
+    expect(await read(solo.id)).toEqual(['member', null]);
+    // A member saving the task unchanged moves its version on but changes nobody: the key's change
+    // stays the latest.
+    await apiUpdateTask(deps(), writer.ctx, solo.id, { title: 'Order flyers' });
+    const unchanged = {
+      id: solo.id,
+      expectedVersion: 4,
+      title: 'Order flyers',
+      notes: null,
+      dueAt: null,
+      remindAt: null,
+      assigneeMembershipId: owner.membership.id,
+    };
+    expect(await crm().updateTask(owner, unchanged)).toEqual({ version: 5 });
+    expect(await read(solo.id)).toEqual(['api', writer.id]);
   });
 
   it('refuse task changes members are refused, and need the scope, an active company and the CRM (ADR-260)', async () => {
@@ -5633,6 +5683,8 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       body: 'Called: will renew in March',
       contactId: asha,
       dealId: deal.id,
+      writtenBy: 'api',
+      apiKeyId: writer.id,
       createdAt: expect.any(String),
     });
     const onDeal = (await crm().getDeal(owner, deal.id)).timeline.filter((a) => a.kind === 'note');
@@ -5804,6 +5856,351 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       keys.create(narrower, { name: 'Notes', scopes: ['notes.write'], expiresInDays: 30 }),
       'forbidden',
       /Add notes to the CRM timeline/,
+    );
+  });
+
+  it('read the notes members and keys added, newest first on exact pages, filtered (ADR-279)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const theirOwner = await fx.ctx(other, other.owner);
+    const reader = await apiKey(c, ['notes.read'], 'Note sync');
+    const writer = await apiKey(c, ['notes.write'], 'Call centre');
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New']);
+    const asha = await contactOf(owner, 'Asha');
+    const ravi = await contactOf(owner, 'Ravi');
+    const deal = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan',
+    });
+    // A second apart, so notes are listed in the order they were added.
+    const start = Date.now() - 60_000;
+    const second = (n: number) => new Date(start + n * 1000);
+    const crmAt = (n: number) =>
+      createCrmService({
+        db: fx.dbs.app,
+        clock: at(second(n)),
+        jobs: fx.jobs(),
+        signer: fx.signer,
+      });
+    const byKey = async (n: number, input: Record<string, unknown>) =>
+      (
+        (await apiCreateNote(deps(at(second(n))), writer.ctx, input, null)).body as {
+          data: ApiNote;
+        }
+      ).data;
+
+    // A member's notes on a contact and on a deal, and a key's on another contact and on the deal;
+    // another company's note and the rest of the timeline (the deal's creation) are never read.
+    const met = await crmAt(1).addNote(owner, { contactId: asha, body: 'Met at the expo' });
+    const discount = await crmAt(2).addNote(owner, {
+      dealId: deal.id,
+      body: 'Asked for a discount',
+    });
+    const called = await byKey(3, { body: '  Called back  ', contactId: ravi });
+    const quote = await byKey(4, { body: 'Sent the quote', dealId: deal.id });
+    const theirContact = await contactOf(theirOwner, 'Mira');
+    const theirs = await crmAt(5).addNote(theirOwner, { contactId: theirContact, body: 'Theirs' });
+
+    const list = (query: Record<string, string | null | undefined>) =>
+      apiListNotes(deps(), reader.ctx, query);
+    const all = await list({});
+    const byMember = { writtenBy: 'member', apiKeyId: null };
+    const byWriter = { writtenBy: 'api', apiKeyId: writer.id };
+    expect(all).toEqual({
+      data: [
+        {
+          id: quote.id,
+          body: 'Sent the quote',
+          contactId: asha,
+          dealId: deal.id,
+          ...byWriter,
+          createdAt: second(4).toISOString(),
+        },
+        {
+          id: called.id,
+          body: 'Called back',
+          contactId: ravi,
+          dealId: null,
+          ...byWriter,
+          createdAt: second(3).toISOString(),
+        },
+        {
+          id: discount.id,
+          body: 'Asked for a discount',
+          contactId: asha,
+          dealId: deal.id,
+          ...byMember,
+          createdAt: second(2).toISOString(),
+        },
+        {
+          id: met.id,
+          body: 'Met at the expo',
+          contactId: asha,
+          dealId: null,
+          ...byMember,
+          createdAt: second(1).toISOString(),
+        },
+      ],
+      nextCursor: null,
+    });
+    // What POST /notes answered is what is read; never which member wrote a note.
+    expect(all.data.slice(0, 2)).toEqual([quote, called]);
+    expect(JSON.stringify(all)).not.toContain(owner.membership.id);
+
+    // Pages of one never skip or repeat a note.
+    const ids: string[] = [];
+    let cursor: string | null | undefined;
+    do {
+      const page = await list({ limit: '1', cursor });
+      ids.push(...page.data.map((n) => n.id));
+      cursor = page.nextCursor;
+    } while (cursor && ids.length < 10);
+    expect(ids).toEqual([quote.id, called.id, discount.id, met.id]);
+
+    // Filters combine: a contact's notes (its deal's included), a deal's, those since a time.
+    const idsOf = async (query: Record<string, string>) =>
+      (await list(query)).data.map((n) => n.id);
+    expect(await idsOf({ contactId: asha })).toEqual([quote.id, discount.id, met.id]);
+    expect(await idsOf({ dealId: deal.id })).toEqual([quote.id, discount.id]);
+    expect(await idsOf({ contactId: ravi, dealId: deal.id })).toEqual([]);
+    expect(await idsOf({ createdSince: second(3).toISOString() })).toEqual([quote.id, called.id]);
+    expect(await idsOf({ contactId: theirContact })).toEqual([]);
+
+    // One by id, as listed; another company's note, a timeline entry that is not a note and an
+    // unknown id are not found.
+    expect(await apiGetNote(deps(), reader.ctx, met.id)).toEqual(all.data[3]);
+    const [created] = await fx.query<{ id: string }>(
+      `SELECT id FROM app.crm_activities WHERE tenant_id = $1 AND kind = 'deal_created' LIMIT 1`,
+      [c.tenant.id],
+    );
+    for (const id of [theirs.id, created!.id, uuidv7()]) {
+      await expectAppError(apiGetNote(deps(), reader.ctx, id), 'not_found', /Note/);
+    }
+
+    // A merge moves the merged contact's notes to the contact kept; erasure deletes a contact's.
+    const merged = await contactByUserId(c);
+    const moved = await crmAt(6).addNote(owner, {
+      contactId: merged,
+      body: 'Wrote from a new phone',
+    });
+    await createContactMergeService({ db: fx.dbs.app, clock: systemClock }).mergeContacts(owner, {
+      keepContactId: ravi,
+      mergeContactId: merged,
+    });
+    expect((await apiGetNote(deps(), reader.ctx, moved.id)).contactId).toBe(ravi);
+    await contacts().eraseContact(owner, { contactId: asha, suppress: false });
+    expect(await idsOf({})).toEqual([moved.id, called.id]);
+    await expectAppError(apiGetNote(deps(), reader.ctx, met.id), 'not_found', /Note/);
+  });
+
+  it('read a deal’s history, newest first on exact pages, each change with who made it (ADR-281)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const theirOwner = await fx.ctx(other, other.owner);
+    const reader = await apiKey(c, ['deals.read'], 'Deal history');
+    const writer = await apiKey(c, ['deals.write', 'notes.write'], 'Order system');
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New', 'Qualified']);
+    const renewals = await pipelineOf(owner, 'Renewals', 'INR', ['Due']);
+    const asha = await contactOf(owner, 'Asha');
+    // A second apart, so the history is in the order the changes were made.
+    const start = Date.now() - 60_000;
+    const second = (n: number) => new Date(start + n * 1000);
+    const crmAt = (n: number) =>
+      createCrmService({
+        db: fx.dbs.app,
+        clock: at(second(n)),
+        jobs: fx.jobs(),
+        signer: fx.signer,
+      });
+    const { id } = await crmAt(1).createDeal(owner, {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan',
+      value: '100',
+    });
+    // The key changes its details, moves it on and gives it to the agent; a member moves it to the
+    // other pipeline and loses it; the key reopens and wins it.
+    const change = (n: number, input: Record<string, unknown>) =>
+      apiUpdateDeal(deps(at(second(n))), writer.ctx, id, input);
+    await change(2, { title: 'Bigger plan', valueMinor: 25_000 });
+    await change(3, { stageId: sales.stages[1] });
+    await change(4, { ownerId: agent.membership.id });
+    await crmAt(5).moveDeal(owner, {
+      id,
+      expectedVersion: 4,
+      pipelineId: renewals.id,
+      stageId: renewals.stages[0],
+    });
+    await crmAt(6).closeDeal(owner, { id, expectedVersion: 5, outcome: 'lost' });
+    await change(7, { status: 'open' });
+    await change(8, { status: 'won' });
+    // A note on the deal and a task about it are on its timeline, never in its history.
+    await apiCreateNote(deps(at(second(9))), writer.ctx, { body: 'Signed', dealId: id }, null);
+    await crmAt(10).createTask(owner, {
+      title: 'Send the invoice',
+      assigneeMembershipId: owner.membership.id,
+      dealId: id,
+    });
+
+    const history = (query: Record<string, string | null | undefined> = {}) =>
+      apiListDealHistory(deps(), reader.ctx, id, query);
+    const none = {
+      stageId: null,
+      pipelineId: null,
+      previousStageId: null,
+      previousPipelineId: null,
+      ownerId: null,
+      previousOwnerId: null,
+      changes: null,
+      valueMinor: null,
+      previousValueMinor: null,
+    };
+    const byMember = { changedBy: 'member', changedByApiKeyId: null };
+    const byKey = { changedBy: 'api', changedByApiKeyId: writer.id };
+    const when = (n: number) => ({ id: expect.any(String), createdAt: second(n).toISOString() });
+    const all = await history();
+    expect(all).toEqual({
+      data: [
+        { ...when(8), type: 'won', ...byKey, ...none, valueMinor: 25_000 },
+        { ...when(7), type: 'reopened', ...byKey, ...none },
+        { ...when(6), type: 'lost', ...byMember, ...none },
+        {
+          ...when(5),
+          type: 'stage_changed',
+          ...byMember,
+          ...none,
+          stageId: renewals.stages[0],
+          pipelineId: renewals.id,
+          previousStageId: sales.stages[1],
+          previousPipelineId: sales.id,
+        },
+        {
+          ...when(4),
+          type: 'owner_changed',
+          ...byKey,
+          ...none,
+          ownerId: agent.membership.id,
+          previousOwnerId: null,
+        },
+        {
+          ...when(3),
+          type: 'stage_changed',
+          ...byKey,
+          ...none,
+          stageId: sales.stages[1],
+          pipelineId: sales.id,
+          previousStageId: sales.stages[0],
+          previousPipelineId: sales.id,
+        },
+        {
+          ...when(2),
+          type: 'updated',
+          ...byKey,
+          ...none,
+          changes: ['title', 'valueMinor'],
+          valueMinor: 25_000,
+          previousValueMinor: 10_000,
+        },
+        {
+          ...when(1),
+          type: 'created',
+          ...byMember,
+          ...none,
+          stageId: sales.stages[0],
+          pipelineId: sales.id,
+          valueMinor: 10_000,
+        },
+      ],
+      nextCursor: null,
+    });
+    // Never which member made a change.
+    for (const member of [owner.membership.id]) {
+      expect(JSON.stringify(all)).not.toContain(member);
+    }
+
+    // Pages of three never skip or repeat a change.
+    const ids: string[] = [];
+    let cursor: string | null | undefined;
+    do {
+      const page = await history({ limit: '3', cursor });
+      expect(page.data.length).toBeLessThanOrEqual(3);
+      ids.push(...page.data.map((e) => e.id));
+      cursor = page.nextCursor;
+    } while (cursor && ids.length < 20);
+    expect(ids).toEqual(all.data.map((e) => e.id));
+
+    // Another company's deal and an unknown one are not found; a key without the scope reads none,
+    // nor a company without the CRM.
+    const theirSales = await pipelineOf(theirOwner, 'Theirs', 'INR', ['Open']);
+    const theirDeal = await crm().createDeal(theirOwner, {
+      contactId: await contactOf(theirOwner, 'Mira'),
+      pipelineId: theirSales.id,
+      stageId: theirSales.stages[0],
+      title: 'Theirs',
+    });
+    for (const dealId of [theirDeal.id, uuidv7()]) {
+      await expectAppError(apiListDealHistory(deps(), reader.ctx, dealId, {}), 'not_found', /Deal/);
+    }
+    await expectAppError(
+      apiListDealHistory(deps(), writer.ctx, id, {}),
+      'forbidden',
+      /deals\.read/,
+    );
+    await onPlan(c, []);
+    await expectAppError(history(), 'forbidden', /does not include the CRM/);
+    await onPlan(c, ['crm']);
+
+    // Erasing the contact deletes its timeline: the deal is kept, without a history.
+    await contacts().eraseContact(owner, { contactId: asha, suppress: false });
+    expect(await history()).toEqual({ data: [], nextCursor: null });
+  });
+
+  it('read notes with the scope and the CRM in the plan only, granted with crm.read (ADR-279)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['notes.read']);
+    const asha = await contactOf(owner, 'Asha');
+    const { id } = await crm().addNote(owner, { contactId: asha, body: 'Prefers mornings' });
+
+    // A key without the scope reads none, even one that adds notes.
+    const writer = await apiKey(c, ['notes.write', 'deals.read', 'tasks.read']);
+    await expectAppError(apiListNotes(deps(), writer.ctx, {}), 'forbidden', /notes\.read/);
+    await expectAppError(apiGetNote(deps(), writer.ctx, id), 'forbidden', /notes\.read/);
+
+    // A plan without the CRM reads none; with it again, the note is read.
+    await onPlan(c, []);
+    for (const read of [
+      () => apiListNotes(deps(), reader.ctx, {}),
+      () => apiGetNote(deps(), reader.ctx, id),
+    ]) {
+      const error = await expectAppError(read(), 'forbidden', /does not include the CRM/);
+      expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    }
+    await onPlan(c, ['crm']);
+    expect((await apiListNotes(deps(), reader.ctx, {})).data.map((n) => n.id)).toEqual([id]);
+
+    // A suspended company's key still reads, as it reads deals and tasks.
+    const suspended = {
+      ...reader.ctx,
+      tenant: { ...reader.ctx.tenant, status: 'suspended' as const },
+    };
+    expect((await apiGetNote(deps(), suspended, id)).body).toBe('Prefers mornings');
+
+    // Granting the scope needs crm.read, which members read the timeline with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'crm.read')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Notes', scopes: ['notes.read'], expiresInDays: 30 }),
+      'forbidden',
+      /Read CRM notes/,
     );
   });
 });

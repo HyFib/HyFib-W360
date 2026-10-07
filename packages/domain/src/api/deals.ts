@@ -4,6 +4,7 @@ import {
   and,
   asc,
   contacts,
+  crmActivities,
   crmDeals,
   crmPipelines,
   crmStages,
@@ -15,11 +16,12 @@ import {
   isNull,
   sql,
   type CrmActivityKind,
+  type CrmChanger,
   type DealStatus,
   type Tx,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
-import { addActivity, memberRefs } from '../crm/common';
+import { addActivity, crmChangedBy, crmCreatedBy, memberRefs } from '../crm/common';
 import { MAX_DEAL_MINOR } from '../crm/money';
 import type { OutboundDeps } from '../messaging/outbound';
 import { loadEntitlements } from '../plans/entitlements';
@@ -204,6 +206,15 @@ export interface ApiDeal {
   updatedAt: string;
   /** Moves on with every change; `PATCH /deals/{id}` takes it as `expectedVersion` (ADR-255). */
   version: number;
+  /**
+   * Who made the latest change the deal events report (ADR-278), with the key for `api`; null
+   * while the deal is as it was added and when the change did not record its maker (ADR-277).
+   */
+  changedBy: CrmChanger | null;
+  changedByApiKeyId: string | null;
+  /** Who added the deal (ADR-282): a member (never which), an automation's run or a key. */
+  createdBy: CrmChanger;
+  createdByApiKeyId: string | null;
 }
 
 /** Pipelines, deals and tasks are the CRM's: a plan without it reads none through the API. */
@@ -326,6 +337,10 @@ const dealColumns = {
   createdAt: crmDeals.createdAt,
   updatedAt: crmDeals.updatedAt,
   version: crmDeals.version,
+  changedBy: crmDeals.changedBy,
+  changedByApiKeyId: crmDeals.changedByApiKeyId,
+  createdByAutomationId: crmDeals.createdByAutomationId,
+  createdByApiKeyId: crmDeals.createdByApiKeyId,
   cursorAt: exactTimestamp(crmDeals.createdAt),
 };
 
@@ -347,6 +362,10 @@ interface DealRow {
   createdAt: Date;
   updatedAt: Date;
   version: number;
+  changedBy: CrmChanger | null;
+  changedByApiKeyId: string | null;
+  createdByAutomationId: string | null;
+  createdByApiKeyId: string | null;
 }
 
 const toApiDeal = (row: DealRow): ApiDeal => ({
@@ -367,6 +386,9 @@ const toApiDeal = (row: DealRow): ApiDeal => ({
   createdAt: row.createdAt.toISOString(),
   updatedAt: row.updatedAt.toISOString(),
   version: row.version,
+  changedBy: row.changedBy,
+  changedByApiKeyId: row.changedByApiKeyId,
+  ...crmCreatedBy(row.createdByAutomationId, row.createdByApiKeyId),
 });
 
 /** A deal's pipeline, which gives its currency (a deal's pipeline is the company's). */
@@ -457,6 +479,224 @@ export async function apiGetDeal(
   );
   if (!deal) throw notFound('Deal');
   return deal;
+}
+
+/** What `GET /deals/{id}/history` takes (ADR-281). */
+export const apiDealHistoryQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(API_LIMITS.pageSize).default(50),
+    cursor: z.string().max(200).optional().describe('`nextCursor` from the previous page.'),
+  })
+  .strict();
+
+/**
+ * The deal's timeline entries its history gives (ADR-281), and the name of each: the changes the
+ * deal events report (ADR-256, ADR-269, ADR-275), never its notes or its tasks' entries.
+ */
+export const API_DEAL_HISTORY_TYPES = {
+  deal_created: 'created',
+  deal_updated: 'updated',
+  stage_changed: 'stage_changed',
+  owner_changed: 'owner_changed',
+  deal_won: 'won',
+  deal_lost: 'lost',
+  deal_reopened: 'reopened',
+} as const satisfies Partial<Record<CrmActivityKind, string>>;
+
+export type ApiDealHistoryType =
+  (typeof API_DEAL_HISTORY_TYPES)[keyof typeof API_DEAL_HISTORY_TYPES];
+
+/** The timeline's names of a deal's details and the names its history gives them, as its events do. */
+export const API_DEAL_HISTORY_DETAILS = {
+  title: 'title',
+  value: 'valueMinor',
+  expected_close_on: 'expectedCloseOn',
+} as const;
+
+export type ApiDealHistoryDetail =
+  (typeof API_DEAL_HISTORY_DETAILS)[keyof typeof API_DEAL_HISTORY_DETAILS];
+
+/** One change of a deal, as `GET /deals/{id}/history` gives it (ADR-281). */
+export interface ApiDealHistoryEntry {
+  id: string;
+  type: ApiDealHistoryType;
+  createdAt: string;
+  /** Who made it: a member (never which), an automation's run or a key; null when none is known. */
+  changedBy: CrmChanger | null;
+  changedByApiKeyId: string | null;
+  /** `created`: the stage it was added in; `stage_changed`: the stage it moved to. */
+  stageId: string | null;
+  pipelineId: string | null;
+  /** `stage_changed`: the stage it left, and its pipeline. */
+  previousStageId: string | null;
+  previousPipelineId: string | null;
+  /** `owner_changed`: the member it was given to (null: nobody) and the one before. */
+  ownerId: string | null;
+  previousOwnerId: string | null;
+  /** `updated`: what changed, in the order deal events name it. */
+  changes: ApiDealHistoryDetail[] | null;
+  /** `created` and `won`: the value then; `updated`: the new value, when the value changed. */
+  valueMinor: number | null;
+  /** `updated`: the value before, when the value changed. */
+  previousValueMinor: number | null;
+}
+
+/** A timeline row as the history reads it: whether a member made it, never which. */
+export interface DealHistoryRow {
+  id: string;
+  kind: CrmActivityKind;
+  data: Record<string, unknown>;
+  byMember: boolean;
+  createdAt: Date;
+}
+
+const text = (value: unknown) => (typeof value === 'string' ? value : null);
+const minor = (value: unknown) =>
+  typeof value === 'number' && Number.isSafeInteger(value) ? value : null;
+
+/**
+ * A deal's timeline row as its history gives it (ADR-281): who made the change (a member, never
+ * which; an automation's run; or a key by the id the row names) and what it changed, with the
+ * pipeline of each stage (`pipelineOf`). Rows of other kinds are never given.
+ */
+export function toApiDealHistoryEntry(
+  row: DealHistoryRow,
+  pipelineOf: (stageId: string | null) => string | null,
+): ApiDealHistoryEntry {
+  const type = API_DEAL_HISTORY_TYPES[row.kind as keyof typeof API_DEAL_HISTORY_TYPES];
+  const { data } = row;
+  const apiKeyId = text(data.apiKeyId);
+  const changedBy: CrmChanger | null = row.byMember
+    ? 'member'
+    : text(data.automationId)
+      ? 'automation'
+      : apiKeyId
+        ? 'api'
+        : null;
+  const fields = Array.isArray(data.fields) ? data.fields : [];
+  const changes =
+    type === 'updated'
+      ? (Object.keys(API_DEAL_HISTORY_DETAILS) as (keyof typeof API_DEAL_HISTORY_DETAILS)[])
+          .filter((field) => fields.includes(field))
+          .map((field) => API_DEAL_HISTORY_DETAILS[field])
+      : null;
+  const valueChanged = changes?.includes('valueMinor') ?? false;
+  const stageId =
+    type === 'created'
+      ? text(data.stageId)
+      : type === 'stage_changed'
+        ? text(data.toStageId)
+        : null;
+  const previousStageId = type === 'stage_changed' ? text(data.fromStageId) : null;
+  return {
+    id: row.id,
+    type,
+    createdAt: row.createdAt.toISOString(),
+    changedBy,
+    changedByApiKeyId: changedBy === 'api' ? apiKeyId : null,
+    stageId,
+    pipelineId: pipelineOf(stageId),
+    previousStageId,
+    previousPipelineId: pipelineOf(previousStageId),
+    ownerId: type === 'owner_changed' ? text(data.to) : null,
+    previousOwnerId: type === 'owner_changed' ? text(data.from) : null,
+    changes,
+    valueMinor:
+      type === 'created' || type === 'won'
+        ? minor(data.valueMinor)
+        : valueChanged
+          ? minor(data.valueTo)
+          : null,
+    previousValueMinor: valueChanged ? minor(data.valueFrom) : null,
+  };
+}
+
+/**
+ * A deal's history (ADR-281): the changes its events report, by members, automations and keys,
+ * newest first on exact keyset pages, a page never skipping or repeating one. Erasing a contact
+ * deletes its timeline, so an erased contact's deal has no history. Only reads.
+ */
+export async function apiListDealHistory(
+  deps: Pick<OutboundDeps, 'db'>,
+  ctx: ApiContext,
+  dealId: string,
+  query: unknown,
+): Promise<{ data: ApiDealHistoryEntry[]; nextCursor: string | null }> {
+  assertScope(ctx, 'deals.read');
+  if (!z.uuid().safeParse(dealId).success) throw notFound('Deal');
+  const q = parseInput(apiDealHistoryQuerySchema, query);
+  const cursor = decodeKeysetCursor(q.cursor);
+  const history = await deps.db.run(
+    ctx.scope,
+    async (tx) => {
+      await assertCrmInPlan(tx, ctx.tenant.id);
+      const [deal] = await tx
+        .select({ id: crmDeals.id })
+        .from(crmDeals)
+        .where(and(eq(crmDeals.tenantId, ctx.tenant.id), eq(crmDeals.id, dealId)));
+      if (!deal) return null;
+      const rows = await tx
+        .select({
+          id: crmActivities.id,
+          kind: crmActivities.kind,
+          data: crmActivities.data,
+          // Whether a member made it, never which.
+          byMember: sql<boolean>`(${crmActivities.actorMembershipId} IS NOT NULL)`,
+          createdAt: crmActivities.createdAt,
+          cursorAt: exactTimestamp(crmActivities.createdAt),
+        })
+        .from(crmActivities)
+        .where(
+          and(
+            eq(crmActivities.tenantId, ctx.tenant.id),
+            eq(crmActivities.dealId, dealId),
+            inArray(
+              crmActivities.kind,
+              Object.keys(API_DEAL_HISTORY_TYPES) as (keyof typeof API_DEAL_HISTORY_TYPES)[],
+            ),
+            cursor
+              ? sql`(${crmActivities.createdAt}, ${crmActivities.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
+              : undefined,
+          ),
+        )
+        .orderBy(desc(crmActivities.createdAt), desc(crmActivities.id))
+        .limit(q.limit + 1);
+      const shown = rows.slice(0, q.limit);
+      // Each stage's pipeline: stages are archived, never deleted, nor moved to another pipeline.
+      const stageIds = [
+        ...new Set(
+          shown.flatMap((r) =>
+            [r.data.stageId, r.data.toStageId, r.data.fromStageId]
+              .map(text)
+              .filter((id): id is string => id !== null && z.uuid().safeParse(id).success),
+          ),
+        ),
+      ];
+      const pipelines = new Map(
+        stageIds.length > 0
+          ? (
+              await tx
+                .select({ id: crmStages.id, pipelineId: crmStages.pipelineId })
+                .from(crmStages)
+                .where(and(eq(crmStages.tenantId, ctx.tenant.id), inArray(crmStages.id, stageIds)))
+            ).map((stage) => [stage.id, stage.pipelineId])
+          : [],
+      );
+      const last = shown.at(-1);
+      return {
+        data: shown.map((row) =>
+          toApiDealHistoryEntry(row, (stageId) =>
+            stageId ? (pipelines.get(stageId) ?? null) : null,
+          ),
+        ),
+        nextCursor:
+          rows.length > q.limit && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
+      };
+    },
+    { accessMode: 'read only' },
+  );
+  if (!history) throw notFound('Deal');
+  return history;
 }
 
 /** A refused value, named by the field that gave it (a deal's or a task's). */
@@ -845,6 +1085,7 @@ export async function apiUpdateDeal(
           closedAt: next.closedAt,
           closedByMembershipId: next.closedByMembershipId,
           version: current.version + 1,
+          ...crmChangedBy({ apiKeyId: ctx.key.id }),
         })
         .where(and(eq(crmDeals.tenantId, ctx.tenant.id), eq(crmDeals.id, current.id)));
       for (const activity of activities) {

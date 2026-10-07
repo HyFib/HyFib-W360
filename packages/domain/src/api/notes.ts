@@ -1,10 +1,10 @@
 import { z } from 'zod';
-import { AppError } from '@w360/core';
-import { and, contacts, crmDeals, eq } from '@w360/db';
+import { AppError, notFound } from '@w360/core';
+import { and, contacts, crmActivities, crmDeals, desc, eq, exactTimestamp, sql } from '@w360/db';
 import { recordSystemAudit } from '../audit';
-import { addActivity } from '../crm/common';
+import { addActivity, noteWriter, type NoteWriter } from '../crm/common';
 import type { OutboundDeps } from '../messaging/outbound';
-import { parseInput } from '../validation';
+import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import { apiContactNotFound } from './contact-view';
 import { apiActor, assertScope, type ApiContext } from './context';
 import { assertCrmInPlan, invalidField } from './deals';
@@ -14,12 +14,16 @@ import {
   type ApiResponse,
   type IdempotencyInput,
 } from './idempotency';
+import { API_LIMITS } from './model';
 
 /**
  * Notes on the CRM timeline through the public API (ADR-268): with `notes.write` a key adds a note
  * to one of the company's contacts, or to one of its deals and so to the deal's contact, as members
- * add notes on the contact and deal pages, recorded as written through the API. Notes, like the rest
- * of the timeline, are never read through the API. A key needs the CRM in the company's plan.
+ * add notes on the contact and deal pages, recorded as written through the API. With `notes.read`
+ * (ADR-279) a key lists the company's notes and reads each one, members' and keys', saying which
+ * wrote it (a key by its id, never which member); the rest of the timeline is never read through
+ * the API. A key needs the CRM in the company's plan. Erasing a contact deletes its notes, so they
+ * are no longer read; a merge moves them to the contact kept.
  */
 
 /** The longest note, as members write them (and as `app.crm_activities` holds them). */
@@ -53,14 +57,151 @@ export const apiCreateNoteSchema = z
     path: ['contactId'],
   });
 
-/** A note as `POST /notes` answers it. */
+/** What `GET /notes` takes (ADR-279). */
+export const apiCrmNoteListQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(API_LIMITS.pageSize).default(50),
+    cursor: z.string().max(200).optional().describe('`nextCursor` from the previous page.'),
+    contactId: z
+      .uuid()
+      .optional()
+      .describe(
+        'Only the notes on this contact’s timeline: about the contact or one of its deals.',
+      ),
+    dealId: z.uuid().optional().describe('Only the notes about this deal.'),
+    createdSince: z.iso
+      .datetime({ offset: true })
+      .optional()
+      .describe('Only the notes added at or after this time.'),
+  })
+  .strict();
+
+/** Who wrote a note: a member on the contact or deal page, or a key through the API. */
+export type ApiNoteWriter = NoteWriter;
+
+/** A note as `POST /notes` answers it and `GET /notes` reads it. */
 export interface ApiNote {
   id: string;
   body: string;
   /** The contact whose timeline holds the note: the one given, or the deal's. */
   contactId: string;
   dealId: string | null;
+  /** Who wrote it (ADR-279): never which member. */
+  writtenBy: ApiNoteWriter;
+  /** The key that wrote it, when `writtenBy` is `api`. */
+  apiKeyId: string | null;
   createdAt: string;
+}
+
+const noteColumns = {
+  id: crmActivities.id,
+  // A note always has its text (`crm_activities_note`).
+  body: sql<string>`${crmActivities.body}`,
+  contactId: crmActivities.contactId,
+  dealId: crmActivities.dealId,
+  // Whether a member wrote it, never which: keys' notes have no member and name the key.
+  byMember: sql<boolean>`(${crmActivities.actorMembershipId} IS NOT NULL)`,
+  apiKeyId: sql<string | null>`(${crmActivities.data} ->> 'apiKeyId')`,
+  createdAt: crmActivities.createdAt,
+  cursorAt: exactTimestamp(crmActivities.createdAt),
+};
+
+/** A note as `noteColumns` reads it. */
+export interface NoteRow {
+  id: string;
+  body: string;
+  contactId: string;
+  dealId: string | null;
+  byMember: boolean;
+  apiKeyId: string | null;
+  createdAt: Date;
+}
+
+/** A note as the API gives it: who wrote it, a key by its id, never which member (ADR-279). */
+export const toApiNote = (row: NoteRow): ApiNote => ({
+  id: row.id,
+  body: row.body,
+  contactId: row.contactId,
+  dealId: row.dealId,
+  ...noteWriter(row.byMember, row.apiKeyId),
+  createdAt: row.createdAt.toISOString(),
+});
+
+/**
+ * The company's notes, members' and keys', newest first by when they were added, on exact keyset
+ * pages: a page never skips or repeats a note (ADR-279). Filters combine. Only notes are read, never
+ * the rest of the timeline, and only reads, so it records nothing.
+ */
+export async function apiListNotes(
+  deps: Pick<OutboundDeps, 'db'>,
+  ctx: ApiContext,
+  query: unknown,
+): Promise<{ data: ApiNote[]; nextCursor: string | null }> {
+  assertScope(ctx, 'notes.read');
+  const q = parseInput(apiCrmNoteListQuerySchema, query);
+  const cursor = decodeKeysetCursor(q.cursor);
+  return deps.db.run(
+    ctx.scope,
+    async (tx) => {
+      await assertCrmInPlan(tx, ctx.tenant.id);
+      const rows = await tx
+        .select(noteColumns)
+        .from(crmActivities)
+        .where(
+          and(
+            eq(crmActivities.tenantId, ctx.tenant.id),
+            eq(crmActivities.kind, 'note'),
+            q.contactId ? eq(crmActivities.contactId, q.contactId) : undefined,
+            q.dealId ? eq(crmActivities.dealId, q.dealId) : undefined,
+            q.createdSince
+              ? sql`${crmActivities.createdAt} >= ${q.createdSince}::timestamptz`
+              : undefined,
+            cursor
+              ? sql`(${crmActivities.createdAt}, ${crmActivities.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
+              : undefined,
+          ),
+        )
+        .orderBy(desc(crmActivities.createdAt), desc(crmActivities.id))
+        .limit(q.limit + 1);
+      const shown = rows.slice(0, q.limit);
+      const last = shown.at(-1);
+      return {
+        data: shown.map(toApiNote),
+        nextCursor:
+          rows.length > q.limit && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
+      };
+    },
+    { accessMode: 'read only' },
+  );
+}
+
+/** One of the company's notes (ADR-279); any other timeline entry is not found, as an unknown id. */
+export async function apiGetNote(
+  deps: Pick<OutboundDeps, 'db'>,
+  ctx: ApiContext,
+  noteId: string,
+): Promise<ApiNote> {
+  assertScope(ctx, 'notes.read');
+  if (!z.uuid().safeParse(noteId).success) throw notFound('Note');
+  const [note] = await deps.db.run(
+    ctx.scope,
+    async (tx) => {
+      await assertCrmInPlan(tx, ctx.tenant.id);
+      return tx
+        .select(noteColumns)
+        .from(crmActivities)
+        .where(
+          and(
+            eq(crmActivities.tenantId, ctx.tenant.id),
+            eq(crmActivities.id, noteId),
+            eq(crmActivities.kind, 'note'),
+          ),
+        );
+    },
+    { accessMode: 'read only' },
+  );
+  if (!note) throw notFound('Note');
+  return toApiNote(note);
 }
 
 /**
@@ -146,7 +287,15 @@ export async function apiCreateNote(
       },
       apiActor(ctx),
     );
-    const note: ApiNote = { id, body: data.body, contactId, dealId, createdAt: now.toISOString() };
+    const note: ApiNote = {
+      id,
+      body: data.body,
+      contactId,
+      dealId,
+      writtenBy: 'api',
+      apiKeyId: ctx.key.id,
+      createdAt: now.toISOString(),
+    };
     const response = { status: 201, body: { data: note } };
     if (claimed) await storeIdempotentResponse(tx, ctx, claimed, response);
     return { ...response, replayed: false };

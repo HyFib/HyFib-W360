@@ -26,6 +26,7 @@ import {
   assertCrmMember,
   assertLiveContact,
   contactRefs,
+  crmChangedBy,
   lockContact,
   memberRefs,
   trimmed,
@@ -115,6 +116,31 @@ export function taskTimeIssue(
     }
   }
   return null;
+}
+
+/** What a member's save of a task's details writes, as `taskDetailsChanged` compares it. */
+interface TaskDetails {
+  title: string;
+  notes: string | null;
+  dueAt: Date | null;
+  remindAt: Date | null;
+  assigneeMembershipId: string;
+}
+
+/**
+ * Whether a member's save changes anything the task events report (ADR-274, ADR-276), and so
+ * records who made it: a save changing nothing moves the version on and keeps the latest changer
+ * (ADR-278).
+ */
+export function taskDetailsChanged(task: TaskDetails, next: TaskDetails): boolean {
+  const time = (at: Date | null) => at?.getTime() ?? null;
+  return (
+    next.title !== task.title ||
+    next.notes !== task.notes ||
+    time(next.dueAt) !== time(task.dueAt) ||
+    time(next.remindAt) !== time(task.remindAt) ||
+    next.assigneeMembershipId !== task.assigneeMembershipId
+  );
 }
 
 function checkTimes(dueAt: Date | null, remindAt: Date | null, now: Date, remindChanged: boolean) {
@@ -256,6 +282,7 @@ export function taskOperations(deps: {
             ? { reminderState: 'skipped' as const, reminderDetail: 'task_closed', remindedAt: now }
             : {}),
           version,
+          ...crmChangedBy('member'),
         })
         .where(and(eq(crmTasks.tenantId, ctx.tenant.id), eq(crmTasks.id, task.id)));
       if (task.contactId) {
@@ -404,6 +431,13 @@ export function taskOperations(deps: {
         if (data.assigneeMembershipId !== task.assigneeMembershipId) {
           await assertCrmMember(tx, ctx.tenant.id, data.assigneeMembershipId);
         }
+        const changed = taskDetailsChanged(task, {
+          title: data.title,
+          notes: data.notes || null,
+          dueAt,
+          remindAt,
+          assigneeMembershipId: data.assigneeMembershipId,
+        });
         const version = task.version + 1;
         await tx
           .update(crmTasks)
@@ -421,6 +455,7 @@ export function taskOperations(deps: {
                 }
               : {}),
             version,
+            ...(changed ? crmChangedBy('member') : {}),
           })
           .where(and(eq(crmTasks.tenantId, ctx.tenant.id), eq(crmTasks.id, task.id)));
         if (remindChanged && remindAt) {

@@ -1,5 +1,482 @@
 # Progress
 
+## 2026-10-07 — Review fix: the Reports forecast reads every stage's chance (P4-04, H-024, ADR-252)
+
+Status: **Implemented; its database test runs in CI only.** The Codex review of PR #38 found that
+the forecast in Reports read whether a pipeline had a chance of winning from its open deals' stages
+only: a pipeline whose only stage with a chance held no open deals showed dashes for the weighted
+values and said that no stage had a chance, while the board, which reads every active stage, weighed
+it. No migration. The local PostgreSQL is unavailable, so the integration test below was written but
+not run here.
+
+### Completed
+
+- **Domain:** `forecastByMonth` takes the chances of all the pipeline's active stages and has a
+  chance when any of them does; `dealReport` reads each stage's chance with the open pipeline, in
+  the same snapshot, and passes them.
+- **Tests:** unit (`forecast.test.ts`: a chance only on a stage without open deals, weighed to 0;
+  stages without chances; the board's agreement); integration (`crm.test.ts`: the ADR-252 test adds
+  a pipeline whose only chance is on a stage without deals, against the board). Written for CI; the
+  integration test was not run here.
+- **Docs:** ADR-252 (amended); ARCHITECTURE (CRM forecast).
+- **Mutation checks:** 5/5 deliberate regressions caught in `forecastByMonth`; the report's reading
+  of the stages' chances is checked by the integration test, which runs in CI only.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 122 files, 1173 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — A webhook event when an order's Payment Link changes status (P5-09, P4-06a, H-014, ADR-285)
+
+Status: **Implemented; its database tests run in CI only.** Integrations heard of orders waiting for
+payment and paid, but not of what happened to a Payment Link in between. The local PostgreSQL is
+unavailable, so the migrations and the integration test below were written but not run here;
+migrations 0204 and 0205 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migrations 0204 (the endpoints' event and number checks and the events' type check
+  with `payment_link.status_changed`, the last NOT VALID; the `AFTER UPDATE OF status` trigger on
+  `app.commerce_payment_links` and its function; `app.capture_webhook_event` with the event among
+  those of a number) and 0205 (validating the events' type check).
+- **Domain:** the event in the lists and among the events of a number; its payload (`paymentLinkOf`,
+  `paymentLinkStatusChangedPayloadSchema`) with the link as the API reads it, through
+  `api/payment-link-view.ts`, now shared with `GET /orders/{id}/payment-links`; the OpenAPI webhook
+  entry.
+- **Web:** no change of its own: Settings → Webhooks lists the event and offers numbers for it, as
+  for every event of a number.
+- **Tests:** unit (`webhooks.test.ts`: the event's label and number, the payload schema without the
+  address, the OpenAPI wording; the event lists updated); integration (1 new in
+  `webhook-events.test.ts`, against the Razorpay stand-in). Written for CI; the integration test was
+  not run here. No e2e test.
+- **Docs:** ADR-285; ARCHITECTURE; SECURITY; THREAT-MODEL T253; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix H-014.
+- **Mutation checks:** 12/12 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 122 files, 1172 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migrations 0204 and 0205         | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — An order's Payment Links through the public API (P5-08, P4-06a, H-033, W-114, ADR-284)
+
+Status: **Implemented; its database tests run in CI only.** Keys asked for payment but could follow
+only the order's status, not whether the link was sent or what was paid. No migration. The local
+PostgreSQL is unavailable, so the integration test below was written but not run here.
+
+### Completed
+
+- **Domain:** `apiListOrderPaymentLinks` and `toApiPaymentLink` (`api/orders.ts`), the `PaymentLink`
+  OpenAPI schema and `GET /orders/{id}/payment-links`; the `orders.read` description and the order
+  list's now point to it.
+- **Web:** `GET /api/v1/orders/{id}/payment-links`.
+- **Tests:** unit (`api/orders.test.ts`: the mapping, the page parameters, refusals before any read,
+  the read-only transaction, the OpenAPI entries); integration (1 new in `commerce.test.ts`, against
+  the Razorpay stand-in). Written for CI; the integration test was not run here. No e2e test.
+- **Docs:** ADR-284; ARCHITECTURE; SECURITY; THREAT-MODEL T252; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-114.
+- **Mutation checks:** 16/16 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 122 files, 1169 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — Asking for payment of WhatsApp orders through the public API (P5-08, P4-06a, H-033, W-114, ADR-283)
+
+Status: **Implemented; its database tests run in CI only.** Order systems moved orders on through
+the API but had to ask a member to request payment. Migrations 0202 and 0203 passed the pglast parse
+check (syntax only); the local PostgreSQL is unavailable, so the integration test below was written
+but not run here.
+
+### Completed
+
+- **Database:** migration 0202 (the `orders.request_payment` scope in the key and plan checks;
+  `commerce_payment_links.created_by_api_key_id` with its foreign key and the one-creator check, NOT
+  VALID) and 0203 (validates them).
+- **Domain:** `writePaymentRequest` and `writePaymentLinkCancel` (`commerce/service.ts`), shared by
+  members' requests and `apiRequestOrderPayment` and `apiCancelOrderPayment` (`api/orders.ts`); the
+  scope; the OpenAPI entries; the worker sends a key's link message as the key; the order page says
+  when a key asked.
+- **Web:** `POST /api/v1/orders/{id}/request-payment` and `POST /api/v1/orders/{id}/cancel-payment`;
+  "through the API" on the order page's links.
+- **Tests:** unit (`commerce/payment-requests.test.ts`: every refusal before anything is written,
+  the writes as a key and as a member, the cancel writes; `api/orders.test.ts`: the scope, refusals
+  before any read, the OpenAPI entries); integration (1 new in `commerce.test.ts`, against the
+  Razorpay stand-in). Written for CI; the integration test was not run here. No e2e test.
+- **Docs:** ADR-283; ARCHITECTURE; SECURITY; THREAT-MODEL T251; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-114.
+- **Mutation checks:** 24/24 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 122 files, 1165 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migrations 0202 and 0203         | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — Who added a CRM deal or task, through the public API (P5-08, H-033, ADR-282)
+
+Status: **Implemented; its database tests run in CI only.** Deals and tasks read through the API
+said who made their latest change but not who added them. No migration. The local PostgreSQL is
+unavailable, so the integration tests below were written but not run here.
+
+### Completed
+
+- **Domain:** `crmCreatedBy` (`crm/common.ts`), shared by `toApiDeal`, `toApiTask` and the
+  `deal.created` and `task.created` payloads; `createdBy` and `createdByApiKeyId` on the OpenAPI
+  `Deal` and `Task` schemas, and the lists' descriptions.
+- **Tests:** unit (`crm/changed-by.test.ts`: the creator of each kind; `api/deals.test.ts` and
+  `api/tasks.test.ts`: the fields, their descriptions and the lists' descriptions); integration
+  (`api.test.ts`: members' deals and tasks as read, a key's in its answers;
+  `webhook-events.test.ts`: members', a key's and an automation's deals and tasks read with the
+  creator their events name). Written for CI; the integration tests were not run here. No e2e test.
+- **Docs:** ADR-282; ARCHITECTURE; SECURITY; THREAT-MODEL T250; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033.
+- **Mutation checks:** 15/15 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 121 files, 1156 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — A CRM deal's history through the public API (P5-08, P4-04, H-033, ADR-281)
+
+Status: **Implemented; its database tests run in CI only.** Keys read a deal as it is and heard each
+change as it happened, but could not learn how a deal got where it is. No migration. The local
+PostgreSQL is unavailable, so the integration test below was written but not run here.
+
+### Completed
+
+- **Domain:** `apiListDealHistory` and `toApiDealHistoryEntry` (`api/deals.ts`), the entry's OpenAPI
+  schema (`DealHistoryEntry`, its type and change names built from the domain's lists) and
+  `GET /deals/{id}/history`.
+- **Web:** `GET /api/v1/deals/{id}/history`.
+- **Tests:** unit (`api/deals.test.ts`: the kinds and names, every entry type and maker, data of the
+  wrong shape, the query, refusals before any read, the OpenAPI entries); integration (1 new in
+  `api.test.ts`). Written for CI; the integration test was not run here. No e2e test: the e2e suite
+  is near its time limit.
+- **Docs:** ADR-281; ARCHITECTURE; SECURITY; THREAT-MODEL T249; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08
+  and P4-04; feature matrix H-033.
+- **Mutation checks:** 25/25 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 121 files, 1155 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — A webhook event when a CRM note is added (P5-09, P4-04, H-014, ADR-280)
+
+Status: **Implemented; its database tests run in CI only.** Integrations read notes through the API
+(ADR-279) but had to poll to learn that one was added. The local PostgreSQL is unavailable, so the
+migrations and the integration tests below were written but not run here; migrations 0200 and 0201
+passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migrations 0200 (the endpoints' and events' type checks with `note.created`, the
+  events' NOT VALID; the `AFTER INSERT` trigger on `app.crm_activities` for notes and its function)
+  and 0201 (validating the events' type check).
+- **Domain:** `note.created` ("Note added") in the event list; its payload (`noteOf`,
+  `noteCreatedPayloadSchema`) without the note's text; `noteWriter` (`crm/common.ts`), shared by
+  `GET /notes` and the event; the OpenAPI webhook entry.
+- **Web:** no change of its own: Settings → Webhooks lists the event, as it lists every event.
+- **Tests:** unit (`webhooks.test.ts`: the event's label, the payload schema without the text, the
+  OpenAPI wording; the event lists updated there and in `api.test.ts`); integration (2 new in
+  `webhook-events.test.ts`). Written for CI; the integration tests were not run here. No e2e test:
+  the e2e suite is near its time limit.
+- **Docs:** ADR-280; ARCHITECTURE; SECURITY; THREAT-MODEL T248; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix W-138 and H-014.
+- **Mutation checks:** 17/17 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 121 files, 1151 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — Reading CRM notes through the public API (P5-08, P4-04, H-033, ADR-279)
+
+Status: **Implemented; its database tests run in CI only.** Keys added notes to the CRM timeline but
+could not read them, so an integration could neither copy the notes members write nor read back its
+own. The local PostgreSQL is unavailable, so the migrations and the integration tests below were
+written but not run here; migrations 0198 and 0199 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migrations 0198 (the keys' and plan versions' scope checks with `notes.read`) and
+  0199 (`crm_activities_notes_idx`, notes only, built concurrently).
+- **Domain:** the `notes.read` scope (granted with `crm.read`); `apiListNotes` and `apiGetNote` with
+  `writtenBy` and `apiKeyId` (`toApiNote`), which `POST /notes` now answers too; the OpenAPI `Note`,
+  `GET /notes` and `GET /notes/{id}` entries.
+- **Web:** `GET /api/v1/notes` and `GET /api/v1/notes/{id}`; the new scope appears in Settings → API
+  keys and the platform plan pages, which list every scope.
+- **Tests:** unit (`api/notes.test.ts`: the scope, the query, refusals before any read, the
+  read-only transactions, who wrote a note, the OpenAPI entries); integration (2 new in
+  `api.test.ts`, and the note-adding test's answer updated). Written for CI; the integration tests
+  were not run here. No e2e test: the e2e suite is near its time limit.
+- **Docs:** ADR-279; ARCHITECTURE; SECURITY; THREAT-MODEL T247 (T236 updated); DEPLOYMENT; RUNBOOKS;
+  BACKLOG P5-08 and P4-04; feature matrix H-033.
+- **Mutation checks:** 24/24 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 121 files, 1148 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — Who last changed a CRM deal or task, through the public API (P5-08, H-033, ADR-278)
+
+Status: **Implemented; its database tests run in CI only.** An integration polling `GET /deals` or
+`GET /tasks` could not tell the deals and tasks it changed last from those members or automations
+did, which ADR-277 sent only in webhooks. No migration. The local PostgreSQL is unavailable, so the
+integration tests below were written but not run here.
+
+### Completed
+
+- **Domain:** `changedBy` and `changedByApiKeyId` on the API's deal and task (`toApiDeal`,
+  `toApiTask`, read from the columns of ADR-277), and the OpenAPI deal, task, `GET /deals` and
+  `GET /tasks` descriptions; a member's save of a task records the member only when it changes
+  something the task events report (`taskDetailsChanged`).
+- **Web:** no change.
+- **Tests:** unit (`api/deals.test.ts` and `api/tasks.test.ts`: the fields, their descriptions, the
+  lists' descriptions; `crm/changed-by.test.ts`: which saves of a task record a changer);
+  integration (the deal and task tests of `api.test.ts`: a deal and a task as added, a key's changes
+  in its answers and as read, a member's change, a member's unchanged save). Written for CI; the
+  integration tests were not run here. No e2e test: the e2e suite is near its time limit.
+- **Docs:** ADR-278; ARCHITECTURE; SECURITY; THREAT-MODEL T246; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033.
+- **Mutation checks:** 21/21 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 121 files, 1143 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — Who changed a CRM deal or task, in its webhook events (P5-09, P4-04, H-014, ADR-277)
+
+Status: **Implemented; its database tests run in CI only.** Deal and task events said what changed
+but not who changed it, so an integration that changes deals and tasks through the API could not
+tell its own changes from members' and automations'. The local PostgreSQL is unavailable, so the
+migrations and the integration tests below were written but not run here; migrations 0196 and 0197
+passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migrations 0196 (the changer columns on deals and tasks, their foreign keys and
+  checks NOT VALID, the runtime role's grants, the trigger clearing a changer another transaction
+  recorded, the deal and task capture functions with the changer in each event's detail) and 0197
+  (validating the foreign keys and checks).
+- **Domain:** `crmChangedBy`, written with every change by members' deal and task services, keys'
+  `apiUpdateDeal` and `apiUpdateTask` and the runner's deal steps; `changedBy` and `apiKeyId` on
+  every deal and task payload, an addition's from its creator; the deal and task events' OpenAPI
+  descriptions; the company export's columns.
+- **Web:** no change.
+- **Tests:** unit (`crm/changed-by.test.ts` for the helper; the payload schema, captured changer
+  and OpenAPI tests extended in `webhooks.test.ts`); integration (2 new in `webhook-events.test.ts`,
+  and the deal and task event tests' details and payloads updated). Written for CI; the integration
+  tests were not run here. No e2e test: the e2e suite is near its time limit.
+- **Docs:** ADR-277; ARCHITECTURE; SECURITY; THREAT-MODEL T245; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix W-138 and H-014.
+- **Mutation checks:** 12/12 deliberate regressions caught, one after a test was added.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 121 files, 1142 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — A webhook event when a task's details change (P5-09, P4-04, H-014, ADR-276)
+
+Status: **Implemented; its database tests run in CI only.** Task events said when a task was added,
+given to another member, completed, cancelled or reopened, but not when its title, notes, due time
+or reminder changed. The local PostgreSQL is unavailable, so the migrations and the integration test
+below were written but not run here; migrations 0194 and 0195 passed the pglast parse check (syntax
+only).
+
+### Completed
+
+- **Database:** migrations 0194 (the endpoints' event and assignee list checks, the events' type
+  check NOT VALID, the task trigger and its function, `app.capture_webhook_event` with the new type
+  among the task events) and 0195 (validating the type check).
+- **Domain:** `task.updated` ("Task details") in the registry and the assignee list's events, its
+  payload with `changes` (one helper now reads the changes of deal and task events), the refusal
+  naming the four task events, the OpenAPI entries (and the step order and wording of
+  `task.assignee_changed` and `task.status_changed`) and the API's field descriptions.
+- **Web:** no change: Settings → Webhooks lists the event from the registry.
+- **Tests:** unit (the task payload, registry, assignee list and OpenAPI tests extended in
+  `webhooks.test.ts`, the API field descriptions and schema in `api.test.ts`); integration (1 new in
+  `webhook-events.test.ts`, and the assignee refusal's wording in `webhooks.test.ts`). Written for
+  CI; the integration tests were not run here. No e2e test: the e2e suite is near its time limit.
+- **Docs:** ADR-276; ARCHITECTURE; SECURITY; THREAT-MODEL T244; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix W-138, H-014 and the CRM row.
+- **Mutation checks:** 21/21 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 120 files, 1139 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — A webhook event when a deal's details change (P5-09, P4-04, H-014, ADR-275)
+
+Status: **Implemented; its database tests run in CI only.** Deal events said when a deal was added,
+moved, given to another owner, won, lost or reopened, but not when its title, value or expected
+close date changed. The local PostgreSQL is unavailable, so the migrations and the integration test
+below were written but not run here; migrations 0192 and 0193 passed the pglast parse check (syntax
+only).
+
+### Completed
+
+- **Database:** migrations 0192 (the endpoints' event and deal list checks, the events' type check
+  NOT VALID, the deal trigger and its function, the definer role's read of a deal's id and owner,
+  `app.capture_webhook_event` with the new type among the deal events) and 0193 (validating the type
+  check).
+- **Domain:** `deal.updated` ("Deal details") in the registry and the deal lists' events, its
+  payload with `changes`, the refusals naming the five deal events, the OpenAPI entries (and
+  `deal.owner_changed`'s step order) and the API's field descriptions.
+- **Web:** no change: Settings → Webhooks lists the event from the registry.
+- **Tests:** unit (the deal payload, registry, deal list and OpenAPI tests extended in
+  `webhooks.test.ts`, the API field descriptions in `api.test.ts`); integration (1 new in
+  `webhook-events.test.ts`, and the deal list refusals' wording in `webhooks.test.ts`). Written for
+  CI; the integration tests were not run here. No e2e test: the e2e suite is near its time limit.
+- **Docs:** ADR-275; ARCHITECTURE; SECURITY; THREAT-MODEL T243; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix W-138, H-014 and the CRM row.
+- **Mutation checks:** 17/17 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 120 files, 1139 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — A webhook event when a task's assignee changes (P5-09, P4-04, H-014, ADR-274)
+
+Status: **Implemented; its database tests run in CI only.** Task events said when a task was added,
+completed, cancelled or reopened, but not when it was given to another member. The local PostgreSQL
+is unavailable, so the migrations and the integration test below were written but not run here;
+migrations 0190 and 0191 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migrations 0190 (the endpoints' event and assignee list checks, the events' type
+  check NOT VALID, the task trigger and its function, `app.capture_webhook_event` matching the
+  assignee a task left) and 0191 (validating the type check).
+- **Domain:** `task.assignee_changed` ("Task assignee") in the registry and the assignee filter's
+  events, the payload's `previousAssigneeId` and the change's `assigneeId`, the refusal naming the
+  three task events, the OpenAPI entries and the API's field descriptions.
+- **Web:** the event among Settings → Webhooks' events, and the "Task assignees" help saying a
+  change reaches the member a task left as well.
+- **Tests:** unit (the task payload, registry, assignee filter and OpenAPI tests extended in
+  `webhooks.test.ts`, the API field descriptions in `api.test.ts`); integration (1 new in
+  `webhook-events.test.ts`, and the assignee refusal's wording in `webhooks.test.ts`). Written for
+  CI; the integration tests were not run here. No e2e test: the e2e suite is near its time limit.
+- **Docs:** ADR-274; ARCHITECTURE; SECURITY; THREAT-MODEL T242; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix W-138, H-014 and the CRM row.
+- **Mutation checks:** 18/18 deliberate regressions caught, one after a test was added.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 120 files, 1139 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — Choosing the conversation tags whose events an endpoint receives (P5-09, H-014, ADR-273)
+
+Status: **Implemented; its database tests run in CI only.** Endpoints could narrow message and
+conversation events by number, team, member and the contact's tags, but not by the conversation's
+own tags. The local PostgreSQL is unavailable, so the migration and the integration tests below were
+written but not run here; migration 0189 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0189 (`conversation_tags` on `app.webhook_endpoints` with its check and
+  column grant, the definer role's read of `app.conversation_tags.tag`, and
+  `app.capture_webhook_event` reading the conversation's tags when an endpoint names them).
+- **Domain:** the list's schema, normalising tags as conversations carry them, and its rules
+  (`webhookConversationTagsSchema`, `webhookConversationTagsFor`), the list in Settings' view,
+  create and update in Settings and the API (`conversationTags`), the audits, the OpenAPI entries
+  and the export.
+- **Web:** "Conversation tags" in the endpoint form (every conversation's events, or the tags typed,
+  separated by commas) and the endpoints list naming them.
+- **Tests:** unit (2 new in `webhooks.test.ts`, 1 in `api.test.ts`); integration (3 in
+  `webhooks.test.ts`, 1 in `api-webhook-endpoints.test.ts`, and the API's endpoint shape). Written
+  for CI; the integration tests were not run here. No e2e test: the e2e suite is near its time
+  limit.
+- **Docs:** ADR-273; ARCHITECTURE; SECURITY; THREAT-MODEL T241; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix W-138 and H-014.
+- **Mutation checks:** 20/20 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 120 files, 1139 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Listing the tags in use through the public API (P5-08, H-033, ADR-272)
 
 Status: **Implemented; its database tests run in CI only.** Keys read, filtered by and changed tags

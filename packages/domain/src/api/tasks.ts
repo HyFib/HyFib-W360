@@ -11,11 +11,12 @@ import {
   sql,
   TASK_STATUSES,
   type CrmActivityKind,
+  type CrmChanger,
   type ReminderState,
   type TaskStatus,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
-import { addActivity, memberRefs } from '../crm/common';
+import { addActivity, crmChangedBy, crmCreatedBy, memberRefs } from '../crm/common';
 import { scheduleTaskReminder } from '../crm/reminders';
 import { taskTimeIssue } from '../crm/tasks';
 import type { OutboundDeps } from '../messaging/outbound';
@@ -166,6 +167,15 @@ export interface ApiTask {
   updatedAt: string;
   /** Moves on with every change; `PATCH /tasks/{id}` takes it as `expectedVersion` (ADR-260). */
   version: number;
+  /**
+   * Who made the latest change the task events report (ADR-278), with the key for `api`; null
+   * while the task is as it was added and when the change did not record its maker (ADR-277).
+   */
+  changedBy: CrmChanger | null;
+  changedByApiKeyId: string | null;
+  /** Who added the task (ADR-282): a member (never which), an automation's run or a key. */
+  createdBy: CrmChanger;
+  createdByApiKeyId: string | null;
 }
 
 const taskColumns = {
@@ -185,6 +195,10 @@ const taskColumns = {
   createdAt: crmTasks.createdAt,
   updatedAt: crmTasks.updatedAt,
   version: crmTasks.version,
+  changedBy: crmTasks.changedBy,
+  changedByApiKeyId: crmTasks.changedByApiKeyId,
+  createdByAutomationId: crmTasks.createdByAutomationId,
+  createdByApiKeyId: crmTasks.createdByApiKeyId,
   cursorAt: exactTimestamp(crmTasks.createdAt),
 };
 
@@ -205,6 +219,10 @@ interface TaskRow {
   createdAt: Date;
   updatedAt: Date;
   version: number;
+  changedBy: CrmChanger | null;
+  changedByApiKeyId: string | null;
+  createdByAutomationId: string | null;
+  createdByApiKeyId: string | null;
 }
 
 const toApiTask = (row: TaskRow): ApiTask => ({
@@ -224,6 +242,9 @@ const toApiTask = (row: TaskRow): ApiTask => ({
   createdAt: row.createdAt.toISOString(),
   updatedAt: row.updatedAt.toISOString(),
   version: row.version,
+  changedBy: row.changedBy,
+  changedByApiKeyId: row.changedByApiKeyId,
+  ...crmCreatedBy(row.createdByAutomationId, row.createdByApiKeyId),
 });
 
 /**
@@ -576,6 +597,7 @@ export async function apiUpdateTask(
           completedAt: next.completedAt,
           completedByMembershipId: next.completedByMembershipId,
           version: current.version + 1,
+          ...crmChangedBy({ apiKeyId: ctx.key.id }),
         })
         .where(and(eq(crmTasks.tenantId, ctx.tenant.id), eq(crmTasks.id, current.id)));
       if (remindChanged && next.remindAt && next.reminderState === 'pending') {

@@ -278,13 +278,19 @@ verification, app review, Embedded Signup configuration).
   browser tests run only in CI]** (ADR-255, no migration; recorded under P5-08). **[Deal webhook
   events built; their database tests run only in CI]** (ADR-256, migrations 0171 and 0172; recorded
   under P5-09). **[Moving deals to another pipeline through the public API built; its database tests
-  run only in CI]** (ADR-257, no migration; recorded under P5-08). **[Reading tasks through the
+  run only in CI]** (ADR-257, no migration; recorded under P5-08).
+  **[A deal's history through the public API built; its database tests run only in CI]** (ADR-281,
+  no migration; recorded under P5-08).
+  **[Reading tasks through the
   public API built; its database tests run only in CI]** (ADR-258, migrations 0173 and 0174;
   recorded under P5-08). **[Creating tasks through the public API built; its database tests run only
   in CI]** (ADR-259, migrations 0175 and 0176; recorded under P5-08). **[Changing tasks through the
   public API built; its database tests run only in CI]** (ADR-260, no migration; recorded under
   P5-08). **[Notes through the public API built; their database tests run only in CI]** (ADR-268,
-  migration 0184; recorded under P5-08). **[Task webhook events built; their database tests run only
+  migration 0184; recorded under P5-08).
+  **[Reading notes through the public API built; its database tests run only in CI]** (ADR-279,
+  migrations 0198 and 0199; recorded under P5-08).
+  **[Task webhook events built; their database tests run only
   in CI]** (ADR-261, migrations 0177 and 0178; recorded under P5-09). **[Pipeline filters for deal
   webhook events built; their database and browser tests run only in CI]** (ADR-263, migration 0179;
   recorded under P5-09). **[Stage filters for deal webhook events built; their database and browser
@@ -725,6 +731,16 @@ verification, app review, Embedded Signup configuration).
   in the plan: an order confirmed, fulfilled or cancelled as members move it, from an expected
   status when one is given, payment statuses left to Razorpay; a retry changes nothing; migration
   0116).
+  **[Asking for payment of WhatsApp orders built; its database tests run only in CI]** (ADR-283,
+  migrations 0202 and 0203: `POST /orders/{id}/request-payment` and
+  `POST /orders/{id}/cancel-payment` with the new `orders.request_payment` scope, granted with
+  `inbox.reply`, and Commerce in the plan: a Payment Link for the order's total from the company's
+  own Razorpay account, sent in the chat as the key, and cancelled, as members do; only Razorpay's
+  report marks an order paid).
+  **[Reading an order's Payment Links built; its database tests run only in CI]** (ADR-284, no
+  migration: `GET /orders/{id}/payment-links` with `orders.read` gives an order's links newest first
+  on exact pages, each with its status, amounts, expiry, the message that sent it or why it was not
+  sent, and who asked, never its address or Razorpay's ids).
   **[Who last changed an order, through the API, built; its database and browser tests run only in
   CI]** (ADR-271, no migration: `GET /orders`, `GET /orders/{id}` and the answer of
   `PATCH /orders/{id}` name who made an order's latest status change, a member, a key by its id or
@@ -733,6 +749,17 @@ verification, app review, Embedded Signup configuration).
   `GET /contact-tags` with `contacts.read` and `GET /conversation-tags` with `conversations.read`
   list the company's tags alphabetically with how many contacts or conversations have each, on pages
   that continue after the last tag, narrowed by a prefix).
+  **[Reading CRM notes built; its database tests run only in CI]** (ADR-279, migrations 0198 and
+  0199: `notes.read`, granted with `crm.read`, for `GET /notes` and `GET /notes/{id}`: members' and
+  keys' notes newest first on exact pages, by contact, deal and time, each saying whether a member
+  or a key wrote it, a key by its id, never which member; never the rest of the timeline).
+  **[Who last changed a deal or task, through the API, built; its database tests run only in CI]**
+  (ADR-278, no migration: `GET /deals`, `GET /tasks`, their single reads and the answers of their
+  writes name who made a deal's or task's latest change, a member, an automation or a key by its id,
+  as the deal and task events do since ADR-277).
+  **[Who added a deal or task, through the API, built; its database tests run only in CI]**
+  (ADR-282, no migration: deals and tasks read and answered through the API name who added them, a
+  member, an automation or a key by its id, as `deal.created` and `task.created` do).
   **[Reading WhatsApp numbers built; its database tests run only in CI]** (ADR-171: `GET /channels`
   with the new `channels.read` scope, granted with the permission of the same name: every number of
   the company oldest first on exact pages, filtered by status, with its number, verified name and
@@ -837,6 +864,10 @@ verification, app review, Embedded Signup configuration).
   `pipelineId` on `PATCH /deals/{id}` moves an open deal to another active pipeline, to `stageId` or
   its first active stage, a deal with a value only to a pipeline of its currency, as members move
   deals; no migration).
+  **[Reading a deal's history built; its database tests run only in CI]** (ADR-281:
+  `GET /deals/{id}/history` with `deals.read` gives the changes the deal events report, newest first
+  on exact pages, each with who made it, a key by its id and never which member; never notes or
+  tasks; no migration).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact
@@ -1029,11 +1060,43 @@ verification, app review, Embedded Signup configuration).
   0188: `order.status_changed` names who made each change, a member, an API key by its id or the
   Payment Link, recorded with the status; a change that does not record its maker names nobody,
   never the one before).
+  **[Conversation tag filters for message and conversation events built; their database tests run
+  only in CI]** (ADR-273, migration 0189: an endpoint takes the events of the conversations that
+  have any of 1 to 50 tags when the events happen; tags are compared as conversations carry them,
+  and one no conversation has yet may be named; with numbers, teams, members or contact tags too, an
+  event must pass every list).
+  **[Task assignee events built; their database tests run only in CI]** (ADR-274, migrations 0190
+  and 0191: `task.assignee_changed` for every task given to another member, by members or API keys,
+  with both assignees; an endpoint naming assignees hears it for the member the task left as well;
+  one change that also reopens or closes the task sends each event in the order the steps happen;
+  automations, erasure and merges send none).
+  **[Deal detail events built; their database tests run only in CI]** (ADR-275, migrations 0192 and
+  0193: `deal.updated` for every change of a deal's title, value or expected close date, by members
+  or API keys, and for erasure's retitling, naming what changed, never the values before; the
+  pipeline, stage and owner lists narrow it; one change that also moves, reopens, closes or gives
+  the deal away sends each event in the order the steps happen).
+  **[Task detail events built; their database tests run only in CI]** (ADR-276, migrations 0194 and
+  0195: `task.updated` for every change of a task's title, notes, due time or reminder by members or
+  API keys, naming what changed, never the values or the notes; the assignee list narrows it; one
+  change that also reopens, closes or gives the task away sends each event in the order the steps
+  happen).
+  **[Who changed a deal or task built; its database tests run only in CI]** (ADR-277, migrations
+  0196 and 0197: every deal and task event's `changedBy` names the member (never which), automation
+  or key (`apiKeyId`) that made the change, recorded with the change and cleared when another
+  transaction recorded it, so an integration can ignore its own changes).
+  **[Note events built; their database tests run only in CI]** (ADR-280, migrations 0200 and 0201:
+  `note.created` for every note a member or a key adds, with who wrote it (a key by its id, never
+  which member), the deal and the contact, never the text, which `notes.read` reads; merges and
+  erasure send none).
+  **[Payment Link events built; their database tests run only in CI]** (ADR-285, migrations 0204 and
+  0205: `payment_link.status_changed` for every status the commerce worker writes, with the link as
+  `GET /orders/{id}/payment-links` reads it, never its address or Razorpay's ids, narrowed by the
+  order's number like the order events).
   Remaining: filters for other event types (task events by their deal's pipeline, stage or owner,
   among them) and on a message's or contact's values (such as a field's value, contact events by
   tag, or the key that started a run), other authentication (headers computed per delivery, other
-  OAuth grants), mutual TLS, fixed egress addresses, events for store orders, Payment Links and each
-  step of a run, `createdAt` finer than the millisecond, load tests.
+  OAuth grants), mutual TLS, fixed egress addresses, events for store orders and each step of a run,
+  `createdAt` finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

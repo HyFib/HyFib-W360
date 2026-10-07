@@ -10,6 +10,7 @@ import {
   sql,
   users,
   type CrmActivityKind,
+  type CrmChanger,
   type Tx,
 } from '@w360/db';
 import { permissionsForRoles } from '../authz/permissions';
@@ -188,6 +189,48 @@ export async function addActivity(
     createdAt: input.at,
   });
   return id;
+}
+
+/**
+ * Who added a deal or a task (ADR-282), from its creator columns: an API key, by its id; an
+ * automation's run; otherwise a member, never which (members' deals and tasks name the member).
+ */
+export const crmCreatedBy = (
+  automationId: string | null,
+  apiKeyId: string | null,
+): { createdBy: CrmChanger; createdByApiKeyId: string | null } =>
+  apiKeyId
+    ? { createdBy: 'api', createdByApiKeyId: apiKeyId }
+    : { createdBy: automationId ? 'automation' : 'member', createdByApiKeyId: null };
+
+/** Who wrote a CRM note: a member on the contact or deal page, or a key through the API. */
+export type NoteWriter = 'member' | 'api';
+
+/**
+ * Who wrote a note (ADR-279), as the API and the note's webhook event (ADR-280) give it: a member,
+ * never which, or a key by the id its note names. A member's note names no key.
+ */
+export const noteWriter = (
+  byMember: boolean,
+  apiKeyId: string | null,
+): { writtenBy: NoteWriter; apiKeyId: string | null } =>
+  byMember ? { writtenBy: 'member', apiKeyId: null } : { writtenBy: 'api', apiKeyId };
+
+/** Who changes a deal or a task: a member, an automation's run or an API key (named). */
+export type CrmChange = Exclude<CrmChanger, 'api'> | { apiKeyId: string };
+
+/**
+ * The columns that record who changes a deal or a task (ADR-277), written in the same statement as
+ * the change. The transaction id marks the record as this change's: the database clears a changer
+ * an earlier transaction recorded, so a change written without these columns never names the one
+ * before, and its events say nobody.
+ */
+export function crmChangedBy(by: CrmChange) {
+  return {
+    changedBy: typeof by === 'string' ? by : ('api' as const),
+    changedByApiKeyId: typeof by === 'string' ? null : by.apiKeyId,
+    changedXact: sql`pg_catalog.pg_current_xact_id()`,
+  };
 }
 
 export function versionConflict(): AppError {

@@ -33,6 +33,7 @@ import {
   assertCrmMember,
   assertLiveContact,
   contactRefs,
+  crmChangedBy,
   lockContact,
   memberRefs,
   trimmed,
@@ -891,6 +892,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             expectedCloseOn: data.expectedCloseOn,
             ownerMembershipId: data.ownerMembershipId,
             version,
+            ...crmChangedBy('member'),
           })
           .where(and(eq(crmDeals.tenantId, ctx.tenant.id), eq(crmDeals.id, deal.id)));
         if (fields.length > 0) {
@@ -954,7 +956,13 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
         const version = deal.version + 1;
         await tx
           .update(crmDeals)
-          .set({ pipelineId, stageId: data.stageId, stageEnteredAt: now, version })
+          .set({
+            pipelineId,
+            stageId: data.stageId,
+            stageEnteredAt: now,
+            version,
+            ...crmChangedBy('member'),
+          })
           .where(and(eq(crmDeals.tenantId, ctx.tenant.id), eq(crmDeals.id, deal.id)));
         await addActivity(tx, {
           tenantId: ctx.tenant.id,
@@ -1003,6 +1011,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             closedByMembershipId: ctx.membership.id,
             lostReason: reason,
             version,
+            ...crmChangedBy('member'),
           })
           .where(and(eq(crmDeals.tenantId, ctx.tenant.id), eq(crmDeals.id, deal.id)));
         await addActivity(tx, {
@@ -1062,6 +1071,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             closedByMembershipId: null,
             lostReason: null,
             version,
+            ...crmChangedBy('member'),
           })
           .where(and(eq(crmDeals.tenantId, ctx.tenant.id), eq(crmDeals.id, deal.id)));
         await addActivity(tx, {

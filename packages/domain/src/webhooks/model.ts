@@ -55,13 +55,18 @@ export const WEBHOOK_EVENT_KEYS = [
   'automation.run_ended',
   'order.received',
   'order.status_changed',
+  'payment_link.status_changed',
   'campaign.status_changed',
   'deal.created',
+  'deal.updated',
   'deal.stage_changed',
   'deal.owner_changed',
   'deal.status_changed',
   'task.created',
+  'task.updated',
+  'task.assignee_changed',
   'task.status_changed',
+  'note.created',
 ] as const satisfies readonly WebhookEventType[];
 
 export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; description: string }> =
@@ -138,6 +143,11 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       description:
         'A WhatsApp order was confirmed, fulfilled or cancelled, is waiting for payment, was paid through its Payment Link, or went back to confirmed when the link ended unpaid.',
     },
+    'payment_link.status_changed': {
+      label: 'Payment Link status',
+      description:
+        'A Payment Link for a WhatsApp order was created at Razorpay (sent in the chat or not), partly paid, paid, expired or cancelled, or Razorpay could not create it.',
+    },
     'campaign.status_changed': {
       label: 'Campaign status',
       description:
@@ -146,6 +156,11 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
     'deal.created': {
       label: 'Deal added',
       description: 'A CRM deal was added: by a member, an automation or an API key.',
+    },
+    'deal.updated': {
+      label: 'Deal details',
+      description:
+        'A CRM deal’s title, value or expected close date changed: by a member or an API key, or by its contact’s erasure, which retitles it.',
     },
     'deal.stage_changed': {
       label: 'Deal stage',
@@ -166,9 +181,23 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       label: 'Task added',
       description: 'A CRM task was added: by a member, an automation or an API key.',
     },
+    'task.updated': {
+      label: 'Task details',
+      description:
+        'A CRM task’s title, notes, due time or reminder changed: by a member or an API key.',
+    },
+    'task.assignee_changed': {
+      label: 'Task assignee',
+      description: 'A CRM task was given to another member: by a member or an API key.',
+    },
     'task.status_changed': {
       label: 'Task done, cancelled or reopened',
       description: 'A CRM task was completed, cancelled or reopened: by a member or an API key.',
+    },
+    'note.created': {
+      label: 'Note added',
+      description:
+        'A note was added to a CRM contact’s or deal’s timeline: by a member or an API key.',
     },
   };
 
@@ -629,6 +658,8 @@ export const WEBHOOK_LIMITS = {
   taskAssignees: 50,
   /** The contact tags an endpoint can choose to take the conversations' events of (ADR-267). */
   contactTags: 50,
+  /** The conversation tags an endpoint can choose to take the conversations' events of (ADR-273). */
+  conversationTags: 50,
   /**
    * An endpoint's OAuth client (ADR-173): its identifier, secret and scope, short enough that the
    * Basic header stays within what the egress client sends, and the longest token kept.
@@ -666,8 +697,8 @@ export function webhookTakesAutomationRuns(eventTypes: readonly WebhookEventType
 
 /**
  * The events that happen on a WhatsApp number, which an endpoint can take for chosen numbers
- * (ADR-170): a campaign's are on the number it sends from. Consent, contact, template, deal and
- * task events belong to no number.
+ * (ADR-170): a campaign's are on the number it sends from, a Payment Link's on its order's (ADR-285).
+ * Consent, contact, template, deal, task and note events belong to no number.
  */
 export const WEBHOOK_CHANNEL_EVENTS = [
   'message.received',
@@ -679,6 +710,7 @@ export const WEBHOOK_CHANNEL_EVENTS = [
   'automation.run_ended',
   'order.received',
   'order.status_changed',
+  'payment_link.status_changed',
   'campaign.status_changed',
 ] as const satisfies readonly WebhookEventType[];
 
@@ -837,10 +869,11 @@ export function webhookTakesCampaignEvents(eventTypes: readonly WebhookEventType
  * (ADR-264) and owners (ADR-265): a deal's event belongs to the pipeline and stage it gives
  * (`deal.pipelineId` and `deal.stageId`, as the event's step left the deal), and a move to the
  * pipeline and stage it left as well; to the deal's owner when it happens, and a change of owner
- * (ADR-269) to the owner it left as well.
+ * (ADR-269) to the owner it left as well. A change of details (ADR-275) is one of them.
  */
 export const WEBHOOK_PIPELINE_EVENTS = [
   'deal.created',
+  'deal.updated',
   'deal.stage_changed',
   'deal.owner_changed',
   'deal.status_changed',
@@ -943,12 +976,15 @@ export const webhookStageText = (stage: {
 
 /**
  * The events of a CRM task, which an endpoint can take for chosen assignees (ADR-266): a task's
- * events belong to the member it is assigned to when they happen. Tasks are assigned to the members
- * who can own deals, so an assignee is chosen and stored as a deal owner is (`WebhookOwnerChoice`,
- * `WebhookEndpointOwner`, `webhookOwnerText`).
+ * events belong to the member it is assigned to when they happen, and a change of assignee
+ * (ADR-274) to the member it left as well; a change of details (ADR-276) is one of them. Tasks are
+ * assigned to the members who can own deals, so an assignee is chosen and stored as a deal owner
+ * is (`WebhookOwnerChoice`, `WebhookEndpointOwner`, `webhookOwnerText`).
  */
 export const WEBHOOK_TASK_EVENTS = [
   'task.created',
+  'task.updated',
+  'task.assignee_changed',
   'task.status_changed',
 ] as const satisfies readonly WebhookEventType[];
 

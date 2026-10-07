@@ -17,8 +17,11 @@ import {
 import {
   advanceAutomationRun,
   apiCreateDeal,
+  apiCreateNote,
   apiCreateTask,
   apiGetCampaign,
+  apiGetDeal,
+  apiGetTask,
   apiStartAutomationRun,
   apiUpdateConversation,
   apiUpdateDeal,
@@ -48,12 +51,15 @@ import {
   createWebhooksService,
   dealCreatedPayloadSchema,
   dealOwnerChangedPayloadSchema,
+  dealUpdatedPayloadSchema,
   dealStageChangedPayloadSchema,
   dealStatusChangedPayloadSchema,
   messageReceivedPayloadSchema,
   messageStatusPayloadSchema,
+  noteCreatedPayloadSchema,
   orderReceivedPayloadSchema,
   orderStatusChangedPayloadSchema,
+  paymentLinkStatusChangedPayloadSchema,
   processCommerceSync,
   processPaymentAccountCheck,
   processPaymentLink,
@@ -63,8 +69,10 @@ import {
   WebhookOAuthTokenCache,
   runCampaignTick,
   syncTemplates,
+  taskAssigneeChangedPayloadSchema,
   taskCreatedPayloadSchema,
   taskStatusChangedPayloadSchema,
+  taskUpdatedPayloadSchema,
   WEBHOOK_EVENT_KEYS,
   type AutomationTrigger,
   type CatalogSyncDeps,
@@ -238,7 +246,7 @@ interface EventRow extends Record<string, unknown> {
 /** The company's captured events of the given types, oldest first, with their delivery counts. */
 const eventsOf = (
   c: Company,
-  prefix: 'conversation.' | 'contact.' | 'automation.' | 'order.' | 'campaign.',
+  prefix: 'conversation.' | 'contact.' | 'automation.' | 'order.' | 'payment_link.' | 'campaign.',
 ) =>
   fx.query<EventRow>(
     `SELECT e.id, e.type, e.status, e.detail, e.conversation_id, e.contact_id, e.contact_changes,
@@ -2892,6 +2900,145 @@ describe('order events (ADR-085)', () => {
     );
   });
 
+  it('sends each Payment Link status the worker writes, with the link as the API reads it, to the endpoints of its order’s number (ADR-285)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const outlet = await fx.addNumber(c, { phone: '+91 90000 54322' });
+    await syncedCatalog(c, '5558580');
+    const links = await addEndpoint(c, ['payment_link.status_changed']);
+    const onOutlet = await addNumberEndpoint(
+      c,
+      ['payment_link.status_changed'],
+      [outlet.channelAccountId],
+    );
+    const ordersOnly = await addEndpoint(c, ['order.status_changed']);
+
+    // The company's Razorpay account, checked.
+    const keyId = `rzp_test_orderevents${String((merchants += 1)).padStart(2, '0')}`;
+    rzp.addMerchant(keyId, 'order-events-secret');
+    await commerce().savePaymentAccount(owner, {
+      keyId,
+      keySecret: 'order-events-secret',
+      webhookSecret: 'order-events-hook',
+    });
+    const [account] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.commerce_payment_accounts WHERE tenant_id = $1',
+      [c.tenant.id],
+    );
+    expect(await processPaymentAccountCheck(commerceWorker(), scopeOf(c), account!.id)).toBe(
+      'done',
+    );
+
+    // A member asks for payment of a ₹30 cart: the worker creates the link and sends it in the
+    // chat; the customer pays.
+    const order = await sendCart(c, waId(), '5558580', [
+      { retailerId: 'sku-1', quantity: 3, price: 10 },
+    ]);
+    const { linkId } = await commerce().requestPayment(agent, {
+      id: order.id,
+      expectedVersion: await orderVersion(order.id),
+    });
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), linkId)).toBe('done');
+    const [created] = await fx.query<{
+      provider_link_id: string;
+      message_id: string;
+      short_url: string;
+      reference: string;
+    }>(
+      'SELECT provider_link_id, message_id, short_url, reference FROM app.commerce_payment_links WHERE id = $1',
+      [linkId],
+    );
+    rzp.payLink(created!.provider_link_id);
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), linkId)).toBe('done');
+
+    // A second cart's link is cancelled at the member's request.
+    const second = await sendCart(c, waId(), '5558580', [
+      { retailerId: 'sku-2', quantity: 1, price: 20 },
+    ]);
+    const { linkId: cancelledId } = await commerce().requestPayment(agent, {
+      id: second.id,
+      expectedVersion: await orderVersion(second.id),
+    });
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), cancelledId)).toBe('done');
+    await commerce().cancelPaymentLink(agent, { orderId: second.id });
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), cancelledId)).toBe('done');
+
+    // One event per status the worker wrote, on the order's conversation and contact: asking for
+    // payment and asking to cancel send none of their own.
+    const events = await eventsOf(c, 'payment_link.');
+    const change = (paymentLinkId: string, orderId: string, previousStatus: string) => ({
+      paymentLinkId,
+      orderId,
+      previousStatus,
+    });
+    expect(events.map((e) => [e.status, e.detail, e.deliveries])).toEqual([
+      ['created', change(linkId, order.id, 'creating'), 1],
+      ['paid', change(linkId, order.id, 'created'), 1],
+      ['created', change(cancelledId, second.id, 'creating'), 1],
+      ['cancelled', change(cancelledId, second.id, 'created'), 1],
+    ]);
+    expect(events.map((e) => [e.conversation_id, e.contact_id])).toEqual([
+      [order.conversation_id, order.contact_id],
+      [order.conversation_id, order.contact_id],
+      [second.conversation_id, second.contact_id],
+      [second.conversation_id, second.contact_id],
+    ]);
+
+    await deliverDue(c);
+    const bodies = bodiesAt(links.path);
+    expect(bodies.map((b) => b.id)).toEqual(events.map((e) => e.id));
+    for (const body of bodies) {
+      expect(paymentLinkStatusChangedPayloadSchema.safeParse(body).success).toBe(true);
+    }
+    // The status and the one before it as captured; the rest as the link is when delivered.
+    expect(
+      bodies.map((b) => {
+        const link = b.data.paymentLink as Record<string, unknown>;
+        return [link.id, link.status, link.previousStatus, link.cancelRequestedAt !== null];
+      }),
+    ).toEqual([
+      [linkId, 'created', 'creating', false],
+      [linkId, 'paid', 'created', false],
+      [cancelledId, 'created', 'creating', true],
+      [cancelledId, 'cancelled', 'created', true],
+    ]);
+    expect(bodies[0]!.data).toMatchObject({
+      paymentLink: {
+        orderId: order.id,
+        amountMinor: 3000,
+        amountPaidMinor: 3000,
+        currency: 'INR',
+        paidAt: expect.any(String),
+        messageId: created!.message_id,
+        notSentReason: null,
+        error: null,
+        requestedBy: 'member',
+        requestedByApiKeyId: null,
+      },
+      order: { id: order.id, reference: order.reference, status: 'paid' },
+      conversation: { id: order.conversation_id },
+      contact: { id: order.contact_id },
+      channel: { id: c.channelAccountId },
+    });
+    expect(bodies[2]!.data.order).toEqual({
+      id: second.id,
+      reference: second.reference,
+      status: 'confirmed',
+    });
+    // Never the link's address or Razorpay's ids.
+    const sent = JSON.stringify(bodies);
+    for (const hidden of [created!.short_url, created!.provider_link_id, created!.reference]) {
+      expect(sent).not.toContain(hidden);
+    }
+    // The outlet's endpoint hears none of the first number's links, and an endpoint for orders
+    // hears their statuses only.
+    expect(bodiesAt(onOutlet.path)).toEqual([]);
+    expect(new Set(bodiesAt(ordersOnly.path).map((b) => b.type))).toEqual(
+      new Set(['order.status_changed']),
+    );
+  });
+
   it('sends an endpoint that names numbers only the orders sent to them (ADR-170)', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
@@ -3804,6 +3951,8 @@ describe('deal events (ADR-256)', () => {
       lostReason: 'Budget cut',
       createdBy: 'member',
       createdAt: expect.any(String),
+      changedBy: 'member',
+      apiKeyId: null,
     });
     expect(lost?.data.contact).toEqual({ id: jaya.id, phone: jaya.phone, name: 'Jaya' });
     expect(lost?.data.conversation).toBeNull();
@@ -3934,10 +4083,14 @@ describe('deal events (ADR-256)', () => {
     );
     const runDealId = byRun!.id;
 
-    // One event per step, in the order the steps happened, each to the endpoints that take it.
+    // One event per step, in the order the steps happened, each to the endpoints that take it, with
+    // who made each change (ADR-277): additions name their creator in the payload, not here.
     const events = await dealEventsOf(c);
     const sales = { pipelineId: s.salesId };
     const renewal = { pipelineId: s.renewalsId };
+    const byMember = { changedBy: 'member', apiKeyId: null };
+    const byKey = { changedBy: 'api', apiKeyId: key.key.id };
+    const byAutomation = { changedBy: 'automation', apiKeyId: null };
     expect(events.map((e) => [e.type, e.status, e.detail, e.deliveries])).toEqual([
       ['deal.created', 'open', { dealId, stageId: s.sales[0], ...sales }, 1],
       [
@@ -3949,6 +4102,7 @@ describe('deal events (ADR-256)', () => {
           ...sales,
           previousStageId: s.sales[0],
           previousPipelineId: null,
+          ...byMember,
         },
         1,
       ],
@@ -3961,20 +4115,21 @@ describe('deal events (ADR-256)', () => {
           ...renewal,
           previousStageId: s.sales[1],
           previousPipelineId: s.salesId,
+          ...byMember,
         },
         1,
       ],
       [
         'deal.status_changed',
         'lost',
-        { dealId, stageId: s.renewals[0], ...renewal, previousStatus: 'open' },
+        { dealId, stageId: s.renewals[0], ...renewal, previousStatus: 'open', ...byMember },
         2,
       ],
       // Reopened in the stage that was removed, then moved to the first stage left.
       [
         'deal.status_changed',
         'open',
-        { dealId, stageId: s.renewals[0], ...renewal, previousStatus: 'lost' },
+        { dealId, stageId: s.renewals[0], ...renewal, previousStatus: 'lost', ...byMember },
         2,
       ],
       [
@@ -3986,6 +4141,7 @@ describe('deal events (ADR-256)', () => {
           ...renewal,
           previousStageId: s.renewals[0],
           previousPipelineId: null,
+          ...byMember,
         },
         1,
       ],
@@ -4000,13 +4156,14 @@ describe('deal events (ADR-256)', () => {
           ...sales,
           previousStageId: s.sales[0],
           previousPipelineId: null,
+          ...byKey,
         },
         1,
       ],
       [
         'deal.status_changed',
         'won',
-        { dealId: apiDealId, stageId: s.sales[2], ...sales, previousStatus: 'open' },
+        { dealId: apiDealId, stageId: s.sales[2], ...sales, previousStatus: 'open', ...byKey },
         2,
       ],
       ['deal.created', 'open', { dealId: runDealId, stageId: s.sales[0], ...sales }, 1],
@@ -4019,13 +4176,20 @@ describe('deal events (ADR-256)', () => {
           ...sales,
           previousStageId: s.sales[0],
           previousPipelineId: null,
+          ...byAutomation,
         },
         1,
       ],
       [
         'deal.status_changed',
         'won',
-        { dealId: runDealId, stageId: s.sales[1], ...sales, previousStatus: 'open' },
+        {
+          dealId: runDealId,
+          stageId: s.sales[1],
+          ...sales,
+          previousStatus: 'open',
+          ...byAutomation,
+        },
         2,
       ],
     ]);
@@ -4124,6 +4288,24 @@ describe('deal events (ADR-256)', () => {
     expect(bodiesAt(contactsOnly.path).map((b) => b.type)).toEqual([
       'contact.created',
       'contact.created',
+    ]);
+
+    // The API reads who added each deal as deal.created says it (ADR-282).
+    const reading = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Deal sync', scopes: ['deals.read'], expiresInDays: 0 },
+    );
+    const reader = await authenticateApiToken(fx.dbs.app, reading.token, uuidv7());
+    if (!reader) throw new Error('a new key does not authenticate');
+    const creators: [string, string | null][] = [];
+    for (const id of [dealId, apiDealId, runDealId]) {
+      const { createdBy, createdByApiKeyId } = await apiGetDeal(apiDeps, reader, id);
+      creators.push([createdBy, createdByApiKeyId]);
+    }
+    expect(creators).toEqual([
+      ['member', null],
+      ['api', key.key.id],
+      ['automation', null],
     ]);
   });
 
@@ -4619,6 +4801,226 @@ describe('deal events (ADR-256)', () => {
       'deal.owner_changed',
     ]);
   });
+
+  it('sends a change of details naming what changed, to the endpoints of the deal’s pipeline and owner, in its place among one request’s steps, and for erasure’s retitling (ADR-275)', async () => {
+    const s = await crmCompany();
+    const { c, owner } = s;
+    const agent = await fx.ctx(c, c.agent);
+    const svc = crm();
+    /** An endpoint of the company taking the events given, with the filters given. */
+    const add = async (eventTypes: WebhookEventType[], filters: Record<string, unknown>) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        ...filters,
+      });
+      return { ...created, path };
+    };
+    const everyone = await add(['deal.updated', 'deal.owner_changed', 'deal.status_changed'], {});
+    const agents = await add(['deal.updated'], { ownerIds: [agent.membership.id] });
+    const renewals = await add(['deal.updated'], { pipelineIds: [s.renewalsId] });
+    const jaya = await newContact(owner, 'Jaya');
+
+    // The agent's deal in Sales: its title alone, then its value and date, then nothing (the same
+    // details again, which keeps the version), then its title with its owner; no endpoint takes its
+    // addition.
+    const { id: dealId } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: s.salesId,
+      stageId: s.sales[0],
+      title: 'Annual plan',
+      ownerMembershipId: agent.membership.id,
+    });
+    const change = (
+      version: number,
+      title: string,
+      value: string,
+      expectedCloseOn: string | null,
+      ownerMembershipId: string | null,
+    ) =>
+      svc.updateDeal(owner, {
+        id: dealId,
+        expectedVersion: version,
+        title,
+        value,
+        ownerMembershipId,
+        expectedCloseOn,
+      });
+    await change(1, 'Annual plan 2027', '', null, agent.membership.id);
+    await change(2, 'Annual plan 2027', '1,200', '2026-12-31', agent.membership.id);
+    await change(3, 'Annual plan 2027', '1,200', '2026-12-31', agent.membership.id);
+    await change(3, 'Annual plan, renewed', '1,200', '2026-12-31', owner.membership.id);
+    const changesOf = (e: EventRow) => (e.detail.changes as string[] | undefined) ?? null;
+    // Captured with what changed; the agent's endpoint hears the changes made while the deal was
+    // the agent's, and not the one made with the change of owner, which goes by the new owner;
+    // Renewals hears none.
+    expect((await dealEventsOf(c)).map((e) => [e.type, changesOf(e), e.deliveries])).toEqual([
+      ['deal.updated', ['title'], 2],
+      ['deal.updated', ['valueMinor', 'expectedCloseOn'], 2],
+      ['deal.updated', ['title'], 1],
+      ['deal.owner_changed', null, 1],
+    ]);
+
+    // A key clears the value and wins the deal in one request: details changed, then won.
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'CRM sync', scopes: ['deals.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    await apiUpdateDeal({ db: fx.dbs.app, clock: systemClock }, key, dealId, {
+      valueMinor: null,
+      status: 'won',
+    });
+    const events = await dealEventsOf(c);
+    expect(events.slice(4).map((e) => [e.type, e.status, changesOf(e), e.deliveries])).toEqual([
+      ['deal.updated', 'open', ['valueMinor'], 1],
+      ['deal.status_changed', 'won', null, 1],
+    ]);
+
+    // Erasing the contact retitles the deal, as the definer role, for an endpoint naming owners
+    // too: the agent's deal, given back to the agent first, reaches the agent's endpoint.
+    await apiUpdateDeal({ db: fx.dbs.app, clock: systemClock }, key, dealId, {
+      ownerId: agent.membership.id,
+    });
+    await contactsService().eraseContact(owner, { contactId: jaya.id, suppress: false });
+    const erased = (await dealEventsOf(c)).slice(7);
+    expect(erased.map((e) => [e.type, e.status, changesOf(e), e.deliveries])).toEqual([
+      ['deal.updated', 'won', ['title'], 2],
+    ]);
+
+    // Delivered, each names what changed and gives the deal as it is then: erased.
+    await deliverDue(c);
+    const bodies = bodiesById(everyone.path);
+    expect(bodies.size).toBe(8);
+    for (const event of [...events, ...erased].filter((e) => e.type === 'deal.updated')) {
+      const body = bodies.get(event.id);
+      expect(dealUpdatedPayloadSchema.safeParse(body).success, event.id).toBe(true);
+      expect((body?.data as { changes?: unknown }).changes, event.id).toEqual(changesOf(event));
+      expect(dealIn(body)).toMatchObject({ title: 'Deal (contact erased)', valueMinor: null });
+    }
+    expect(bodiesAt(agents.path).map((b) => b.type)).toEqual(Array<string>(3).fill('deal.updated'));
+    expect(bodiesAt(renewals.path)).toEqual([]);
+  });
+
+  it('names who made each change: a member, the automation or the key, nobody for a change that did not record it, as erasure’s, and keeps a changer to its own transaction (ADR-277)', async () => {
+    const s = await crmCompany();
+    const { c, owner } = s;
+    const hook = await addEndpoint(c, ['deal.updated', 'deal.stage_changed']);
+    const svc = crm();
+    const jaya = await newContact(owner, 'Jaya');
+    const { id: dealId } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: s.salesId,
+      stageId: s.sales[0],
+      title: 'Annual plan',
+      ownerMembershipId: null,
+    });
+    const changerOf = async () =>
+      (
+        await fx.query<{ by: string | null; key: string | null }>(
+          'SELECT changed_by AS by, changed_by_api_key_id AS key FROM app.crm_deals WHERE id = $1',
+          [dealId],
+        )
+      )[0];
+    const set = (assignments: string) =>
+      fx.query(`UPDATE app.crm_deals SET ${assignments} WHERE id = $1`, [dealId]);
+
+    // A member moves it and a key retitles it, each recorded with its change.
+    await svc.moveDeal(owner, { id: dealId, expectedVersion: 1, stageId: s.sales[1] });
+    expect(await changerOf()).toEqual({ by: 'member', key: null });
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'CRM sync', scopes: ['deals.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    await apiUpdateDeal({ db: fx.dbs.app, clock: systemClock }, key, dealId, {
+      title: 'Annual plan 2027',
+    });
+    expect(await changerOf()).toEqual({ by: 'api', key: key.key.id });
+
+    // A change that does not record its maker (a server from before this release) names nobody:
+    // the key's record is an earlier transaction's. Recorded by another transaction, a changer is
+    // cleared too; recorded by its own, it stays; a write of nothing the events report leaves it.
+    await set(`title = 'Annual plan, renewed'`);
+    expect(await changerOf()).toEqual({ by: null, key: null });
+    await set(`value_minor = 100000, changed_by = 'member', changed_xact = '1'::xid8`);
+    expect(await changerOf()).toEqual({ by: null, key: null });
+    await set(
+      `expected_close_on = '2026-12-31', changed_by = 'automation',
+       changed_xact = pg_catalog.pg_current_xact_id()`,
+    );
+    expect(await changerOf()).toEqual({ by: 'automation', key: null });
+    await set('stage_entered_at = now()');
+    expect(await changerOf()).toEqual({ by: 'automation', key: null });
+
+    // Erasure retitles it and records nobody.
+    await contactsService().eraseContact(owner, { contactId: jaya.id, suppress: false });
+    expect(await changerOf()).toEqual({ by: null, key: null });
+
+    // Each event, and its payload when delivered, names the maker of its change as captured.
+    const events = await dealEventsOf(c);
+    const makers = [
+      ['member', null],
+      ['api', key.key.id],
+      [null, null],
+      [null, null],
+      ['automation', null],
+      [null, null],
+    ];
+    expect(events.map((e) => [e.type, e.detail.changedBy, e.detail.apiKeyId])).toEqual([
+      ['deal.stage_changed', ...makers[0]!],
+      ...makers.slice(1).map((m) => ['deal.updated', ...m]),
+    ]);
+    await deliverDue(c);
+    const bodies = bodiesById(hook.path);
+    expect(
+      events.map((e) => [dealIn(bodies.get(e.id)).changedBy, dealIn(bodies.get(e.id)).apiKeyId]),
+    ).toEqual(makers);
+
+    // The database keeps the changer to a member, an automation or a key of the deal's company,
+    // named only for a key's change, and the runtime role records it.
+    for (const bad of [
+      `changed_by = 'api', changed_by_api_key_id = NULL`,
+      `changed_by = 'member', changed_by_api_key_id = '${key.key.id}'`,
+      `changed_by = NULL, changed_by_api_key_id = '${key.key.id}'`,
+      `changed_by = 'payment_link', changed_by_api_key_id = NULL`,
+    ]) {
+      await expect(set(bad), bad).rejects.toThrow(/crm_deals_changed_by"/);
+    }
+    const other = await fx.company();
+    await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      await fx.ctx(other, other.owner),
+      { name: 'Elsewhere', scopes: ['deals.write'], expiresInDays: 0 },
+    );
+    const [theirKey] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.api_keys WHERE tenant_id = $1 AND name = $2',
+      [other.tenant.id, 'Elsewhere'],
+    );
+    await expect(
+      set(`changed_by = 'api', changed_by_api_key_id = '${theirKey!.id}'`),
+    ).rejects.toThrow(/crm_deals_changed_by_api_key_fk/);
+    await set(`changed_by = 'api', changed_by_api_key_id = '${key.key.id}'`);
+    expect(await changerOf()).toEqual({ by: 'api', key: key.key.id });
+    const grants = await fx.query<{ t: string; c: string; can: boolean }>(
+      `SELECT t, c, has_column_privilege('w360_app', t, c, 'UPDATE') AS can
+         FROM unnest(ARRAY['app.crm_deals', 'app.crm_tasks']) AS t,
+              unnest(ARRAY['changed_by', 'changed_by_api_key_id', 'changed_xact']) AS c`,
+    );
+    expect(grants.map((g) => [g.t, g.c, g.can]).sort()).toEqual(
+      ['app.crm_deals', 'app.crm_tasks']
+        .flatMap((table) =>
+          ['changed_by', 'changed_by_api_key_id', 'changed_xact'].map((column) => [
+            table,
+            column,
+            true,
+          ]),
+        )
+        .sort(),
+    );
+  });
 });
 
 describe('task events (ADR-261)', () => {
@@ -4778,16 +5180,31 @@ describe('task events (ADR-261)', () => {
     );
     const runTaskId = byRun!.id;
 
-    // One event per addition and status change, in order, each to the endpoints that take it.
+    // One event per addition and status change, in order, each to the endpoints that take it, with
+    // who made each change (ADR-277).
     const events = await taskEventsOf(c);
+    const byMember = { changedBy: 'member', apiKeyId: null };
+    const byKey = { changedBy: 'api', apiKeyId: key.key.id };
     expect(events.map((e) => [e.type, e.status, e.detail, e.contact_id, e.deliveries])).toEqual([
       ['task.created', 'open', { taskId }, jaya.id, 1],
-      ['task.status_changed', 'done', { taskId, previousStatus: 'open' }, jaya.id, 2],
-      ['task.status_changed', 'open', { taskId, previousStatus: 'done' }, jaya.id, 2],
-      ['task.status_changed', 'cancelled', { taskId, previousStatus: 'open' }, jaya.id, 2],
+      ['task.status_changed', 'done', { taskId, previousStatus: 'open', ...byMember }, jaya.id, 2],
+      ['task.status_changed', 'open', { taskId, previousStatus: 'done', ...byMember }, jaya.id, 2],
+      [
+        'task.status_changed',
+        'cancelled',
+        { taskId, previousStatus: 'open', ...byMember },
+        jaya.id,
+        2,
+      ],
       ['task.created', 'open', { taskId: soloId }, null, 1],
       ['task.created', 'open', { taskId: apiTaskId }, jaya.id, 1],
-      ['task.status_changed', 'done', { taskId: apiTaskId, previousStatus: 'open' }, jaya.id, 2],
+      [
+        'task.status_changed',
+        'done',
+        { taskId: apiTaskId, previousStatus: 'open', ...byKey },
+        jaya.id,
+        2,
+      ],
       ['task.created', 'open', { taskId: runTaskId }, customerId, 1],
     ]);
     expect(events.every((e) => e.conversation_id === null)).toBe(true);
@@ -4820,6 +5237,17 @@ describe('task events (ADR-261)', () => {
       ['task.created', apiTaskId, 'open', null, 'api'],
       ['task.status_changed', apiTaskId, 'done', 'open', 'api'],
       ['task.created', runTaskId, 'open', null, 'automation'],
+    ]);
+    // Who made each: an addition's maker is the task's creator, a change's as captured (ADR-277).
+    expect(delivered.map((b) => [taskIn(b).changedBy, taskIn(b).apiKeyId])).toEqual([
+      ['member', null],
+      ['member', null],
+      ['member', null],
+      ['member', null],
+      ['member', null],
+      ['api', key.key.id],
+      ['api', key.key.id],
+      ['automation', null],
     ]);
     const [jayaTask] = await fx.query<{ created_at: Date }>(
       'SELECT created_at FROM app.crm_tasks WHERE id = $1',
@@ -4857,6 +5285,25 @@ describe('task events (ADR-261)', () => {
     expect(bodiesAt(contactsOnly.path).map((b) => b.type)).toEqual([
       'contact.created',
       'contact.created',
+    ]);
+
+    // The API reads who added each task as task.created says it (ADR-282).
+    const reading = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Task sync', scopes: ['tasks.read'], expiresInDays: 0 },
+    );
+    const reader = await authenticateApiToken(fx.dbs.app, reading.token, uuidv7());
+    if (!reader) throw new Error('a new key does not authenticate');
+    const creators: [string, string | null][] = [];
+    for (const id of [taskId, soloId, apiTaskId, runTaskId]) {
+      const { createdBy, createdByApiKeyId } = await apiGetTask(apiDeps, reader, id);
+      creators.push([createdBy, createdByApiKeyId]);
+    }
+    expect(creators).toEqual([
+      ['member', null],
+      ['member', null],
+      ['api', key.key.id],
+      ['automation', null],
     ]);
   });
 
@@ -4949,8 +5396,8 @@ describe('task events (ADR-261)', () => {
     const everyone = await add(null);
     const jaya = await newContact(owner, 'Jaya');
 
-    // The agent's task is added; then it is given to the owner, which sends nothing, and completed:
-    // the owner's by then. The owner's own task is not the agent's either.
+    // The agent's task is added; then it is given to the owner, a change neither endpoint takes, and
+    // completed: the owner's by then. The owner's own task is not the agent's either.
     const { id: theirs } = await svc.createTask(owner, {
       title: 'Call Jaya',
       assigneeMembershipId: agent.membership.id,
@@ -4998,5 +5445,461 @@ describe('task events (ADR-261)', () => {
     expect(taskIn(added).assigneeId).toBe(owner.membership.id);
     // Contact events are not narrowed by assignees.
     expect(bodiesAt(agents.path).filter((b) => b.type === 'contact.created')).toHaveLength(1);
+  });
+
+  it('sends a change of assignee with both assignees, to the endpoints of either assignee, in its place among one request’s steps (ADR-274)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const svc = crm();
+    /** An endpoint of the company taking the events given, with the filters given. */
+    const add = async (eventTypes: WebhookEventType[], filters: Record<string, unknown>) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        ...filters,
+      });
+      return { ...created, path };
+    };
+    const everyone = await add(['task.assignee_changed', 'task.status_changed'], {});
+    const agents = await add(['task.assignee_changed'], { taskAssigneeIds: [agent.membership.id] });
+    // An endpoint without the new event hears none of its changes, whoever the task goes to.
+    const owners = await add(TASK_EVENTS, { taskAssigneeIds: [owner.membership.id] });
+    const jaya = await newContact(owner, 'Jaya');
+
+    // The agent's task is given to the owner and back by members' edits; an edit of its title alone
+    // sends nothing, and no endpoint takes its addition for the agent.
+    const { id: taskId } = await svc.createTask(owner, {
+      title: 'Call Jaya',
+      assigneeMembershipId: agent.membership.id,
+      contactId: jaya.id,
+    });
+    const edit = (version: number, title: string, assigneeMembershipId: string) =>
+      svc.updateTask(owner, {
+        id: taskId,
+        expectedVersion: version,
+        title,
+        notes: null,
+        dueAt: null,
+        remindAt: null,
+        assigneeMembershipId,
+      });
+    await edit(1, 'Call Jaya', owner.membership.id);
+    await edit(2, 'Call Jaya', agent.membership.id);
+    await edit(3, 'Call Jaya today', agent.membership.id);
+    const assignees = (e: EventRow) => [
+      e.detail.assigneeId ?? null,
+      e.detail.previousAssigneeId ?? null,
+    ];
+    // The agent's endpoint hears the task leave the agent and come back.
+    expect((await taskEventsOf(c)).map((e) => [e.type, ...assignees(e), e.deliveries])).toEqual([
+      ['task.assignee_changed', owner.membership.id, agent.membership.id, 2],
+      ['task.assignee_changed', agent.membership.id, owner.membership.id, 2],
+    ]);
+
+    // A key gives the task to the owner and completes it in one request: given, then completed;
+    // then it reopens the task and gives it back in another: reopened, then given.
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Task sync', scopes: ['tasks.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    const apiDeps = { db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer };
+    await apiUpdateTask(apiDeps, key, taskId, { assigneeId: owner.membership.id, status: 'done' });
+    await apiUpdateTask(apiDeps, key, taskId, { status: 'open', assigneeId: agent.membership.id });
+    const events = await taskEventsOf(c);
+    expect(events.slice(2).map((e) => [e.type, e.status, ...assignees(e), e.deliveries])).toEqual([
+      ['task.assignee_changed', 'open', owner.membership.id, agent.membership.id, 2],
+      // The owner's endpoint takes the completion: the task is the owner's when it happens.
+      ['task.status_changed', 'done', null, null, 2],
+      // Reopened, the task is the agent's again as the request leaves it.
+      ['task.status_changed', 'open', null, null, 1],
+      ['task.assignee_changed', 'open', agent.membership.id, owner.membership.id, 2],
+    ]);
+
+    // Delivered, each change gives both assignees as it left them, whoever has the task by then.
+    await deliverDue(c);
+    const bodies = bodiesById(everyone.path);
+    expect(bodies.size).toBe(6);
+    for (const event of events.filter((e) => e.type === 'task.assignee_changed')) {
+      const task = taskIn(bodies.get(event.id));
+      expect([task?.assigneeId, task?.previousAssigneeId], event.id).toEqual(assignees(event));
+      expect(taskAssigneeChangedPayloadSchema.safeParse(bodies.get(event.id)).success).toBe(true);
+    }
+    const done = taskIn(bodies.get(events[3]!.id));
+    expect([done?.status, done?.previousStatus, done?.previousAssigneeId]).toEqual([
+      'done',
+      'open',
+      null,
+    ]);
+    expect(done?.assigneeId).toBe(agent.membership.id);
+    expect(bodiesAt(agents.path).map((b) => b.type)).toEqual(
+      Array<string>(4).fill('task.assignee_changed'),
+    );
+    expect(bodiesAt(owners.path).map((b) => [b.type, taskIn(b).status])).toEqual([
+      ['task.status_changed', 'done'],
+    ]);
+  });
+
+  it('sends a change of details naming what changed, to the endpoints of the task’s assignee, in its place among one request’s steps (ADR-276)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const svc = crm();
+    /** An endpoint of the company taking the events given, with the filters given. */
+    const add = async (eventTypes: WebhookEventType[], filters: Record<string, unknown>) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        ...filters,
+      });
+      return { ...created, path };
+    };
+    const everyone = await add(
+      ['task.updated', 'task.assignee_changed', 'task.status_changed'],
+      {},
+    );
+    const agents = await add(['task.updated'], { taskAssigneeIds: [agent.membership.id] });
+    // An endpoint without the new event hears none of the edits.
+    const others = await add(TASK_EVENTS, {});
+    const jaya = await newContact(owner, 'Jaya');
+
+    // Members edit the agent's task: its title and due time, then its notes, then its reminder;
+    // an edit that changes nothing sends nothing; then its title with its assignee.
+    const due = new Date(Date.now() + 86_400_000).toISOString();
+    const remind = new Date(Date.now() + 3_600_000).toISOString();
+    const { id: taskId } = await svc.createTask(owner, {
+      title: 'Call Jaya',
+      assigneeMembershipId: agent.membership.id,
+      contactId: jaya.id,
+    });
+    const edit = (
+      expectedVersion: number,
+      title: string,
+      notes: string | null,
+      dueAt: string | null,
+      remindAt: string | null,
+      assigneeMembershipId: string,
+    ) =>
+      svc.updateTask(owner, {
+        id: taskId,
+        expectedVersion,
+        title,
+        notes,
+        dueAt,
+        remindAt,
+        assigneeMembershipId,
+      });
+    const notes = 'Ask about the renewal';
+    await edit(1, 'Call Jaya today', null, due, null, agent.membership.id);
+    await edit(2, 'Call Jaya today', notes, due, null, agent.membership.id);
+    await edit(3, 'Call Jaya today', notes, due, remind, agent.membership.id);
+    await edit(4, 'Call Jaya today', notes, due, remind, agent.membership.id);
+    await edit(5, 'Call Jaya now', notes, due, remind, owner.membership.id);
+    const changesOf = (e: EventRow) => (e.detail.changes as string[] | undefined) ?? null;
+    expect(
+      (await taskEventsOf(c)).map((e) => [e.type, e.status, changesOf(e), e.deliveries]),
+    ).toEqual([
+      ['task.created', 'open', null, 1],
+      ['task.updated', 'open', ['title', 'dueAt'], 2],
+      ['task.updated', 'open', ['notes'], 2],
+      ['task.updated', 'open', ['remindAt'], 2],
+      // The details changed before the assignee: the task is the owner's as the edit leaves it, so
+      // the agent's endpoint does not take the change of title.
+      ['task.updated', 'open', ['title'], 1],
+      ['task.assignee_changed', 'open', null, 1],
+    ]);
+
+    // A key clears the due time and completes the task in one request: the change, with status
+    // open, then the completion; then it reopens the task, retitles it and gives it back to the
+    // agent in another: reopened, details changed, given.
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Task sync', scopes: ['tasks.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    const apiDeps = { db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer };
+    await apiUpdateTask(apiDeps, key, taskId, { dueAt: null, status: 'done' });
+    await apiUpdateTask(apiDeps, key, taskId, {
+      status: 'open',
+      title: 'Call Jaya again',
+      assigneeId: agent.membership.id,
+    });
+    const events = await taskEventsOf(c);
+    expect(events.slice(6).map((e) => [e.type, e.status, changesOf(e), e.deliveries])).toEqual([
+      ['task.updated', 'open', ['dueAt'], 1],
+      ['task.status_changed', 'done', null, 2],
+      ['task.status_changed', 'open', null, 2],
+      // The agent's again as the request leaves it.
+      ['task.updated', 'open', ['title'], 2],
+      ['task.assignee_changed', 'open', null, 1],
+    ]);
+
+    // Delivered, each change names what it changed and gives the task as it is then, without its
+    // notes or reminder.
+    await deliverDue(c);
+    const bodies = bodiesById(everyone.path);
+    expect(bodies.size).toBe(10);
+    for (const event of events.filter((e) => e.type === 'task.updated')) {
+      const body = bodies.get(event.id);
+      expect(body?.data.changes, event.id).toEqual(changesOf(event));
+      expect(taskUpdatedPayloadSchema.safeParse(body).success, event.id).toBe(true);
+      expect(taskIn(body)).toMatchObject({
+        id: taskId,
+        title: 'Call Jaya again',
+        status: 'open',
+        previousStatus: null,
+        dueAt: null,
+        assigneeId: agent.membership.id,
+        previousAssigneeId: null,
+      });
+      expect(Object.keys(taskIn(body))).not.toContain('notes');
+      expect(Object.keys(taskIn(body))).not.toContain('remindAt');
+      expect(body?.data.contact).toEqual({ id: jaya.id, phone: jaya.phone, name: 'Jaya' });
+    }
+    // The agent's endpoint hears the changes made while the task was the agent's, in any order.
+    const byText = (a: unknown, b: unknown) => JSON.stringify(a).localeCompare(JSON.stringify(b));
+    expect(
+      bodiesAt(agents.path)
+        .map((b) => [b.type, b.data.changes])
+        .sort(byText),
+    ).toEqual(
+      [
+        ['task.updated', ['title', 'dueAt']],
+        ['task.updated', ['notes']],
+        ['task.updated', ['remindAt']],
+        ['task.updated', ['title']],
+      ].sort(byText),
+    );
+    expect(
+      bodiesAt(others.path)
+        .map((b) => b.type)
+        .sort(),
+    ).toEqual(['task.created', 'task.status_changed', 'task.status_changed']);
+  });
+
+  it('names who made each change of a task, the member or the key, and nobody for a change that did not record it (ADR-277)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const svc = crm();
+    const hook = await addEndpoint(c, [
+      'task.updated',
+      'task.assignee_changed',
+      'task.status_changed',
+    ]);
+    const jaya = await newContact(owner, 'Jaya');
+    const { id: taskId } = await svc.createTask(owner, {
+      title: 'Call Jaya',
+      assigneeMembershipId: owner.membership.id,
+      contactId: jaya.id,
+    });
+    const set = (assignments: string) =>
+      fx.query(`UPDATE app.crm_tasks SET ${assignments} WHERE id = $1`, [taskId]);
+
+    // A member completes it; a key reopens and retitles it in one request; a write of nothing the
+    // events report keeps the key; a change that does not record its maker names nobody.
+    await svc.completeTask(owner, { id: taskId, expectedVersion: 1 });
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Task sync', scopes: ['tasks.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    const apiDeps = { db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer };
+    await apiUpdateTask(apiDeps, key, taskId, { status: 'open', title: 'Call Jaya again' });
+    await set(`reminder_state = 'none'`);
+    expect(
+      await fx.query('SELECT changed_by, changed_by_api_key_id FROM app.crm_tasks WHERE id = $1', [
+        taskId,
+      ]),
+    ).toEqual([{ changed_by: 'api', changed_by_api_key_id: key.key.id }]);
+    await set(`notes = 'Ask about the renewal'`);
+
+    const events = await taskEventsOf(c);
+    const makers = [
+      ['task.status_changed', 'member', null],
+      ['task.status_changed', 'api', key.key.id],
+      ['task.updated', 'api', key.key.id],
+      ['task.updated', null, null],
+    ];
+    expect(events.map((e) => [e.type, e.detail.changedBy, e.detail.apiKeyId])).toEqual(makers);
+    await deliverDue(c);
+    const bodies = bodiesById(hook.path);
+    expect(
+      events.map((e) => {
+        const task = taskIn(bodies.get(e.id));
+        return [bodies.get(e.id)?.type, task.changedBy, task.apiKeyId];
+      }),
+    ).toEqual(makers);
+
+    // The database keeps a task's changer as a deal's.
+    for (const bad of [
+      `changed_by = 'api', changed_by_api_key_id = NULL`,
+      `changed_by = 'automation', changed_by_api_key_id = '${key.key.id}'`,
+      `changed_by = 'erasure', changed_by_api_key_id = NULL`,
+    ]) {
+      await expect(set(bad), bad).rejects.toThrow(/crm_tasks_changed_by"/);
+    }
+    await expect(set(`changed_by = 'api', changed_by_api_key_id = '${uuidv7()}'`)).rejects.toThrow(
+      /crm_tasks_changed_by_api_key_fk/,
+    );
+  });
+});
+
+describe('note events (ADR-280)', () => {
+  const crm = () =>
+    createCrmService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
+
+  /** A contact a member adds, with a number; its id and number. */
+  async function newContact(owner: TenantContext, name: string) {
+    const phone = `+${waId()}`;
+    const { id } = await contactsService().createContact(owner, { displayName: name, phone });
+    return { id, phone };
+  }
+
+  /** The company's note events in the order they were captured, with their delivery counts. */
+  const noteEventsOf = (c: Company) =>
+    fx.query<EventRow & { occurred_at: Date }>(
+      `SELECT e.id, e.type, e.status, e.detail, e.conversation_id, e.contact_id, e.occurred_at,
+              (SELECT count(*)::int FROM app.webhook_deliveries d
+                WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id) AS deliveries
+         FROM app.webhook_events e
+        WHERE e.tenant_id = $1 AND e.type = 'note.created' ORDER BY e.occurred_at, e.id`,
+      [c.tenant.id],
+    );
+
+  it('sends each note members and keys add, without its text, to the endpoints that take it', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const svc = crm();
+    const asha = await newContact(owner, 'Asha');
+    const { id: pipelineId } = await svc.createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New'],
+    });
+    const [pipeline] = (await svc.listPipelines(owner)).filter((p) => p.id === pipelineId);
+    const { id: dealId } = await svc.createDeal(owner, {
+      contactId: asha.id,
+      pipelineId,
+      stageId: pipeline!.stages[0]!.id,
+      title: 'Annual plan',
+    });
+
+    // While no endpoint takes the event, a note captures nothing.
+    await svc.addNote(owner, { contactId: asha.id, body: 'Before any endpoint' });
+    expect(await noteEventsOf(c)).toEqual([]);
+
+    const hook = await addEndpoint(c, ['note.created']);
+    const tasksOnly = await addEndpoint(c, ['task.created']);
+
+    // A member's note on the contact and one on the deal, then a key's on the deal.
+    const onContact = await svc.addNote(owner, {
+      contactId: asha.id,
+      body: 'Ring 98450 12345 after Diwali',
+    });
+    const onDeal = await svc.addNote(owner, { dealId, body: 'Wants a discount' });
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Call centre', scopes: ['notes.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    const response = await apiCreateNote(
+      { db: fx.dbs.app, clock: systemClock },
+      key,
+      { body: 'Sent the quote', dealId },
+      null,
+    );
+    const byKey = (response.body as { data: { id: string } }).data.id;
+
+    // One event per note, in order, for the endpoint taking it only, naming the note and its
+    // contact.
+    const events = await noteEventsOf(c);
+    expect(
+      events.map((e) => [e.status, e.detail, e.conversation_id, e.contact_id, e.deliveries]),
+    ).toEqual([
+      [null, { noteId: onContact.id }, null, asha.id, 1],
+      [null, { noteId: onDeal.id }, null, asha.id, 1],
+      [null, { noteId: byKey }, null, asha.id, 1],
+    ]);
+
+    // Built when delivered: the deal, who wrote each (a key by its id, a member never by name) and
+    // the contact; never the text.
+    await deliverDue(c);
+    const bodies = new Map(bodiesAt(hook.path).map((b) => [b.id, b]));
+    expect([...bodies.keys()].sort()).toEqual(events.map((e) => e.id).sort());
+    const delivered = events.map((e) => bodies.get(e.id)!);
+    for (const body of delivered) {
+      expect(noteCreatedPayloadSchema.safeParse(body).success).toBe(true);
+      const sent = JSON.stringify(body);
+      for (const hidden of ['98450', 'discount', 'quote', owner.membership.id]) {
+        expect(sent).not.toContain(hidden);
+      }
+      expect(body.data.contact).toEqual({ id: asha.id, phone: asha.phone, name: 'Asha' });
+    }
+    expect(delivered.map((b) => b.createdAt)).toEqual(
+      events.map((e) => e.occurred_at.toISOString()),
+    );
+    const note = { createdAt: expect.any(String) };
+    expect(delivered.map((b) => b.data.note)).toEqual([
+      { id: onContact.id, dealId: null, writtenBy: 'member', apiKeyId: null, ...note },
+      { id: onDeal.id, dealId, writtenBy: 'member', apiKeyId: null, ...note },
+      { id: byKey, dealId, writtenBy: 'api', apiKeyId: key.key.id, ...note },
+    ]);
+    expect(bodiesAt(tasksOnly.path)).toEqual([]);
+  });
+
+  it('gives a moved note with the contact kept, and sends nothing for a note erasure deleted', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const svc = crm();
+    const hook = await addEndpoint(c, ['note.created']);
+
+    // A customer who wrote by WhatsApp user id gets a note, and is merged into a contact a member
+    // added: the merge moves the note without adding one, so nothing more is captured.
+    const merged = await writesByUserId(c);
+    const moved = await svc.addNote(owner, { contactId: merged, body: 'Wrote from a new phone' });
+    const kept = await newContact(owner, 'Asha');
+    await createContactMergeService({ db: fx.dbs.app, clock: systemClock }).mergeContacts(owner, {
+      keepContactId: kept.id,
+      mergeContactId: merged,
+    });
+    expect((await noteEventsOf(c)).map((e) => [e.detail, e.contact_id])).toEqual([
+      [{ noteId: moved.id }, merged],
+    ]);
+    await deliverDue(c);
+    expect(bodiesAt(hook.path).map((b) => b.data)).toEqual([
+      {
+        note: {
+          id: moved.id,
+          dealId: null,
+          writtenBy: 'member',
+          apiKeyId: null,
+          createdAt: expect.any(String),
+        },
+        contact: { id: kept.id, phone: kept.phone, name: 'Asha' },
+      },
+    ]);
+
+    // A note whose contact is erased before its event is delivered is gone: the delivery fails
+    // without an attempt and nothing is sent.
+    const ravi = await newContact(owner, 'Ravi');
+    await svc.addNote(owner, { contactId: ravi.id, body: 'Lives at 12 Park Street' });
+    await contactsService().eraseContact(owner, { contactId: ravi.id, suppress: false });
+    await deliverDue(c);
+    expect(
+      await fx.query(
+        `SELECT d.state, d.attempts, d.last_error FROM app.webhook_deliveries d
+           JOIN app.webhook_events e ON e.tenant_id = d.tenant_id AND e.id = d.event_id
+          WHERE e.tenant_id = $1 AND e.contact_id = $2`,
+        [c.tenant.id, ravi.id],
+      ),
+    ).toEqual([{ state: 'failed', attempts: 0, last_error: 'event_gone' }]);
+    expect(bodiesAt(hook.path)).toHaveLength(1);
   });
 });

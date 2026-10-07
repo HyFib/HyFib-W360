@@ -13,10 +13,13 @@ import {
   channelAccounts,
   commerceOrderItems,
   commerceOrders,
+  commercePaymentLinks,
   contactMerges,
   contacts,
   CONVERSATION_STATUSES,
   conversations,
+  CRM_CHANGERS,
+  crmActivities,
   crmDeals,
   crmPipelines,
   crmTasks,
@@ -26,14 +29,22 @@ import {
   messages,
   ORDER_STATUSES,
   ORDER_STATUS_CHANGERS,
+  PAYMENT_LINK_STATUSES,
+  sql,
   TASK_STATUSES,
   type OrderStatusChanger,
   type Tx,
   type WebhookEventType,
 } from '@w360/db';
 import { apiContactColumns, apiContactSchema, toApiContact } from '../api/contact-view';
+import {
+  apiPaymentLinkSchema,
+  paymentLinkColumns,
+  toApiPaymentLink,
+} from '../api/payment-link-view';
 import { campaignAnalytics, campaignResultsSchema, toCampaignResults } from '../campaigns/results';
 import { COMMERCE_LIMITS } from '../commerce/model';
+import { crmCreatedBy, noteWriter } from '../crm/common';
 import { findAnsweredMessageId } from '../messaging/reply-context';
 import { WEBHOOK_MESSAGE_STATUSES, WEBHOOK_RUN_TRIGGERS } from './model';
 
@@ -516,6 +527,38 @@ export const orderStatusChangedPayloadSchema = envelope(
   webhookOrderDataSchema,
 );
 
+/**
+ * A Payment Link's change of status (ADR-285): the link as GET /orders/{id}/payment-links reads it
+ * when the event is delivered (ADR-284), with the status and the one before it as captured; never
+ * its address or Razorpay's ids.
+ */
+const webhookPaymentLinkSchema = apiPaymentLinkSchema.extend({
+  status: z
+    .enum(PAYMENT_LINK_STATUSES)
+    .describe(
+      'The status this event reports, as the worker wrote it: created (open: sent in the chat, or notSentReason says why not), partially_paid, paid (which marks the order paid), expired, cancelled, or failed (Razorpay could not create it: error says why).',
+    ),
+  previousStatus: z.enum(PAYMENT_LINK_STATUSES).describe('The status before it.'),
+});
+export const paymentLinkStatusChangedPayloadSchema = envelope(
+  'payment_link.status_changed',
+  z.object({
+    paymentLink: webhookPaymentLinkSchema,
+    order: z.object({
+      id: z.uuid().describe('The order, as GET /orders/{id} reads it.'),
+      reference: z.string().describe('The short reference members and the customer quote.'),
+      status: z
+        .enum(ORDER_STATUSES)
+        .describe(
+          'The order’s status when the event is delivered: order.status_changed reports its changes.',
+        ),
+    }),
+    conversation: z.object({ id: z.uuid() }),
+    contact: contactSchema,
+    channel: channelSchema,
+  }),
+);
+
 const campaignStatusSchema = z.enum(CAMPAIGN_STATUSES);
 
 const webhookCampaignSchema = z.object({
@@ -633,6 +676,18 @@ const webhookDealSchema = z.object({
     .enum(['member', 'automation', 'api'])
     .describe('Who added the deal: a member, an automation’s run or an API key.'),
   createdAt: z.iso.datetime(),
+  changedBy: z
+    .enum(CRM_CHANGERS)
+    .nullable()
+    .describe(
+      'Who made what this event reports, as it was captured: a member (never which member), an automation’s run, or an API key (api, named by apiKeyId); for deal.created, who added the deal. Null for a change HyFib did not record the maker of, such as erasure retitling the deal.',
+    ),
+  apiKeyId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The API key that made what this event reports, when changedBy is api; null otherwise.',
+    ),
 });
 const webhookDealDataSchema = z.object({
   deal: webhookDealSchema,
@@ -644,6 +699,20 @@ const webhookDealDataSchema = z.object({
 });
 
 export const dealCreatedPayloadSchema = envelope('deal.created', webhookDealDataSchema);
+
+/** The details of a deal whose change deal.updated reports (ADR-275), as its payload names them. */
+export const WEBHOOK_DEAL_DETAIL_CHANGES = ['title', 'valueMinor', 'expectedCloseOn'] as const;
+export const dealUpdatedPayloadSchema = envelope(
+  'deal.updated',
+  webhookDealDataSchema.extend({
+    changes: z
+      .array(z.enum(WEBHOOK_DEAL_DETAIL_CHANGES))
+      .min(1)
+      .describe(
+        'What the change changed, once each and in this order: `title`, `valueMinor` (the value, set, changed or cleared) and `expectedCloseOn`. Names only: the deal carries the details as they are when the event is delivered.',
+      ),
+  }),
+);
 export const dealStageChangedPayloadSchema = envelope('deal.stage_changed', webhookDealDataSchema);
 export const dealOwnerChangedPayloadSchema = envelope('deal.owner_changed', webhookDealDataSchema);
 export const dealStatusChangedPayloadSchema = envelope(
@@ -673,7 +742,13 @@ const webhookTaskSchema = z.object({
   assigneeId: z
     .uuid()
     .describe(
-      'The member the task is assigned to when the event is delivered (an id from GET /members).',
+      'The member the task is assigned to (an id from GET /members): for task.assignee_changed, the one it was given to; for other events, its assignee when the event is delivered.',
+    ),
+  previousAssigneeId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'task.assignee_changed: the member the task was assigned to before. Null for other events.',
     ),
   dealId: z
     .uuid()
@@ -685,6 +760,18 @@ const webhookTaskSchema = z.object({
     .enum(['member', 'automation', 'api'])
     .describe('Who added the task: a member, an automation’s run or an API key.'),
   createdAt: z.iso.datetime(),
+  changedBy: z
+    .enum(CRM_CHANGERS)
+    .nullable()
+    .describe(
+      'Who made what this event reports, as it was captured: a member (never which member) or an API key (api, named by apiKeyId); for task.created, who added the task, an automation’s run among them. Null for a change HyFib did not record the maker of.',
+    ),
+  apiKeyId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The API key that made what this event reports, when changedBy is api; null otherwise.',
+    ),
 });
 const webhookTaskDataSchema = z.object({
   task: webhookTaskSchema,
@@ -694,9 +781,61 @@ const webhookTaskDataSchema = z.object({
 });
 
 export const taskCreatedPayloadSchema = envelope('task.created', webhookTaskDataSchema);
+
+/** The details of a task whose change task.updated reports (ADR-276), as its payload names them. */
+export const WEBHOOK_TASK_DETAIL_CHANGES = ['title', 'notes', 'dueAt', 'remindAt'] as const;
+export const taskUpdatedPayloadSchema = envelope(
+  'task.updated',
+  webhookTaskDataSchema.extend({
+    changes: z
+      .array(z.enum(WEBHOOK_TASK_DETAIL_CHANGES))
+      .min(1)
+      .describe(
+        'What the change changed, once each and in this order: `title`, `notes`, `dueAt` (the due time, set, changed or cleared) and `remindAt` (the reminder time, likewise). Names only: the task carries its title and due time as they are when the event is delivered, and GET /tasks/{id} reads its notes and reminder.',
+      ),
+  }),
+);
+export const taskAssigneeChangedPayloadSchema = envelope(
+  'task.assignee_changed',
+  webhookTaskDataSchema,
+);
 export const taskStatusChangedPayloadSchema = envelope(
   'task.status_changed',
   webhookTaskDataSchema,
+);
+
+/**
+ * A CRM note as its event gives it (ADR-280): what it is about and who wrote it, as it is when the
+ * event is delivered. Never its text, which may hold anything a member wrote: GET /notes/{id} reads
+ * it with `notes.read` (ADR-279).
+ */
+const webhookNoteSchema = z.object({
+  id: z.uuid().describe('The note, as GET /notes/{id} reads it with `notes.read`.'),
+  dealId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The deal the note is about, as GET /deals/{id} reads it; null when it is about the contact only.',
+    ),
+  writtenBy: z
+    .enum(['member', 'api'])
+    .describe(
+      'Who wrote the note: a member on the contact or deal page (member, never which member) or an API key (api, named by apiKeyId).',
+    ),
+  apiKeyId: z
+    .uuid()
+    .nullable()
+    .describe('The API key that added the note, when writtenBy is api; null otherwise.'),
+  createdAt: z.iso.datetime().describe('When the note was added.'),
+});
+export const noteCreatedPayloadSchema = envelope(
+  'note.created',
+  z.object({
+    note: webhookNoteSchema,
+    contact: contactSchema.describe(
+      'The customer whose timeline holds the note, as it is now: the one it was added to, or the contact kept when a merge moved it.',
+    ),
+  }),
 );
 
 export const pingPayloadSchema = envelope(
@@ -729,6 +868,24 @@ export interface StoredWebhookEvent {
 }
 
 const str = (value: unknown): string | null => (typeof value === 'string' ? value : null);
+
+/**
+ * The details a deal.updated (ADR-275) or task.updated (ADR-276) event captured as changed, among
+ * the names its payload knows, in the payload's order.
+ */
+const detailChanges = <T extends string>(detail: Record<string, unknown>, names: readonly T[]) => {
+  const captured = Array.isArray(detail.changes) ? detail.changes : [];
+  return names.filter((name) => captured.includes(name));
+};
+
+/**
+ * Who made a deal's or task's change, as its event captured it (ADR-277), with the key for `api`;
+ * nobody when the change did not record it, and for events captured before it.
+ */
+export const capturedCrmChanger = (detail: Record<string, unknown>) => {
+  const changedBy = CRM_CHANGERS.find((changer) => changer === detail.changedBy) ?? null;
+  return { changedBy, apiKeyId: changedBy === 'api' ? str(detail.apiKeyId) : null };
+};
 
 /** Who changed an order's status, as its event captured it (ADR-270); null when not recorded. */
 const orderChanger = (detail: Record<string, unknown>): OrderStatusChanger | null => {
@@ -1087,6 +1244,68 @@ async function taskOf(tx: Tx, tenantId: string, taskId: string | null) {
   return row ?? null;
 }
 
+/**
+ * A CRM note with what its event gives (ADR-280), never its text, or null once it is gone (erasure
+ * deletes an erased contact's notes). Any other timeline entry is not a note.
+ */
+async function noteOf(tx: Tx, tenantId: string, noteId: string | null) {
+  if (!noteId || !z.uuid().safeParse(noteId).success) return null;
+  const [row] = await tx
+    .select({
+      id: crmActivities.id,
+      contactId: crmActivities.contactId,
+      dealId: crmActivities.dealId,
+      // Whether a member wrote it, never which: keys' notes have no member and name the key.
+      byMember: sql<boolean>`(${crmActivities.actorMembershipId} IS NOT NULL)`,
+      apiKeyId: sql<string | null>`(${crmActivities.data} ->> 'apiKeyId')`,
+      createdAt: crmActivities.createdAt,
+    })
+    .from(crmActivities)
+    .where(
+      and(
+        eq(crmActivities.tenantId, tenantId),
+        eq(crmActivities.id, noteId),
+        eq(crmActivities.kind, 'note'),
+      ),
+    );
+  return row ?? null;
+}
+
+/**
+ * A Payment Link with its order's reference, status, conversation, contact and number, in the
+ * company, read as the API reads it (ADR-284, ADR-285); null if there is none.
+ */
+async function paymentLinkOf(tx: Tx, tenantId: string, linkId: string | null) {
+  if (!linkId || !z.uuid().safeParse(linkId).success) return null;
+  const [row] = await tx
+    .select({
+      ...paymentLinkColumns,
+      orderReference: commerceOrders.reference,
+      orderStatus: commerceOrders.status,
+      conversationId: commerceOrders.conversationId,
+      contactId: commerceOrders.contactId,
+      channelId: commerceOrders.channelAccountId,
+      channelPhone: channelAccounts.displayPhoneNumber,
+    })
+    .from(commercePaymentLinks)
+    .innerJoin(
+      commerceOrders,
+      and(
+        eq(commerceOrders.tenantId, commercePaymentLinks.tenantId),
+        eq(commerceOrders.id, commercePaymentLinks.orderId),
+      ),
+    )
+    .leftJoin(
+      channelAccounts,
+      and(
+        eq(channelAccounts.tenantId, commerceOrders.tenantId),
+        eq(channelAccounts.id, commerceOrders.channelAccountId),
+      ),
+    )
+    .where(and(eq(commercePaymentLinks.tenantId, tenantId), eq(commercePaymentLinks.id, linkId)));
+  return row ?? null;
+}
+
 /** A WhatsApp order with its items in cart order and its number, in the company. */
 async function orderOf(tx: Tx, tenantId: string, orderId: string | null) {
   if (!orderId || !z.uuid().safeParse(orderId).success) return null;
@@ -1372,17 +1591,44 @@ export async function buildWebhookPayload(
         },
       };
     }
+    case 'payment_link.status_changed': {
+      // The status and the one before it as captured; the rest as the link and its order are now.
+      // Links are kept until the company is deleted, so a link that is gone was never one of the
+      // company's.
+      const link = await paymentLinkOf(tx, tenantId, str(event.detail.paymentLinkId));
+      if (!link) throw new WebhookEventGoneError();
+      return {
+        ...base,
+        data: {
+          paymentLink: {
+            ...toApiPaymentLink(link),
+            status: event.status ?? link.status,
+            previousStatus: str(event.detail.previousStatus),
+          },
+          order: { id: link.orderId, reference: link.orderReference, status: link.orderStatus },
+          conversation: { id: link.conversationId },
+          contact: await contactOf(tx, tenantId, link.contactId),
+          channel: { id: link.channelId, phone: link.channelPhone ?? null },
+        },
+      };
+    }
     case 'deal.created':
+    case 'deal.updated':
     case 'deal.stage_changed':
     case 'deal.owner_changed':
     case 'deal.status_changed': {
-      // The stage, pipeline and status, and those before them, as captured, and for a change of
-      // owner the owners; the rest as it is now, so an erased contact's deal is sent as erasure left
-      // it.
+      // The stage, pipeline and status, and those before them, as captured, for a change of owner
+      // the owners, and who made the change (an addition's maker is the deal's creator); the rest
+      // as it is now, so an erased contact's deal is sent as erasure left it.
       const deal = await dealOf(tx, tenantId, str(event.detail.dealId));
       if (!deal) throw new WebhookEventGoneError();
       const moved = event.type === 'deal.stage_changed';
       const owned = event.type === 'deal.owner_changed';
+      const { createdBy, createdByApiKeyId } = crmCreatedBy(deal.automationId, deal.apiKeyId);
+      const changer =
+        event.type === 'deal.created'
+          ? { changedBy: createdBy, apiKeyId: createdByApiKeyId }
+          : capturedCrmChanger(event.detail);
       return {
         ...base,
         data: {
@@ -1402,20 +1648,34 @@ export async function buildWebhookPayload(
             ownerId: owned ? str(event.detail.ownerId) : deal.ownerId,
             expectedCloseOn: deal.expectedCloseOn,
             lostReason: deal.lostReason,
-            createdBy: deal.apiKeyId ? 'api' : deal.automationId ? 'automation' : 'member',
+            createdBy,
             createdAt: deal.createdAt.toISOString(),
+            ...changer,
           },
           conversation: deal.conversationId ? { id: deal.conversationId } : null,
           contact: await contactOf(tx, tenantId, deal.contactId),
+          ...(event.type === 'deal.updated'
+            ? { changes: detailChanges(event.detail, WEBHOOK_DEAL_DETAIL_CHANGES) }
+            : {}),
         },
       };
     }
     case 'task.created':
+    case 'task.updated':
+    case 'task.assignee_changed':
     case 'task.status_changed': {
-      // The status, and the one before it, as captured; the rest as it is now. Erasing a contact
-      // deletes its tasks, so an erased contact's task is gone and its events send nothing.
+      // The status, and the one before it, as captured, for a change of assignee the assignees, for
+      // a change of details the names of what changed, and who made the change (an addition's
+      // maker is the task's creator); the rest as it is now. Erasing a contact deletes its tasks,
+      // so an erased contact's task is gone and its events send nothing.
       const task = await taskOf(tx, tenantId, str(event.detail.taskId));
       if (!task) throw new WebhookEventGoneError();
+      const reassigned = event.type === 'task.assignee_changed';
+      const { createdBy, createdByApiKeyId } = crmCreatedBy(task.automationId, task.apiKeyId);
+      const changer =
+        event.type === 'task.created'
+          ? { changedBy: createdBy, apiKeyId: createdByApiKeyId }
+          : capturedCrmChanger(event.detail);
       return {
         ...base,
         data: {
@@ -1426,12 +1686,36 @@ export async function buildWebhookPayload(
             previousStatus:
               event.type === 'task.status_changed' ? str(event.detail.previousStatus) : null,
             dueAt: task.dueAt?.toISOString() ?? null,
-            assigneeId: task.assigneeId,
+            assigneeId: reassigned ? str(event.detail.assigneeId) : task.assigneeId,
+            previousAssigneeId: reassigned ? str(event.detail.previousAssigneeId) : null,
             dealId: task.dealId,
-            createdBy: task.apiKeyId ? 'api' : task.automationId ? 'automation' : 'member',
+            createdBy,
             createdAt: task.createdAt.toISOString(),
+            ...changer,
           },
           contact: await contactOf(tx, tenantId, task.contactId),
+          ...(event.type === 'task.updated'
+            ? { changes: detailChanges(event.detail, WEBHOOK_TASK_DETAIL_CHANGES) }
+            : {}),
+        },
+      };
+    }
+    case 'note.created': {
+      // The note as it is now, without its text (GET /notes/{id} reads that with notes.read): a
+      // merge moves a note to the contact kept, which the payload then gives, and erasing a contact
+      // deletes its notes, so an erased contact's note is gone and its event sends nothing.
+      const note = await noteOf(tx, tenantId, str(event.detail.noteId));
+      if (!note) throw new WebhookEventGoneError();
+      return {
+        ...base,
+        data: {
+          note: {
+            id: note.id,
+            dealId: note.dealId,
+            ...noteWriter(note.byMember, note.apiKeyId),
+            createdAt: note.createdAt.toISOString(),
+          },
+          contact: await contactOf(tx, tenantId, note.contactId),
         },
       };
     }

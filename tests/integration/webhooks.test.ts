@@ -3657,7 +3657,7 @@ describe('pipeline filters (ADR-263)', () => {
       expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(pipelineIds)).toBe(path);
     };
     const needsTheEvents =
-      /only for an endpoint that receives Deal added, Deal stage, Deal owner or Deal won, lost or reopened/;
+      /only for an endpoint that receives Deal added, Deal details, Deal stage, Deal owner or Deal won, lost or reopened/;
     // Task events are no pipeline's, even those of a deal's tasks.
     await refused(['task.created', 'task.status_changed'], [sales], needsTheEvents);
     await refused(['deal.created'], [], /at least one pipeline/);
@@ -3825,7 +3825,7 @@ describe('stage filters (ADR-264)', () => {
       expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(stageIds)).toBe(path);
     };
     const needsTheEvents =
-      /only for an endpoint that receives Deal added, Deal stage, Deal owner or Deal won, lost or reopened/;
+      /only for an endpoint that receives Deal added, Deal details, Deal stage, Deal owner or Deal won, lost or reopened/;
     await refused(['task.created', 'contact.created'], [proposal], needsTheEvents);
     await refused(['deal.created'], [], /at least one stage/);
     await refused(['deal.created'], ['Proposal'], /from the list/, 'stageIds.0');
@@ -3977,7 +3977,7 @@ describe('owner filters (ADR-265)', () => {
       expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(ownerIds)).toBe(path);
     };
     const needsTheEvents =
-      /only for an endpoint that receives Deal added, Deal stage, Deal owner or Deal won, lost or reopened/;
+      /only for an endpoint that receives Deal added, Deal details, Deal stage, Deal owner or Deal won, lost or reopened/;
     await refused(['task.created', 'message.received'], [agent], needsTheEvents);
     await refused(['deal.created'], [], /at least one member/);
     await refused(['deal.created'], ['agent@example.com'], /from the list/, 'ownerIds.0');
@@ -4127,7 +4127,7 @@ describe('task assignee filters (ADR-266)', () => {
       );
     };
     const needsTheEvents =
-      /only for an endpoint that receives Task added or Task done, cancelled or reopened/;
+      /only for an endpoint that receives Task added, Task details, Task assignee or Task done, cancelled or reopened/;
     await refused(['deal.created', 'message.received'], [agent], needsTheEvents);
     await refused(['task.created'], [], /at least one member/);
     await refused(['task.created'], ['agent@example.com'], /from the list/, 'taskAssigneeIds.0');
@@ -4431,6 +4431,278 @@ describe('contact tag filters (ADR-267)', () => {
         expect(body.data.conversation?.id, body.type).toBe(first.conversation_id);
       }
     }
+  });
+});
+
+describe('conversation tag filters (ADR-273)', () => {
+  /** Puts a tag on a conversation, or takes it off, as the inbox writes tags. */
+  const tagConversation = (c: Company, conversationId: string, name: string) =>
+    fx.query(
+      'INSERT INTO app.conversation_tags (id, tenant_id, conversation_id, tag) VALUES ($1, $2, $3, $4)',
+      [uuidv7(), c.tenant.id, conversationId, name],
+    );
+  const untagConversation = (c: Company, conversationId: string, name: string) =>
+    fx.query(
+      'DELETE FROM app.conversation_tags WHERE tenant_id = $1 AND conversation_id = $2 AND tag = $3',
+      [c.tenant.id, conversationId, name],
+    );
+  const tagContact = (c: Company, contactId: string, name: string) =>
+    fx.query(
+      'INSERT INTO app.contact_tags (id, tenant_id, contact_id, tag) VALUES ($1, $2, $3, $4)',
+      [uuidv7(), c.tenant.id, contactId, name],
+    );
+  /** An endpoint of the company on a path of its own, with the tag lists given. */
+  const add = async (
+    c: Company,
+    eventTypes: WebhookEventType[],
+    lists: { contactTags?: string[] | null; conversationTags?: string[] | null },
+  ) => {
+    const path = `/ok/${randomBytes(6).toString('hex')}`;
+    const created = await webhooks().create(await fx.ctx(c, c.owner), {
+      url: `http://${HOST}:${port}${path}`,
+      eventTypes,
+      ...lists,
+    });
+    return { ...created, path };
+  };
+  const typesTo = async (endpointId: string) =>
+    (await deliveriesOf(endpointId)).map((d) => [d.type, d.status]);
+
+  it('are refused without an event of a conversation, empty, over 50 or not as tags are written; kept as conversations carry them, kept by a change that leaves them out and cleared with the events; the database keeps them to those events and to tags as conversations carry them', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = async (
+      eventTypes: string[],
+      conversationTags: unknown,
+      message: RegExp,
+      path = 'conversationTags',
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes, conversationTags }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(conversationTags)).toBe(
+        path,
+      );
+    };
+    const needsTheEvents =
+      /conversation tags only for an endpoint that receives message or conversation events/;
+    await refused(['deal.created', 'contact.created'], ['refund'], needsTheEvents);
+    await refused(['message.received'], [], /at least one tag/);
+    await refused(['message.received'], ['refund', 'a,b'], /commas/, 'conversationTags.1');
+    await refused(
+      ['message.received'],
+      Array.from({ length: 51 }, (_, i) => `tag ${i}`),
+      /at most 50/,
+    );
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['message.received', 'deal.created'],
+      conversationTags: ['Refund', ' refund', 'Delivery   Delay'],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { conversationTags?: unknown; contactTags?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => a.metadata.conversationTags);
+    expect(await audits('webhook.endpoint_created')).toEqual([['refund', 'delivery delay']]);
+    const current = async () => (await webhooks().list(owner)).find((e) => e.id === created.id);
+    expect(await current()).toMatchObject({
+      conversationTags: ['refund', 'delivery delay'],
+      contactTags: null,
+    });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['message.received', 'deal.created'],
+        ...fields,
+      });
+    await change({ description: 'kept' });
+    expect((await current())?.conversationTags).toEqual(['refund', 'delivery delay']);
+    // Contact tags and conversation tags are lists of their own.
+    await change({ conversationTags: ['Urgent'], contactTags: ['vip'] });
+    expect(await current()).toMatchObject({ conversationTags: ['urgent'], contactTags: ['vip'] });
+    await change({ conversationTags: null });
+    expect(await current()).toMatchObject({ conversationTags: null, contactTags: ['vip'] });
+    await change({ conversationTags: ['urgent'] });
+    // Any event of a conversation keeps the list.
+    await change({ eventTypes: ['conversation.assignment_changed', 'task.created'] });
+    expect((await current())?.conversationTags).toEqual(['urgent']);
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      ['refund', 'delivery delay'],
+      ['urgent'],
+      undefined,
+      ['urgent'],
+      ['urgent'],
+    ]);
+    // The database refuses an empty list, more than 50, a missing tag, a list of lists, and tags
+    // not as conversations carry them (capitals, a comma, spaces around, over 40 characters, a
+    // control character, an empty tag), from an endpoint taking an event of a conversation…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET conversation_tags = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    const many = `ARRAY[${Array.from({ length: 51 }, (_, i) => `'tag ${i}'`).join(',')}]`;
+    for (const bad of [
+      `'{}'::text[]`,
+      many,
+      `ARRAY['refund', NULL]`,
+      `ARRAY[ARRAY['refund'], ARRAY['urgent']]`,
+      `ARRAY['Refund']`,
+      `ARRAY['urgent', 'a,b']`,
+      `ARRAY[' refund']`,
+      `ARRAY['refund ']`,
+      `ARRAY['${'x'.repeat(41)}']`,
+      `ARRAY[E're\\tfund']`,
+      `ARRAY['refund', '']`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_conversation_tags/);
+    }
+    // Tags as conversations carry them, spaces inside and 40 characters included, are kept.
+    await setInDatabase(`ARRAY['delivery delay', '${'x'.repeat(40)}', 'refund']`);
+    expect((await current())?.conversationTags).toEqual([
+      'delivery delay',
+      'x'.repeat(40),
+      'refund',
+    ]);
+    await change({ eventTypes: ['deal.created'] });
+    expect(await current()).toMatchObject({ conversationTags: null, contactTags: null });
+    await expectAppError(
+      change({ eventTypes: ['deal.created'], conversationTags: ['refund'] }),
+      'validation_failed',
+      needsTheEvents,
+    );
+    // …and any list for an endpoint that takes none.
+    await expect(setInDatabase(`ARRAY['refund']`)).rejects.toThrow(
+      /webhook_endpoints_conversation_tags/,
+    );
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'conversation_tags',
+                                   'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('send an endpoint that names conversation tags only the events of the conversations that have one of them when the events happen, with contact tags too only those that pass both, events of no conversation all the same, and capture none nobody takes', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const refunds = await add(
+      c,
+      ['message.received', 'message.status', 'conversation.status_changed', 'consent.changed'],
+      { conversationTags: ['refund', 'urgent'] },
+    );
+    const vipRefunds = await add(c, ['message.received'], {
+      contactTags: ['vip'],
+      conversationTags: ['refund'],
+    });
+    const from = waId();
+    // A message in a conversation without tags: no endpoint takes it, so nothing is captured.
+    const first = await inbound(c, from, 'Hello');
+    expect(await eventsOf(c)).toEqual([]);
+    // Tagged refund, the conversation's next message and the reply's status are captured for the
+    // first endpoint; the second also needs the contact tagged vip, as the next message has it.
+    await tagConversation(c, first.conversation_id, 'refund');
+    await inbound(c, from, 'Still there?');
+    await sendReply(c, first.conversation_id, 'Here');
+    await tagContact(c, first.contact_id, 'vip');
+    await inbound(c, from, 'Where is my refund?');
+    await fx.query(`UPDATE app.conversations SET status = 'resolved' WHERE id = $1`, [
+      first.conversation_id,
+    ]);
+    // Another conversation, tagged delivery, is not, though its contact is tagged vip.
+    const otherFrom = waId();
+    const other = await inbound(c, otherFrom, 'Where is my parcel?');
+    await tagConversation(c, other.conversation_id, 'delivery');
+    await tagContact(c, other.contact_id, 'vip');
+    await inbound(c, otherFrom, 'Still waiting');
+    // The tag taken off, the first conversation's next message, which reopens it, is not
+    // captured either.
+    await untagConversation(c, first.conversation_id, 'refund');
+    await inbound(c, from, 'Bye');
+    // A consent change belongs to no conversation: the endpoint takes it.
+    await createConsentService({ db: fx.dbs.app, clock: systemClock }).recordConsent(owner, {
+      contactId: first.contact_id,
+      purpose: 'marketing',
+      action: 'opt_in',
+    });
+    // An endpoint for every conversation's messages hears every conversation's, tagged or not.
+    const everyone = await add(c, ['message.received'], {});
+    await inbound(c, otherFrom, 'Again');
+    await inbound(c, from, 'Me too');
+    expect(await typesTo(refunds.id)).toEqual([
+      ['message.received', null],
+      ['message.status', 'accepted'],
+      ['message.received', null],
+      ['conversation.status_changed', 'resolved'],
+      ['consent.changed', null],
+    ]);
+    expect(await typesTo(vipRefunds.id)).toEqual([['message.received', null]]);
+    expect(await typesTo(everyone.id)).toEqual([
+      ['message.received', null],
+      ['message.received', null],
+    ]);
+    // Each delivery of a conversation's event names the tagged conversation.
+    expect(await deliverDue(c)).toMatchObject({ attempted: 8, succeeded: 8 });
+    for (const request of [...requestsTo(refunds.path), ...requestsTo(vipRefunds.path)]) {
+      const body = JSON.parse(request.body) as {
+        type: string;
+        data: { conversation?: { id: string } };
+      };
+      if (body.type !== 'consent.changed') {
+        expect(body.data.conversation?.id, body.type).toBe(first.conversation_id);
+      }
+    }
+  });
+
+  it("reach an endpoint from the definer role's changes too: erasure cancels a tagged conversation's unsent reply before it deletes the conversation's tags", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const refunds = await add(c, ['message.status'], { conversationTags: ['refund'] });
+    const urgent = await add(c, ['message.status'], { conversationTags: ['urgent'] });
+    const first = await inbound(c, waId(), 'I want a refund');
+    await tagConversation(c, first.conversation_id, 'refund');
+    // A reply queued and not sent yet: erasure, which runs as the definer role, cancels it.
+    const agent = await fx.ctx(c, c.agent);
+    const { messageId } = await queueTextMessage(
+      { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock: systemClock },
+      agent,
+      {
+        conversationId: first.conversation_id,
+        text: 'Your refund is on its way',
+        clientKey: `ck-${randomBytes(6).toString('hex')}`,
+      },
+    );
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(owner, {
+      contactId: first.contact_id,
+      suppress: false,
+    });
+    const [message] = await fx.query<{ status: string }>(
+      'SELECT status FROM app.messages WHERE id = $1',
+      [messageId],
+    );
+    expect(message?.status).toBe('canceled');
+    expect(await typesTo(refunds.id)).toEqual([['message.status', 'canceled']]);
+    expect(await deliveriesOf(urgent.id)).toEqual([]);
+    // The conversation's tags were deleted afterwards, as erasure deletes them.
+    expect(
+      await fx.query('SELECT tag FROM app.conversation_tags WHERE conversation_id = $1', [
+        first.conversation_id,
+      ]),
+    ).toEqual([]);
+    const [grant] = await fx.query<{ can_select: boolean }>(
+      `SELECT has_column_privilege('w360_definer', 'app.conversation_tags', 'tag', 'SELECT')
+                AS can_select`,
+    );
+    expect(grant?.can_select).toBe(true);
   });
 });
 

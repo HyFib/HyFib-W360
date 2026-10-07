@@ -5,6 +5,7 @@ import {
   CAMPAIGN_STATUSES,
   CHANNEL_STATUSES,
   CONVERSATION_STATUSES,
+  CRM_CHANGERS,
   DEAL_STATUSES,
   MESSAGE_STATUSES,
   TEAM_ASSIGNMENT_MODES,
@@ -40,11 +41,16 @@ import {
   automationRunStartedPayloadSchema,
   campaignStatusChangedPayloadSchema,
   dealCreatedPayloadSchema,
+  dealUpdatedPayloadSchema,
   dealStageChangedPayloadSchema,
   dealOwnerChangedPayloadSchema,
   dealStatusChangedPayloadSchema,
   taskCreatedPayloadSchema,
+  taskUpdatedPayloadSchema,
+  taskAssigneeChangedPayloadSchema,
   taskStatusChangedPayloadSchema,
+  noteCreatedPayloadSchema,
+  paymentLinkStatusChangedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
@@ -111,7 +117,15 @@ import {
   apiUpdateMatchingConversationsSchema,
 } from './conversations';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
-import { apiCreateDealSchema, apiUpdateDealSchema } from './deals';
+import { apiPaymentLinkSchema } from './payment-link-view';
+import {
+  API_DEAL_HISTORY_DETAILS,
+  API_DEAL_HISTORY_TYPES,
+  apiCreateDealSchema,
+  apiUpdateDealSchema,
+  type ApiDealHistoryDetail,
+  type ApiDealHistoryType,
+} from './deals';
 import { API_NOTE_MAX_LENGTH, apiCreateNoteSchema } from './notes';
 import { apiCreateTaskSchema, apiUpdateTaskSchema } from './tasks';
 import { apiUpdateOrderSchema } from './orders';
@@ -452,23 +466,133 @@ export const apiDealSchema = z.object({
     .describe(
       'Moves on with every change of the deal, by members, automations or keys; PATCH /deals/{id} takes it as `expectedVersion`.',
     ),
+  changedBy: z
+    .enum(CRM_CHANGERS)
+    .nullable()
+    .describe(
+      'Who made the latest change of what deal events report (its stage, status, owner, title, value or expected close date): a member (member, never which member), an automation’s run (automation) or an API key (api, named by changedByApiKeyId). Null while the deal is as it was added, and when HyFib did not record who made the latest change, such as erasure retitling the deal; never the maker of an earlier change.',
+    ),
+  changedByApiKeyId: z
+    .uuid()
+    .nullable()
+    .describe('The API key that made the latest change, when changedBy is api; null otherwise.'),
+  createdBy: z
+    .enum(CRM_CHANGERS)
+    .describe(
+      'Who added the deal: a member (member, never which member), an automation’s run (automation) or an API key (api, named by createdByApiKeyId), as deal.created says.',
+    ),
+  createdByApiKeyId: z
+    .uuid()
+    .nullable()
+    .describe('The API key that added the deal, when createdBy is api; null otherwise.'),
 });
 
-/** A CRM task (ADR-258). */
-/** A note on the CRM timeline, as `POST /notes` answers it (ADR-268). */
+/** One change of a CRM deal, as its history gives it (ADR-281). */
+export const apiDealHistoryEntrySchema = z.object({
+  id: z.uuid().describe('The change, on the deal’s timeline.'),
+  type: z
+    .enum(Object.values(API_DEAL_HISTORY_TYPES) as [ApiDealHistoryType, ...ApiDealHistoryType[]])
+    .describe(
+      'What changed: the deal was added (created), its title, value or expected close date changed (updated), it moved to another stage or pipeline (stage_changed), it was given to another owner or left without one (owner_changed), or it was won, lost or reopened.',
+    ),
+  createdAt: z.iso.datetime().describe('When the change was made.'),
+  changedBy: z
+    .enum(CRM_CHANGERS)
+    .nullable()
+    .describe(
+      'Who made the change: a member (member, never which member), an automation’s run (automation) or an API key (api, named by changedByApiKeyId). Null when HyFib did not record who.',
+    ),
+  changedByApiKeyId: z
+    .uuid()
+    .nullable()
+    .describe('The API key that made the change, when changedBy is api; null otherwise.'),
+  stageId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'created: the stage the deal was added in; stage_changed: the stage it moved to. Null for other changes.',
+    ),
+  pipelineId: z.uuid().nullable().describe('The pipeline of stageId, when there is one.'),
+  previousStageId: z
+    .uuid()
+    .nullable()
+    .describe('stage_changed: the stage the deal left. Null for other changes.'),
+  previousPipelineId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The pipeline of previousStageId: another pipeline than pipelineId when the deal moved to another pipeline.',
+    ),
+  ownerId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'owner_changed: the member the deal was given to, or null when it was left without an owner. Null for other changes.',
+    ),
+  previousOwnerId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'owner_changed: the member who owned the deal before, or null. Null for other changes.',
+    ),
+  changes: z
+    .array(
+      z.enum(
+        Object.values(API_DEAL_HISTORY_DETAILS) as [
+          ApiDealHistoryDetail,
+          ...ApiDealHistoryDetail[],
+        ],
+      ),
+    )
+    .nullable()
+    .describe(
+      'updated: what changed, in this order: `title`, `valueMinor` and `expectedCloseOn`; names only, never the title or date before. Null for other changes.',
+    ),
+  valueMinor: z
+    .number()
+    .int()
+    .nullable()
+    .describe(
+      'created and won: the deal’s value then, in the pipeline currency’s minor units; updated: the new value, when the value changed (null when it was cleared). Null otherwise.',
+    ),
+  previousValueMinor: z
+    .number()
+    .int()
+    .nullable()
+    .describe('updated: the value before, when the value changed. Null otherwise.'),
+});
+
+/**
+ * A note on the CRM timeline, as `POST /notes` answers it (ADR-268) and `GET /notes` reads it
+ * (ADR-279).
+ */
 export const apiNoteSchema = z.object({
   id: z.uuid().describe('The note, on the CRM timeline.'),
   body: z.string().describe('The note as kept: its text, spaces around it trimmed.'),
   contactId: z
     .uuid()
-    .describe('The contact whose timeline holds the note: the one given, or the deal’s.'),
+    .describe(
+      'The contact whose timeline holds the note: the one it was added to, or the deal’s; a merge moves it to the contact kept.',
+    ),
   dealId: z
     .uuid()
     .nullable()
     .describe('The deal the note is about; null when it is about the contact only.'),
+  writtenBy: z
+    .enum(['member', 'api'])
+    .describe(
+      'Who wrote the note: a member on the contact or deal page (member, never which member) or an API key (api, named by apiKeyId).',
+    ),
+  apiKeyId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The key that added the note through the API, when writtenBy is api; null otherwise.',
+    ),
   createdAt: z.iso.datetime().describe('When the note was added.'),
 });
 
+/** A CRM task (ADR-258). */
 export const apiTaskSchema = z.object({
   id: z.uuid(),
   title: z.string(),
@@ -526,6 +650,25 @@ export const apiTaskSchema = z.object({
     .describe(
       'Moves on with every change of the task by members or keys; PATCH /tasks/{id} takes it as `expectedVersion`.',
     ),
+  changedBy: z
+    .enum(CRM_CHANGERS)
+    .nullable()
+    .describe(
+      'Who made the latest change of what task events report (its status, assignee, title, notes, due time or reminder time): a member (member, never which member) or an API key (api, named by changedByApiKeyId); automations only add tasks. Null while the task is as it was added, and when HyFib did not record who made the latest change; never the maker of an earlier change.',
+    ),
+  changedByApiKeyId: z
+    .uuid()
+    .nullable()
+    .describe('The API key that made the latest change, when changedBy is api; null otherwise.'),
+  createdBy: z
+    .enum(CRM_CHANGERS)
+    .describe(
+      'Who added the task: a member (member, never which member), an automation’s run (automation) or an API key (api, named by createdByApiKeyId), as task.created says.',
+    ),
+  createdByApiKeyId: z
+    .uuid()
+    .nullable()
+    .describe('The API key that added the task, when createdBy is api; null otherwise.'),
 });
 
 /** A member conversations can be assigned to (ADR-093). */
@@ -857,25 +1000,25 @@ export const apiWebhookEndpointSchema = z.object({
     .array(z.uuid())
     .nullable()
     .describe(
-      "The CRM pipelines whose deals' events (deal.created, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the pipeline an event gives (deal.stage_changed also by the pipeline a move to another pipeline left); null receives every pipeline's. Other events are not narrowed.",
+      "The CRM pipelines whose deals' events (deal.created, deal.updated, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the pipeline an event gives (deal.stage_changed also by the pipeline a move to another pipeline left); null receives every pipeline's. Other events are not narrowed.",
     ),
   stageIds: z
     .array(z.uuid())
     .nullable()
     .describe(
-      "The CRM stages whose deals' events (deal.created, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the stage an event gives (deal.stage_changed also by the stage the deal left); null receives every stage's. With pipelineIds too, an event must pass both. Other events are not narrowed.",
+      "The CRM stages whose deals' events (deal.created, deal.updated, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the stage an event gives (deal.stage_changed also by the stage the deal left); null receives every stage's. With pipelineIds too, an event must pass both. Other events are not narrowed.",
     ),
   ownerIds: z
     .array(z.uuid())
     .nullable()
     .describe(
-      "The members whose deals' events (deal.created, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the deal's owner when an event happens (deal.owner_changed also by the owner it left); a deal without an owner is on no list. null receives every deal's. With pipelineIds or stageIds too, an event must pass them all. Other events are not narrowed.",
+      "The members whose deals' events (deal.created, deal.updated, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the deal's owner when an event happens (deal.owner_changed also by the owner it left); a deal without an owner is on no list. null receives every deal's. With pipelineIds or stageIds too, an event must pass them all. Other events are not narrowed.",
     ),
   taskAssigneeIds: z
     .array(z.uuid())
     .nullable()
     .describe(
-      "The members whose tasks' events (task.created, task.status_changed) the endpoint receives, by the member a task is assigned to when an event happens. null receives every task's. Other events are not narrowed.",
+      "The members whose tasks' events (task.created, task.updated, task.assignee_changed, task.status_changed) the endpoint receives, by the member a task is assigned to when an event happens (task.assignee_changed also by the member it left). null receives every task's. Other events are not narrowed.",
     ),
   assigneeIds: z
     .array(z.uuid())
@@ -888,6 +1031,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       "The contact tags whose conversations' message and conversation events the endpoint receives, by the tags the conversation's contact has when the event happens (any of them); null receives every conversation's. Other events are not narrowed.",
+    ),
+  conversationTags: z
+    .array(z.string())
+    .nullable()
+    .describe(
+      "The conversation tags whose message and conversation events the endpoint receives, by the tags the conversation has when the event happens (any of them); null receives every conversation's. Other events are not narrowed.",
     ),
   oauth: z
     .object({
@@ -1115,7 +1264,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         '',
         `POST /messages needs an \`Idempotency-Key\` header: a retry with the same key and body returns the first response (header \`Idempotent-Replayed: true\`) and never sends twice; responses are kept ${API_LIMITS.idempotencyHours} hours. Delivery itself follows WhatsApp: read the status with GET /messages/{id}.`,
         '',
-        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact, template, deal and task event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens, or members (its \`assigneeIds\`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens, or contact tags (its \`contactTags\`): then those of the conversations whose contact has any of the tags when the event happens only. And it can name templates (its \`templateIds\`): then it receives the statuses of the messages sent with them and their changes only, or campaigns (its \`campaignIds\`): then the statuses of the messages they sent and their changes only. And it can name CRM pipelines (its \`pipelineIds\`): then it receives the events of those pipelines' deals only, by the pipeline an event gives, a move to another pipeline reaching the endpoints of the pipeline it left as well, or stages (its \`stageIds\`): then those of the deals in those stages only, a move reaching the endpoints of the stage it left as well, or the deals' owners (its \`ownerIds\`): then those of the deals the members own when the event happens only, a change of owner reaching the endpoints of the owner it left as well; with more than one of these, an event must pass them all. And it can name the members whose tasks it takes (its \`taskAssigneeIds\`): then it receives the events of the tasks assigned to them when the event happens only.`,
+        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact, template, deal and task event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens, or members (its \`assigneeIds\`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens, or contact tags (its \`contactTags\`): then those of the conversations whose contact has any of the tags when the event happens only, or conversation tags (its \`conversationTags\`): then those of the conversations that have any of the tags when the event happens only. And it can name templates (its \`templateIds\`): then it receives the statuses of the messages sent with them and their changes only, or campaigns (its \`campaignIds\`): then the statuses of the messages they sent and their changes only. And it can name CRM pipelines (its \`pipelineIds\`): then it receives the events of those pipelines' deals only, by the pipeline an event gives, a move to another pipeline reaching the endpoints of the pipeline it left as well, or stages (its \`stageIds\`): then those of the deals in those stages only, a move reaching the endpoints of the stage it left as well, or the deals' owners (its \`ownerIds\`): then those of the deals the members own when the event happens only, a change of owner reaching the endpoints of the owner it left as well; with more than one of these, an event must pass them all. And it can name the members whose tasks it takes (its \`taskAssigneeIds\`): then it receives the events of the tasks assigned to them when the event happens only, a change of assignee reaching the endpoints of the member it left as well.`,
       ].join('\n'),
     },
     servers: [{ url: serverUrl }],
@@ -1783,7 +1932,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           operationId: 'listConversationTags',
           summary: 'Tags on conversations, alphabetically',
           description: [
-            `${scopeNote('conversations.read')} The tags on the company's conversations, alphabetically, each with how many conversations have it when the page is read: the tags conversations carry (\`tags\`), \`GET /conversations\` filters by (\`tag\`) and changes add and remove (\`addTags\`, \`removeTags\`). A tag no conversation has any more is not listed.`,
+            `${scopeNote('conversations.read')} The tags on the company's conversations, alphabetically, each with how many conversations have it when the page is read: the tags conversations carry (\`tags\`), \`GET /conversations\` filters by (\`tag\`), changes add and remove (\`addTags\`, \`removeTags\`) and webhook endpoints name (\`conversationTags\`). A tag no conversation has any more is not listed.`,
             tagPagesNote,
           ].join('\n\n'),
           parameters: [...pageParams, tagPrefixParam],
@@ -2200,7 +2349,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           summary: 'WhatsApp orders, newest first',
           description: [
             `${scopeNote('orders.read')} The carts customers send from the company’s WhatsApp catalog, as the Orders page lists them, newest first by when they were received; pages never skip or repeat an order. Each order has its items, total and note, with its conversation, contact and number by id. Needs Commerce in the company’s plan (403, reason not_in_plan).`,
-            'Amounts are integers in the currency’s minor units (paise for INR). Payment Links and Razorpay’s payment ids are never read here: the company’s Razorpay account reports those. An erased contact’s orders are listed without the note, which erasure clears. To catch up on changes, ask for `updatedSince` a little before your previous pass began (a minute, say) and expect to see some orders again: a change carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
+            'Amounts are integers in the currency’s minor units (paise for INR). An order’s Payment Links are read with GET /orders/{id}/payment-links, never their address or Razorpay’s ids. An erased contact’s orders are listed without the note, which erasure clears. To catch up on changes, ask for `updatedSince` a little before your previous pass began (a minute, say) and expect to see some orders again: a change carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
             '`statusChangedBy` says who made an order’s latest status change, with the key for one made through the API (`statusChangedByApiKeyId`), so an integration can tell the orders it changed last from those members or payments did.',
           ].join('\n\n'),
           parameters: [
@@ -2260,7 +2409,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           summary: 'Confirm, fulfil or cancel a WhatsApp order',
           description: [
             `${scopeNote('orders.write')} As members do on the order page: a received order is confirmed or cancelled, a confirmed one fulfilled or cancelled, a paid one fulfilled. Needs Commerce in the company’s plan (403, reason not_in_plan). The order’s \`order.status_changed\` webhook event follows, as for a member’s change.`,
-            'Any other move is refused (409, naming the order’s status, changing nothing), and so is an order not in `expectedStatus` when you give it. Payment statuses come only from Razorpay, and an order waiting for payment is not changed through the API: members cancel its Payment Link in the app first. Nothing is sent to the customer.',
+            'Any other move is refused (409, naming the order’s status, changing nothing), and so is an order not in `expectedStatus` when you give it. Payment statuses come only from Razorpay, and an order waiting for payment is not changed: cancel its Payment Link first, with POST /orders/{id}/cancel-payment or in the app. Nothing is sent to the customer.',
             'An order that already has the status asked for is answered as it is, whatever `expectedStatus` says, so a retry is safe without an `Idempotency-Key`.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/Id' }],
@@ -2271,6 +2420,65 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('Order'))),
             },
             ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/orders/{id}/payment-links': {
+        get: {
+          operationId: 'listOrderPaymentLinks',
+          summary: 'A WhatsApp order’s Payment Links, newest first',
+          description: [
+            `${scopeNote('orders.read')} The Payment Links asked for the order, by members on the order page or by API keys, newest first by when they were asked for, as the order page lists them: each one’s status, amount and amount paid, expiry, whether it was sent in the order’s conversation (the message’s id) or why not, what went wrong at Razorpay, and who asked. Needs Commerce in the company’s plan (403, reason not_in_plan).`,
+            'Never the link’s address or Razorpay’s ids for the link and its payments: HyFib sends the link in the chat, and members copy it from the order page. Only Razorpay’s report marks a link paid, and with it the order.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }, ...pageParams],
+          responses: {
+            '200': {
+              description: 'A page of the order’s Payment Links.',
+              content: pageOf('PaymentLink'),
+            },
+            ...errors(401, 403, 404, 422, 429, 500),
+          },
+        },
+      },
+      '/orders/{id}/request-payment': {
+        post: {
+          operationId: 'requestOrderPayment',
+          summary: 'Ask the customer to pay a WhatsApp order',
+          description: [
+            `${scopeNote('orders.request_payment')} As members ask for payment on the order page: a Payment Link for the order’s total from the company’s own Razorpay account, which HyFib creates at Razorpay and sends in the order’s conversation, as the key, while the customer service window is open (otherwise members copy it from the order page). The order waits for payment (\`awaiting_payment\`) until Razorpay reports the link paid, which marks it \`paid\`, or expired or cancelled, which takes it back to \`confirmed\`; \`order.status_changed\` webhook events report each change. Needs Commerce in the company’s plan (403, reason not_in_plan).`,
+            'Only a received or confirmed order is asked for (409 otherwise, naming its status, and for an order that already has an open link). Refused with 412 when HyFib could not read the whole cart or work out its total, the total is not in Indian rupees, below ₹1 or above the most HyFib asks for in one link, or the company’s Razorpay account is missing or not checked (members add and check it in Commerce → Payments). Payment statuses come only from Razorpay, never from the API.',
+            'With an `Idempotency-Key`, a retry answers the first response; without one, asking again for an order waiting for payment is refused with 409.',
+          ].join('\n\n'),
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKeyOptional' },
+          ],
+          responses: {
+            '200': {
+              description: 'The order, waiting for payment.',
+              content: json(dataOf(ref('Order'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 412, 423, 429, 500),
+          },
+        },
+      },
+      '/orders/{id}/cancel-payment': {
+        post: {
+          operationId: 'cancelOrderPayment',
+          summary: 'Cancel a WhatsApp order’s Payment Link',
+          description: [
+            `${scopeNote('orders.request_payment')} As members cancel a link on the order page: HyFib cancels the order’s open Payment Link at Razorpay, and the order goes back to \`confirmed\` once Razorpay reports the link cancelled, or is marked \`paid\` if the customer paid first; \`order.status_changed\` webhook events report it. Needs Commerce in the company’s plan (403, reason not_in_plan).`,
+            'An order without an open link is refused with 409, naming its status. Asking again while the link is being cancelled answers the order as it is, so a retry is harmless until the link has ended. No `Idempotency-Key` is needed.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description:
+                'The order, as it is now: still waiting for payment until Razorpay reports the link cancelled.',
+              content: json(dataOf(ref('Order'))),
+            },
+            ...errors(401, 403, 404, 409, 423, 429, 500),
           },
         },
       },
@@ -2293,6 +2501,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           description: [
             `${scopeNote('deals.read')} The company’s CRM deals, open and closed, as the CRM board and the deal page show them, newest first by when they were created; pages never skip or repeat a deal. Filters combine: a deal matches all of them. Each deal has its pipeline, stage, status, value, expected close date and owner, with its contact and conversation by id. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
             'Values are integers in the pipeline currency’s minor units (paise for INR). Notes, tasks and the deal’s timeline are never read here, nor the contact’s name or number, which `contacts.read` reads. An erased contact’s deals are kept, renamed and without a lost reason, as erasure leaves them. To catch up on changes, ask for `updatedSince` a little before your previous pass began (a minute, say) and expect to see some deals again: a change carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
+            '`changedBy` says who made a deal’s latest change of what deal events report, with the key for one made through the API (`changedByApiKeyId`), so an integration can tell the deals it changed last from those members or automations did; `createdBy` and `createdByApiKeyId` say likewise who added it.',
           ].join('\n\n'),
           parameters: [
             ...pageParams,
@@ -2374,13 +2583,32 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/deals/{id}/history': {
+        get: {
+          operationId: 'listDealHistory',
+          summary: 'A CRM deal’s history, newest first',
+          description: [
+            `${scopeNote('deals.read')} The changes the deal events report, as the deal’s timeline keeps them: the deal added, its title, value or expected close date changed, moved to another stage or pipeline, given to another owner, won, lost or reopened, by members, automations and API keys, newest first; pages never skip or repeat a change. Each says who made it (\`changedBy\`, never which member, with the key for one made through the API), so an integration can rebuild how a deal moved, and skip its own changes. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+            'Notes and the deal’s tasks are never given here (`GET /notes` and `GET /tasks` read them), nor the title, date or lost reason before a change. Erasing a contact deletes its timeline, so an erased contact’s deal has no history; a merge keeps the deal’s.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }, ...pageParams],
+          responses: {
+            '200': {
+              description: 'A page of the deal’s changes.',
+              content: pageOf('DealHistoryEntry'),
+            },
+            ...errors(401, 403, 404, 422, 429, 500),
+          },
+        },
+      },
       '/tasks': {
         get: {
           operationId: 'listTasks',
           summary: 'CRM tasks, newest first',
           description: [
-            `${scopeNote('tasks.read')} The company’s CRM tasks, open and closed, as the Tasks page and the contact and deal pages show them, whoever created them (a member or an automation), newest first by when they were created; pages never skip or repeat a task. Filters combine: a task matches all of them. Each task has its title, notes, due time, reminder, status and assignee, with its contact and deal by id. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+            `${scopeNote('tasks.read')} The company’s CRM tasks, open and closed, as the Tasks page and the contact and deal pages show them, whoever created them (a member, an automation or an API key), newest first by when they were created; pages never skip or repeat a task. Filters combine: a task matches all of them. Each task has its title, notes, due time, reminder, status and assignee, with its contact and deal by id. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
             'The CRM timeline is never read here, nor the contact’s name or number, which `contacts.read` reads. Erasing a contact deletes its tasks, so they are no longer listed, and their ids answer 404; merging contacts moves the merged contact’s tasks to the one kept. To catch up on changes, ask for `updatedSince` a little before your previous pass began (a minute, say) and expect to see some tasks again: a change carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
+            '`changedBy` says who made a task’s latest change of what task events report, with the key for one made through the API (`changedByApiKeyId`), so an integration can tell the tasks it changed last from those members did; `createdBy` and `createdByApiKeyId` say likewise who added it.',
           ].join('\n\n'),
           parameters: [
             ...pageParams,
@@ -2457,15 +2685,61 @@ export function buildOpenApiDocument(serverUrl: string) {
         },
       },
       '/notes': {
+        get: {
+          operationId: 'listNotes',
+          summary: 'CRM notes, newest first',
+          description: [
+            `${scopeNote('notes.read')} The notes on the CRM timelines of the company’s contacts and deals, as the contact and deal pages show them, whoever wrote them (a member or an API key), newest first by when they were added; pages never skip or repeat a note. Filters combine: a note matches all of them. Each note has its text and the contact and deal it is about by id, and says who wrote it (\`writtenBy\`), with the key for one added through the API (\`apiKeyId\`), never which member, so an integration can tell the notes it added from members’. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+            'The rest of the timeline (stage moves, closings, tasks done) is never read here, nor the contact’s name or number, which `contacts.read` reads. A note is never changed; erasing a contact deletes its notes, so they are no longer listed and their ids answer 404, and merging contacts moves the merged contact’s notes to the one kept (`contactId` changes; `contact.merged` and GET /contact-changes say when). To catch up, ask for `createdSince` a little before your previous pass began (a minute, say) and expect to see some notes again: a note carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
+          ].join('\n\n'),
+          parameters: [
+            ...pageParams,
+            {
+              name: 'contactId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description:
+                'Only the notes on this contact’s timeline: about the contact or one of its deals.',
+            },
+            {
+              name: 'dealId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the notes about this deal.',
+            },
+            {
+              name: 'createdSince',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description: 'Only the notes added at or after this time.',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of notes.', content: pageOf('Note') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
         post: {
           operationId: 'createNote',
           summary: 'Add a note to the CRM timeline',
-          description: `${scopeNote('notes.write')} As members add a note on the contact and deal pages: to a contact (not erased), or to a deal and so to its contact, up to ${API_NOTE_MAX_LENGTH} characters. The note is recorded as written through the API: the timeline says so, and the audit log names the key, never the note’s text. Notes, like the rest of the timeline, are not read through the API. An unknown deal or a contact other than the deal’s is answered with 422 naming the field; an unknown or erased contact with 404, and a deal whose contact was erased with 409. Needs the CRM in the company’s plan (403, reason not_in_plan). With an \`Idempotency-Key\`, a retry answers the first response. ${MERGED_CONTACT_NOTE}`,
+          description: `${scopeNote('notes.write')} As members add a note on the contact and deal pages: to a contact (not erased), or to a deal and so to its contact, up to ${API_NOTE_MAX_LENGTH} characters. The note is recorded as written through the API: the timeline says so, and the audit log names the key, never the note’s text. GET /notes reads notes (\`notes.read\`); the rest of the timeline is not read through the API. An unknown deal or a contact other than the deal’s is answered with 422 naming the field; an unknown or erased contact with 404, and a deal whose contact was erased with 409. Needs the CRM in the company’s plan (403, reason not_in_plan). With an \`Idempotency-Key\`, a retry answers the first response. ${MERGED_CONTACT_NOTE}`,
           parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
           requestBody: { required: true, content: json(ref('CreateNote')) },
           responses: {
             '201': { description: 'The note added.', content: json(dataOf(ref('Note'))) },
             ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/notes/{id}': {
+        get: {
+          operationId: 'getNote',
+          summary: 'A CRM note',
+          description: `${scopeNote('notes.read')} As GET /notes gives it. The id of any other timeline entry answers 404, as an unknown one does. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': { description: 'The note.', content: json(dataOf(ref('Note'))) },
+            ...errors(401, 403, 404, 429, 500),
           },
         },
       },
@@ -2903,6 +3177,12 @@ export function buildOpenApiDocument(serverUrl: string) {
         `${WEBHOOK_EVENT_INFO['order.status_changed'].description} order.status and order.previousStatus are the change, and order.changedBy who made it: a member, an API key (order.apiKeyId names it, so an integration can tell its own changes from others') or HyFib applying the order’s Payment Link; the rest is the order when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt. An endpoint receives every status unless it names the statuses it takes (its \`orderStatuses\`, or the statuses ticked in Settings → Webhooks).`,
         'WebhookOrderStatusChanged',
       ),
+      'payment_link.status_changed': webhook(
+        'webhookPaymentLinkStatusChanged',
+        WEBHOOK_EVENT_INFO['payment_link.status_changed'].label,
+        `${WEBHOOK_EVENT_INFO['payment_link.status_changed'].description} paymentLink.status and paymentLink.previousStatus are the change, as the worker wrote it from what it did at Razorpay or what Razorpay reported; the rest is the link as GET /orders/{id}/payment-links reads it when the event is delivered: its amounts, expiry, the message that sent it in the chat or why it was not sent (notSentReason), what went wrong at Razorpay, and who asked for it (a member, never which, or an API key by its id). Never the link’s address or Razorpay’s ids. Only a link Razorpay reports paid marks the order paid, which order.status_changed reports. Asking for payment and asking to cancel a link send no event of their own here: the link is \`creating\` until the worker creates it, and cancelled when Razorpay reports it. It happens on the order’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        'WebhookPaymentLinkStatusChanged',
+      ),
       'campaign.status_changed': webhook(
         'webhookCampaignStatusChanged',
         WEBHOOK_EVENT_INFO['campaign.status_changed'].label,
@@ -2912,8 +3192,14 @@ export function buildOpenApiDocument(serverUrl: string) {
       'deal.created': webhook(
         'webhookDealCreated',
         WEBHOOK_EVENT_INFO['deal.created'].label,
-        `${WEBHOOK_EVENT_INFO['deal.created'].description} deal.stageId, deal.pipelineId and deal.status are those it was added with; the rest is the deal when the event is delivered, so a deal whose contact was erased is sent as erasure left it, without the contact's number or name. Read deals with GET /deals/{id} (\`deals.read\`).`,
+        `${WEBHOOK_EVENT_INFO['deal.created'].description} deal.stageId, deal.pipelineId and deal.status are those it was added with; the rest is the deal when the event is delivered, so a deal whose contact was erased is sent as erasure left it, without the contact's number or name. Read deals with GET /deals/{id} (\`deals.read\`). Every deal event's deal.changedBy says who made what it reports, as captured: a member, an automation or an API key, which deal.apiKeyId names, so an integration that changes deals through the API can tell its own changes from others'.`,
         'WebhookDealCreated',
+      ),
+      'deal.updated': webhook(
+        'webhookDealUpdated',
+        WEBHOOK_EVENT_INFO['deal.updated'].label,
+        `${WEBHOOK_EVENT_INFO['deal.updated'].description} changes names what changed (title, valueMinor, expectedCloseOn), never the values before: the deal is the deal when the event is delivered, so a deal changed again since gives its latest details, and a deal whose contact was erased is sent as erasure left it. One change can also move, reopen, close or give the deal to another owner, and then sends deal.stage_changed, deal.status_changed and deal.owner_changed as well, in the order the steps happen: reopened, moved, details changed, given to another owner, closed; they can have the same createdAt. Pipelines, stages and owners an endpoint names narrow it as the other deal events. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        'WebhookDealUpdated',
       ),
       'deal.stage_changed': webhook(
         'webhookDealStageChanged',
@@ -2924,7 +3210,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'deal.owner_changed': webhook(
         'webhookDealOwnerChanged',
         WEBHOOK_EVENT_INFO['deal.owner_changed'].label,
-        `${WEBHOOK_EVENT_INFO['deal.owner_changed'].description} deal.ownerId and deal.previousOwnerId are the change (null for no owner), with the stage, pipeline and status the deal had; the rest is the deal when the event is delivered. One change can also move, reopen or close the deal, and then sends deal.stage_changed and deal.status_changed as well, in the order the steps happen: reopened, moved, given to another owner, closed; each event gives the deal as its step left it, and they can have the same createdAt. An endpoint that names owners (its \`ownerIds\`) receives it for the owner the deal left as well as for the one it was given to. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['deal.owner_changed'].description} deal.ownerId and deal.previousOwnerId are the change (null for no owner), with the stage, pipeline and status the deal had; the rest is the deal when the event is delivered. One change can also move, reopen or close the deal or change its details, and then sends deal.stage_changed, deal.status_changed and deal.updated as well, in the order the steps happen: reopened, moved, details changed, given to another owner, closed; each event gives the deal as its step left it, and they can have the same createdAt. An endpoint that names owners (its \`ownerIds\`) receives it for the owner the deal left as well as for the one it was given to. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookDealOwnerChanged',
       ),
       'deal.status_changed': webhook(
@@ -2936,14 +3222,32 @@ export function buildOpenApiDocument(serverUrl: string) {
       'task.created': webhook(
         'webhookTaskCreated',
         WEBHOOK_EVENT_INFO['task.created'].label,
-        `${WEBHOOK_EVENT_INFO['task.created'].description} task.status is the one it was added with; the rest is the task when the event is delivered. A task’s notes are never sent: read the task with GET /tasks/{id} (\`tasks.read\`). Erasing a contact deletes its tasks, so the events of an erased contact’s task are no longer delivered.`,
+        `${WEBHOOK_EVENT_INFO['task.created'].description} task.status is the one it was added with; the rest is the task when the event is delivered. A task’s notes are never sent: read the task with GET /tasks/{id} (\`tasks.read\`). Erasing a contact deletes its tasks, so the events of an erased contact’s task are no longer delivered. Every task event's task.changedBy says who made what it reports, as captured: a member, an automation (which only adds tasks) or an API key, which task.apiKeyId names, so an integration that changes tasks through the API can tell its own changes from others'.`,
         'WebhookTaskCreated',
+      ),
+      'task.updated': webhook(
+        'webhookTaskUpdated',
+        WEBHOOK_EVENT_INFO['task.updated'].label,
+        `${WEBHOOK_EVENT_INFO['task.updated'].description} changes names what changed (title, notes, dueAt, remindAt), never the values before: the task is the task when the event is delivered, so a task changed again since gives its latest title and due time, and its notes and reminder are never sent: read them with GET /tasks/{id} (\`tasks.read\`). One change can also give the task to another member, and one through the API can also reopen or close it, and then sends task.assignee_changed and task.status_changed as well, in the order the steps happen: reopened, details changed, given to another member, closed; they can have the same createdAt. Assignees an endpoint names narrow it as the other task events. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        'WebhookTaskUpdated',
+      ),
+      'task.assignee_changed': webhook(
+        'webhookTaskAssigneeChanged',
+        WEBHOOK_EVENT_INFO['task.assignee_changed'].label,
+        `${WEBHOOK_EVENT_INFO['task.assignee_changed'].description} task.assigneeId and task.previousAssigneeId are the change, with the status the task had; the rest is the task when the event is delivered. One change can also change the task’s details, and one through the API can also reopen or close it, and then sends task.updated and task.status_changed as well, in the order the steps happen: reopened, details changed, given to another member, closed; each event gives the task as its step left it, and they can have the same createdAt. An endpoint that names assignees (its \`taskAssigneeIds\`) receives it for the member the task left as well as for the one it was given to. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        'WebhookTaskAssigneeChanged',
       ),
       'task.status_changed': webhook(
         'webhookTaskStatusChanged',
         WEBHOOK_EVENT_INFO['task.status_changed'].label,
-        `${WEBHOOK_EVENT_INFO['task.status_changed'].description} task.status and task.previousStatus are the change (open, done or cancelled); the rest is the task when the event is delivered. Editing a task’s details or its reminder sends nothing. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['task.status_changed'].description} task.status and task.previousStatus are the change (open, done or cancelled); the rest is the task when the event is delivered. Editing its title, notes, due time or reminder sends task.updated, and giving it to another member task.assignee_changed. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookTaskStatusChanged',
+      ),
+      'note.created': webhook(
+        'webhookNoteCreated',
+        WEBHOOK_EVENT_INFO['note.created'].label,
+        `${WEBHOOK_EVENT_INFO['note.created'].description} The note is the note when the event is delivered: the deal it is about, who wrote it (\`note.writtenBy\`: a member, never which, or an API key, named by note.apiKeyId, so an integration that adds notes through the API can tell its own from members’), and its contact, the contact kept when a merge has moved it. Never the note’s text, which may hold anything a member wrote: read the note with GET /notes/{id} (\`notes.read\`). Notes are never changed, so no other note event is sent; erasing a contact deletes its notes, so the events of an erased contact’s notes are no longer delivered. No endpoint filter narrows it.`,
+        'WebhookNoteCreated',
       ),
       ping: webhook(
         'webhookPing',
@@ -3134,9 +3438,11 @@ export function buildOpenApiDocument(serverUrl: string) {
         ConversationNote: jsonSchema(apiConversationNoteSchema),
         Campaign: jsonSchema(apiCampaignSchema),
         Order: jsonSchema(apiOrderSchema),
+        PaymentLink: jsonSchema(apiPaymentLinkSchema),
         UpdateOrder: jsonSchema(apiUpdateOrderSchema, 'input'),
         Pipeline: jsonSchema(apiPipelineSchema),
         Deal: jsonSchema(apiDealSchema),
+        DealHistoryEntry: jsonSchema(apiDealHistoryEntrySchema),
         CreateDeal: jsonSchema(apiCreateDealSchema, 'input'),
         UpdateDeal: jsonSchema(apiUpdateDealSchema, 'input'),
         Task: jsonSchema(apiTaskSchema),
@@ -3184,13 +3490,18 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookAutomationRunEnded: jsonSchema(automationRunEndedPayloadSchema),
         WebhookOrderReceived: jsonSchema(orderReceivedPayloadSchema),
         WebhookOrderStatusChanged: jsonSchema(orderStatusChangedPayloadSchema),
+        WebhookPaymentLinkStatusChanged: jsonSchema(paymentLinkStatusChangedPayloadSchema),
         WebhookCampaignStatusChanged: jsonSchema(campaignStatusChangedPayloadSchema),
         WebhookDealCreated: jsonSchema(dealCreatedPayloadSchema),
+        WebhookDealUpdated: jsonSchema(dealUpdatedPayloadSchema),
         WebhookDealStageChanged: jsonSchema(dealStageChangedPayloadSchema),
         WebhookDealOwnerChanged: jsonSchema(dealOwnerChangedPayloadSchema),
         WebhookDealStatusChanged: jsonSchema(dealStatusChangedPayloadSchema),
         WebhookTaskCreated: jsonSchema(taskCreatedPayloadSchema),
+        WebhookTaskUpdated: jsonSchema(taskUpdatedPayloadSchema),
+        WebhookTaskAssigneeChanged: jsonSchema(taskAssigneeChangedPayloadSchema),
         WebhookTaskStatusChanged: jsonSchema(taskStatusChangedPayloadSchema),
+        WebhookNoteCreated: jsonSchema(noteCreatedPayloadSchema),
         WebhookPing: jsonSchema(pingPayloadSchema),
       },
     },
@@ -3259,17 +3570,23 @@ export const API_ROUTES = [
   ['post', '/automation-runs/stop-many'],
   ['get', '/orders'],
   ['get', '/orders/{id}'],
+  ['get', '/orders/{id}/payment-links'],
   ['patch', '/orders/{id}'],
+  ['post', '/orders/{id}/request-payment'],
+  ['post', '/orders/{id}/cancel-payment'],
   ['get', '/pipelines'],
   ['get', '/deals'],
   ['post', '/deals'],
   ['get', '/deals/{id}'],
   ['patch', '/deals/{id}'],
+  ['get', '/deals/{id}/history'],
   ['get', '/tasks'],
   ['post', '/tasks'],
   ['get', '/tasks/{id}'],
   ['patch', '/tasks/{id}'],
+  ['get', '/notes'],
   ['post', '/notes'],
+  ['get', '/notes/{id}'],
   ['get', '/webhook-endpoints'],
   ['post', '/webhook-endpoints'],
   ['post', '/webhook-endpoints/replay-failed'],

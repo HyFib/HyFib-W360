@@ -279,6 +279,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       taskAssigneeIds: null,
       assigneeIds: null,
       contactTags: null,
+      conversationTags: null,
       oauth: null,
       apiKeyId: key.id,
       createdAt: expect.any(String),
@@ -2890,6 +2891,88 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { contactTags: [] }))).toMatchObject({
       path: 'contactTags',
+    });
+  });
+
+  it('choose the conversation tags whose events an endpoint receives, as conversations carry them, kept by changes that leave them out and cleared with the events (ADR-273)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    const refusals = [
+      [['deal.created'], ['refund'], 'conversationTags'],
+      [['message.received'], [], 'conversationTags'],
+      [['message.received'], ['refund', 'a,b'], 'conversationTags.1'],
+      [['message.status'], ['refund', ' '], 'conversationTags.1'],
+    ] as const;
+    for (const [index, [events, conversationTags, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, conversationTags },
+            idem(`conversation-tags-bad-${index}`, JSON.stringify(conversationTags)),
+          ),
+        ),
+        JSON.stringify(conversationTags),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'conv-tags-1', {
+      url: receiverUrl(),
+      events: ['message.received', 'contact.created'],
+      conversationTags: ['Refund', 'refund ', 'Delivery  Delay'],
+      contactTags: ['vip'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data).toMatchObject({
+      conversationTags: ['refund', 'delivery delay'],
+      contactTags: ['vip'],
+    });
+    expect((await api().get(key.ctx, id)).conversationTags).toEqual(['refund', 'delivery delay']);
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { conversationTags?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => a.metadata.conversationTags);
+    expect(await audits('webhook.endpoint_created')).toEqual([['refund', 'delivery delay']]);
+    expect(await api().update(key.ctx, id, { description: 'Refunds desk' })).toMatchObject({
+      conversationTags: ['refund', 'delivery delay'],
+    });
+    expect(await api().update(key.ctx, id, { conversationTags: ['Urgent'] })).toMatchObject({
+      conversationTags: ['urgent'],
+      contactTags: ['vip'],
+    });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      ['refund', 'delivery delay'],
+      ['urgent'],
+    ]);
+    // Any event of a conversation keeps the list; events without one clear it.
+    expect(
+      await api().update(key.ctx, id, { events: ['conversation.team_changed'] }),
+    ).toMatchObject({ conversationTags: ['urgent'] });
+    expect(await api().update(key.ctx, id, { events: ['contact.created'] })).toMatchObject({
+      events: ['contact.created'],
+      conversationTags: null,
+      contactTags: null,
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { conversationTags: ['refund'] })),
+    ).toMatchObject({ path: 'conversationTags' });
+    expect(
+      await api().update(key.ctx, id, { events: ['message.status'], conversationTags: ['refund'] }),
+    ).toMatchObject({ conversationTags: ['refund'] });
+    expect(await api().update(key.ctx, id, { conversationTags: null })).toMatchObject({
+      conversationTags: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { conversationTags: [] }))).toMatchObject({
+      path: 'conversationTags',
     });
   });
 

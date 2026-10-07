@@ -172,6 +172,165 @@ export async function writeLockedOrderStatus(
   return version;
 }
 
+/** Who asks a customer to pay: a member on the order page, or an API key (ADR-283). */
+export type PaymentRequester = { membershipId: string; userId: string } | { apiKeyId: string };
+
+/** An order whose row the caller locked, as a payment request reads it. */
+export interface PayableOrder {
+  id: string;
+  status: OrderStatus;
+  droppedItems: number;
+  currency: string | null;
+  subtotalMinor: number | null;
+  conversationId: string;
+  version: number;
+}
+
+/**
+ * Asks the customer to pay an order whose row the caller locked, as members do on the order page
+ * and keys through `POST /orders/{id}/request-payment` (ADR-283): the order must be received or
+ * confirmed, its cart read whole and its total in rupees within Razorpay's and HyFib's bounds, and
+ * the company's Razorpay account checked. The link is written ahead for the worker to create once
+ * and send in the chat, and the order waits for payment, naming who asked. Each caller writes its
+ * own audit row.
+ */
+export async function writePaymentRequest(
+  tx: Tx,
+  deps: Pick<CommerceDeps, 'jobs' | 'signer'>,
+  tenantId: string,
+  order: PayableOrder,
+  by: PaymentRequester,
+  now: Date,
+): Promise<{ linkId: string; version: number }> {
+  if (!PAYABLE_ORDER_STATUSES.includes(order.status)) {
+    throw new AppError(
+      'conflict',
+      'Payment can be requested only for received or confirmed orders.',
+    );
+  }
+  if (order.droppedItems > 0) {
+    throw new AppError('precondition_failed', DROPPED_ITEMS_MESSAGE);
+  }
+  if (order.currency !== 'INR' || order.subtotalMinor === null) {
+    throw new AppError(
+      'precondition_failed',
+      order.currency !== 'INR'
+        ? 'Payment Links are for amounts in Indian rupees.'
+        : 'The order total could not be worked out from the prices WhatsApp sent.',
+    );
+  }
+  if (order.subtotalMinor < COMMERCE_LIMITS.minPaymentMinor) {
+    throw new AppError('precondition_failed', 'Razorpay needs at least ₹1.');
+  }
+  if (order.subtotalMinor > COMMERCE_LIMITS.maxPaymentMinor) {
+    throw new AppError('precondition_failed', PAYMENT_CAP_MESSAGE);
+  }
+  const [account] = await tx
+    .select({ status: commercePaymentAccounts.status })
+    .from(commercePaymentAccounts)
+    .where(eq(commercePaymentAccounts.tenantId, tenantId));
+  if (!account || account.status !== 'verified') {
+    throw new AppError(
+      'precondition_failed',
+      account
+        ? 'Your Razorpay account has not been checked successfully. Check it in Commerce → Payments.'
+        : 'Add your Razorpay account in Commerce → Payments first.',
+    );
+  }
+  const byKey = 'apiKeyId' in by;
+  const linkId = uuidv7();
+  try {
+    await tx.insert(commercePaymentLinks).values({
+      id: linkId,
+      tenantId,
+      orderId: order.id,
+      conversationId: order.conversationId,
+      reference: newPaymentLinkReference(),
+      amountMinor: order.subtotalMinor,
+      currency: 'INR',
+      expiresAt: new Date(now.getTime() + COMMERCE_LIMITS.paymentLinkDays * 86_400_000),
+      nextCheckAt: now,
+      createdByMembershipId: byKey ? null : by.membershipId,
+      createdByApiKeyId: byKey ? by.apiKeyId : null,
+    });
+  } catch (error) {
+    if (isUniqueViolation(error, 'commerce_payment_links_open_uq')) {
+      throw new AppError('conflict', 'This order already has an open Payment Link.');
+    }
+    throw error;
+  }
+  const version = order.version + 1;
+  await tx
+    .update(commerceOrders)
+    .set({
+      status: 'awaiting_payment',
+      statusChangedAt: now,
+      version,
+      ...orderStatusChangedBy(byKey ? { apiKeyId: by.apiKeyId } : 'member'),
+    })
+    .where(and(eq(commerceOrders.tenantId, tenantId), eq(commerceOrders.id, order.id)));
+  await deps.jobs.enqueue(
+    tx,
+    QUEUES.commerceLink.name,
+    deps.signer.sign({
+      kind: 'commerce.link',
+      tenantId,
+      actorUserId: byKey ? null : by.userId,
+      ref: linkId,
+    }),
+    { singletonKey: `${linkId}:create` },
+  );
+  return { linkId, version };
+}
+
+/**
+ * Asks the worker to cancel the open Payment Link of an order whose row the caller locked, as
+ * members do on the order page and keys through `POST /orders/{id}/cancel-payment` (ADR-283); the
+ * order waits for payment until Razorpay confirms the cancellation. Asking again while it is being
+ * cancelled changes nothing (`requested` false); an order without an open link is refused. Each
+ * caller writes its own audit row when `requested` is true.
+ */
+export async function writePaymentLinkCancel(
+  tx: Tx,
+  deps: Pick<CommerceDeps, 'jobs' | 'signer' | 'clock'>,
+  tenantId: string,
+  orderId: string,
+  actorUserId: string | null,
+): Promise<{ requested: boolean }> {
+  const [link] = await tx
+    .select({
+      id: commercePaymentLinks.id,
+      cancelRequestedAt: commercePaymentLinks.cancelRequestedAt,
+    })
+    .from(commercePaymentLinks)
+    .where(
+      and(
+        eq(commercePaymentLinks.tenantId, tenantId),
+        eq(commercePaymentLinks.orderId, orderId),
+        inArray(commercePaymentLinks.status, [...OPEN_PAYMENT_LINK_STATUSES]),
+      ),
+    )
+    .for('update');
+  if (!link) throw new AppError('conflict', 'This order has no open Payment Link.');
+  if (link.cancelRequestedAt) return { requested: false };
+  const now = deps.clock.now();
+  await tx
+    .update(commercePaymentLinks)
+    .set({
+      cancelRequestedAt: now,
+      nextCheckAt: now,
+      version: sql`${commercePaymentLinks.version} + 1`,
+    })
+    .where(and(eq(commercePaymentLinks.tenantId, tenantId), eq(commercePaymentLinks.id, link.id)));
+  await deps.jobs.enqueue(
+    tx,
+    QUEUES.commerceLink.name,
+    deps.signer.sign({ kind: 'commerce.link', tenantId, actorUserId, ref: link.id }),
+    { singletonKey: `${link.id}:cancel` },
+  );
+  return { requested: true };
+}
+
 export function createCommerceService(deps: CommerceDeps) {
   const { db } = deps;
 
@@ -957,6 +1116,8 @@ export function createCommerceService(deps: CommerceDeps) {
               checkedAt: commercePaymentLinks.checkedAt,
               messageId: commercePaymentLinks.messageId,
               createdAt: commercePaymentLinks.createdAt,
+              // Asked for by an API key rather than a member (ADR-283).
+              throughApi: sql<boolean>`(${commercePaymentLinks.createdByApiKeyId} IS NOT NULL)`,
             })
             .from(commercePaymentLinks)
             .where(
@@ -1095,72 +1256,14 @@ export function createCommerceService(deps: CommerceDeps) {
       const now = deps.clock.now();
       return db.run(ctx.scope, async (tx) => {
         const order = await lockOrder(tx, ctx, data.id, data.expectedVersion);
-        if (!PAYABLE_ORDER_STATUSES.includes(order.status)) {
-          throw new AppError(
-            'conflict',
-            'Payment can be requested only for received or confirmed orders.',
-          );
-        }
-        if (order.droppedItems > 0) {
-          throw new AppError('precondition_failed', DROPPED_ITEMS_MESSAGE);
-        }
-        if (order.currency !== 'INR' || order.subtotalMinor === null) {
-          throw new AppError(
-            'precondition_failed',
-            order.currency !== 'INR'
-              ? 'Payment Links are for amounts in Indian rupees.'
-              : 'The order total could not be worked out from the prices WhatsApp sent.',
-          );
-        }
-        if (order.subtotalMinor < COMMERCE_LIMITS.minPaymentMinor) {
-          throw new AppError('precondition_failed', 'Razorpay needs at least ₹1.');
-        }
-        if (order.subtotalMinor > COMMERCE_LIMITS.maxPaymentMinor) {
-          throw new AppError('precondition_failed', PAYMENT_CAP_MESSAGE);
-        }
-        const [account] = await tx
-          .select({ status: commercePaymentAccounts.status })
-          .from(commercePaymentAccounts)
-          .where(eq(commercePaymentAccounts.tenantId, ctx.tenant.id));
-        if (!account || account.status !== 'verified') {
-          throw new AppError(
-            'precondition_failed',
-            account
-              ? 'Your Razorpay account has not been checked successfully. Check it in Commerce → Payments.'
-              : 'Add your Razorpay account in Commerce → Payments first.',
-          );
-        }
-        const linkId = uuidv7();
-        try {
-          await tx.insert(commercePaymentLinks).values({
-            id: linkId,
-            tenantId: ctx.tenant.id,
-            orderId: order.id,
-            conversationId: order.conversationId,
-            reference: newPaymentLinkReference(),
-            amountMinor: order.subtotalMinor,
-            currency: 'INR',
-            expiresAt: new Date(now.getTime() + COMMERCE_LIMITS.paymentLinkDays * 86_400_000),
-            nextCheckAt: now,
-            createdByMembershipId: ctx.membership.id,
-          });
-        } catch (error) {
-          if (isUniqueViolation(error, 'commerce_payment_links_open_uq')) {
-            throw new AppError('conflict', 'This order already has an open Payment Link.');
-          }
-          throw error;
-        }
-        const version = order.version + 1;
-        await tx
-          .update(commerceOrders)
-          .set({
-            status: 'awaiting_payment',
-            statusChangedAt: now,
-            version,
-            ...orderStatusChangedBy('member'),
-          })
-          .where(and(eq(commerceOrders.tenantId, ctx.tenant.id), eq(commerceOrders.id, order.id)));
-        await enqueue(tx, ctx, 'commerceLink', 'commerce.link', linkId, `${linkId}:create`);
+        const requested = await writePaymentRequest(
+          tx,
+          deps,
+          ctx.tenant.id,
+          order,
+          { membershipId: ctx.membership.id, userId: ctx.user.id },
+          now,
+        );
         await recordAudit(
           tx,
           ctx,
@@ -1176,7 +1279,7 @@ export function createCommerceService(deps: CommerceDeps) {
           },
           meta,
         );
-        return { linkId, version };
+        return requested;
       });
     },
 
@@ -1187,37 +1290,14 @@ export function createCommerceService(deps: CommerceDeps) {
       const data = parseInput(z.object({ orderId: z.uuid() }), input);
       return db.run(ctx.scope, async (tx) => {
         const order = await lockOrder(tx, ctx, data.orderId);
-        const [link] = await tx
-          .select({
-            id: commercePaymentLinks.id,
-            cancelRequestedAt: commercePaymentLinks.cancelRequestedAt,
-          })
-          .from(commercePaymentLinks)
-          .where(
-            and(
-              eq(commercePaymentLinks.tenantId, ctx.tenant.id),
-              eq(commercePaymentLinks.orderId, order.id),
-              inArray(commercePaymentLinks.status, [...OPEN_PAYMENT_LINK_STATUSES]),
-            ),
-          )
-          .for('update');
-        if (!link) throw new AppError('conflict', 'This order has no open Payment Link.');
-        if (!link.cancelRequestedAt) {
-          const now = deps.clock.now();
-          await tx
-            .update(commercePaymentLinks)
-            .set({
-              cancelRequestedAt: now,
-              nextCheckAt: now,
-              version: sql`${commercePaymentLinks.version} + 1`,
-            })
-            .where(
-              and(
-                eq(commercePaymentLinks.tenantId, ctx.tenant.id),
-                eq(commercePaymentLinks.id, link.id),
-              ),
-            );
-          await enqueue(tx, ctx, 'commerceLink', 'commerce.link', link.id, `${link.id}:cancel`);
+        const { requested } = await writePaymentLinkCancel(
+          tx,
+          deps,
+          ctx.tenant.id,
+          order.id,
+          ctx.user.id,
+        );
+        if (requested) {
           await recordAudit(
             tx,
             ctx,

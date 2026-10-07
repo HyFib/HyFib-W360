@@ -483,6 +483,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'checked_at',
       'paid_at',
       'created_by_membership_id',
+      'created_by_api_key_id',
       'version',
       'created_at',
       'updated_at',
@@ -970,9 +971,15 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'created_by_membership_id',
       'created_by_automation_id',
       'created_by_api_key_id',
+      'changed_by',
+      'changed_by_api_key_id',
       'created_at',
       'updated_at',
     ],
+    omitted: {
+      changed_xact:
+        'The database transaction that recorded who made the latest change (ADR-277), meaningless outside the database.',
+    },
   },
   {
     table: 'app.crm_pipelines',
@@ -1022,9 +1029,15 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'created_by_membership_id',
       'created_by_automation_id',
       'created_by_api_key_id',
+      'changed_by',
+      'changed_by_api_key_id',
       'created_at',
       'updated_at',
     ],
+    omitted: {
+      changed_xact:
+        'The database transaction that recorded who made the latest change (ADR-277), meaningless outside the database.',
+    },
   },
   {
     table: 'app.csat_surveys',
@@ -1609,6 +1622,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'task_assignee_ids',
       'assignee_ids',
       'contact_tags',
+      'conversation_tags',
       'oauth_token_url',
       'oauth_client_id',
       'oauth_scope',

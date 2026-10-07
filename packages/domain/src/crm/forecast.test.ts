@@ -152,6 +152,7 @@ describe('the forecast by month in Reports (ADR-252)', () => {
         group({ closeMonth: null, valueMinor: 2_000 }),
       ],
       months,
+      [50, 80, null],
     );
     expect(result).toEqual({
       months,
@@ -170,8 +171,32 @@ describe('the forecast by month in Reports (ADR-252)', () => {
       forecastByMonth(
         [group({ winPercent: null }), group({ stageId: 'new', winPercent: null })],
         months,
+        [null, null],
       ),
     ).toMatchObject({ hasChances: false, dealsWithoutChance: 2 });
-    expect(forecastByMonth([], months).buckets.map((b) => b.deals)).toEqual([0, 0, 0, 0, 0]);
+    expect(forecastByMonth([], months, []).buckets.map((b) => b.deals)).toEqual([0, 0, 0, 0, 0]);
+  });
+
+  it('weighs when any active stage has a chance, even one without open deals, as the board does', () => {
+    // Found in review: the only stage with a chance holds no open deals.
+    const unweighed: ForecastGroup = {
+      stageId: 'new',
+      winPercent: null,
+      closeMonth: null,
+      deals: 2,
+      valueMinor: 4_000,
+    };
+    const result = forecastByMonth([unweighed], months, [null, 60]);
+    expect(result).toMatchObject({ hasChances: true, dealsWithoutChance: 2 });
+    expect(result.buckets.map((b) => b.weightedMinor)).toEqual([0, 0, 0, 0, 0]);
+    expect(forecastByMonth([], months, [25]).hasChances).toBe(true);
+    expect(forecastByMonth([unweighed], months, [null, null]).hasChances).toBe(false);
+    // The board says the same of the same stages.
+    expect(
+      forecast([
+        stage({ winPercent: null }),
+        stage({ count: 0, valueMinor: 0, monthValueMinor: 0, winPercent: 60 }),
+      ]).hasChances,
+    ).toBe(true);
   });
 });
