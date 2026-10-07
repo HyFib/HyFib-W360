@@ -5550,6 +5550,118 @@ describe('task events (ADR-261)', () => {
     expect(bodiesAt(salesTasks.path).filter((b) => b.type === 'deal.created')).toHaveLength(2);
   });
 
+  it("sends an endpoint that names stages or owners of tasks' deals only the events of the tasks about deals in those stages or owned by those members when the events happen, and with both only those passing both (ADR-304)", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const svc = crm();
+    const { id: salesId } = await svc.createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New', 'Proposal'],
+    });
+    const [sales] = (await svc.listPipelines(owner)).filter((p) => p.id === salesId);
+    const stage = (name: string) => sales!.stages.find((st) => st.name === name)!.id;
+    const [fresh, proposal] = [stage('New'), stage('Proposal')];
+    /** An endpoint of the company taking the events of the tasks of the stages' and owners' deals. */
+    const add = async (
+      eventTypes: WebhookEventType[],
+      taskStageIds: string[] | null,
+      taskDealOwnerIds: string[] | null,
+    ) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        taskStageIds,
+        taskDealOwnerIds,
+      });
+      return { ...created, path };
+    };
+    const proposals = await add([...TASK_EVENTS, 'deal.created'], [proposal], null);
+    const agentsDeals = await add(TASK_EVENTS, null, [agent.membership.id]);
+    const agentsProposals = await add(TASK_EVENTS, [proposal], [agent.membership.id]);
+    const everyTask = await add(TASK_EVENTS, null, null);
+    const jaya = await newContact(owner, 'Jaya');
+    // The agent's deal is new; the other is a proposal nobody owns.
+    const { id: big } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: salesId,
+      stageId: fresh,
+      title: 'Annual plan',
+      ownerMembershipId: agent.membership.id,
+    });
+    const { id: small } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: salesId,
+      stageId: proposal,
+      title: 'Starter plan',
+    });
+    const addTask = async (title: string, about: Record<string, string>) =>
+      (
+        await svc.createTask(owner, {
+          title,
+          assigneeMembershipId: owner.membership.id,
+          ...about,
+        })
+      ).id;
+    const call = await addTask('Call about the annual plan', { dealId: big });
+    const quote = await addTask('Send the starter quote', { dealId: small });
+    const brochures = await addTask('Order brochures', {});
+    // The agent's deal becomes a proposal, and the other deal is given to the agent; then both
+    // tasks are completed: each in Proposal and the agent's by then.
+    await svc.moveDeal(owner, { id: big, expectedVersion: 1, stageId: proposal });
+    await svc.updateDeal(owner, {
+      id: small,
+      expectedVersion: 1,
+      title: 'Starter plan',
+      value: '',
+      ownerMembershipId: agent.membership.id,
+      expectedCloseOn: null,
+    });
+    await svc.completeTask(owner, { id: call, expectedVersion: 1 });
+    await svc.completeTask(owner, { id: quote, expectedVersion: 1 });
+
+    // Each task event is captured once, with a delivery to each endpoint its deal's stage and owner
+    // reach; a task about no deal, or of a deal without an owner, reaches no list of owners.
+    expect((await taskEventsOf(c)).map((e) => [e.type, e.detail.taskId, e.deliveries])).toEqual([
+      ['task.created', call, 2],
+      ['task.created', quote, 2],
+      ['task.created', brochures, 1],
+      ['task.status_changed', call, 4],
+      ['task.status_changed', quote, 4],
+    ]);
+    await deliverDue(c);
+    const tasksAt = (path: string) =>
+      bodiesAt(path)
+        .filter((b) => b.type.startsWith('task.'))
+        .map((b) => [b.type, taskIn(b).id])
+        .sort();
+    expect(tasksAt(proposals.path)).toEqual(
+      [
+        ['task.created', quote],
+        ['task.status_changed', call],
+        ['task.status_changed', quote],
+      ].sort(),
+    );
+    expect(tasksAt(agentsDeals.path)).toEqual(
+      [
+        ['task.created', call],
+        ['task.status_changed', call],
+        ['task.status_changed', quote],
+      ].sort(),
+    );
+    expect(tasksAt(agentsProposals.path)).toEqual(
+      [
+        ['task.status_changed', call],
+        ['task.status_changed', quote],
+      ].sort(),
+    );
+    expect(tasksAt(everyTask.path)).toHaveLength(5);
+    // Deal events are not narrowed by the stages or owners of tasks' deals.
+    expect(bodiesAt(proposals.path).filter((b) => b.type === 'deal.created')).toHaveLength(2);
+  });
+
   it('sends a change of assignee with both assignees, to the endpoints of either assignee, in its place among one request’s steps (ADR-274)', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);

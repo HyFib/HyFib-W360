@@ -215,6 +215,12 @@ import {
   webhookTaskPipelineIdsFor,
   webhookTaskPipelineIdsSchema,
   WEBHOOK_TASK_PIPELINES_NEED_THE_EVENTS,
+  webhookTaskStageIdsFor,
+  webhookTaskStageIdsSchema,
+  WEBHOOK_TASK_STAGES_NEED_THE_EVENTS,
+  webhookTaskDealOwnerIdsFor,
+  webhookTaskDealOwnerIdsSchema,
+  WEBHOOK_TASK_DEAL_OWNERS_NEED_THE_EVENTS,
   webhookContactTagsFor,
   webhookContactTagsSchema,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
@@ -3531,6 +3537,80 @@ describe('pipeline filters for task events (ADR-303)', () => {
     // The refusal names the events as Settings lists them.
     for (const type of WEBHOOK_TASK_EVENTS) {
       expect(WEBHOOK_TASK_PIPELINES_NEED_THE_EVENTS).toContain(WEBHOOK_EVENT_INFO[type].label);
+    }
+  });
+});
+
+describe('stage and owner filters for task events (ADR-304)', () => {
+  const proposal = 'c0d1e2f3-a4b5-4a8b-8c9d-0e1f2a3b4c5d';
+  const signed = 'd1e2f3a4-b5c6-4b9c-9d0e-1f2a3b4c5d6e';
+  const asha = 'e2f3a4b5-c6d7-4cad-8e1f-2a3b4c5d6e7f';
+  const dev = 'f3a4b5c6-d7e8-4dbe-9f2a-3b4c5d6e7f8a';
+  const many = (n: number) =>
+    Array.from({ length: n }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`);
+
+  it('take 1 to 50 stages or members, once each and in lower case, in the order given; null takes every task', () => {
+    expect(webhookTaskStageIdsSchema.parse([signed, proposal.toUpperCase(), signed])).toEqual([
+      signed,
+      proposal,
+    ]);
+    expect(webhookTaskDealOwnerIdsSchema.parse([dev, asha.toUpperCase(), dev])).toEqual([
+      dev,
+      asha,
+    ]);
+    expect(webhookTaskStageIdsSchema.parse(null)).toBeNull();
+    expect(webhookTaskDealOwnerIdsSchema.parse(null)).toBeNull();
+    expect(WEBHOOK_LIMITS.taskStages).toBe(50);
+    expect(WEBHOOK_LIMITS.taskDealOwners).toBe(50);
+    expect(webhookTaskStageIdsSchema.parse(many(51).slice(1))).toEqual(many(51).slice(1));
+    expect(webhookTaskDealOwnerIdsSchema.parse(many(51).slice(1))).toEqual(many(51).slice(1));
+    for (const refused of [[], many(51), ['Proposal'], [proposal, null], proposal, [42]]) {
+      expect(webhookTaskStageIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+      expect(
+        webhookTaskDealOwnerIdsSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookTaskStageIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one stage, or take every task.',
+    );
+    expect(webhookTaskStageIdsSchema.safeParse(many(51)).error?.issues[0]?.message).toBe(
+      'Choose at most 50 stages.',
+    );
+    expect(webhookTaskStageIdsSchema.safeParse(['Proposal']).error?.issues[0]?.message).toBe(
+      'Choose stages from the list.',
+    );
+    expect(webhookTaskDealOwnerIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one member, or take every task.',
+    );
+    expect(webhookTaskDealOwnerIdsSchema.safeParse(many(51)).error?.issues[0]?.message).toBe(
+      'Choose at most 50 members.',
+    );
+    expect(
+      webhookTaskDealOwnerIdsSchema.safeParse(['asha@example.com']).error?.issues[0]?.message,
+    ).toBe('Choose members from the list.');
+  });
+
+  it('are kept only while the endpoint takes a task event: given, kept, or cleared', () => {
+    for (const [keep, given, current] of [
+      [webhookTaskStageIdsFor, proposal, signed],
+      [webhookTaskDealOwnerIdsFor, asha, dev],
+    ] as const) {
+      for (const type of WEBHOOK_TASK_EVENTS) {
+        expect(keep([type], [given], null), type).toEqual([given]);
+        expect(keep([type], undefined, [current]), type).toEqual([current]);
+      }
+      expect(keep(['task.created'], null, [current])).toBeNull();
+      expect(keep(['task.status_changed'], undefined, null)).toBeNull();
+      // Deal events have stages and owners of their own (ADR-264, ADR-265).
+      expect(keep(['deal.created', 'contact.created'], [given], [current])).toBeNull();
+    }
+    // The refusals name the events as Settings lists them.
+    for (const type of WEBHOOK_TASK_EVENTS) {
+      expect(WEBHOOK_TASK_STAGES_NEED_THE_EVENTS).toContain(WEBHOOK_EVENT_INFO[type].label);
+      expect(WEBHOOK_TASK_DEAL_OWNERS_NEED_THE_EVENTS).toContain(WEBHOOK_EVENT_INFO[type].label);
     }
   });
 });

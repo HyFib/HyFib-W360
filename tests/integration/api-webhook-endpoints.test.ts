@@ -278,6 +278,8 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       ownerIds: null,
       taskAssigneeIds: null,
       taskPipelineIds: null,
+      taskStageIds: null,
+      taskDealOwnerIds: null,
       assigneeIds: null,
       contactTags: null,
       conversationTags: null,
@@ -2923,6 +2925,184 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { taskPipelineIds: [] }))).toMatchObject({
       path: 'taskPipelineIds',
+    });
+  });
+
+  it("choose the stages and owners of the deals whose tasks' events an endpoint receives, removed stages and members who left too, kept by changes that leave them out and cleared with the events (ADR-304)", async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const owner = await fx.ctx(c, c.owner);
+    const ownerId = owner.membership.id;
+    const agent = (await fx.ctx(c, c.agent)).membership.id;
+    const marketer = (await fx.ctx(c, c.marketer)).membership.id;
+    const other = await fx.company();
+    const elsewhereMember = (await fx.ctx(other, other.agent)).membership.id;
+    const crm = createCrmService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    const stagesOf = async (company: Company) => {
+      const companyOwner = await fx.ctx(company, company.owner);
+      const { id } = await crm.createPipeline(companyOwner, {
+        name: 'Sales',
+        currency: 'INR',
+        stages: ['New', 'Proposal', 'Lost'],
+      });
+      const [sales] = (await crm.listPipelines(companyOwner)).filter((p) => p.id === id);
+      const stage = (name: string) => sales!.stages.find((st) => st.name === name)!.id;
+      return { fresh: stage('New'), proposal: stage('Proposal'), lost: stage('Lost') };
+    };
+    const { fresh, proposal, lost } = await stagesOf(c);
+    const elsewhereStage = (await stagesOf(other)).proposal;
+    // Lost is removed from the pipeline: a list may still name it.
+    const [sales] = (await crm.listPipelines(owner)).filter((p) =>
+      p.stages.some((st) => st.id === lost),
+    );
+    await crm.updatePipeline(owner, {
+      id: sales!.id,
+      expectedVersion: sales!.version,
+      name: 'Sales',
+      stages: sales!.stages.slice(0, 2).map((st) => ({ id: st.id, name: st.name })),
+    });
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // They need a task event (deal events take stageIds and ownerIds), at least one, each the
+    // company's stage, or a member of it who can own deals (named by place).
+    const refusals = [
+      ['taskStageIds', ['deal.created'], [proposal], 'taskStageIds'],
+      ['taskStageIds', ['task.created'], [], 'taskStageIds'],
+      ['taskStageIds', ['task.created'], [proposal, 'Proposal'], 'taskStageIds.1'],
+      ['taskStageIds', ['task.updated'], [proposal, elsewhereStage], 'taskStageIds.1'],
+      ['taskDealOwnerIds', ['deal.created'], [agent], 'taskDealOwnerIds'],
+      ['taskDealOwnerIds', ['task.created'], [], 'taskDealOwnerIds'],
+      ['taskDealOwnerIds', ['task.created'], [agent, 'agent@example.com'], 'taskDealOwnerIds.1'],
+      ['taskDealOwnerIds', ['task.status_changed'], [agent, marketer], 'taskDealOwnerIds.1'],
+      ['taskDealOwnerIds', ['task.created'], [elsewhereMember], 'taskDealOwnerIds.0'],
+    ] as const;
+    for (const [index, [field, events, ids, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, [field]: ids },
+            idem(`task-deal-bad-${index}`, JSON.stringify(ids)),
+          ),
+        ),
+        `${field} ${JSON.stringify(ids)}`,
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'task-deals-1', {
+      url: receiverUrl(),
+      events: ['task.created', 'deal.created'],
+      stageIds: [fresh],
+      ownerIds: [ownerId],
+      taskStageIds: [lost, proposal.toUpperCase(), lost],
+      taskDealOwnerIds: [agent, ownerId.toUpperCase(), agent],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data).toMatchObject({
+      stageIds: [fresh],
+      ownerIds: [ownerId],
+      taskStageIds: [lost, proposal],
+      taskDealOwnerIds: [agent, ownerId],
+    });
+    expect(await api().get(key.ctx, id)).toMatchObject({
+      taskStageIds: [lost, proposal],
+      taskDealOwnerIds: [agent, ownerId],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { taskStageIds?: unknown; taskDealOwnerIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => [a.metadata.taskStageIds ?? null, a.metadata.taskDealOwnerIds ?? null]);
+    expect(await audits('webhook.endpoint_created')).toEqual([
+      [
+        [lost, proposal],
+        [agent, ownerId],
+      ],
+    ]);
+    // Settings names them: the removed stage as removed, and the agent, gone, as no longer using
+    // the CRM, still on the list.
+    await fx.query(`UPDATE app.memberships SET status = 'removed' WHERE id = $1`, [agent]);
+    const shown = (await settings().list(owner)).find((e) => e.id === id);
+    expect(shown?.taskStages?.map((st) => [st.id, st.removed])).toEqual([
+      [lost, true],
+      [proposal, false],
+    ]);
+    expect(shown?.taskDealOwners).toEqual([
+      { id: agent, name: 'Agent', active: false },
+      { id: ownerId, name: 'Owner', active: true },
+    ]);
+    expect(await api().update(key.ctx, id, { description: 'Tasks of deals' })).toMatchObject({
+      taskStageIds: [lost, proposal],
+      taskDealOwnerIds: [agent, ownerId],
+    });
+    // Given again, a list keeps a member it held; one it adds must be able to own deals.
+    expect(
+      await api().update(key.ctx, id, {
+        taskStageIds: [proposal],
+        taskDealOwnerIds: [agent, ownerId],
+      }),
+    ).toMatchObject({ taskStageIds: [proposal], taskDealOwnerIds: [agent, ownerId] });
+    expect(
+      await issueOf(api().update(key.ctx, id, { taskDealOwnerIds: [ownerId, marketer] })),
+    ).toMatchObject({ path: 'taskDealOwnerIds.1' });
+    expect(
+      await issueOf(api().update(key.ctx, id, { taskStageIds: [elsewhereStage] })),
+    ).toMatchObject({ path: 'taskStageIds.0' });
+    expect(await api().update(key.ctx, id, { taskDealOwnerIds: [ownerId] })).toMatchObject({
+      taskStageIds: [proposal],
+      taskDealOwnerIds: [ownerId],
+    });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [
+        [lost, proposal],
+        [agent, ownerId],
+      ],
+      [[proposal], [agent, ownerId]],
+      [[proposal], [ownerId]],
+    ]);
+    // Any task event keeps the lists; events without one clear them.
+    expect(await api().update(key.ctx, id, { events: ['task.status_changed'] })).toMatchObject({
+      taskStageIds: [proposal],
+      taskDealOwnerIds: [ownerId],
+      stageIds: null,
+      ownerIds: null,
+    });
+    expect(await api().update(key.ctx, id, { events: ['deal.created'] })).toMatchObject({
+      events: ['deal.created'],
+      taskStageIds: null,
+      taskDealOwnerIds: null,
+    });
+    for (const field of ['taskStageIds', 'taskDealOwnerIds'] as const) {
+      expect(
+        await issueOf(
+          api().update(key.ctx, id, { [field]: [field === 'taskStageIds' ? fresh : ownerId] }),
+        ),
+        field,
+      ).toMatchObject({ path: field });
+    }
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['task.updated'],
+        taskStageIds: [fresh],
+        taskDealOwnerIds: [ownerId],
+      }),
+    ).toMatchObject({ taskStageIds: [fresh], taskDealOwnerIds: [ownerId] });
+    expect(
+      await api().update(key.ctx, id, { taskStageIds: null, taskDealOwnerIds: null }),
+    ).toMatchObject({ taskStageIds: null, taskDealOwnerIds: null });
+    expect(await issueOf(api().update(key.ctx, id, { taskStageIds: [] }))).toMatchObject({
+      path: 'taskStageIds',
     });
   });
 

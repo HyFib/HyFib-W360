@@ -2987,6 +2987,21 @@ deal, and `GET /deals/{id}` gives its pipeline now. An archived pipeline stays o
 `PATCH /webhook-endpoints/{id}` with `taskPipelineIds` (null for every task). Removing every task
 event clears the list.
 
+**A receiver misses the tasks of a stage or a deal owner it follows (ADR-304).** An endpoint can
+take the events of the tasks about the deals in chosen stages, or owned by chosen members, only. The
+endpoints list shows them ("Stages whose deals’ tasks’ events are sent: …", "Members whose deals’
+tasks’ events are sent: …"), and the API answers `taskStageIds` and `taskDealOwnerIds` (null takes
+every task's). A task's events go by its deal's stage and owner when each happens: a task about a
+contact alone or about nobody matches neither list, a deal without an owner matches no list of
+owners, a deal moved or given away takes its tasks' later events with it, and events no endpoint
+takes are not recorded, so there is nothing to replay. With task assignees or the pipelines of
+tasks' deals chosen too, an event must pass every list. The payload's `task.dealId` names the deal,
+and `GET /deals/{id}` gives its stage and owner now. A removed stage stays on a list, "(removed)",
+and a member who left, "(no longer uses the CRM)", matching the deals they still own. To take more,
+tick stages or members under "Stages of tasks’ deals" or "Owners of tasks’ deals" on the endpoint's
+page or choose "Every task’s events", or `PATCH /webhook-endpoints/{id}` with `taskStageIds` or
+`taskDealOwnerIds` (null for every task). Removing every task event clears both lists.
+
 **A receiver misses a task's change of assignee, or doubts one (ADR-274).** Endpoints that take
 `task.assignee_changed` ("Task assignee") are sent one event each time a member gives a task to
 another member by editing it, or a key changes its `assigneeId`. Automations set an assignee only on

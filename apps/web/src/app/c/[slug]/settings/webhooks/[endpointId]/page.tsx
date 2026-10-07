@@ -226,6 +226,8 @@ export default async function WebhookEndpointPage({
               owners: endpoint.owners,
               taskAssignees: endpoint.taskAssignees,
               taskPipelines: endpoint.taskPipelines,
+              taskStages: endpoint.taskStages,
+              taskDealOwners: endpoint.taskDealOwners,
               assignees: endpoint.assignees,
               contactTags: endpoint.contactTags,
               conversationTags: endpoint.conversationTags,

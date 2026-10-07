@@ -162,6 +162,8 @@ import {
   WEBHOOK_OWNERS_NEED_THE_EVENTS,
   WEBHOOK_TASK_ASSIGNEES_NEED_THE_EVENTS,
   WEBHOOK_TASK_PIPELINES_NEED_THE_EVENTS,
+  WEBHOOK_TASK_STAGES_NEED_THE_EVENTS,
+  WEBHOOK_TASK_DEAL_OWNERS_NEED_THE_EVENTS,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
@@ -1472,7 +1474,9 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'runTriggers',
       'stageIds',
       'taskAssigneeIds',
+      'taskDealOwnerIds',
       'taskPipelineIds',
+      'taskStageIds',
       'teamIds',
       'templateIds',
       'templateStatuses',
@@ -2047,7 +2051,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       taskAssigneeIds: [dev],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the deal owners, the task assignees, the pipelines of tasks’ deals, the members, the contact tags, the conversation tags, the OAuth client',
+      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals, the members, the contact tags, the conversation tags, the OAuth client',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -2175,8 +2179,92 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'task.created, task.updated, task.assignee_changed or task.status_changed',
     );
     expect(doc.info.description).toContain(
-      "or the pipelines whose deals' tasks it takes (its `taskPipelineIds`): then those of the tasks about deals in those pipelines when the event happens only",
+      'or the pipelines, stages or owners of the deals whose tasks it takes (its `taskPipelineIds`, `taskStageIds` and `taskDealOwnerIds`): then those of the tasks about deals in those pipelines or stages, or owned by those members, when the event happens only',
     );
+  });
+
+  it('take the stages and owners of tasks’ deals only with a task event, each once, and a list of them alone is a change (ADR-304)', () => {
+    const proposal = '0190e9a1-0000-7000-8000-00000000008a';
+    const asha = '0190e9a1-0000-7000-8000-00000000008b';
+    const dev = '0190e9a1-0000-7000-8000-00000000008c';
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    for (const event of WEBHOOK_TASK_EVENTS) {
+      const parsed = apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        events: ['contact.created', event],
+        taskStageIds: [proposal, proposal.toUpperCase()],
+        taskDealOwnerIds: [dev, asha.toUpperCase(), dev],
+      });
+      expect([parsed.taskStageIds, parsed.taskDealOwnerIds], event).toEqual([
+        [proposal],
+        [dev, asha],
+      ]);
+    }
+    // Deal events take stages and owners of their own (stageIds, ownerIds).
+    for (const [field, message] of [
+      ['taskStageIds', WEBHOOK_TASK_STAGES_NEED_THE_EVENTS],
+      ['taskDealOwnerIds', WEBHOOK_TASK_DEAL_OWNERS_NEED_THE_EVENTS],
+    ] as const) {
+      const refused = apiCreateWebhookEndpointSchema.safeParse({
+        ...base,
+        events: ['deal.created', 'message.received'],
+        [field]: [asha],
+      });
+      expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+        [field, message],
+      ]);
+      const tasks = { ...base, events: ['task.updated'] };
+      for (const value of [
+        [],
+        ['Proposal'],
+        Array.from(
+          { length: 51 },
+          (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+        ),
+      ]) {
+        expect(
+          apiCreateWebhookEndpointSchema.safeParse({ ...tasks, [field]: value }).success,
+          `${field} ${JSON.stringify(value)}`,
+        ).toBe(false);
+      }
+      expect(apiCreateWebhookEndpointSchema.parse({ ...tasks, [field]: null })[field]).toBe(null);
+      expect(apiUpdateWebhookEndpointSchema.parse({ [field]: null })).toEqual({ [field]: null });
+      expect(apiUpdateWebhookEndpointSchema.parse({ [field]: [asha] })).toEqual({
+        [field]: [asha],
+      });
+    }
+    expect(WEBHOOK_LIMITS.taskStages).toBe(50);
+    expect(WEBHOOK_LIMITS.taskDealOwners).toBe(50);
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    for (const field of ['taskStageIds', 'taskDealOwnerIds']) {
+      expect(answered.properties[field]?.anyOf, field).toHaveLength(2);
+      expect(answered.required).toContain(field);
+    }
+    expect(JSON.stringify(answered.properties.taskStageIds)).toContain(
+      "by the stage of the task's deal when an event happens; a task without a deal is on no list",
+    );
+    expect(JSON.stringify(answered.properties.taskDealOwnerIds)).toContain(
+      "by the owner of the task's deal when an event happens; a task without a deal, or of a deal without an owner, is on no list",
+    );
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.taskStageIds)).toContain(
+      "A task's event belongs to the stage of the deal the task is about when the event happens",
+    );
+    expect(JSON.stringify(given.taskDealOwnerIds)).toContain(
+      "A task's event belongs to the member who owns the deal the task is about when the event happens",
+    );
+    for (const field of ['taskStageIds', 'taskDealOwnerIds']) {
+      expect(JSON.stringify(given[field]), field).toContain(
+        'task.created, task.updated, task.assignee_changed or task.status_changed',
+      );
+    }
   });
 
   it('take contact tags only with an event of a conversation, as contacts carry them, and a list of them alone is a change (ADR-267)', () => {

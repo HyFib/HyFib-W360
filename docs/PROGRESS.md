@@ -1,5 +1,47 @@
 # Progress
 
+## 2026-10-07 — Stage and owner filters for task webhook events (P5-09, P4-04, H-014, W-138, ADR-304)
+
+Status: **Implemented; its database tests run in CI only.** Endpoints taking task events could name
+the tasks' assignees (ADR-266) and their deals' pipelines (ADR-303), but not the deals' stages or
+owners. The local PostgreSQL is unavailable, so the migration and the integration tests below were
+written but not run here; migration 0227 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0227 (`task_stage_ids` and `task_deal_owner_ids` on
+  `app.webhook_endpoints` with their checks and update grants; `app.capture_webhook_event` with the
+  task's deal's stage and owner, read with its pipeline in one query only when an endpoint names any
+  of them).
+- **Domain:** `webhookTaskStageIdsSchema`, `webhookTaskStageIdsFor`, `assertWebhookTaskStages`,
+  `webhookTaskDealOwnerIdsSchema`, `webhookTaskDealOwnerIdsFor` and `assertWebhookTaskDealOwners` in
+  `webhooks/service.ts` (the deals' stage check now shared, the members' check given a third list),
+  the endpoint view's `taskStages` and `taskDealOwners`, creation, changes, audits and the export
+  columns; `taskStageIds` and `taskDealOwnerIds` in `api/webhook-endpoints.ts` and the OpenAPI
+  document.
+- **Web:** Settings → Webhooks' "Stages of tasks’ deals" (the stages' fieldset given a `kind`) and
+  "Owners of tasks’ deals" (the members' fieldset's third kind), and the endpoints list's lines for
+  both.
+- **Tests:** unit (3 new: both lists' rules, keeping and clearing in `webhooks/webhooks.test.ts`;
+  the API schemas and OpenAPI entries in `api/api.test.ts`); integration (4 new: capture in
+  `webhook-events.test.ts`, the services for each list in `webhooks.test.ts`, the API in
+  `api-webhook-endpoints.test.ts`). Written for CI; the integration tests were not run here. No e2e
+  test.
+- **Docs:** ADR-304; ARCHITECTURE; SECURITY; THREAT-MODEL T272; DEPLOYMENT; RUNBOOKS; BACKLOG P4-04
+  and P5-09; feature matrix H-014 and W-138.
+- **Mutation checks:** 30/30 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 137 files, 1295 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0227                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Pipeline filters for task webhook events (P5-09, P4-04, H-014, W-138, ADR-303)
 
 Status: **Implemented; its database tests run in CI only.** Endpoints taking task events received

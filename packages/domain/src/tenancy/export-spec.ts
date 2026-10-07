@@ -1626,6 +1626,8 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'owner_ids',
       'task_assignee_ids',
       'task_pipeline_ids',
+      'task_stage_ids',
+      'task_deal_owner_ids',
       'assignee_ids',
       'contact_tags',
       'conversation_tags',

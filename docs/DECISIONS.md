@@ -11577,3 +11577,60 @@ Decision:
 
 Not built: task events by their deal's stage or owner, and pipelines chosen per task event (one list
 serves the four events).
+
+## ADR-304 Choosing the CRM stages and deal owners whose deals' tasks' events a webhook endpoint receives (P5-09, P4-04) (2026-10-07)
+
+Context: an endpoint taking task events could name the members the tasks are assigned to (ADR-266)
+and the pipelines of their deals (ADR-303), but not their deals' stages or owners, which the deal
+events can be narrowed by (ADR-264, ADR-265). A receiver serving one stage of a pipeline (the
+proposals desk, say) or one sales rep's deals, whoever the tasks are assigned to, was sent every
+task and had to look each deal up. ADR-303 left task events by their deal's stage or owner unbuilt.
+
+Decision:
+
+- **Two more lists per endpoint for its task events,** apart from its deals' (`stageIds`,
+  `ownerIds`): the stages of tasks' deals (`taskStageIds`) and the members owning them
+  (`taskDealOwnerIds`), for the four task events. Null receives every task's, as before; a list
+  holds 1 to 50 of the company's stages, or of its members, by id, in the order given with repeats
+  merged. A task's event counts when the task is about a deal and that deal's stage, or owner, is
+  listed when the event happens: a task about a contact alone or about nobody matches neither list,
+  and a deal without an owner matches no list of owners. A task's deal never changes, but the deal
+  may move to another stage or be given to another owner, and the task's later events go by the new
+  ones. With task assignees or the pipelines of tasks' deals too, an event must pass every list.
+  Deal events and every other event are not narrowed, and the deals' stages and owners do not narrow
+  task events. Chosen in Settings → Webhooks ("Stages of tasks’ deals" and "Owners of tasks’
+  deals"), shown on the endpoint as "Stages whose deals’ tasks’ events are sent: …" and "Members
+  whose deals’ tasks’ events are sent: …", and through the API as `taskStageIds` and
+  `taskDealOwnerIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every
+  endpoint the API answers.
+- **Chosen as the deals' are:** a stage list may hold only the company's stages, removed ones and
+  those of archived pipelines included, by the deals' check, now shared; an owner list may add only
+  members who can own deals now (active, with access to the CRM), by the check deal owners and task
+  assignees already share, and keeps members it held who have left or lost the access since,
+  matching the deals they still own. Settings offers the stages in use and the members who can own
+  deals, and keeps listing what the endpoint already names, marked as removed or as no longer using
+  the CRM.
+- **Only while a task event is taken:** a list given for an endpoint that takes none is refused
+  (`taskStageIds` or `taskDealOwnerIds`; 422 through the API). A change that drops all four events
+  clears both, and a `PATCH` that leaves one out keeps it; Settings always sends them. A check in
+  the database holds the same rule for each (null, or 1 to 50 ids in one dimension without a null,
+  with a task event).
+- **Applied at capture:** `app.capture_webhook_event` reads the pipeline, stage and owner of the
+  task's deal in one query (`app.crm_tasks` joined to `app.crm_deals`, by the task the trigger
+  stores in the event's detail and as the transaction sees them), only when an active endpoint of
+  the company that takes the event names pipelines, stages or owners of tasks' deals, and matches
+  each endpoint's lists. The task trigger runs as whoever changes the task, in the company's scope.
+  No event is written when no endpoint takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `taskStageIds` and `taskDealOwnerIds` when the endpoint has the lists, and the company data export
+  carries the columns.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0227:** `task_stage_ids uuid[]` and `task_deal_owner_ids uuid[]` on
+  `app.webhook_endpoints` with their checks, validated at once (a company has at most 10 endpoints),
+  an update grant on both columns for the runtime role, and `app.capture_webhook_event` replaced
+  with the same signature (0226's, with the stage and owner of the task's deal), so its owner and
+  grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: stages and owners chosen per task event (each list serves the four events), and note
+events narrowed by their deal.
