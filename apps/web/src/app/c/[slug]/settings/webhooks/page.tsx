@@ -301,6 +301,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.taskAssignees.map(webhookOwnerText).join(', ')}
                       </p>
                     ) : null}
+                    {e.taskPipelines ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Pipelines whose deals’ tasks’ events are sent:{' '}
+                        {e.taskPipelines.map(webhookPipelineText).join(', ')}
+                      </p>
+                    ) : null}
                     {e.teams ? (
                       <p className="text-xs text-muted-foreground">
                         Teams whose conversations’ events are sent:{' '}

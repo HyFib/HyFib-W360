@@ -1244,12 +1244,34 @@ function CampaignChoices({
   );
 }
 
+/** What the pipelines' fieldset says for deals' events (ADR-263) and tasks' events (ADR-303). */
+const PIPELINE_WORDS = {
+  deals: {
+    legend: 'Pipelines',
+    help: 'A deal’s events belong to its pipeline; a deal moved to another pipeline belongs to both for that move. Task and other events are sent whichever pipelines are chosen.',
+    every: 'Every deal’s events',
+    everyHelp: 'Including pipelines added later.',
+    only: 'Only those of the deals in the pipelines ticked',
+    idPart: 'pipeline',
+  },
+  tasks: {
+    legend: 'Pipelines of tasks’ deals',
+    help: 'A task’s events belong to the pipeline of the deal it is about when they happen; a task about no deal belongs to none. With task assignees chosen too, an event must pass both. Deal and other events are sent whichever pipelines are chosen.',
+    every: 'Every task’s events',
+    everyHelp: 'Including tasks about no deal, and pipelines added later.',
+    only: 'Only those of the tasks about deals in the pipelines ticked',
+    idPart: 'task-pipeline',
+  },
+} as const;
+
 /**
- * The CRM pipelines whose deals' events an endpoint takes (ADR-263): every pipeline's, or those of
- * the pipelines ticked. The pipelines the company uses are offered; an archived one the endpoint
+ * The CRM pipelines whose deals' events (ADR-263) or deals' tasks' events (ADR-303) an endpoint
+ * takes, as `kind` says: every deal's or task's, or those of the deals in the pipelines ticked, or
+ * of the tasks about them. The pipelines the company uses are offered; an archived one the endpoint
  * already names stays listed, ticked, until it is unticked.
  */
 function PipelineChoices({
+  kind,
   prefix,
   choices,
   stored,
@@ -1258,6 +1280,7 @@ function PipelineChoices({
   chosen,
   onChange,
 }: {
+  kind: keyof typeof PIPELINE_WORDS;
   prefix: string;
   choices: WebhookPipelineChoice[];
   /** The pipelines the endpoint names now, so an archived one stays listed until saved without. */
@@ -1271,39 +1294,35 @@ function PipelineChoices({
     ...choices.map((c) => ({ ...c, archived: false })),
     ...stored.filter((s) => !choices.some((c) => c.id === s.id)),
   ];
+  const words = PIPELINE_WORDS[kind];
   return (
     <fieldset className="grid gap-2">
-      <legend className="mb-1 text-sm font-medium">Pipelines</legend>
-      <p className="text-xs text-muted-foreground">
-        A deal’s events belong to its pipeline; a deal moved to another pipeline belongs to both for
-        that move. Task and other events are sent whichever pipelines are chosen.
-      </p>
+      <legend className="mb-1 text-sm font-medium">{words.legend}</legend>
+      <p className="text-xs text-muted-foreground">{words.help}</p>
       <label className="flex items-start gap-2 text-sm">
         <input
           type="radio"
-          name={`${prefix}-pipelines`}
+          name={`${prefix}-${words.idPart}s`}
           className="mt-1"
           checked={every}
           onChange={() => onEveryChange(true)}
         />
         <span>
-          Every deal’s events
-          <span className="block text-xs text-muted-foreground">
-            Including pipelines added later.
-          </span>
+          {words.every}
+          <span className="block text-xs text-muted-foreground">{words.everyHelp}</span>
         </span>
       </label>
       <label className="flex items-start gap-2 text-sm">
         <input
           type="radio"
-          name={`${prefix}-pipelines`}
+          name={`${prefix}-${words.idPart}s`}
           className="mt-1"
           checked={!every}
           disabled={listed.length === 0}
           onChange={() => onEveryChange(false)}
         />
         <span>
-          Only those of the deals in the pipelines ticked
+          {words.only}
           {listed.length === 0 ? (
             <span className="block text-xs text-muted-foreground">
               The company has no pipeline yet.
@@ -1314,7 +1333,7 @@ function PipelineChoices({
       {!every ? (
         <div className="ml-6 grid max-h-64 gap-1 overflow-y-auto">
           {listed.map((p) => {
-            const id = `${prefix}-pipeline-${p.id}`;
+            const id = `${prefix}-${words.idPart}-${p.id}`;
             return (
               <div key={p.id} className="flex items-center gap-2">
                 <Checkbox
@@ -2178,6 +2197,8 @@ export function WebhookEndpointForm({
     owners: WebhookEndpointOwner[] | null;
     /** The members whose tasks it takes (ADR-266), with whether they can be assigned; null: all. */
     taskAssignees: WebhookEndpointOwner[] | null;
+    /** The CRM pipelines whose deals' tasks it takes (ADR-303), archived or not; null: every one. */
+    taskPipelines: WebhookEndpointPipeline[] | null;
     /** The members it names (ADR-181), with whether they still take conversations; null: all. */
     assignees: WebhookEndpointAssignee[] | null;
     /** The contact tags it names (ADR-267); null for every conversation. */
@@ -2277,6 +2298,10 @@ export function WebhookEndpointForm({
   const [everyTaskAssignee, setEveryTaskAssignee] = useState(!endpoint?.taskAssignees);
   const [taskAssigneeIds, setTaskAssigneeIds] = useState<string[]>(
     endpoint?.taskAssignees?.map((m) => m.id) ?? [],
+  );
+  const [everyTaskPipeline, setEveryTaskPipeline] = useState(!endpoint?.taskPipelines);
+  const [taskPipelineIds, setTaskPipelineIds] = useState<string[]>(
+    endpoint?.taskPipelines?.map((p) => p.id) ?? [],
   );
   const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
   const [everyField, setEveryField] = useState(!endpoint?.contactFields);
@@ -2423,6 +2448,9 @@ export function WebhookEndpointForm({
         // Every task's events unless the assignees ticked are chosen (ADR-266).
         const chosenTaskAssignees =
           webhookTakesTaskEvents(eventTypes) && !everyTaskAssignee ? taskAssigneeIds : null;
+        // Every task's events unless the pipelines of their deals ticked are chosen (ADR-303).
+        const chosenTaskPipelines =
+          webhookTakesTaskEvents(eventTypes) && !everyTaskPipeline ? taskPipelineIds : null;
         // Every conversation's events unless the members ticked are chosen (ADR-181).
         const chosenAssignees =
           webhookTakesTeamEvents(eventTypes) && !everyAssignee ? assigneeIds : null;
@@ -2469,6 +2497,7 @@ export function WebhookEndpointForm({
           stageIds: chosenStages,
           ownerIds: chosenOwners,
           taskAssigneeIds: chosenTaskAssignees,
+          taskPipelineIds: chosenTaskPipelines,
           assigneeIds: chosenAssignees,
           contactTags: chosenContactTags,
           conversationTags: chosenConversationTags,
@@ -2547,6 +2576,8 @@ export function WebhookEndpointForm({
               setOwnerIds([]);
               setEveryTaskAssignee(true);
               setTaskAssigneeIds([]);
+              setEveryTaskPipeline(true);
+              setTaskPipelineIds([]);
               setEveryAssignee(true);
               setAssigneeIds([]);
               setEveryContactTag(true);
@@ -2729,6 +2760,7 @@ export function WebhookEndpointForm({
       ) : null}
       {webhookTakesPipelineEvents(eventTypes) ? (
         <PipelineChoices
+          kind="deals"
           prefix={prefix}
           choices={pipelineChoices}
           stored={endpoint?.pipelines ?? []}
@@ -2771,6 +2803,18 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryTaskAssignee}
           chosen={taskAssigneeIds}
           onChange={setTaskAssigneeIds}
+        />
+      ) : null}
+      {webhookTakesTaskEvents(eventTypes) ? (
+        <PipelineChoices
+          kind="tasks"
+          prefix={prefix}
+          choices={pipelineChoices}
+          stored={endpoint?.taskPipelines ?? []}
+          every={everyTaskPipeline}
+          onEveryChange={setEveryTaskPipeline}
+          chosen={taskPipelineIds}
+          onChange={setTaskPipelineIds}
         />
       ) : null}
       <fieldset className="grid gap-2">

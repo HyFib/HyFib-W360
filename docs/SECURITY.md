@@ -173,25 +173,26 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   for that company alone, and only when one of its active endpoints takes it; erasing a contact
   deletes its tasks, so their pending events are not delivered (`event_gone`). No number, team,
   member or deal filter narrows task events, which Settings and the OpenAPI document say; an
-  endpoint's list of assignees does (ADR-266). A change of assignee (`task.assignee_changed`,
-  ADR-274) gives the ids of the member the task left and of the one it was given to, both the
-  company's own members (the assignee's foreign key goes through the company's id), never who made
-  the change, and reaches the endpoints naming either member, so an endpoint following a member
-  hears a task leave them; automations, erasure and merges never change an assignee, so they send
-  none. A change of details (`task.updated`, ADR-276) names which of the title, notes, due time and
-  reminder changed, never their values, and the task it gives carries neither its notes nor its
-  reminder, so a change of notes is named without a word of them; members and keys capture it as the
-  runtime role, in the company's scope, since no definer function changes these columns. Deal and
-  task events name who made each change (`changedBy`: a member, never which; an automation; or a
-  key, with its id, ADR-277), a key of the company's own only (a foreign key through the company's
-  id), so an integration can ignore its own changes; a change that does not record its maker names
-  nobody, never the maker of an earlier change, since the database clears a changer another
-  transaction recorded. A note's event (`note.created`, ADR-280) gives the note's id, deal id and
-  who wrote it (a member, never which, or a key by its id) with its contact as the API describes it,
-  never its text: endpoints take events without scopes, so a note's text is read only with
-  `notes.read`. Members and keys capture it as the runtime role in the company's scope; erasing a
-  contact deletes its notes, so their pending events are not delivered (`event_gone`). A Payment
-  Link's event (`payment_link.status_changed`, ADR-285) gives the link as
+  endpoint's list of assignees does (ADR-266), and so does its list of pipelines of tasks' deals,
+  matched against the task's own deal read in the company's scope (ADR-303). A change of assignee
+  (`task.assignee_changed`, ADR-274) gives the ids of the member the task left and of the one it was
+  given to, both the company's own members (the assignee's foreign key goes through the company's
+  id), never who made the change, and reaches the endpoints naming either member, so an endpoint
+  following a member hears a task leave them; automations, erasure and merges never change an
+  assignee, so they send none. A change of details (`task.updated`, ADR-276) names which of the
+  title, notes, due time and reminder changed, never their values, and the task it gives carries
+  neither its notes nor its reminder, so a change of notes is named without a word of them; members
+  and keys capture it as the runtime role, in the company's scope, since no definer function changes
+  these columns. Deal and task events name who made each change (`changedBy`: a member, never which;
+  an automation; or a key, with its id, ADR-277), a key of the company's own only (a foreign key
+  through the company's id), so an integration can ignore its own changes; a change that does not
+  record its maker names nobody, never the maker of an earlier change, since the database clears a
+  changer another transaction recorded. A note's event (`note.created`, ADR-280) gives the note's
+  id, deal id and who wrote it (a member, never which, or a key by its id) with its contact as the
+  API describes it, never its text: endpoints take events without scopes, so a note's text is read
+  only with `notes.read`. Members and keys capture it as the runtime role in the company's scope;
+  erasing a contact deletes its notes, so their pending events are not delivered (`event_gone`). A
+  Payment Link's event (`payment_link.status_changed`, ADR-285) gives the link as
   `GET /orders/{id}/payment-links` reads it (who asked: a member never by name, or a key by its id),
   never its address or Razorpay's ids; the commerce worker captures it as the runtime role in the
   company's scope, and an endpoint that names numbers hears it only for its order's number.
@@ -1604,6 +1605,14 @@ Phase 5 rules (outgoing webhooks, P5-09):
   `app.capture_webhook_event` to the assignee it reads from the task in the company's scope: it
   narrows what one endpoint receives and never adds an event or a delivery for another endpoint or
   company. Audited with the list (unit tests; integration tests, run in CI only).
+- An endpoint can take the events of the tasks about the deals of chosen pipelines only (ADR-303),
+  chosen the same way. A list holds only pipelines of the endpoint's company, archived ones included
+  (checked in its scope, as the deals' pipelines are), is kept only while the endpoint takes a task
+  event (a database check too, which also refuses a null entry), and is applied in
+  `app.capture_webhook_event` to the pipeline it reads from the task's deal in the company's scope,
+  a task without a deal matching none: it narrows what one endpoint receives and never adds an event
+  or a delivery for another endpoint or company. Audited with the list (unit tests; integration
+  tests, run in CI only).
 - An endpoint can take the message and conversation events of the conversations whose contact has
   chosen tags only (ADR-267), chosen the same way. A list holds tags in the form contacts carry them
   (the services normalise them; a database check holds the form, the count and the events, and

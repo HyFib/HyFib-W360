@@ -297,8 +297,10 @@ verification, app review, Embedded Signup configuration).
   tests run only in CI]** (ADR-264, migration 0180; recorded under P5-09). **[Owner filters for deal
   webhook events built; their database tests run only in CI]** (ADR-265, migration 0181; recorded
   under P5-09). **[Assignee filters for task webhook events built; their database tests run only in
-  CI]** (ADR-266, migration 0182; recorded under P5-09). **[Deal owner webhook events built; their
-  database tests run only in CI]** (ADR-269, migrations 0185 and 0186; recorded under P5-09).
+  CI]** (ADR-266, migration 0182; recorded under P5-09). **[Pipeline filters for task webhook events
+  built; their database tests run only in CI]** (ADR-303, migration 0226; recorded under P5-09).
+  **[Deal owner webhook events built; their database tests run only in CI]** (ADR-269, migrations
+  0185 and 0186; recorded under P5-09).
   **Remaining:** custom deal fields, products on deals, deal import, CRM connectors (HubSpot,
   Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
   checklist).
@@ -1109,6 +1111,10 @@ verification, app review, Embedded Signup configuration).
   migration 0182: an endpoint takes the events of the tasks assigned to 1 to 50 chosen members when
   the events happen; a list adds only members who can be assigned tasks and keeps those who left;
   deal and other events are not narrowed).
+  **[Pipeline filters for task events built; their database tests run only in CI]** (ADR-303,
+  migration 0226: an endpoint takes the events of the tasks about the deals of 1 to 50 of the
+  company's pipelines when the events happen, archived ones included; a task about no deal is in
+  none; with task assignees too, an event must pass both; deal and other events are not narrowed).
   **[Contact tag filters for message and conversation events built; their database tests run only in
   CI]** (ADR-267, migration 0183: an endpoint takes the events of the conversations whose contact
   has any of 1 to 50 tags when the events happen; tags are compared as contacts carry them, and one
@@ -1158,8 +1164,8 @@ verification, app review, Embedded Signup configuration).
   **[Satisfaction survey events built; their database tests run only in CI]** (ADR-293, migrations
   0213 and 0214: `satisfaction_survey.answered` once for each survey a customer answers, with the
   survey as `GET /satisfaction-surveys` reads it, narrowed by the conversation's number).
-  Remaining: filters for other event types (task events by their deal's pipeline, stage or owner,
-  among them) and on a message's or contact's values (such as a field's value, contact events by
+  Remaining: filters for other event types (task events by their deal's stage or owner, among
+  them) and on a message's or contact's values (such as a field's value, contact events by
   tag, or the key that started a run), other authentication (headers computed per delivery, other
   OAuth grants), mutual TLS, fixed egress addresses, events for store orders and each step of a run,
   `createdAt` finer than the millisecond, load tests.

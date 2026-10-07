@@ -212,6 +212,9 @@ import {
   webhookTaskAssigneeIdsFor,
   webhookTaskAssigneeIdsSchema,
   WEBHOOK_TASK_ASSIGNEES_NEED_THE_EVENTS,
+  webhookTaskPipelineIdsFor,
+  webhookTaskPipelineIdsSchema,
+  WEBHOOK_TASK_PIPELINES_NEED_THE_EVENTS,
   webhookContactTagsFor,
   webhookContactTagsSchema,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
@@ -3480,6 +3483,55 @@ describe('task assignee filters (ADR-266)', () => {
     expect(
       webhookTaskAssigneeIdsFor(['deal.created', 'contact.created'], [asha], [dev]),
     ).toBeNull();
+  });
+});
+
+describe('pipeline filters for task events (ADR-303)', () => {
+  const sales = 'a8b9c0d1-e2f3-4e6f-8a7b-8c9d0e1f2a3b';
+  const renewals = 'b9c0d1e2-f3a4-4f7a-9b8c-9d0e1f2a3b4c';
+
+  it('take 1 to 50 pipelines, once each and in lower case, in the order given; null takes every task', () => {
+    expect(
+      webhookTaskPipelineIdsSchema.parse([renewals, sales.toUpperCase(), renewals, sales]),
+    ).toEqual([renewals, sales]);
+    expect(webhookTaskPipelineIdsSchema.parse(null)).toBeNull();
+    const ids = Array.from(
+      { length: WEBHOOK_LIMITS.taskPipelines + 1 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(WEBHOOK_LIMITS.taskPipelines).toBe(50);
+    expect(webhookTaskPipelineIdsSchema.parse(ids.slice(1))).toEqual(ids.slice(1));
+    for (const refused of [[], ids, ['Sales'], [sales, null], sales, [42]]) {
+      expect(webhookTaskPipelineIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookTaskPipelineIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one pipeline, or take every task.',
+    );
+    expect(webhookTaskPipelineIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 50 pipelines.',
+    );
+    expect(webhookTaskPipelineIdsSchema.safeParse(['Sales']).error?.issues[0]?.message).toBe(
+      'Choose pipelines from the list.',
+    );
+  });
+
+  it('are kept only while the endpoint takes a task event: given, kept, or cleared', () => {
+    for (const type of WEBHOOK_TASK_EVENTS) {
+      expect(webhookTaskPipelineIdsFor([type], [sales], null), type).toEqual([sales]);
+      expect(webhookTaskPipelineIdsFor([type], undefined, [renewals]), type).toEqual([renewals]);
+    }
+    expect(webhookTaskPipelineIdsFor(['task.created'], null, [renewals])).toBeNull();
+    expect(webhookTaskPipelineIdsFor(['task.status_changed'], undefined, null)).toBeNull();
+    // Deal events have pipelines of their own (ADR-263): a task list goes with the task events.
+    expect(
+      webhookTaskPipelineIdsFor(['deal.created', 'contact.created'], [sales], [renewals]),
+    ).toBeNull();
+    // The refusal names the events as Settings lists them.
+    for (const type of WEBHOOK_TASK_EVENTS) {
+      expect(WEBHOOK_TASK_PIPELINES_NEED_THE_EVENTS).toContain(WEBHOOK_EVENT_INFO[type].label);
+    }
   });
 });
 

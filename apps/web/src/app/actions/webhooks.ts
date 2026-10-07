@@ -72,6 +72,8 @@ export async function createWebhookEndpointAction(
     ownerIds: string[] | null;
     /** The members whose tasks' events it takes (ADR-266); null takes every task's. */
     taskAssigneeIds: string[] | null;
+    /** The CRM pipelines whose deals' tasks' events it takes (ADR-303); null: every task's. */
+    taskPipelineIds: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /** The contact tags whose conversations' events it takes (ADR-267); null: every one's. */
@@ -146,6 +148,8 @@ export async function updateWebhookEndpointAction(
     ownerIds: string[] | null;
     /** The members whose tasks' events it takes (ADR-266); null takes every task's. */
     taskAssigneeIds: string[] | null;
+    /** The CRM pipelines whose deals' tasks' events it takes (ADR-303); null: every task's. */
+    taskPipelineIds: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /** The contact tags whose conversations' events it takes (ADR-267); null: every one's. */

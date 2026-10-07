@@ -662,6 +662,8 @@ export const WEBHOOK_LIMITS = {
   owners: 50,
   /** The members an endpoint can choose to take the events of their assigned tasks (ADR-266). */
   taskAssignees: 50,
+  /** The CRM pipelines an endpoint can choose to take the events of their deals' tasks (ADR-303). */
+  taskPipelines: 50,
   /** The contact tags an endpoint can choose to take the conversations' events of (ADR-267). */
   contactTags: 50,
   /** The conversation tags an endpoint can choose to take the conversations' events of (ADR-273). */
@@ -987,7 +989,9 @@ export const webhookStageText = (stage: {
  * events belong to the member it is assigned to when they happen, and a change of assignee
  * (ADR-274) to the member it left as well; a change of details (ADR-276) is one of them. Tasks are
  * assigned to the members who can own deals, so an assignee is chosen and stored as a deal owner
- * is (`WebhookOwnerChoice`, `WebhookEndpointOwner`, `webhookOwnerText`).
+ * is (`WebhookOwnerChoice`, `WebhookEndpointOwner`, `webhookOwnerText`). They can also be taken for
+ * the tasks of the deals in chosen pipelines (ADR-303), chosen and stored as the deals' pipelines
+ * are (`WebhookPipelineChoice`, `WebhookEndpointPipeline`, `webhookPipelineText`).
  */
 export const WEBHOOK_TASK_EVENTS = [
   'task.created',

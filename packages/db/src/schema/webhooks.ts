@@ -259,6 +259,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   taskAssigneeIds: uuid('task_assignee_ids').array(),
   /**
+   * The CRM pipelines whose deals' tasks' events it takes (migration 0226, ADR-303), by the pipeline
+   * of the task's deal when the event happens; a task without a deal is in none. null takes every
+   * task's. Set only while a task event is among its events.
+   */
+  taskPipelineIds: uuid('task_pipeline_ids').array(),
+  /**
    * The consent changes it takes as `consent.changed` (ADR-189), by purpose and action; null takes
    * every change. Set only while `consent.changed` is among its events.
    */

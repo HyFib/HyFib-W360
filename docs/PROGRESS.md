@@ -1,5 +1,43 @@
 # Progress
 
+## 2026-10-07 — Pipeline filters for task webhook events (P5-09, P4-04, H-014, W-138, ADR-303)
+
+Status: **Implemented; its database tests run in CI only.** Endpoints taking task events received
+every task's unless they named the tasks' assignees (ADR-266); the deal filters narrowed deal events
+only. The local PostgreSQL is unavailable, so the migration and the integration tests below were
+written but not run here; migration 0226 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0226 (`task_pipeline_ids` on `app.webhook_endpoints` with its check and
+  update grant; `app.capture_webhook_event` with the pipeline of the task's deal, read only when an
+  endpoint names such pipelines).
+- **Domain:** `webhookTaskPipelineIdsSchema`, `webhookTaskPipelineIdsFor` and
+  `assertWebhookTaskPipelines` in `webhooks/service.ts` (the deals' pipeline check now shared), the
+  endpoint view's `taskPipelines`, creation, changes, audits and the export column;
+  `taskPipelineIds` in `api/webhook-endpoints.ts` and the OpenAPI document.
+- **Web:** Settings → Webhooks' "Pipelines of tasks’ deals" (the pipelines' fieldset given a
+  `kind`), and the endpoints list's "Pipelines whose deals’ tasks’ events are sent".
+- **Tests:** unit (3 new: the list's rules, keeping and clearing in `webhooks/webhooks.test.ts`; the
+  API schemas and OpenAPI entries in `api/api.test.ts`); integration (3 new: capture in
+  `webhook-events.test.ts`, the services in `webhooks.test.ts`, the API in
+  `api-webhook-endpoints.test.ts`). Written for CI; the integration tests were not run here. No e2e
+  test.
+- **Docs:** ADR-303; ARCHITECTURE; SECURITY; THREAT-MODEL T271; DEPLOYMENT; RUNBOOKS; BACKLOG P4-04
+  and P5-09; feature matrix H-014 and W-138.
+- **Mutation checks:** 22/22 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 137 files, 1292 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0226                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Click-to-WhatsApp ads through the public API (P5-08, H-033, W-071, ADR-302)
 
 Status: **Implemented; its database tests run in CI only.** Growth → Ads listed the ads customers

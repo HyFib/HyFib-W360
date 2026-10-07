@@ -1007,6 +1007,15 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `POST /api/v1/conversations/update-matching` (422); rolling web servers back does the same.
    Workers are unaffected.
 
+   Migration 0226 (ADR-303) adds `task_pipeline_ids` to `app.webhook_endpoints` with a check
+   validated by reading the table, and replaces `app.capture_webhook_event` (keeping 0215's filters)
+   with the same signature; every endpoint starts with none. Web servers of this release need it, as
+   their reads of endpoints name the column; workers do not read it. Web servers from before it
+   neither show nor change the column: until the web rollout ends, an old server's change that drops
+   every task event from an endpoint with a list of pipelines of tasks' deals fails on the check,
+   its other changes keep it, and its API refuses `taskPipelineIds` (422) and leaves it out of the
+   endpoints it answers.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

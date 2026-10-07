@@ -2220,6 +2220,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   and members it held stay; a change that drops every task event clears it. For
   `task.assignee_changed` (ADR-274) it also matches the `previousAssigneeId` the trigger stores, so
   the endpoints of the member a task left hear the change too.
+- **Pipeline filters for task events** (migration 0226, ADR-303): `task_pipeline_ids` on an endpoint
+  lists the pipelines whose deals' tasks' events it takes, null for every task's; a check keeps it
+  to 1 to 50 ids and to endpoints taking a task event. `app.capture_webhook_event` (replaced with
+  the same signature) reads the pipeline of the task's deal (`app.crm_tasks.deal_id` joined to
+  `app.crm_deals`) by the detail's `taskId` only when an active endpoint of the company taking the
+  event names such pipelines, and matches it against each list; a task without a deal matches none.
+  Settings (radio buttons and checkboxes under "Pipelines of tasks’ deals", the deals' fieldset
+  given a `kind`) and the API (`taskPipelineIds`) set it; the services check the pipelines given as
+  they check the deals' (one shared check), and a change that drops every task event clears it.
 - **Contact tag filters** (migration 0183, ADR-267): `contact_tags` on an endpoint lists the contact
   tags whose conversations' message and conversation events it takes, null for every conversation's;
   a check keeps it to 1 to 50 tags in `app.contact_tags`' form and to endpoints taking such an

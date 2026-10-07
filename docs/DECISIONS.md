@@ -11525,3 +11525,55 @@ Decision:
 
 Not built: ads over other periods, ads of one number, and ad spend, which needs an ad account HyFib
 does not connect.
+
+## ADR-303 Choosing the CRM pipelines whose deals' tasks' events a webhook endpoint receives (P5-09, P4-04) (2026-10-07)
+
+Context: an endpoint taking task events (ADR-261) received those of every task of the company unless
+it named the members the tasks are assigned to (ADR-266); the deal filters (ADR-263 to ADR-265)
+narrow deal events only. A company that runs a pipeline per team (sales and renewals, say) and
+connects each to its own system had every pipeline's tasks sent to every receiver, which had to read
+`task.dealId`, look the deal up and drop the rest. ADR-263 and ADR-266 left task events by their
+deal's pipeline unbuilt.
+
+Decision:
+
+- **A list of pipelines per endpoint for its task events,** apart from its deals' (`pipelineIds`,
+  ADR-263), for the four task events: null receives every task's, as before; a list holds 1 to 50 of
+  the company's pipelines, by id, in the order given with repeats merged. A task's event counts when
+  the task is about a deal and that deal's pipeline is listed when the event happens: a task about a
+  contact alone, or about nobody, is in no pipeline. A task's deal never changes, but the deal may
+  move to another pipeline, and the task's later events go by the new one. With task assignees too
+  (ADR-266), an event must pass both. Deal events and every other event are not narrowed, and the
+  deals' pipelines do not narrow task events. Chosen in Settings → Webhooks ("Pipelines of tasks’
+  deals": every task's events, or only those of the tasks about deals in the pipelines ticked),
+  shown on the endpoint as "Pipelines whose deals’ tasks’ events are sent: …", and through the API
+  as `taskPipelineIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every
+  endpoint the API answers.
+- **The company's pipelines, archived ones too,** as for deals: a list given now may hold only
+  pipelines of the company, checked in its scope by the deals' check, now shared; pipelines are
+  archived, never deleted, so a list never names one that is gone, and an archived pipeline has no
+  open deal to take tasks for until it is restored. Settings offers the pipelines the company uses,
+  in board order, and keeps listing an archived one the endpoint already names, marked as archived;
+  the API takes any of the company's, as `GET /pipelines` lists them.
+- **Only while a task event is taken:** a list given for an endpoint that takes none is refused
+  (`taskPipelineIds`; 422 through the API). A change that drops all four clears it, and a `PATCH`
+  that leaves it out keeps it; Settings always sends it. A check in the database holds the same rule
+  (null, or 1 to 50 ids in one dimension without a null, with a task event).
+- **Applied at capture:** `app.capture_webhook_event` reads the pipeline of the task's deal, from
+  `app.crm_tasks` and `app.crm_deals` by the task the trigger stores in the event's detail and as
+  the transaction sees them, only when an active endpoint of the company that takes the event names
+  pipelines of tasks' deals, and matches it against each endpoint's list. The task trigger runs as
+  whoever changes the task, in the company's scope. No event is written when no endpoint takes it,
+  and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `taskPipelineIds` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0226:** `task_pipeline_ids uuid[]` on `app.webhook_endpoints` with the check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role, and `app.capture_webhook_event` replaced with the same signature (0215's, with the
+  pipeline of the task's deal), so its owner and grants stay. Existing endpoints keep null; nothing
+  is backfilled.
+
+Not built: task events by their deal's stage or owner, and pipelines chosen per task event (one list
+serves the four events).

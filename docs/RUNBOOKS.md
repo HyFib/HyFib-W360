@@ -2974,6 +2974,19 @@ someone else. To take more, tick members under "Task assignees" on the endpoint'
 "Every task’s events", or `PATCH /webhook-endpoints/{id}` with `taskAssigneeIds` (null for every
 task). Removing every task event clears the list.
 
+**A receiver misses the tasks of a pipeline it follows (ADR-303).** An endpoint can take the events
+of the tasks about the deals of chosen pipelines only. The endpoints list shows them ("Pipelines
+whose deals’ tasks’ events are sent: …"), and the API answers `taskPipelineIds` (null takes every
+task's). A task's events go by the pipeline of its deal when each happens: a task about a contact
+alone, or about nobody, is in no pipeline; a deal moved to another pipeline takes its tasks' later
+events with it; and events no endpoint takes are not recorded, so there is nothing to replay. With
+task assignees chosen too, an event must pass both lists. The payload's `task.dealId` names the
+deal, and `GET /deals/{id}` gives its pipeline now. An archived pipeline stays on a list,
+"(archived)", and has no open deal until it is restored. To take more, tick pipelines under
+"Pipelines of tasks’ deals" on the endpoint's page or choose "Every task’s events", or
+`PATCH /webhook-endpoints/{id}` with `taskPipelineIds` (null for every task). Removing every task
+event clears the list.
+
 **A receiver misses a task's change of assignee, or doubts one (ADR-274).** Endpoints that take
 `task.assignee_changed` ("Task assignee") are sent one event each time a member gives a task to
 another member by editing it, or a key changes its `assigneeId`. Automations set an assignee only on
