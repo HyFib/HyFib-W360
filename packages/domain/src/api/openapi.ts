@@ -998,7 +998,9 @@ export const apiTeamSettingsSchema = z.object({
     .describe('Words in a customer’s first message that route the conversation to the team.'),
   memberIds: z
     .array(z.uuid())
-    .describe('The team’s active members, as GET /members lists them, in the order they joined.'),
+    .describe(
+      'The team’s members who answer conversations now, as GET /members lists them, in the order they joined; a member suspended or given another role is left out until they can again.',
+    ),
   channelIds: z
     .array(z.uuid())
     .describe('The WhatsApp numbers whose new conversations go to the team (GET /channels).'),
@@ -2763,7 +2765,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         patch: {
           operationId: 'updateTeam',
           summary: 'Change a team',
-          description: `${scopeNote('teams.manage')} As members save a team in Settings → Teams: the settings given change and the rest stay as they are; \`memberIds\` and \`channelIds\` replace the team’s lists. The same checks as when adding one apply (409 for a name in use, 422 naming \`memberIds\` or \`channelIds\`). Waiting conversations are routed again. A change that leaves the team as it is answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
+          description: `${scopeNote('teams.manage')} As members save a team in Settings → Teams: the settings given change and the rest stay as they are; \`memberIds\` and \`channelIds\` replace the team’s lists, though members who cannot answer conversations now (suspended, or given another role) are never in \`memberIds\` and keep their place in the team. The same checks as when adding one apply (409 for a name in use, 422 naming \`memberIds\` or \`channelIds\`). Waiting conversations are routed again. A change that leaves the team as it is answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           requestBody: { required: true, content: json(ref('UpdateTeam')) },
           responses: {

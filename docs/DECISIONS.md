@@ -10965,6 +10965,15 @@ Not built: webhook events for changes to teams, setting members' availability th
 (members set their own, and supervisors theirs in Settings), the round robin's place, and a version
 check on teams (a change applies to the team as it is when the request runs, its row locked).
 
+Amended (2026-10-07, found in review of PR #40): saving a team, in Settings or through the API with
+or without `memberIds`, removed the places of the members who could not answer conversations at the
+time (suspended, or given another role), since neither lists nor accepts them; a member back from a
+suspension was then in none of their teams. A save now takes away only the places of members who
+answer conversations and are left out, and those of removed members, who must be invited again; the
+others keep their place and are the team's members again when they can answer conversations
+(`droppedTeamMembers` in `inbox/teams.ts`). No migration; places a save took away before are not
+restored.
+
 ## ADR-288 A CRM pipeline's weighted forecast through the public API (P5-08, P4-04) (2026-10-07)
 
 Context: members see a pipeline's open deals weighed by each stage's chance of winning on the board

@@ -12,11 +12,13 @@ import {
   memberAvailability,
   memberships,
   notInArray,
+  or,
   sql,
   teamMembers,
   teams,
   users,
   type Database,
+  type SQL,
   type TeamAssignmentMode,
   type Tx,
 } from '@w360/db';
@@ -116,7 +118,8 @@ export function teamNameError(error: unknown): unknown {
 /**
  * The members a team has and routing gives conversations to: active, with a role that can read and
  * answer conversations. A member suspended or given another role stays in `team_members` but is no
- * team's member until they can answer conversations again.
+ * team's member until they can answer conversations again; saving the team keeps their place
+ * (`droppedTeamMembers`).
  */
 const answersConversations = () =>
   and(
@@ -155,6 +158,30 @@ async function checkChannels(tx: Tx, tenantId: string, channelIds: string[]) {
   }
 }
 
+/**
+ * The places in a team that saving it with the members `memberIds` takes away: those of members who
+ * answer conversations and are not among them, and those of removed members. Members who cannot
+ * answer conversations now (suspended, or given another role) are neither shown nor chosen, in
+ * Settings or through the API, so they keep their place and are the team's again when they can.
+ */
+export function droppedTeamMembers(
+  tenantId: string,
+  teamId: string,
+  memberIds: readonly string[],
+): SQL | undefined {
+  const gone = and(
+    eq(memberships.tenantId, teamMembers.tenantId),
+    eq(memberships.id, teamMembers.membershipId),
+    or(answersConversations(), eq(memberships.status, 'removed')),
+  );
+  return and(
+    eq(teamMembers.tenantId, tenantId),
+    eq(teamMembers.teamId, teamId),
+    memberIds.length ? notInArray(teamMembers.membershipId, [...memberIds]) : undefined,
+    sql`exists (select 1 from ${memberships} where ${gone})`,
+  );
+}
+
 async function syncMembersAndChannels(
   tx: Tx,
   tenantId: string,
@@ -163,15 +190,7 @@ async function syncMembersAndChannels(
 ) {
   const memberIds = [...new Set(data.memberIds)];
   const channelIds = [...new Set(data.channelIds)];
-  await tx
-    .delete(teamMembers)
-    .where(
-      and(
-        eq(teamMembers.tenantId, tenantId),
-        eq(teamMembers.teamId, teamId),
-        ...(memberIds.length ? [notInArray(teamMembers.membershipId, memberIds)] : []),
-      ),
-    );
+  await tx.delete(teamMembers).where(droppedTeamMembers(tenantId, teamId, memberIds));
   if (memberIds.length) {
     await tx
       .insert(teamMembers)

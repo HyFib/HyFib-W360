@@ -85,7 +85,7 @@ const memberIdsSchema = z
   .array(z.uuid())
   .max(200)
   .describe(
-    'The team’s members: active members whose role answers conversations, as GET /members lists them. Replaces the team’s list.',
+    'The team’s members: active members whose role answers conversations, as GET /members lists them. Replaces the team’s list; members who cannot answer conversations now (suspended, or given another role) are not in it and keep their place, back in the team when they can again.',
   );
 const channelIdsSchema = z
   .array(z.uuid())

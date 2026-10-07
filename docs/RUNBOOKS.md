@@ -2296,8 +2296,10 @@ conversations (a marketer, analyst or billing manager, or a member suspended or 
 `GET /members` lists those who can), `channelIds` for a number that is not the company's
 (`GET /channels` lists them), or `routingKeywords` for a keyword over 40 characters or more than 20.
 423 means the company is suspended or its plan has ended; `GET /teams/{id}` still reads. A member
-left out of a team's `memberIds` after their role changed cannot answer conversations; the team's
-next change drops them. The audit log has each change with the key, and deleting a team sends
+left out of a team's `memberIds` after a suspension or a change of role cannot answer conversations
+now; they keep their place and are listed again when they can (since the review fix of 2026-10-07; a
+place a save took away before it is gone, so add the member again). A removed member's place goes at
+the team's next save. The audit log has each change with the key, and deleting a team sends
 `conversation.team_changed` for each of its conversations.
 
 **`POST /api/v1/pipelines` or `PATCH /api/v1/pipelines/{id}` answers 403, 404, 409, 422 or 423

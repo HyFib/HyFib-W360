@@ -1,5 +1,40 @@
 # Progress
 
+## 2026-10-07 — Review fix: saving a team keeps the places of members who cannot answer now (ADR-287 amended)
+
+Status: **Implemented; its database test runs in CI only.** The Codex review of PR #40 found that
+saving a team, in Settings or with `PATCH /teams/{id}` (members given or not), took away the places
+of members suspended or given another role at the time, so they were in none of their teams when
+they came back. No migration. The local PostgreSQL is unavailable, so the integration test below was
+written but not run here.
+
+### Completed
+
+- **Domain:** `droppedTeamMembers` in `inbox/teams.ts`, the places a save takes away: those of
+  members who answer conversations and are left out, and of removed members; the shared writer
+  deletes only those. The `memberIds` descriptions and `PATCH /teams/{id}` say so.
+- **Tests:** unit (`api/teams.test.ts`, 1 new: the condition with and without members, the
+  description); integration (1 new in `api.test.ts`: a suspended member and one given another role
+  keep their places through API changes, with members and without, and a Settings save, and are the
+  team's again when restored; a member left out and a removed member lose theirs). Written for CI;
+  the integration test was not run here.
+- **Docs:** ADR-287 amended; ARCHITECTURE; RUNBOOKS; DEPLOYMENT; feature matrix W-037.
+- **Mutation checks:** 10/10 deliberate regressions caught.
+- **Not changed:** the second finding of that review (forecast sums as JavaScript numbers, exact up
+  to 2^53 − 1 minor units) is answered on its thread: it needs open deals worth more than about 9 ×
+  10^15 minor units in one stage and month (₹90 trillion in a rupee pipeline), and money sums are
+  numbers throughout the board, Reports and the API; the call is the project owner's.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 136 files, 1285 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Where conversations came from, through the public API (P5-08, H-033, W-160, ADR-301)
 
 Status: **Implemented; its database tests run in CI only.** The inbox showed the chat link or

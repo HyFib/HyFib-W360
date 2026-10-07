@@ -996,6 +996,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    without `source` and refuses the `source` and `chatLinkId` filters of `GET /api/v1/conversations`
    and `POST /api/v1/conversations/update-matching` (422); rolling web servers back does the same.
 
+   The team places fix (review of PR #40, ADR-287 amended) has no migration. Until the web rollout
+   ends, an old web server still takes away, when it saves a team, the places of members who cannot
+   answer conversations now; rolling web servers back does the same.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

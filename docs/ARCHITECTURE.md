@@ -1587,10 +1587,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `PATCH /teams/{id}` and `DELETE /teams/{id}` (`api/teams.ts`, `teams.manage`) call the writes the
   Settings operations now call too (`inbox/teams.ts`): `writeCreateTeam` (the plan's limit of teams
   under its lock, the members and numbers checked, then the team with its members and numbers),
-  `writeUpdateTeam` (the team's row locked, the same checks, then the lists replaced) and
-  `writeDeleteTeam` (the conversations leave the team first, in routing's lock order); each caller
-  audits, then routes waiting conversations (`routeWaitingConversations`). `PATCH` reads the team
-  with `readTeamSettings` under its row lock, merges the settings given, normalizes them with the
+  `writeUpdateTeam` (the team's row locked, the same checks, then the lists replaced, keeping the
+  places of members who cannot answer conversations now, `droppedTeamMembers`) and `writeDeleteTeam`
+  (the conversations leave the team first, in routing's lock order); each caller audits, then routes
+  waiting conversations (`routeWaitingConversations`). `PATCH` reads the team with
+  `readTeamSettings` under its row lock, merges the settings given, normalizes them with the
   Settings schema (`teamSettingsOf`), and writes nothing when `sameTeamSettings` finds the team
   unchanged (members and numbers compared as sets). A team's members are those
   `answersConversations` finds (active, `INBOX_WORKER_ROLES`) in the check, in `readTeamSettings`

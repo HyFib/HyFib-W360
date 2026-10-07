@@ -8732,6 +8732,57 @@ describe('assigning conversations (ADR-093)', () => {
     );
   });
 
+  it('keep the places of members who cannot answer conversations when a team is saved (ADR-287)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const supervisor = await joined(c, 'supervisor', 'Sam Supervisor');
+    const manager = await apiKey(c, ['teams.manage']);
+    const { teamId } = await teams().createTeam(owner, {
+      name: 'Support',
+      memberIds: [agent.membership.id, supervisor.membership.id],
+    });
+    const both = [agent.membership.id, supervisor.membership.id].sort();
+    const members = async () =>
+      [...(await apiGetTeam(deps(), manager.ctx, teamId)).memberIds].sort();
+    const places = async () =>
+      (
+        await fx.query<{ membership_id: string }>(
+          'SELECT membership_id FROM app.team_members WHERE team_id = $1 ORDER BY membership_id',
+          [teamId],
+        )
+      ).map((r) => r.membership_id);
+    const setMember = (id: string, column: 'status' | 'roles', value: string | string[]) =>
+      fx.query(`UPDATE app.memberships SET ${column} = $2 WHERE id = $1`, [id, value]);
+
+    // Suspended, or given a role that cannot answer conversations, neither is the team's member;
+    // changes through the API, without members or with none, and a save in Settings keep their
+    // places.
+    await setMember(supervisor.membership.id, 'status', 'suspended');
+    await setMember(agent.membership.id, 'roles', ['marketer']);
+    expect(await members()).toEqual([]);
+    expect(
+      (await apiUpdateTeam(deps(), manager.ctx, teamId, { name: 'Customer care' })).memberIds,
+    ).toEqual([]);
+    await apiUpdateTeam(deps(), manager.ctx, teamId, { memberIds: [], description: 'Orders' });
+    await teams().updateTeam(owner, teamId, { name: 'Customer care', memberIds: [] });
+    expect(await places()).toEqual(both);
+
+    // Back as they were, they are the team's members again.
+    await setMember(supervisor.membership.id, 'status', 'active');
+    await setMember(agent.membership.id, 'roles', ['agent']);
+    expect(await members()).toEqual(both);
+
+    // A member who answers conversations and is left out loses the place, and so does a removed
+    // member at the next save.
+    await apiUpdateTeam(deps(), manager.ctx, teamId, { memberIds: [agent.membership.id] });
+    expect(await places()).toEqual([agent.membership.id]);
+    await apiUpdateTeam(deps(), manager.ctx, teamId, { memberIds: both });
+    await setMember(supervisor.membership.id, 'status', 'removed');
+    await apiUpdateTeam(deps(), manager.ctx, teamId, { description: 'Orders and returns' });
+    expect(await places()).toEqual([agent.membership.id]);
+  });
+
   it('set whether members take conversations as Settings does, as the key (ADR-289)', async () => {
     const c = await fx.company();
     const other = await fx.company();
