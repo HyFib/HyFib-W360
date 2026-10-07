@@ -202,6 +202,7 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   await page.getByRole('checkbox', { name: /Read CRM deals/ }).check();
   await page.getByRole('checkbox', { name: /Create and change CRM deals/ }).check();
   await page.getByRole('checkbox', { name: /Read CRM tasks/ }).check();
+  await page.getByRole('checkbox', { name: /Create CRM tasks/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const tokenField = page.getByLabel('API key', { exact: true });
   await expect(tokenField).toBeVisible();
@@ -245,7 +246,8 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   // its contact by id.
   const tasksRes = await request.get(`/api/v1/tasks?dealId=${won[0]!.id}`, { headers: auth });
   expect(tasksRes.status()).toBe(200);
-  expect(((await tasksRes.json()) as { data: unknown[] }).data).toEqual([
+  const dealTasks = ((await tasksRes.json()) as { data: { assigneeId: string }[] }).data;
+  expect(dealTasks).toEqual([
     expect.objectContaining({
       title: 'Send the proposal',
       status: 'done',
@@ -256,6 +258,28 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
       completedAt: expect.any(String),
     }),
   ]);
+
+  // It adds a follow-up task to the deal for the same member (ADR-259), which the deal's timeline
+  // shows as added through the API.
+  const followUpRes = await request.post('/api/v1/tasks', {
+    headers: { ...auth, 'Idempotency-Key': `crm-task-e2e-${Date.now()}` },
+    data: { title: 'Ask for a review', assigneeId: dealTasks[0]!.assigneeId, dealId: won[0]!.id },
+  });
+  expect(followUpRes.status()).toBe(201);
+  expect(((await followUpRes.json()) as { data: unknown }).data).toMatchObject({
+    title: 'Ask for a review',
+    status: 'open',
+    dealId: won[0]!.id,
+    contactId: won[0]!.contactId,
+  });
+  await page.goto(`/c/${slug}/crm/deals/${won[0]!.id}`);
+  await expect(page.getByRole('heading', { name: 'Annual plan', level: 1 })).toBeVisible();
+  await expect(
+    page
+      .getByRole('list', { name: 'Timeline' })
+      .getByRole('listitem')
+      .filter({ hasText: 'Ask for a review' }),
+  ).toContainText('through the API');
 
   // The key also creates a deal for the customer (ADR-254), in the pipeline's first stage, then
   // changes it as members do (ADR-255): a new value and the next stage. Its page says it came

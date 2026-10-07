@@ -652,6 +652,15 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    (and the platform plan pages for a plan version including it), and `/api/v1/tasks` with 404;
    rolling web servers back to an image from before them does the same. Workers are not affected.
 
+   Migration 0175 (ADR-259) widens the same scope checks again, with the same brief locks, adds
+   `app.crm_tasks.created_by_api_key_id` and replaces the tasks' creator check with one taking a key
+   as the creator, NOT VALID with the new foreign key (no row is read under the migration's lock);
+   0176 validates both while the table stays writable. Web servers from before 0175 do not know
+   `tasks.write`: until the web rollout ends, an old server answers Settings → API keys with an
+   error for a company with a key holding it (and the platform plan pages for a plan version
+   including it), and `POST /api/v1/tasks` with 405 (404 before 0173). Workers are not affected:
+   they send a key's task reminders as members' ones.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

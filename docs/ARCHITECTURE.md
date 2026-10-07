@@ -1471,6 +1471,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`crm_tasks_list_idx`), the filters as plain equalities and `updated_at >= updatedSince`;
   `toApiTask` gives ids in place of the assignee, contact and deal, and `reminder_detail` as
   `reminderSkipReason`. The creator and the member who closed a task are never selected.
+- **Creating CRM tasks through the API (ADR-259):** `POST /tasks` (`apiCreateTask`, `tasks.write`)
+  claims the `Idempotency-Key` in the task's transaction, then checks the times with `taskTimeIssue`
+  (the members' rule, naming the field), the CRM in the plan and the assignee with `memberRefs`; a
+  deal gives the contact, which is locked (key share; `apiContactNotFound` for a missing or erased
+  contact given alone, 409 for a deal's contact erased or merged away); then it inserts the task
+  with `created_by_api_key_id`, schedules its reminder (`scheduleTaskReminder`, so
+  `runtime.outbound` carries the job queue and signer), adds a `task_created` activity without an
+  actor naming the key for a task about a contact, and a `crm.task_created` audit row as the key,
+  and answers the task as `GET /tasks/{id}` reads it.
 - **Numbers through the API (ADR-171):** `GET /channels` (`api/channels.ts`, `channels.read`) reads
   `channel_accounts` in the company oldest first on exact keyset cursors (`created_at`, `id`), with
   `status` as an equality, and gives the id, `display_phone_number`, `verified_name`, the status and

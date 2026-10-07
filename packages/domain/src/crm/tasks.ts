@@ -93,18 +93,33 @@ const listSchema = z.object({
   assigneeMembershipId: uuidSchema.nullable().default(null),
 });
 
-function checkTimes(dueAt: Date | null, remindAt: Date | null, now: Date, remindChanged: boolean) {
+/**
+ * Why a due or reminder time is refused, named by its field, or null: a due date within five years,
+ * and a new reminder in the future and within a year. Members' and keys' tasks share the rule.
+ */
+export function taskTimeIssue(
+  dueAt: Date | null,
+  remindAt: Date | null,
+  now: Date,
+  remindChanged: boolean,
+): { path: 'dueAt' | 'remindAt'; message: string } | null {
   if (dueAt && Math.abs(dueAt.getTime() - now.getTime()) > 5 * YEAR_MS) {
-    throw new AppError('validation_failed', 'Choose a due date within five years.');
+    return { path: 'dueAt', message: 'Choose a due date within five years.' };
   }
   if (remindAt && remindChanged) {
     if (remindAt.getTime() < now.getTime() - REMINDER_GRACE_MS) {
-      throw new AppError('validation_failed', 'Choose a reminder time in the future.');
+      return { path: 'remindAt', message: 'Choose a reminder time in the future.' };
     }
     if (remindAt.getTime() - now.getTime() > YEAR_MS) {
-      throw new AppError('validation_failed', 'Choose a reminder time within a year.');
+      return { path: 'remindAt', message: 'Choose a reminder time within a year.' };
     }
   }
+  return null;
+}
+
+function checkTimes(dueAt: Date | null, remindAt: Date | null, now: Date, remindChanged: boolean) {
+  const issue = taskTimeIssue(dueAt, remindAt, now, remindChanged);
+  if (issue) throw new AppError('validation_failed', issue.message);
 }
 
 /** Task rows as pages show them, with assignee, contact and deal. */

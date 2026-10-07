@@ -3,9 +3,16 @@ import { isAppError } from '@w360/core';
 import { API_SCOPES, REMINDER_STATES, TASK_STATUSES, type Database } from '@w360/db';
 import { ROLE_PERMISSIONS } from '../authz/permissions';
 import type { ApiContext } from './context';
+import { taskTimeIssue } from '../crm/tasks';
 import { API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
 import { API_ROUTES, buildOpenApiDocument } from './openapi';
-import { apiGetTask, apiListTasks, apiTaskListQuerySchema } from './tasks';
+import {
+  apiCreateTask,
+  apiCreateTaskSchema,
+  apiGetTask,
+  apiListTasks,
+  apiTaskListQuerySchema,
+} from './tasks';
 
 const TENANT = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
 const OTHER = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';
@@ -180,9 +187,7 @@ describe('CRM tasks through the API (ADR-258)', () => {
     ]) {
       expect(list.description).toContain(words);
     }
-    expect(list.responses['403']?.description).toContain(
-      'the CRM when reading pipelines, deals or tasks or creating or changing deals,',
-    );
+    expect(list.responses['403']?.description).toContain('the CRM for pipelines, deals and tasks,');
 
     const one = doc.paths['/tasks/{id}']?.get as Operation;
     expect(one.operationId).toBe('getTask');
@@ -220,5 +225,182 @@ describe('CRM tasks through the API (ADR-258)', () => {
     }
     // Ids only: no contact details, creators or timeline anywhere in it.
     expect(JSON.stringify(task)).not.toMatch(/"(phone|contactName|createdBy\w*|timeline)"/);
+  });
+});
+
+describe('creating CRM tasks through the API (ADR-259)', () => {
+  const deps = (db: Database) =>
+    ({ db, clock: { now: () => new Date() }, jobs: {}, signer: {} }) as unknown as Parameters<
+      typeof apiCreateTask
+    >[0];
+  const task = { title: 'Call back', assigneeId: OTHER };
+
+  it('needs tasks.write, a writing scope the database accepts, granted with crm.write', () => {
+    expect(API_SCOPES).toContain('tasks.write');
+    expect(API_SCOPE_KEYS.indexOf('tasks.write')).toBe(API_SCOPE_KEYS.indexOf('tasks.read') + 1);
+    expect(API_SCOPE_INFO['tasks.write']).toMatchObject({
+      label: 'Create CRM tasks',
+      permission: 'crm.write',
+      writes: true,
+    });
+    for (const words of [
+      'as members do',
+      "for one of the company's contacts or deals or for nobody",
+      'an active member who can use the CRM',
+      'a reminder emailed to the assignee',
+      'recorded as created through the API',
+      "CRM in the company's plan",
+    ]) {
+      expect(API_SCOPE_INFO['tasks.write'].description).toContain(words);
+    }
+    // Owners and administrators, who create keys, create tasks in the app.
+    for (const role of ['owner', 'admin'] as const) {
+      expect(ROLE_PERMISSIONS[role].has('crm.write')).toBe(true);
+    }
+  });
+
+  it('takes a title and an assignee, and optionally notes, a contact or deal and times', () => {
+    const parse = (input: unknown) => apiCreateTaskSchema.safeParse(input);
+    const minimal = parse({ ...task, title: '  Call back  ' });
+    expect(minimal.success && minimal.data).toEqual(task);
+    for (const input of [
+      { ...task, notes: 'About the renewal', contactId: TENANT },
+      { ...task, dealId: TENANT, contactId: OTHER },
+      { ...task, notes: null, dueAt: null, remindAt: null },
+      { ...task, dueAt: '2026-10-09T10:00:00+05:30', remindAt: '2026-10-08T09:30:00Z' },
+      { ...task, title: 'x'.repeat(200), notes: 'y'.repeat(2000) },
+    ]) {
+      expect(parse(input).success, JSON.stringify(input)).toBe(true);
+    }
+    for (const input of [
+      { assigneeId: OTHER },
+      { title: 'Call back' },
+      { ...task, title: '   ' },
+      { ...task, title: 'x'.repeat(201) },
+      { ...task, notes: 'y'.repeat(2001) },
+      { ...task, assigneeId: 'me' },
+      { ...task, assigneeId: null },
+      { ...task, contactId: 'asha' },
+      { ...task, dealId: 'annual-plan' },
+      { ...task, dueAt: 'tomorrow' },
+      { ...task, remindAt: '2026-10-08' },
+      { ...task, status: 'done' },
+      { ...task, createdById: TENANT },
+    ]) {
+      expect(parse(input).success, JSON.stringify(input)).toBe(false);
+    }
+  });
+
+  it('keeps the members’ rule for times, naming the field', () => {
+    const now = new Date('2026-10-07T10:00:00Z');
+    const at = (ms: number) => new Date(now.getTime() + ms);
+    const year = 365 * 24 * 3600_000;
+    expect(taskTimeIssue(at(4 * year), at(year - 60_000), now, true)).toBeNull();
+    expect(taskTimeIssue(at(-4 * year), at(-30_000), now, true)).toBeNull();
+    expect(taskTimeIssue(at(5 * year + 60_000), null, now, true)).toEqual({
+      path: 'dueAt',
+      message: 'Choose a due date within five years.',
+    });
+    expect(taskTimeIssue(at(-5 * year - 60_000), null, now, true)?.path).toBe('dueAt');
+    expect(taskTimeIssue(null, at(-90_000), now, true)).toEqual({
+      path: 'remindAt',
+      message: 'Choose a reminder time in the future.',
+    });
+    expect(taskTimeIssue(null, at(year + 60_000), now, true)).toEqual({
+      path: 'remindAt',
+      message: 'Choose a reminder time within a year.',
+    });
+    // A reminder that does not change is not checked again.
+    expect(taskTimeIssue(null, at(-90_000), now, false)).toBeNull();
+  });
+
+  it('refuses keys without the scope, suspended companies and bad bodies before anything is read', async () => {
+    expect(await refusal(apiCreateTask(deps(untouched), ctx(['tasks.read']), task, null))).toEqual([
+      'forbidden',
+      'This API key does not have the tasks.write scope.',
+      [],
+    ]);
+    for (const status of ['suspended', 'restricted']) {
+      expect(
+        (
+          await refusal(apiCreateTask(deps(untouched), ctx(['tasks.write'], status), task, null))
+        )[0],
+      ).toBe('tenant_suspended');
+    }
+    expect(
+      (
+        await refusal(
+          apiCreateTask(deps(untouched), ctx(['tasks.write']), { ...task, dealId: 'x' }, null),
+        )
+      )[2],
+    ).toEqual(['dealId']);
+    // A valid request reaches the database in a writing transaction, where the times are checked
+    // after an Idempotency-Key is claimed, so a retry after the reminder time is answered.
+    const runs: unknown[] = [];
+    const db = {
+      run: (_scope: unknown, _fn: unknown, options?: unknown) => {
+        runs.push(options);
+        throw new Error('reached the database');
+      },
+    } as unknown as Database;
+    const late = { ...task, remindAt: '2020-01-01T00:00:00Z' };
+    await expect(apiCreateTask(deps(db), ctx(['tasks.write']), late, null)).rejects.toThrow(
+      'reached the database',
+    );
+    expect(runs).toEqual([undefined]);
+  });
+
+  it('is described: the scope, what a task is about, the refusals and the request body', () => {
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      paths: Record<string, Record<string, Record<string, unknown>>>;
+      components: { schemas: Record<string, unknown> };
+    };
+    expect(API_ROUTES).toContainEqual(['post', '/tasks']);
+    const create = doc.paths['/tasks']?.post as {
+      operationId: string;
+      description: string;
+      parameters: { $ref?: string }[];
+      requestBody: { content: Record<string, { schema: unknown }> };
+      responses: Record<string, unknown>;
+    };
+    expect(create.operationId).toBe('createTask');
+    expect(create.parameters).toEqual([{ $ref: '#/components/parameters/IdempotencyKeyOptional' }]);
+    expect(create.requestBody.content['application/json']?.schema).toEqual({
+      $ref: '#/components/schemas/CreateTask',
+    });
+    expect(Object.keys(create.responses)).toEqual(
+      expect.arrayContaining(['201', '403', '404', '409', '422', '423']),
+    );
+    for (const words of [
+      'Scope: `tasks.write`.',
+      'about a contact (not erased), a deal and so its contact, or nobody',
+      'an active member who can use the CRM (GET /members)',
+      'a due time within five years',
+      'from now to a year ahead',
+      'recorded as created through the API',
+      '422 naming the field',
+      'a deal whose contact was erased with 409',
+      '(403, reason not_in_plan)',
+      'With an `Idempotency-Key`, a retry answers the first response.',
+      '`contact_merged`',
+    ]) {
+      expect(create.description).toContain(words);
+    }
+    const body = doc.components.schemas.CreateTask as {
+      properties: Record<string, unknown>;
+      required: string[];
+      additionalProperties: boolean;
+    };
+    expect(Object.keys(body.properties)).toEqual([
+      'title',
+      'notes',
+      'assigneeId',
+      'contactId',
+      'dealId',
+      'dueAt',
+      'remindAt',
+    ]);
+    expect(body.required).toEqual(['title', 'assigneeId']);
+    expect(body.additionalProperties).toBe(false);
   });
 });

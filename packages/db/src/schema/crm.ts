@@ -91,6 +91,8 @@ export const crmTasks = appSchema.table('crm_tasks', {
   createdByMembershipId: uuid('created_by_membership_id'),
   /** The automation whose run created the task (ADR-244); exactly one creator is set. */
   createdByAutomationId: uuid('created_by_automation_id'),
+  /** The API key that created the task (migration 0175, ADR-259). */
+  createdByApiKeyId: uuid('created_by_api_key_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });

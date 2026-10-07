@@ -14,6 +14,7 @@ import {
   apiAddConversationNote,
   apiCreateContact,
   apiCreateDeal,
+  apiCreateTask,
   apiErrorResponse,
   apiGetAutomationRun,
   apiGetContact,
@@ -88,6 +89,7 @@ import {
   type ApiContext,
   type ApiConversation,
   type ApiDeal,
+  type ApiTask,
   type ApiKeyReminderDeps,
   type ApiKeysService,
   type ApiScope,
@@ -3955,6 +3957,26 @@ describe('CRM pipelines and deals (ADR-253)', () => {
     return (await contacts().createContact(owner, { displayName: name, phone: `+9198${digits}` }))
       .id;
   };
+  /** A customer who wrote by WhatsApp user id, without a number: a contact members cannot add. */
+  async function contactByUserId(c: Company) {
+    const bsuid = `IN.${nextExternalId()}`;
+    const body = fx.messagesBody(c, { messages: [{ text: 'Hello' }] }) as {
+      entry: {
+        changes: {
+          value: { messages: Record<string, unknown>[]; contacts: Record<string, unknown>[] };
+        }[];
+      }[];
+    };
+    const value = body.entry[0]!.changes[0]!.value;
+    value.messages[0]!.from = bsuid;
+    value.contacts[0]!.user_id = bsuid;
+    await fx.deliver(body);
+    const [identity] = await fx.query<{ contact_id: string }>(
+      'SELECT contact_id FROM app.contact_identities WHERE tenant_id = $1 AND bsuid = $2',
+      [c.tenant.id, bsuid],
+    );
+    return identity!.contact_id;
+  }
   /** A pipeline of the company and its active stages, as the CRM settings list them. */
   async function pipelineOf(
     owner: TenantContext,
@@ -4949,31 +4971,16 @@ describe('CRM pipelines and deals (ADR-253)', () => {
 
     // A customer who wrote by WhatsApp user id, without a number, has a task; merging them into
     // a contact moves it there and changes it, so a pass catching up on changes sees it again.
-    const bsuid = `IN.${nextExternalId()}`;
-    const body = fx.messagesBody(c, { messages: [{ text: 'Hello' }] }) as {
-      entry: {
-        changes: {
-          value: { messages: Record<string, unknown>[]; contacts: Record<string, unknown>[] };
-        }[];
-      }[];
-    };
-    const value = body.entry[0]!.changes[0]!.value;
-    value.messages[0]!.from = bsuid;
-    value.contacts[0]!.user_id = bsuid;
-    await fx.deliver(body);
-    const [identity] = await fx.query<{ contact_id: string }>(
-      'SELECT contact_id FROM app.contact_identities WHERE tenant_id = $1 AND bsuid = $2',
-      [c.tenant.id, bsuid],
-    );
+    const byUserId = await contactByUserId(c);
     const moved = await crm().createTask(owner, {
       title: 'Send the catalogue',
       assigneeMembershipId: owner.membership.id,
-      contactId: identity!.contact_id,
+      contactId: byUserId,
     });
     const before = await apiGetTask(deps(), reader.ctx, moved.id);
     await createContactMergeService({ db: fx.dbs.app, clock: systemClock }).mergeContacts(owner, {
       keepContactId: ravi,
-      mergeContactId: identity!.contact_id,
+      mergeContactId: byUserId,
     });
     const after = await apiGetTask(deps(), reader.ctx, moved.id);
     expect(after).toEqual({ ...before, contactId: ravi, updatedAt: expect.any(String) });
@@ -5023,6 +5030,266 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       keys.create(narrower, { name: 'Tasks', scopes: ['tasks.read'], expiresInDays: 30 }),
       'forbidden',
       /Read CRM tasks/,
+    );
+  });
+
+  it('create tasks as members create them, as the key, and a retry answers the first (ADR-259)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const writer = await apiKey(c, ['tasks.write'], 'Order system');
+    const reader = await apiKey(c, ['tasks.read']);
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New']);
+    const asha = await contactOf(owner, 'Asha');
+    const deal = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan',
+    });
+
+    // A task about the deal, and so its contact, with a due time and a reminder.
+    const dueAt = new Date(Date.now() + 86_400_000);
+    const remindAt = new Date(Date.now() + 3_600_000);
+    const created = await apiCreateTask(
+      deps(),
+      writer.ctx,
+      {
+        title: '  Send the proposal  ',
+        notes: 'With the renewal price',
+        assigneeId: agent.membership.id,
+        dealId: deal.id,
+        dueAt: dueAt.toISOString(),
+        remindAt: remindAt.toISOString(),
+      },
+      null,
+    );
+    expect([created.status, created.replayed]).toEqual([201, false]);
+    const task = (created.body as { data: ApiTask }).data;
+    expect(task).toMatchObject({
+      title: 'Send the proposal',
+      notes: 'With the renewal price',
+      status: 'open',
+      dueAt: dueAt.toISOString(),
+      remindAt: remindAt.toISOString(),
+      reminderState: 'pending',
+      remindedAt: null,
+      reminderSkipReason: null,
+      assigneeId: agent.membership.id,
+      contactId: asha,
+      dealId: deal.id,
+      completedAt: null,
+      version: 1,
+    });
+    expect(await apiGetTask(deps(), reader.ctx, task.id)).toEqual(task);
+    // Its reminder is scheduled for the time given, as members' reminders are.
+    const [job] = await fx.query<{ start_after: Date }>(
+      `SELECT start_after FROM pgboss.job WHERE name = $1 AND singleton_key = $2`,
+      [QUEUES.crmReminder.name, `${task.id}:${remindAt.getTime()}`],
+    );
+    expect(job?.start_after.getTime()).toBe(remindAt.getTime());
+
+    // Recorded as the key's: its creator, the deal's timeline, the contact's tasks and the audit log.
+    const [row] = await fx.query<{
+      created_by_api_key_id: string | null;
+      created_by_membership_id: string | null;
+      created_by_automation_id: string | null;
+    }>(
+      `SELECT created_by_api_key_id, created_by_membership_id, created_by_automation_id
+         FROM app.crm_tasks WHERE id = $1`,
+      [task.id],
+    );
+    expect(row).toEqual({
+      created_by_api_key_id: writer.id,
+      created_by_membership_id: null,
+      created_by_automation_id: null,
+    });
+    const shown = await crm().getDeal(owner, deal.id);
+    expect(
+      shown.timeline
+        .filter((a) => a.kind === 'task_created')
+        .map((a) => [a.actor, a.data.apiKeyId, a.taskTitle]),
+    ).toEqual([[null, writer.id, 'Send the proposal']]);
+    expect((await crm().contactCrm(owner, asha)).tasks.map((t) => t.id)).toEqual([task.id]);
+    const [audit] = await fx.query<{
+      actor_type: string;
+      actor_id: string;
+      metadata: Record<string, unknown>;
+    }>(
+      `SELECT actor_type, actor_id, metadata FROM app.audit_events
+        WHERE action = 'crm.task_created' AND subject_id = $1`,
+      [task.id],
+    );
+    expect(audit).toEqual({
+      actor_type: 'api_key',
+      actor_id: writer.id,
+      metadata: { assigneeId: agent.membership.id, source: 'api' },
+    });
+
+    // A task about the contact alone, and one about nobody, which no timeline shows; blank notes
+    // are none, as members' are.
+    const made = async (body: Record<string, unknown>) =>
+      ((await apiCreateTask(deps(), writer.ctx, body, null)).body as { data: ApiTask }).data;
+    const call = await made({
+      title: 'Call Asha',
+      assigneeId: owner.membership.id,
+      contactId: asha,
+    });
+    expect([call.contactId, call.dealId, call.reminderState, call.dueAt, call.notes]).toEqual([
+      asha,
+      null,
+      'none',
+      null,
+      null,
+    ]);
+    const solo = await made({
+      title: 'Order brochures',
+      assigneeId: owner.membership.id,
+      notes: '',
+    });
+    expect([solo.contactId, solo.dealId, solo.notes]).toEqual([null, null, null]);
+    const activities = await fx.query<{ task_id: string; actor_membership_id: string | null }>(
+      `SELECT task_id, actor_membership_id FROM app.crm_activities
+        WHERE tenant_id = $1 AND kind = 'task_created' ORDER BY created_at`,
+      [c.tenant.id],
+    );
+    expect(activities).toEqual([
+      { task_id: task.id, actor_membership_id: null },
+      { task_id: call.id, actor_membership_id: null },
+    ]);
+
+    // A retry with the same Idempotency-Key answers the first, once, even after the reminder time
+    // it gave has passed; the same request without one is then refused for that time.
+    const soon = new Date(Date.now() + 30_000);
+    const request = {
+      title: 'Confirm the delivery',
+      assigneeId: agent.membership.id,
+      contactId: asha,
+      remindAt: soon.toISOString(),
+    };
+    const key = idem('task-delivery-1', JSON.stringify(request));
+    const first = await apiCreateTask(deps(), writer.ctx, request, key);
+    const later = deps(at(new Date(soon.getTime() + 600_000)));
+    const again = await apiCreateTask(later, writer.ctx, request, key);
+    expect([first.replayed, again.replayed]).toEqual([false, true]);
+    expect(again.body).toEqual(first.body);
+    const late = await expectAppError(
+      apiCreateTask(later, writer.ctx, request, null),
+      'validation_failed',
+    );
+    expect(isAppError(late) && (late.issues ?? []).map((i) => i.path)).toEqual(['remindAt']);
+    expect(
+      await fx.query('SELECT id FROM app.crm_tasks WHERE tenant_id = $1 AND title = $2', [
+        c.tenant.id,
+        'Confirm the delivery',
+      ]),
+    ).toHaveLength(1);
+  });
+
+  it('refuse tasks members are refused, and need the scope, an active company and the CRM (ADR-259)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const marketer = await fx.ctx(c, c.marketer);
+    const theirOwner = await fx.ctx(other, other.owner);
+    const writer = await apiKey(c, ['tasks.write']);
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New']);
+    const theirSales = await pipelineOf(theirOwner, 'Theirs', 'INR', ['Open']);
+    const asha = await contactOf(owner, 'Asha');
+    const ravi = await contactOf(owner, 'Ravi');
+    const theirContact = await contactOf(theirOwner, 'Mira');
+    const deal = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan',
+    });
+    const theirDeal = await crm().createDeal(theirOwner, {
+      contactId: theirContact,
+      pipelineId: theirSales.id,
+      stageId: theirSales.stages[0],
+      title: 'Theirs',
+    });
+    const body = (input: Record<string, unknown> = {}) => ({
+      title: 'Call back',
+      assigneeId: owner.membership.id,
+      ...input,
+    });
+    const create = (input: Record<string, unknown> = {}) =>
+      apiCreateTask(deps(), writer.ctx, body(input), null);
+    const paths = (error: unknown) =>
+      isAppError(error) ? (error.issues ?? []).map((i) => i.path) : [];
+    const days = (n: number) => new Date(Date.now() + n * 86_400_000).toISOString();
+
+    // Assignees who cannot use the CRM, another company's or an unknown deal, a contact other than
+    // the deal's, and times members are refused are named.
+    for (const [input, path] of [
+      [{ assigneeId: marketer.membership.id }, 'assigneeId'],
+      [{ assigneeId: theirOwner.membership.id }, 'assigneeId'],
+      [{ assigneeId: uuidv7() }, 'assigneeId'],
+      [{ dealId: theirDeal.id }, 'dealId'],
+      [{ dealId: uuidv7() }, 'dealId'],
+      [{ dealId: deal.id, contactId: ravi }, 'contactId'],
+      [{ dueAt: days(6 * 365) }, 'dueAt'],
+      [{ remindAt: days(-1) }, 'remindAt'],
+      [{ remindAt: days(400) }, 'remindAt'],
+    ] as const) {
+      expect(paths(await expectAppError(create(input), 'validation_failed'))).toEqual([path]);
+    }
+
+    // Another company's or an unknown contact is not found, nor is an erased one, and a contact
+    // merged into another names the one it belongs to now; a deal whose contact was erased takes
+    // no new tasks.
+    await expectAppError(create({ contactId: theirContact }), 'not_found', /Contact/);
+    await expectAppError(create({ contactId: uuidv7() }), 'not_found', /Contact/);
+    const merged = await contactByUserId(c);
+    await createContactMergeService({ db: fx.dbs.app, clock: systemClock }).mergeContacts(owner, {
+      keepContactId: ravi,
+      mergeContactId: merged,
+    });
+    const gone = await expectAppError(create({ contactId: merged }), 'not_found', /merged/);
+    expect(isAppError(gone) && gone.details).toEqual({
+      apiReason: 'contact_merged',
+      mergedInto: ravi,
+    });
+    await contacts().eraseContact(owner, { contactId: asha, suppress: false });
+    await expectAppError(create({ contactId: asha }), 'not_found', /Contact/);
+    await expectAppError(create({ dealId: deal.id }), 'conflict', /erased/);
+    const [none] = await fx.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM app.crm_tasks WHERE tenant_id = $1',
+      [c.tenant.id],
+    );
+    expect(none?.n).toBe(0);
+
+    // A key that only reads tasks, or one of a suspended company, creates none.
+    const reader = await apiKey(c, ['tasks.read', 'deals.write']);
+    await expectAppError(
+      apiCreateTask(deps(), reader.ctx, body(), null),
+      'forbidden',
+      /tasks\.write/,
+    );
+    const suspended = {
+      ...writer.ctx,
+      tenant: { ...writer.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(apiCreateTask(deps(), suspended, body(), null), 'tenant_suspended');
+
+    // A plan without the CRM creates none; with it again, the task is created.
+    await onPlan(c, []);
+    const error = await expectAppError(create(), 'forbidden', /does not include the CRM/);
+    expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    await onPlan(c, ['crm']);
+    expect((await create({ contactId: ravi })).status).toBe(201);
+
+    // Granting the scope needs crm.write, which members create tasks with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'crm.write')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Tasks', scopes: ['tasks.write'], expiresInDays: 30 }),
+      'forbidden',
+      /Create CRM tasks/,
     );
   });
 });

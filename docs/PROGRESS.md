@@ -1,5 +1,39 @@
 # Progress
 
+## 2026-10-07 — Creating CRM tasks through the public API (P5-08, P4-04, H-033, ADR-259)
+
+Status: **Implemented; its database and browser tests run in CI only.** Keys could read tasks
+(ADR-258) but not add one. The local PostgreSQL is unavailable, so the migrations and the
+integration tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0175 (the scope checks with `tasks.write`,
+  `crm_tasks.created_by_api_key_id` and the creator check, NOT VALID) and 0176 (validates them).
+- **Domain:** `apiCreateTask` and `apiCreateTaskSchema` in `api/tasks.ts`; `taskTimeIssue` shared
+  with members' tasks in `crm/tasks.ts`; `invalidField` shared from `api/deals.ts`; the scope; the
+  export spec's new column; the OpenAPI path, the `CreateTask` schema and the 403 wording.
+- **Web:** `POST /api/v1/tasks`.
+- **Tests:** unit (5 new in `tasks.test.ts`; the writing scopes in `api.test.ts` and the 403 wording
+  updated); integration (2 new in `api.test.ts`, and a shared helper for a contact who wrote by user
+  id); e2e (the CRM test's key adds a task the deal's timeline shows). Written for CI; the
+  integration and e2e tests were not run here.
+- **Docs:** ADR-259; ARCHITECTURE; SECURITY; THREAT-MODEL T228; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08
+  and P4-04; feature matrix W-134, H-033 and H-012.
+- **Mutation checks:** 29/29 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 1100 passed (117 files)                                       |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm test:e2e`                                    | not run here; CI runs it                                      |
+| `pnpm build`                                       | passed                                                        |
+| Mutation checks                                    | 29/29 deliberate regressions caught                           |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Reading CRM tasks through the public API (P5-08, P4-04, H-033, ADR-258)
 
 Status: **Implemented; its database and browser tests run in CI only.** Keys could read, create and

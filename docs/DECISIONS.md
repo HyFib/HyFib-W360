@@ -9799,3 +9799,39 @@ Decision:
 
 Not built: creating, changing, completing or cancelling tasks through the API, notes and the
 timeline, task webhook events, and who created or completed a task.
+
+## ADR-259 Creating CRM tasks through the public API (P5-08, P4-04) (2026-10-07)
+
+Context: after ADR-258 an integration could read the company's tasks but not add one, so an order
+system, a booking tool or another CRM could not hand a member a follow-up (call the customer back,
+confirm a delivery) without someone typing it in.
+
+Decision:
+
+- **A new writing scope, `tasks.write`** ("Create CRM tasks"), granted with `crm.write`, the
+  permission members create tasks with; refused while the company is suspended or restricted, as
+  every writing scope is. Existing keys keep their scopes, and a plan version that chose its scopes
+  leaves it out until a new version includes it. Migration 0175 replaces the key and plan scope
+  checks with ones that also accept it, validated at once, as 0173 did.
+- **`POST /api/v1/tasks` (`createTask`)** creates a task as members do on the Tasks page and the
+  contact and deal pages: a title, notes, an assignee who is an active member able to use the CRM,
+  and about a contact, a deal (and so the deal's contact) or nobody, with a due time within five
+  years and a reminder from now to a year ahead, the members' rule (`taskTimeIssue`, shared with
+  their tasks), whose email is scheduled as theirs are. With an `Idempotency-Key` a retry answers
+  the first response; the key is claimed before the times are checked, so a retry after the reminder
+  time is still answered.
+- **Refusals as members get them, named for keys:** an assignee who is not an active member able to
+  use the CRM, an unknown or another company's deal, a contact other than the deal's and a refused
+  time are 422 naming the field; an unknown, another company's or erased contact is 404 (a merged
+  one with reason `contact_merged` and `mergedInto`); a deal whose contact was erased is 409, as
+  members are refused. The contact is locked against erasure and merges until the task is in; merges
+  lock both contacts first, so a deal whose contact a merge removed between the reads answers 409
+  rather than a task attached to the wrong contact.
+- **Recorded as the key's:** migration 0175 adds `crm_tasks.created_by_api_key_id` and replaces the
+  creator check with one taking a key as the creator (NOT VALID with the foreign key; 0176 validates
+  both). The `task_created` activity of a task about a contact has no member actor and names the
+  key, so the contact's and deal's timelines say it came through the API, and a `crm.task_created`
+  audit row names the key and the assignee. The data export lists the new column.
+
+Not built: changing, completing, cancelling or reopening tasks through the API (members do it in the
+app), and task webhook events.

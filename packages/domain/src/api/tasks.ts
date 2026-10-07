@@ -1,7 +1,9 @@
 import { z } from 'zod';
-import { notFound } from '@w360/core';
+import { AppError, notFound, uuidv7 } from '@w360/core';
 import {
   and,
+  contacts,
+  crmDeals,
   crmTasks,
   desc,
   eq,
@@ -11,10 +13,21 @@ import {
   type ReminderState,
   type TaskStatus,
 } from '@w360/db';
+import { recordSystemAudit } from '../audit';
+import { addActivity, memberRefs } from '../crm/common';
+import { scheduleTaskReminder } from '../crm/reminders';
+import { taskTimeIssue } from '../crm/tasks';
 import type { OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
-import { assertScope, type ApiContext } from './context';
-import { assertCrmInPlan } from './deals';
+import { apiContactNotFound } from './contact-view';
+import { apiActor, assertScope, type ApiContext } from './context';
+import { assertCrmInPlan, invalidField } from './deals';
+import {
+  claimIdempotencyKey,
+  storeIdempotentResponse,
+  type ApiResponse,
+  type IdempotencyInput,
+} from './idempotency';
 import { API_LIMITS } from './model';
 
 /**
@@ -23,7 +36,7 @@ import { API_LIMITS } from './model';
  * automation), with the assignee, the contact and the deal by id only. The CRM timeline is never
  * read, nor the contact's name or number (`contacts.read` reads those). A key needs the CRM in the
  * company's plan. Erasing a contact deletes its tasks, so they are no longer read; a merge moves
- * them to the contact kept.
+ * them to the contact kept. With `tasks.write` a key creates tasks as members do (ADR-259).
  */
 
 export const apiTaskListQuerySchema = z
@@ -40,6 +53,46 @@ export const apiTaskListQuerySchema = z
       .describe(
         'Only tasks changed at or after this time (created, edited, completed, cancelled or reopened, reminded, or moved to another contact by a merge).',
       ),
+  })
+  .strict();
+
+const taskTime = z.iso.datetime({ offset: true });
+
+/** What `POST /tasks` takes: a task as members create one, about a contact, a deal or nobody. */
+export const apiCreateTaskSchema = z
+  .object({
+    title: z
+      .string()
+      .trim()
+      .min(1, 'Give the task a title.')
+      .max(200, 'A title is limited to 200 characters.'),
+    notes: z
+      .string()
+      .trim()
+      .max(2000, 'Notes are limited to 2000 characters.')
+      .nullable()
+      .optional()
+      .describe('What the task is about, as members write it.'),
+    assigneeId: z
+      .uuid()
+      .describe(
+        'The member who does the task: an active member who can use the CRM (GET /members).',
+      ),
+    contactId: z
+      .uuid()
+      .optional()
+      .describe('The customer the task is about, as GET /contacts gives them.'),
+    dealId: z
+      .uuid()
+      .optional()
+      .describe(
+        'The deal the task is about (GET /deals): the task is about the deal’s contact too.',
+      ),
+    dueAt: taskTime.nullable().optional().describe('When the task is due, within five years.'),
+    remindAt: taskTime
+      .nullable()
+      .optional()
+      .describe('When to email the assignee a reminder: from now to a year ahead.'),
   })
   .strict();
 
@@ -194,4 +247,134 @@ export async function apiGetTask(
   );
   if (!task) throw notFound('Task');
   return toApiTask(task);
+}
+
+/**
+ * Creates a task as members do (ADR-259), recorded as created by the key: about one of the
+ * company's contacts (not erased), one of its deals and so the deal's contact, or nobody, assigned
+ * to an active member who can use the CRM, its reminder scheduled when one is set. The contact is
+ * locked against erasure and merges until the task is in, as members' tasks lock it. The
+ * `task_created` activity of a task about a contact has no member actor and names the key, so the
+ * timeline says it came through the API; the audit log names the key. With an Idempotency-Key a
+ * retry answers the first response.
+ */
+export async function apiCreateTask(
+  deps: Pick<OutboundDeps, 'db' | 'clock' | 'jobs' | 'signer'>,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput | null,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'tasks.write');
+  const data = parseInput(apiCreateTaskSchema, input);
+  const now = deps.clock.now();
+  const dueAt = data.dueAt ? new Date(data.dueAt) : null;
+  const remindAt = data.remindAt ? new Date(data.remindAt) : null;
+  return deps.db.run(ctx.scope, async (tx) => {
+    // Claimed in the task's transaction, so a refused task leaves the key unused (ADR-052), and
+    // before the times are checked, so a retry after the reminder time answers the first response.
+    let claimed: string | null = null;
+    if (idempotency) {
+      const claim = await claimIdempotencyKey(tx, ctx, idempotency, now);
+      if ('replay' in claim) return claim.replay;
+      claimed = claim.claimed;
+    }
+    const timeIssue = taskTimeIssue(dueAt, remindAt, now, true);
+    if (timeIssue) throw invalidField(timeIssue.path, timeIssue.message);
+    await assertCrmInPlan(tx, ctx.tenant.id);
+    if (!(await memberRefs(tx, ctx.tenant.id, [data.assigneeId])).get(data.assigneeId)?.active) {
+      throw invalidField(
+        'assigneeId',
+        'Give the id of an active member who can use the CRM (GET /members).',
+      );
+    }
+    let contactId = data.contactId ?? null;
+    const dealId = data.dealId ?? null;
+    if (dealId) {
+      const [deal] = await tx
+        .select({ contactId: crmDeals.contactId })
+        .from(crmDeals)
+        .where(and(eq(crmDeals.tenantId, ctx.tenant.id), eq(crmDeals.id, dealId)));
+      if (!deal) {
+        throw invalidField('dealId', 'Give the id of one of the company’s deals (GET /deals).');
+      }
+      if (contactId && contactId !== deal.contactId) {
+        throw invalidField(
+          'contactId',
+          'The deal is another contact’s: leave `contactId` out, or give the deal’s contact.',
+        );
+      }
+      contactId = deal.contactId;
+    }
+    if (contactId) {
+      const [contact] = await tx
+        .select({ erasedAt: contacts.erasedAt })
+        .from(contacts)
+        .where(and(eq(contacts.tenantId, ctx.tenant.id), eq(contacts.id, contactId)))
+        .for('key share');
+      if (dealId) {
+        // Merges lock both contacts first, so once the deal's contact is locked the deal stays
+        // with it; a contact gone means a merge moved the deal between the reads.
+        if (!contact) {
+          throw new AppError('conflict', 'The deal moved to another contact meanwhile; try again.');
+        }
+        if (contact.erasedAt) {
+          throw new AppError(
+            'conflict',
+            'The deal’s contact was erased, so it takes no new tasks.',
+          );
+        }
+      } else if (!contact || contact.erasedAt) {
+        throw await apiContactNotFound(tx, ctx.tenant.id, contactId);
+      }
+    }
+    const id = uuidv7();
+    await tx.insert(crmTasks).values({
+      id,
+      tenantId: ctx.tenant.id,
+      title: data.title,
+      notes: data.notes || null,
+      contactId,
+      dealId,
+      assigneeMembershipId: data.assigneeId,
+      dueAt,
+      remindAt,
+      reminderState: remindAt ? 'pending' : 'none',
+      createdByApiKeyId: ctx.key.id,
+    });
+    if (remindAt) {
+      await scheduleTaskReminder(deps, tx, { tenantId: ctx.tenant.id, taskId: id, remindAt });
+    }
+    if (contactId) {
+      await addActivity(tx, {
+        tenantId: ctx.tenant.id,
+        contactId,
+        dealId,
+        taskId: id,
+        actorMembershipId: null,
+        kind: 'task_created',
+        data: { apiKeyId: ctx.key.id },
+        at: now,
+      });
+    }
+    await recordSystemAudit(
+      tx,
+      ctx.tenant.id,
+      {
+        action: 'crm.task_created',
+        subjectType: 'crm_task',
+        subjectId: id,
+        correlationId: ctx.requestId,
+        metadata: { assigneeId: data.assigneeId, source: 'api' },
+      },
+      apiActor(ctx),
+    );
+    const [task] = await tx
+      .select(taskColumns)
+      .from(crmTasks)
+      .where(and(eq(crmTasks.tenantId, ctx.tenant.id), eq(crmTasks.id, id)));
+    if (!task) throw notFound('Task');
+    const response = { status: 201, body: { data: toApiTask(task) } };
+    if (claimed) await storeIdempotentResponse(tx, ctx, claimed, response);
+    return { ...response, replayed: false };
+  });
 }

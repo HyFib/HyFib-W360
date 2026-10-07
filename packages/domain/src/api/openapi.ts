@@ -108,6 +108,7 @@ import {
 } from './conversations';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
 import { apiCreateDealSchema, apiUpdateDealSchema } from './deals';
+import { apiCreateTaskSchema } from './tasks';
 import { apiUpdateOrderSchema } from './orders';
 import {
   apiConsentSchema,
@@ -930,7 +931,7 @@ const errors = (...statuses: number[]) =>
           {
             400: 'The request is malformed (for example invalid JSON or a missing header).',
             401: 'No valid API key: missing, unknown, revoked or expired.',
-            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one, the CRM when reading pipelines, deals or tasks or creating or changing deals, or Commerce when sending products or reading or changing orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
+            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one, the CRM for pipelines, deals and tasks, or Commerce when sending products or reading or changing orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
             404: 'Not found in the company.',
             409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit). Pausing, resuming or cancelling a campaign: its status does not allow it, or, resuming, a member or HyFib paused it; the message names the status or the pause reason.',
             412: "A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it. Starting an automation: it is not published, archived or not started through the API (automation_unavailable), paused (automation_paused), its number is not active (channel_unavailable), or the plan's automation runs for the month are used up (automation_quota).",
@@ -2293,6 +2294,17 @@ export function buildOpenApiDocument(serverUrl: string) {
             ...errors(401, 403, 422, 429, 500),
           },
         },
+        post: {
+          operationId: 'createTask',
+          summary: 'Create a CRM task',
+          description: `${scopeNote('tasks.write')} As members create a task on the Tasks page and the contact and deal pages: about a contact (not erased), a deal and so its contact, or nobody, assigned to an active member who can use the CRM (GET /members), with notes, a due time within five years and a reminder emailed to the assignee, from now to a year ahead. The task is recorded as created through the API: the timeline of a task about a contact says so, and the audit log names the key. An unknown assignee or deal, a contact other than the deal’s, or a refused time is answered with 422 naming the field; an unknown or erased contact with 404, and a deal whose contact was erased with 409. Needs the CRM in the company’s plan (403, reason not_in_plan). With an \`Idempotency-Key\`, a retry answers the first response. ${MERGED_CONTACT_NOTE}`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateTask')) },
+          responses: {
+            '201': { description: 'The task created.', content: json(dataOf(ref('Task'))) },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
       },
       '/tasks/{id}': {
         get: {
@@ -2957,6 +2969,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         CreateDeal: jsonSchema(apiCreateDealSchema, 'input'),
         UpdateDeal: jsonSchema(apiUpdateDealSchema, 'input'),
         Task: jsonSchema(apiTaskSchema),
+        CreateTask: jsonSchema(apiCreateTaskSchema, 'input'),
         CampaignWithResults: jsonSchema(apiCampaignDetailSchema),
         CampaignReview: jsonSchema(apiCampaignReviewSchema),
         CreateCampaign: jsonSchema(apiCreateCampaignSchema, 'input'),
@@ -3074,6 +3087,7 @@ export const API_ROUTES = [
   ['get', '/deals/{id}'],
   ['patch', '/deals/{id}'],
   ['get', '/tasks'],
+  ['post', '/tasks'],
   ['get', '/tasks/{id}'],
   ['get', '/webhook-endpoints'],
   ['post', '/webhook-endpoints'],

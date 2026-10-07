@@ -2151,6 +2151,18 @@ day before it could be sent (`too_late`), or the assignee could no longer use th
 index can remain: run `DROP INDEX CONCURRENTLY app.crm_tasks_list_idx;` and run the migrations
 again.
 
+**`POST /api/v1/tasks` answers 403, 404, 409, 422 or 423 (ADR-259).** 403 `forbidden` names the
+scope the key lacks, `tasks.write` (granted by members with `crm.write`), or with reason
+`not_in_plan` the company's plan leaves out the CRM or the scope. 422 names the field: `assigneeId`
+for someone who is not an active member able to use the CRM (GET /members lists who can be),
+`dealId` for a deal the company does not have, `contactId` for a contact other than the deal's
+(leave it out with a deal), `dueAt` beyond five years, and `remindAt` in the past or over a year
+ahead. 404 means the contact is not one of the company's or was erased (reason `contact_merged` and
+`mergedInto` name the contact a merged one belongs to now). 409 means the deal's contact was erased,
+or a merge moved the deal while the task was being created (try again). 423 means the company is
+suspended or its plan has ended. A retry with the same `Idempotency-Key` answers the first task,
+even after its reminder time.
+
 **`GET /api/v1/channels` answers 403, or a number shows no phone or name (ADR-171).** 403
 `forbidden` names the scope the key lacks, `channels.read` (keys keep the scopes they were created
 with: create a key with it); reason `not_in_plan` means the company's plan leaves the scope out

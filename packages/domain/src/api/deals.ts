@@ -459,8 +459,8 @@ export async function apiGetDeal(
   return deal;
 }
 
-/** A refused pipeline, stage or owner, named by the field that gave it. */
-const invalidField = (path: string, message: string) =>
+/** A refused value, named by the field that gave it (a deal's or a task's). */
+export const invalidField = (path: string, message: string) =>
   new AppError('validation_failed', message, { issues: [{ path, message }] });
 
 /**
@@ -592,7 +592,7 @@ export async function apiCreateDeal(
   });
 }
 
-/** The pipeline of a deal being moved or reopened, shared until the change is in (see entryStage). */
+/** A moved or reopened deal's pipeline, shared until the change is in (see entryStage). */
 async function sharedActivePipeline(tx: Tx, tenantId: string, pipelineId: string) {
   const [pipeline] = await tx
     .select({ archivedAt: crmPipelines.archivedAt })
@@ -617,12 +617,12 @@ async function sharedActivePipeline(tx: Tx, tenantId: string, pipelineId: string
  * transaction with the deal's contact and then its row locked (the order erasure takes them in): a
  * closed deal is reopened (in its stage, or the pipeline's first active one when its stage was
  * removed), the open deal moved to another active stage of its pipeline or to another active
- * pipeline (ADR-257: to a stage of it or its first active one, a deal with a value only to a pipeline
- * of its currency), its title, value, owner and expected close date changed (not once its contact is
- * erased), and the open deal closed as won or lost, in that order, with the version moving on once. A deal already as asked is answered as it
- * is, so a retry changes nothing; a closed deal is not moved or closed the other way until it is
- * reopened. Each change is on the deal's timeline without a member actor, naming the key, and the
- * audit log records it as the key.
+ * pipeline (ADR-257: to a stage of it or its first active one, a deal with a value only to a
+ * pipeline of its currency), its title, value, owner and expected close date changed (not once its
+ * contact is erased), and the open deal closed as won or lost, in that order, with the version
+ * moving on once. A deal already as asked is answered as it is, so a retry changes nothing; a
+ * closed deal is not moved or closed the other way until it is reopened. Each change is on the
+ * deal's timeline without a member actor, naming the key, and the audit log records it as the key.
  */
 export async function apiUpdateDeal(
   deps: Pick<OutboundDeps, 'db' | 'clock'>,
