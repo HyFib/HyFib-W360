@@ -1039,6 +1039,11 @@ verification, app review, Embedded Signup configuration).
   with both assignees; an endpoint naming assignees hears it for the member the task left as well;
   one change that also reopens or closes the task sends each event in the order the steps happen;
   automations, erasure and merges send none).
+  **[Deal detail events built; their database tests run only in CI]** (ADR-275, migrations 0192 and
+  0193: `deal.updated` for every change of a deal's title, value or expected close date, by members
+  or API keys, and for erasure's retitling, naming what changed, never the values before; the
+  pipeline, stage and owner lists narrow it; one change that also moves, reopens, closes or gives
+  the deal away sends each event in the order the steps happen).
   Remaining: filters for other event types (task events by their deal's pipeline, stage or owner,
   among them) and on a message's or contact's values (such as a field's value, contact events by
   tag, or the key that started a run), other authentication (headers computed per delivery, other

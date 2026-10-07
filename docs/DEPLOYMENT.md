@@ -780,6 +780,20 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    endpoints once the rollout ends, and turn it off before rolling web servers back to such an
    image.
 
+   Migration 0192 (ADR-275) replaces the endpoints' event check and the checks of their pipeline,
+   stage and owner lists (validated at once: at most 10 endpoints per company), the events' type
+   check (NOT VALID; 0193 validates it while captures go on), the deal trigger (now also on its
+   title, value and expected close date) and its function, grants the definer role a read of a
+   deal's id and owner, and replaces `app.capture_webhook_event` (keeping 0190's filters) with the
+   same signature. Workers roll out before web servers, so no endpoint takes `deal.updated` before
+   every worker can describe it. A worker from before it fails each delivery of the event without an
+   attempt (`payload_failed`; replay it once newer workers run), so before rolling workers back to
+   such an image, turn the event off on the endpoints that take it. An old web server's Settings and
+   API do not offer it, and until the web rollout ends an old server answers Settings → Webhooks
+   with an error for a company with an endpoint taking it (it has no label for it): add it to
+   endpoints once the rollout ends, and turn it off before rolling web servers back to such an
+   image.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

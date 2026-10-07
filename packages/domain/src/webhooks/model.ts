@@ -57,6 +57,7 @@ export const WEBHOOK_EVENT_KEYS = [
   'order.status_changed',
   'campaign.status_changed',
   'deal.created',
+  'deal.updated',
   'deal.stage_changed',
   'deal.owner_changed',
   'deal.status_changed',
@@ -147,6 +148,11 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
     'deal.created': {
       label: 'Deal added',
       description: 'A CRM deal was added: by a member, an automation or an API key.',
+    },
+    'deal.updated': {
+      label: 'Deal details',
+      description:
+        'A CRM deal’s title, value or expected close date changed: by a member or an API key, or by its contact’s erasure, which retitles it.',
     },
     'deal.stage_changed': {
       label: 'Deal stage',
@@ -844,10 +850,11 @@ export function webhookTakesCampaignEvents(eventTypes: readonly WebhookEventType
  * (ADR-264) and owners (ADR-265): a deal's event belongs to the pipeline and stage it gives
  * (`deal.pipelineId` and `deal.stageId`, as the event's step left the deal), and a move to the
  * pipeline and stage it left as well; to the deal's owner when it happens, and a change of owner
- * (ADR-269) to the owner it left as well.
+ * (ADR-269) to the owner it left as well. A change of details (ADR-275) is one of them.
  */
 export const WEBHOOK_PIPELINE_EVENTS = [
   'deal.created',
+  'deal.updated',
   'deal.stage_changed',
   'deal.owner_changed',
   'deal.status_changed',

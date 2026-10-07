@@ -10427,3 +10427,45 @@ Decision:
 
 Not built: events for other edits of a task (its title, notes, due time or reminder), who made a
 change in the payload, and task events by their deal's pipeline, stage or owner.
+
+## ADR-275 A webhook event when a CRM deal's details change (P5-09, P4-04) (2026-10-07)
+
+Context: deal events (ADR-256, ADR-269) told integrations of deals added, moved, given to another
+owner, won, lost or reopened, but a change of a deal's title, value or expected close date sent
+nothing: a receiver keeping deals in step (a CRM, a forecast sheet) learnt of a new value only from
+the deal's next event, if one came, or by reading every deal again. ADR-269 left events for other
+edits of a deal unbuilt.
+
+Decision:
+
+- **`deal.updated`** ("Deal details") is captured by the deal trigger (`app.webhook_capture_deal`,
+  replaced in place; its update trigger now also fires on `title`, `value_minor` and
+  `expected_close_on`) when an update changes any of them: a member editing the deal, or a key
+  changing `title`, `valueMinor` or `expectedCloseOn` (`PATCH /deals/{id}`, ADR-255). Erasure
+  retitles an erased contact's deals "Deal (contact erased)", which sends it too, so a receiver
+  replaces a title that may name the person. Automations set details only on the deals they add
+  (`deal.created`), and merges keep them, so they send none; an edit that changes nothing sends
+  none.
+- **What changed, not the values:** the payload is the deal events' one with `changes`, naming the
+  details the change changed, once each and in the order `title`, `valueMinor`, `expectedCloseOn`;
+  the deal is the deal when the event is delivered, so a deal changed again since gives its latest
+  details, and the values before a change are never sent (a title can name a person; the deal's
+  timeline keeps a value's change for members). Who made the change is not sent.
+- **Its place among one change's steps:** one update that also reopens, moves, gives away or closes
+  the deal captures each in the order members' and keys' steps run (ADR-255): reopened, moved,
+  details changed, given to another owner, closed, each stamped with `clock_timestamp()`; a key
+  clearing a value and winning the deal in one request sends the change of details with status
+  `open`, then the win. `deal.owner_changed`'s description names the new step.
+- **Filters:** it is a deal event for the pipeline, stage and owner lists (ADR-263 to ADR-265),
+  matched by the pipeline, stage and owner the deal has as the change left it; the lists stay while
+  an endpoint takes any of the five deal events, and their refusals name the five as Settings lists
+  them. Erasure's capture runs as the definer role, which now reads a deal's id and owner (a column
+  grant) so that an endpoint naming owners can be matched; its rows are those its existing policy on
+  deals gives it.
+- **Migrations 0192 and 0193:** 0192 replaces the endpoints' event check and their three deal lists'
+  checks (validated at once: at most 10 endpoints per company), the events' type check (NOT VALID;
+  0193 validates it while captures go on), the trigger and its function, grants the definer role the
+  read, and replaces `app.capture_webhook_event` with the same signature (keeping 0190's filters).
+
+Not built: the values before a change, edits of a lost reason, a deal's notes or its contact's
+details as deal events, and who made a change in the payload.

@@ -28,6 +28,7 @@ export const WEBHOOK_EVENT_TYPES = [
   'order.status_changed',
   'campaign.status_changed',
   'deal.created',
+  'deal.updated',
   'deal.stage_changed',
   'deal.owner_changed',
   'deal.status_changed',

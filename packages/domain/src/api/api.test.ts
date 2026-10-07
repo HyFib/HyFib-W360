@@ -1970,7 +1970,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     );
     for (const field of ['pipelineIds', 'stageIds', 'ownerIds'] as const) {
       expect(JSON.stringify(given[field]), field).toContain(
-        'deal.created, deal.stage_changed, deal.owner_changed or deal.status_changed',
+        'deal.created, deal.updated, deal.stage_changed, deal.owner_changed or deal.status_changed',
       );
     }
     expect(JSON.stringify(answered.properties.ownerIds)).toContain(
@@ -2703,6 +2703,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'contact.erased',
       'contact.merged',
       'deal.created',
+      'deal.updated',
       'deal.stage_changed',
       'deal.owner_changed',
       'deal.status_changed',

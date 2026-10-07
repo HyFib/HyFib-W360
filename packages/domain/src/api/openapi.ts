@@ -40,6 +40,7 @@ import {
   automationRunStartedPayloadSchema,
   campaignStatusChangedPayloadSchema,
   dealCreatedPayloadSchema,
+  dealUpdatedPayloadSchema,
   dealStageChangedPayloadSchema,
   dealOwnerChangedPayloadSchema,
   dealStatusChangedPayloadSchema,
@@ -858,19 +859,19 @@ export const apiWebhookEndpointSchema = z.object({
     .array(z.uuid())
     .nullable()
     .describe(
-      "The CRM pipelines whose deals' events (deal.created, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the pipeline an event gives (deal.stage_changed also by the pipeline a move to another pipeline left); null receives every pipeline's. Other events are not narrowed.",
+      "The CRM pipelines whose deals' events (deal.created, deal.updated, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the pipeline an event gives (deal.stage_changed also by the pipeline a move to another pipeline left); null receives every pipeline's. Other events are not narrowed.",
     ),
   stageIds: z
     .array(z.uuid())
     .nullable()
     .describe(
-      "The CRM stages whose deals' events (deal.created, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the stage an event gives (deal.stage_changed also by the stage the deal left); null receives every stage's. With pipelineIds too, an event must pass both. Other events are not narrowed.",
+      "The CRM stages whose deals' events (deal.created, deal.updated, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the stage an event gives (deal.stage_changed also by the stage the deal left); null receives every stage's. With pipelineIds too, an event must pass both. Other events are not narrowed.",
     ),
   ownerIds: z
     .array(z.uuid())
     .nullable()
     .describe(
-      "The members whose deals' events (deal.created, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the deal's owner when an event happens (deal.owner_changed also by the owner it left); a deal without an owner is on no list. null receives every deal's. With pipelineIds or stageIds too, an event must pass them all. Other events are not narrowed.",
+      "The members whose deals' events (deal.created, deal.updated, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the deal's owner when an event happens (deal.owner_changed also by the owner it left); a deal without an owner is on no list. null receives every deal's. With pipelineIds or stageIds too, an event must pass them all. Other events are not narrowed.",
     ),
   taskAssigneeIds: z
     .array(z.uuid())
@@ -2922,6 +2923,12 @@ export function buildOpenApiDocument(serverUrl: string) {
         `${WEBHOOK_EVENT_INFO['deal.created'].description} deal.stageId, deal.pipelineId and deal.status are those it was added with; the rest is the deal when the event is delivered, so a deal whose contact was erased is sent as erasure left it, without the contact's number or name. Read deals with GET /deals/{id} (\`deals.read\`).`,
         'WebhookDealCreated',
       ),
+      'deal.updated': webhook(
+        'webhookDealUpdated',
+        WEBHOOK_EVENT_INFO['deal.updated'].label,
+        `${WEBHOOK_EVENT_INFO['deal.updated'].description} changes names what changed (title, valueMinor, expectedCloseOn), never the values before: the deal is the deal when the event is delivered, so a deal changed again since gives its latest details, and a deal whose contact was erased is sent as erasure left it. One change can also move, reopen, close or give the deal to another owner, and then sends deal.stage_changed, deal.status_changed and deal.owner_changed as well, in the order the steps happen: reopened, moved, details changed, given to another owner, closed; they can have the same createdAt. Pipelines, stages and owners an endpoint names narrow it as the other deal events. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        'WebhookDealUpdated',
+      ),
       'deal.stage_changed': webhook(
         'webhookDealStageChanged',
         WEBHOOK_EVENT_INFO['deal.stage_changed'].label,
@@ -2931,7 +2938,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'deal.owner_changed': webhook(
         'webhookDealOwnerChanged',
         WEBHOOK_EVENT_INFO['deal.owner_changed'].label,
-        `${WEBHOOK_EVENT_INFO['deal.owner_changed'].description} deal.ownerId and deal.previousOwnerId are the change (null for no owner), with the stage, pipeline and status the deal had; the rest is the deal when the event is delivered. One change can also move, reopen or close the deal, and then sends deal.stage_changed and deal.status_changed as well, in the order the steps happen: reopened, moved, given to another owner, closed; each event gives the deal as its step left it, and they can have the same createdAt. An endpoint that names owners (its \`ownerIds\`) receives it for the owner the deal left as well as for the one it was given to. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['deal.owner_changed'].description} deal.ownerId and deal.previousOwnerId are the change (null for no owner), with the stage, pipeline and status the deal had; the rest is the deal when the event is delivered. One change can also move, reopen or close the deal or change its details, and then sends deal.stage_changed, deal.status_changed and deal.updated as well, in the order the steps happen: reopened, moved, details changed, given to another owner, closed; each event gives the deal as its step left it, and they can have the same createdAt. An endpoint that names owners (its \`ownerIds\`) receives it for the owner the deal left as well as for the one it was given to. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookDealOwnerChanged',
       ),
       'deal.status_changed': webhook(
@@ -3199,6 +3206,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookOrderStatusChanged: jsonSchema(orderStatusChangedPayloadSchema),
         WebhookCampaignStatusChanged: jsonSchema(campaignStatusChangedPayloadSchema),
         WebhookDealCreated: jsonSchema(dealCreatedPayloadSchema),
+        WebhookDealUpdated: jsonSchema(dealUpdatedPayloadSchema),
         WebhookDealStageChanged: jsonSchema(dealStageChangedPayloadSchema),
         WebhookDealOwnerChanged: jsonSchema(dealOwnerChangedPayloadSchema),
         WebhookDealStatusChanged: jsonSchema(dealStatusChangedPayloadSchema),

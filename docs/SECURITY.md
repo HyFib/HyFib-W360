@@ -161,7 +161,11 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   member the deal left and of the one it was given to, both the company's own members (the owner's
   foreign key goes through the company's id), never who made the change, and reaches the endpoints
   naming either member, so an endpoint following a member hears a deal leave them; automations,
-  erasure and merges never change an owner, so they send none.
+  erasure and merges never change an owner, so they send none. A change of details (`deal.updated`,
+  ADR-275) names which of the title, value and expected close date changed, never their values
+  before, and gives the deal as it is when delivered, so erasure's retitling replaces a title that
+  may name the person; its capture during erasure runs as the definer role, which may read a deal's
+  id and owner beyond what erasure already read, nothing more.
 - Integrations hear of CRM tasks (ADR-261) through the company's own endpoints only: `task.created`
   and `task.status_changed` give the task's title, statuses, due time, assignee and deal ids, its
   creator and its contact as the API describes it, never its notes (free text members write;

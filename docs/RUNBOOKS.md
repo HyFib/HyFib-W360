@@ -2121,13 +2121,13 @@ asks for the deal as it already is changes nothing and answers 200. The timeline
 **An integration misses a deal change, or hears two at once (ADR-256).** Endpoints that take
 `deal.created`, `deal.stage_changed` or `deal.status_changed` are sent one event per deal added and
 per change of a deal's stage or status, whoever made it; edits of its title, value or expected date
-send nothing (read the deal with GET /deals/{id}), and neither do erasure and merges; a change of
-its owner sends `deal.owner_changed` to the endpoints that take it (ADR-269). Changes made while no
-endpoint took the type were not recorded and are not sent later. A deal reopened in another stage
-(its own was removed), or moved and closed by one API request, sends two events, in the order the
-steps happened and possibly with the same `createdAt`; each gives the stage and status its step
-left. An erased contact's deal is sent titled "Deal (contact erased)", without its contact's number
-or name or a lost reason.
+send `deal.updated` to the endpoints that take it (ADR-275), as does erasure's retitling, and merges
+send nothing; a change of its owner sends `deal.owner_changed` to the endpoints that take it
+(ADR-269). Changes made while no endpoint took the type were not recorded and are not sent later. A
+deal reopened in another stage (its own was removed), or moved and closed by one API request, sends
+two events, in the order the steps happened and possibly with the same `createdAt`; each gives the
+stage and status its step left. An erased contact's deal is sent titled "Deal (contact erased)",
+without its contact's number or name or a lost reason.
 
 **An integration misses a task change, or a task event fails as gone (ADR-261).** Endpoints that
 take `task.created` or `task.status_changed` are sent one event per task added and per completion,
@@ -2752,6 +2752,19 @@ made while no endpoint took the type were not recorded and are not sent later. `
 the one it was given to. One API request that gives the task to another member and completes it
 sends the change first, with status `open`, then the completion; one that reopens it sends the
 reopening first. Who made the change is not sent.
+
+**A receiver misses a change of a deal's details, or doubts one (ADR-275).** Endpoints that take
+`deal.updated` ("Deal details") are sent one event each time a member editing a deal or a key
+changes its title, value or expected close date, and when erasing its contact retitles it "Deal
+(contact erased)". An edit that changes nothing sends nothing, automations set details only on the
+deals they add (`deal.created`), merges keep them, and changes made while no endpoint took the type
+were not recorded and are not sent later. `changes` names what changed (`title`, `valueMinor`,
+`expectedCloseOn`); the deal is the deal when the event is delivered, so read it there, not the
+values before, which are never sent (members see a value's change on the deal's timeline). Endpoints
+naming pipelines, stages or owners hear it by the deal's as the change left them. One API request
+that changes details and closes the deal sends the change first, with status `open`, then the close;
+one that also gives the deal to another owner sends the change of details before the change of
+owner.
 
 **A receiver misses the conversations of a tagged customer (ADR-267).** An endpoint can take the
 message and conversation events of the conversations whose contact has chosen tags only. The

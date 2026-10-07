@@ -104,6 +104,8 @@ import {
   dealStageChangedPayloadSchema,
   dealOwnerChangedPayloadSchema,
   dealStatusChangedPayloadSchema,
+  dealUpdatedPayloadSchema,
+  WEBHOOK_DEAL_DETAIL_CHANGES,
   taskCreatedPayloadSchema,
   taskAssigneeChangedPayloadSchema,
   taskStatusChangedPayloadSchema,
@@ -1254,6 +1256,29 @@ describe('webhook payload schemas', () => {
       ).toBe(true);
     }
     expect(dealOwnerChangedPayloadSchema.safeParse(created).success).toBe(false);
+    // A change of details names what changed, once each, in its order (ADR-275).
+    const updated = { ...created, type: 'deal.updated' };
+    for (const changes of [
+      ['title'],
+      ['valueMinor'],
+      ['expectedCloseOn'],
+      ['title', 'valueMinor', 'expectedCloseOn'],
+    ]) {
+      expect(
+        dealUpdatedPayloadSchema.safeParse({ ...updated, data: { ...created.data, changes } })
+          .success,
+        JSON.stringify(changes),
+      ).toBe(true);
+    }
+    for (const changes of [[], ['owner'], ['lostReason'], undefined]) {
+      expect(
+        dealUpdatedPayloadSchema.safeParse({ ...updated, data: { ...created.data, changes } })
+          .success,
+        JSON.stringify(changes),
+      ).toBe(false);
+    }
+    expect(WEBHOOK_DEAL_DETAIL_CHANGES).toEqual(['title', 'valueMinor', 'expectedCloseOn']);
+    expect(dealUpdatedPayloadSchema.safeParse(created).success).toBe(false);
     // Every status a deal can reach, from every other one, with a lost deal's reason.
     for (const status of DEAL_STATUSES) {
       for (const previousStatus of DEAL_STATUSES) {
@@ -1570,6 +1595,7 @@ describe('the OpenAPI document', () => {
       'order.status_changed',
       'campaign.status_changed',
       'deal.created',
+      'deal.updated',
       'deal.stage_changed',
       'deal.owner_changed',
       'deal.status_changed',
@@ -1632,6 +1658,7 @@ describe('the OpenAPI document', () => {
       Object.keys(doc.components.schemas).filter((name) => name.startsWith('WebhookDeal')),
     ).toEqual([
       'WebhookDealCreated',
+      'WebhookDealUpdated',
       'WebhookDealStageChanged',
       'WebhookDealOwnerChanged',
       'WebhookDealStatusChanged',
@@ -1640,10 +1667,20 @@ describe('the OpenAPI document', () => {
     for (const words of [
       'by a member or an API key',
       'deal.ownerId and deal.previousOwnerId are the change (null for no owner)',
-      'reopened, moved, given to another owner, closed',
+      'reopened, moved, details changed, given to another owner, closed',
       'for the owner the deal left as well as for the one it was given to',
     ]) {
       expect(owned).toContain(words);
+    }
+    // A change of details (ADR-275).
+    const edited = doc.webhooks['deal.updated'].post.description;
+    for (const words of [
+      'by a member or an API key, or by its contact’s erasure, which retitles it',
+      'changes names what changed (title, valueMinor, expectedCloseOn), never the values before',
+      'reopened, moved, details changed, given to another owner, closed',
+      'Pipelines, stages and owners an endpoint names narrow it as the other deal events',
+    ]) {
+      expect(edited).toContain(words);
     }
   });
 
@@ -2401,6 +2438,7 @@ describe('number filters (ADR-170)', () => {
       'order.status_changed': orderStatusChangedPayloadSchema,
       'campaign.status_changed': campaignStatusChangedPayloadSchema,
       'deal.created': dealCreatedPayloadSchema,
+      'deal.updated': dealUpdatedPayloadSchema,
       'deal.stage_changed': dealStageChangedPayloadSchema,
       'deal.owner_changed': dealOwnerChangedPayloadSchema,
       'deal.status_changed': dealStatusChangedPayloadSchema,
@@ -2999,9 +3037,10 @@ describe('pipeline filters (ADR-263)', () => {
     );
   });
 
-  it('apply to the four deal events, whose payloads give the pipeline and the one a move left, and to no other event', () => {
+  it('apply to the five deal events, whose payloads give the pipeline and the one a move left, and to no other event', () => {
     expect(WEBHOOK_PIPELINE_EVENTS).toEqual([
       'deal.created',
+      'deal.updated',
       'deal.stage_changed',
       'deal.owner_changed',
       'deal.status_changed',
@@ -3014,6 +3053,7 @@ describe('pipeline filters (ADR-263)', () => {
     expect(webhookTakesPipelineEvents(['task.created', 'deal.status_changed'])).toBe(true);
     for (const schema of [
       dealCreatedPayloadSchema,
+      dealUpdatedPayloadSchema,
       dealStageChangedPayloadSchema,
       dealOwnerChangedPayloadSchema,
       dealStatusChangedPayloadSchema,
@@ -3078,6 +3118,7 @@ describe('stage filters (ADR-264)', () => {
   it('apply to the deal events, whose payloads give the stage and the one a move left, and are kept only while one is taken', () => {
     for (const schema of [
       dealCreatedPayloadSchema,
+      dealUpdatedPayloadSchema,
       dealStageChangedPayloadSchema,
       dealOwnerChangedPayloadSchema,
       dealStatusChangedPayloadSchema,
@@ -3142,6 +3183,7 @@ describe('owner filters (ADR-265)', () => {
   it('apply to the deal events, whose payloads give the owner, and are kept only while one is taken', () => {
     for (const schema of [
       dealCreatedPayloadSchema,
+      dealUpdatedPayloadSchema,
       dealStageChangedPayloadSchema,
       dealOwnerChangedPayloadSchema,
       dealStatusChangedPayloadSchema,

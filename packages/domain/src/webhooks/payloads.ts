@@ -644,6 +644,20 @@ const webhookDealDataSchema = z.object({
 });
 
 export const dealCreatedPayloadSchema = envelope('deal.created', webhookDealDataSchema);
+
+/** The details of a deal whose change deal.updated reports (ADR-275), as its payload names them. */
+export const WEBHOOK_DEAL_DETAIL_CHANGES = ['title', 'valueMinor', 'expectedCloseOn'] as const;
+export const dealUpdatedPayloadSchema = envelope(
+  'deal.updated',
+  webhookDealDataSchema.extend({
+    changes: z
+      .array(z.enum(WEBHOOK_DEAL_DETAIL_CHANGES))
+      .min(1)
+      .describe(
+        'What the change changed, once each and in this order: `title`, `valueMinor` (the value, set, changed or cleared) and `expectedCloseOn`. Names only: the deal carries the details as they are when the event is delivered.',
+      ),
+  }),
+);
 export const dealStageChangedPayloadSchema = envelope('deal.stage_changed', webhookDealDataSchema);
 export const dealOwnerChangedPayloadSchema = envelope('deal.owner_changed', webhookDealDataSchema);
 export const dealStatusChangedPayloadSchema = envelope(
@@ -739,6 +753,12 @@ export interface StoredWebhookEvent {
 }
 
 const str = (value: unknown): string | null => (typeof value === 'string' ? value : null);
+
+/** The details a deal.updated event captured as changed (ADR-275), in the payload's order. */
+const dealDetailChanges = (detail: Record<string, unknown>) => {
+  const captured = Array.isArray(detail.changes) ? detail.changes : [];
+  return WEBHOOK_DEAL_DETAIL_CHANGES.filter((name) => captured.includes(name));
+};
 
 /** Who changed an order's status, as its event captured it (ADR-270); null when not recorded. */
 const orderChanger = (detail: Record<string, unknown>): OrderStatusChanger | null => {
@@ -1383,6 +1403,7 @@ export async function buildWebhookPayload(
       };
     }
     case 'deal.created':
+    case 'deal.updated':
     case 'deal.stage_changed':
     case 'deal.owner_changed':
     case 'deal.status_changed': {
@@ -1417,6 +1438,7 @@ export async function buildWebhookPayload(
           },
           conversation: deal.conversationId ? { id: deal.conversationId } : null,
           contact: await contactOf(tx, tenantId, deal.contactId),
+          ...(event.type === 'deal.updated' ? { changes: dealDetailChanges(event.detail) } : {}),
         },
       };
     }

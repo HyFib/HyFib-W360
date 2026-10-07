@@ -48,6 +48,7 @@ import {
   createWebhooksService,
   dealCreatedPayloadSchema,
   dealOwnerChangedPayloadSchema,
+  dealUpdatedPayloadSchema,
   dealStageChangedPayloadSchema,
   dealStatusChangedPayloadSchema,
   messageReceivedPayloadSchema,
@@ -4619,6 +4620,108 @@ describe('deal events (ADR-256)', () => {
       'deal.owner_changed',
       'deal.owner_changed',
     ]);
+  });
+
+  it('sends a change of details naming what changed, to the endpoints of the deal’s pipeline and owner, in its place among one request’s steps, and for erasure’s retitling (ADR-275)', async () => {
+    const s = await crmCompany();
+    const { c, owner } = s;
+    const agent = await fx.ctx(c, c.agent);
+    const svc = crm();
+    /** An endpoint of the company taking the events given, with the filters given. */
+    const add = async (eventTypes: WebhookEventType[], filters: Record<string, unknown>) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        ...filters,
+      });
+      return { ...created, path };
+    };
+    const everyone = await add(['deal.updated', 'deal.owner_changed', 'deal.status_changed'], {});
+    const agents = await add(['deal.updated'], { ownerIds: [agent.membership.id] });
+    const renewals = await add(['deal.updated'], { pipelineIds: [s.renewalsId] });
+    const jaya = await newContact(owner, 'Jaya');
+
+    // The agent's deal in Sales: its title alone, then its value and date, then nothing (the same
+    // details again, which keeps the version), then its title with its owner; no endpoint takes its
+    // addition.
+    const { id: dealId } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: s.salesId,
+      stageId: s.sales[0],
+      title: 'Annual plan',
+      ownerMembershipId: agent.membership.id,
+    });
+    const change = (
+      version: number,
+      title: string,
+      value: string,
+      expectedCloseOn: string | null,
+      ownerMembershipId: string | null,
+    ) =>
+      svc.updateDeal(owner, {
+        id: dealId,
+        expectedVersion: version,
+        title,
+        value,
+        ownerMembershipId,
+        expectedCloseOn,
+      });
+    await change(1, 'Annual plan 2027', '', null, agent.membership.id);
+    await change(2, 'Annual plan 2027', '1,200', '2026-12-31', agent.membership.id);
+    await change(3, 'Annual plan 2027', '1,200', '2026-12-31', agent.membership.id);
+    await change(3, 'Annual plan, renewed', '1,200', '2026-12-31', owner.membership.id);
+    const changesOf = (e: EventRow) => (e.detail.changes as string[] | undefined) ?? null;
+    // Captured with what changed; the agent's endpoint hears the changes made while the deal was
+    // the agent's, and not the one made with the change of owner, which goes by the new owner;
+    // Renewals hears none.
+    expect((await dealEventsOf(c)).map((e) => [e.type, changesOf(e), e.deliveries])).toEqual([
+      ['deal.updated', ['title'], 2],
+      ['deal.updated', ['valueMinor', 'expectedCloseOn'], 2],
+      ['deal.updated', ['title'], 1],
+      ['deal.owner_changed', null, 1],
+    ]);
+
+    // A key clears the value and wins the deal in one request: details changed, then won.
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'CRM sync', scopes: ['deals.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    await apiUpdateDeal({ db: fx.dbs.app, clock: systemClock }, key, dealId, {
+      valueMinor: null,
+      status: 'won',
+    });
+    const events = await dealEventsOf(c);
+    expect(events.slice(4).map((e) => [e.type, e.status, changesOf(e), e.deliveries])).toEqual([
+      ['deal.updated', 'open', ['valueMinor'], 1],
+      ['deal.status_changed', 'won', null, 1],
+    ]);
+
+    // Erasing the contact retitles the deal, as the definer role, for an endpoint naming owners
+    // too: the agent's deal, given back to the agent first, reaches the agent's endpoint.
+    await apiUpdateDeal({ db: fx.dbs.app, clock: systemClock }, key, dealId, {
+      ownerId: agent.membership.id,
+    });
+    await contactsService().eraseContact(owner, { contactId: jaya.id, suppress: false });
+    const erased = (await dealEventsOf(c)).slice(7);
+    expect(erased.map((e) => [e.type, e.status, changesOf(e), e.deliveries])).toEqual([
+      ['deal.updated', 'won', ['title'], 2],
+    ]);
+
+    // Delivered, each names what changed and gives the deal as it is then: erased.
+    await deliverDue(c);
+    const bodies = bodiesById(everyone.path);
+    expect(bodies.size).toBe(8);
+    for (const event of [...events, ...erased].filter((e) => e.type === 'deal.updated')) {
+      const body = bodies.get(event.id);
+      expect(dealUpdatedPayloadSchema.safeParse(body).success, event.id).toBe(true);
+      expect((body?.data as { changes?: unknown }).changes, event.id).toEqual(changesOf(event));
+      expect(dealIn(body)).toMatchObject({ title: 'Deal (contact erased)', valueMinor: null });
+    }
+    expect(bodiesAt(agents.path).map((b) => b.type)).toEqual(Array<string>(3).fill('deal.updated'));
+    expect(bodiesAt(renewals.path)).toEqual([]);
   });
 });
 

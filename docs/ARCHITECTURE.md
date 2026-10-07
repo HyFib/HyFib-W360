@@ -1746,6 +1746,13 @@ true`); the same key with another request (method, path and body hashed) answers
   `detail`, between a move and a close made by the same update. Its payload (`dealOf`) gives
   `ownerId` and `previousOwnerId` as captured, where the other deal events give the owner when
   delivered and `previousOwnerId` null.
+- **Deal detail events** (migrations 0192–0193, ADR-275): the deal update trigger, now also on
+  `title`, `value_minor` and `expected_close_on`, captures `deal.updated` when an update changes any
+  of them (members on the deal page, keys through `apiUpdateDeal`, and erasure retitling an erased
+  contact's deals, as the definer role, which may read a deal's id and owner for the owner filter),
+  with the deal, stage and pipeline ids and the names of the changed details in `detail`, between a
+  move and a change of owner made by the same update. Its payload (`dealOf`) adds `changes` to the
+  deal as it is when delivered.
 - **Task events** (migrations 0177–0178, ADR-261): triggers on `app.crm_tasks` capture
   `task.created` when a task is inserted (members, the runner's task steps, keys) and
   `task.status_changed` when an update changes its status (members, keys through `apiUpdateTask`),
