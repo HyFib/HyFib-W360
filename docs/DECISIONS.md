@@ -9764,3 +9764,38 @@ Decision:
 
 Not built: moving deals between pipelines of different currencies in one request, and an end-to-end
 test of its own.
+
+## ADR-258 Reading CRM tasks through the public API (P5-08, P4-04) (2026-10-07)
+
+Context: integrations could read, create and change deals through the API (ADR-253 to ADR-257), but
+not the tasks members and automations add to contacts and deals: a sales dashboard or another CRM
+could see a deal, not the follow-ups due on it.
+
+Decision:
+
+- **A new reading scope, `tasks.read`** ("Read CRM tasks"), granted with `crm.read`, the permission
+  members read tasks with on the Tasks page; only owners and administrators create keys, and both
+  hold it. It only reads, so it works while the company is suspended or restricted. Existing keys
+  keep their scopes, and a plan version that chose its scopes (ADR-092) leaves it out until a new
+  version includes it. Migration 0173 replaces the key and plan scope checks with ones that also
+  accept it, validated at once (one row per key and per plan version), as 0169 did.
+- **The CRM in the plan:** tasks are the CRM's, so a plan without it reads none through the API
+  (403, reason `not_in_plan`), checked first in the transaction, as for deals (ADR-253).
+- **Endpoints:** `GET /api/v1/tasks` (`listTasks`) pages the company's tasks, open and closed,
+  whoever created them (a member or an automation), newest first by when they were created, on exact
+  keyset pages (`crm_tasks_list_idx`, built concurrently by migration 0174), filtered by `status`,
+  `assigneeId`, `contactId`, `dealId` and `updatedSince`; `GET /api/v1/tasks/{id}` (`getTask`) reads
+  one. Another company's task and an unknown id answer 404, and an id that is not a UUID is refused
+  before any query.
+- **A task with ids only:** its title and notes, status, due time, reminder time, the reminder's
+  state with when it was sent or skipped and, as a code, why it was skipped (`task_closed`,
+  `too_late` or `assignee_inactive`, as the Tasks page explains them), the assignee, contact and
+  deal by id (a task about a deal is about its contact too), when it was completed or cancelled,
+  created and last changed, and its version. Never the timeline, who created or completed it, or the
+  contact's name or number, which `contacts.read` reads.
+- **Erased and merged contacts:** erasure deletes a contact's tasks, so they are no longer listed
+  and their ids answer 404; a merge moves the merged contact's tasks to the contact kept, which
+  changes their `updatedAt`, so a pass catching up on changes sees them again.
+
+Not built: creating, changing, completing or cancelling tasks through the API, notes and the
+timeline, task webhook events, and who created or completed a task.

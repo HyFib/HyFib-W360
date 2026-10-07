@@ -1,5 +1,38 @@
 # Progress
 
+## 2026-10-07 — Reading CRM tasks through the public API (P5-08, P4-04, H-033, ADR-258)
+
+Status: **Implemented; its database and browser tests run in CI only.** Keys could read, create and
+change deals (ADR-253 to ADR-257) but not tasks. The local PostgreSQL is unavailable, so the
+migrations and the integration tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0173 (the key and plan scope checks with `tasks.read`) and 0174
+  (`crm_tasks_list_idx`, built concurrently).
+- **Domain:** `api/tasks.ts` (`apiListTasks`, `apiGetTask`, `apiTaskListQuerySchema`); the scope in
+  `API_SCOPE_KEYS`, `API_SCOPE_INFO` and the database's list; `assertCrmInPlan` shared with the deal
+  reads; the OpenAPI paths, the `Task` schema and the 403 wording.
+- **Web:** `GET /api/v1/tasks` and `GET /api/v1/tasks/{id}`.
+- **Tests:** unit (5 new in `tasks.test.ts`; the 403 wording in `deals.test.ts`); integration (2 new
+  in `api.test.ts`); e2e (the CRM test's key also reads the deal's done task). Written for CI; the
+  integration and e2e tests were not run here.
+- **Docs:** ADR-258; ARCHITECTURE; SECURITY; THREAT-MODEL T227; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08
+  and P4-04; feature matrix W-134, H-033 and H-012.
+- **Mutation checks:** 30/30 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 1095 passed (117 files)                                       |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm test:e2e`                                    | not run here; CI runs it                                      |
+| `pnpm build`                                       | passed                                                        |
+| Mutation checks                                    | 30/30 deliberate regressions caught                           |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Moving CRM deals to another pipeline through the public API (P5-08, P4-04, H-033, ADR-257)
 
 Status: **Implemented; its database tests run in CI only.** Keys could move deals only within their

@@ -201,6 +201,7 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   await page.getByLabel('Name', { exact: true }).fill('Deal sync');
   await page.getByRole('checkbox', { name: /Read CRM deals/ }).check();
   await page.getByRole('checkbox', { name: /Create and change CRM deals/ }).check();
+  await page.getByRole('checkbox', { name: /Read CRM tasks/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const tokenField = page.getByLabel('API key', { exact: true });
   await expect(tokenField).toBeVisible();
@@ -239,6 +240,22 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   });
   const one = await request.get(`/api/v1/deals/${won[0]!.id}`, { headers: auth });
   expect(((await one.json()) as { data: unknown }).data).toEqual(won[0]);
+
+  // The same key reads the deal's task (ADR-258): done, its reminder emailed, about the deal and
+  // its contact by id.
+  const tasksRes = await request.get(`/api/v1/tasks?dealId=${won[0]!.id}`, { headers: auth });
+  expect(tasksRes.status()).toBe(200);
+  expect(((await tasksRes.json()) as { data: unknown[] }).data).toEqual([
+    expect.objectContaining({
+      title: 'Send the proposal',
+      status: 'done',
+      reminderState: 'sent',
+      remindedAt: expect.any(String),
+      dealId: won[0]!.id,
+      contactId: won[0]!.contactId,
+      completedAt: expect.any(String),
+    }),
+  ]);
 
   // The key also creates a deal for the customer (ADR-254), in the pipeline's first stage, then
   // changes it as members do (ADR-255): a new value and the next stage. Its page says it came

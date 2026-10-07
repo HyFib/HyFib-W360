@@ -10,6 +10,8 @@ import {
   TEAM_ASSIGNMENT_MODES,
   MESSAGE_TYPES,
   ORDER_STATUSES,
+  REMINDER_STATES,
+  TASK_STATUSES,
   WEBHOOK_DELIVERY_STATES,
   type MessageStatus,
 } from '@w360/db';
@@ -432,6 +434,64 @@ export const apiDealSchema = z.object({
     .describe(
       'Moves on with every change of the deal, by members, automations or keys; PATCH /deals/{id} takes it as `expectedVersion`.',
     ),
+});
+
+/** A CRM task (ADR-258). */
+export const apiTaskSchema = z.object({
+  id: z.uuid(),
+  title: z.string(),
+  notes: z.string().nullable().describe('As members wrote them; null when the task has none.'),
+  status: z.enum(TASK_STATUSES).describe('`open`, or closed as `done` or `cancelled`.'),
+  dueAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When the task is due; null when it has no due time.'),
+  remindAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When the assignee is to be emailed a reminder; null when none is set.'),
+  reminderState: z
+    .enum(REMINDER_STATES)
+    .describe(
+      '`none` without a reminder, `pending` until it is due, then `sent` once the reminder email to the assignee was queued, or `skipped` when it was not sent (`reminderSkipReason` says why).',
+    ),
+  remindedAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When the reminder was sent or skipped; null before.'),
+  reminderSkipReason: z
+    .string()
+    .nullable()
+    .describe(
+      'Why a skipped reminder was not sent: `task_closed` (the task was closed first), `too_late` (it came due more than a day before it could be sent) or `assignee_inactive` (the assignee could no longer use the CRM); null otherwise.',
+    ),
+  assigneeId: z
+    .uuid()
+    .describe(
+      'The member the task is assigned to, by the id GET /members gives them (it lists the members still active).',
+    ),
+  contactId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The customer the task is about, as GET /contacts/{id} reads them with `contacts.read`; null when it is about none.',
+    ),
+  dealId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The deal the task is about, as GET /deals/{id} reads it with `deals.read`; null when it is about none. A task about a deal is about its contact too.',
+    ),
+  completedAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When the task was done or cancelled; null while open.'),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime().describe('When anything about the task last changed.'),
+  version: z
+    .number()
+    .int()
+    .describe('Moves on when members edit, complete, cancel or reopen the task.'),
 });
 
 /** A member conversations can be assigned to (ADR-093). */
@@ -870,7 +930,7 @@ const errors = (...statuses: number[]) =>
           {
             400: 'The request is malformed (for example invalid JSON or a missing header).',
             401: 'No valid API key: missing, unknown, revoked or expired.',
-            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one, the CRM when reading pipelines or deals or creating or changing deals, or Commerce when sending products or reading or changing orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
+            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one, the CRM when reading pipelines, deals or tasks or creating or changing deals, or Commerce when sending products or reading or changing orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
             404: 'Not found in the company.',
             409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit). Pausing, resuming or cancelling a campaign: its status does not allow it, or, resuming, a member or HyFib paused it; the message names the status or the pause reason.',
             412: "A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it. Starting an automation: it is not published, archived or not started through the API (automation_unavailable), paused (automation_paused), its number is not active (channel_unavailable), or the plan's automation runs for the month are used up (automation_quota).",
@@ -2186,6 +2246,66 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/tasks': {
+        get: {
+          operationId: 'listTasks',
+          summary: 'CRM tasks, newest first',
+          description: [
+            `${scopeNote('tasks.read')} The company’s CRM tasks, open and closed, as the Tasks page and the contact and deal pages show them, whoever created them (a member or an automation), newest first by when they were created; pages never skip or repeat a task. Filters combine: a task matches all of them. Each task has its title, notes, due time, reminder, status and assignee, with its contact and deal by id. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+            'The CRM timeline is never read here, nor the contact’s name or number, which `contacts.read` reads. Erasing a contact deletes its tasks, so they are no longer listed, and their ids answer 404; merging contacts moves the merged contact’s tasks to the one kept. To catch up on changes, ask for `updatedSince` a little before your previous pass began (a minute, say) and expect to see some tasks again: a change carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
+          ].join('\n\n'),
+          parameters: [
+            ...pageParams,
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: [...TASK_STATUSES] },
+              description: 'Only the tasks with this status.',
+            },
+            {
+              name: 'assigneeId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the tasks assigned to this member.',
+            },
+            {
+              name: 'contactId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the tasks about this contact.',
+            },
+            {
+              name: 'dealId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the tasks about this deal.',
+            },
+            {
+              name: 'updatedSince',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description:
+                'Only tasks changed at or after this time (created, edited, completed, cancelled or reopened, reminded, or moved to another contact by a merge).',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of tasks.', content: pageOf('Task') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/tasks/{id}': {
+        get: {
+          operationId: 'getTask',
+          summary: 'A CRM task',
+          description: `${scopeNote('tasks.read')} As GET /tasks gives it. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': { description: 'The task.', content: json(dataOf(ref('Task'))) },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+      },
       '/webhook-endpoints': {
         get: {
           operationId: 'listWebhookEndpoints',
@@ -2836,6 +2956,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         Deal: jsonSchema(apiDealSchema),
         CreateDeal: jsonSchema(apiCreateDealSchema, 'input'),
         UpdateDeal: jsonSchema(apiUpdateDealSchema, 'input'),
+        Task: jsonSchema(apiTaskSchema),
         CampaignWithResults: jsonSchema(apiCampaignDetailSchema),
         CampaignReview: jsonSchema(apiCampaignReviewSchema),
         CreateCampaign: jsonSchema(apiCreateCampaignSchema, 'input'),
@@ -2952,6 +3073,8 @@ export const API_ROUTES = [
   ['post', '/deals'],
   ['get', '/deals/{id}'],
   ['patch', '/deals/{id}'],
+  ['get', '/tasks'],
+  ['get', '/tasks/{id}'],
   ['get', '/webhook-endpoints'],
   ['post', '/webhook-endpoints'],
   ['post', '/webhook-endpoints/replay-failed'],

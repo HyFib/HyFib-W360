@@ -235,7 +235,7 @@ describe('CRM pipelines and deals through the API (ADR-253)', () => {
       expect(list.description).toContain(words);
     }
     expect(list.responses['403']?.description).toContain(
-      'the CRM when reading pipelines or deals or creating or changing deals,',
+      'the CRM when reading pipelines, deals or tasks or creating or changing deals,',
     );
 
     const one = doc.paths['/deals/{id}']?.get as Operation;

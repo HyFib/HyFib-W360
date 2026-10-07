@@ -206,8 +206,8 @@ export interface ApiDeal {
   version: number;
 }
 
-/** Pipelines and deals are the CRM's: a plan without it reads none through the API. */
-async function assertCrmInPlan(tx: Tx, tenantId: string): Promise<void> {
+/** Pipelines, deals and tasks are the CRM's: a plan without it reads none through the API. */
+export async function assertCrmInPlan(tx: Tx, tenantId: string): Promise<void> {
   const entitlements = await loadEntitlements(tx, tenantId);
   if (!entitlements.modules.has('crm')) {
     throw new AppError('forbidden', "Your company's plan does not include the CRM.", {

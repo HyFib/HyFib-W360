@@ -275,9 +275,11 @@ verification, app review, Embedded Signup configuration).
   browser tests run only in CI]** (ADR-255, no migration; recorded under P5-08). **[Deal webhook
   events built; their database tests run only in CI]** (ADR-256, migrations 0171 and 0172; recorded
   under P5-09). **[Moving deals to another pipeline through the public API built; its database tests
-  run only in CI]** (ADR-257, no migration; recorded under P5-08). **Remaining:** custom deal
-  fields, products on deals, deal import, CRM connectors (HubSpot, Salesforce, Zoho: integrations),
-  reminder emails through the production SMTP provider (release checklist).
+  run only in CI]** (ADR-257, no migration; recorded under P5-08). **[Reading tasks through the
+  public API built; its database tests run only in CI]** (ADR-258, migrations 0173 and 0174;
+  recorded under P5-08). **Remaining:** custom deal fields, products on deals, deal import, CRM
+  connectors (HubSpot, Salesforce, Zoho: integrations), reminder emails through the production SMTP
+  provider (release checklist).
 - **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad
   traffic yet_: click-to-chat links (a short link that counts clicks per link and company day
   without any visitor data and redirects to wa.me with a pre-filled message and an optional
@@ -811,7 +813,11 @@ verification, app review, Embedded Signup configuration).
   `pipelineId` on `PATCH /deals/{id}` moves an open deal to another active pipeline, to `stageId` or
   its first active stage, a deal with a value only to a pipeline of its currency, as members move
   deals; no migration).
-  Remaining: reading tasks through the API,
+  **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
+  0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
+  assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact
+  and deal by id; needs the CRM in the plan).
+  Remaining: creating and changing tasks through the API,
   call-to-action messages through the API, taking
   reactions back,
   changing a field's type,

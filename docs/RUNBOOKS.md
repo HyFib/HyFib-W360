@@ -2136,6 +2136,21 @@ for a stage of another pipeline (GET /pipelines). 409 also means the pipeline is
 was removed, or the deal is closed (reopen it with `status` `open`, in the same request if wanted).
 The pipeline the deal is in, without a stage, changes nothing.
 
+**`GET /api/v1/tasks` answers 403 or 404, or a task seems missing (ADR-258).** 403 `forbidden` names
+the scope the key lacks, `tasks.read` (keys keep the scopes they were created with: create a key
+with it); reason `not_in_plan` means the company's plan leaves out the CRM or the scope (ADR-092).
+404 means the id is not one of the key's company's tasks: erasing a contact deletes its tasks. Tasks
+are listed newest first by when they were created, closed ones too, and filters narrow them: a task
+missing from a pass with `updatedSince` changed while the pass ran, so ask from a little before the
+previous pass began. A task merged from another contact names the contact kept. `reminderSkipReason`
+says why a reminder was not sent: the task was closed first (`task_closed`), it came due more than a
+day before it could be sent (`too_late`), or the assignee could no longer use the CRM
+(`assignee_inactive`).
+
+**Migration 0174 failed.** It builds `app.crm_tasks_list_idx` concurrently. If it failed, an INVALID
+index can remain: run `DROP INDEX CONCURRENTLY app.crm_tasks_list_idx;` and run the migrations
+again.
+
 **`GET /api/v1/channels` answers 403, or a number shows no phone or name (ADR-171).** 403
 `forbidden` names the scope the key lacks, `channels.read` (keys keep the scopes they were created
 with: create a key with it); reason `not_in_plan` means the company's plan leaves the scope out

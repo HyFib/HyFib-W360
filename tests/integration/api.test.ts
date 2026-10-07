@@ -21,6 +21,7 @@ import {
   apiGetDeal,
   apiGetOrder,
   apiGetMessage,
+  apiGetTask,
   apiKeyReminderNotice,
   apiListAutomations,
   apiListChannels,
@@ -34,6 +35,7 @@ import {
   apiMessageChanges,
   apiListOrders,
   apiListPipelines,
+  apiListTasks,
   apiListTeams,
   apiListTemplates,
   apiRecordConsent,
@@ -57,6 +59,7 @@ import {
   createCampaignsService,
   createCommerceService,
   createConsentService,
+  createContactMergeService,
   createContactsService,
   createCrmService,
   createCsatService,
@@ -4803,6 +4806,224 @@ describe('CRM pipelines and deals (ADR-253)', () => {
     });
     await expectAppError(change({ pipelineId: sales.id }), 'conflict', /archived/);
     expect(await versionOf()).toBe(moved);
+  });
+
+  it('list tasks newest first on exact pages, filtered, and one by id (ADR-258)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const theirOwner = await fx.ctx(other, other.owner);
+    const reader = await apiKey(c, ['tasks.read'], 'Task sync');
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New']);
+    const asha = await contactOf(owner, 'Asha');
+    const deal = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan',
+    });
+    const dueAt = new Date(Date.now() + 2 * 86_400_000).toISOString();
+    const remindAt = new Date(Date.now() + 86_400_000).toISOString();
+    const first = await crm().createTask(owner, {
+      title: 'Call Asha',
+      notes: 'About the renewal',
+      assigneeMembershipId: agent.membership.id,
+      contactId: asha,
+      dueAt,
+      remindAt,
+    });
+    const second = await crm().createTask(owner, {
+      title: 'Send the proposal',
+      assigneeMembershipId: owner.membership.id,
+      dealId: deal.id,
+    });
+    const third = await crm().createTask(owner, {
+      title: 'Order brochures',
+      assigneeMembershipId: owner.membership.id,
+    });
+    const theirTask = await crm().createTask(theirOwner, {
+      title: 'Theirs',
+      assigneeMembershipId: theirOwner.membership.id,
+    });
+
+    // Newest first, two to a page and the last on the next; another company's never.
+    const list = (query: Record<string, string | null | undefined>) =>
+      apiListTasks(deps(), reader.ctx, query);
+    const tasks = await list({ limit: '2' });
+    expect(tasks.data.map((t) => t.id)).toEqual([third.id, second.id]);
+    const last = await list({ limit: '2', cursor: tasks.nextCursor });
+    expect(last.data.map((t) => t.id)).toEqual([first.id]);
+    expect(last.nextCursor).toBeNull();
+
+    // The task as the Tasks page shows it, with the assignee, the contact and the deal by id.
+    const [stored] = await fx.query<{ created_at: Date; updated_at: Date }>(
+      'SELECT created_at, updated_at FROM app.crm_tasks WHERE id = $1',
+      [first.id],
+    );
+    expect(last.data[0]).toEqual({
+      id: first.id,
+      title: 'Call Asha',
+      notes: 'About the renewal',
+      status: 'open',
+      dueAt,
+      remindAt,
+      reminderState: 'pending',
+      remindedAt: null,
+      reminderSkipReason: null,
+      assigneeId: agent.membership.id,
+      contactId: asha,
+      dealId: null,
+      completedAt: null,
+      createdAt: stored!.created_at.toISOString(),
+      updatedAt: stored!.updated_at.toISOString(),
+      version: 1,
+    });
+    expect(await apiGetTask(deps(), reader.ctx, first.id)).toEqual(last.data[0]);
+    // A task about a deal is about its contact too; one about nobody names neither.
+    expect(tasks.data.map((t) => [t.contactId, t.dealId, t.notes, t.reminderState])).toEqual([
+      [null, null, null, 'none'],
+      [asha, deal.id, null, 'none'],
+    ]);
+
+    // Filters, alone and together.
+    const ids = async (query: Record<string, string>) => (await list(query)).data.map((t) => t.id);
+    expect(await ids({ assigneeId: agent.membership.id })).toEqual([first.id]);
+    expect(await ids({ contactId: asha })).toEqual([second.id, first.id]);
+    expect(await ids({ dealId: deal.id })).toEqual([second.id]);
+    expect(await ids({ contactId: asha, assigneeId: owner.membership.id })).toEqual([second.id]);
+    expect(await ids({ status: 'open' })).toEqual([third.id, second.id, first.id]);
+
+    // A member completes the second task and cancels the first, whose pending reminder is then
+    // skipped: they are found by their status and as changed since.
+    const before = new Date(Date.now() - 1_000).toISOString();
+    await crm().completeTask(owner, { id: second.id, expectedVersion: 1 });
+    await crm().cancelTask(owner, { id: first.id, expectedVersion: 1 });
+    expect(await apiGetTask(deps(), reader.ctx, second.id)).toMatchObject({
+      status: 'done',
+      completedAt: expect.any(String),
+      version: 2,
+    });
+    const cancelled = await apiGetTask(deps(), reader.ctx, first.id);
+    expect(cancelled).toMatchObject({
+      status: 'cancelled',
+      reminderState: 'skipped',
+      reminderSkipReason: 'task_closed',
+      version: 2,
+    });
+    expect(cancelled.remindedAt).toEqual(expect.any(String));
+    expect(cancelled.remindedAt).toBe(cancelled.completedAt);
+    expect(await ids({ status: 'done' })).toEqual([second.id]);
+    expect(await ids({ status: 'cancelled' })).toEqual([first.id]);
+    expect(await ids({ status: 'open' })).toEqual([third.id]);
+    expect(await ids({ updatedSince: before })).toEqual(
+      expect.arrayContaining([second.id, first.id]),
+    );
+    expect(await ids({ updatedSince: new Date(Date.now() + 60_000).toISOString() })).toEqual([]);
+
+    // Another company's task is not found by its id; nor is one that does not exist.
+    await expectAppError(apiGetTask(deps(), reader.ctx, theirTask.id), 'not_found');
+    await expectAppError(apiGetTask(deps(), reader.ctx, uuidv7()), 'not_found');
+  });
+
+  it('drop an erased contact’s tasks, follow a merge, and need the scope and the CRM (ADR-258)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['tasks.read']);
+    const asha = await contactOf(owner, 'Asha');
+    const ravi = await contactOf(owner, 'Ravi');
+    const erased = await crm().createTask(owner, {
+      title: 'Call Asha back',
+      assigneeMembershipId: owner.membership.id,
+      contactId: asha,
+    });
+    const kept = await crm().createTask(owner, {
+      title: 'Order brochures',
+      assigneeMembershipId: owner.membership.id,
+    });
+
+    // Erasing a contact deletes its tasks: they are no longer listed or found.
+    await contacts().eraseContact(owner, { contactId: asha, suppress: false });
+    await expectAppError(apiGetTask(deps(), reader.ctx, erased.id), 'not_found');
+    expect((await apiListTasks(deps(), reader.ctx, {})).data.map((t) => t.id)).toEqual([kept.id]);
+
+    // A customer who wrote by WhatsApp user id, without a number, has a task; merging them into
+    // a contact moves it there and changes it, so a pass catching up on changes sees it again.
+    const bsuid = `IN.${nextExternalId()}`;
+    const body = fx.messagesBody(c, { messages: [{ text: 'Hello' }] }) as {
+      entry: {
+        changes: {
+          value: { messages: Record<string, unknown>[]; contacts: Record<string, unknown>[] };
+        }[];
+      }[];
+    };
+    const value = body.entry[0]!.changes[0]!.value;
+    value.messages[0]!.from = bsuid;
+    value.contacts[0]!.user_id = bsuid;
+    await fx.deliver(body);
+    const [identity] = await fx.query<{ contact_id: string }>(
+      'SELECT contact_id FROM app.contact_identities WHERE tenant_id = $1 AND bsuid = $2',
+      [c.tenant.id, bsuid],
+    );
+    const moved = await crm().createTask(owner, {
+      title: 'Send the catalogue',
+      assigneeMembershipId: owner.membership.id,
+      contactId: identity!.contact_id,
+    });
+    const before = await apiGetTask(deps(), reader.ctx, moved.id);
+    await createContactMergeService({ db: fx.dbs.app, clock: systemClock }).mergeContacts(owner, {
+      keepContactId: ravi,
+      mergeContactId: identity!.contact_id,
+    });
+    const after = await apiGetTask(deps(), reader.ctx, moved.id);
+    expect(after).toEqual({ ...before, contactId: ravi, updatedAt: expect.any(String) });
+    expect(Date.parse(after.updatedAt)).toBeGreaterThan(Date.parse(before.updatedAt));
+    expect(
+      (await apiListTasks(deps(), reader.ctx, { updatedSince: after.updatedAt })).data.map(
+        (t) => t.id,
+      ),
+    ).toEqual([moved.id]);
+
+    // A key without the scope is refused before anything is read; reading is allowed while the
+    // company is suspended, as every read is.
+    const others = await apiKey(c, ['deals.read', 'contacts.read']);
+    for (const read of [
+      () => apiListTasks(deps(), others.ctx, {}),
+      () => apiGetTask(deps(), others.ctx, kept.id),
+    ]) {
+      await expectAppError(read(), 'forbidden', /tasks\.read/);
+    }
+    const suspended = {
+      ...reader.ctx,
+      tenant: { ...reader.ctx.tenant, status: 'suspended' as const },
+    };
+    expect((await apiGetTask(deps(), suspended, kept.id)).id).toBe(kept.id);
+
+    // A plan without the CRM reads no tasks; with it again, it does.
+    await onPlan(c, []);
+    for (const read of [
+      () => apiListTasks(deps(), reader.ctx, {}),
+      () => apiGetTask(deps(), reader.ctx, kept.id),
+    ]) {
+      const error = await expectAppError(read(), 'forbidden', /does not include the CRM/);
+      expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    }
+    await onPlan(c, ['crm']);
+    expect((await apiListTasks(deps(), reader.ctx, {})).data.map((t) => t.id)).toEqual([
+      moved.id,
+      kept.id,
+    ]);
+
+    // Granting the scope needs crm.read, which members read the CRM with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'crm.read')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Tasks', scopes: ['tasks.read'], expiresInDays: 30 }),
+      'forbidden',
+      /Read CRM tasks/,
+    );
   });
 });
 

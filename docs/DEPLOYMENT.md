@@ -645,6 +645,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `PATCH /api/v1/deals/{id}` as an unknown field (422); rolling web servers back does the same.
    Workers are not affected.
 
+   Migration 0173 (ADR-258) widens the same scope checks again, with the same brief locks, and 0174
+   builds `app.crm_tasks_list_idx` concurrently, outside a transaction (if it fails, see
+   `docs/RUNBOOKS.md`). Web servers from before them do not know `tasks.read`: until the web rollout
+   ends, an old server answers Settings → API keys with an error for a company with a key holding it
+   (and the platform plan pages for a plan version including it), and `/api/v1/tasks` with 404;
+   rolling web servers back to an image from before them does the same. Workers are not affected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

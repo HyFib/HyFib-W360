@@ -29,6 +29,7 @@ export const API_SCOPE_KEYS = [
   'orders.write',
   'deals.read',
   'deals.write',
+  'tasks.read',
   'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
 
@@ -178,6 +179,13 @@ export const API_SCOPE_INFO: Record<
       "Create deals for the company's contacts in its active pipelines and change them as members do on the board: their title, value, owner and expected close date, their stage or pipeline, and closing them as won or lost or reopening them, recorded as done through the API. Needs the CRM in the company's plan.",
     permission: 'crm.write',
     writes: true,
+  },
+  'tasks.read': {
+    label: 'Read CRM tasks',
+    description:
+      "List the company's CRM tasks with their title, notes, due time, reminder, status and assignee, and their contact and deal ids, and read each one. Never the CRM timeline. Needs the CRM in the company's plan.",
+    permission: 'crm.read',
+    writes: false,
   },
   'webhooks.manage': {
     label: 'Manage webhook endpoints',

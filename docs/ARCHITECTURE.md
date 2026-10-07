@@ -1465,6 +1465,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   statement; currencies never change). The row is written once with the new pipeline and stage, and
   the `stage_changed` activity names `fromPipelineId` and `toPipelineId`, as members' moves record
   them.
+- **CRM tasks through the API (ADR-258):** `GET /tasks` and `GET /tasks/{id}` (`api/tasks.ts`,
+  `tasks.read`) check the CRM in the plan first (`assertCrmInPlan`, shared with the deal reads).
+  Tasks are read in the company newest first by `created_at` on exact keyset cursors
+  (`crm_tasks_list_idx`), the filters as plain equalities and `updated_at >= updatedSince`;
+  `toApiTask` gives ids in place of the assignee, contact and deal, and `reminder_detail` as
+  `reminderSkipReason`. The creator and the member who closed a task are never selected.
 - **Numbers through the API (ADR-171):** `GET /channels` (`api/channels.ts`, `channels.read`) reads
   `channel_accounts` in the company oldest first on exact keyset cursors (`created_at`, `id`), with
   `status` as an equality, and gives the id, `display_phone_number`, `verified_name`, the status and
