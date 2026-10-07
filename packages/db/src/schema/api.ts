@@ -28,6 +28,7 @@ export const API_SCOPES = [
   'deals.write',
   'tasks.read',
   'tasks.write',
+  'notes.read',
   'notes.write',
   'webhooks.manage',
 ] as const;

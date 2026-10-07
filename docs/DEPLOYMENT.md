@@ -821,6 +821,17 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `POST /tasks` whose first answer an old server stored replays that answer, without them; rolling
    web servers back does the same. Workers are not affected.
 
+   Migration 0198 (ADR-279) widens the API keys' and plan versions' scope checks again for
+   `notes.read`, with the same brief locks, validated at once; 0199 builds
+   `crm_activities_notes_idx` concurrently, outside a transaction (if it fails, drop the INVALID
+   index with `DROP INDEX CONCURRENTLY app.crm_activities_notes_idx;` and run the migrations again).
+   Web servers from before it do not know `notes.read`: until the web rollout ends, an old server
+   answers Settings → API keys with an error for a company with a key holding it (and the platform
+   plan pages for a plan version including it), `GET /api/v1/notes` with 405 and
+   `GET /api/v1/notes/{id}` with 404, and for 24 hours after it a retried `POST /notes` whose first
+   answer an old server stored replays that answer, without `writtenBy` and `apiKeyId`. Workers are
+   not affected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

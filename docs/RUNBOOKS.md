@@ -2190,9 +2190,22 @@ have, `contactId` for a contact other than the deal's (leave it out with a deal)
 404 means the contact is not one of the company's or was erased (reason `contact_merged` and
 `mergedInto` name the contact a merged one belongs to now). 409 means the deal's contact was erased,
 or a merge moved the deal while the note was being added (try again). 423 means the company is
-suspended or its plan has ended. A note added cannot be read, changed or deleted through the API;
-members see it on the timeline as written through the API. A retry with the same `Idempotency-Key`
-answers the first note.
+suspended or its plan has ended. A note added cannot be changed or deleted through the API, and a
+key with `notes.read` reads it back (ADR-279); members see it on the timeline as written through the
+API. A retry with the same `Idempotency-Key` answers the first note.
+
+**`GET /api/v1/notes` or `/notes/{id}` answers 403, 404 or 422, or leaves out a note (ADR-279).**
+403 `forbidden` names the scope the key lacks, `notes.read` (granted by members with `crm.read`;
+`notes.write` adds notes but does not read them, and keys keep the scopes they were created with),
+or with reason `not_in_plan` the company's plan leaves out the CRM or the scope. 422 names the
+parameter: `limit` beyond 1 to 100, `contactId` or `dealId` not a UUID, `createdSince` not an ISO
+time, or a parameter the list does not take. 404 means the id is not one of the company's notes:
+another company's, any other timeline entry (a stage move, a closing, a task entry), or a note of a
+contact since erased. A note left out of a page filtered by contact was moved to another contact by
+a merge (its `contactId` is now the contact kept), or was added with a time before `createdSince`
+while the integration's previous pass was reading: ask from a minute before the previous pass began.
+`writtenBy` says `member` or `api`, with `apiKeyId` for a key's note; which member wrote a note is
+shown on the contact and deal pages only.
 
 **`GET /api/v1/contact-tags` or `/conversation-tags` answers 403 or 422, or leaves out a tag
 (ADR-272).** 403 `forbidden` names the scope the key lacks: `contacts.read` for contact tags,

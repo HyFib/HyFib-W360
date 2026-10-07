@@ -10590,3 +10590,37 @@ Decision:
 
 Not built: which member made a change, filtering deals or tasks by who changed them, who added a
 deal or task through the API, and the history of a deal's or task's changes through the API.
+
+## ADR-279 Reading CRM notes through the public API (P5-08, P4-04) (2026-10-07)
+
+Context: keys add notes to the CRM timeline (ADR-268), and read deals and tasks (ADR-253, ADR-258),
+but no key could read a note: a CRM or help desk kept in step with HyFib could not copy the notes
+members write on the contact and deal pages, nor read back its own, and ADR-268 left reading notes
+unbuilt. Notes hold what members write about customers, so reading them is a scope of its own rather
+than part of `deals.read` or `tasks.read`.
+
+Decision:
+
+- **`notes.read`**, a reading scope granted with `crm.read` (as `deals.read` and `tasks.read`), for
+  **`GET /notes`** and **`GET /notes/{id}`**: the notes on the timelines of the company's contacts
+  and deals, members' and keys', newest first by when they were added, on exact keyset pages,
+  filtered by contact (its deals' notes included), deal and `createdSince`. Each note gives its
+  text, its contact and deal by id, **`writtenBy`** (`member` or `api`) and **`apiKeyId`** for a
+  key's note: never which member wrote it, as conversation notes (ADR-084), tasks (ADR-258) and the
+  deal and task events (ADR-277) never name the member. `POST /notes` answers the same fields. The
+  CRM must be in the plan (403, reason `not_in_plan`); a suspended company's keys still read, as for
+  deals and tasks.
+- **Only notes:** the rest of the timeline (stage moves, closings, task entries) is never read, and
+  the id of any other timeline entry answers 404, as an unknown one does. Erasing a contact deletes
+  its notes, so they are no longer read; a merge moves the merged contact's notes to the contact
+  kept, so a note's `contactId` changes (`contact.merged` and `GET /contact-changes` say when).
+  Notes are never changed otherwise, so `createdSince` catches up, overlapping a little as the other
+  lists ask, since a note carries the time it began to be saved.
+- **Migrations 0198 and 0199:** 0198 replaces the keys' and plan versions' scope checks with
+  `notes.read` (existing keys and plan versions that chose their scopes gain nothing); 0199 builds
+  `crm_activities_notes_idx` on `(tenant_id, created_at DESC, id DESC)` for notes only,
+  concurrently, outside a transaction, so the list never reads the rest of a company's timeline. The
+  contact and deal filters use the timeline's existing indexes.
+
+Not built: which member wrote a note, reading the rest of the timeline, changing or deleting notes
+(members cannot either), webhook events for notes, and filtering notes by who wrote them.

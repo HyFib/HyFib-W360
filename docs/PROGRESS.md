@@ -1,5 +1,39 @@
 # Progress
 
+## 2026-10-07 — Reading CRM notes through the public API (P5-08, P4-04, H-033, ADR-279)
+
+Status: **Implemented; its database tests run in CI only.** Keys added notes to the CRM timeline but
+could not read them, so an integration could neither copy the notes members write nor read back its
+own. The local PostgreSQL is unavailable, so the migrations and the integration tests below were
+written but not run here; migrations 0198 and 0199 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migrations 0198 (the keys' and plan versions' scope checks with `notes.read`) and
+  0199 (`crm_activities_notes_idx`, notes only, built concurrently).
+- **Domain:** the `notes.read` scope (granted with `crm.read`); `apiListNotes` and `apiGetNote` with
+  `writtenBy` and `apiKeyId` (`toApiNote`), which `POST /notes` now answers too; the OpenAPI `Note`,
+  `GET /notes` and `GET /notes/{id}` entries.
+- **Web:** `GET /api/v1/notes` and `GET /api/v1/notes/{id}`; the new scope appears in Settings → API
+  keys and the platform plan pages, which list every scope.
+- **Tests:** unit (`api/notes.test.ts`: the scope, the query, refusals before any read, the
+  read-only transactions, who wrote a note, the OpenAPI entries); integration (2 new in
+  `api.test.ts`, and the note-adding test's answer updated). Written for CI; the integration tests
+  were not run here. No e2e test: the e2e suite is near its time limit.
+- **Docs:** ADR-279; ARCHITECTURE; SECURITY; THREAT-MODEL T247 (T236 updated); DEPLOYMENT; RUNBOOKS;
+  BACKLOG P5-08 and P4-04; feature matrix H-033.
+- **Mutation checks:** 24/24 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 121 files, 1148 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Who last changed a CRM deal or task, through the public API (P5-08, H-033, ADR-278)
 
 Status: **Implemented; its database tests run in CI only.** An integration polling `GET /deals` or

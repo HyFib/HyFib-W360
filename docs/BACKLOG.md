@@ -284,7 +284,10 @@ verification, app review, Embedded Signup configuration).
   in CI]** (ADR-259, migrations 0175 and 0176; recorded under P5-08). **[Changing tasks through the
   public API built; its database tests run only in CI]** (ADR-260, no migration; recorded under
   P5-08). **[Notes through the public API built; their database tests run only in CI]** (ADR-268,
-  migration 0184; recorded under P5-08). **[Task webhook events built; their database tests run only
+  migration 0184; recorded under P5-08).
+  **[Reading notes through the public API built; its database tests run only in CI]** (ADR-279,
+  migrations 0198 and 0199; recorded under P5-08).
+  **[Task webhook events built; their database tests run only
   in CI]** (ADR-261, migrations 0177 and 0178; recorded under P5-09). **[Pipeline filters for deal
   webhook events built; their database and browser tests run only in CI]** (ADR-263, migration 0179;
   recorded under P5-09). **[Stage filters for deal webhook events built; their database and browser
@@ -733,6 +736,10 @@ verification, app review, Embedded Signup configuration).
   `GET /contact-tags` with `contacts.read` and `GET /conversation-tags` with `conversations.read`
   list the company's tags alphabetically with how many contacts or conversations have each, on pages
   that continue after the last tag, narrowed by a prefix).
+  **[Reading CRM notes built; its database tests run only in CI]** (ADR-279, migrations 0198 and
+  0199: `notes.read`, granted with `crm.read`, for `GET /notes` and `GET /notes/{id}`: members' and
+  keys' notes newest first on exact pages, by contact, deal and time, each saying whether a member
+  or a key wrote it, a key by its id, never which member; never the rest of the timeline).
   **[Who last changed a deal or task, through the API, built; its database tests run only in CI]**
   (ADR-278, no migration: `GET /deals`, `GET /tasks`, their single reads and the answers of their
   writes name who made a deal's or task's latest change, a member, an automation or a key by its id,

@@ -468,21 +468,37 @@ export const apiDealSchema = z.object({
     .describe('The API key that made the latest change, when changedBy is api; null otherwise.'),
 });
 
-/** A CRM task (ADR-258). */
-/** A note on the CRM timeline, as `POST /notes` answers it (ADR-268). */
+/**
+ * A note on the CRM timeline, as `POST /notes` answers it (ADR-268) and `GET /notes` reads it
+ * (ADR-279).
+ */
 export const apiNoteSchema = z.object({
   id: z.uuid().describe('The note, on the CRM timeline.'),
   body: z.string().describe('The note as kept: its text, spaces around it trimmed.'),
   contactId: z
     .uuid()
-    .describe('The contact whose timeline holds the note: the one given, or the deal’s.'),
+    .describe(
+      'The contact whose timeline holds the note: the one it was added to, or the deal’s; a merge moves it to the contact kept.',
+    ),
   dealId: z
     .uuid()
     .nullable()
     .describe('The deal the note is about; null when it is about the contact only.'),
+  writtenBy: z
+    .enum(['member', 'api'])
+    .describe(
+      'Who wrote the note: a member on the contact or deal page (member, never which member) or an API key (api, named by apiKeyId).',
+    ),
+  apiKeyId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The key that added the note through the API, when writtenBy is api; null otherwise.',
+    ),
   createdAt: z.iso.datetime().describe('When the note was added.'),
 });
 
+/** A CRM task (ADR-258). */
 export const apiTaskSchema = z.object({
   id: z.uuid(),
   title: z.string(),
@@ -2489,15 +2505,61 @@ export function buildOpenApiDocument(serverUrl: string) {
         },
       },
       '/notes': {
+        get: {
+          operationId: 'listNotes',
+          summary: 'CRM notes, newest first',
+          description: [
+            `${scopeNote('notes.read')} The notes on the CRM timelines of the company’s contacts and deals, as the contact and deal pages show them, whoever wrote them (a member or an API key), newest first by when they were added; pages never skip or repeat a note. Filters combine: a note matches all of them. Each note has its text and the contact and deal it is about by id, and says who wrote it (\`writtenBy\`), with the key for one added through the API (\`apiKeyId\`), never which member, so an integration can tell the notes it added from members’. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+            'The rest of the timeline (stage moves, closings, tasks done) is never read here, nor the contact’s name or number, which `contacts.read` reads. A note is never changed; erasing a contact deletes its notes, so they are no longer listed and their ids answer 404, and merging contacts moves the merged contact’s notes to the one kept (`contactId` changes; `contact.merged` and GET /contact-changes say when). To catch up, ask for `createdSince` a little before your previous pass began (a minute, say) and expect to see some notes again: a note carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
+          ].join('\n\n'),
+          parameters: [
+            ...pageParams,
+            {
+              name: 'contactId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description:
+                'Only the notes on this contact’s timeline: about the contact or one of its deals.',
+            },
+            {
+              name: 'dealId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the notes about this deal.',
+            },
+            {
+              name: 'createdSince',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description: 'Only the notes added at or after this time.',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of notes.', content: pageOf('Note') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
         post: {
           operationId: 'createNote',
           summary: 'Add a note to the CRM timeline',
-          description: `${scopeNote('notes.write')} As members add a note on the contact and deal pages: to a contact (not erased), or to a deal and so to its contact, up to ${API_NOTE_MAX_LENGTH} characters. The note is recorded as written through the API: the timeline says so, and the audit log names the key, never the note’s text. Notes, like the rest of the timeline, are not read through the API. An unknown deal or a contact other than the deal’s is answered with 422 naming the field; an unknown or erased contact with 404, and a deal whose contact was erased with 409. Needs the CRM in the company’s plan (403, reason not_in_plan). With an \`Idempotency-Key\`, a retry answers the first response. ${MERGED_CONTACT_NOTE}`,
+          description: `${scopeNote('notes.write')} As members add a note on the contact and deal pages: to a contact (not erased), or to a deal and so to its contact, up to ${API_NOTE_MAX_LENGTH} characters. The note is recorded as written through the API: the timeline says so, and the audit log names the key, never the note’s text. GET /notes reads notes (\`notes.read\`); the rest of the timeline is not read through the API. An unknown deal or a contact other than the deal’s is answered with 422 naming the field; an unknown or erased contact with 404, and a deal whose contact was erased with 409. Needs the CRM in the company’s plan (403, reason not_in_plan). With an \`Idempotency-Key\`, a retry answers the first response. ${MERGED_CONTACT_NOTE}`,
           parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
           requestBody: { required: true, content: json(ref('CreateNote')) },
           responses: {
             '201': { description: 'The note added.', content: json(dataOf(ref('Note'))) },
             ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/notes/{id}': {
+        get: {
+          operationId: 'getNote',
+          summary: 'A CRM note',
+          description: `${scopeNote('notes.read')} As GET /notes gives it. The id of any other timeline entry answers 404, as an unknown one does. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': { description: 'The note.', content: json(dataOf(ref('Note'))) },
+            ...errors(401, 403, 404, 429, 500),
           },
         },
       },
@@ -3322,7 +3384,9 @@ export const API_ROUTES = [
   ['post', '/tasks'],
   ['get', '/tasks/{id}'],
   ['patch', '/tasks/{id}'],
+  ['get', '/notes'],
   ['post', '/notes'],
+  ['get', '/notes/{id}'],
   ['get', '/webhook-endpoints'],
   ['post', '/webhook-endpoints'],
   ['post', '/webhook-endpoints/replay-failed'],

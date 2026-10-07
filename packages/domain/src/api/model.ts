@@ -31,6 +31,7 @@ export const API_SCOPE_KEYS = [
   'deals.write',
   'tasks.read',
   'tasks.write',
+  'notes.read',
   'notes.write',
   'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
@@ -195,6 +196,13 @@ export const API_SCOPE_INFO: Record<
       "Create tasks as members do on the Tasks page and the contact and deal pages: for one of the company's contacts or deals or for nobody, assigned to an active member who can use the CRM, with notes, a due time and a reminder emailed to the assignee; and change, complete, cancel and reopen them as members do, recorded as done through the API. Needs the CRM in the company's plan.",
     permission: 'crm.write',
     writes: true,
+  },
+  'notes.read': {
+    label: 'Read CRM notes',
+    description:
+      "List the notes on the CRM timelines of the company's contacts and deals, with their text, the contact and deal each is about, and whether a member or a key wrote it (a key by its id), and read each one. Never which member wrote a note, or the rest of the timeline. Needs the CRM in the company's plan.",
+    permission: 'crm.read',
+    writes: false,
   },
   'notes.write': {
     label: 'Add notes to the CRM timeline',

@@ -1506,6 +1506,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `apiContactNotFound` for a missing or erased contact given alone, 409 for a deal's contact erased
   or merged away), adds a `note` activity (`addActivity`) without an actor naming the key, and a
   `crm.note_added` audit row as the key without the text, and answers the note.
+- **Reading CRM notes through the API (ADR-279):** `GET /notes` and `GET /notes/{id}`
+  (`api/notes.ts`, `notes.read`) check the CRM in the plan first (`assertCrmInPlan`), then read
+  `crm_activities` of kind `note` in the company newest first by `created_at` on exact keyset
+  cursors (`crm_activities_notes_idx`, migration 0199), the contact and deal filters as plain
+  equalities and `created_at >= createdSince`, in read-only transactions. `toApiNote` gives
+  `writtenBy` from whether the activity has a member actor (never which member) and the key from its
+  data; any other timeline entry is never selected.
 - **Numbers through the API (ADR-171):** `GET /channels` (`api/channels.ts`, `channels.read`) reads
   `channel_accounts` in the company oldest first on exact keyset cursors (`created_at`, `id`), with
   `status` as an equality, and gives the id, `display_phone_number`, `verified_name`, the status and

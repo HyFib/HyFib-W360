@@ -623,9 +623,10 @@ Phase 5 rules (Public API, P5-08):
   same names (ADR-125, ADR-186), `campaigns.send` for `campaigns.stop` (ADR-128) and
   `campaigns.resume` (ADR-176), `commerce.read` for `orders.read` (ADR-167), `inbox.reply` for
   `orders.write` (ADR-168), `channels.read` for the scope of the same name (ADR-171), `crm.read` for
-  `deals.read` (ADR-253) and `tasks.read` (ADR-258), and `crm.write` for `deals.write` (ADR-254,
-  ADR-255), `tasks.write` (ADR-259) and `notes.write` (ADR-268). Nobody grants a key more than they
-  hold, and rotating needs the same. A key keeps the scopes it was created with.
+  `deals.read` (ADR-253), `tasks.read` (ADR-258) and `notes.read` (ADR-279), and `crm.write` for
+  `deals.write` (ADR-254, ADR-255), `tasks.write` (ADR-259) and `notes.write` (ADR-268). Nobody
+  grants a key more than they hold, and rotating needs the same. A key keeps the scopes it was
+  created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -1104,7 +1105,16 @@ Phase 5 rules (Public API, P5-08):
   only (another company's is named or not found, as an unknown one is), and a note on a deal is
   always on the deal's contact, locked against erasure and merges until the note is in, so a note
   never lands on an erased contact or the wrong one. The note is recorded as the key's (the timeline
-  and the audit log, which never holds its text), and notes are never read through the API (unit
+  and the audit log, which never holds its text), and notes are read only with `notes.read`
+  (ADR-279) (unit tests; integration tests, run in CI only).
+- Reading CRM notes (ADR-279): `GET /notes` and `GET /notes/{id}` need `notes.read`, granted only
+  with `crm.read`, and the CRM in the company's plan, both checked before a note is read. They read
+  notes of the key's company only (row security and an explicit company condition) in read-only
+  transactions: another company's note and any timeline entry that is not a note answer 404 as an
+  unknown one does, an id that is not a UUID is refused before any query, and every filter is typed
+  (UUIDs, an ISO time). A note gives its text and its contact and deal by id, and says whether a
+  member or a key wrote it, a key by its id, never which member; never the contact's name or number
+  or the rest of the timeline. Erasing a contact deletes its notes, so they are no longer read (unit
   tests; integration tests, run in CI only).
 - Listing the tags in use (ADR-272): `GET /contact-tags` needs `contacts.read` and
   `GET /conversation-tags` `conversations.read`, both checked before anything is read. They group
