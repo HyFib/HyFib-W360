@@ -200,6 +200,7 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   await page.goto(`/c/${slug}/settings/api-keys`);
   await page.getByLabel('Name', { exact: true }).fill('Deal sync');
   await page.getByRole('checkbox', { name: /Read CRM deals/ }).check();
+  await page.getByRole('checkbox', { name: /Create CRM deals/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const tokenField = page.getByLabel('API key', { exact: true });
   await expect(tokenField).toBeVisible();
@@ -222,7 +223,7 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   expect(wonRes.status()).toBe(200);
   const won = (
     (await wonRes.json()) as {
-      data: { id: string; title: string; pipelineId: string; stageId: string }[];
+      data: { id: string; title: string; pipelineId: string; stageId: string; contactId: string }[];
       nextCursor: string | null;
     }
   ).data;
@@ -238,6 +239,26 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   });
   const one = await request.get(`/api/v1/deals/${won[0]!.id}`, { headers: auth });
   expect(((await one.json()) as { data: unknown }).data).toEqual(won[0]);
+
+  // The key also creates a deal for the customer (ADR-254): in the pipeline's first stage, and
+  // its page says it came through the API.
+  const createdRes = await request.post('/api/v1/deals', {
+    headers: { ...auth, 'Idempotency-Key': `crm-e2e-${Date.now()}` },
+    data: {
+      contactId: won[0]!.contactId,
+      pipelineId: pipelines[0]!.id,
+      title: 'Second order',
+      valueMinor: 120_000,
+    },
+  });
+  expect(createdRes.status()).toBe(201);
+  const created = ((await createdRes.json()) as { data: { id: string; stageId: string } }).data;
+  expect(created.stageId).toBe(pipelines[0]!.stages[0]!.id);
+  await page.goto(`/c/${slug}/crm/deals/${created.id}`);
+  await expect(page.getByRole('heading', { name: 'Second order', level: 1 })).toBeVisible();
+  await expect(page.getByText('Sales · ₹1,200.00')).toBeVisible();
+  await expect(page.getByText(/through the API/).first()).toBeVisible();
+  await expectNoHorizontalOverflow(page);
 });
 
 test.describe('from the inbox', () => {

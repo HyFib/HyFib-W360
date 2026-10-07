@@ -1,5 +1,38 @@
 # Progress
 
+## 2026-10-07 — Creating CRM deals through the public API (P5-08, P4-04, H-033, ADR-254)
+
+Status: **Implemented; its database and browser tests run in CI only.** Integrations could read
+deals (ADR-253) but not create them. The local PostgreSQL is unavailable, so migrations 0169 and
+0170 and the integration and e2e tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0169 (the scope checks with `deals.write`;
+  `crm_deals.created_by_api_key_id`, its foreign key and the creator check with a key, NOT VALID)
+  and 0170 (validates them); the company export includes the new column.
+- **Domain:** `apiCreateDeal` and `apiCreateDealSchema` in `api/deals.ts` (with `entryStage` and
+  `readApiDeal`); the scope in `API_SCOPES` and `API_SCOPE_INFO`; `createdThroughApi` on the deal
+  page's data; the OpenAPI operation, the `CreateDeal` schema and the 403 wording.
+- **Web:** `POST /api/v1/deals`; the deal page and the timeline say "through the API".
+- **Tests:** unit (4 new in `deals.test.ts`, the writing scopes of `api.test.ts` updated);
+  integration (2 new in `api.test.ts`); e2e (`crm.spec.ts`: the key also creates a deal, shown as
+  created through the API). Written for CI; not run here.
+- **Docs:** ADR-254; ARCHITECTURE; SECURITY; THREAT-MODEL T223; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08
+  and P4-04; feature matrix W-134, H-033 and H-012.
+- **Mutation checks:** 16/16 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                                     | Result                                                          |
+| ----------------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`          | clean                                                           |
+| `pnpm test` (unit)                                          | 1083 passed (116 files)                                         |
+| `pnpm test:integration`, `pnpm test:e2e`, `pnpm db:migrate` | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                                | passed                                                          |
+| Mutation checks                                             | 16/16 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes                       | no leaks found                                                  |
+
 ## 2026-10-07 — Reading CRM deals through the public API (P5-08, P4-04, H-033, ADR-253)
 
 Status: **Implemented; its database and browser tests run in CI only.** Integrations could not read

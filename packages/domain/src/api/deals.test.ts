@@ -3,7 +3,10 @@ import { isAppError } from '@w360/core';
 import { API_SCOPES, DEAL_STATUSES, type Database } from '@w360/db';
 import { ROLE_PERMISSIONS } from '../authz/permissions';
 import type { ApiContext } from './context';
+import { MAX_DEAL_MINOR } from '../crm/money';
 import {
+  apiCreateDeal,
+  apiCreateDealSchema,
   apiDealListQuerySchema,
   apiGetDeal,
   apiListDeals,
@@ -230,7 +233,7 @@ describe('CRM pipelines and deals through the API (ADR-253)', () => {
       expect(list.description).toContain(words);
     }
     expect(list.responses['403']?.description).toContain(
-      'the CRM when reading pipelines or deals,',
+      'the CRM when reading pipelines or deals or creating deals,',
     );
 
     const one = doc.paths['/deals/{id}']?.get as Operation;
@@ -286,5 +289,138 @@ describe('CRM pipelines and deals through the API (ADR-253)', () => {
     expect(deal.required).toEqual(Object.keys(deal.properties));
     // Ids only: no contact details, notes, tasks or timeline anywhere in it.
     expect(JSON.stringify(deal)).not.toMatch(/"(phone|contactName|notes?|tasks?|timeline)"/);
+  });
+});
+
+describe('creating CRM deals through the API (ADR-254)', () => {
+  const deps = (db: Database) => ({ db, clock: { now: () => new Date() } });
+  const deal = { contactId: TENANT, pipelineId: OTHER, title: 'Annual plan' };
+
+  it('needs deals.write, a writing scope the database accepts, granted with crm.write', () => {
+    expect(API_SCOPES).toContain('deals.write');
+    expect(API_SCOPE_INFO['deals.write']).toMatchObject({
+      label: 'Create CRM deals',
+      permission: 'crm.write',
+      writes: true,
+    });
+    for (const words of ['as members do', 'recorded as created through the API', 'CRM']) {
+      expect(API_SCOPE_INFO['deals.write'].description).toContain(words);
+    }
+    // Owners and administrators, who create keys, create deals in the app.
+    for (const role of ['owner', 'admin'] as const) {
+      expect(ROLE_PERMISSIONS[role].has('crm.write')).toBe(true);
+    }
+  });
+
+  it('takes a contact, a pipeline, a title and optionally a stage, a value, an owner and a date', () => {
+    const parse = (input: unknown) => apiCreateDealSchema.safeParse(input);
+    const minimal = parse({ ...deal, title: '  Annual plan  ' });
+    expect(minimal.success && minimal.data).toEqual(deal);
+    for (const input of [
+      { ...deal, stageId: OTHER, valueMinor: 2_500_050, ownerId: TENANT },
+      { ...deal, valueMinor: 0, expectedCloseOn: '2026-12-31' },
+      { ...deal, valueMinor: MAX_DEAL_MINOR, ownerId: null, expectedCloseOn: null },
+      { ...deal, title: 'x'.repeat(120) },
+    ]) {
+      expect(parse(input).success, JSON.stringify(input)).toBe(true);
+    }
+    for (const input of [
+      { pipelineId: OTHER, title: 'Annual plan' },
+      { contactId: TENANT, title: 'Annual plan' },
+      { contactId: TENANT, pipelineId: OTHER },
+      { ...deal, title: '   ' },
+      { ...deal, title: 'x'.repeat(121) },
+      { ...deal, contactId: 'asha' },
+      { ...deal, stageId: 'won' },
+      { ...deal, valueMinor: -1 },
+      { ...deal, valueMinor: 1.5 },
+      { ...deal, valueMinor: MAX_DEAL_MINOR + 1 },
+      { ...deal, valueMinor: '100' },
+      { ...deal, ownerId: 'me' },
+      { ...deal, expectedCloseOn: '2026-02-30' },
+      { ...deal, status: 'won' },
+    ]) {
+      expect(parse(input).success, JSON.stringify(input)).toBe(false);
+    }
+  });
+
+  it('refuses keys without the scope, suspended companies and bad bodies before anything is read', async () => {
+    expect(await refusal(apiCreateDeal(deps(untouched), ctx(['deals.read']), deal, null))).toEqual([
+      'forbidden',
+      'This API key does not have the deals.write scope.',
+      [],
+    ]);
+    for (const status of ['suspended', 'restricted']) {
+      expect(
+        (
+          await refusal(apiCreateDeal(deps(untouched), ctx(['deals.write'], status), deal, null))
+        )[0],
+      ).toBe('tenant_suspended');
+    }
+    expect(
+      (
+        await refusal(
+          apiCreateDeal(deps(untouched), ctx(['deals.write']), { ...deal, valueMinor: -5 }, null),
+        )
+      )[2],
+    ).toEqual(['valueMinor']);
+    // A valid request reaches the database in a writing transaction.
+    const { db, runs } = reached();
+    await expect(apiCreateDeal(deps(db), ctx(['deals.write']), deal, null)).rejects.toThrow(
+      'reached the database',
+    );
+    expect(runs).toEqual([undefined]);
+  });
+
+  it('is described: the scope, the defaults, the refusals and the request body', () => {
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      paths: Record<string, Record<string, Record<string, unknown>>>;
+      components: { schemas: Record<string, unknown> };
+    };
+    expect(API_ROUTES).toContainEqual(['post', '/deals']);
+    const create = doc.paths['/deals']?.post as {
+      operationId: string;
+      description: string;
+      parameters: { $ref?: string }[];
+      requestBody: { content: Record<string, { schema: unknown }> };
+      responses: Record<string, unknown>;
+    };
+    expect(create.operationId).toBe('createDeal');
+    expect(create.parameters).toEqual([{ $ref: '#/components/parameters/IdempotencyKeyOptional' }]);
+    expect(create.requestBody.content['application/json']?.schema).toEqual({
+      $ref: '#/components/schemas/CreateDeal',
+    });
+    expect(Object.keys(create.responses)).toEqual(
+      expect.arrayContaining(['201', '403', '404', '409', '422', '423']),
+    );
+    for (const words of [
+      'Scope: `deals.write`.',
+      'its first when `stageId` is left out',
+      'a value in the pipeline currency’s minor units',
+      'recorded as created through the API',
+      'refused with 409',
+      '422 naming the field',
+      '(403, reason not_in_plan)',
+      'With an `Idempotency-Key`, a retry answers the first response.',
+      '`contact_merged`',
+    ]) {
+      expect(create.description).toContain(words);
+    }
+    const body = doc.components.schemas.CreateDeal as {
+      properties: Record<string, unknown>;
+      required: string[];
+      additionalProperties: boolean;
+    };
+    expect(Object.keys(body.properties)).toEqual([
+      'contactId',
+      'pipelineId',
+      'stageId',
+      'title',
+      'valueMinor',
+      'ownerId',
+      'expectedCloseOn',
+    ]);
+    expect(body.required).toEqual(['contactId', 'pipelineId', 'title']);
+    expect(body.additionalProperties).toBe(false);
   });
 });

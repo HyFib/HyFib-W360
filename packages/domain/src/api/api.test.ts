@@ -249,6 +249,7 @@ describe('API scopes', () => {
       'campaigns.resume',
       'automations.start',
       'orders.write',
+      'deals.write',
       'webhooks.manage',
     ]);
     expect([...API_SEND_SCOPES]).toEqual(API_SCOPE_KEYS.filter((s) => s.startsWith('messages.')));

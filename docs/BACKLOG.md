@@ -269,9 +269,11 @@ verification, app review, Embedded Signup configuration).
   forecast in Reports built; its database and browser tests run only in CI]** (ADR-252, migration
   0166: open deals by expected close month, weighed by each stage's chance as on the board).
   **[Reading pipelines and deals through the public API built; its database and browser tests run
-  only in CI]** (ADR-253, migrations 0167 and 0168; recorded under P5-08). **Remaining:** custom
-  deal fields, products on deals, deal import, CRM connectors (HubSpot, Salesforce, Zoho:
-  integrations), reminder emails through the production SMTP provider (release checklist).
+  only in CI]** (ADR-253, migrations 0167 and 0168; recorded under P5-08). **[Creating deals through
+  the public API built; its database and browser tests run only in CI]** (ADR-254, migrations 0169
+  and 0170; recorded under P5-08). **Remaining:** custom deal fields, products on deals, deal
+  import, CRM connectors (HubSpot, Salesforce, Zoho: integrations), reminder emails through the
+  production SMTP provider (release checklist).
 - **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad
   traffic yet_: click-to-chat links (a short link that counts clicks per link and company day
   without any visitor data and redirects to wa.me with a pre-filled message and an optional
@@ -793,8 +795,12 @@ verification, app review, Embedded Signup configuration).
   new `deals.read` scope, granted with `crm.read`, and the CRM in the plan: pipelines with their
   stages and chances, deals newest first on exact pages, filtered by pipeline, stage, status,
   contact, owner or time of change, values in minor units and ids only).
-  Remaining: changing CRM deals and reading tasks through the API, call-to-action messages through
-  the API, taking
+  **[Creating CRM deals built; its database and browser tests run only in CI]** (ADR-254, migrations
+  0169 and 0170: `POST /deals` with the new `deals.write` scope, granted with `crm.write`, and the
+  CRM in the plan: a deal for a contact in an active stage, as members create one, recorded as
+  created through the API, with an optional `Idempotency-Key`).
+  Remaining: changing, moving and closing CRM deals and reading tasks through the API,
+  call-to-action messages through the API, taking
   reactions back,
   changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),

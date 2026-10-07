@@ -9634,3 +9634,36 @@ Decision:
 
 Not built: changing deals or pipelines through the API, tasks and notes, the timeline, deal webhook
 events, and who created a deal (a member or an automation).
+
+## ADR-254 Creating CRM deals through the public API (P5-08, P4-04) (2026-10-07)
+
+Context: after ADR-253 an integration could read the company's deals but not add one, so a web shop,
+a booking form or another CRM still needed a member to type each new deal on the board.
+
+Decision:
+
+- **A new writing scope, `deals.write`** ("Create CRM deals"), granted with `crm.write`, the
+  permission members create deals with; only owners and administrators create keys, and both hold
+  it. It writes, so it is refused while the company is suspended or restricted (423). Existing keys
+  keep their scopes, and a plan version that chose its scopes (ADR-092) leaves it out until a new
+  version includes it.
+- **`POST /api/v1/deals` (`createDeal`)** creates a deal as members do on the board: for a contact
+  of the company that exists and was not erased (404 otherwise, with reason `contact_merged` for a
+  merged one), in an active pipeline and an active stage of it (its first when `stageId` is left
+  out), with a title of up to 120 characters, a value as an integer in the pipeline currency's minor
+  units up to the CRM's limit, an owner who is an active member able to use the CRM, and an expected
+  close date. An unknown pipeline, a stage of another pipeline or an owner who cannot use the CRM is
+  refused with 422 naming the field; a pipeline or stage members archived with 409. The CRM must be
+  in the plan (403, reason `not_in_plan`). It answers 201 with the deal as GET /deals/{id} reads it;
+  with an `Idempotency-Key`, a retry answers the first response.
+- **Recorded as the key's:** the deal names the key as its creator (`created_by_api_key_id`,
+  migration 0169; the creator check now takes exactly one of a member, an automation or a key, and
+  0170 validates both), its `deal_created` activity has no member actor and names the key, so the
+  deal's page and the timeline say it came "through the API", and the audit log has
+  `crm.deal_created` as the key. The pipeline is shared and the contact locked until the deal is in,
+  as for members' deals, so archiving or erasure waits.
+- Migration 0169 also replaces the key and plan scope checks with ones that also accept
+  `deals.write`, validated at once, as 0167 did.
+
+Not built: changing, moving, closing or deleting deals through the API, linking a deal to a
+conversation through the API, and deal webhook events.

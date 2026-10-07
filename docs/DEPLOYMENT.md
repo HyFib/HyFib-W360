@@ -620,6 +620,15 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `/api/v1/deals` with 404; rolling web servers back to an image from before them does the same.
    Workers are not affected.
 
+   Migration 0169 (ADR-254) widens the same scope checks again, with the same brief locks, adds
+   `app.crm_deals.created_by_api_key_id` and replaces the deals' creator check with one taking a key
+   as the creator, NOT VALID with the new foreign key (no row is read under the migration's lock);
+   0170 validates both while the table stays writable. Web servers from before 0169 do not know
+   `deals.write`: until the web rollout ends, an old server answers Settings → API keys with an
+   error for a company with a key holding it (and the platform plan pages for a plan version
+   including it), and `POST /api/v1/deals` with 405; an old server shows a deal a key created as
+   created by nobody. Workers are not affected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -13,6 +13,7 @@ import {
   advanceAutomationRun,
   apiAddConversationNote,
   apiCreateContact,
+  apiCreateDeal,
   apiErrorResponse,
   apiGetAutomationRun,
   apiGetContact,
@@ -82,6 +83,7 @@ import {
   type ApiAutomationRunStart,
   type ApiContext,
   type ApiConversation,
+  type ApiDeal,
   type ApiKeyReminderDeps,
   type ApiKeysService,
   type ApiScope,
@@ -4207,6 +4209,189 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       keys.create(narrower, { name: 'Deals', scopes: ['deals.read'], expiresInDays: 30 }),
       'forbidden',
       /Read CRM deals/,
+    );
+  });
+
+  it('are created as members create them, as the key, and a retry answers the first (ADR-254)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const writer = await apiKey(c, ['deals.write'], 'Web shop');
+    const reader = await apiKey(c, ['deals.read']);
+    const sales = await pipelineOf(owner, 'Sales', 'INR', [
+      'New',
+      { name: 'Qualified', winPercent: 40 },
+    ]);
+    const asha = await contactOf(owner, 'Asha');
+    const created = await apiCreateDeal(
+      deps(),
+      writer.ctx,
+      {
+        contactId: asha,
+        pipelineId: sales.id,
+        title: '  Website order  ',
+        valueMinor: 49_900,
+        ownerId: agent.membership.id,
+        expectedCloseOn: '2026-11-30',
+      },
+      null,
+    );
+    expect([created.status, created.replayed]).toEqual([201, false]);
+    const deal = (created.body as { data: ApiDeal }).data;
+    // In the pipeline's first stage, as GET /deals/{id} reads it.
+    expect(deal).toMatchObject({
+      title: 'Website order',
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      status: 'open',
+      valueMinor: 49_900,
+      currency: 'INR',
+      contactId: asha,
+      conversationId: null,
+      ownerId: agent.membership.id,
+      expectedCloseOn: '2026-11-30',
+      lostReason: null,
+      closedAt: null,
+    });
+    expect(await apiGetDeal(deps(), reader.ctx, deal.id)).toEqual(deal);
+
+    // Recorded as the key's: its creator, its page and timeline, and the audit log.
+    const [row] = await fx.query<{
+      created_by_api_key_id: string | null;
+      created_by_membership_id: string | null;
+    }>('SELECT created_by_api_key_id, created_by_membership_id FROM app.crm_deals WHERE id = $1', [
+      deal.id,
+    ]);
+    expect(row).toEqual({ created_by_api_key_id: writer.id, created_by_membership_id: null });
+    const shown = await crm().getDeal(owner, deal.id);
+    expect([shown.createdBy, shown.createdByAutomation, shown.createdThroughApi]).toEqual([
+      null,
+      false,
+      true,
+    ]);
+    expect(shown.timeline.map((a) => [a.kind, a.actor, a.data.apiKeyId])).toEqual([
+      ['deal_created', null, writer.id],
+    ]);
+    const [audit] = await fx.query<{
+      actor_type: string;
+      actor_id: string;
+      metadata: Record<string, unknown>;
+    }>(
+      `SELECT actor_type, actor_id, metadata FROM app.audit_events
+        WHERE action = 'crm.deal_created' AND subject_id = $1`,
+      [deal.id],
+    );
+    expect(audit).toMatchObject({
+      actor_type: 'api_key',
+      actor_id: writer.id,
+      metadata: { pipelineId: sales.id, stageId: sales.stages[0], source: 'api' },
+    });
+
+    // A stage of the pipeline; a retry with the same Idempotency-Key answers the first, once.
+    const request = {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[1],
+      title: 'Renewal',
+    };
+    const key = idem('deal-renewal-1', JSON.stringify(request));
+    const first = await apiCreateDeal(deps(), writer.ctx, request, key);
+    const again = await apiCreateDeal(deps(), writer.ctx, request, key);
+    expect([first.replayed, again.replayed]).toEqual([false, true]);
+    expect(again.body).toEqual(first.body);
+    expect((first.body as { data: ApiDeal }).data.stageId).toBe(sales.stages[1]);
+    expect(
+      await fx.query('SELECT id FROM app.crm_deals WHERE tenant_id = $1 AND title = $2', [
+        c.tenant.id,
+        'Renewal',
+      ]),
+    ).toHaveLength(1);
+  });
+
+  it('refuse what members are refused, and need the scope, an active company and the CRM (ADR-254)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const marketer = await fx.ctx(c, c.marketer);
+    const writer = await apiKey(c, ['deals.write']);
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New', 'Qualified', 'Proposal']);
+    const renewals = await pipelineOf(owner, 'Renewals', 'INR', ['Due']);
+    const theirs = await pipelineOf(await fx.ctx(other, other.owner), 'Theirs', 'INR', ['Open']);
+    const asha = await contactOf(owner, 'Asha');
+    const body = (input: Record<string, unknown> = {}) => ({
+      contactId: asha,
+      pipelineId: sales.id,
+      title: 'Annual plan',
+      ...input,
+    });
+    const create = (input: Record<string, unknown> = {}) =>
+      apiCreateDeal(deps(), writer.ctx, body(input), null);
+    const paths = (error: unknown) =>
+      isAppError(error) ? (error.issues ?? []).map((i) => i.path) : [];
+
+    // Another company's pipeline, another pipeline's stage, and owners who cannot use the CRM are
+    // named; another company's or an unknown contact is not found.
+    for (const [input, path] of [
+      [{ pipelineId: theirs.id }, 'pipelineId'],
+      [{ stageId: renewals.stages[0] }, 'stageId'],
+      [{ ownerId: marketer.membership.id }, 'ownerId'],
+      [{ ownerId: uuidv7() }, 'ownerId'],
+    ] as const) {
+      expect(paths(await expectAppError(create(input), 'validation_failed'))).toEqual([path]);
+    }
+    await expectAppError(create({ contactId: uuidv7() }), 'not_found', /Contact/);
+
+    // A stage members removed and an archived pipeline are conflicts; an erased contact is gone.
+    await crm().updatePipeline(owner, {
+      id: sales.id,
+      expectedVersion: 1,
+      name: 'Sales',
+      stages: [
+        { id: sales.stages[0], name: 'New' },
+        { id: sales.stages[1], name: 'Qualified' },
+      ],
+    });
+    await expectAppError(create({ stageId: sales.stages[2] }), 'conflict', /removed/);
+    await crm().archivePipeline(owner, { id: renewals.id, expectedVersion: 1 });
+    await expectAppError(create({ pipelineId: renewals.id }), 'conflict', /archived/);
+    const erased = await contactOf(owner, 'Ravi');
+    await contacts().eraseContact(owner, { contactId: erased, suppress: false });
+    await expectAppError(create({ contactId: erased }), 'not_found', /Contact/);
+    const [none] = await fx.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM app.crm_deals WHERE tenant_id = $1',
+      [c.tenant.id],
+    );
+    expect(none?.n).toBe(0);
+
+    // A key that only reads deals, or one of a suspended company, creates none.
+    const reader = await apiKey(c, ['deals.read']);
+    await expectAppError(
+      apiCreateDeal(deps(), reader.ctx, body(), null),
+      'forbidden',
+      /deals\.write/,
+    );
+    const suspended = {
+      ...writer.ctx,
+      tenant: { ...writer.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(apiCreateDeal(deps(), suspended, body(), null), 'tenant_suspended');
+
+    // A plan without the CRM creates none; with it again, the deal is created.
+    await onPlan(c, []);
+    const error = await expectAppError(create(), 'forbidden', /does not include the CRM/);
+    expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    await onPlan(c, ['crm']);
+    expect((await create()).status).toBe(201);
+
+    // Granting the scope needs crm.write, which members create deals with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'crm.write')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Deals', scopes: ['deals.write'], expiresInDays: 30 }),
+      'forbidden',
+      /Create CRM deals/,
     );
   });
 });

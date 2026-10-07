@@ -2098,6 +2098,16 @@ erased contact. Archived pipelines are listed with `archived: true`; their deals
 index can remain: run `DROP INDEX CONCURRENTLY app.crm_deals_list_idx;` and run the migrations
 again.
 
+**`POST /api/v1/deals` answers 403, 404, 409, 422 or 423 (ADR-254).** 403 `forbidden` names the
+scope the key lacks, `deals.write` (granted by members with `crm.write`), or with reason
+`not_in_plan` the company's plan leaves out the CRM or the scope. 404 means the contact is not one
+of the company's or was erased (reason `contact_merged` and `mergedInto` name the contact a merged
+one belongs to now). 409 means members archived the pipeline or removed the stage: read GET
+/pipelines again. 422 names the field: a pipeline, stage or owner the company does not have, a stage
+of another pipeline, or an owner who cannot use the CRM (GET /members). 423 means the company is
+suspended or its plan has ended; reading deals still works. A deal created through the API says so
+on its page and timeline; the audit log has `crm.deal_created` with the key.
+
 **`GET /api/v1/channels` answers 403, or a number shows no phone or name (ADR-171).** 403
 `forbidden` names the scope the key lacks, `channels.read` (keys keep the scopes they were created
 with: create a key with it); reason `not_in_plan` means the company's plan leaves the scope out

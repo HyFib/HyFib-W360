@@ -59,6 +59,8 @@ export const crmDeals = appSchema.table('crm_deals', {
   createdByMembershipId: uuid('created_by_membership_id'),
   /** The automation whose run created the deal (ADR-245); exactly one creator is set. */
   createdByAutomationId: uuid('created_by_automation_id'),
+  /** The API key that created the deal (migration 0169, ADR-254). */
+  createdByApiKeyId: uuid('created_by_api_key_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });

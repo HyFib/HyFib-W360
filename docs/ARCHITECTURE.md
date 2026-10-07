@@ -1442,6 +1442,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `created_at` on exact keyset cursors (`crm_deals_list_idx`), the filters as plain equalities
   (`ownerId` `none` as a null owner) and `updated_at >= updatedSince`; `toApiDeal` gives ids in
   place of the contact, conversation and owner.
+- **Creating CRM deals through the API (ADR-254):** `POST /deals` (`apiCreateDeal`, `deals.write`)
+  claims the `Idempotency-Key` in the deal's transaction, checks the CRM in the plan, locks the
+  contact (key share; `apiContactNotFound` for a missing or erased one), shares the pipeline and
+  picks the stage (`entryStage`: the one given, or the first active by position), checks the owner
+  with `memberRefs`, then inserts the deal with `created_by_api_key_id`, a `deal_created` activity
+  without an actor whose data names the key, and a `crm.deal_created` audit row as the key, and
+  answers the deal as `readApiDeal` reads it.
 - **Numbers through the API (ADR-171):** `GET /channels` (`api/channels.ts`, `channels.read`) reads
   `channel_accounts` in the company oldest first on exact keyset cursors (`created_at`, `id`), with
   `status` as an equality, and gives the id, `display_phone_number`, `verified_name`, the status and

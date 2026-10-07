@@ -1,8 +1,9 @@
 import { z } from 'zod';
-import { AppError, notFound } from '@w360/core';
+import { AppError, notFound, uuidv7 } from '@w360/core';
 import {
   and,
   asc,
+  contacts,
   crmDeals,
   crmPipelines,
   crmStages,
@@ -16,10 +17,20 @@ import {
   type DealStatus,
   type Tx,
 } from '@w360/db';
+import { recordSystemAudit } from '../audit';
+import { addActivity, memberRefs } from '../crm/common';
+import { MAX_DEAL_MINOR } from '../crm/money';
 import type { OutboundDeps } from '../messaging/outbound';
 import { loadEntitlements } from '../plans/entitlements';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
-import { assertScope, type ApiContext } from './context';
+import { apiContactNotFound } from './contact-view';
+import { apiActor, assertScope, type ApiContext } from './context';
+import {
+  claimIdempotencyKey,
+  storeIdempotentResponse,
+  type ApiResponse,
+  type IdempotencyInput,
+} from './idempotency';
 import { API_LIMITS } from './model';
 
 /**
@@ -28,7 +39,7 @@ import { API_LIMITS } from './model';
  * page show them, with the contact, the conversation and the owner by id only. Notes, tasks and the
  * timeline are never read, nor the contact's name or number (`contacts.read` reads those). A key
  * needs the CRM in the company's plan. An erased contact's deals are read as erasure leaves them:
- * renamed, without a lost reason.
+ * renamed, without a lost reason. With `deals.write` a key creates deals as members do (ADR-254).
  */
 
 const page = {
@@ -55,6 +66,43 @@ export const apiDealListQuerySchema = z
       .describe(
         'Only deals changed at or after this time (created, edited, moved, closed or reopened, moved to another contact by a merge, or renamed when their contact was erased).',
       ),
+  })
+  .strict();
+
+/** What `POST /deals` takes: the contact, the pipeline and the deal, as members create one. */
+export const apiCreateDealSchema = z
+  .object({
+    contactId: z.uuid().describe('The customer the deal is with, as GET /contacts gives them.'),
+    pipelineId: z.uuid().describe('One of the company’s active pipelines (GET /pipelines).'),
+    stageId: z
+      .uuid()
+      .optional()
+      .describe('An active stage of the pipeline; without one, its first active stage.'),
+    title: z
+      .string()
+      .trim()
+      .min(1, 'Give the deal a title.')
+      .max(120, 'A title is limited to 120 characters.'),
+    valueMinor: z
+      .number()
+      .int()
+      .min(0)
+      .max(MAX_DEAL_MINOR)
+      .nullable()
+      .optional()
+      .describe('The deal’s value in the pipeline currency’s minor units (paise for INR).'),
+    ownerId: z
+      .uuid()
+      .nullable()
+      .optional()
+      .describe(
+        'The member who owns the deal: an active member who can use the CRM (GET /members).',
+      ),
+    expectedCloseOn: z.iso
+      .date()
+      .nullable()
+      .optional()
+      .describe('The day the deal is expected to close.'),
   })
   .strict();
 
@@ -323,6 +371,16 @@ export async function apiListDeals(
   );
 }
 
+/** One of the company's deals, or null when it has none with this id. */
+async function readApiDeal(tx: Tx, tenantId: string, dealId: string): Promise<ApiDeal | null> {
+  const [found] = await tx
+    .select(dealColumns)
+    .from(crmDeals)
+    .innerJoin(crmPipelines, pipelineOfDeal)
+    .where(and(eq(crmDeals.tenantId, tenantId), eq(crmDeals.id, dealId)));
+  return found ? toApiDeal(found) : null;
+}
+
 /** One of the company's deals. */
 export async function apiGetDeal(
   deps: Pick<OutboundDeps, 'db'>,
@@ -331,19 +389,147 @@ export async function apiGetDeal(
 ): Promise<ApiDeal> {
   assertScope(ctx, 'deals.read');
   if (!z.uuid().safeParse(dealId).success) throw notFound('Deal');
-  const row = await deps.db.run(
+  const deal = await deps.db.run(
     ctx.scope,
     async (tx) => {
       await assertCrmInPlan(tx, ctx.tenant.id);
-      const [found] = await tx
-        .select(dealColumns)
-        .from(crmDeals)
-        .innerJoin(crmPipelines, pipelineOfDeal)
-        .where(and(eq(crmDeals.tenantId, ctx.tenant.id), eq(crmDeals.id, dealId)));
-      return found ?? null;
+      return readApiDeal(tx, ctx.tenant.id, dealId);
     },
     { accessMode: 'read only' },
   );
-  if (!row) throw notFound('Deal');
-  return toApiDeal(row);
+  if (!deal) throw notFound('Deal');
+  return deal;
+}
+
+/** A refused pipeline, stage or owner, named by the field that gave it. */
+const invalidField = (path: string, message: string) =>
+  new AppError('validation_failed', message, { issues: [{ path, message }] });
+
+/**
+ * The stage a new deal enters: the one given, or the pipeline's first active stage. The pipeline is
+ * shared until the deal is in, so archiving it or a stage of it (members lock it to update) waits,
+ * as for members' deals.
+ */
+async function entryStage(
+  tx: Tx,
+  tenantId: string,
+  pipelineId: string,
+  stageId: string | undefined,
+): Promise<string> {
+  const [pipeline] = await tx
+    .select({ archivedAt: crmPipelines.archivedAt })
+    .from(crmPipelines)
+    .where(and(eq(crmPipelines.tenantId, tenantId), eq(crmPipelines.id, pipelineId)))
+    .for('share');
+  if (!pipeline) {
+    throw invalidField(
+      'pipelineId',
+      'Give the id of one of the company’s pipelines (GET /pipelines).',
+    );
+  }
+  if (pipeline.archivedAt) {
+    throw new AppError('conflict', 'This pipeline is archived: members restore it in the app.');
+  }
+  const stages = await tx
+    .select({ id: crmStages.id, archivedAt: crmStages.archivedAt })
+    .from(crmStages)
+    .where(and(eq(crmStages.tenantId, tenantId), eq(crmStages.pipelineId, pipelineId)))
+    .orderBy(asc(crmStages.position), asc(crmStages.id));
+  if (stageId === undefined) {
+    const first = stages.find((s) => s.archivedAt === null);
+    if (!first) throw new AppError('conflict', 'This pipeline has no stages.');
+    return first.id;
+  }
+  const stage = stages.find((s) => s.id === stageId);
+  if (!stage) {
+    throw invalidField('stageId', 'Give the id of a stage of the pipeline (GET /pipelines).');
+  }
+  if (stage.archivedAt) throw new AppError('conflict', 'This stage was removed from the pipeline.');
+  return stage.id;
+}
+
+/**
+ * Creates a deal as members do on the board (ADR-254), recorded as created by the key: in an active
+ * stage of an active pipeline (its first when none is given), for a contact that exists and was not
+ * erased, owned by an active member who can use the CRM or by nobody. Its `deal_created` activity
+ * has no member actor and names the key, so the timeline says it came through the API; the audit
+ * log names the key. With an Idempotency-Key a retry answers the first response.
+ */
+export async function apiCreateDeal(
+  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+  ctx: ApiContext,
+  input: unknown,
+  idempotency: IdempotencyInput | null,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'deals.write');
+  const data = parseInput(apiCreateDealSchema, input);
+  const now = deps.clock.now();
+  return deps.db.run(ctx.scope, async (tx) => {
+    // Claimed in the deal's transaction, so a refused deal leaves the key unused (ADR-052).
+    let claimed: string | null = null;
+    if (idempotency) {
+      const claim = await claimIdempotencyKey(tx, ctx, idempotency, now);
+      if ('replay' in claim) return claim.replay;
+      claimed = claim.claimed;
+    }
+    await assertCrmInPlan(tx, ctx.tenant.id);
+    // Locked against erasure until the deal is in, as members' deals lock it.
+    const [contact] = await tx
+      .select({ erasedAt: contacts.erasedAt })
+      .from(contacts)
+      .where(and(eq(contacts.tenantId, ctx.tenant.id), eq(contacts.id, data.contactId)))
+      .for('key share');
+    if (!contact || contact.erasedAt) {
+      throw await apiContactNotFound(tx, ctx.tenant.id, data.contactId);
+    }
+    const stageId = await entryStage(tx, ctx.tenant.id, data.pipelineId, data.stageId);
+    const ownerId = data.ownerId ?? null;
+    if (ownerId && !(await memberRefs(tx, ctx.tenant.id, [ownerId])).get(ownerId)?.active) {
+      throw invalidField(
+        'ownerId',
+        'Give the id of an active member who can use the CRM (GET /members).',
+      );
+    }
+    const id = uuidv7();
+    const valueMinor = data.valueMinor ?? null;
+    await tx.insert(crmDeals).values({
+      id,
+      tenantId: ctx.tenant.id,
+      pipelineId: data.pipelineId,
+      stageId,
+      contactId: data.contactId,
+      title: data.title,
+      valueMinor,
+      ownerMembershipId: ownerId,
+      expectedCloseOn: data.expectedCloseOn ?? null,
+      stageEnteredAt: now,
+      createdByApiKeyId: ctx.key.id,
+    });
+    await addActivity(tx, {
+      tenantId: ctx.tenant.id,
+      contactId: data.contactId,
+      dealId: id,
+      actorMembershipId: null,
+      kind: 'deal_created',
+      data: { stageId, valueMinor, apiKeyId: ctx.key.id },
+      at: now,
+    });
+    await recordSystemAudit(
+      tx,
+      ctx.tenant.id,
+      {
+        action: 'crm.deal_created',
+        subjectType: 'crm_deal',
+        subjectId: id,
+        correlationId: ctx.requestId,
+        metadata: { pipelineId: data.pipelineId, stageId, source: 'api' },
+      },
+      apiActor(ctx),
+    );
+    const deal = await readApiDeal(tx, ctx.tenant.id, id);
+    if (!deal) throw notFound('Deal');
+    const response = { status: 201, body: { data: deal } };
+    if (claimed) await storeIdempotentResponse(tx, ctx, claimed, response);
+    return { ...response, replayed: false };
+  });
 }
