@@ -1752,9 +1752,16 @@ true`); the same key with another request (method, path and body hashed) answers
   through `app.capture_webhook_event`: the task id, and the status before a change, in `detail`,
   with the task's contact and no conversation, so no number, team, member or deal filter narrows
   them (assignees do, ADR-266), stamped with `clock_timestamp()`. Edits, reminders and merges leave
-  the status, and erasure deletes the row, so they capture nothing. Their payloads are built when
-  delivered (`taskOf`): the statuses as captured; the title, due time, assignee id, deal id and
-  creator as they are then, and the contact or null; never the notes.
+  the status, and erasure deletes the row, so they capture no status change. Their payloads are
+  built when delivered (`taskOf`): the statuses as captured; the title, due time, assignee id, deal
+  id and creator as they are then, and the contact or null; never the notes.
+- **Task assignee events** (migrations 0190–0191, ADR-274): the task update trigger, now also on
+  `assignee_membership_id`, captures `task.assignee_changed` when an update changes the assignee
+  (members editing an open task, keys through `apiUpdateTask`; the runner's task steps set an
+  assignee only on the tasks they add), with the task id and the new and previous assignee ids in
+  `detail`, between a reopening and a close made by the same update. Its payload (`taskOf`) gives
+  `assigneeId` and `previousAssigneeId` as captured, where the other task events give the assignee
+  when delivered and `previousAssigneeId` null.
 - **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
   notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
   SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same
@@ -2005,8 +2012,9 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   the company taking the event names assignees, and matches it against the list. Settings (radio
   buttons and checkboxes under "Task assignees", the members who can own deals, who are those tasks
   are assigned to) and the API (`taskAssigneeIds`) set it; the services check the members a list
-  adds as they check deal owners, and members it held stay; a change that drops both task events
-  clears it.
+  adds as they check deal owners, and members it held stay; a change that drops every task event
+  clears it. For `task.assignee_changed` (ADR-274) it also matches the `previousAssigneeId` the
+  trigger stores, so the endpoints of the member a task left hear the change too.
 - **Contact tag filters** (migration 0183, ADR-267): `contact_tags` on an endpoint lists the contact
   tags whose conversations' message and conversation events it takes, null for every conversation's;
   a check keeps it to 1 to 50 tags in `app.contact_tags`' form and to endpoints taking such an

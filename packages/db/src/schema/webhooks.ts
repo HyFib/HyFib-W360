@@ -32,6 +32,7 @@ export const WEBHOOK_EVENT_TYPES = [
   'deal.owner_changed',
   'deal.status_changed',
   'task.created',
+  'task.assignee_changed',
   'task.status_changed',
 ] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];

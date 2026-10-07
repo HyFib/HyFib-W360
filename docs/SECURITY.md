@@ -169,7 +169,12 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   for that company alone, and only when one of its active endpoints takes it; erasing a contact
   deletes its tasks, so their pending events are not delivered (`event_gone`). No number, team,
   member or deal filter narrows task events, which Settings and the OpenAPI document say; an
-  endpoint's list of assignees does (ADR-266).
+  endpoint's list of assignees does (ADR-266). A change of assignee (`task.assignee_changed`,
+  ADR-274) gives the ids of the member the task left and of the one it was given to, both the
+  company's own members (the assignee's foreign key goes through the company's id), never who made
+  the change, and reaches the endpoints naming either member, so an endpoint following a member
+  hears a task leave them; automations, erasure and merges never change an assignee, so they send
+  none.
 - Customers' numbers (ADR-226): a company's owners and administrators choose the roles (supervisor,
   agent, marketer, analyst) whose members see them masked; the context leaves out
   `contacts.view_numbers` for a member whose every role that grants it is masked, and the services

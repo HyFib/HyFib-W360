@@ -1034,6 +1034,11 @@ verification, app review, Embedded Signup configuration).
   have any of 1 to 50 tags when the events happen; tags are compared as conversations carry them,
   and one no conversation has yet may be named; with numbers, teams, members or contact tags too, an
   event must pass every list).
+  **[Task assignee events built; their database tests run only in CI]** (ADR-274, migrations 0190
+  and 0191: `task.assignee_changed` for every task given to another member, by members or API keys,
+  with both assignees; an endpoint naming assignees hears it for the member the task left as well;
+  one change that also reopens or closes the task sends each event in the order the steps happen;
+  automations, erasure and merges send none).
   Remaining: filters for other event types (task events by their deal's pipeline, stage or owner,
   among them) and on a message's or contact's values (such as a field's value, contact events by
   tag, or the key that started a run), other authentication (headers computed per delivery, other

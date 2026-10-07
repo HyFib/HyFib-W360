@@ -408,7 +408,7 @@ const invalidOwners = () =>
   });
 
 const taskAssigneeIdsField = webhookTaskAssigneeIdsSchema.describe(
-  `The members whose tasks' events the endpoint receives: 1 to ${WEBHOOK_LIMITS.taskAssignees} member ids (as GET /members lists them, and as task events give them in \`task.assigneeId\`), only with a task event: task.created or task.status_changed. A task's event belongs to the member it is assigned to when the event happens (the payload gives the assignee when it is delivered); reassigning a task sends nothing. A list may add only active members who can use the CRM; one who later leaves or loses access stays on the list. Deal and other events are not narrowed. null receives every task's events.`,
+  `The members whose tasks' events the endpoint receives: 1 to ${WEBHOOK_LIMITS.taskAssignees} member ids (as GET /members lists them, and as task events give them in \`task.assigneeId\`), only with a task event: task.created, task.assignee_changed or task.status_changed. A task's event belongs to the member it is assigned to when the event happens (the payload gives the assignee when it is delivered); task.assignee_changed reaches the endpoints of the member the task left as well as of the one it was given to. A list may add only active members who can use the CRM; one who later leaves or loses access stays on the list. Deal and other events are not narrowed. null receives every task's events.`,
 );
 
 /** Task assignees are chosen only for an endpoint that receives task events (ADR-266). */

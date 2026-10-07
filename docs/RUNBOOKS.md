@@ -2131,11 +2131,12 @@ or name or a lost reason.
 
 **An integration misses a task change, or a task event fails as gone (ADR-261).** Endpoints that
 take `task.created` or `task.status_changed` are sent one event per task added and per completion,
-cancellation or reopening, whoever made it; edits of its title, notes, due time, assignee or
-reminder send nothing (read the task with GET /tasks/{id}), and neither do reminders being sent,
-merges and erasure. Changes made while no endpoint took the type were not recorded and are not sent
-later. A delivery that failed with `event_gone` belonged to a task that no longer exists: erasing a
-contact deletes its tasks. Payloads never carry a task's notes.
+cancellation or reopening, whoever made it; edits of its title, notes, due time or reminder send
+nothing (read the task with GET /tasks/{id}), and neither do reminders being sent, merges and
+erasure; a change of its assignee sends `task.assignee_changed` to the endpoints that take it
+(ADR-274). Changes made while no endpoint took the type were not recorded and are not sent later. A
+delivery that failed with `event_gone` belonged to a task that no longer exists: erasing a contact
+deletes its tasks. Payloads never carry a task's notes.
 
 **A deal does not move to another pipeline through the API (ADR-257).** 409 with "This pipeline uses
 …; clear the deal's value (in …) before moving it" means the deal has a value in another currency:
@@ -2732,13 +2733,25 @@ the tasks assigned to chosen members only. The endpoints list shows them ("Membe
 events are sent: …"), and the API answers `taskAssigneeIds` (null takes every task's). A task's
 events go by its assignee when each happens: a task assigned to someone else at the time is not
 queued for the endpoint, and events no endpoint takes are not recorded, so there is nothing to
-replay. Reassigning a task sends nothing; the task's next event goes by its new assignee. The
-payload's `task.assigneeId` is the assignee when it is delivered, so a task given away meanwhile can
-name someone else. A member who left stays on a list, "(no longer uses the CRM)", matching the tasks
-still assigned to them; assign those tasks to someone else. To take more, tick members under "Task
-assignees" on the endpoint's page or choose "Every task’s events", or `PATCH
-/webhook-endpoints/{id}` with `taskAssigneeIds` (null for every task). Removing both task events
-clears the list.
+replay. Reassigning a task sends `task.assignee_changed` to the endpoints of the member it left as
+well as of the new one, if they take it (ADR-274); the task's later events go by its new assignee.
+The payload's `task.assigneeId` is the assignee when it is delivered (for `task.assignee_changed`,
+the assignee the change gave), so a task given away meanwhile can name someone else. A member who
+left stays on a list, "(no longer uses the CRM)", matching the tasks still assigned to them; assign
+those tasks to someone else. To take more, tick members under "Task assignees" on the endpoint's
+page or choose "Every task’s events", or `PATCH /webhook-endpoints/{id}` with `taskAssigneeIds`
+(null for every task). Removing every task event clears the list.
+
+**A receiver misses a task's change of assignee, or doubts one (ADR-274).** Endpoints that take
+`task.assignee_changed` ("Task assignee") are sent one event each time a member gives a task to
+another member by editing it, or a key changes its `assigneeId`. Automations set an assignee only on
+the tasks they add (`task.created`), and erasure and merges keep it, so they send nothing; changes
+made while no endpoint took the type were not recorded and are not sent later. `task.assigneeId` and
+`task.previousAssigneeId` are the change: compare them, not the assignee the task has now (GET
+/tasks/{id}). An endpoint with assignees chosen hears it for the member the task left as well as for
+the one it was given to. One API request that gives the task to another member and completes it
+sends the change first, with status `open`, then the completion; one that reopens it sends the
+reopening first. Who made the change is not sent.
 
 **A receiver misses the conversations of a tagged customer (ADR-267).** An endpoint can take the
 message and conversation events of the conversations whose contact has chosen tags only. The

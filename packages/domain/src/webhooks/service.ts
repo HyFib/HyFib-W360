@@ -1183,7 +1183,7 @@ export const webhookTaskAssigneeIdsSchema = z
   .nullable();
 
 export const WEBHOOK_TASK_ASSIGNEES_NEED_THE_EVENTS =
-  'Choose task assignees only for an endpoint that receives Task added or Task done, cancelled or reopened.';
+  'Choose task assignees only for an endpoint that receives Task added, Task assignee or Task done, cancelled or reopened.';
 
 /**
  * The assignees an endpoint keeps after it is added or changed: every task (null) unless it takes a

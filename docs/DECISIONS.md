@@ -10387,3 +10387,43 @@ Decision:
 
 Not built: every listed tag required rather than any, tags to leave out, contact events by tag
 (ADR-267), an event when a conversation is tagged or untagged, and other values of a conversation.
+
+## ADR-274 A webhook event when a CRM task's assignee changes (P5-09, P4-04) (2026-10-07)
+
+Context: task events (ADR-261) told integrations of tasks added, completed, cancelled or reopened,
+and an endpoint could take the tasks of chosen members (ADR-266), but giving a task to another
+member sent nothing: a receiver following a member's tasks (their list in another tool, a team
+lead's board) learnt that a task had left or reached them only from the task's next event, if one
+came. ADR-266 left an event when a task is reassigned unbuilt.
+
+Decision:
+
+- **`task.assignee_changed`** ("Task assignee") is captured by the task trigger
+  (`app.webhook_capture_task`, replaced in place; its update trigger now also fires on
+  `assignee_membership_id`) when an update changes a task's assignee: a member giving the task to
+  another member by editing it, or a key changing `assigneeId` (`PATCH /tasks/{id}`, ADR-260).
+  Automations set an assignee only on the tasks they add (`task.created`), and erasure and merges
+  keep it, so they send none; a task always has an assignee.
+- **The change, not the task now:** the payload is the task events' one with a new field,
+  `task.previousAssigneeId` (the assignee before; null in the other task events), and its
+  `task.assigneeId` is the member the change gave rather than the assignee at delivery, so a
+  receiver reads the change even when the task has changed hands again since. The status is the one
+  the task had at the change; the rest is the task at delivery. Who made the change is not sent.
+- **Its place among one change's steps:** one update that also reopens or closes the task captures
+  each in the order the API's steps run (ADR-260): reopened, given to another member, closed, each
+  with the task as its step left it, stamped with `clock_timestamp()`; a key giving a task away and
+  completing it in one request sends the change of assignee with status `open`, then the completion.
+  Members change the assignee of an open task only, by editing it.
+- **Filters:** it is a task event for the assignee lists (ADR-266): an endpoint naming assignees
+  receives it for the member the task left as well as for the one it was given to, as
+  `deal.owner_changed` reaches both owners (ADR-269), so a receiver hears a task leave the members
+  it follows. The lists stay while an endpoint takes any of the three task events, and a list given
+  without one is refused naming the three as Settings lists them; no number, team, member or deal
+  filter narrows it.
+- **Migrations 0190 and 0191:** 0190 replaces the endpoints' event check and the check of their
+  assignee lists (validated at once: at most 10 endpoints per company), the events' type check (NOT
+  VALID; 0191 validates it while captures go on), the trigger and its function, and
+  `app.capture_webhook_event` with the same signature (keeping 0189's filters).
+
+Not built: events for other edits of a task (its title, notes, due time or reminder), who made a
+change in the payload, and task events by their deal's pipeline, stage or owner.

@@ -1458,7 +1458,7 @@ const CRM_MEMBER_WORDS = {
   },
   taskAssignees: {
     legend: 'Task assignees',
-    help: 'A task’s events belong to the member it is assigned to when they happen. Deal and other events are sent whichever assignees are chosen.',
+    help: 'A task’s events belong to the member it is assigned to when they happen, and a change of assignee to the member it left as well. Deal and other events are sent whichever assignees are chosen.',
     every: 'Every task’s events',
     everyHelp: 'Including those of members who join later.',
     only: 'Only those of the tasks assigned to the members ticked',

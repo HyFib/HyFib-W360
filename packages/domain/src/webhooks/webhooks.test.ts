@@ -105,6 +105,7 @@ import {
   dealOwnerChangedPayloadSchema,
   dealStatusChangedPayloadSchema,
   taskCreatedPayloadSchema,
+  taskAssigneeChangedPayloadSchema,
   taskStatusChangedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
@@ -1329,6 +1330,7 @@ describe('webhook payload schemas', () => {
       previousStatus: null,
       dueAt: base.createdAt,
       assigneeId: base.id,
+      previousAssigneeId: null,
       dealId: null,
       createdBy: 'member',
       createdAt: base.createdAt,
@@ -1359,13 +1361,28 @@ describe('webhook payload schemas', () => {
         ).toBe(true);
       }
     }
+    // A task given to another member, open or closed (ADR-274).
+    for (const status of TASK_STATUSES) {
+      expect(
+        taskAssigneeChangedPayloadSchema.safeParse({
+          ...created,
+          type: 'task.assignee_changed',
+          data: { ...created.data, task: { ...task, status, previousAssigneeId: base.id } },
+        }).success,
+        status,
+      ).toBe(true);
+    }
+    expect(taskAssigneeChangedPayloadSchema.safeParse(created).success).toBe(false);
     // An unknown status or creator, an id or time that is not one, a field left out, or another
-    // type is not described.
+    // type is not described; a task always has an assignee.
     for (const change of [
       { status: 'closed' },
       { previousStatus: 'won' },
       { createdBy: 'import' },
       { assigneeId: 'agent-1' },
+      { assigneeId: null },
+      { previousAssigneeId: 'agent-1' },
+      { previousAssigneeId: undefined },
       { dueAt: '2026-10-09' },
       { dealId: undefined },
     ]) {
@@ -1387,6 +1404,7 @@ describe('webhook payload schemas', () => {
       'previousStatus',
       'dueAt',
       'assigneeId',
+      'previousAssigneeId',
       'dealId',
       'createdBy',
       'createdAt',
@@ -1394,6 +1412,10 @@ describe('webhook payload schemas', () => {
     // The database takes exactly the events the API describes, in its order.
     expect([...WEBHOOK_EVENT_TYPES]).toEqual([...WEBHOOK_EVENT_KEYS]);
     expect(WEBHOOK_EVENT_INFO['task.created'].label).toBe('Task added');
+    expect(WEBHOOK_EVENT_INFO['task.assignee_changed']).toEqual({
+      label: 'Task assignee',
+      description: 'A CRM task was given to another member: by a member or an API key.',
+    });
     expect(WEBHOOK_EVENT_INFO['task.status_changed']).toEqual({
       label: 'Task done, cancelled or reopened',
       description: 'A CRM task was completed, cancelled or reopened: by a member or an API key.',
@@ -1552,6 +1574,7 @@ describe('the OpenAPI document', () => {
       'deal.owner_changed',
       'deal.status_changed',
       'task.created',
+      'task.assignee_changed',
       'task.status_changed',
     ]);
     const schemas = doc.components.schemas as Record<string, unknown>;
@@ -1659,14 +1682,24 @@ describe('the OpenAPI document', () => {
     for (const words of [
       'by a member or an API key',
       'task.status and task.previousStatus are the change (open, done or cancelled)',
-      'Editing a task’s details or its reminder sends nothing.',
+      'Editing a task’s other details or its reminder sends nothing; giving it to another member sends task.assignee_changed.',
       'the latest change is the one with the latest createdAt',
     ]) {
       expect(text('task.status_changed')).toContain(words);
     }
+    // A change of assignee (ADR-274).
+    const reassigned = doc.webhooks['task.assignee_changed'].post.description;
+    for (const words of [
+      'by a member or an API key',
+      'task.assigneeId and task.previousAssigneeId are the change',
+      'reopened, given to another member, closed',
+      'for the member the task left as well as for the one it was given to',
+    ]) {
+      expect(reassigned).toContain(words);
+    }
     expect(
       Object.keys(doc.components.schemas).filter((name) => name.startsWith('WebhookTask')),
-    ).toEqual(['WebhookTaskCreated', 'WebhookTaskStatusChanged']);
+    ).toEqual(['WebhookTaskCreated', 'WebhookTaskAssigneeChanged', 'WebhookTaskStatusChanged']);
   });
 
   it('builds no body for an event type it does not know, before reading anything', async () => {
@@ -2372,6 +2405,7 @@ describe('number filters (ADR-170)', () => {
       'deal.owner_changed': dealOwnerChangedPayloadSchema,
       'deal.status_changed': dealStatusChangedPayloadSchema,
       'task.created': taskCreatedPayloadSchema,
+      'task.assignee_changed': taskAssigneeChangedPayloadSchema,
       'task.status_changed': taskStatusChangedPayloadSchema,
     } satisfies Record<(typeof WEBHOOK_EVENT_KEYS)[number], unknown>;
     for (const type of WEBHOOK_EVENT_KEYS) {
@@ -3170,16 +3204,25 @@ describe('task assignee filters (ADR-266)', () => {
     ).toBe('Choose members from the list.');
   });
 
-  it('apply to the two task events, whose payloads give the assignee, and to no other event', () => {
-    expect(WEBHOOK_TASK_EVENTS).toEqual(['task.created', 'task.status_changed']);
+  it('apply to the three task events, whose payloads give the assignee, and to no other event', () => {
+    expect(WEBHOOK_TASK_EVENTS).toEqual([
+      'task.created',
+      'task.assignee_changed',
+      'task.status_changed',
+    ]);
     for (const type of WEBHOOK_EVENT_KEYS) {
       expect(webhookTakesTaskEvents([type]), type).toBe(type.startsWith('task.'));
     }
     // Deal events are not a task's, even of a deal with tasks.
     expect(webhookTakesTaskEvents(['deal.created', 'deal.status_changed'])).toBe(false);
     expect(webhookTakesTaskEvents(['deal.created', 'task.status_changed'])).toBe(true);
-    for (const schema of [taskCreatedPayloadSchema, taskStatusChangedPayloadSchema]) {
+    for (const schema of [
+      taskCreatedPayloadSchema,
+      taskAssigneeChangedPayloadSchema,
+      taskStatusChangedPayloadSchema,
+    ]) {
       expect('assigneeId' in schema.shape.data.shape.task.shape).toBe(true);
+      expect('previousAssigneeId' in schema.shape.data.shape.task.shape).toBe(true);
     }
     // The refusal names the events as Settings lists them.
     for (const type of WEBHOOK_TASK_EVENTS) {

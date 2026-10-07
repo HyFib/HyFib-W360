@@ -2051,6 +2051,29 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(doc.info.description).toContain(
       'then it receives the events of the tasks assigned to them when the event happens only',
     );
+    // A change of assignee is a task event, and reaches both assignees (ADR-274).
+    expect(JSON.stringify(given.taskAssigneeIds)).toContain(
+      'task.created, task.assignee_changed or task.status_changed',
+    );
+    expect(JSON.stringify(given.taskAssigneeIds)).toContain(
+      'task.assignee_changed reaches the endpoints of the member the task left as well as of the one it was given to',
+    );
+    expect(JSON.stringify(answered.properties.taskAssigneeIds)).toContain(
+      'task.assignee_changed also by the member it left',
+    );
+    expect(JSON.stringify(answered.properties.taskAssigneeIds)).toContain(
+      '(task.created, task.assignee_changed, task.status_changed)',
+    );
+    expect(doc.info.description).toContain(
+      'a change of assignee reaching the endpoints of the member it left as well',
+    );
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...tasks,
+        events: ['task.assignee_changed'],
+        taskAssigneeIds: [dev],
+      }).taskAssigneeIds,
+    ).toEqual([dev]);
   });
 
   it('take contact tags only with an event of a conversation, as contacts carry them, and a list of them alone is a change (ADR-267)', () => {
@@ -2684,6 +2707,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'deal.owner_changed',
       'deal.status_changed',
       'task.created',
+      'task.assignee_changed',
       'task.status_changed',
     ]);
     const refused = apiCreateWebhookEndpointSchema.safeParse({

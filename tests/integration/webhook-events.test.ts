@@ -63,6 +63,7 @@ import {
   WebhookOAuthTokenCache,
   runCampaignTick,
   syncTemplates,
+  taskAssigneeChangedPayloadSchema,
   taskCreatedPayloadSchema,
   taskStatusChangedPayloadSchema,
   WEBHOOK_EVENT_KEYS,
@@ -4949,8 +4950,8 @@ describe('task events (ADR-261)', () => {
     const everyone = await add(null);
     const jaya = await newContact(owner, 'Jaya');
 
-    // The agent's task is added; then it is given to the owner, which sends nothing, and completed:
-    // the owner's by then. The owner's own task is not the agent's either.
+    // The agent's task is added; then it is given to the owner, a change neither endpoint takes, and
+    // completed: the owner's by then. The owner's own task is not the agent's either.
     const { id: theirs } = await svc.createTask(owner, {
       title: 'Call Jaya',
       assigneeMembershipId: agent.membership.id,
@@ -4998,5 +4999,101 @@ describe('task events (ADR-261)', () => {
     expect(taskIn(added).assigneeId).toBe(owner.membership.id);
     // Contact events are not narrowed by assignees.
     expect(bodiesAt(agents.path).filter((b) => b.type === 'contact.created')).toHaveLength(1);
+  });
+
+  it('sends a change of assignee with both assignees, to the endpoints of either assignee, in its place among one request’s steps (ADR-274)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const svc = crm();
+    /** An endpoint of the company taking the events given, with the filters given. */
+    const add = async (eventTypes: WebhookEventType[], filters: Record<string, unknown>) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        ...filters,
+      });
+      return { ...created, path };
+    };
+    const everyone = await add(['task.assignee_changed', 'task.status_changed'], {});
+    const agents = await add(['task.assignee_changed'], { taskAssigneeIds: [agent.membership.id] });
+    // An endpoint without the new event hears none of its changes, whoever the task goes to.
+    const owners = await add(TASK_EVENTS, { taskAssigneeIds: [owner.membership.id] });
+    const jaya = await newContact(owner, 'Jaya');
+
+    // The agent's task is given to the owner and back by members' edits; an edit of its title alone
+    // sends nothing, and no endpoint takes its addition for the agent.
+    const { id: taskId } = await svc.createTask(owner, {
+      title: 'Call Jaya',
+      assigneeMembershipId: agent.membership.id,
+      contactId: jaya.id,
+    });
+    const edit = (version: number, title: string, assigneeMembershipId: string) =>
+      svc.updateTask(owner, {
+        id: taskId,
+        expectedVersion: version,
+        title,
+        notes: null,
+        dueAt: null,
+        remindAt: null,
+        assigneeMembershipId,
+      });
+    await edit(1, 'Call Jaya', owner.membership.id);
+    await edit(2, 'Call Jaya', agent.membership.id);
+    await edit(3, 'Call Jaya today', agent.membership.id);
+    const assignees = (e: EventRow) => [
+      e.detail.assigneeId ?? null,
+      e.detail.previousAssigneeId ?? null,
+    ];
+    // The agent's endpoint hears the task leave the agent and come back.
+    expect((await taskEventsOf(c)).map((e) => [e.type, ...assignees(e), e.deliveries])).toEqual([
+      ['task.assignee_changed', owner.membership.id, agent.membership.id, 2],
+      ['task.assignee_changed', agent.membership.id, owner.membership.id, 2],
+    ]);
+
+    // A key gives the task to the owner and completes it in one request: given, then completed;
+    // then it reopens the task and gives it back in another: reopened, then given.
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Task sync', scopes: ['tasks.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    const apiDeps = { db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer };
+    await apiUpdateTask(apiDeps, key, taskId, { assigneeId: owner.membership.id, status: 'done' });
+    await apiUpdateTask(apiDeps, key, taskId, { status: 'open', assigneeId: agent.membership.id });
+    const events = await taskEventsOf(c);
+    expect(events.slice(2).map((e) => [e.type, e.status, ...assignees(e), e.deliveries])).toEqual([
+      ['task.assignee_changed', 'open', owner.membership.id, agent.membership.id, 2],
+      // The owner's endpoint takes the completion: the task is the owner's when it happens.
+      ['task.status_changed', 'done', null, null, 2],
+      // Reopened, the task is the agent's again as the request leaves it.
+      ['task.status_changed', 'open', null, null, 1],
+      ['task.assignee_changed', 'open', agent.membership.id, owner.membership.id, 2],
+    ]);
+
+    // Delivered, each change gives both assignees as it left them, whoever has the task by then.
+    await deliverDue(c);
+    const bodies = bodiesById(everyone.path);
+    expect(bodies.size).toBe(6);
+    for (const event of events.filter((e) => e.type === 'task.assignee_changed')) {
+      const task = taskIn(bodies.get(event.id));
+      expect([task?.assigneeId, task?.previousAssigneeId], event.id).toEqual(assignees(event));
+      expect(taskAssigneeChangedPayloadSchema.safeParse(bodies.get(event.id)).success).toBe(true);
+    }
+    const done = taskIn(bodies.get(events[3]!.id));
+    expect([done?.status, done?.previousStatus, done?.previousAssigneeId]).toEqual([
+      'done',
+      'open',
+      null,
+    ]);
+    expect(done?.assigneeId).toBe(agent.membership.id);
+    expect(bodiesAt(agents.path).map((b) => b.type)).toEqual(
+      Array<string>(4).fill('task.assignee_changed'),
+    );
+    expect(bodiesAt(owners.path).map((b) => [b.type, taskIn(b).status])).toEqual([
+      ['task.status_changed', 'done'],
+    ]);
   });
 });

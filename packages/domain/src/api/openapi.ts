@@ -44,6 +44,7 @@ import {
   dealOwnerChangedPayloadSchema,
   dealStatusChangedPayloadSchema,
   taskCreatedPayloadSchema,
+  taskAssigneeChangedPayloadSchema,
   taskStatusChangedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
@@ -875,7 +876,7 @@ export const apiWebhookEndpointSchema = z.object({
     .array(z.uuid())
     .nullable()
     .describe(
-      "The members whose tasks' events (task.created, task.status_changed) the endpoint receives, by the member a task is assigned to when an event happens. null receives every task's. Other events are not narrowed.",
+      "The members whose tasks' events (task.created, task.assignee_changed, task.status_changed) the endpoint receives, by the member a task is assigned to when an event happens (task.assignee_changed also by the member it left). null receives every task's. Other events are not narrowed.",
     ),
   assigneeIds: z
     .array(z.uuid())
@@ -1121,7 +1122,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         '',
         `POST /messages needs an \`Idempotency-Key\` header: a retry with the same key and body returns the first response (header \`Idempotent-Replayed: true\`) and never sends twice; responses are kept ${API_LIMITS.idempotencyHours} hours. Delivery itself follows WhatsApp: read the status with GET /messages/{id}.`,
         '',
-        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact, template, deal and task event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens, or members (its \`assigneeIds\`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens, or contact tags (its \`contactTags\`): then those of the conversations whose contact has any of the tags when the event happens only, or conversation tags (its \`conversationTags\`): then those of the conversations that have any of the tags when the event happens only. And it can name templates (its \`templateIds\`): then it receives the statuses of the messages sent with them and their changes only, or campaigns (its \`campaignIds\`): then the statuses of the messages they sent and their changes only. And it can name CRM pipelines (its \`pipelineIds\`): then it receives the events of those pipelines' deals only, by the pipeline an event gives, a move to another pipeline reaching the endpoints of the pipeline it left as well, or stages (its \`stageIds\`): then those of the deals in those stages only, a move reaching the endpoints of the stage it left as well, or the deals' owners (its \`ownerIds\`): then those of the deals the members own when the event happens only, a change of owner reaching the endpoints of the owner it left as well; with more than one of these, an event must pass them all. And it can name the members whose tasks it takes (its \`taskAssigneeIds\`): then it receives the events of the tasks assigned to them when the event happens only.`,
+        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact, template, deal and task event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens, or members (its \`assigneeIds\`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens, or contact tags (its \`contactTags\`): then those of the conversations whose contact has any of the tags when the event happens only, or conversation tags (its \`conversationTags\`): then those of the conversations that have any of the tags when the event happens only. And it can name templates (its \`templateIds\`): then it receives the statuses of the messages sent with them and their changes only, or campaigns (its \`campaignIds\`): then the statuses of the messages they sent and their changes only. And it can name CRM pipelines (its \`pipelineIds\`): then it receives the events of those pipelines' deals only, by the pipeline an event gives, a move to another pipeline reaching the endpoints of the pipeline it left as well, or stages (its \`stageIds\`): then those of the deals in those stages only, a move reaching the endpoints of the stage it left as well, or the deals' owners (its \`ownerIds\`): then those of the deals the members own when the event happens only, a change of owner reaching the endpoints of the owner it left as well; with more than one of these, an event must pass them all. And it can name the members whose tasks it takes (its \`taskAssigneeIds\`): then it receives the events of the tasks assigned to them when the event happens only, a change of assignee reaching the endpoints of the member it left as well.`,
       ].join('\n'),
     },
     servers: [{ url: serverUrl }],
@@ -2945,10 +2946,16 @@ export function buildOpenApiDocument(serverUrl: string) {
         `${WEBHOOK_EVENT_INFO['task.created'].description} task.status is the one it was added with; the rest is the task when the event is delivered. A task’s notes are never sent: read the task with GET /tasks/{id} (\`tasks.read\`). Erasing a contact deletes its tasks, so the events of an erased contact’s task are no longer delivered.`,
         'WebhookTaskCreated',
       ),
+      'task.assignee_changed': webhook(
+        'webhookTaskAssigneeChanged',
+        WEBHOOK_EVENT_INFO['task.assignee_changed'].label,
+        `${WEBHOOK_EVENT_INFO['task.assignee_changed'].description} task.assigneeId and task.previousAssigneeId are the change, with the status the task had; the rest is the task when the event is delivered. One change through the API can also reopen or close the task, and then sends task.status_changed as well, in the order the steps happen: reopened, given to another member, closed; each event gives the task as its step left it, and they can have the same createdAt. An endpoint that names assignees (its \`taskAssigneeIds\`) receives it for the member the task left as well as for the one it was given to. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        'WebhookTaskAssigneeChanged',
+      ),
       'task.status_changed': webhook(
         'webhookTaskStatusChanged',
         WEBHOOK_EVENT_INFO['task.status_changed'].label,
-        `${WEBHOOK_EVENT_INFO['task.status_changed'].description} task.status and task.previousStatus are the change (open, done or cancelled); the rest is the task when the event is delivered. Editing a task’s details or its reminder sends nothing. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['task.status_changed'].description} task.status and task.previousStatus are the change (open, done or cancelled); the rest is the task when the event is delivered. Editing a task’s other details or its reminder sends nothing; giving it to another member sends task.assignee_changed. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookTaskStatusChanged',
       ),
       ping: webhook(
@@ -3196,6 +3203,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookDealOwnerChanged: jsonSchema(dealOwnerChangedPayloadSchema),
         WebhookDealStatusChanged: jsonSchema(dealStatusChangedPayloadSchema),
         WebhookTaskCreated: jsonSchema(taskCreatedPayloadSchema),
+        WebhookTaskAssigneeChanged: jsonSchema(taskAssigneeChangedPayloadSchema),
         WebhookTaskStatusChanged: jsonSchema(taskStatusChangedPayloadSchema),
         WebhookPing: jsonSchema(pingPayloadSchema),
       },

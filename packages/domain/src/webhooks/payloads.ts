@@ -673,7 +673,13 @@ const webhookTaskSchema = z.object({
   assigneeId: z
     .uuid()
     .describe(
-      'The member the task is assigned to when the event is delivered (an id from GET /members).',
+      'The member the task is assigned to (an id from GET /members): for task.assignee_changed, the one it was given to; for other events, its assignee when the event is delivered.',
+    ),
+  previousAssigneeId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'task.assignee_changed: the member the task was assigned to before. Null for other events.',
     ),
   dealId: z
     .uuid()
@@ -694,6 +700,10 @@ const webhookTaskDataSchema = z.object({
 });
 
 export const taskCreatedPayloadSchema = envelope('task.created', webhookTaskDataSchema);
+export const taskAssigneeChangedPayloadSchema = envelope(
+  'task.assignee_changed',
+  webhookTaskDataSchema,
+);
 export const taskStatusChangedPayloadSchema = envelope(
   'task.status_changed',
   webhookTaskDataSchema,
@@ -1411,11 +1421,14 @@ export async function buildWebhookPayload(
       };
     }
     case 'task.created':
+    case 'task.assignee_changed':
     case 'task.status_changed': {
-      // The status, and the one before it, as captured; the rest as it is now. Erasing a contact
-      // deletes its tasks, so an erased contact's task is gone and its events send nothing.
+      // The status, and the one before it, as captured, and for a change of assignee the
+      // assignees; the rest as it is now. Erasing a contact deletes its tasks, so an erased
+      // contact's task is gone and its events send nothing.
       const task = await taskOf(tx, tenantId, str(event.detail.taskId));
       if (!task) throw new WebhookEventGoneError();
+      const reassigned = event.type === 'task.assignee_changed';
       return {
         ...base,
         data: {
@@ -1426,7 +1439,8 @@ export async function buildWebhookPayload(
             previousStatus:
               event.type === 'task.status_changed' ? str(event.detail.previousStatus) : null,
             dueAt: task.dueAt?.toISOString() ?? null,
-            assigneeId: task.assigneeId,
+            assigneeId: reassigned ? str(event.detail.assigneeId) : task.assigneeId,
+            previousAssigneeId: reassigned ? str(event.detail.previousAssigneeId) : null,
             dealId: task.dealId,
             createdBy: task.apiKeyId ? 'api' : task.automationId ? 'automation' : 'member',
             createdAt: task.createdAt.toISOString(),
