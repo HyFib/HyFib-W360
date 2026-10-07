@@ -117,9 +117,10 @@ test('an endpoint receives the deal events of the pipelines (ADR-263) and stages
   });
   expect(contactRes.status()).toBe(201);
   const contactId = ((await contactRes.json()) as { data: { id: string } }).data.id;
+  // An Idempotency-Key is visible ASCII only, so the title's spaces become hyphens.
   const addDeal = async (pipeline: string, title: string) => {
     const res = await request.post('/api/v1/deals', {
-      headers: { ...auth, 'Idempotency-Key': `${slug}-${title}` },
+      headers: { ...auth, 'Idempotency-Key': `${slug}-${title.replaceAll(' ', '-')}` },
       data: { contactId, pipelineId: pipelineId(pipeline), title },
     });
     expect(res.status()).toBe(201);
