@@ -197,6 +197,9 @@ import {
   webhookTaskAssigneeIdsFor,
   webhookTaskAssigneeIdsSchema,
   WEBHOOK_TASK_ASSIGNEES_NEED_THE_EVENTS,
+  webhookContactTagsFor,
+  webhookContactTagsSchema,
+  WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
   webhookTemplateStatusesFor,
   webhookTemplateStatusesSchema,
 } from './service';
@@ -3149,6 +3152,54 @@ describe('assignee filters (ADR-181)', () => {
     );
     expect(webhookAssigneeText({ id: ravi, name: null, assignable: false })).toBe(
       'Unknown member (no longer takes conversations)',
+    );
+  });
+});
+
+describe('contact tag filters (ADR-267)', () => {
+  it('take 1 to 50 tags as contacts carry them, once each, in the order given; null takes every conversation', () => {
+    expect(webhookContactTagsSchema.parse(['VIP', ' wholesale ', 'vip', 'Gold   Member'])).toEqual([
+      'vip',
+      'wholesale',
+      'gold member',
+    ]);
+    expect(webhookContactTagsSchema.parse(null)).toBeNull();
+    const tags = Array.from({ length: WEBHOOK_LIMITS.contactTags + 1 }, (_, i) => `tag ${i}`);
+    expect(WEBHOOK_LIMITS.contactTags).toBe(50);
+    expect(webhookContactTagsSchema.parse(tags.slice(1))).toEqual(tags.slice(1));
+    const refusal = (given: unknown) => {
+      const issue = webhookContactTagsSchema.safeParse(given).error?.issues[0];
+      return issue && [issue.path.join('.'), issue.message];
+    };
+    expect(refusal([])).toEqual(['', 'Give at least one tag, or take every conversation.']);
+    expect(refusal(tags)).toEqual(['', 'Give at most 50 tags.']);
+    expect(refusal(['vip', 'a,b'])).toEqual([
+      '1',
+      'Tags cannot contain commas or control characters.',
+    ]);
+    expect(refusal(['vip', 'gold', '   '])).toEqual(['2', 'Tags cannot be empty.']);
+    expect(refusal(['x'.repeat(41)])).toEqual(['0', 'Tags are limited to 40 characters.']);
+    expect(refusal(['vip', 42])).toEqual(['1', 'Give tags as text.']);
+    expect(webhookContactTagsSchema.parse(['x'.repeat(40)])).toEqual(['x'.repeat(40)]);
+    expect(webhookContactTagsSchema.safeParse('vip').success).toBe(false);
+  });
+
+  it('apply to the events of a conversation only, and are kept only while one is taken: given, kept, or cleared', () => {
+    for (const type of WEBHOOK_EVENT_KEYS) {
+      expect(webhookContactTagsFor([type], ['vip'], null), type).toEqual(
+        (WEBHOOK_TEAM_EVENTS as readonly string[]).includes(type) ? ['vip'] : null,
+      );
+    }
+    expect(webhookContactTagsFor(['conversation.team_changed'], undefined, ['vip'])).toEqual([
+      'vip',
+    ]);
+    expect(webhookContactTagsFor(['message.status'], null, ['vip'])).toBeNull();
+    expect(webhookContactTagsFor(['message.received'], undefined, null)).toBeNull();
+    expect(
+      webhookContactTagsFor(['deal.created', 'contact.created'], ['vip'], ['gold']),
+    ).toBeNull();
+    expect(WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS).toBe(
+      'Choose contact tags only for an endpoint that receives message or conversation events.',
     );
   });
 });

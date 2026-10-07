@@ -1,5 +1,39 @@
 # Progress
 
+## 2026-10-07 — Choosing the contact tags whose conversations' events an endpoint receives (P5-09, H-014, ADR-267)
+
+Status: **Implemented; its database tests run in CI only.** Endpoints could narrow message and
+conversation events by number, team and member, but not by who the customer is. The local PostgreSQL
+is unavailable, so the migration and the integration tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0183 (`contact_tags` on `app.webhook_endpoints` with its check and column
+  grant, and `app.capture_webhook_event` reading the tags of the conversation's contact when an
+  endpoint names tags).
+- **Domain:** the list's schema, normalising tags as contacts carry them, and its rules
+  (`webhookContactTagsSchema`, `webhookContactTagsFor`), the list in Settings' view, create and
+  update in Settings and the API (`contactTags`), the audits, the OpenAPI entries and the export.
+- **Web:** "Contact tags" in the endpoint form (every conversation's events, or the tags typed,
+  separated by commas) and the endpoints list naming them.
+- **Tests:** unit (2 new in `webhooks.test.ts`, 1 in `api.test.ts`); integration (2 in
+  `webhooks.test.ts`, 1 in `api-webhook-endpoints.test.ts`, and the API's endpoint shape). Written
+  for CI; the integration tests were not run here. No e2e test: the e2e suite is near its time
+  limit.
+- **Docs:** ADR-267; ARCHITECTURE; SECURITY; THREAT-MODEL T235; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix W-138 and H-014.
+- **Mutation checks:** 21/21 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 117 files, 1125 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Choosing the members whose task events an endpoint receives (P5-09, P4-04, H-014, ADR-266)
 
 Status: **Implemented; its database tests run in CI only.** Endpoints could choose the deals of

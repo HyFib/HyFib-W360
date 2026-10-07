@@ -1001,11 +1001,16 @@ verification, app review, Embedded Signup configuration).
   migration 0182: an endpoint takes the events of the tasks assigned to 1 to 50 chosen members when
   the events happen; a list adds only members who can be assigned tasks and keeps those who left;
   deal and other events are not narrowed).
+  **[Contact tag filters for message and conversation events built; their database tests run only in
+  CI]** (ADR-267, migration 0183: an endpoint takes the events of the conversations whose contact
+  has any of 1 to 50 tags when the events happen; tags are compared as contacts carry them, and one
+  no contact has yet may be named; with numbers, teams or members too, an event must pass every
+  list).
   Remaining: filters for other event types (task events by their deal's pipeline, stage or owner,
-  among them) and on a message's or contact's values (such as by tag or a field's value, or the key
-  that started a run), other authentication (headers computed per delivery, other OAuth grants),
-  mutual TLS, fixed egress addresses, events for store orders, Payment Links and each step of a run,
-  `createdAt` finer than the millisecond, load tests.
+  among them) and on a message's or contact's values (such as a field's value, contact events by
+  tag, or the key that started a run), other authentication (headers computed per delivery, other
+  OAuth grants), mutual TLS, fixed egress addresses, events for store orders, Payment Links and each
+  step of a run, `createdAt` finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

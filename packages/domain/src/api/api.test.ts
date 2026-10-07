@@ -161,6 +161,7 @@ import {
   WEBHOOK_STAGES_NEED_THE_EVENTS,
   WEBHOOK_OWNERS_NEED_THE_EVENTS,
   WEBHOOK_TASK_ASSIGNEES_NEED_THE_EVENTS,
+  WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
   WEBHOOK_CHANNELS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
@@ -1436,6 +1437,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'contactFieldKeys',
       'contactParts',
       'contactSources',
+      'contactTags',
       'conversationStatuses',
       'description',
       'enabled',
@@ -2012,7 +2014,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       taskAssigneeIds: [dev],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the deal owners, the task assignees, the members',
+      'the deal owners, the task assignees, the members, the contact tags, the OAuth client',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -2030,6 +2032,64 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     );
     expect(doc.info.description).toContain(
       'then it receives the events of the tasks assigned to them when the event happens only',
+    );
+  });
+
+  it('take contact tags only with an event of a conversation, as contacts carry them, and a list of them alone is a change (ADR-267)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['contact.created'] };
+    for (const event of WEBHOOK_TEAM_EVENTS) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events: ['contact.created', event],
+          contactTags: ['VIP', 'vip ', 'Wholesale'],
+        }).contactTags,
+        event,
+      ).toEqual(['vip', 'wholesale']);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['deal.created', 'task.created'],
+      contactTags: ['vip'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['contactTags', WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS],
+    ]);
+    const messages = { ...base, events: ['message.received'] };
+    for (const body of [
+      { ...messages, contactTags: [] },
+      { ...messages, contactTags: ['a,b'] },
+      { ...messages, contactTags: Array.from({ length: 51 }, (_, i) => `tag ${i}`) },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...messages, contactTags: null }).contactTags,
+    ).toBe(null);
+    expect(apiUpdateWebhookEndpointSchema.parse({ contactTags: null })).toEqual({
+      contactTags: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ contactTags: ['Gold'] })).toEqual({
+      contactTags: ['gold'],
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.contactTags?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('contactTags');
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.contactTags)).toContain(
+      'counts when the contact has any of the tags when the event happens',
+    );
+    expect(doc.info.description).toContain(
+      'or contact tags (its `contactTags`): then those of the conversations whose contact has any of the tags when the event happens only',
     );
   });
 
@@ -2438,7 +2498,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     };
     expect(created.properties.assigneeIds?.description).toContain('as GET /members lists them');
     expect(doc.info.description).toContain(
-      'or members (its `assigneeIds`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens.',
+      'or members (its `assigneeIds`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens',
     );
   });
 

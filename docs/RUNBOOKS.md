@@ -2703,6 +2703,19 @@ assignees" on the endpoint's page or choose "Every task’s events", or `PATCH
 /webhook-endpoints/{id}` with `taskAssigneeIds` (null for every task). Removing both task events
 clears the list.
 
+**A receiver misses the conversations of a tagged customer (ADR-267).** An endpoint can take the
+message and conversation events of the conversations whose contact has chosen tags only. The
+endpoints list shows them ("Contact tags whose conversations’ events are sent: …"), and the API
+answers `contactTags` (null takes every conversation's). An event goes by the tags the contact has
+when it happens: a message that arrived before the tag was put on (by a member, an import or an
+automation reacting to that very message) was not queued for the endpoint, and events no endpoint
+takes are not recorded, so there is nothing to replay; the contact's next event counts. Tags are
+compared as contacts carry them (lower case, trimmed), and a tag no contact has matches nothing.
+With numbers, teams or members chosen too, an event must pass every list. To take more, change the
+tags under "Contact tags" on the endpoint's page or choose "Every conversation’s events", or `PATCH
+/webhook-endpoints/{id}` with `contactTags` (null for every conversation). Removing every event of a
+conversation clears the list.
+
 **A receiver misses a run's events (ADR-183).** An endpoint can take the run events of the runs
 started by chosen triggers only. The endpoints list shows them ("Automation runs started by: …"),
 and the API answers `runTriggers` (null takes every run). A run's events go by what started it, as

@@ -313,6 +313,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.assignees.map(webhookAssigneeText).join(', ')}
                       </p>
                     ) : null}
+                    {e.contactTags ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Contact tags whose conversations’ events are sent:{' '}
+                        {e.contactTags.join(', ')}
+                      </p>
+                    ) : null}
                     {e.headerNames.length > 0 ? (
                       <p className="text-xs text-muted-foreground">
                         Headers sent: {e.headerNames.join(', ')} (values hidden)

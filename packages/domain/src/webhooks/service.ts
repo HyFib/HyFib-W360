@@ -37,6 +37,7 @@ import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
+import { normalizeTag } from '../contacts/fields';
 import { crmMembers, memberRefs } from '../crm/common';
 import { INBOX_WORKER_ROLES } from '../inbox/routing';
 import { parseInput } from '../validation';
@@ -1326,6 +1327,45 @@ export async function assertWebhookAssignees(
   });
 }
 
+/**
+ * The contact tags whose conversations' message and conversation events an endpoint takes
+ * (ADR-267), as contacts carry them (`normalizeTag`), each once; null takes every conversation's.
+ */
+export const webhookContactTagsSchema = z
+  .array(z.string({ error: 'Give tags as text.' }))
+  .min(1, 'Give at least one tag, or take every conversation.')
+  .max(WEBHOOK_LIMITS.contactTags, `Give at most ${WEBHOOK_LIMITS.contactTags} tags.`)
+  .transform((given, ctx) => {
+    const tags: string[] = [];
+    for (const [index, raw] of given.entries()) {
+      const tag = normalizeTag(raw);
+      if (!tag.ok) {
+        ctx.addIssue({ code: 'custom', message: tag.message, path: [index] });
+        return z.NEVER;
+      }
+      if (!tags.includes(tag.tag)) tags.push(tag.tag);
+    }
+    return tags;
+  })
+  .nullable();
+
+export const WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS =
+  'Choose contact tags only for an endpoint that receives message or conversation events.';
+
+/**
+ * The tags an endpoint keeps after it is added or changed: every conversation (null) unless it
+ * takes an event of a conversation; then those given, or else the ones it had.
+ */
+export function webhookContactTagsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesTeamEvents(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
 /** A new signing secret: `whsec_` and 32 random bytes. */
 export function generateWebhookSecret(): string {
   return `whsec_${randomBytes(32).toString('base64url')}`;
@@ -1447,6 +1487,11 @@ const endpointFields = z.object({
    * ADR-181); left out, they stay.
    */
   assigneeIds: webhookAssigneeIdsSchema.optional(),
+  /**
+   * Given, the contact tags whose conversations' events it takes (null: every conversation's,
+   * ADR-267); left out, they stay.
+   */
+  contactTags: webhookContactTagsSchema.optional(),
   /** Given, its OAuth client (null: none, ADR-173); left out, it stays. */
   oauth: webhookOAuthSchema.nullable().optional(),
 });
@@ -1591,6 +1636,12 @@ const assigneesNeedTheEvents = {
     !data.assigneeIds || webhookTakesTeamEvents(data.eventTypes),
   options: { path: ['assigneeIds'], message: WEBHOOK_ASSIGNEES_NEED_THE_EVENTS },
 };
+/** Contact tags are chosen only for an endpoint that takes events of conversations (ADR-267). */
+const contactTagsNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; contactTags?: unknown }) =>
+    !data.contactTags || webhookTakesTeamEvents(data.eventTypes),
+  options: { path: ['contactTags'], message: WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS },
+};
 const endpointSchema = endpointFields
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
   .refine(sendersNeedTheEvent.check, sendersNeedTheEvent.options)
@@ -1614,7 +1665,8 @@ const endpointSchema = endpointFields
   .refine(stagesNeedTheEvents.check, stagesNeedTheEvents.options)
   .refine(ownersNeedTheEvents.check, ownersNeedTheEvents.options)
   .refine(taskAssigneesNeedTheEvents.check, taskAssigneesNeedTheEvents.options)
-  .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options);
+  .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options)
+  .refine(contactTagsNeedTheEvents.check, contactTagsNeedTheEvents.options);
 const endpointIdSchema = z.object({ endpointId: z.uuid() });
 const updateSchema = endpointFields
   .extend({ endpointId: z.uuid() })
@@ -1640,7 +1692,8 @@ const updateSchema = endpointFields
   .refine(stagesNeedTheEvents.check, stagesNeedTheEvents.options)
   .refine(ownersNeedTheEvents.check, ownersNeedTheEvents.options)
   .refine(taskAssigneesNeedTheEvents.check, taskAssigneesNeedTheEvents.options)
-  .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options);
+  .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options)
+  .refine(contactTagsNeedTheEvents.check, contactTagsNeedTheEvents.options);
 const enabledSchema = endpointIdSchema.extend({ enabled: z.boolean() });
 const deliveryIdSchema = z.object({ deliveryId: z.uuid() });
 const replayAllFailedSchema = z.object({
@@ -1747,6 +1800,11 @@ export interface WebhookEndpointView {
    * whether conversations can still be assigned to them; null takes every conversation's.
    */
   assignees: WebhookEndpointAssignee[] | null;
+  /**
+   * The contact tags whose conversations' events it takes (ADR-267), as stored; null takes every
+   * conversation's.
+   */
+  contactTags: string[] | null;
   /** Where it gets OAuth tokens and as which client (ADR-173); the secret is never shown. */
   oauth: WebhookEndpointOAuth | null;
   createdAt: Date;
@@ -1987,6 +2045,7 @@ export async function lockWebhookEndpoint(
       ownerIds: webhookEndpoints.ownerIds,
       taskAssigneeIds: webhookEndpoints.taskAssigneeIds,
       assigneeIds: webhookEndpoints.assigneeIds,
+      contactTags: webhookEndpoints.contactTags,
       headerNames: webhookEndpoints.headerNames,
       oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
       oauthClientId: webhookEndpoints.oauthClientId,
@@ -2048,6 +2107,7 @@ export async function insertWebhookEndpoint(
     ownerIds: string[] | null;
     taskAssigneeIds: string[] | null;
     assigneeIds: string[] | null;
+    contactTags: string[] | null;
     /** Its OAuth client (ADR-173), checked by `checkedWebhookOAuth` with nothing stored. */
     oauth: CheckedWebhookOAuth | null;
     creator: WebhookEndpointCreator;
@@ -2098,6 +2158,7 @@ export async function insertWebhookEndpoint(
     ownerIds: input.ownerIds,
     taskAssigneeIds: input.taskAssigneeIds,
     assigneeIds: input.assigneeIds,
+    contactTags: input.contactTags,
     ...webhookOAuthColumns(keyring, tenantId, id, input.oauth, NO_WEBHOOK_OAUTH),
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
@@ -2497,6 +2558,7 @@ export function createWebhooksService(deps: {
               ownerIds: webhookEndpoints.ownerIds,
               taskAssigneeIds: webhookEndpoints.taskAssigneeIds,
               assigneeIds: webhookEndpoints.assigneeIds,
+              contactTags: webhookEndpoints.contactTags,
               oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
               oauthClientId: webhookEndpoints.oauthClientId,
               oauthScope: webhookEndpoints.oauthScope,
@@ -3131,6 +3193,7 @@ export function createWebhooksService(deps: {
         await assertWebhookTaskAssignees(tx, ctx.tenant.id, taskAssigneeIds);
         const assigneeIds = webhookAssigneeIdsFor(data.eventTypes, data.assigneeIds, null);
         await assertWebhookAssignees(tx, ctx.tenant.id, assigneeIds);
+        const contactTags = webhookContactTagsFor(data.eventTypes, data.contactTags, null);
         const oauth = data.oauth
           ? checkedWebhookOAuth(data.oauth, NO_WEBHOOK_OAUTH, deps.egressPolicy)
           : null;
@@ -3168,6 +3231,7 @@ export function createWebhooksService(deps: {
           ownerIds,
           taskAssigneeIds,
           assigneeIds,
+          contactTags,
           oauth,
           creator: { userId: ctx.user.id },
         });
@@ -3206,6 +3270,7 @@ export function createWebhooksService(deps: {
               ...(ownerIds ? { ownerIds } : {}),
               ...(taskAssigneeIds ? { taskAssigneeIds } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
+              ...(contactTags ? { contactTags } : {}),
               ...(oauth ? { oauthTokenHost: oauth.host } : {}),
             },
           },
@@ -3396,6 +3461,12 @@ export function createWebhooksService(deps: {
         if (data.assigneeIds !== undefined) {
           await assertWebhookAssignees(tx, ctx.tenant.id, assigneeIds, endpoint.assigneeIds);
         }
+        // Tags are labels: any tag may be named, one no contact has yet included (ADR-267).
+        const contactTags = webhookContactTagsFor(
+          data.eventTypes,
+          data.contactTags,
+          endpoint.contactTags,
+        );
         // Left out, the OAuth client stays as it is (ADR-173).
         const oauth = data.oauth
           ? checkedWebhookOAuth(data.oauth, endpoint, deps.egressPolicy)
@@ -3435,6 +3506,7 @@ export function createWebhooksService(deps: {
             ownerIds,
             taskAssigneeIds,
             assigneeIds,
+            contactTags,
             ...(data.headers
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
               : {}),
@@ -3484,6 +3556,7 @@ export function createWebhooksService(deps: {
               ...(ownerIds ? { ownerIds } : {}),
               ...(taskAssigneeIds ? { taskAssigneeIds } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
+              ...(contactTags ? { contactTags } : {}),
               ...webhookOAuthAudit(oauth, endpoint),
             },
           },

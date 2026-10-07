@@ -4236,6 +4236,203 @@ describe('task assignee filters (ADR-266)', () => {
   });
 });
 
+describe('contact tag filters (ADR-267)', () => {
+  /** Puts a tag on a contact, or takes it off, as the contacts service writes tags. */
+  const tag = (c: Company, contactId: string, name: string) =>
+    fx.query(
+      'INSERT INTO app.contact_tags (id, tenant_id, contact_id, tag) VALUES ($1, $2, $3, $4)',
+      [uuidv7(), c.tenant.id, contactId, name],
+    );
+  const untag = (c: Company, contactId: string, name: string) =>
+    fx.query('DELETE FROM app.contact_tags WHERE tenant_id = $1 AND contact_id = $2 AND tag = $3', [
+      c.tenant.id,
+      contactId,
+      name,
+    ]);
+
+  it('are refused without an event of a conversation, empty, over 50 or not as tags are written; kept as contacts carry them, kept by a change that leaves them out and cleared with the events; the database keeps them to those events and to tags as contacts carry them', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = async (
+      eventTypes: string[],
+      contactTags: unknown,
+      message: RegExp,
+      path = 'contactTags',
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes, contactTags }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(contactTags)).toBe(path);
+    };
+    const needsTheEvents = /only for an endpoint that receives message or conversation events/;
+    await refused(['deal.created', 'contact.created'], ['vip'], needsTheEvents);
+    await refused(['message.received'], [], /at least one tag/);
+    await refused(['message.received'], ['vip', 'a,b'], /commas/, 'contactTags.1');
+    await refused(
+      ['message.received'],
+      Array.from({ length: 51 }, (_, i) => `tag ${i}`),
+      /at most 50/,
+    );
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['message.received', 'deal.created'],
+      contactTags: ['VIP', ' vip', 'Wholesale'],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { contactTags?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => a.metadata.contactTags);
+    expect(await audits('webhook.endpoint_created')).toEqual([['vip', 'wholesale']]);
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.contactTags;
+    expect(await current()).toEqual(['vip', 'wholesale']);
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['message.received', 'deal.created'],
+        ...fields,
+      });
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['vip', 'wholesale']);
+    await change({ contactTags: ['Gold'] });
+    expect(await current()).toEqual(['gold']);
+    await change({ contactTags: null });
+    expect(await current()).toBeNull();
+    await change({ contactTags: ['gold'] });
+    // Any event of a conversation keeps the list.
+    await change({ eventTypes: ['conversation.status_changed', 'task.created'] });
+    expect(await current()).toEqual(['gold']);
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      ['vip', 'wholesale'],
+      ['gold'],
+      undefined,
+      ['gold'],
+      ['gold'],
+    ]);
+    // The database refuses an empty list, more than 50, a missing tag, a list of lists, and tags
+    // not as contacts carry them (capitals, a comma, spaces around, over 40 characters, a control
+    // character, an empty tag), from an endpoint taking an event of a conversation…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET contact_tags = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    const many = `ARRAY[${Array.from({ length: 51 }, (_, i) => `'tag ${i}'`).join(',')}]`;
+    for (const bad of [
+      `'{}'::text[]`,
+      many,
+      `ARRAY['vip', NULL]`,
+      `ARRAY[ARRAY['vip'], ARRAY['gold']]`,
+      `ARRAY['VIP']`,
+      `ARRAY['gold', 'a,b']`,
+      `ARRAY[' vip']`,
+      `ARRAY['vip ']`,
+      `ARRAY['${'x'.repeat(41)}']`,
+      `ARRAY[E'vi\\tp']`,
+      `ARRAY['vip', '']`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_contact_tags/);
+    }
+    // Tags as contacts carry them, spaces inside and 40 characters included, are kept.
+    await setInDatabase(`ARRAY['gold member', '${'x'.repeat(40)}', 'vip']`);
+    expect(await current()).toEqual(['gold member', 'x'.repeat(40), 'vip']);
+    await change({ eventTypes: ['deal.created'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['deal.created'], contactTags: ['vip'] }),
+      'validation_failed',
+      needsTheEvents,
+    );
+    // …and any list for an endpoint that takes none.
+    await expect(setInDatabase(`ARRAY['vip']`)).rejects.toThrow(/webhook_endpoints_contact_tags/);
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'contact_tags', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('send an endpoint that names contact tags only the events of the conversations whose contact has one of them when the events happen, events of no conversation all the same, and capture none nobody takes', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const add = async (eventTypes: WebhookEventType[], contactTags: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        contactTags,
+      });
+      return { ...created, path };
+    };
+    const vips = await add(
+      ['message.received', 'message.status', 'conversation.status_changed', 'consent.changed'],
+      ['vip', 'gold'],
+    );
+    const from = waId();
+    // A message from a contact without tags: no endpoint takes it, so nothing is captured.
+    const first = await inbound(c, from, 'Hello');
+    expect(await eventsOf(c)).toEqual([]);
+    // Tagged vip, the contact's next message, the reply's status and the conversation resolved are
+    // captured.
+    await tag(c, first.contact_id, 'vip');
+    await inbound(c, from, 'Still there?');
+    await sendReply(c, first.conversation_id, 'Here');
+    await fx.query(`UPDATE app.conversations SET status = 'resolved' WHERE id = $1`, [
+      first.conversation_id,
+    ]);
+    // Another contact, tagged wholesale only, is not.
+    const otherFrom = waId();
+    const other = await inbound(c, otherFrom, 'Wholesale order');
+    await tag(c, other.contact_id, 'wholesale');
+    await inbound(c, otherFrom, 'Ten boxes');
+    // The tag taken off, the first contact's next message, which reopens the conversation, is not
+    // captured either.
+    await untag(c, first.contact_id, 'vip');
+    await inbound(c, from, 'Bye');
+    // A consent change belongs to no conversation: the endpoint takes it.
+    await createConsentService({ db: fx.dbs.app, clock: systemClock }).recordConsent(owner, {
+      contactId: first.contact_id,
+      purpose: 'marketing',
+      action: 'opt_in',
+    });
+    // An endpoint for every conversation's messages hears every contact's, tagged or not.
+    const everyone = await add(['message.received'], null);
+    await inbound(c, otherFrom, 'Again');
+    await inbound(c, from, 'Me too');
+    const typesTo = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).map((d) => [d.type, d.status]);
+    expect(await typesTo(vips.id)).toEqual([
+      ['message.received', null],
+      ['message.status', 'accepted'],
+      ['conversation.status_changed', 'resolved'],
+      ['consent.changed', null],
+    ]);
+    expect(await typesTo(everyone.id)).toEqual([
+      ['message.received', null],
+      ['message.received', null],
+    ]);
+    // Each delivery names the tagged contact's conversation.
+    expect(await deliverDue(c)).toMatchObject({ attempted: 6, succeeded: 6 });
+    for (const body of requestsTo(vips.path).map(
+      (r) => JSON.parse(r.body) as { type: string; data: { conversation?: { id: string } } },
+    )) {
+      if (body.type !== 'consent.changed') {
+        expect(body.data.conversation?.id, body.type).toBe(first.conversation_id);
+      }
+    }
+  });
+});
+
 describe('consent change filters (ADR-189)', () => {
   it('are refused without consent.changed, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to the event', async () => {
     const c = await fx.company();

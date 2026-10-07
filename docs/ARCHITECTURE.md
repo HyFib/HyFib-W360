@@ -1977,6 +1977,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   are assigned to) and the API (`taskAssigneeIds`) set it; the services check the members a list
   adds as they check deal owners, and members it held stay; a change that drops both task events
   clears it.
+- **Contact tag filters** (migration 0183, ADR-267): `contact_tags` on an endpoint lists the contact
+  tags whose conversations' message and conversation events it takes, null for every conversation's;
+  a check keeps it to 1 to 50 tags in `app.contact_tags`' form and to endpoints taking such an
+  event. `app.capture_webhook_event` (replaced with the same signature) reads the tags of the
+  conversation's contact only when an active endpoint of the company taking the event names tags,
+  and creates a delivery only for endpoints whose list is null or shares a tag with them. Settings
+  (radio buttons and a text field under "Contact tags", tags separated by commas) and the API
+  (`contactTags`) set it; the services read the tags as contacts carry them (`normalizeTag`) and
+  check nothing else, as any tag may be named; a change that drops the events clears it.
 - **Health:** a success clears the failing state; a failure when the endpoint has been failing for
   72 hours without a success turns it off (`failing`), fails its waiting deliveries as
   `endpoint_disabled`, records a system audit entry and emails the company's active owners and

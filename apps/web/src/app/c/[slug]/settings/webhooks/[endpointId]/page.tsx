@@ -226,6 +226,7 @@ export default async function WebhookEndpointPage({
               owners: endpoint.owners,
               taskAssignees: endpoint.taskAssignees,
               assignees: endpoint.assignees,
+              contactTags: endpoint.contactTags,
               oauth: endpoint.oauth,
             }}
             automationChoices={automationChoices}

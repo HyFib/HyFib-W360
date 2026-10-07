@@ -621,6 +621,8 @@ export const WEBHOOK_LIMITS = {
   owners: 50,
   /** The members an endpoint can choose to take the events of their assigned tasks (ADR-266). */
   taskAssignees: 50,
+  /** The contact tags an endpoint can choose to take the conversations' events of (ADR-267). */
+  contactTags: 50,
   /**
    * An endpoint's OAuth client (ADR-173): its identifier, secret and scope, short enough that the
    * Basic header stays within what the egress client sends, and the longest token kept.

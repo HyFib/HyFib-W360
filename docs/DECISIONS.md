@@ -10100,3 +10100,55 @@ Decision:
 
 Not built: task events by their deal's pipeline, stage or owner, an event when a task is reassigned,
 and assignees chosen per event type (one list serves the two events).
+
+## ADR-267 Choosing the contact tags whose conversations' events a webhook endpoint receives (P5-09) (2026-10-07)
+
+Context: an endpoint taking message or conversation events received those of every conversation of
+the company unless it named numbers, teams or members (ADR-170, ADR-174, ADR-181). A receiver that
+serves some customers (a priority desk for those tagged vip, a wholesale system) was sent everyone's
+conversations and had to look each contact up to drop the rest. P5-09 left filters on a contact's
+values, such as by tag, unbuilt.
+
+Decision:
+
+- **A list of contact tags per endpoint,** for the events of a conversation (`message.received`,
+  `message.status`, `conversation.status_changed`, `conversation.assignment_changed`,
+  `conversation.team_changed`, the events teams and members narrow): null receives every
+  conversation's, as before; a list holds 1 to 50 tags as contacts carry them (`normalizeTag`:
+  trimmed, spaces inside collapsed, lower case, 1 to 40 characters, no comma or control character),
+  in the order given with repeats merged. Such an event belongs to the conversation's contact, and
+  counts when the contact has any of the listed tags when the event happens, as the transaction that
+  captures it sees the contact's tags: a tag put on later counts from the next event on, and one
+  taken off no longer does. With numbers, teams or members too, an event must pass them all. Deal,
+  task, order, contact and other events are not narrowed. Chosen in Settings → Webhooks ("Contact
+  tags": every conversation's events, or only those of the conversations whose contact has any of
+  the tags typed, separated by commas), shown on the endpoint as "Contact tags whose conversations’
+  events are sent: …", and through the API as `contactTags` on `POST /webhook-endpoints` and `PATCH
+/webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Tags are labels,** not rows of their own: a list may name a tag no contact has yet, which
+  matches nothing until a contact gets it, so nothing is checked against the company's contacts; a
+  tag no contact carries any more stays listed until it is taken off.
+- **Only while an event of a conversation is taken:** a list given for an endpoint that takes none
+  is refused (`contactTags`; 422 through the API). A change that drops them all clears it, and a
+  `PATCH` that leaves it out keeps it; Settings always sends it. A check in the database holds the
+  same rule and the tags' form (null, or 1 to 50 tags in one dimension without a null, each as
+  `app.contact_tags` allows a tag, with an event of a conversation).
+- **Applied at capture:** `app.capture_webhook_event` reads the tags of the conversation's contact
+  (through the conversation, as its team and member are read, ADR-174, ADR-181) only when an active
+  endpoint of the company that takes the event names tags, and creates a delivery only for the
+  endpoints whose list is null or shares a tag with it. Both roles whose changes capture these
+  events read a company's tags (the runtime role in its scope, the definer role through its column
+  grants and policy). No event is written when no endpoint takes it, and stored events are
+  unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `contactTags` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0183:** `contact_tags text[]` on `app.webhook_endpoints` with the check, validated at
+  once (a company has at most 10 endpoints), an update grant on the column for the runtime role, and
+  `app.capture_webhook_event` replaced with the same signature (0182's, with the tags), so its owner
+  and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: contact events by tag (a contact's tags are often written after the event that adds it is
+captured, in the same transaction), every listed tag required rather than any, tags to leave out,
+events of a conversation by its own tags (ADR-220), and other values of a contact (a field's value).

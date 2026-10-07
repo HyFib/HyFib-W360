@@ -1602,6 +1602,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'owner_ids',
       'task_assignee_ids',
       'assignee_ids',
+      'contact_tags',
       'oauth_token_url',
       'oauth_client_id',
       'oauth_scope',

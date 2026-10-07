@@ -74,6 +74,8 @@ export async function createWebhookEndpointAction(
     taskAssigneeIds: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
+    /** The contact tags whose conversations' events it takes (ADR-267); null: every one's. */
+    contactTags: string[] | null;
     /** Its OAuth client (ADR-173); null: none. */
     oauth: WebhookOAuthActionInput | null;
   },
@@ -144,6 +146,8 @@ export async function updateWebhookEndpointAction(
     taskAssigneeIds: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
+    /** The contact tags whose conversations' events it takes (ADR-267); null: every one's. */
+    contactTags: string[] | null;
     /**
      * Given, its OAuth client (null removes it, ADR-173): a secret left out keeps the stored one
      * while the token URL stays the same. Left out, it stays.
